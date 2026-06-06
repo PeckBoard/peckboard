@@ -25,7 +25,7 @@ type DisplayItem =
   | { type: 'assistant'; text: string; key: string }
   | { type: 'tool'; toolName: string; input?: Record<string, unknown>; output?: Record<string, unknown>; error?: string; isRunning: boolean; key: string }
   | { type: 'status'; text: string; key: string }
-  | { type: 'system'; text: string; key: string }
+  | { type: 'system'; text: string; key: string; reportFolder?: string; reportFile?: string }
   | { type: 'step'; label: string; key: string }
   | { type: 'question'; questionId: string; questions: QuestionItem[]; key: string }
   | { type: 'question-resolved'; questionId: string; questions: QuestionItem[]; answers: Record<string, unknown>; key: string }
@@ -170,7 +170,9 @@ function buildDisplayItems(events: Event[]): DisplayItem[] {
       case 'system': {
         flushAssistant()
         const text = (ev.data.text as string) ?? (ev.data.message as string) ?? JSON.stringify(ev.data)
-        items.push({ type: 'system', text, key: ev.id })
+        const reportFolder = ev.data.reportFolder as string | undefined
+        const reportFile = ev.data.reportFile as string | undefined
+        items.push({ type: 'system', text, key: ev.id, reportFolder, reportFile })
         break
       }
       case 'step-change': {
@@ -643,7 +645,26 @@ export default function ChatView({ sessionId }: ChatViewProps) {
             case 'system':
               return (
                 <div key={item.key} className="chat-row chat-row-system">
-                  <div className="chat-system-notice">{item.text}</div>
+                  {item.reportFolder && item.reportFile ? (
+                    <button
+                      className="chat-report-chip"
+                      onClick={() => {
+                        window.history.pushState({}, '', '/reports')
+                        window.dispatchEvent(new PopStateEvent('popstate'))
+                      }}
+                    >
+                      <span className="chat-report-chip-icon">{'\u{1F4C4}'}</span>
+                      <span className="chat-report-chip-body">
+                        <span className="chat-report-chip-title">{item.text}</span>
+                        <span className="chat-report-chip-folder">{item.reportFolder}</span>
+                      </span>
+                    </button>
+                  ) : (
+                    <div className="chat-system-notice">
+                      <span className="chat-system-notice-icon">{'\u2139\uFE0F'}</span>
+                      <span>{item.text}</span>
+                    </div>
+                  )}
                 </div>
               )
             case 'step':
