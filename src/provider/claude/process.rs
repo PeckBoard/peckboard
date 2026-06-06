@@ -353,7 +353,10 @@ fn parse_stream_json(
                 if let Some(model) = json.get("model").and_then(|v| v.as_str()) {
                     *model_name = Some(model.to_string());
                 }
-                if let Some(cid) = json.get("conversation_id").and_then(|v| v.as_str()) {
+                // CLI uses "session_id" as the resumable conversation identifier
+                if let Some(cid) = json.get("session_id").and_then(|v| v.as_str())
+                    .or_else(|| json.get("conversation_id").and_then(|v| v.as_str()))
+                {
                     *conversation_id = Some(cid.to_string());
                 }
                 if !*emitted_start {
@@ -525,7 +528,10 @@ fn parse_stream_json(
 
         // ── result ───────────────────────────────────────────────
         "result" => {
-            if let Some(cid) = json.get("conversation_id").and_then(|v| v.as_str()) {
+            // CLI uses "session_id" in result events
+            if let Some(cid) = json.get("session_id").and_then(|v| v.as_str())
+                .or_else(|| json.get("conversation_id").and_then(|v| v.as_str()))
+            {
                 *conversation_id = Some(cid.to_string());
             }
             // The result event signals completion — we let the process exit
@@ -736,7 +742,7 @@ mod tests {
             "type": "system",
             "subtype": "init",
             "model": "claude-sonnet-4-20250514",
-            "conversation_id": "conv-abc123"
+            "session_id": "conv-abc123"
         });
 
         let mut cid = None;
@@ -823,7 +829,7 @@ mod tests {
     fn test_parse_result_captures_conversation_id() {
         let json = serde_json::json!({
             "type": "result",
-            "conversation_id": "conv-final-456"
+            "session_id": "conv-final-456"
         });
 
         let mut cid = None;
