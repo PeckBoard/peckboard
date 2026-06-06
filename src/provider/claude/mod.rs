@@ -21,23 +21,28 @@ pub async fn register_claude_provider(registry: &ProviderRegistry) {
 fn discover_models() -> Vec<ModelInfo> {
     let mut models = vec![
         ModelInfo {
-            id: "opus".into(),
-            display_name: "Claude Opus".into(),
+            id: "claude-opus-4-8".into(),
+            display_name: "Claude Opus 4.8".into(),
             capabilities: vec!["code".into(), "reasoning".into(), "vision".into()],
         },
         ModelInfo {
-            id: "sonnet".into(),
-            display_name: "Claude Sonnet".into(),
+            id: "claude-opus-4-7".into(),
+            display_name: "Claude Opus 4.7".into(),
+            capabilities: vec!["code".into(), "reasoning".into(), "vision".into()],
+        },
+        ModelInfo {
+            id: "claude-opus-4-6".into(),
+            display_name: "Claude Opus 4.6".into(),
+            capabilities: vec!["code".into(), "reasoning".into(), "vision".into()],
+        },
+        ModelInfo {
+            id: "claude-sonnet-4-6".into(),
+            display_name: "Claude Sonnet 4.6".into(),
             capabilities: vec!["code".into(), "vision".into()],
         },
         ModelInfo {
-            id: "haiku".into(),
-            display_name: "Claude Haiku".into(),
-            capabilities: vec!["code".into()],
-        },
-        ModelInfo {
-            id: "default".into(),
-            display_name: "Default".into(),
+            id: "claude-haiku-4-5".into(),
+            display_name: "Claude Haiku 4.5".into(),
             capabilities: vec!["code".into()],
         },
     ];
@@ -114,16 +119,16 @@ mod tests {
     #[test]
     fn test_discover_models() {
         let models = discover_models();
-        assert!(models.len() >= 4);
-        assert!(models.iter().any(|m| m.id == "opus"));
-        assert!(models.iter().any(|m| m.id == "sonnet"));
-        assert!(models.iter().any(|m| m.id == "haiku"));
+        assert!(models.len() >= 5);
+        assert!(models.iter().any(|m| m.id == "claude-opus-4-8"));
+        assert!(models.iter().any(|m| m.id == "claude-sonnet-4-6"));
+        assert!(models.iter().any(|m| m.id == "claude-haiku-4-5"));
     }
 
     #[test]
     fn test_build_cli_args_basic() {
         let config = SpawnConfig {
-            model: "opus".into(),
+            model: "claude-opus-4-8".into(),
             effort: None,
             working_dir: "/tmp".into(),
             mcp_config_path: None,
@@ -138,14 +143,14 @@ mod tests {
         assert!(args.contains(&"-p".to_string()));
         assert!(args.contains(&"hello".to_string()));
         assert!(args.contains(&"--model".to_string()));
-        assert!(args.contains(&"opus".to_string()));
+        assert!(args.contains(&"claude-opus-4-8".to_string()));
         assert!(!args.contains(&"--resume".to_string()));
     }
 
     #[test]
     fn test_build_cli_args_with_resume() {
         let config = SpawnConfig {
-            model: "sonnet".into(),
+            model: "claude-sonnet-4-6".into(),
             effort: Some("high".into()),
             working_dir: "/tmp".into(),
             mcp_config_path: Some("/tmp/mcp.json".into()),

@@ -116,6 +116,40 @@ async fn main() -> anyhow::Result<()> {
         tracing::info!("Worker watchdog started");
     }
 
+    // Start worker completion listener -- receives notifications when a
+    // streaming process finishes and runs the worker-done handler +
+    // orchestration outside the tokio::spawn boundary (avoiding Send issues
+    // with AppState's PluginManager).
+    {
+        if let Some(mut rx) = state.session_manager.take_completion_rx().await {
+            let orchestrator_state = state.clone();
+            tokio::spawn(async move {
+                while let Some(completion) = rx.recv().await {
+                    if !completion.completed {
+                        continue;
+                    }
+                    let sid = completion.session_id.clone();
+                    match orchestrator_state.db.get_session(&sid).await {
+                        Ok(Some(session)) if session.is_worker => {
+                            tracing::info!(session_id = %sid, "Worker completed, running handle_worker_done");
+                            peckboard::worker::orchestrator::handle_worker_done(
+                                &orchestrator_state,
+                                &sid,
+                            )
+                            .await;
+                            peckboard::worker::orchestrator::check_and_spawn_workers(
+                                &orchestrator_state,
+                            )
+                            .await;
+                        }
+                        _ => {}
+                    }
+                }
+            });
+            tracing::info!("Worker completion listener started");
+        }
+    }
+
     // Start HTTPS listener if TLS certs can be loaded
     let https_addr = format!("{}:{}", state.config.host, state.config.https_port);
     let tls_handle = match tls::ensure_certs(&state.config.data_dir) {

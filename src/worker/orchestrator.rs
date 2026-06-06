@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use crate::db::models::{Card, NewSession, Project, UpdateCard, UpdateSession};
+use crate::db::models::{Card, NewSession, Project, UpdateCard};
 use crate::provider::stream::SpawnConfig;
 use crate::service::mcp_server;
 use crate::state::AppState;
