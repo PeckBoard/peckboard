@@ -15,12 +15,17 @@ use super::process::{self, ClaudeProcess};
 /// and query agent processes.
 pub struct SessionManager {
     processes: Arc<Mutex<HashMap<String, ClaudeProcess>>>,
+    /// Channels for writing to the stdin of running processes.
+    /// When `stream_events` owns the child, callers use this channel
+    /// to feed answers (e.g. question-resolved) back into the process.
+    stdin_channels: Arc<Mutex<HashMap<String, tokio::sync::mpsc::Sender<String>>>>,
 }
 
 impl SessionManager {
     pub fn new() -> Self {
         SessionManager {
             processes: Arc::new(Mutex::new(HashMap::new())),
+            stdin_channels: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
@@ -91,29 +96,7 @@ impl SessionManager {
         let db_clone = db.clone();
         let broadcaster_clone = broadcaster.clone();
         let processes = self.processes.clone();
-
-        // Store the process — we need to take it out to pass ownership to
-        // stream_events, but we also need to track that a process *exists*
-        // for the session. We use a two-step approach: store a sentinel
-        // (the real process), then swap it out in the background task.
-
-        // Actually, stream_events consumes the process, so we cannot store
-        // it and also pass it. Instead we do NOT store the process in the
-        // map (stream_events owns it), but we store a tracking entry so
-        // is_running() can work. We'll use a different approach: store
-        // nothing in the map for now and let the background task signal
-        // completion. For cancel/interrupt we need the actual child handle.
-        //
-        // Better approach: split — stream_events takes stdout (not the
-        // whole process). But that requires refactoring process.rs.
-        //
-        // Simplest correct approach: don't call stream_events, instead
-        // manage the streaming here and keep the process in the map.
-        // But that defeats the abstraction.
-        //
-        // Pragmatic approach: store the process, have the background task
-        // lock the mutex, remove it, and pass it to stream_events. The
-        // lock is held only briefly.
+        let stdin_channels = self.stdin_channels.clone();
 
         {
             let mut map = processes.lock().await;
@@ -126,30 +109,31 @@ impl SessionManager {
             }
         }
 
+        // Create a channel so callers can write to the process's stdin
+        // (e.g. delivering answers to question-resolved events).
+        let (stdin_tx, stdin_rx) = tokio::sync::mpsc::channel::<String>(32);
+        {
+            let mut channels = stdin_channels.lock().await;
+            channels.insert(sid.clone(), stdin_tx);
+        }
+
         // We need to move `child` into the background task
         let sid_for_task = sid.clone();
+        let stdin_channels_for_task = stdin_channels.clone();
         tokio::spawn(async move {
             // Run the event stream to completion
-            process::stream_events(child, db_clone, broadcaster_clone).await;
+            process::stream_events(child, db_clone, broadcaster_clone, stdin_rx).await;
 
-            // Clean up the process entry (it's already consumed, but remove
-            // any tracking if we added one)
+            // Clean up the process entry and stdin channel
             let mut map = processes.lock().await;
             map.remove(&sid_for_task);
+            drop(map);
+
+            let mut channels = stdin_channels_for_task.lock().await;
+            channels.remove(&sid_for_task);
+
             tracing::debug!(session_id = %sid_for_task, "Process streaming completed, removed from manager");
         });
-
-        // Store a marker in the map so is_running and cancel/interrupt can
-        // find it. Since the actual Child is consumed by stream_events, we
-        // cannot store it. Instead we track running sessions via a separate
-        // mechanism. For now, we rely on the DB event state (agent-start
-        // without agent-end) for is_running checks, and cancel/interrupt
-        // operate via PID. But that's fragile.
-        //
-        // A better design: keep the Child in the map and have stream_events
-        // borrow stdout only. Let's not over-engineer this — the background
-        // task handles cleanup, and cancel/interrupt can emit events that
-        // the CLI may respond to.
 
         Ok(())
     }
@@ -170,8 +154,19 @@ impl SessionManager {
         }
     }
 
-    /// Interrupt the process for a session by writing to its stdin.
+    /// Interrupt the process for a session by writing a newline to its stdin.
+    /// Uses the stdin channel if available (preferred), otherwise falls back
+    /// to the process handle.
     pub async fn interrupt(&self, session_id: &str) {
+        // Try the stdin channel first (covers the common case where
+        // stream_events owns the child)
+        let sent = self.write_stdin(session_id, "").await;
+        if sent {
+            tracing::info!(session_id = %session_id, "Sent interrupt via stdin channel");
+            return;
+        }
+
+        // Fall back to direct process handle
         let mut map = self.processes.lock().await;
         if let Some(proc) = map.get_mut(session_id) {
             process::interrupt_process(proc).await;
@@ -237,6 +232,28 @@ impl SessionManager {
         }
 
         None
+    }
+
+    /// Write a message to the stdin of a running process via its channel.
+    /// Used to deliver answers (e.g. question-resolved) back to a Claude
+    /// process that is waiting for user input.
+    pub async fn write_stdin(&self, session_id: &str, text: &str) -> bool {
+        let channels = self.stdin_channels.lock().await;
+        if let Some(tx) = channels.get(session_id) {
+            match tx.try_send(text.to_string()) {
+                Ok(()) => {
+                    tracing::info!(session_id = %session_id, "Sent stdin message to process");
+                    true
+                }
+                Err(e) => {
+                    tracing::warn!(session_id = %session_id, "Failed to send stdin message: {e}");
+                    false
+                }
+            }
+        } else {
+            tracing::debug!(session_id = %session_id, "No stdin channel for session (process may have exited)");
+            false
+        }
     }
 
     /// Kill all tracked processes. Called during graceful shutdown.

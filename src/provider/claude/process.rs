@@ -83,10 +83,14 @@ pub fn spawn_claude(
 ///
 /// This function consumes the process and runs until the child exits.
 /// On exit it emits either a `Completed` or `Crashed` event.
+///
+/// The `stdin_rx` channel allows callers to feed text into the process's
+/// stdin (e.g. to deliver answers to questions).
 pub async fn stream_events(
     mut process: ClaudeProcess,
     db: Db,
     broadcaster: Arc<Broadcaster>,
+    stdin_rx: tokio::sync::mpsc::Receiver<String>,
 ) {
     let session_id = process.session_id.clone();
 
@@ -108,6 +112,34 @@ pub async fn stream_events(
             return;
         }
     };
+
+    // Spawn a task that reads from the stdin channel and writes to the
+    // child's stdin pipe. This lets callers (e.g. question-resolved route)
+    // feed answers into the running process.
+    let stdin_handle = process.child.stdin.take();
+    let stdin_session_id = session_id.clone();
+    let stdin_task = tokio::spawn(async move {
+        let mut rx = stdin_rx;
+        if let Some(mut stdin) = stdin_handle {
+            while let Some(text) = rx.recv().await {
+                if let Err(e) = stdin.write_all(text.as_bytes()).await {
+                    tracing::warn!(
+                        session_id = %stdin_session_id,
+                        "Failed to write to process stdin: {e}"
+                    );
+                    break;
+                }
+                if let Err(e) = stdin.write_all(b"\n").await {
+                    tracing::warn!(
+                        session_id = %stdin_session_id,
+                        "Failed to write newline to stdin: {e}"
+                    );
+                    break;
+                }
+                let _ = stdin.flush().await;
+            }
+        }
+    });
 
     let stderr = process.child.stderr.take();
 
@@ -152,6 +184,9 @@ pub async fn stream_events(
             emit_event(&db, &broadcaster, &session_id, event).await;
         }
     }
+
+    // Stdout has closed; abort the stdin forwarding task
+    stdin_task.abort();
 
     // Wait for the process to exit and capture the exit code
     let exit_status = process.child.wait().await;

@@ -494,13 +494,52 @@ async fn send_message(
         )
         .await;
 
-    // 2. Build spawn config
+    // 2. Build spawn config — resolve model/effort with precedence:
+    //    request body > session > card > project > "default"
+    let (resolved_model, resolved_effort) = {
+        let mut model: Option<String> = body.model;
+        let mut effort: Option<String> = body.effort;
+
+        // Fallback to session-level
+        if model.is_none() {
+            model = session.model.clone();
+        }
+        if effort.is_none() {
+            effort = session.effort.clone();
+        }
+
+        // Fallback to card-level, and then project-level
+        if model.is_none() || effort.is_none() {
+            if let Some(ref card_id) = session.card_id {
+                if let Ok(Some(card)) = state.db.get_card(card_id).await {
+                    if model.is_none() {
+                        model = card.model.clone();
+                    }
+                    if effort.is_none() {
+                        effort = card.effort.clone();
+                    }
+
+                    // Fallback to project-level
+                    if model.is_none() || effort.is_none() {
+                        if let Ok(Some(project)) = state.db.get_project(&card.project_id).await {
+                            if model.is_none() {
+                                model = project.model.clone();
+                            }
+                            if effort.is_none() {
+                                effort = project.effort.clone();
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        (model.unwrap_or_else(|| "default".into()), effort)
+    };
+
     let config = SpawnConfig {
-        model: body
-            .model
-            .or(session.model.clone())
-            .unwrap_or_else(|| "default".into()),
-        effort: body.effort.or(session.effort.clone()),
+        model: resolved_model,
+        effort: resolved_effort,
         working_dir: String::new(), // Will be resolved by SessionManager from the folder
         mcp_config_path: None,
         env: Default::default(),

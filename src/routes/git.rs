@@ -1,12 +1,12 @@
 use axum::{
     Json, Router,
-    extract::Query,
+    extract::{Query, State},
     http::StatusCode,
     middleware,
     response::IntoResponse,
     routing::get,
 };
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
 use crate::auth::middleware::require_auth;
@@ -28,8 +28,17 @@ struct DiffQuery {
     path: String,
 }
 
+#[derive(Serialize)]
+struct DiscoveredRepo {
+    name: String,
+    path: String,
+    folder_id: String,
+    folder_name: String,
+}
+
 pub fn router(state: Arc<AppState>) -> Router<Arc<AppState>> {
     Router::new()
+        .route("/api/git/repos", get(scan_repos))
         .route("/api/git/status", get(git_status))
         .route("/api/git/diff", get(git_diff))
         .route("/api/git/commits", get(git_commits))
@@ -128,4 +137,57 @@ async fn git_commits(Query(q): Query<GitQuery>) -> impl IntoResponse {
             Json(serde_json::json!({"error": format!("git log failed: {e}")})),
         )),
     }
+}
+
+/// GET /api/git/repos — scan all folder paths from the database for git repos
+async fn scan_repos(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+    let folders = state.db.list_folders().await.map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({"error": format!("failed to list folders: {e}")})),
+        )
+    })?;
+
+    let mut repos: Vec<DiscoveredRepo> = Vec::new();
+
+    for folder in &folders {
+        let folder_path = std::path::Path::new(&folder.path);
+
+        // Check if the folder itself is a git repo
+        if folder_path.join(".git").exists() {
+            let name = folder_path
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or(&folder.name)
+                .to_string();
+            repos.push(DiscoveredRepo {
+                name,
+                path: folder.path.clone(),
+                folder_id: folder.id.clone(),
+                folder_name: folder.name.clone(),
+            });
+        }
+
+        // Check immediate subdirectories for .git
+        if let Ok(entries) = std::fs::read_dir(folder_path) {
+            for entry in entries.flatten() {
+                let entry_path = entry.path();
+                if entry_path.is_dir() && entry_path.join(".git").exists() {
+                    let name = entry_path
+                        .file_name()
+                        .and_then(|n| n.to_str())
+                        .unwrap_or("unknown")
+                        .to_string();
+                    repos.push(DiscoveredRepo {
+                        name,
+                        path: entry_path.to_string_lossy().to_string(),
+                        folder_id: folder.id.clone(),
+                        folder_name: folder.name.clone(),
+                    });
+                }
+            }
+        }
+    }
+
+    Ok::<_, (StatusCode, Json<serde_json::Value>)>(Json(serde_json::json!(repos)))
 }

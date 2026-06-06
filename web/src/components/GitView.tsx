@@ -1,4 +1,4 @@
-import { useState, useCallback } from 'react'
+import { useState, useCallback, useEffect } from 'react'
 import { authedFetch } from '../store/auth'
 
 interface FileStatus {
@@ -22,6 +22,13 @@ interface CommitDetail {
   diff: string
 }
 
+interface DiscoveredRepo {
+  name: string
+  path: string
+  folder_id: string
+  folder_name: string
+}
+
 export default function GitView() {
   const [repoPath, setRepoPath] = useState('')
   const [fileStatuses, setFileStatuses] = useState<FileStatus[]>([])
@@ -31,6 +38,28 @@ export default function GitView() {
   const [activeCommit, setActiveCommit] = useState<CommitDetail | null>(null)
   const [loadingCommit, setLoadingCommit] = useState(false)
   const [fetched, setFetched] = useState(false)
+  const [discoveredRepos, setDiscoveredRepos] = useState<DiscoveredRepo[]>([])
+  const [loadingRepos, setLoadingRepos] = useState(false)
+
+  useEffect(() => {
+    setLoadingRepos(true)
+    authedFetch('/api/git/repos')
+      .then(async (res) => {
+        if (res.ok) {
+          const repos: DiscoveredRepo[] = await res.json()
+          setDiscoveredRepos(repos)
+        }
+      })
+      .catch(() => {
+        /* ignore scan errors */
+      })
+      .finally(() => setLoadingRepos(false))
+  }, [])
+
+  const selectRepo = (repo: DiscoveredRepo) => {
+    setRepoPath(repo.path)
+    fetchStatus(repo.path)
+  }
 
   const fetchStatus = useCallback(async (path: string) => {
     setLoading(true)
@@ -103,6 +132,36 @@ export default function GitView() {
 
       <section className="settings-section">
         <h3>Repository</h3>
+        {loadingRepos ? (
+          <div className="chat-loading"><div className="loading-spinner" /></div>
+        ) : discoveredRepos.length > 0 ? (
+          <div className="folder-list" style={{ marginBottom: 12 }}>
+            {discoveredRepos.map((repo) => (
+              <button
+                key={`${repo.folder_id}-${repo.path}`}
+                className="folder-row"
+                style={{
+                  cursor: 'pointer',
+                  width: '100%',
+                  border: repoPath === repo.path ? '1px solid var(--accent)' : '1px solid transparent',
+                  background: repoPath === repo.path ? 'var(--surface2)' : 'transparent',
+                  borderRadius: 'var(--radius)',
+                  textAlign: 'left',
+                  font: 'inherit',
+                  color: 'inherit',
+                  padding: '8px 12px',
+                }}
+                onClick={() => selectRepo(repo)}
+              >
+                <div className="folder-info">
+                  <strong style={{ fontSize: 'var(--text-sm)' }}>{repo.name}</strong>
+                  <span className="folder-path">{repo.path}</span>
+                </div>
+                <span style={{ fontSize: 'var(--text-xs)', color: 'var(--text3)' }}>{repo.folder_name}</span>
+              </button>
+            ))}
+          </div>
+        ) : null}
         <form onSubmit={handleSubmit} style={{ display: 'flex', gap: 8 }}>
           <input
             className="form-input"

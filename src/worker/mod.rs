@@ -1,3 +1,4 @@
+pub mod orchestrator;
 pub mod pipeline;
 pub mod scheduler;
 pub mod watchdog;

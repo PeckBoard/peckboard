@@ -27,6 +27,7 @@ export default function KanbanBoard({ projectId }: KanbanBoardProps) {
   const cards = useProjectsStore((s) => s.cards)
   const fetchCards = useProjectsStore((s) => s.fetchCards)
   const createCard = useProjectsStore((s) => s.createCard)
+  const updateCard = useProjectsStore((s) => s.updateCard)
   const deleteCard = useProjectsStore((s) => s.deleteCard)
   const [selectedCard, setSelectedCard] = useState<Card | null>(null)
   const [showAddForm, setShowAddForm] = useState(false)
@@ -35,6 +36,8 @@ export default function KanbanBoard({ projectId }: KanbanBoardProps) {
   const [addPriority, setAddPriority] = useState(2)
   const [addSubmitting, setAddSubmitting] = useState(false)
   const [confirmDeleteId, setConfirmDeleteId] = useState<string | null>(null)
+  const [draggingCardId, setDraggingCardId] = useState<string | null>(null)
+  const [dragOverStep, setDragOverStep] = useState<string | null>(null)
 
   useEffect(() => {
     fetchCards(projectId)
@@ -70,6 +73,57 @@ export default function KanbanBoard({ projectId }: KanbanBoardProps) {
       setConfirmDeleteId(null)
     } catch {
       /* ignore */
+    }
+  }
+
+  const handleDragStart = (e: React.DragEvent, card: Card) => {
+    e.dataTransfer.setData('cardId', card.id)
+    e.dataTransfer.setData('fromStep', card.step)
+    e.dataTransfer.effectAllowed = 'move'
+    setDraggingCardId(card.id)
+  }
+
+  const handleDragEnd = () => {
+    setDraggingCardId(null)
+    setDragOverStep(null)
+  }
+
+  const handleDragOver = (e: React.DragEvent, stepKey: string) => {
+    e.preventDefault()
+    e.dataTransfer.dropEffect = 'move'
+    setDragOverStep(stepKey)
+  }
+
+  const handleDragLeave = (e: React.DragEvent, stepKey: string) => {
+    // Only clear if we're actually leaving the column, not entering a child
+    const related = e.relatedTarget as Node | null
+    const current = e.currentTarget as Node
+    if (!related || !current.contains(related)) {
+      if (dragOverStep === stepKey) {
+        setDragOverStep(null)
+      }
+    }
+  }
+
+  const handleDrop = async (e: React.DragEvent, targetStep: string) => {
+    e.preventDefault()
+    setDragOverStep(null)
+    const cardId = e.dataTransfer.getData('cardId')
+    const fromStep = e.dataTransfer.getData('fromStep')
+    if (!cardId || fromStep === targetStep) return
+
+    // Optimistic update: modify local state immediately
+    useProjectsStore.setState((s) => ({
+      cards: s.cards.map((c) =>
+        c.id === cardId ? { ...c, step: targetStep } : c
+      ),
+    }))
+
+    try {
+      await updateCard(projectId, cardId, { step: targetStep })
+    } catch {
+      // Revert on failure
+      fetchCards(projectId)
     }
   }
 
@@ -110,7 +164,13 @@ export default function KanbanBoard({ projectId }: KanbanBoardProps) {
 
       <div className="kanban-columns">
         {STEPS.map((step) => (
-          <div key={step.key} className="kanban-column">
+          <div
+            key={step.key}
+            className={`kanban-column${dragOverStep === step.key ? ' drag-over' : ''}`}
+            onDragOver={(e) => handleDragOver(e, step.key)}
+            onDragLeave={(e) => handleDragLeave(e, step.key)}
+            onDrop={(e) => handleDrop(e, step.key)}
+          >
             <div className="kanban-column-header">
               <h3>{step.label}</h3>
               <span className="kanban-count">{cardsByStep(step.key).length}</span>
@@ -119,7 +179,10 @@ export default function KanbanBoard({ projectId }: KanbanBoardProps) {
               {cardsByStep(step.key).map((card) => (
                 <button
                   key={card.id}
-                  className={`kanban-card ${card.blocked ? 'blocked' : ''}`}
+                  className={`kanban-card ${card.blocked ? 'blocked' : ''}${draggingCardId === card.id ? ' dragging' : ''}`}
+                  draggable={true}
+                  onDragStart={(e) => handleDragStart(e, card)}
+                  onDragEnd={handleDragEnd}
                   onClick={() => setSelectedCard(card)}
                 >
                   <div className="kanban-card-header">
