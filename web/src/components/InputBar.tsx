@@ -125,16 +125,6 @@ export default function InputBar({ sessionId }: InputBarProps) {
 
   return (
     <div className="input-bar">
-      {attachments.length > 0 && (
-        <div className="attachment-chips">
-          {attachments.map((a) => (
-            <span key={a.id} className="attachment-chip">
-              {a.name}
-              <button className="attachment-chip-remove" onClick={() => removeAttachment(a.id)} type="button">&times;</button>
-            </span>
-          ))}
-        </div>
-      )}
       <div className="input-bar-inner">
         <input
           ref={fileInputRef}
@@ -175,6 +165,18 @@ export default function InputBar({ sessionId }: InputBarProps) {
           </button>
         </div>
       </div>
+      {attachments.length > 0 && (
+        <div className="attachment-chips">
+          {uploading && <span className="attachment-chip attachment-chip-uploading">Uploading...</span>}
+          {attachments.map((a) => (
+            <span key={a.id} className="attachment-chip">
+              <span className="attachment-chip-icon">{'\u{1F4CE}'}</span>
+              <span className="attachment-chip-name">{a.name}</span>
+              <button className="attachment-chip-remove" onClick={() => removeAttachment(a.id)} type="button">&times;</button>
+            </span>
+          ))}
+        </div>
+      )}
     </div>
   )
 }
