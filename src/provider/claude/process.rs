@@ -172,7 +172,7 @@ pub async fn stream_events(
         None
     };
 
-    match exit_status {
+    let is_completed = match exit_status {
         Ok(status) if status.success() => {
             // Process exited cleanly — emit Completed
             emit_event(
@@ -184,6 +184,7 @@ pub async fn stream_events(
                 },
             )
             .await;
+            true
         }
         Ok(status) => {
             let code = status.code();
@@ -203,6 +204,7 @@ pub async fn stream_events(
                 },
             )
             .await;
+            false
         }
         Err(e) => {
             tracing::error!(
@@ -218,6 +220,51 @@ pub async fn stream_events(
                     reason: format!("wait error: {}", e),
                     exit_code: None,
                     stderr: stderr_text,
+                },
+            )
+            .await;
+            false
+        }
+    };
+
+    // Auto-deliver queued message if one exists after successful completion
+    if is_completed {
+        if let Ok(Some(queued)) = db.get_queued_message(&session_id).await {
+            let _ = db.delete_queued_message(&session_id).await;
+            tracing::info!(
+                session_id = %session_id,
+                "Found queued message after completion, broadcasting notification"
+            );
+            // Append the queued message as a user event so the frontend sees it
+            if let Ok(user_ev) = db
+                .append_event(
+                    &session_id,
+                    "user",
+                    serde_json::json!({"text": queued.text}),
+                )
+                .await
+            {
+                broadcaster.broadcast(WsEvent {
+                    event_type: "event".into(),
+                    session_id: session_id.clone(),
+                    data: serde_json::json!({
+                        "id": user_ev.id,
+                        "seq": user_ev.seq,
+                        "ts": user_ev.ts,
+                        "kind": user_ev.kind,
+                        "data": serde_json::from_str::<serde_json::Value>(&user_ev.data).unwrap_or_default(),
+                    }),
+                });
+            }
+            // Broadcast a system notification so the frontend knows to re-spawn
+            emit_event(
+                &db,
+                &broadcaster,
+                &session_id,
+                ProviderEvent::ControlRequest {
+                    request_id: uuid::Uuid::new_v4().to_string(),
+                    request_type: "queued-message-ready".into(),
+                    payload: serde_json::json!({"text": queued.text}),
                 },
             )
             .await;

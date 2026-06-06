@@ -200,6 +200,12 @@ async fn delete_session(
         )
     })?;
 
+    // Remove attachments directory for this session
+    let attachments_dir = state.config.data_dir.join("attachments").join(&id);
+    if attachments_dir.exists() {
+        let _ = std::fs::remove_dir_all(&attachments_dir);
+    }
+
     let deleted = state.db.delete_session(&id).await.map_err(|e| {
         (
             StatusCode::INTERNAL_SERVER_ERROR,

@@ -6,10 +6,13 @@ use axum::{
     routing::get,
 };
 use serde::Deserialize;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use crate::auth::middleware::require_auth;
 use crate::state::AppState;
+
+/// Global handle for the caffeinate process on macOS.
+static CAFFEINATE: Mutex<Option<std::process::Child>> = Mutex::new(None);
 
 pub fn router(state: Arc<AppState>) -> Router<Arc<AppState>> {
     Router::new()
@@ -68,27 +71,85 @@ async fn list_workflows() -> impl IntoResponse {
 
 /// GET /api/keep-awake — returns keep-awake status
 async fn get_keep_awake() -> impl IntoResponse {
-    // Keep-awake is a platform-dependent feature; report as unsupported stub for now
+    let supported = cfg!(target_os = "macos");
+    let active = CAFFEINATE
+        .lock()
+        .map(|guard| guard.is_some())
+        .unwrap_or(false);
+
     Json(serde_json::json!({
-        "supported": false,
-        "enabled": false,
-        "active": false,
+        "supported": supported,
+        "enabled": active,
+        "active": active,
     }))
 }
 
 #[derive(Deserialize)]
 struct KeepAwakeRequest {
-    #[allow(dead_code)]
     enabled: bool,
 }
 
 /// PUT /api/keep-awake — toggle keep-awake
 async fn put_keep_awake(Json(req): Json<KeepAwakeRequest>) -> impl IntoResponse {
-    // Stub: acknowledge the request but keep-awake is not yet implemented
+    let supported = cfg!(target_os = "macos");
+
+    if !supported {
+        return Json(serde_json::json!({
+            "supported": false,
+            "enabled": false,
+            "active": false,
+        }));
+    }
+
+    if req.enabled {
+        // Spawn caffeinate if not already running
+        let mut guard = CAFFEINATE.lock().unwrap();
+        if guard.is_none() {
+            let pid = std::process::id().to_string();
+            match std::process::Command::new("caffeinate")
+                .args(["-i", "-w", &pid])
+                .spawn()
+            {
+                Ok(child) => {
+                    tracing::info!(
+                        caffeinate_pid = child.id(),
+                        "Started caffeinate for keep-awake"
+                    );
+                    *guard = Some(child);
+                }
+                Err(e) => {
+                    tracing::error!("Failed to spawn caffeinate: {e}");
+                    return Json(serde_json::json!({
+                        "supported": true,
+                        "enabled": false,
+                        "active": false,
+                        "error": format!("Failed to spawn caffeinate: {e}"),
+                    }));
+                }
+            }
+        }
+    } else {
+        // Kill caffeinate if running
+        let mut guard = CAFFEINATE.lock().unwrap();
+        if let Some(mut child) = guard.take() {
+            tracing::info!(
+                caffeinate_pid = child.id(),
+                "Stopping caffeinate for keep-awake"
+            );
+            let _ = child.kill();
+            let _ = child.wait();
+        }
+    }
+
+    let active = CAFFEINATE
+        .lock()
+        .map(|guard| guard.is_some())
+        .unwrap_or(false);
+
     Json(serde_json::json!({
-        "supported": false,
-        "enabled": req.enabled,
-        "active": false,
+        "supported": true,
+        "enabled": active,
+        "active": active,
     }))
 }
 

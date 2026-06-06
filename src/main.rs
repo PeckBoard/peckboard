@@ -8,6 +8,7 @@ use peckboard::provider::claude::register_claude_provider;
 use peckboard::provider::registry::ProviderRegistry;
 use peckboard::routes::api_router;
 use peckboard::security::{origin_check, repair_dangling_sessions, security_headers};
+use peckboard::service::tls;
 use peckboard::state::AppState;
 use peckboard::ws::broadcaster::Broadcaster;
 
@@ -75,6 +76,31 @@ async fn main() -> anyhow::Result<()> {
     tracing::info!("Peckboard listening on http://{addr}");
     let listener = TcpListener::bind(&addr).await?;
 
+    // Start HTTPS listener if TLS certs can be loaded
+    let https_addr = format!("{}:{}", state.config.host, state.config.https_port);
+    let tls_handle = match tls::ensure_certs(&state.config.data_dir) {
+        Ok(tls_config) => {
+            // Install the default crypto provider for rustls (idempotent)
+            let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+            match tls::load_tls_config(&tls_config) {
+                Ok(tls_acceptor) => {
+                    let https_app = app.clone();
+                    let https_listener = TcpListener::bind(&https_addr).await?;
+                    tracing::info!("Peckboard listening on https://{https_addr}");
+                    Some(tokio::spawn(serve_https(https_listener, tls_acceptor, https_app)))
+                }
+                Err(e) => {
+                    tracing::warn!("Failed to load TLS config, HTTPS disabled: {e}");
+                    None
+                }
+            }
+        }
+        Err(e) => {
+            tracing::warn!("Failed to ensure TLS certs, HTTPS disabled: {e}");
+            None
+        }
+    };
+
     // Graceful shutdown on SIGINT/SIGTERM
     let shutdown_state = state.clone();
     axum::serve(listener, app)
@@ -87,7 +113,67 @@ async fn main() -> anyhow::Result<()> {
         })
         .await?;
 
+    // Abort the HTTPS task when HTTP server shuts down
+    if let Some(handle) = tls_handle {
+        handle.abort();
+    }
+
     Ok(())
+}
+
+/// Serve the axum app over HTTPS by accepting TLS connections and feeding them
+/// into `axum::serve`.  Each accepted TCP stream is upgraded to TLS via the
+/// `TlsAcceptor` and then handled by the router.
+async fn serve_https(
+    listener: TcpListener,
+    tls_acceptor: tokio_rustls::TlsAcceptor,
+    app: axum::Router,
+) {
+    use tower::Service;
+
+    let mut make_service = app.into_make_service();
+
+    loop {
+        let (tcp_stream, remote_addr) = match listener.accept().await {
+            Ok(conn) => conn,
+            Err(e) => {
+                tracing::debug!("HTTPS accept error: {e}");
+                continue;
+            }
+        };
+
+        let acceptor = tls_acceptor.clone();
+        let service = match make_service.call(remote_addr).await {
+            Ok(svc) => svc,
+            Err(e) => {
+                // Infallible in practice, but handle gracefully
+                tracing::debug!("HTTPS make_service error: {e}");
+                continue;
+            }
+        };
+
+        tokio::spawn(async move {
+            let tls_stream = match acceptor.accept(tcp_stream).await {
+                Ok(s) => s,
+                Err(e) => {
+                    tracing::debug!("TLS handshake failed from {remote_addr}: {e}");
+                    return;
+                }
+            };
+
+            let io = hyper_util::rt::TokioIo::new(tls_stream);
+            let hyper_service = hyper_util::service::TowerToHyperService::new(service);
+
+            if let Err(e) = hyper_util::server::conn::auto::Builder::new(
+                hyper_util::rt::TokioExecutor::new(),
+            )
+            .serve_connection(io, hyper_service)
+            .await
+            {
+                tracing::debug!("HTTPS connection error from {remote_addr}: {e}");
+            }
+        });
+    }
 }
 
 async fn shutdown_signal() {
