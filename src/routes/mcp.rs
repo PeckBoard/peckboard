@@ -210,8 +210,47 @@ async fn mcp_handler(
                 db: Arc::new(state.db.clone()),
             };
 
-            match registry.handle_tool_call(tool_name, arguments, &ctx).await {
+            // ── Hook: mcp.tool.call.before ──
+            let mut final_args = arguments;
+            let hook_result = state.plugins.dispatch(
+                "mcp.tool.call.before",
+                serde_json::json!({
+                    "sessionId": &ctx.session_id,
+                    "toolName": tool_name,
+                    "args": &final_args,
+                }),
+            ).await;
+
+            if let crate::plugin::hooks::HookResult::Cancelled { plugin, reason } = &hook_result {
+                tracing::info!(plugin = %plugin, reason = %reason, "mcp.tool.call.before cancelled");
+                return (
+                    StatusCode::OK,
+                    rpc_json(JsonRpcResponse::error(
+                        body.id,
+                        -32000,
+                        format!("cancelled by plugin {plugin}: {reason}"),
+                    )),
+                );
+            }
+            // If a plugin modified the args, use the modified version
+            if let crate::plugin::hooks::HookResult::Allowed(modified) = hook_result {
+                if let Some(new_args) = modified.get("args") {
+                    final_args = new_args.clone();
+                }
+            }
+
+            match registry.handle_tool_call(tool_name, final_args, &ctx).await {
                 Ok(result) => {
+                    // ── Hook: mcp.tool.call.after ──
+                    state.plugins.dispatch(
+                        "mcp.tool.call.after",
+                        serde_json::json!({
+                            "sessionId": &ctx.session_id,
+                            "toolName": tool_name,
+                            "result": &result,
+                        }),
+                    ).await;
+
                     let content = serde_json::json!([{
                         "type": "text",
                         "text": serde_json::to_string(&result).unwrap_or_default(),
@@ -224,14 +263,26 @@ async fn mcp_handler(
                         )),
                     )
                 }
-                Err(e) => (
-                    StatusCode::OK,
-                    rpc_json(JsonRpcResponse::error(
-                        body.id,
-                        -32000,
-                        e.to_string(),
-                    )),
-                ),
+                Err(e) => {
+                    // ── Hook: mcp.tool.call.failed ──
+                    state.plugins.dispatch(
+                        "mcp.tool.call.failed",
+                        serde_json::json!({
+                            "sessionId": &ctx.session_id,
+                            "toolName": tool_name,
+                            "reason": e.to_string(),
+                        }),
+                    ).await;
+
+                    (
+                        StatusCode::OK,
+                        rpc_json(JsonRpcResponse::error(
+                            body.id,
+                            -32000,
+                            e.to_string(),
+                        )),
+                    )
+                }
             }
         }
         _ => (

@@ -128,19 +128,49 @@ async fn spawn_worker_for_card(
         return Ok(());
     }
 
-    // 3. Issue MCP token
+    // 3. Hook: mcp.token.issue.before
+    let token_hook = state.plugins.dispatch(
+        "mcp.token.issue.before",
+        serde_json::json!({ "sessionId": &session_id, "projectId": &project.id, "role": "worker" }),
+    ).await;
+    if token_hook.is_cancelled() {
+        tracing::info!(session_id = %session_id, "mcp.token.issue.before cancelled by plugin");
+        return Ok(());
+    }
+
     let mcp_token = state
         .mcp_tokens
         .issue_token(session_id.clone(), Some(project.id.clone()))
         .await;
 
-    // 4. Write MCP config
+    // Hook: mcp.token.issue.after
+    state.plugins.dispatch(
+        "mcp.token.issue.after",
+        serde_json::json!({ "sessionId": &session_id, "projectId": &project.id }),
+    ).await;
+
+    // 4. Hook: mcp.config.write.before
+    let config_hook = state.plugins.dispatch(
+        "mcp.config.write.before",
+        serde_json::json!({ "sessionId": &session_id, "port": state.config.port }),
+    ).await;
+    if config_hook.is_cancelled() {
+        tracing::info!(session_id = %session_id, "mcp.config.write.before cancelled by plugin");
+        return Ok(());
+    }
+
     let mcp_config_path = mcp_server::write_mcp_config(
         &state.config.data_dir,
         &session_id,
         state.config.port,
         &mcp_token,
     )?;
+
+    // Hook: mcp.config.write.after
+    state.plugins.dispatch(
+        "mcp.config.write.after",
+        serde_json::json!({ "sessionId": &session_id }),
+    ).await;
 
     // 5. Build worker prompt
     let prompt = pipeline::build_worker_prompt(
@@ -387,8 +417,18 @@ pub async fn handle_worker_done(state: &Arc<AppState>, session_id: &str) {
         }
     }
 
-    // Clean up MCP config file for this session
+    // Clean up MCP config and revoke tokens
     mcp_server::delete_mcp_config(&state.config.data_dir, session_id);
+    state.plugins.dispatch(
+        "mcp.config.delete.after",
+        serde_json::json!({ "sessionId": session_id }),
+    ).await;
+
+    state.mcp_tokens.revoke_by_session(session_id).await;
+    state.plugins.dispatch(
+        "mcp.token.revoke.after",
+        serde_json::json!({ "sessionId": session_id }),
+    ).await;
 
     // After handling, trigger another round of orchestration so freed slots
     // get filled.
