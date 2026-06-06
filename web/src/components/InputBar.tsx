@@ -27,10 +27,9 @@ function fileToBase64(file: File): Promise<string> {
   })
 }
 
-export default function InputBar({ sessionId, agentWorking }: InputBarProps) {
+export default function InputBar({ sessionId }: InputBarProps) {
   const getDraft = useSessionsStore((s) => s.getDraft)
   const setDraft = useSessionsStore((s) => s.setDraft)
-  const interruptSession = useSessionsStore((s) => s.interruptSession)
 
   const [text, setText] = useState(() => getDraft(sessionId))
   const [sending, setSending] = useState(false)
@@ -114,10 +113,6 @@ export default function InputBar({ sessionId, agentWorking }: InputBarProps) {
     }
   }, [text, sending, sessionId, setDraft, attachments])
 
-  const handleInterrupt = useCallback(async () => {
-    await interruptSession(sessionId)
-  }, [sessionId, interruptSession])
-
   const handleKeyDown = (e: KeyboardEvent<HTMLTextAreaElement>) => {
     const isMobile = window.matchMedia('(pointer: coarse)').matches
     if (e.key === 'Enter' && !e.shiftKey && !isMobile) {
@@ -170,11 +165,6 @@ export default function InputBar({ sessionId, agentWorking }: InputBarProps) {
           disabled={sending}
         />
         <div className="input-buttons">
-          {agentWorking && (
-            <button className="interrupt-btn" onClick={handleInterrupt} type="button">
-              Stop
-            </button>
-          )}
           <button
             className="send-btn"
             onClick={handleSend}

@@ -21,12 +21,13 @@ interface QuestionItem {
 
 /** A display item derived from one or more raw events. */
 type DisplayItem =
-  | { type: 'user'; text: string; key: string }
-  | { type: 'assistant'; text: string; key: string }
+  | { type: 'user'; text: string; key: string; ts: number }
+  | { type: 'assistant'; text: string; key: string; ts: number }
   | { type: 'tool'; toolName: string; input?: Record<string, unknown>; output?: Record<string, unknown>; error?: string; isRunning: boolean; key: string }
-  | { type: 'status'; text: string; key: string }
-  | { type: 'system'; text: string; key: string; reportFolder?: string; reportFile?: string }
+  | { type: 'status'; text: string; key: string; ts: number }
+  | { type: 'system'; text: string; key: string; reportFolder?: string; reportFile?: string; ts: number }
   | { type: 'step'; label: string; key: string }
+  | { type: 'agent-start'; model: string; effort: string; ts: number; key: string }
   | { type: 'question'; questionId: string; questions: QuestionItem[]; key: string }
   | { type: 'question-resolved'; questionId: string; questions: QuestionItem[]; answers: Record<string, unknown>; key: string }
 
@@ -83,12 +84,14 @@ function buildDisplayItems(events: Event[]): DisplayItem[] {
   const items: DisplayItem[] = []
   let assistantBuffer = ''
   let assistantKey = ''
+  let assistantTs = 0
 
   const flushAssistant = () => {
     if (assistantBuffer) {
-      items.push({ type: 'assistant', text: assistantBuffer, key: assistantKey })
+      items.push({ type: 'assistant', text: assistantBuffer, key: assistantKey, ts: assistantTs })
       assistantBuffer = ''
       assistantKey = ''
+      assistantTs = 0
     }
   }
 
@@ -109,12 +112,12 @@ function buildDisplayItems(events: Event[]): DisplayItem[] {
       case 'user': {
         flushAssistant()
         const text = (ev.data.text as string) ?? JSON.stringify(ev.data)
-        items.push({ type: 'user', text, key: ev.id })
+        items.push({ type: 'user', text, key: ev.id, ts: ev.ts })
         break
       }
       case 'agent-text': {
         const chunk = (ev.data.text as string) ?? ''
-        if (!assistantKey) assistantKey = ev.id
+        if (!assistantKey) { assistantKey = ev.id; assistantTs = ev.ts }
         assistantBuffer += chunk
         break
       }
@@ -148,23 +151,28 @@ function buildDisplayItems(events: Event[]): DisplayItem[] {
       }
       case 'agent-start': {
         flushAssistant()
-        // Don't render — toolbar status indicator already shows agent state
+        const model = (ev.data.model as string) ?? 'default'
+        // Strip provider prefix for display
+        const displayModel = model.replace(/^claude:/, '')
+        const effort = (ev.data.effort as string) ?? ''
+        items.push({ type: 'agent-start', model: displayModel, effort, ts: ev.ts, key: ev.id })
         break
       }
       case 'agent-end': {
         flushAssistant()
-        // Only show a notice when the agent crashed
         if ((ev.data.status as string) === 'crashed') {
           const reason = (ev.data.reason as string) ?? 'unknown error'
           const stderr = ev.data.stderr as string | undefined
           const crashText = stderr ? `Agent crashed: ${reason}\n\n${stderr}` : `Agent crashed: ${reason}`
-          items.push({ type: 'system', text: crashText, key: ev.id })
+          items.push({ type: 'system', text: crashText, key: ev.id, ts: ev.ts })
+        } else {
+          items.push({ type: 'status', text: 'Ready for your next message.', key: ev.id, ts: ev.ts })
         }
         break
       }
       case 'interrupt': {
         flushAssistant()
-        items.push({ type: 'system', text: 'Interrupted', key: ev.id })
+        items.push({ type: 'system', text: 'Interrupted', key: ev.id, ts: ev.ts })
         break
       }
       case 'system': {
@@ -172,7 +180,7 @@ function buildDisplayItems(events: Event[]): DisplayItem[] {
         const text = (ev.data.text as string) ?? (ev.data.message as string) ?? JSON.stringify(ev.data)
         const reportFolder = ev.data.reportFolder as string | undefined
         const reportFile = ev.data.reportFile as string | undefined
-        items.push({ type: 'system', text, key: ev.id, reportFolder, reportFile })
+        items.push({ type: 'system', text, key: ev.id, reportFolder, reportFile, ts: ev.ts })
         break
       }
       case 'step-change': {
@@ -218,6 +226,11 @@ function buildDisplayItems(events: Event[]): DisplayItem[] {
 
   flushAssistant()
   return items
+}
+
+function formatTime(ts: number): string {
+  if (!ts) return ''
+  return new Date(ts).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit', second: '2-digit' })
 }
 
 function ResolvedQuestionCard({ questions, answers }: { questions: QuestionItem[]; answers: Record<string, unknown> }) {
@@ -372,6 +385,7 @@ export default function ChatView({ sessionId }: ChatViewProps) {
   const renameSession = useSessionsStore((s) => s.renameSession)
   const clearSession = useSessionsStore((s) => s.clearSession)
   const deleteSession = useSessionsStore((s) => s.deleteSession)
+  const interruptSession = useSessionsStore((s) => s.interruptSession)
 
   // Fetch session detail on mount
   useEffect(() => {
@@ -615,13 +629,31 @@ export default function ChatView({ sessionId }: ChatViewProps) {
             case 'user':
               return (
                 <div key={item.key} className="chat-row chat-row-user">
-                  <div className="chat-bubble chat-bubble-user">{item.text}</div>
+                  <div className="chat-bubble chat-bubble-user">
+                    {item.text}
+                    <div className="chat-time chat-time-user">{formatTime(item.ts)}</div>
+                  </div>
                 </div>
               )
             case 'assistant':
               return (
                 <div key={item.key} className="chat-row chat-row-assistant">
-                  <div className="chat-bubble chat-bubble-assistant">{item.text}</div>
+                  <div className="chat-bubble chat-bubble-assistant">
+                    {item.text}
+                    <div className="chat-time">{formatTime(item.ts)}</div>
+                  </div>
+                </div>
+              )
+            case 'agent-start':
+              return (
+                <div key={item.key} className="chat-row chat-row-system">
+                  <div className="chat-agent-start">
+                    <span className="chat-agent-start-label">Agent started</span>
+                    <span className="chat-agent-start-detail">
+                      {item.model}{item.effort ? `, ${item.effort}` : ''}
+                    </span>
+                    <span className="chat-agent-start-time">{formatTime(item.ts)}</span>
+                  </div>
                 </div>
               )
             case 'tool':
@@ -638,8 +670,11 @@ export default function ChatView({ sessionId }: ChatViewProps) {
               )
             case 'status':
               return (
-                <div key={item.key} className="chat-row chat-row-status">
-                  <span className="chat-status">{item.text}</span>
+                <div key={item.key} className="chat-row chat-row-system">
+                  <div className="chat-ready-notice">
+                    <span>{item.text}</span>
+                    <span className="chat-ready-time">{formatTime(item.ts)}</span>
+                  </div>
                 </div>
               )
             case 'system':
@@ -689,7 +724,28 @@ export default function ChatView({ sessionId }: ChatViewProps) {
               )
           }
         })}
+        {/* Thinking indicator — shown when agent is working but no text yet */}
+        {agentWorking && displayItems.length > 0 && displayItems[displayItems.length - 1].type === 'agent-start' && (
+          <div className="chat-row chat-row-system">
+            <div className="chat-thinking">
+              <div className="chat-thinking-dots">
+                <span /><span /><span />
+              </div>
+              <span>Thinking...</span>
+            </div>
+          </div>
+        )}
       </div>
+
+      {/* Interrupt button — centered above input bar when agent is working */}
+      {agentWorking && (
+        <div className="chat-interrupt-bar">
+          <button className="chat-interrupt-btn" onClick={() => interruptSession(sessionId)}>
+            Interrupt
+          </button>
+        </div>
+      )}
+
       <InputBar sessionId={sessionId} agentWorking={agentWorking} />
       {confirmAction && (
         <ConfirmDialog
