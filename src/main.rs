@@ -76,6 +76,10 @@ async fn main() -> anyhow::Result<()> {
         push_service,
     });
 
+    // Resume any in-flight worker sessions after startup repair
+    peckboard::worker::orchestrator::check_and_spawn_workers(&state).await;
+    tracing::info!("Worker orchestrator startup check complete");
+
     let app = api_router(state.clone())
         .layer(axum::extract::DefaultBodyLimit::max(20 * 1024 * 1024))
         .layer(middleware::from_fn(security_headers))

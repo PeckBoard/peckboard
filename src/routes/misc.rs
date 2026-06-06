@@ -7,6 +7,7 @@ use axum::{
 };
 use serde::Deserialize;
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use crate::auth::middleware::require_auth;
 use crate::state::AppState;
@@ -121,6 +122,36 @@ async fn put_keep_awake(Json(req): Json<KeepAwakeRequest>) -> impl IntoResponse 
                         "Started caffeinate for keep-awake"
                     );
                     *guard = Some(child);
+                    // Start watchdog to respawn caffeinate if it dies
+                    tokio::spawn(async {
+                        loop {
+                            tokio::time::sleep(Duration::from_secs(5)).await;
+                            let mut guard = CAFFEINATE.lock().unwrap();
+                            if let Some(ref mut child) = *guard {
+                                match child.try_wait() {
+                                    Ok(Some(_)) => {
+                                        // Caffeinate died, respawn
+                                        tracing::warn!("caffeinate process died, respawning");
+                                        match std::process::Command::new("caffeinate")
+                                            .args(["-i", "-w", &std::process::id().to_string()])
+                                            .spawn()
+                                        {
+                                            Ok(new_child) => { *child = new_child; }
+                                            Err(e) => {
+                                                tracing::error!("Failed to respawn caffeinate: {e}");
+                                                *guard = None;
+                                                break;
+                                            }
+                                        }
+                                    }
+                                    Ok(None) => {} // Still running
+                                    Err(_) => { *guard = None; break; }
+                                }
+                            } else {
+                                break; // No process, stop watchdog
+                            }
+                        }
+                    });
                 }
                 Err(e) => {
                     tracing::error!("Failed to spawn caffeinate: {e}");

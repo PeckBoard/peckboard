@@ -9,6 +9,12 @@ use crate::ws::broadcaster::Broadcaster;
 
 use super::process::{self, ClaudeProcess};
 
+/// Notification sent when a process finishes streaming.
+pub struct ProcessCompletion {
+    pub session_id: String,
+    pub completed: bool,
+}
+
 /// Maps session IDs to their running Claude CLI processes.
 ///
 /// Provides the high-level API used by route handlers to start, stop,
@@ -19,14 +25,27 @@ pub struct SessionManager {
     /// When `stream_events` owns the child, callers use this channel
     /// to feed answers (e.g. question-resolved) back into the process.
     stdin_channels: Arc<Mutex<HashMap<String, tokio::sync::mpsc::Sender<String>>>>,
+    /// Channel for notifying when a process completes. Used by the
+    /// worker orchestrator to trigger handle_worker_done.
+    completion_tx: tokio::sync::mpsc::Sender<ProcessCompletion>,
+    completion_rx: Arc<Mutex<Option<tokio::sync::mpsc::Receiver<ProcessCompletion>>>>,
 }
 
 impl SessionManager {
     pub fn new() -> Self {
+        let (completion_tx, completion_rx) = tokio::sync::mpsc::channel(64);
         SessionManager {
             processes: Arc::new(Mutex::new(HashMap::new())),
             stdin_channels: Arc::new(Mutex::new(HashMap::new())),
+            completion_tx,
+            completion_rx: Arc::new(Mutex::new(Some(completion_rx))),
         }
+    }
+
+    /// Take the completion receiver. This should be called once at startup
+    /// to set up the worker-done listener loop.
+    pub async fn take_completion_rx(&self) -> Option<tokio::sync::mpsc::Receiver<ProcessCompletion>> {
+        self.completion_rx.lock().await.take()
     }
 
     /// Spawn a Claude CLI process for a session and begin streaming its output.
@@ -120,9 +139,10 @@ impl SessionManager {
         // We need to move `child` into the background task
         let sid_for_task = sid.clone();
         let stdin_channels_for_task = stdin_channels.clone();
+        let completion_tx = self.completion_tx.clone();
         tokio::spawn(async move {
             // Run the event stream to completion
-            process::stream_events(child, db_clone, broadcaster_clone, stdin_rx).await;
+            let is_completed = process::stream_events(child, db_clone, broadcaster_clone, stdin_rx).await;
 
             // Clean up the process entry and stdin channel
             let mut map = processes.lock().await;
@@ -131,8 +151,18 @@ impl SessionManager {
 
             let mut channels = stdin_channels_for_task.lock().await;
             channels.remove(&sid_for_task);
+            drop(channels);
 
             tracing::debug!(session_id = %sid_for_task, "Process streaming completed, removed from manager");
+
+            // Notify the completion channel so the orchestrator can handle
+            // worker-done logic outside this task (avoiding Send issues).
+            let _ = completion_tx
+                .send(ProcessCompletion {
+                    session_id: sid_for_task,
+                    completed: is_completed,
+                })
+                .await;
         });
 
         Ok(())

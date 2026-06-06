@@ -86,12 +86,15 @@ pub fn spawn_claude(
 ///
 /// The `stdin_rx` channel allows callers to feed text into the process's
 /// stdin (e.g. to deliver answers to questions).
+///
+/// Returns `true` if the process completed successfully, `false` if it
+/// crashed or encountered an error.
 pub async fn stream_events(
     mut process: ClaudeProcess,
     db: Db,
     broadcaster: Arc<Broadcaster>,
     stdin_rx: tokio::sync::mpsc::Receiver<String>,
-) {
+) -> bool {
     let session_id = process.session_id.clone();
 
     let stdout = match process.child.stdout.take() {
@@ -109,7 +112,7 @@ pub async fn stream_events(
                 },
             )
             .await;
-            return;
+            return false;
         }
     };
 
@@ -305,6 +308,8 @@ pub async fn stream_events(
             .await;
         }
     }
+
+    is_completed
 }
 
 /// Parse a single JSON line from Claude CLI stream-json output into zero or more

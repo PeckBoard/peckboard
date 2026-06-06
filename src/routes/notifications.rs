@@ -209,6 +209,12 @@ async fn create_announcement(
             )
         })?;
 
+    state.broadcaster.broadcast(crate::ws::broadcaster::WsEvent {
+        event_type: "announcement".into(),
+        session_id: String::new(),
+        data: serde_json::json!({ "action": "created", "id": announcement.id, "title": announcement.title, "message": announcement.message }),
+    });
+
     Ok::<_, (StatusCode, Json<serde_json::Value>)>((
         StatusCode::CREATED,
         Json(serde_json::json!(announcement)),
@@ -234,6 +240,12 @@ async fn delete_announcement(
         ));
     }
 
+    state.broadcaster.broadcast(crate::ws::broadcaster::WsEvent {
+        event_type: "announcement".into(),
+        session_id: String::new(),
+        data: serde_json::json!({ "action": "dismissed", "id": id }),
+    });
+
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -246,6 +258,8 @@ async fn upsert_queued_message(
     Json(body): Json<QueueMessageRequest>,
 ) -> impl IntoResponse {
     let now = chrono::Utc::now().to_rfc3339();
+    let broadcast_session_id = session_id.clone();
+    let broadcast_text = body.text.clone();
 
     let msg = state
         .db
@@ -261,6 +275,12 @@ async fn upsert_queued_message(
                 Json(serde_json::json!({ "error": e.to_string() })),
             )
         })?;
+
+    state.broadcaster.broadcast(crate::ws::broadcaster::WsEvent {
+        event_type: "queue".into(),
+        session_id: broadcast_session_id,
+        data: serde_json::json!({ "action": "set", "text": broadcast_text }),
+    });
 
     Ok::<_, (StatusCode, Json<serde_json::Value>)>((
         StatusCode::CREATED,
@@ -315,6 +335,12 @@ async fn delete_queued_message(
             Json(serde_json::json!({ "error": "no queued message" })),
         ));
     }
+
+    state.broadcaster.broadcast(crate::ws::broadcaster::WsEvent {
+        event_type: "queue".into(),
+        session_id: session_id.clone(),
+        data: serde_json::json!({ "action": "deleted" }),
+    });
 
     Ok(StatusCode::NO_CONTENT)
 }

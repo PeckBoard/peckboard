@@ -286,6 +286,9 @@ async fn append_event(
         ));
     }
 
+    let event_kind = body.kind.clone();
+    let event_data = body.data.clone();
+
     let event = state
         .db
         .append_event(&id, &body.kind, body.data)
@@ -313,7 +316,7 @@ async fn append_event(
     // Broadcast the event to WebSocket subscribers
     state.broadcaster.broadcast(crate::ws::broadcaster::WsEvent {
         event_type: "event".into(),
-        session_id: id,
+        session_id: id.clone(),
         data: serde_json::json!({
             "id": event.id,
             "seq": event.seq,
@@ -322,6 +325,15 @@ async fn append_event(
             "data": serde_json::from_str::<serde_json::Value>(&event.data).unwrap_or_default(),
         }),
     });
+
+    // If this is a question-resolved event, deliver the answer to the
+    // process's stdin so the Claude CLI receives it.
+    if event_kind == "question-resolved" {
+        if let Some(answer) = event_data.get("answer").and_then(|v| v.as_str()) {
+            let answer_json = serde_json::json!({ "answer": answer }).to_string();
+            state.session_manager.write_stdin(&id, &answer_json).await;
+        }
+    }
 
     Ok::<_, (StatusCode, Json<serde_json::Value>)>((
         StatusCode::CREATED,

@@ -114,6 +114,20 @@ async fn spawn_worker_for_card(
         card.title
     );
 
+    // Check money-loop defense
+    let events = state.db.events_tail(&session.id, 64).await.unwrap_or_default();
+    let (crash_count, should_block) = pipeline::detect_retry_loop(&events);
+    if should_block {
+        // Block the card
+        let _ = state.db.update_card(&card.id, UpdateCard {
+            blocked: Some(true),
+            block_reason: Some(Some(format!("Money-loop defense: {} consecutive crashes", crash_count))),
+            ..Default::default()
+        }).await;
+        tracing::warn!(card_id = %card.id, crash_count, "Card blocked by money-loop defense");
+        return Ok(());
+    }
+
     // 3. Issue MCP token
     let mcp_token = state
         .mcp_tokens
