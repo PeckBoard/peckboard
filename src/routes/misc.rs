@@ -61,6 +61,11 @@ async fn list_workflows() -> impl IntoResponse {
                 "steps": ["backlog", "in_progress", "done"],
             },
             {
+                "id": "research",
+                "name": "Research",
+                "steps": ["backlog", "research", "summarize", "done"],
+            },
+            {
                 "id": "full",
                 "name": "Full Pipeline",
                 "steps": ["backlog", "design", "implement", "test", "review", "done"],

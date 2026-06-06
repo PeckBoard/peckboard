@@ -114,6 +114,18 @@ impl Db {
         .await
     }
 
+    pub async fn list_worker_sessions(&self) -> anyhow::Result<Vec<Session>> {
+        self.with_conn(move |conn| {
+            sessions::table
+                .filter(sessions::is_worker.eq(true))
+                .select(Session::as_select())
+                .order(sessions::last_activity.desc())
+                .load(conn)
+                .map_err(Into::into)
+        })
+        .await
+    }
+
     pub async fn list_plain_sessions(&self) -> anyhow::Result<Vec<Session>> {
         self.with_conn(move |conn| {
             sessions::table

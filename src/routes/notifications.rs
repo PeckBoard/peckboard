@@ -43,7 +43,10 @@ struct QueueMessageRequest {
 // ── Router ─────────────────────────────────────────────────────────
 
 pub fn router(state: Arc<AppState>) -> Router<Arc<AppState>> {
-    Router::new()
+    let public = Router::new()
+        .route("/api/push/vapid-key", get(get_vapid_key));
+
+    let protected = Router::new()
         .route(
             "/api/push/subscribe",
             post(subscribe).delete(unsubscribe),
@@ -59,7 +62,20 @@ pub fn router(state: Arc<AppState>) -> Router<Arc<AppState>> {
                 .get(get_queued_message)
                 .delete(delete_queued_message),
         )
-        .route_layer(middleware::from_fn_with_state(state, require_auth))
+        .route_layer(middleware::from_fn_with_state(state, require_auth));
+
+    public.merge(protected)
+}
+
+// ── VAPID public key ──────────────────────────────────────────────
+
+/// GET /api/push/vapid-key — returns the VAPID public key for push subscriptions.
+async fn get_vapid_key(
+    State(state): State<Arc<AppState>>,
+) -> impl IntoResponse {
+    Json(serde_json::json!({
+        "publicKey": state.push_service.vapid_public_key
+    }))
 }
 
 // ── Push subscribe / unsubscribe ───────────────────────────────────

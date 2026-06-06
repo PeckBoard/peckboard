@@ -1,10 +1,115 @@
+use std::collections::HashMap;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use tokio::sync::Mutex;
 
 use crate::db::Db;
 use crate::db::models::NewCard;
+
+// ── MCP config file generation ────────────────────────────────────
+
+/// Write a per-session MCP config JSON file so workers can discover
+/// the peckboard MCP endpoint.
+pub fn write_mcp_config(
+    data_dir: &Path,
+    session_id: &str,
+    http_port: u16,
+    token: &str,
+) -> anyhow::Result<PathBuf> {
+    let mcp_dir = data_dir.join("worker-mcp");
+    std::fs::create_dir_all(&mcp_dir)?;
+    let config_path = mcp_dir.join(format!("{session_id}.json"));
+
+    let config = serde_json::json!({
+        "mcpServers": {
+            "peckboard": {
+                "url": format!("http://127.0.0.1:{http_port}/api/internal/mcp"),
+                "headers": {
+                    "Authorization": format!("Bearer {token}")
+                }
+            }
+        }
+    });
+
+    std::fs::write(&config_path, serde_json::to_string_pretty(&config)?)?;
+    Ok(config_path)
+}
+
+/// Remove a per-session MCP config file.
+pub fn delete_mcp_config(data_dir: &Path, session_id: &str) {
+    let config_path = data_dir
+        .join("worker-mcp")
+        .join(format!("{session_id}.json"));
+    let _ = std::fs::remove_file(config_path);
+}
+
+// ── MCP bearer token registry ─────────────────────────────────────
+
+/// Metadata associated with an issued MCP token.
+pub struct McpTokenInfo {
+    pub session_id: String,
+    pub project_id: Option<String>,
+}
+
+/// A simple in-memory registry mapping token hashes to session metadata.
+pub struct McpTokenRegistry {
+    tokens: Mutex<HashMap<String, McpTokenInfo>>, // token_hash -> info
+}
+
+impl McpTokenRegistry {
+    pub fn new() -> Self {
+        McpTokenRegistry {
+            tokens: Mutex::new(HashMap::new()),
+        }
+    }
+
+    /// Issue a new bearer token for the given session/project.
+    /// Returns the raw token (caller must pass it to the worker).
+    pub async fn issue_token(
+        &self,
+        session_id: String,
+        project_id: Option<String>,
+    ) -> String {
+        use rand::Rng;
+        use sha2::Digest;
+
+        let mut raw = [0u8; 24];
+        rand::thread_rng().fill(&mut raw);
+        let token = hex::encode(raw);
+
+        let hash = hex::encode(sha2::Sha256::digest(token.as_bytes()));
+
+        self.tokens.lock().await.insert(
+            hash,
+            McpTokenInfo {
+                session_id,
+                project_id,
+            },
+        );
+        token
+    }
+
+    /// Look up a token by its SHA-256 hash.
+    pub async fn lookup(&self, token: &str) -> Option<(String, Option<String>)> {
+        use sha2::Digest;
+        let hash = hex::encode(sha2::Sha256::digest(token.as_bytes()));
+        let guard = self.tokens.lock().await;
+        guard
+            .get(&hash)
+            .map(|info| (info.session_id.clone(), info.project_id.clone()))
+    }
+
+    /// Revoke all tokens belonging to a session.
+    pub async fn revoke_by_session(&self, session_id: &str) {
+        self.tokens
+            .lock()
+            .await
+            .retain(|_, info| info.session_id != session_id);
+    }
+}
 
 /// Context scoped from the MCP token — identifies what session/project/card
 /// the tool call is operating within.
@@ -533,5 +638,72 @@ mod tests {
             .await
             .unwrap();
         assert!(result["workflows"].is_array());
+    }
+
+    #[test]
+    fn test_write_and_delete_mcp_config() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = write_mcp_config(tmp.path(), "sess-1", 3333, "tok123").unwrap();
+
+        assert!(path.exists());
+        let content: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(
+            content["mcpServers"]["peckboard"]["url"],
+            "http://127.0.0.1:3333/api/internal/mcp"
+        );
+        assert_eq!(
+            content["mcpServers"]["peckboard"]["headers"]["Authorization"],
+            "Bearer tok123"
+        );
+
+        delete_mcp_config(tmp.path(), "sess-1");
+        assert!(!path.exists());
+    }
+
+    #[test]
+    fn test_delete_mcp_config_no_op() {
+        let tmp = tempfile::tempdir().unwrap();
+        // Should not panic even if file doesn't exist
+        delete_mcp_config(tmp.path(), "nonexistent");
+    }
+
+    #[tokio::test]
+    async fn test_token_registry_issue_and_lookup() {
+        let registry = McpTokenRegistry::new();
+        let token = registry
+            .issue_token("sess-1".into(), Some("proj-a".into()))
+            .await;
+
+        assert_eq!(token.len(), 48); // 24 bytes => 48 hex chars
+
+        let info = registry.lookup(&token).await;
+        assert!(info.is_some());
+        let (sid, pid) = info.unwrap();
+        assert_eq!(sid, "sess-1");
+        assert_eq!(pid.as_deref(), Some("proj-a"));
+
+        // Unknown token returns None
+        assert!(registry.lookup("bogus").await.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_token_registry_revoke_by_session() {
+        let registry = McpTokenRegistry::new();
+        let t1 = registry
+            .issue_token("sess-1".into(), None)
+            .await;
+        let t2 = registry
+            .issue_token("sess-1".into(), Some("proj-b".into()))
+            .await;
+        let t3 = registry
+            .issue_token("sess-2".into(), None)
+            .await;
+
+        registry.revoke_by_session("sess-1").await;
+
+        assert!(registry.lookup(&t1).await.is_none());
+        assert!(registry.lookup(&t2).await.is_none());
+        assert!(registry.lookup(&t3).await.is_some());
     }
 }

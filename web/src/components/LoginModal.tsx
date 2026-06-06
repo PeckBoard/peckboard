@@ -5,6 +5,7 @@ export default function LoginModal() {
   const login = useAuthStore((s) => s.login)
   const [username, setUsername] = useState('')
   const [password, setPassword] = useState('')
+  const [rememberMe, setRememberMe] = useState(true)
   const [error, setError] = useState<string | null>(null)
   const [loading, setLoading] = useState(false)
 
@@ -13,7 +14,7 @@ export default function LoginModal() {
     setError(null)
     setLoading(true)
     try {
-      await login(username, password)
+      await login(username, password, rememberMe)
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Login failed')
     } finally {
@@ -49,6 +50,15 @@ export default function LoginModal() {
               onChange={(e) => setPassword(e.target.value)}
               required
             />
+          </div>
+          <div className="form-field" style={{ flexDirection: 'row', alignItems: 'center', gap: '0.5rem' }}>
+            <input
+              id="login-remember"
+              type="checkbox"
+              checked={rememberMe}
+              onChange={(e) => setRememberMe(e.target.checked)}
+            />
+            <label className="form-label" htmlFor="login-remember" style={{ margin: 0 }}>Remember me</label>
           </div>
           {error && <p className="form-error">{error}</p>}
           <button className="btn-primary" type="submit" disabled={loading}>

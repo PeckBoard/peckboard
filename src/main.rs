@@ -8,8 +8,13 @@ use peckboard::provider::claude::register_claude_provider;
 use peckboard::provider::registry::ProviderRegistry;
 use peckboard::routes::api_router;
 use peckboard::security::{origin_check, repair_dangling_sessions, security_headers};
+use peckboard::service::mcp_server::McpTokenRegistry;
+use peckboard::service::mdns;
+use peckboard::service::push::PushService;
 use peckboard::service::tls;
+use peckboard::service::wake::WakeDetector;
 use peckboard::state::AppState;
+use peckboard::worker::watchdog;
 use peckboard::ws::broadcaster::Broadcaster;
 
 use axum::middleware;
@@ -55,6 +60,9 @@ async fn main() -> anyhow::Result<()> {
     register_claude_provider(&provider_registry).await;
     let session_manager = SessionManager::new();
 
+    let mcp_tokens = McpTokenRegistry::new();
+    let push_service = PushService::new(&config.data_dir);
+
     let state = Arc::new(AppState {
         config,
         db,
@@ -64,6 +72,8 @@ async fn main() -> anyhow::Result<()> {
         broadcaster,
         provider_registry,
         session_manager,
+        mcp_tokens,
+        push_service,
     });
 
     let app = api_router(state.clone())
@@ -75,6 +85,32 @@ async fn main() -> anyhow::Result<()> {
 
     tracing::info!("Peckboard listening on http://{addr}");
     let listener = TcpListener::bind(&addr).await?;
+
+    // Start mDNS advertisement
+    let mdns_name = mdns::generate_mdns_name();
+    let mdns_handle = match mdns::start_mdns(&mdns_name, state.config.port) {
+        Ok(handle) => {
+            tracing::info!("mDNS name: {mdns_name}");
+            Some(handle)
+        }
+        Err(e) => {
+            tracing::warn!("Failed to start mDNS: {e}");
+            None
+        }
+    };
+
+    // Start wake-from-sleep detector
+    let _wake_detector = WakeDetector::start();
+    tracing::info!("Wake-from-sleep detector started");
+
+    // Start worker watchdog (orphan cleanup every 60s)
+    {
+        let watchdog_db = state.db.clone();
+        let watchdog_sm = SessionManager::new();
+        let watchdog_bc = state.broadcaster.clone();
+        tokio::spawn(watchdog::start_watchdog(watchdog_db, watchdog_sm, watchdog_bc));
+        tracing::info!("Worker watchdog started");
+    }
 
     // Start HTTPS listener if TLS certs can be loaded
     let https_addr = format!("{}:{}", state.config.host, state.config.https_port);
@@ -112,6 +148,15 @@ async fn main() -> anyhow::Result<()> {
             tracing::info!("Shutdown complete");
         })
         .await?;
+
+    // Stop mDNS advertisement
+    if let Some(mdns) = mdns_handle {
+        if let Err(e) = mdns.stop() {
+            tracing::warn!("Failed to stop mDNS: {e}");
+        } else {
+            tracing::info!("mDNS advertisement stopped");
+        }
+    }
 
     // Abort the HTTPS task when HTTP server shuts down
     if let Some(handle) = tls_handle {

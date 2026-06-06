@@ -3,15 +3,21 @@ import { create } from 'zustand'
 const TOKEN_KEY = 'peckboard_token'
 
 function getToken(): string | null {
-  return localStorage.getItem(TOKEN_KEY)
+  // Check localStorage first (remember-me), then sessionStorage
+  return localStorage.getItem(TOKEN_KEY) ?? sessionStorage.getItem(TOKEN_KEY)
 }
 
-function setToken(token: string): void {
-  localStorage.setItem(TOKEN_KEY, token)
+function setToken(token: string, rememberMe: boolean): void {
+  if (rememberMe) {
+    localStorage.setItem(TOKEN_KEY, token)
+  } else {
+    sessionStorage.setItem(TOKEN_KEY, token)
+  }
 }
 
 function clearToken(): void {
   localStorage.removeItem(TOKEN_KEY)
+  sessionStorage.removeItem(TOKEN_KEY)
 }
 
 /** Fetch wrapper that attaches JWT and handles 401 by clearing auth state. */
@@ -39,7 +45,7 @@ interface AuthState {
   user: { id: string; username: string; role: string } | null
   clearAuth: () => void
   checkAuth: () => Promise<void>
-  login: (username: string, password: string) => Promise<void>
+  login: (username: string, password: string, rememberMe?: boolean) => Promise<void>
   logout: () => Promise<void>
   register: (username: string, password: string, email?: string) => Promise<void>
 }
@@ -81,7 +87,7 @@ export const useAuthStore = create<AuthState>((set) => ({
     }
   },
 
-  login: async (username, password) => {
+  login: async (username, password, rememberMe = true) => {
     const res = await fetch('/api/auth/login', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -92,7 +98,7 @@ export const useAuthStore = create<AuthState>((set) => ({
       throw new Error(err.error || 'Login failed')
     }
     const data = await res.json()
-    setToken(data.token)
+    setToken(data.token, rememberMe)
     set({ authenticated: true, user: data.user, needsRegistration: false })
   },
 
@@ -119,7 +125,7 @@ export const useAuthStore = create<AuthState>((set) => ({
       throw new Error(err.error || 'Registration failed')
     }
     const data = await res.json()
-    setToken(data.token)
+    setToken(data.token, true)
     set({ authenticated: true, user: data.user, needsRegistration: false })
   },
 }))
