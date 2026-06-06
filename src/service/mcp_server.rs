@@ -553,22 +553,70 @@ impl McpToolRegistry {
             .and_then(|v| v.as_str())
             .ok_or_else(|| anyhow::anyhow!("write_report requires 'body'"))?;
 
+        // Write to disk: <dataDir>/reports/<date>/<sanitized-title>.md
+        let now = chrono::Utc::now();
+        let date_folder = now.format("%Y-%m-%d").to_string();
+        let data_dir = dirs::home_dir()
+            .unwrap_or_else(|| std::path::PathBuf::from("."))
+            .join(".peckboard");
+        let reports_dir = data_dir.join("reports").join(&date_folder);
+        std::fs::create_dir_all(&reports_dir)?;
+
+        // Sanitize title for filename
+        let sanitized: String = title
+            .chars()
+            .map(|c| if c.is_alphanumeric() || c == '-' || c == '_' || c == ' ' { c } else { '_' })
+            .collect::<String>()
+            .replace(' ', "-")
+            .to_lowercase();
+        let sanitized = if sanitized.is_empty() { "report".to_string() } else { sanitized };
+
+        // Collision avoidance
+        let mut filename = format!("{sanitized}.md");
+        let mut path = reports_dir.join(&filename);
+        let mut counter = 1;
+        while path.exists() {
+            filename = format!("{sanitized}-{counter}.md");
+            path = reports_dir.join(&filename);
+            counter += 1;
+        }
+
+        // Resolve project name for frontmatter
+        let project_name = if let Some(ref pid) = ctx.project_id {
+            ctx.db.get_project(pid).await.ok().flatten().map(|p| p.name)
+        } else {
+            None
+        };
+
+        // Build markdown with YAML frontmatter
+        let mut content = format!("---\ntitle: \"{title}\"\ndate: \"{}\"\nsessionId: \"{}\"",
+            now.to_rfc3339(), ctx.session_id);
+        if let Some(ref pn) = project_name {
+            content.push_str(&format!("\nprojectName: \"{pn}\""));
+        }
+        content.push_str("\n---\n\n");
+        content.push_str(body);
+
+        std::fs::write(&path, &content)?;
+        tracing::info!(session_id = %ctx.session_id, path = %path.display(), "Report written to disk");
+
+        // Append system event so it shows in the chat
         ctx.db
             .append_event(
                 &ctx.session_id,
-                "report",
+                "system",
                 serde_json::json!({
-                    "title": title,
-                    "body": body,
-                    "cardId": ctx.card_id,
-                    "projectId": ctx.project_id,
+                    "text": format!("Report written: {title}"),
+                    "reportFolder": date_folder,
+                    "reportFile": filename,
                 }),
             )
             .await?;
 
         Ok(serde_json::json!({
             "status": "ok",
-            "message": "Report written"
+            "folder": date_folder,
+            "file": filename,
         }))
     }
 }

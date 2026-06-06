@@ -30,10 +30,12 @@ export default function ReportBrowser() {
         const data = await res.json().catch(() => ({ error: 'Failed to fetch reports' }))
         throw new Error(data.error || 'Failed to fetch reports')
       }
-      const data: ReportEntry[] = await res.json()
-      setReports(data)
+      const data = await res.json()
+      // Backend returns { reports: [...] }
+      const list: ReportEntry[] = Array.isArray(data) ? data : (data.reports ?? [])
+      setReports(list)
       // Auto-expand all folders
-      const folders = new Set(data.map((r) => r.folder))
+      const folders = new Set(list.map((r: ReportEntry) => r.folder))
       setExpandedFolders(folders)
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to fetch reports')
@@ -63,10 +65,10 @@ export default function ReportBrowser() {
     try {
       const res = await authedFetch(`/api/reports/${encodeURIComponent(folder)}/${encodeURIComponent(file)}`)
       if (!res.ok) throw new Error('Failed to load report')
-      const text = await res.text()
-      setReportContent(text)
+      const data = await res.json()
+      setReportContent(data.body ?? data.content ?? JSON.stringify(data, null, 2))
     } catch {
-      setReportContent('<p>Failed to load report content.</p>')
+      setReportContent('Failed to load report content.')
     } finally {
       setLoadingContent(false)
     }
@@ -86,19 +88,30 @@ export default function ReportBrowser() {
             &larr; Back
           </button>
           <h2 style={{ margin: 0 }}>Report</h2>
-          <a
-            href={`/api/reports/${encodeURIComponent(activeReport.folder)}/${encodeURIComponent(activeReport.file)}/download`}
+          <button
             className="btn-secondary"
-            style={{ marginLeft: 'auto', textDecoration: 'none' }}
-            download
+            style={{ marginLeft: 'auto' }}
+            onClick={async () => {
+              const res = await authedFetch(`/api/reports/${encodeURIComponent(activeReport.folder)}/${encodeURIComponent(activeReport.file)}/download`)
+              if (!res.ok) return
+              const blob = await res.blob()
+              const url = URL.createObjectURL(blob)
+              const a = document.createElement('a')
+              a.href = url
+              a.download = activeReport.file
+              a.click()
+              URL.revokeObjectURL(url)
+            }}
           >
             Download
-          </a>
+          </button>
         </div>
         {loadingContent ? (
           <div className="chat-loading"><div className="loading-spinner" /></div>
         ) : (
-          <div dangerouslySetInnerHTML={{ __html: reportContent }} />
+          <div style={{ whiteSpace: 'pre-wrap', fontFamily: 'var(--font)', fontSize: 'var(--text-sm)', lineHeight: 1.7, color: 'var(--text)' }}>
+            {reportContent}
+          </div>
         )}
       </div>
     )
@@ -142,15 +155,24 @@ export default function ReportBrowser() {
                       <span className="folder-path">{r.date}</span>
                     </div>
                   </button>
-                  <a
-                    href={`/api/reports/${encodeURIComponent(r.folder)}/${encodeURIComponent(r.file)}/download`}
+                  <button
                     className="btn-secondary"
-                    style={{ textDecoration: 'none', fontSize: 'var(--text-xs)', padding: '4px 10px' }}
-                    download
-                    onClick={(e) => e.stopPropagation()}
+                    style={{ fontSize: 'var(--text-xs)', padding: '4px 10px' }}
+                    onClick={async (e) => {
+                      e.stopPropagation()
+                      const res = await authedFetch(`/api/reports/${encodeURIComponent(r.folder)}/${encodeURIComponent(r.file)}/download`)
+                      if (!res.ok) return
+                      const blob = await res.blob()
+                      const url = URL.createObjectURL(blob)
+                      const a = document.createElement('a')
+                      a.href = url
+                      a.download = r.file
+                      a.click()
+                      URL.revokeObjectURL(url)
+                    }}
                   >
                     Download
-                  </a>
+                  </button>
                 </div>
               ))}
             </div>
