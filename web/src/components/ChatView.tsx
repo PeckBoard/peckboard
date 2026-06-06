@@ -511,6 +511,19 @@ export default function ChatView({ sessionId }: ChatViewProps) {
 
   const agentStatus = deriveAgentStatus(events)
 
+  // Show thinking when:
+  // 1. Agent is actively working but no text has arrived yet (last display item is agent-start)
+  // 2. Last event is 'user' (message just sent, CLI hasn't started yet)
+  const showThinking = (() => {
+    if (displayItems.length === 0) return false
+    const lastDisplay = displayItems[displayItems.length - 1].type
+    // After agent-start but before first text/tool
+    if (agentWorking && lastDisplay === 'agent-start') return true
+    // User just sent, waiting for CLI to boot (last raw event is 'user')
+    if (events.length > 0 && events[events.length - 1].kind === 'user') return true
+    return false
+  })()
+
   // Toolbar actions
   const handleRename = async () => {
     setMenuOpen(false)
@@ -724,8 +737,8 @@ export default function ChatView({ sessionId }: ChatViewProps) {
               )
           }
         })}
-        {/* Thinking indicator — shown when agent is working but no text yet */}
-        {agentWorking && displayItems.length > 0 && displayItems[displayItems.length - 1].type === 'agent-start' && (
+        {/* Thinking indicator — shown when waiting for agent response */}
+        {showThinking && (
           <div className="chat-row chat-row-system">
             <div className="chat-thinking">
               <div className="chat-thinking-dots">
