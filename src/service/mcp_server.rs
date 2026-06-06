@@ -23,13 +23,35 @@ pub fn write_mcp_config(
     std::fs::create_dir_all(&mcp_dir)?;
     let config_path = mcp_dir.join(format!("{session_id}.json"));
 
+    // Write a tiny proxy script that bridges stdio ↔ HTTP for MCP.
+    // Claude CLI requires command/args format (stdio subprocess).
+    let proxy_path = mcp_dir.join("mcp-proxy.sh");
+    if !proxy_path.exists() {
+        let proxy_script = "#!/bin/bash\n\
+            # Peckboard MCP stdio-to-HTTP proxy\n\
+            while IFS= read -r line; do\n\
+            \tcurl -s -X POST \\\n\
+            \t\t-H 'Content-Type: application/json' \\\n\
+            \t\t-H \"Authorization: Bearer $PECKBOARD_TOKEN\" \\\n\
+            \t\t-d \"$line\" \\\n\
+            \t\t\"$PECKBOARD_MCP_URL\" 2>/dev/null\n\
+            done\n";
+        std::fs::write(&proxy_path, proxy_script)?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&proxy_path, std::fs::Permissions::from_mode(0o755))?;
+        }
+    }
+
     let config = serde_json::json!({
         "mcpServers": {
             "peckboard": {
-                "type": "url",
-                "url": format!("http://127.0.0.1:{http_port}/mcp"),
-                "headers": {
-                    "Authorization": format!("Bearer {token}")
+                "command": proxy_path.to_string_lossy(),
+                "args": [],
+                "env": {
+                    "PECKBOARD_TOKEN": token,
+                    "PECKBOARD_MCP_URL": format!("http://127.0.0.1:{http_port}/mcp")
                 }
             }
         }
@@ -1297,17 +1319,15 @@ mod tests {
         assert!(path.exists());
         let content: serde_json::Value =
             serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        // Config uses command/args format (stdio subprocess)
+        assert!(content["mcpServers"]["peckboard"]["command"].is_string());
         assert_eq!(
-            content["mcpServers"]["peckboard"]["url"],
+            content["mcpServers"]["peckboard"]["env"]["PECKBOARD_TOKEN"],
+            "tok123"
+        );
+        assert_eq!(
+            content["mcpServers"]["peckboard"]["env"]["PECKBOARD_MCP_URL"],
             "http://127.0.0.1:3333/mcp"
-        );
-        assert_eq!(
-            content["mcpServers"]["peckboard"]["type"],
-            "url"
-        );
-        assert_eq!(
-            content["mcpServers"]["peckboard"]["headers"]["Authorization"],
-            "Bearer tok123"
         );
 
         delete_mcp_config(tmp.path(), "sess-1");
