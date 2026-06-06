@@ -345,14 +345,22 @@ function QuestionCard({ sessionId, questionId, questions }: { sessionId: string;
   )
 }
 
+interface ModelInfo {
+  id: string
+  display_name: string
+}
+
 export default function ChatView({ sessionId }: ChatViewProps) {
   const [events, setEvents] = useState<Event[]>([])
   const [loading, setLoading] = useState(true)
   const [sessionDetail, setSessionDetail] = useState<Session | null>(null)
   const [menuOpen, setMenuOpen] = useState(false)
   const [confirmAction, setConfirmAction] = useState<{ title: string; message: string; onConfirm: () => void } | null>(null)
+  const [modelDropdownOpen, setModelDropdownOpen] = useState(false)
+  const [availableModels, setAvailableModels] = useState<ModelInfo[]>([])
   const scrollRef = useRef<HTMLDivElement>(null)
   const menuRef = useRef<HTMLDivElement>(null)
+  const modelRef = useRef<HTMLDivElement>(null)
   const userScrolledUp = useRef(false)
 
   const subscribe = useWsStore((s) => s.subscribe)
@@ -386,6 +394,31 @@ export default function ChatView({ sessionId }: ChatViewProps) {
     document.addEventListener('mousedown', handleClick)
     return () => document.removeEventListener('mousedown', handleClick)
   }, [menuOpen])
+
+  // Close model dropdown on outside click
+  useEffect(() => {
+    if (!modelDropdownOpen) return
+    const handleClick = (e: MouseEvent) => {
+      if (modelRef.current && !modelRef.current.contains(e.target as Node)) {
+        setModelDropdownOpen(false)
+      }
+    }
+    document.addEventListener('mousedown', handleClick)
+    return () => document.removeEventListener('mousedown', handleClick)
+  }, [modelDropdownOpen])
+
+  // Fetch available models when model dropdown opens
+  useEffect(() => {
+    if (!modelDropdownOpen || availableModels.length > 0) return
+    authedFetch('/api/models')
+      .then((res) => (res.ok ? res.json() : null))
+      .then((data) => {
+        if (data && Array.isArray(data.models)) {
+          setAvailableModels(data.models as ModelInfo[])
+        }
+      })
+      .catch(() => {})
+  }, [modelDropdownOpen, availableModels.length])
 
   // Fetch initial events
   const fetchEvents = useCallback(() => {
@@ -498,6 +531,23 @@ export default function ChatView({ sessionId }: ChatViewProps) {
     })
   }
 
+  const handleModelChange = async (modelId: string) => {
+    setModelDropdownOpen(false)
+    try {
+      const res = await authedFetch(`/api/sessions/${sessionId}`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ model: modelId }),
+      })
+      if (res.ok) {
+        const updated: Session = await res.json()
+        setSessionDetail(updated)
+      }
+    } catch {
+      /* ignore */
+    }
+  }
+
   if (loading) {
     return (
       <div className="chat-container">
@@ -511,7 +561,31 @@ export default function ChatView({ sessionId }: ChatViewProps) {
       {/* Toolbar */}
       <div className="chat-toolbar">
         <span className="chat-toolbar-name">{sessionDetail?.name ?? 'Session'}</span>
-        <span className="chat-toolbar-model">{sessionDetail?.model ?? 'default'}</span>
+        <div className="chat-toolbar-model-wrapper" ref={modelRef}>
+          <button
+            className="chat-toolbar-model"
+            onClick={() => setModelDropdownOpen(!modelDropdownOpen)}
+            type="button"
+          >
+            {sessionDetail?.model ?? 'default'}
+          </button>
+          {modelDropdownOpen && (
+            <div className="chat-toolbar-dropdown chat-model-dropdown">
+              {availableModels.length === 0 && (
+                <div className="chat-model-loading">Loading models...</div>
+              )}
+              {availableModels.map((m) => (
+                <button
+                  key={m.id}
+                  className={m.id === sessionDetail?.model ? 'active' : ''}
+                  onClick={() => handleModelChange(m.id)}
+                >
+                  {m.display_name}
+                </button>
+              ))}
+            </div>
+          )}
+        </div>
         <span className="chat-toolbar-status">
           <span className={getStatusDotClass(agentStatus)} />
           {getStatusLabel(agentStatus)}

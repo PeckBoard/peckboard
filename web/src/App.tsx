@@ -1,5 +1,6 @@
 import { useEffect, useState, useMemo, useCallback } from 'react'
-import { useAuthStore } from './store/auth'
+import { useAuthStore, authedFetch } from './store/auth'
+import type { Announcement } from './types/api'
 import { useUiStore } from './store/ui'
 import { useWsStore } from './store/ws'
 import { useSessionsStore } from './store/sessions'
@@ -102,6 +103,7 @@ function App() {
   const [showNewProject, setShowNewProject] = useState(false)
   const [contextSession, setContextSession] = useState<string | null>(null)
   const [confirmDeleteId, setConfirmDeleteId] = useState<string | null>(null)
+  const [announcement, setAnnouncement] = useState<Announcement | null>(null)
 
   // Navigate: update view + push URL
   const navigate = useCallback((newView: View, activeId?: string | null) => {
@@ -172,6 +174,15 @@ function App() {
       connect()
       fetchSessions()
       fetchFolders()
+      // Fetch announcements
+      authedFetch('/api/announcements')
+        .then((res) => (res.ok ? res.json() : []))
+        .then((data: Announcement[]) => {
+          if (Array.isArray(data) && data.length > 0) {
+            setAnnouncement(data[0])
+          }
+        })
+        .catch(() => {})
       return () => { disconnect() }
     }
   }, [authenticated, connect, disconnect, fetchSessions, fetchFolders])
@@ -187,6 +198,17 @@ function App() {
 
   if (needsRegistration) return <RegisterModal />
   if (!authenticated) return <LoginModal />
+
+  const dismissAnnouncement = async () => {
+    if (!announcement) return
+    const id = announcement.id
+    setAnnouncement(null)
+    try {
+      await authedFetch(`/api/announcements/${id}`, { method: 'DELETE' })
+    } catch {
+      /* ignore */
+    }
+  }
 
   const handleDeleteSession = (id: string) => {
     setConfirmDeleteId(id)
@@ -282,6 +304,17 @@ function App() {
 
       {/* Main Content */}
       <main className="content">
+        {announcement && (
+          <div className="announcement-banner">
+            <div className="announcement-content">
+              <strong>{announcement.title}</strong>
+              <span>{announcement.message}</span>
+            </div>
+            <button className="announcement-dismiss" onClick={dismissAnnouncement} type="button">
+              Dismiss
+            </button>
+          </div>
+        )}
         {view === 'sessions' && (activeSessionId ? <ChatView sessionId={activeSessionId} /> : (
           <div className="empty-state">
             <div className="empty-icon"><svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z" /></svg></div>

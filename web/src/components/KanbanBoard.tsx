@@ -26,7 +26,15 @@ interface KanbanBoardProps {
 export default function KanbanBoard({ projectId }: KanbanBoardProps) {
   const cards = useProjectsStore((s) => s.cards)
   const fetchCards = useProjectsStore((s) => s.fetchCards)
+  const createCard = useProjectsStore((s) => s.createCard)
+  const deleteCard = useProjectsStore((s) => s.deleteCard)
   const [selectedCard, setSelectedCard] = useState<Card | null>(null)
+  const [showAddForm, setShowAddForm] = useState(false)
+  const [addTitle, setAddTitle] = useState('')
+  const [addDescription, setAddDescription] = useState('')
+  const [addPriority, setAddPriority] = useState(2)
+  const [addSubmitting, setAddSubmitting] = useState(false)
+  const [confirmDeleteId, setConfirmDeleteId] = useState<string | null>(null)
 
   useEffect(() => {
     fetchCards(projectId)
@@ -34,8 +42,72 @@ export default function KanbanBoard({ projectId }: KanbanBoardProps) {
 
   const cardsByStep = (step: string) => cards.filter((c) => c.step === step)
 
+  const handleAddCard = async () => {
+    if (!addTitle.trim() || addSubmitting) return
+    setAddSubmitting(true)
+    try {
+      await createCard(projectId, {
+        title: addTitle.trim(),
+        description: addDescription.trim(),
+        step: 'backlog',
+        priority: addPriority,
+      } as Partial<Card>)
+      setAddTitle('')
+      setAddDescription('')
+      setAddPriority(2)
+      setShowAddForm(false)
+    } catch {
+      /* ignore */
+    } finally {
+      setAddSubmitting(false)
+    }
+  }
+
+  const handleDeleteCard = async (cardId: string) => {
+    try {
+      await deleteCard(projectId, cardId)
+      setSelectedCard(null)
+      setConfirmDeleteId(null)
+    } catch {
+      /* ignore */
+    }
+  }
+
   return (
     <div className="kanban-board">
+      <div className="kanban-board-header">
+        <button className="btn-primary" onClick={() => setShowAddForm(!showAddForm)}>
+          {showAddForm ? 'Cancel' : 'Add Card'}
+        </button>
+      </div>
+
+      {showAddForm && (
+        <div className="kanban-add-form">
+          <input
+            type="text"
+            placeholder="Card title"
+            value={addTitle}
+            onChange={(e) => setAddTitle(e.target.value)}
+            onKeyDown={(e) => { if (e.key === 'Enter') handleAddCard() }}
+            autoFocus
+          />
+          <textarea
+            placeholder="Description"
+            value={addDescription}
+            onChange={(e) => setAddDescription(e.target.value)}
+            rows={3}
+          />
+          <select value={addPriority} onChange={(e) => setAddPriority(Number(e.target.value))}>
+            <option value={1}>High priority</option>
+            <option value={2}>Medium priority</option>
+            <option value={3}>Low priority</option>
+          </select>
+          <button className="btn-primary" onClick={handleAddCard} disabled={!addTitle.trim() || addSubmitting}>
+            {addSubmitting ? 'Creating...' : 'Create Card'}
+          </button>
+        </div>
+      )}
+
       <div className="kanban-columns">
         {STEPS.map((step) => (
           <div key={step.key} className="kanban-column">
@@ -67,7 +139,7 @@ export default function KanbanBoard({ projectId }: KanbanBoardProps) {
       </div>
 
       {selectedCard && (
-        <div className="modal-backdrop" onClick={() => setSelectedCard(null)}>
+        <div className="modal-backdrop" onClick={() => { setSelectedCard(null); setConfirmDeleteId(null) }}>
           <div className="modal" onClick={(e) => e.stopPropagation()}>
             <h2>{selectedCard.title}</h2>
             <div className="card-detail-grid">
@@ -102,7 +174,34 @@ export default function KanbanBoard({ projectId }: KanbanBoardProps) {
                 </div>
               )}
             </div>
-            <button className="close-btn" onClick={() => setSelectedCard(null)}>
+            <div className="card-detail-actions">
+              {selectedCard.worker_session_id && (
+                <button
+                  className="btn-secondary"
+                  onClick={() => {
+                    window.location.href = `/sessions/${selectedCard.worker_session_id}`
+                  }}
+                >
+                  View Session
+                </button>
+              )}
+              {confirmDeleteId === selectedCard.id ? (
+                <div className="card-delete-confirm">
+                  <span>Delete this card?</span>
+                  <button className="btn-danger" onClick={() => handleDeleteCard(selectedCard.id)}>
+                    Confirm Delete
+                  </button>
+                  <button className="btn-secondary" onClick={() => setConfirmDeleteId(null)}>
+                    Cancel
+                  </button>
+                </div>
+              ) : (
+                <button className="btn-danger" onClick={() => setConfirmDeleteId(selectedCard.id)}>
+                  Delete Card
+                </button>
+              )}
+            </div>
+            <button className="close-btn" onClick={() => { setSelectedCard(null); setConfirmDeleteId(null) }}>
               Close
             </button>
           </div>

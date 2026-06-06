@@ -66,6 +66,7 @@ async fn main() -> anyhow::Result<()> {
     });
 
     let app = api_router(state.clone())
+        .layer(axum::extract::DefaultBodyLimit::max(20 * 1024 * 1024))
         .layer(middleware::from_fn(security_headers))
         .layer(middleware::from_fn(origin_check))
         .layer(TraceLayer::new_for_http())

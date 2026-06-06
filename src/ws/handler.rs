@@ -52,7 +52,7 @@ async fn handle_connection(socket: WebSocket, state: Arc<AppState>) {
             if let Message::Text(text) = msg {
                 if let Ok(ClientFrame::Auth { token }) = serde_json::from_str(&text) {
                     return validate_token(&state.jwt_secret, &token)
-                        .map(|claims| claims.sub)
+                        .map(|claims| (claims.sub, claims.jti))
                         .ok();
                 }
             }
@@ -62,8 +62,8 @@ async fn handle_connection(socket: WebSocket, state: Arc<AppState>) {
     })
     .await;
 
-    let user_id = match auth_result {
-        Ok(Some(uid)) => uid,
+    let (user_id, session_id) = match auth_result {
+        Ok(Some(pair)) => pair,
         _ => {
             let _ = sender
                 .send(Message::Close(Some(axum::extract::ws::CloseFrame {
@@ -91,9 +91,34 @@ async fn handle_connection(socket: WebSocket, state: Arc<AppState>) {
     // Get a broadcast receiver
     let mut broadcast_rx = state.broadcaster.subscribe_all();
 
+    // Periodic auth session check
+    let mut auth_check_interval = tokio::time::interval(Duration::from_secs(10));
+    auth_check_interval.tick().await; // consume the immediate first tick
+
     // Main message loop
     loop {
         tokio::select! {
+            // Periodic auth session validity check
+            _ = auth_check_interval.tick() => {
+                let session_exists = state
+                    .db
+                    .get_auth_session(&session_id)
+                    .await
+                    .ok()
+                    .flatten()
+                    .is_some();
+
+                if !session_exists {
+                    tracing::info!("WS client {client_id} auth session revoked, closing");
+                    let _ = sender
+                        .send(Message::Close(Some(axum::extract::ws::CloseFrame {
+                            code: 4001,
+                            reason: "session revoked".into(),
+                        })))
+                        .await;
+                    break;
+                }
+            }
             // Handle incoming client frames
             msg = receiver.next() => {
                 match msg {

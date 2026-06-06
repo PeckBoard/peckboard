@@ -489,6 +489,48 @@ impl Db {
         .await
     }
 
+    pub async fn delete_auth_sessions_by_user(&self, user_id: &str) -> anyhow::Result<usize> {
+        let user_id = user_id.to_string();
+        self.with_conn(move |conn| {
+            diesel::delete(auth_sessions::table.filter(auth_sessions::user_id.eq(&user_id)))
+                .execute(conn)
+                .map_err(Into::into)
+        })
+        .await
+    }
+
+    pub async fn delete_auth_sessions_by_user_except(
+        &self,
+        user_id: &str,
+        except_session_id: &str,
+    ) -> anyhow::Result<usize> {
+        let user_id = user_id.to_string();
+        let except_session_id = except_session_id.to_string();
+        self.with_conn(move |conn| {
+            diesel::delete(
+                auth_sessions::table
+                    .filter(auth_sessions::user_id.eq(&user_id))
+                    .filter(auth_sessions::id.ne(&except_session_id)),
+            )
+            .execute(conn)
+            .map_err(Into::into)
+        })
+        .await
+    }
+
+    pub async fn list_auth_sessions_by_user(&self, user_id: &str) -> anyhow::Result<Vec<AuthSession>> {
+        let user_id = user_id.to_string();
+        self.with_conn(move |conn| {
+            auth_sessions::table
+                .filter(auth_sessions::user_id.eq(&user_id))
+                .select(AuthSession::as_select())
+                .order(auth_sessions::created_at.desc())
+                .load(conn)
+                .map_err(Into::into)
+        })
+        .await
+    }
+
     // ── Push Subscriptions ───────────────────────────────────────────
 
     pub async fn create_push_subscription(&self, new: NewPushSubscription) -> anyhow::Result<PushSubscription> {

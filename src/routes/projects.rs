@@ -228,7 +228,34 @@ async fn delete_project(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
 ) -> impl IntoResponse {
-    // Cascade: delete all cards first
+    // Cascade: collect worker session IDs from cards, then clean up
+    let cards = state.db.list_cards_by_project(&id).await.map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({ "error": e.to_string() })),
+        )
+    })?;
+
+    // Collect all worker session IDs (current and last)
+    let mut session_ids: Vec<String> = Vec::new();
+    for card in &cards {
+        if let Some(ref sid) = card.worker_session_id {
+            session_ids.push(sid.clone());
+        }
+        if let Some(ref sid) = card.last_worker_session_id {
+            session_ids.push(sid.clone());
+        }
+    }
+    session_ids.sort();
+    session_ids.dedup();
+
+    // Delete events then sessions for each worker session
+    for sid in &session_ids {
+        let _ = state.db.delete_events_by_session(sid).await;
+        let _ = state.db.delete_session(sid).await;
+    }
+
+    // Delete all cards
     state.db.delete_cards_by_project(&id).await.map_err(|e| {
         (
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -387,6 +414,42 @@ async fn update_card(
     Path((_project_id, card_id)): Path<(String, String)>,
     Json(body): Json<UpdateCardRequest>,
 ) -> impl IntoResponse {
+    // Fetch existing card for edit policy checks
+    let existing = state.db.get_card(&card_id).await.map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({ "error": e.to_string() })),
+        )
+    })?;
+
+    let existing = match existing {
+        Some(c) => c,
+        None => {
+            return Err((
+                StatusCode::NOT_FOUND,
+                Json(serde_json::json!({ "error": "card not found" })),
+            ))
+        }
+    };
+
+    // Reject all updates if card is in a terminal state
+    if existing.step == "done" || existing.step == "wont_do" {
+        return Err((
+            StatusCode::FORBIDDEN,
+            Json(serde_json::json!({ "error": "card is in terminal state" })),
+        ));
+    }
+
+    // Reject updates to backlog-only fields after leaving backlog
+    if existing.step != "backlog" {
+        if body.workflow.is_some() || body.model.is_some() || body.effort.is_some() {
+            return Err((
+                StatusCode::FORBIDDEN,
+                Json(serde_json::json!({ "error": "field locked after leaving backlog" })),
+            ));
+        }
+    }
+
     let update = UpdateCard {
         title: body.title,
         description: body.description,

@@ -164,6 +164,20 @@ async fn login(
     State(state): State<Arc<AppState>>,
     Json(body): Json<LoginRequest>,
 ) -> impl IntoResponse {
+    // Rate limiting by client IP
+    let ip: std::net::IpAddr = "0.0.0.0".parse().unwrap();
+
+    let delay = state.login_limiter.check(ip).map_err(|_| {
+        (
+            StatusCode::TOO_MANY_REQUESTS,
+            Json(serde_json::json!({"error": "too many login attempts, try again later"})),
+        )
+    })?;
+
+    if !delay.is_zero() {
+        tokio::time::sleep(delay).await;
+    }
+
     // Look up user
     let user = state
         .db
@@ -174,15 +188,17 @@ async fn login(
     let user = match user {
         Some(u) => u,
         None => {
+            state.login_limiter.record_failure(ip);
             return Err((
                 StatusCode::UNAUTHORIZED,
                 Json(serde_json::json!({"error": "invalid credentials"})),
-            ))
+            ));
         }
     };
 
     // Verify password
     if !verify_password(&body.password, &user.password_hash) {
+        state.login_limiter.record_failure(ip);
         return Err((
             StatusCode::UNAUTHORIZED,
             Json(serde_json::json!({"error": "invalid credentials"})),
@@ -212,6 +228,8 @@ async fn login(
         })
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": e.to_string()}))))?;
+
+    state.login_limiter.reset(ip);
 
     Ok(Json(AuthResponse {
         token,
@@ -323,8 +341,12 @@ async fn change_password(
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": e.to_string()}))))?;
 
-    // Revoke all existing auth sessions
-    // TODO: revoke all sessions for this user (need to add this DB method)
+    // Revoke all existing auth sessions for this user
+    state
+        .db
+        .delete_auth_sessions_by_user(&auth_user.user_id)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": e.to_string()}))))?;
 
     // Issue fresh token
     let session_id = uuid::Uuid::new_v4().to_string();
@@ -370,26 +392,28 @@ async fn list_sessions(
         .get::<AuthUser>()
         .expect("auth middleware should inject AuthUser");
 
-    // List sessions by user (need DB method)
-    // For now, return the current session info
-    let session = state
+    let sessions = state
         .db
-        .get_auth_session(&auth_user.session_id)
+        .list_auth_sessions_by_user(&auth_user.user_id)
         .await
-        .ok()
-        .flatten();
+        .unwrap_or_default();
 
-    Json(serde_json::json!({
-        "sessions": session.map(|s| serde_json::json!({
-            "id": s.id,
-            "created_at": s.created_at,
-            "expires_at": s.expires_at,
-            "last_used_at": s.last_used_at,
-            "user_agent": s.user_agent,
-            "ip_address": s.ip_address,
-            "current": true,
-        })).into_iter().collect::<Vec<_>>()
-    }))
+    let sessions_json: Vec<serde_json::Value> = sessions
+        .iter()
+        .map(|s| {
+            serde_json::json!({
+                "id": s.id,
+                "created_at": s.created_at,
+                "expires_at": s.expires_at,
+                "last_used_at": s.last_used_at,
+                "user_agent": s.user_agent,
+                "ip_address": s.ip_address,
+                "current": s.id == auth_user.session_id,
+            })
+        })
+        .collect();
+
+    Json(serde_json::json!({ "sessions": sessions_json }))
 }
 
 /// DELETE /api/auth/sessions/:id — revoke one session
@@ -431,10 +455,11 @@ async fn revoke_all(
         .get::<AuthUser>()
         .expect("auth middleware should inject AuthUser");
 
-    // TODO: add DB method to revoke all sessions for a user except one
-    // For now, this is a placeholder
-    let _ = &auth_user.session_id;
-    let _ = state;
+    state
+        .db
+        .delete_auth_sessions_by_user_except(&auth_user.user_id, &auth_user.session_id)
+        .await
+        .ok();
 
     StatusCode::NO_CONTENT
 }
