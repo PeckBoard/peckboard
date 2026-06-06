@@ -84,7 +84,9 @@ pub fn build_cli_args(
 
     if config.model != "default" {
         args.push("--model".to_string());
-        args.push(config.model.clone());
+        // Strip provider prefix if present (e.g. "claude:claude-opus-4-8" → "claude-opus-4-8")
+        let model = config.model.strip_prefix("claude:").unwrap_or(&config.model);
+        args.push(model.to_string());
     }
 
     if let Some(effort) = &config.effort {
