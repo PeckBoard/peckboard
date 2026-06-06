@@ -206,6 +206,10 @@ async fn delete_session(
         let _ = std::fs::remove_dir_all(&attachments_dir);
     }
 
+    // Clean up MCP config and tokens
+    crate::service::mcp_server::delete_mcp_config(&state.config.data_dir, &id);
+    state.mcp_tokens.revoke_by_session(&id).await;
+
     let deleted = state.db.delete_session(&id).await.map_err(|e| {
         (
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -549,11 +553,26 @@ async fn send_message(
         (model.unwrap_or_else(|| "default".into()), effort)
     };
 
+    // Issue MCP token and write config so the session has access to MCP tools
+    let mcp_token = state
+        .mcp_tokens
+        .issue_token(id.clone(), session.project_id.clone())
+        .await;
+
+    let mcp_config_path = crate::service::mcp_server::write_mcp_config(
+        &state.config.data_dir,
+        &id,
+        state.config.port,
+        &mcp_token,
+    )
+    .ok()
+    .map(|p| p.to_string_lossy().to_string());
+
     let config = SpawnConfig {
         model: resolved_model,
         effort: resolved_effort,
         working_dir: String::new(), // Will be resolved by SessionManager from the folder
-        mcp_config_path: None,
+        mcp_config_path,
         env: Default::default(),
         permission_mode: None,
         timeout_ms: None,

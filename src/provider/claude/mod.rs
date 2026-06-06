@@ -102,6 +102,23 @@ pub fn build_cli_args(
     if let Some(mcp_path) = &config.mcp_config_path {
         args.push("--mcp-config".to_string());
         args.push(mcp_path.clone());
+
+        // Tell Claude which MCP tools are allowed
+        let mcp_tools = [
+            "create_card", "list_projects", "list_workflows", "list_cards",
+            "write_report", "attach_report_file", "update_card", "update_project",
+            "create_project", "pause_project", "resume_project", "delete_card",
+            "move_card_to_done", "move_card_to_wont_do",
+            // Worker-only tools (harmless to allow for plain sessions — they just
+            // fail with "requires card context" if called without one)
+            "complete_step", "finish_card", "wont_do_card", "ask_user",
+        ];
+        let allowed: Vec<String> = mcp_tools
+            .iter()
+            .map(|t| format!("mcp__peckboard__{t}"))
+            .collect();
+        args.push("--allowedTools".to_string());
+        args.push(allowed.join(","));
     }
 
     // Permission handling: Peckboard runs Claude headless, so we need
