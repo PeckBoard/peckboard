@@ -1,7 +1,11 @@
 import { useEffect, useState } from 'react'
 import { useProjectsStore } from '../store/projects'
 
-export default function ProjectList() {
+interface ProjectListProps {
+  onNewProject?: () => void
+}
+
+export default function ProjectList({ onNewProject }: ProjectListProps) {
   const projects = useProjectsStore((s) => s.projects)
   const activeProjectId = useProjectsStore((s) => s.activeProjectId)
   const fetchProjects = useProjectsStore((s) => s.fetchProjects)
@@ -45,8 +49,8 @@ export default function ProjectList() {
     <div className="project-list-container">
       <div className="project-list-header">
         <h2>Projects</h2>
-        <button className="create-btn" onClick={() => setShowCreate(!showCreate)}>
-          {showCreate ? 'Cancel' : 'New Project'}
+        <button className="create-btn" onClick={() => onNewProject ? onNewProject() : setShowCreate(!showCreate)}>
+          {showCreate ? 'Cancel' : '+ New'}
         </button>
       </div>
 

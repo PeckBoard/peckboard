@@ -11,6 +11,7 @@ use std::sync::Arc;
 
 use crate::auth::middleware::require_auth;
 use crate::db::models::{NewSession, UpdateSession};
+use crate::provider::stream::SpawnConfig;
 use crate::state::AppState;
 
 #[derive(Deserialize)]
@@ -37,6 +38,15 @@ struct UpdateSessionRequest {
     last_activity: Option<String>,
 }
 
+#[derive(Deserialize)]
+struct SendMessageRequest {
+    text: String,
+    #[serde(default, rename = "attachmentIds")]
+    attachment_ids: Option<Vec<String>>,
+    model: Option<String>,
+    effort: Option<String>,
+}
+
 pub fn router(state: Arc<AppState>) -> Router<Arc<AppState>> {
     Router::new()
         .route("/api/sessions", post(create_session).get(list_sessions))
@@ -46,6 +56,11 @@ pub fn router(state: Arc<AppState>) -> Router<Arc<AppState>> {
         )
         .route("/api/sessions/{id}/events", get(list_events).post(append_event))
         .route("/api/sessions/{id}/read", post(mark_read))
+        .route("/api/sessions/{id}/clear", post(clear_session))
+        .route("/api/sessions/{id}/message", post(send_message))
+        .route("/api/sessions/{id}/cancel", post(cancel_session))
+        .route("/api/sessions/{id}/interrupt", post(interrupt_session))
+        .route("/api/sessions/{id}/status", get(get_session_status))
         .route_layer(middleware::from_fn_with_state(state, require_auth))
 }
 
@@ -104,9 +119,9 @@ async fn list_sessions(
     Query(params): Query<ListSessionsQuery>,
 ) -> impl IntoResponse {
     let sessions = if let Some(folder_id) = params.folder_id {
-        state.db.list_sessions_by_folder(&folder_id).await
+        state.db.list_plain_sessions_by_folder(&folder_id).await
     } else {
-        state.db.list_sessions().await
+        state.db.list_plain_sessions().await
     };
 
     let sessions = sessions.map_err(|e| {
@@ -202,7 +217,7 @@ async fn delete_session(
     Ok(StatusCode::NO_CONTENT)
 }
 
-/// GET /api/sessions/:id/events — list events with optional afterSeq + limit
+/// GET /api/sessions/:id/events -- list events with optional afterSeq + limit
 async fn list_events(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
@@ -244,7 +259,7 @@ async fn list_events(
     Ok::<_, (StatusCode, Json<serde_json::Value>)>(Json(serde_json::json!(events_json)))
 }
 
-/// POST /api/sessions/:id/events — append an event
+/// POST /api/sessions/:id/events -- append an event
 async fn append_event(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
@@ -276,6 +291,19 @@ async fn append_event(
             )
         })?;
 
+    // Update last_activity to now
+    let now = chrono::Utc::now().to_rfc3339();
+    let _ = state
+        .db
+        .update_session(
+            &id,
+            UpdateSession {
+                last_activity: Some(now),
+                ..Default::default()
+            },
+        )
+        .await;
+
     // Broadcast the event to WebSocket subscribers
     state.broadcaster.broadcast(crate::ws::broadcaster::WsEvent {
         event_type: "event".into(),
@@ -300,7 +328,7 @@ async fn append_event(
     ))
 }
 
-/// POST /api/sessions/:id/read — mark session as read
+/// POST /api/sessions/:id/read -- mark session as read
 async fn mark_read(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
@@ -331,4 +359,416 @@ async fn mark_read(
         })?;
 
     Ok::<_, (StatusCode, Json<serde_json::Value>)>(StatusCode::NO_CONTENT)
+}
+
+/// POST /api/sessions/:id/clear -- kill process (placeholder), delete events,
+/// delete attachments directory, reset conversation_id. Returns 204.
+async fn clear_session(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> impl IntoResponse {
+    let session = state.db.get_session(&id).await.map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({ "error": e.to_string() })),
+        )
+    })?;
+
+    if session.is_none() {
+        return Err((
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({ "error": "session not found" })),
+        ));
+    }
+
+    // Kill any running process for this session
+    state.session_manager.cancel(&id).await;
+
+    // Delete all events for this session
+    state.db.delete_events_by_session(&id).await.map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({ "error": e.to_string() })),
+        )
+    })?;
+
+    // Delete attachments directory
+    let attachments_dir = state.config.data_dir.join("attachments").join(&id);
+    if attachments_dir.exists() {
+        let _ = tokio::fs::remove_dir_all(&attachments_dir).await;
+    }
+
+    // Reset conversation_id to None
+    state
+        .db
+        .update_session(
+            &id,
+            UpdateSession {
+                conversation_id: Some(None),
+                ..Default::default()
+            },
+        )
+        .await
+        .map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({ "error": e.to_string() })),
+            )
+        })?;
+
+    Ok::<_, (StatusCode, Json<serde_json::Value>)>(StatusCode::NO_CONTENT)
+}
+
+/// POST /api/sessions/:id/message -- send a message to spawn a Claude CLI process.
+/// Appends a user event and an agent-start event, spawns the CLI in the background,
+/// and returns 200 immediately.
+async fn send_message(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+    Json(body): Json<SendMessageRequest>,
+) -> impl IntoResponse {
+    // Verify session exists
+    let session = state.db.get_session(&id).await.map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({ "error": e.to_string() })),
+        )
+    })?;
+
+    let session = match session {
+        Some(s) => s,
+        None => {
+            return Err((
+                StatusCode::NOT_FOUND,
+                Json(serde_json::json!({ "error": "session not found" })),
+            ));
+        }
+    };
+
+    // 1. Append a user event with the message text
+    let mut user_data = serde_json::json!({ "text": body.text });
+    if let Some(ref attachment_ids) = body.attachment_ids {
+        user_data["attachmentIds"] = serde_json::json!(attachment_ids);
+    }
+
+    let user_event = state
+        .db
+        .append_event(&id, "user", user_data)
+        .await
+        .map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({ "error": e.to_string() })),
+            )
+        })?;
+
+    // Broadcast user event
+    state.broadcaster.broadcast(crate::ws::broadcaster::WsEvent {
+        event_type: "event".into(),
+        session_id: id.clone(),
+        data: serde_json::json!({
+            "id": user_event.id,
+            "seq": user_event.seq,
+            "ts": user_event.ts,
+            "kind": user_event.kind,
+            "data": serde_json::from_str::<serde_json::Value>(&user_event.data).unwrap_or_default(),
+        }),
+    });
+
+    // Update last_activity
+    let now = chrono::Utc::now().to_rfc3339();
+    let _ = state
+        .db
+        .update_session(
+            &id,
+            UpdateSession {
+                last_activity: Some(now),
+                ..Default::default()
+            },
+        )
+        .await;
+
+    // 2. Build spawn config
+    let config = SpawnConfig {
+        model: body
+            .model
+            .or(session.model.clone())
+            .unwrap_or_else(|| "default".into()),
+        effort: body.effort.or(session.effort.clone()),
+        working_dir: String::new(), // Will be resolved by SessionManager from the folder
+        mcp_config_path: None,
+        env: Default::default(),
+        permission_mode: None,
+        timeout_ms: None,
+        metadata: serde_json::Value::Null,
+    };
+
+    // 3. Spawn the Claude CLI process in the background
+    if let Err(e) = state
+        .session_manager
+        .send_message(&id, &body.text, &state.db, &state.broadcaster, config)
+        .await
+    {
+        tracing::error!(session_id = %id, "Failed to spawn claude process: {}", e);
+
+        // Append a crashed event so the UI knows it failed
+        let crash_event = state
+            .db
+            .append_event(
+                &id,
+                "agent-end",
+                serde_json::json!({
+                    "status": "crashed",
+                    "reason": format!("spawn error: {}", e),
+                }),
+            )
+            .await;
+
+        if let Ok(ev) = crash_event {
+            state.broadcaster.broadcast(crate::ws::broadcaster::WsEvent {
+                event_type: "event".into(),
+                session_id: id.clone(),
+                data: serde_json::json!({
+                    "id": ev.id,
+                    "seq": ev.seq,
+                    "ts": ev.ts,
+                    "kind": ev.kind,
+                    "data": serde_json::from_str::<serde_json::Value>(&ev.data).unwrap_or_default(),
+                }),
+            });
+        }
+
+        return Err((
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({ "error": format!("Failed to spawn agent: {}", e) })),
+        ));
+    }
+
+    // 4. Return 200 immediately — streaming happens in background
+    Ok::<_, (StatusCode, Json<serde_json::Value>)>(Json(serde_json::json!({
+        "status": "started",
+        "session_id": id,
+    })))
+}
+
+/// POST /api/sessions/:id/cancel -- kill the running process, append agent-end
+/// with crashed/operator-stop and broadcast it. Returns 204.
+async fn cancel_session(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> impl IntoResponse {
+    let session = state.db.get_session(&id).await.map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({ "error": e.to_string() })),
+        )
+    })?;
+
+    if session.is_none() {
+        return Err((
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({ "error": "session not found" })),
+        ));
+    }
+
+    // Kill the running process (if any)
+    state.session_manager.cancel(&id).await;
+
+    let event = state
+        .db
+        .append_event(
+            &id,
+            "agent-end",
+            serde_json::json!({ "status": "crashed", "reason": "operator-stop" }),
+        )
+        .await
+        .map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({ "error": e.to_string() })),
+            )
+        })?;
+
+    state.broadcaster.broadcast(crate::ws::broadcaster::WsEvent {
+        event_type: "event".into(),
+        session_id: id,
+        data: serde_json::json!({
+            "id": event.id,
+            "seq": event.seq,
+            "ts": event.ts,
+            "kind": event.kind,
+            "data": serde_json::from_str::<serde_json::Value>(&event.data).unwrap_or_default(),
+        }),
+    });
+
+    Ok::<_, (StatusCode, Json<serde_json::Value>)>(StatusCode::NO_CONTENT)
+}
+
+/// POST /api/sessions/:id/interrupt -- interrupt the running process,
+/// append an interrupt event with user-interrupt reason, and broadcast it.
+/// Returns 204.
+async fn interrupt_session(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> impl IntoResponse {
+    let session = state.db.get_session(&id).await.map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({ "error": e.to_string() })),
+        )
+    })?;
+
+    if session.is_none() {
+        return Err((
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({ "error": "session not found" })),
+        ));
+    }
+
+    // Interrupt the running process (if any)
+    state.session_manager.interrupt(&id).await;
+
+    let event = state
+        .db
+        .append_event(
+            &id,
+            "interrupt",
+            serde_json::json!({ "reason": "user-interrupt" }),
+        )
+        .await
+        .map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({ "error": e.to_string() })),
+            )
+        })?;
+
+    state.broadcaster.broadcast(crate::ws::broadcaster::WsEvent {
+        event_type: "event".into(),
+        session_id: id,
+        data: serde_json::json!({
+            "id": event.id,
+            "seq": event.seq,
+            "ts": event.ts,
+            "kind": event.kind,
+            "data": serde_json::from_str::<serde_json::Value>(&event.data).unwrap_or_default(),
+        }),
+    });
+
+    Ok::<_, (StatusCode, Json<serde_json::Value>)>(StatusCode::NO_CONTENT)
+}
+
+/// GET /api/sessions/:id/status -- derive agent status from the event tail.
+async fn get_session_status(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> impl IntoResponse {
+    let session = state.db.get_session(&id).await.map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({ "error": e.to_string() })),
+        )
+    })?;
+
+    if session.is_none() {
+        return Err((
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({ "error": "session not found" })),
+        ));
+    }
+
+    let tail = state.db.events_tail(&id, 10).await.map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({ "error": e.to_string() })),
+        )
+    })?;
+
+    let status = derive_status(&tail);
+
+    Ok::<_, (StatusCode, Json<serde_json::Value>)>(Json(serde_json::json!({ "status": status })))
+}
+
+/// Walk the event tail to derive the current agent status.
+fn derive_status(events: &[crate::db::models::Event]) -> &'static str {
+    // Track the latest lifecycle positions
+    let mut last_agent_start: Option<usize> = None;
+    let mut last_agent_end: Option<usize> = None;
+    let mut last_tool_start: Option<usize> = None;
+    let mut last_tool_end: Option<usize> = None;
+    let mut last_question: Option<usize> = None;
+    let mut last_question_resolved: Option<usize> = None;
+
+    for (i, event) in events.iter().enumerate() {
+        match event.kind.as_str() {
+            "agent-start" => last_agent_start = Some(i),
+            "agent-end" => last_agent_end = Some(i),
+            "agent-tool-start" => last_tool_start = Some(i),
+            "agent-tool-end" => last_tool_end = Some(i),
+            "question" => last_question = Some(i),
+            "question-resolved" => last_question_resolved = Some(i),
+            _ => {}
+        }
+    }
+
+    // Check if latest agent-end has status "crashed"
+    if let Some(end_idx) = last_agent_end {
+        // Only consider it if there is no agent-start after this end
+        let agent_ended = last_agent_start.map_or(true, |s| s < end_idx);
+        if agent_ended {
+            if let Ok(data) =
+                serde_json::from_str::<serde_json::Value>(&events[end_idx].data)
+            {
+                if data.get("status").and_then(|v| v.as_str()) == Some("crashed") {
+                    return "crashed";
+                }
+            }
+        }
+    }
+
+    // Check if we are within an active agent run (agent-start with no agent-end after it)
+    let agent_active = match (last_agent_start, last_agent_end) {
+        (Some(start), Some(end)) => start > end,
+        (Some(_), None) => true,
+        _ => false,
+    };
+
+    if agent_active {
+        // Check for unresolved question within the active run
+        let has_unresolved_question = match (last_question, last_question_resolved) {
+            (Some(q), Some(r)) => q > r,
+            (Some(_), None) => true,
+            _ => false,
+        };
+
+        if has_unresolved_question {
+            return "questioning";
+        }
+
+        // Check if tool is active (agent-tool-start without agent-tool-end after it)
+        let tool_active = match (last_tool_start, last_tool_end) {
+            (Some(ts), Some(te)) => ts > te,
+            (Some(_), None) => true,
+            _ => false,
+        };
+
+        if tool_active {
+            return "tool-active";
+        }
+
+        return "working";
+    }
+
+    // Check for unresolved question even outside of active agent run
+    let has_unresolved_question = match (last_question, last_question_resolved) {
+        (Some(q), Some(r)) => q > r,
+        (Some(_), None) => true,
+        _ => false,
+    };
+
+    if has_unresolved_question {
+        return "questioning";
+    }
+
+    "idle"
 }

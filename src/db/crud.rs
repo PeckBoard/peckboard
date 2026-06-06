@@ -101,6 +101,45 @@ impl Db {
         .await
     }
 
+    /// Move all sessions from one folder to another.
+    pub async fn move_sessions_to_folder(&self, from_folder_id: &str, to_folder_id: &str) -> anyhow::Result<usize> {
+        let from = from_folder_id.to_string();
+        let to = to_folder_id.to_string();
+        self.with_conn(move |conn| {
+            diesel::update(sessions::table.filter(sessions::folder_id.eq(&from)))
+                .set(sessions::folder_id.eq(&to))
+                .execute(conn)
+                .map_err(Into::into)
+        })
+        .await
+    }
+
+    pub async fn list_plain_sessions(&self) -> anyhow::Result<Vec<Session>> {
+        self.with_conn(move |conn| {
+            sessions::table
+                .filter(sessions::is_worker.eq(false))
+                .select(Session::as_select())
+                .order(sessions::last_activity.desc())
+                .load(conn)
+                .map_err(Into::into)
+        })
+        .await
+    }
+
+    pub async fn list_plain_sessions_by_folder(&self, folder_id: &str) -> anyhow::Result<Vec<Session>> {
+        let folder_id = folder_id.to_string();
+        self.with_conn(move |conn| {
+            sessions::table
+                .filter(sessions::folder_id.eq(&folder_id))
+                .filter(sessions::is_worker.eq(false))
+                .select(Session::as_select())
+                .order(sessions::last_activity.desc())
+                .load(conn)
+                .map_err(Into::into)
+        })
+        .await
+    }
+
     pub async fn update_session(&self, id: &str, update: UpdateSession) -> anyhow::Result<Option<Session>> {
         let id = id.to_string();
         self.with_conn(move |conn| {

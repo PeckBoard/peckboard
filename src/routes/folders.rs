@@ -19,10 +19,17 @@ struct CreateFolderRequest {
     path: String,
 }
 
+#[derive(Deserialize)]
+struct MoveSessionsRequest {
+    target_folder_id: String,
+}
+
 pub fn router(state: Arc<AppState>) -> Router<Arc<AppState>> {
     Router::new()
         .route("/api/folders", post(create_folder).get(list_folders))
         .route("/api/folders/{id}", delete(delete_folder))
+        .route("/api/folders/{id}/delete-sessions", post(delete_with_sessions))
+        .route("/api/folders/{id}/move-sessions", post(move_sessions_then_delete))
         .route_layer(middleware::from_fn_with_state(state, require_auth))
 }
 
@@ -112,4 +119,64 @@ async fn delete_folder(
     }
 
     Ok(StatusCode::NO_CONTENT)
+}
+
+/// POST /api/folders/:id/delete-sessions — delete all sessions in folder, then delete folder
+async fn delete_with_sessions(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> impl IntoResponse {
+    let sessions = state.db.list_sessions_by_folder(&id).await.map_err(|e| {
+        (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({ "error": e.to_string() })))
+    })?;
+
+    // Delete events and sessions
+    for session in &sessions {
+        let _ = state.db.delete_events_by_session(&session.id).await;
+        let _ = state.db.delete_queued_message(&session.id).await;
+        let _ = state.db.delete_session(&session.id).await;
+    }
+
+    // Delete folder
+    state.db.delete_folder(&id).await.map_err(|e| {
+        (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({ "error": e.to_string() })))
+    })?;
+
+    Ok::<_, (StatusCode, Json<serde_json::Value>)>(Json(serde_json::json!({
+        "deleted_sessions": sessions.len()
+    })))
+}
+
+/// POST /api/folders/:id/move-sessions — move sessions to target folder, then delete folder
+async fn move_sessions_then_delete(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+    Json(body): Json<MoveSessionsRequest>,
+) -> impl IntoResponse {
+    // Verify target folder exists
+    let target = state.db.get_folder(&body.target_folder_id).await.map_err(|e| {
+        (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({ "error": e.to_string() })))
+    })?;
+
+    if target.is_none() {
+        return Err((StatusCode::BAD_REQUEST, Json(serde_json::json!({ "error": "target folder not found" }))));
+    }
+
+    let sessions = state.db.list_sessions_by_folder(&id).await.map_err(|e| {
+        (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({ "error": e.to_string() })))
+    })?;
+
+    // Move all sessions to target folder
+    let moved = state.db.move_sessions_to_folder(&id, &body.target_folder_id).await.map_err(|e| {
+        (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({ "error": e.to_string() })))
+    })?;
+
+    // Delete the now-empty folder
+    state.db.delete_folder(&id).await.map_err(|e| {
+        (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({ "error": e.to_string() })))
+    })?;
+
+    Ok::<_, (StatusCode, Json<serde_json::Value>)>(Json(serde_json::json!({
+        "moved_sessions": moved
+    })))
 }

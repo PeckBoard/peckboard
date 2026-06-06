@@ -32,48 +32,58 @@ export default function RegisterModal() {
   return (
     <div className="modal-backdrop">
       <div className="modal">
-        <h2>Create Account</h2>
+        <h1 className="modal-brand">Peck<span>board</span></h1>
         <p className="modal-subtitle">Set up the first admin account for Peckboard.</p>
         <form onSubmit={handleSubmit}>
-          <label>
-            Username
+          <div className="form-field">
+            <label className="form-label" htmlFor="reg-username">Username</label>
             <input
+              id="reg-username"
+              className="form-input"
               type="text"
               value={username}
               onChange={(e) => setUsername(e.target.value)}
               autoFocus
               required
             />
-          </label>
-          <label>
-            Email <span className="optional">(optional)</span>
+          </div>
+          <div className="form-field">
+            <label className="form-label" htmlFor="reg-email">
+              Email <span className="optional">(optional)</span>
+            </label>
             <input
+              id="reg-email"
+              className="form-input"
               type="email"
               value={email}
               onChange={(e) => setEmail(e.target.value)}
             />
-          </label>
-          <label>
-            Password
+          </div>
+          <div className="form-field">
+            <label className="form-label" htmlFor="reg-password">Password</label>
             <input
+              id="reg-password"
+              className="form-input"
               type="password"
               value={password}
               onChange={(e) => setPassword(e.target.value)}
               required
               minLength={6}
             />
-          </label>
-          <label>
-            Confirm Password
+          </div>
+          <div className="form-field">
+            <label className="form-label" htmlFor="reg-confirm">Confirm Password</label>
             <input
+              id="reg-confirm"
+              className="form-input"
               type="password"
               value={confirmPassword}
               onChange={(e) => setConfirmPassword(e.target.value)}
               required
             />
-          </label>
+          </div>
           {error && <p className="form-error">{error}</p>}
-          <button type="submit" disabled={loading}>
+          <button className="btn-primary" type="submit" disabled={loading}>
             {loading ? 'Creating account...' : 'Create Account'}
           </button>
         </form>

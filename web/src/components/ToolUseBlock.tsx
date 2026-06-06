@@ -11,15 +11,22 @@ interface ToolUseBlockProps {
 export default function ToolUseBlock({ toolName, input, output, error, isRunning }: ToolUseBlockProps) {
   const [expanded, setExpanded] = useState(false)
 
-  const statusClass = error ? 'tool-error' : isRunning ? 'tool-running' : 'tool-success'
+  const blockExtra = error ? 'tool-error' : isRunning ? 'tool-running' : ''
+
+  const badgeEl = isRunning ? (
+    <span className="tool-status-badge tool-badge-running">Running</span>
+  ) : error ? (
+    <span className="tool-status-badge tool-badge-error">Error</span>
+  ) : (
+    <span className="tool-status-badge tool-badge-success">Done</span>
+  )
 
   return (
-    <div className={`tool-block ${statusClass}`}>
+    <div className={`tool-block ${blockExtra}`}>
       <button className="tool-header" onClick={() => setExpanded((v) => !v)}>
-        <span className="tool-chevron">{expanded ? '\u25BC' : '\u25B6'}</span>
+        <span className={`tool-chevron ${expanded ? 'open' : ''}`}>&#9654;</span>
         <span className="tool-name">{toolName}</span>
-        {isRunning && <span className="tool-status-badge">Running...</span>}
-        {error && <span className="tool-status-badge tool-badge-error">Error</span>}
+        {badgeEl}
       </button>
       {expanded && (
         <div className="tool-body">

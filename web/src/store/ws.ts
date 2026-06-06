@@ -1,6 +1,7 @@
 import { create } from 'zustand'
 import type { Event } from '../types/api'
 import { useUiStore } from './ui'
+import { useSessionsStore } from './sessions'
 
 const TOKEN_KEY = 'peckboard_token'
 
@@ -80,15 +81,28 @@ export const useWsStore = create<WsState>((set, get) => ({
       }
 
       if (msg.type === 'event') {
-        const event = msg as unknown as Event
+        // Server sends { type: "event", session_id: "...", event: { id, seq, ts, kind, data } }
+        const sessionId = msg.session_id as string
+        const eventData = msg.event as Record<string, unknown>
+        const event: Event = {
+          id: eventData.id as string,
+          session_id: sessionId,
+          seq: eventData.seq as number,
+          ts: eventData.ts as number,
+          kind: eventData.kind as string,
+          data: (eventData.data ?? {}) as Record<string, unknown>,
+        }
         const { eventsBySession } = get()
-        const existing = eventsBySession[event.session_id] ?? []
+        const existing = eventsBySession[sessionId] ?? []
         set({
           eventsBySession: {
             ...eventsBySession,
-            [event.session_id]: [...existing, event],
+            [sessionId]: [...existing, event],
           },
         })
+        // Update processing/unread state in sessions store
+        useSessionsStore.getState().handleEvent(event)
+
         for (const listener of listeners) {
           listener(event)
         }

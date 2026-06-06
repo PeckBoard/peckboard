@@ -1,6 +1,5 @@
-import { useEffect, useState } from 'react'
+import { useState } from 'react'
 import { useAuthStore } from '../store/auth'
-import { authedFetch } from '../store/auth'
 
 type Theme = 'light' | 'dark' | 'auto'
 
@@ -21,35 +20,9 @@ function applyTheme(theme: Theme) {
   }
 }
 
-interface ServerConfig {
-  port?: number
-  host?: string
-  data_dir?: string
-  [key: string]: unknown
-}
-
 export default function SettingsPage() {
   const user = useAuthStore((s) => s.user)
   const [theme, setTheme] = useState<Theme>(getStoredTheme)
-  const [serverConfig, setServerConfig] = useState<ServerConfig | null>(null)
-  const [configError, setConfigError] = useState('')
-
-  useEffect(() => {
-    async function loadConfig() {
-      try {
-        const res = await authedFetch('/api/health')
-        if (res.ok) {
-          const data = await res.json()
-          setServerConfig(data)
-        } else {
-          setConfigError('Could not load server config')
-        }
-      } catch {
-        setConfigError('Could not load server config')
-      }
-    }
-    loadConfig()
-  }, [])
 
   const changeTheme = (t: Theme) => {
     setTheme(t)
@@ -90,22 +63,6 @@ export default function SettingsPage() {
             </button>
           ))}
         </div>
-      </section>
-
-      <section className="settings-section">
-        <h3>Server Configuration</h3>
-        {configError && <p className="form-error">{configError}</p>}
-        {serverConfig && (
-          <div className="settings-info-grid">
-            {Object.entries(serverConfig).map(([key, value]) => (
-              <div key={key} className="settings-row">
-                <span className="settings-label">{key}</span>
-                <span>{String(value)}</span>
-              </div>
-            ))}
-          </div>
-        )}
-        {!serverConfig && !configError && <p>Loading...</p>}
       </section>
     </div>
   )

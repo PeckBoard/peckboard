@@ -3,6 +3,7 @@ use peckboard::auth::token::generate_jwt_secret;
 use peckboard::config::Config;
 use peckboard::db::Db;
 use peckboard::plugin::manager::PluginManager;
+use peckboard::provider::claude::manager::SessionManager;
 use peckboard::provider::claude::register_claude_provider;
 use peckboard::provider::registry::ProviderRegistry;
 use peckboard::routes::api_router;
@@ -51,6 +52,7 @@ async fn main() -> anyhow::Result<()> {
     let broadcaster = Broadcaster::new();
     let provider_registry = ProviderRegistry::new();
     register_claude_provider(&provider_registry).await;
+    let session_manager = SessionManager::new();
 
     let state = Arc::new(AppState {
         config,
@@ -60,6 +62,7 @@ async fn main() -> anyhow::Result<()> {
         login_limiter,
         broadcaster,
         provider_registry,
+        session_manager,
     });
 
     let app = api_router(state.clone())
@@ -77,6 +80,7 @@ async fn main() -> anyhow::Result<()> {
         .with_graceful_shutdown(async move {
             shutdown_signal().await;
             tracing::info!("Shutdown signal received, shutting down gracefully...");
+            shutdown_state.session_manager.shutdown().await;
             shutdown_state.plugins.shutdown().await;
             tracing::info!("Shutdown complete");
         })

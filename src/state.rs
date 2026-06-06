@@ -4,6 +4,7 @@ use crate::auth::rate_limit::RateLimiter;
 use crate::config::Config;
 use crate::db::Db;
 use crate::plugin::manager::PluginManager;
+use crate::provider::claude::manager::SessionManager;
 use crate::provider::registry::ProviderRegistry;
 use crate::ws::broadcaster::Broadcaster;
 
@@ -15,4 +16,5 @@ pub struct AppState {
     pub login_limiter: RateLimiter,
     pub broadcaster: Arc<Broadcaster>,
     pub provider_registry: ProviderRegistry,
+    pub session_manager: SessionManager,
 }

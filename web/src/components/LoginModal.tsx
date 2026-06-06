@@ -24,29 +24,34 @@ export default function LoginModal() {
   return (
     <div className="modal-backdrop">
       <div className="modal">
-        <h2>Sign In</h2>
+        <h1 className="modal-brand">Peck<span>board</span></h1>
+        <p className="modal-subtitle">Sign in to your account</p>
         <form onSubmit={handleSubmit}>
-          <label>
-            Username
+          <div className="form-field">
+            <label className="form-label" htmlFor="login-username">Username</label>
             <input
+              id="login-username"
+              className="form-input"
               type="text"
               value={username}
               onChange={(e) => setUsername(e.target.value)}
               autoFocus
               required
             />
-          </label>
-          <label>
-            Password
+          </div>
+          <div className="form-field">
+            <label className="form-label" htmlFor="login-password">Password</label>
             <input
+              id="login-password"
+              className="form-input"
               type="password"
               value={password}
               onChange={(e) => setPassword(e.target.value)}
               required
             />
-          </label>
+          </div>
           {error && <p className="form-error">{error}</p>}
-          <button type="submit" disabled={loading}>
+          <button className="btn-primary" type="submit" disabled={loading}>
             {loading ? 'Signing in...' : 'Sign In'}
           </button>
         </form>

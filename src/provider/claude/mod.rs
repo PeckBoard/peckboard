@@ -1,3 +1,6 @@
+pub mod manager;
+pub mod process;
+
 use crate::provider::registry::{ProviderInfo, ProviderRegistry};
 use crate::provider::stream::{ModelInfo, SpawnConfig};
 
