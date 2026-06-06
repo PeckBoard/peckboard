@@ -102,10 +102,23 @@ pub fn build_cli_args(
         args.push(mcp_path.clone());
     }
 
-    if let Some(mode) = &config.permission_mode {
-        if mode == "bypass" {
+    // Permission handling: Peckboard runs Claude headless, so we need
+    // to skip interactive permission prompts. Without this, the CLI
+    // blocks waiting for user input on tool use approvals.
+    match config.permission_mode.as_deref() {
+        Some("bypass") | None => {
+            // Default for headless operation: skip all permission prompts
+            args.push("--dangerously-skip-permissions".to_string());
+        }
+        Some("prompt") => {
+            // Interactive mode: use stdio for permission prompts
+            // (answers delivered via stdin channel)
             args.push("--permission-prompt-tool".to_string());
             args.push("stdio".to_string());
+        }
+        Some(_) => {
+            // Unknown mode: default to skip
+            args.push("--dangerously-skip-permissions".to_string());
         }
     }
 
@@ -144,6 +157,7 @@ mod tests {
         assert!(args.contains(&"hello".to_string()));
         assert!(args.contains(&"--model".to_string()));
         assert!(args.contains(&"claude-opus-4-8".to_string()));
+        assert!(args.contains(&"--dangerously-skip-permissions".to_string()));
         assert!(!args.contains(&"--resume".to_string()));
     }
 
@@ -155,7 +169,7 @@ mod tests {
             working_dir: "/tmp".into(),
             mcp_config_path: Some("/tmp/mcp.json".into()),
             env: Default::default(),
-            permission_mode: Some("bypass".into()),
+            permission_mode: Some("prompt".into()),
             timeout_ms: None,
             metadata: serde_json::Value::Null,
         };
