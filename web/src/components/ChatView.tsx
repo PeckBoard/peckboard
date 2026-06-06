@@ -120,9 +120,9 @@ function buildDisplayItems(events: Event[]): DisplayItem[] {
       }
       case 'agent-tool-start': {
         flushAssistant()
-        const toolName = (ev.data.tool_name as string) ?? 'tool'
+        const toolName = (ev.data.name as string) ?? (ev.data.tool_name as string) ?? 'tool'
         const input = (ev.data.input as Record<string, unknown>) ?? undefined
-        const toolUseId = (ev.data.tool_use_id as string) ?? ev.id
+        const toolUseId = (ev.data.toolUseId as string) ?? (ev.data.tool_use_id as string) ?? ev.id
         const idx = items.length
         items.push({ type: 'tool', toolName, input, isRunning: true, key: ev.id })
         openTools.set(toolUseId, idx)
@@ -130,7 +130,7 @@ function buildDisplayItems(events: Event[]): DisplayItem[] {
       }
       case 'agent-tool-end': {
         flushAssistant()
-        const toolUseId = (ev.data.tool_use_id as string) ?? ''
+        const toolUseId = (ev.data.toolUseId as string) ?? (ev.data.tool_use_id as string) ?? ''
         const idx = openTools.get(toolUseId)
         if (idx !== undefined) {
           const existing = items[idx] as Extract<DisplayItem, { type: 'tool' }>
@@ -139,7 +139,7 @@ function buildDisplayItems(events: Event[]): DisplayItem[] {
           items[idx] = { ...existing, isRunning: false, output, error: errorText }
           openTools.delete(toolUseId)
         } else {
-          const toolName = (ev.data.tool_name as string) ?? 'tool'
+          const toolName = (ev.data.name as string) ?? (ev.data.tool_name as string) ?? 'tool'
           const errorText = ev.data.error as string | undefined
           const output = (ev.data.output as Record<string, unknown>) ?? undefined
           items.push({ type: 'tool', toolName, output, error: errorText, isRunning: false, key: ev.id })
@@ -148,12 +148,23 @@ function buildDisplayItems(events: Event[]): DisplayItem[] {
       }
       case 'agent-start': {
         flushAssistant()
-        items.push({ type: 'status', text: 'Agent started', key: ev.id })
+        // Don't render — toolbar status indicator already shows agent state
         break
       }
       case 'agent-end': {
         flushAssistant()
-        items.push({ type: 'status', text: 'Agent finished', key: ev.id })
+        // Only show a notice when the agent crashed
+        if ((ev.data.status as string) === 'crashed') {
+          const reason = (ev.data.reason as string) ?? 'unknown error'
+          const stderr = ev.data.stderr as string | undefined
+          const crashText = stderr ? `Agent crashed: ${reason}\n\n${stderr}` : `Agent crashed: ${reason}`
+          items.push({ type: 'system', text: crashText, key: ev.id })
+        }
+        break
+      }
+      case 'interrupt': {
+        flushAssistant()
+        items.push({ type: 'system', text: 'Interrupted', key: ev.id })
         break
       }
       case 'system': {

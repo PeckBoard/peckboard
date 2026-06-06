@@ -25,7 +25,7 @@ interface SessionsState {
   processing: Set<string>
   unreadSessions: Set<string>
   fetchSessions: () => Promise<void>
-  createSession: (name: string, folderId: string) => Promise<Session>
+  createSession: (name: string, folderId: string, model?: string, effort?: string) => Promise<Session>
   deleteSession: (id: string) => Promise<void>
   setActiveSession: (id: string | null) => void
   renameSession: (id: string, name: string) => Promise<void>
@@ -53,11 +53,14 @@ export const useSessionsStore = create<SessionsState>((set, get) => ({
     }
   },
 
-  createSession: async (name: string, folderId: string) => {
+  createSession: async (name: string, folderId: string, model?: string, effort?: string) => {
+    const body: Record<string, string> = { name, folder_id: folderId }
+    if (model) body.model = model
+    if (effort && effort !== 'default') body.effort = effort
     const res = await authedFetch('/api/sessions', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ name, folder_id: folderId }),
+      body: JSON.stringify(body),
     })
     if (!res.ok) {
       const err = await res.json().catch(() => ({ error: 'Failed to create session' }))

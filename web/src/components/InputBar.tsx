@@ -119,7 +119,8 @@ export default function InputBar({ sessionId, agentWorking }: InputBarProps) {
   }, [sessionId, interruptSession])
 
   const handleKeyDown = (e: KeyboardEvent<HTMLTextAreaElement>) => {
-    if (e.key === 'Enter' && !e.shiftKey) {
+    const isMobile = window.matchMedia('(pointer: coarse)').matches
+    if (e.key === 'Enter' && !e.shiftKey && !isMobile) {
       e.preventDefault()
       handleSend()
     }

@@ -1,9 +1,21 @@
 import { useEffect, useState, type FormEvent } from 'react'
 import { useSessionsStore } from '../store/sessions'
 import { useFoldersStore } from '../store/folders'
+import { authedFetch } from '../store/auth'
 
 interface Props {
   onClose: () => void
+}
+
+interface ModelInfo {
+  id: string
+  display_name: string
+}
+
+interface ProviderInfo {
+  id: string
+  display_name: string
+  models: ModelInfo[]
 }
 
 export default function NewSessionModal({ onClose }: Props) {
@@ -15,6 +27,9 @@ export default function NewSessionModal({ onClose }: Props) {
 
   const [name, setName] = useState('')
   const [folderId, setFolderId] = useState('')
+  const [model, setModel] = useState('')
+  const [effort, setEffort] = useState('default')
+  const [providers, setProviders] = useState<ProviderInfo[]>([])
   const [newFolderName, setNewFolderName] = useState('')
   const [newFolderPath, setNewFolderPath] = useState('')
   const [showNewFolder, setShowNewFolder] = useState(false)
@@ -22,6 +37,15 @@ export default function NewSessionModal({ onClose }: Props) {
   const [loading, setLoading] = useState(false)
 
   useEffect(() => { fetchFolders() }, [fetchFolders])
+
+  useEffect(() => {
+    authedFetch('/api/models')
+      .then((res) => (res.ok ? res.json() : null))
+      .then((data) => {
+        if (data?.providers) setProviders(data.providers as ProviderInfo[])
+      })
+      .catch(() => {})
+  }, [])
   useEffect(() => {
     if (folders.length > 0 && !folderId) setFolderId(folders[0].id)
   }, [folders, folderId])
@@ -48,7 +72,12 @@ export default function NewSessionModal({ onClose }: Props) {
     setLoading(true)
     setError('')
     try {
-      const session = await createSession(name.trim(), folderId)
+      const session = await createSession(
+        name.trim(),
+        folderId,
+        model || undefined,
+        effort !== 'default' ? effort : undefined,
+      )
       setActiveSession(session.id)
       onClose()
     } catch (err) {
@@ -87,6 +116,28 @@ export default function NewSessionModal({ onClose }: Props) {
               <button type="button" className="btn-secondary" onClick={handleCreateFolder} disabled={!newFolderName.trim() || !newFolderPath.trim()}>Create Folder</button>
             </div>
           )}
+          <div className="form-field">
+            <label className="form-label">Model</label>
+            <select className="form-input" value={model} onChange={(e) => setModel(e.target.value)}>
+              <option value="">Server default</option>
+              {providers.map((p) => (
+                <optgroup key={p.id} label={p.display_name}>
+                  {p.models.map((m) => (
+                    <option key={m.id} value={m.id}>{m.display_name}</option>
+                  ))}
+                </optgroup>
+              ))}
+            </select>
+          </div>
+          <div className="form-field">
+            <label className="form-label">Effort</label>
+            <select className="form-input" value={effort} onChange={(e) => setEffort(e.target.value)}>
+              <option value="default">Default</option>
+              <option value="low">Low</option>
+              <option value="medium">Medium</option>
+              <option value="high">High</option>
+            </select>
+          </div>
           {error && <p className="form-error">{error}</p>}
           <div className="form-actions">
             <button type="button" className="btn-secondary" onClick={onClose}>Cancel</button>

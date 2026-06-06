@@ -420,8 +420,8 @@ async fn clear_session(
 }
 
 /// POST /api/sessions/:id/message -- send a message to spawn a Claude CLI process.
-/// Appends a user event and an agent-start event, spawns the CLI in the background,
-/// and returns 200 immediately.
+/// Appends a user event, spawns the CLI in the background (which emits its own
+/// agent-start event via the stream parser), and returns 200 immediately.
 async fn send_message(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
