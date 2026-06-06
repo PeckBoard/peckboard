@@ -4,12 +4,26 @@ import { useUiStore } from './ui'
 import { useSessionsStore } from './sessions'
 
 const TOKEN_KEY = 'peckboard_token'
+const SEQ_KEY = 'peckboard_last_seq'
 
 type EventListener = (event: Event) => void
 
+function loadLastSeqs(): Record<string, number> {
+  try {
+    const raw = sessionStorage.getItem(SEQ_KEY)
+    if (raw) return JSON.parse(raw)
+  } catch { /* ignore */ }
+  return {}
+}
+
+function saveLastSeqs(seqs: Record<string, number>) {
+  try { sessionStorage.setItem(SEQ_KEY, JSON.stringify(seqs)) } catch { /* ignore */ }
+}
+
 interface WsState {
-  /** Map of sessionId -> events received over the socket */
   eventsBySession: Record<string, Event[]>
+  lastSeqBySession: Record<string, number>
+  subscribedSessions: Set<string>
   connect: () => void
   disconnect: () => void
   subscribe: (sessionId: string) => void
@@ -46,6 +60,8 @@ function sendJson(data: unknown) {
 
 export const useWsStore = create<WsState>((set, get) => ({
   eventsBySession: {},
+  lastSeqBySession: loadLastSeqs(),
+  subscribedSessions: new Set<string>(),
 
   connect: () => {
     intentionalClose = false
@@ -77,6 +93,15 @@ export const useWsStore = create<WsState>((set, get) => ({
 
       if (msg.type === 'auth_ok') {
         useUiStore.getState().setConnected(true)
+        // Resume subscriptions for all tracked sessions
+        const { subscribedSessions, lastSeqBySession } = get()
+        for (const sid of subscribedSessions) {
+          sendJson({ type: 'subscribe', session_id: sid })
+          const lastSeq = lastSeqBySession[sid]
+          if (lastSeq !== undefined) {
+            sendJson({ type: 'resume', session_id: sid, last_seq: lastSeq })
+          }
+        }
         return
       }
 
@@ -92,13 +117,18 @@ export const useWsStore = create<WsState>((set, get) => ({
           kind: eventData.kind as string,
           data: (eventData.data ?? {}) as Record<string, unknown>,
         }
-        const { eventsBySession } = get()
+        const { eventsBySession, lastSeqBySession } = get()
         const existing = eventsBySession[sessionId] ?? []
+        // Dedupe by seq
+        if (existing.some((e) => e.seq === event.seq)) return
+        const updatedSeqs = { ...lastSeqBySession, [sessionId]: event.seq }
+        saveLastSeqs(updatedSeqs)
         set({
           eventsBySession: {
             ...eventsBySession,
             [sessionId]: [...existing, event],
           },
+          lastSeqBySession: updatedSeqs,
         })
         // Update processing/unread state in sessions store
         useSessionsStore.getState().handleEvent(event)
@@ -138,10 +168,21 @@ export const useWsStore = create<WsState>((set, get) => ({
   },
 
   subscribe: (sessionId: string) => {
+    const { subscribedSessions, lastSeqBySession } = get()
+    subscribedSessions.add(sessionId)
+    set({ subscribedSessions: new Set(subscribedSessions) })
     sendJson({ type: 'subscribe', session_id: sessionId })
+    // Auto-resume from last known seq
+    const lastSeq = lastSeqBySession[sessionId]
+    if (lastSeq !== undefined) {
+      sendJson({ type: 'resume', session_id: sessionId, last_seq: lastSeq })
+    }
   },
 
   unsubscribe: (sessionId: string) => {
+    const { subscribedSessions } = get()
+    subscribedSessions.delete(sessionId)
+    set({ subscribedSessions: new Set(subscribedSessions) })
     sendJson({ type: 'unsubscribe', session_id: sessionId })
   },
 
