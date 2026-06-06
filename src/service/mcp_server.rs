@@ -7,7 +7,7 @@ use serde_json::Value;
 use tokio::sync::Mutex;
 
 use crate::db::Db;
-use crate::db::models::NewCard;
+use crate::db::models::{NewCard, NewProject, UpdateCard, UpdateProject};
 
 // ── MCP config file generation ────────────────────────────────────
 
@@ -26,7 +26,8 @@ pub fn write_mcp_config(
     let config = serde_json::json!({
         "mcpServers": {
             "peckboard": {
-                "url": format!("http://127.0.0.1:{http_port}/api/internal/mcp"),
+                "type": "url",
+                "url": format!("http://127.0.0.1:{http_port}/mcp"),
                 "headers": {
                     "Authorization": format!("Bearer {token}")
                 }
@@ -268,6 +269,209 @@ impl McpToolRegistry {
                     "additionalProperties": false
                 }),
             },
+            McpToolDef {
+                name: "attach_report_file".into(),
+                description: "Attach a file to a report folder. Accepts base64-encoded data with allowlisted extensions and a 10MB size cap.".into(),
+                input_schema: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "folder": {
+                            "type": "string",
+                            "description": "Report folder name (e.g. date string)"
+                        },
+                        "file": {
+                            "type": "string",
+                            "description": "File base name (without extension)"
+                        },
+                        "data": {
+                            "type": "string",
+                            "description": "Base64-encoded file content"
+                        },
+                        "extension": {
+                            "type": "string",
+                            "description": "File extension (e.g. png, pdf, csv, json, txt, md, html, svg, jpg, jpeg, gif, webp)"
+                        }
+                    },
+                    "required": ["folder", "file", "data", "extension"],
+                    "additionalProperties": false
+                }),
+            },
+            McpToolDef {
+                name: "update_card".into(),
+                description: "Update fields on an existing card.".into(),
+                input_schema: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "card_id": {
+                            "type": "string",
+                            "description": "ID of the card to update"
+                        },
+                        "title": {
+                            "type": "string",
+                            "description": "New card title"
+                        },
+                        "description": {
+                            "type": "string",
+                            "description": "New card description"
+                        },
+                        "priority": {
+                            "type": "integer",
+                            "description": "New priority value"
+                        },
+                        "step": {
+                            "type": "string",
+                            "description": "New workflow step"
+                        },
+                        "blocked": {
+                            "type": "boolean",
+                            "description": "Whether the card is blocked"
+                        },
+                        "block_reason": {
+                            "type": "string",
+                            "description": "Reason the card is blocked"
+                        }
+                    },
+                    "required": ["card_id"],
+                    "additionalProperties": false
+                }),
+            },
+            McpToolDef {
+                name: "update_project".into(),
+                description: "Update fields on an existing project.".into(),
+                input_schema: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "project_id": {
+                            "type": "string",
+                            "description": "ID of the project to update"
+                        },
+                        "name": {
+                            "type": "string",
+                            "description": "New project name"
+                        },
+                        "context": {
+                            "type": "string",
+                            "description": "New project context"
+                        },
+                        "worker_count": {
+                            "type": "integer",
+                            "description": "New worker count"
+                        },
+                        "status": {
+                            "type": "string",
+                            "description": "New project status"
+                        }
+                    },
+                    "required": ["project_id"],
+                    "additionalProperties": false
+                }),
+            },
+            McpToolDef {
+                name: "create_project".into(),
+                description: "Create a new project in a folder.".into(),
+                input_schema: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "name": {
+                            "type": "string",
+                            "description": "Project name"
+                        },
+                        "folder_id": {
+                            "type": "string",
+                            "description": "Folder ID to create the project in"
+                        },
+                        "context": {
+                            "type": "string",
+                            "description": "Project context / instructions"
+                        },
+                        "worker_count": {
+                            "type": "integer",
+                            "description": "Number of concurrent workers (default 1)"
+                        }
+                    },
+                    "required": ["name", "folder_id"],
+                    "additionalProperties": false
+                }),
+            },
+            McpToolDef {
+                name: "pause_project".into(),
+                description: "Pause a project, preventing new work from being scheduled.".into(),
+                input_schema: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "project_id": {
+                            "type": "string",
+                            "description": "ID of the project to pause"
+                        }
+                    },
+                    "required": ["project_id"],
+                    "additionalProperties": false
+                }),
+            },
+            McpToolDef {
+                name: "resume_project".into(),
+                description: "Resume a paused project, allowing work to be scheduled again.".into(),
+                input_schema: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "project_id": {
+                            "type": "string",
+                            "description": "ID of the project to resume"
+                        }
+                    },
+                    "required": ["project_id"],
+                    "additionalProperties": false
+                }),
+            },
+            McpToolDef {
+                name: "delete_card".into(),
+                description: "Delete a card permanently.".into(),
+                input_schema: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "card_id": {
+                            "type": "string",
+                            "description": "ID of the card to delete"
+                        }
+                    },
+                    "required": ["card_id"],
+                    "additionalProperties": false
+                }),
+            },
+            McpToolDef {
+                name: "move_card_to_done".into(),
+                description: "Move a card to the done step.".into(),
+                input_schema: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "card_id": {
+                            "type": "string",
+                            "description": "ID of the card to mark as done"
+                        }
+                    },
+                    "required": ["card_id"],
+                    "additionalProperties": false
+                }),
+            },
+            McpToolDef {
+                name: "move_card_to_wont_do".into(),
+                description: "Move a card to the won't-do step, optionally with a reason.".into(),
+                input_schema: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "card_id": {
+                            "type": "string",
+                            "description": "ID of the card to mark as won't-do"
+                        },
+                        "reason": {
+                            "type": "string",
+                            "description": "Reason the card won't be done"
+                        }
+                    },
+                    "required": ["card_id"],
+                    "additionalProperties": false
+                }),
+            },
         ];
 
         McpToolRegistry { tools }
@@ -295,6 +499,15 @@ impl McpToolRegistry {
             "list_projects" => self.handle_list_projects(ctx).await,
             "list_workflows" => self.handle_list_workflows(ctx).await,
             "write_report" => self.handle_write_report(args, ctx).await,
+            "attach_report_file" => self.handle_attach_report_file(args, ctx).await,
+            "update_card" => self.handle_update_card(args, ctx).await,
+            "update_project" => self.handle_update_project(args, ctx).await,
+            "create_project" => self.handle_create_project(args, ctx).await,
+            "pause_project" => self.handle_pause_project(args, ctx).await,
+            "resume_project" => self.handle_resume_project(args, ctx).await,
+            "delete_card" => self.handle_delete_card(args, ctx).await,
+            "move_card_to_done" => self.handle_move_card_to_done(args, ctx).await,
+            "move_card_to_wont_do" => self.handle_move_card_to_wont_do(args, ctx).await,
             _ => anyhow::bail!("unknown tool: {tool_name}"),
         }
     }
@@ -619,6 +832,385 @@ impl McpToolRegistry {
             "file": filename,
         }))
     }
+
+    async fn handle_attach_report_file(
+        &self,
+        args: Value,
+        _ctx: &ToolCallContext,
+    ) -> anyhow::Result<Value> {
+        const ALLOWED_EXTENSIONS: &[&str] = &[
+            "png", "pdf", "csv", "json", "txt", "md", "html", "svg", "jpg", "jpeg", "gif", "webp",
+        ];
+        const MAX_DECODED_SIZE: usize = 10 * 1024 * 1024; // 10 MB
+
+        let folder = args
+            .get("folder")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| anyhow::anyhow!("attach_report_file requires 'folder'"))?;
+
+        let file = args
+            .get("file")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| anyhow::anyhow!("attach_report_file requires 'file'"))?;
+
+        let data_b64 = args
+            .get("data")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| anyhow::anyhow!("attach_report_file requires 'data'"))?;
+
+        let extension = args
+            .get("extension")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| anyhow::anyhow!("attach_report_file requires 'extension'"))?;
+
+        // Validate extension
+        let ext_lower = extension.to_lowercase();
+        if !ALLOWED_EXTENSIONS.contains(&ext_lower.as_str()) {
+            anyhow::bail!(
+                "extension '{extension}' not allowed; allowed: {}",
+                ALLOWED_EXTENSIONS.join(", ")
+            );
+        }
+
+        // Sanitize folder and file names to prevent path traversal
+        let sanitize = |s: &str| -> String {
+            s.chars()
+                .map(|c| {
+                    if c.is_alphanumeric() || c == '-' || c == '_' || c == '.' {
+                        c
+                    } else {
+                        '_'
+                    }
+                })
+                .collect()
+        };
+        let safe_folder = sanitize(folder);
+        let safe_file = sanitize(file);
+
+        if safe_folder.is_empty() || safe_file.is_empty() {
+            anyhow::bail!("folder and file names must not be empty after sanitization");
+        }
+
+        // Decode base64
+        use base64::Engine;
+        let decoded = base64::engine::general_purpose::STANDARD
+            .decode(data_b64)
+            .map_err(|e| anyhow::anyhow!("invalid base64 data: {e}"))?;
+
+        if decoded.len() > MAX_DECODED_SIZE {
+            anyhow::bail!(
+                "file too large: {} bytes exceeds 10MB limit",
+                decoded.len()
+            );
+        }
+
+        // Write to <dataDir>/reports/<folder>/<file>.<ext>
+        let data_dir = dirs::home_dir()
+            .unwrap_or_else(|| std::path::PathBuf::from("."))
+            .join(".peckboard");
+        let reports_dir = data_dir.join("reports").join(&safe_folder);
+        std::fs::create_dir_all(&reports_dir)?;
+
+        let filename = format!("{safe_file}.{ext_lower}");
+        let path = reports_dir.join(&filename);
+        std::fs::write(&path, &decoded)?;
+
+        tracing::info!(path = %path.display(), size = decoded.len(), "Report file attached");
+
+        Ok(serde_json::json!({
+            "status": "ok",
+            "folder": safe_folder,
+            "file": filename,
+            "size": decoded.len(),
+        }))
+    }
+
+    async fn handle_update_card(
+        &self,
+        args: Value,
+        ctx: &ToolCallContext,
+    ) -> anyhow::Result<Value> {
+        let card_id = args
+            .get("card_id")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| anyhow::anyhow!("update_card requires 'card_id'"))?;
+
+        let update = UpdateCard {
+            title: args.get("title").and_then(|v| v.as_str()).map(|s| s.to_string()),
+            description: args.get("description").and_then(|v| v.as_str()).map(|s| s.to_string()),
+            priority: args.get("priority").and_then(|v| v.as_i64()).map(|n| n as i32),
+            step: args.get("step").and_then(|v| v.as_str()).map(|s| s.to_string()),
+            blocked: args.get("blocked").and_then(|v| v.as_bool()),
+            block_reason: args.get("block_reason").map(|v| v.as_str().map(|s| s.to_string())),
+            updated_at: Some(chrono::Utc::now().to_rfc3339()),
+            ..Default::default()
+        };
+
+        let card = ctx
+            .db
+            .update_card(card_id, update)
+            .await?
+            .ok_or_else(|| anyhow::anyhow!("card not found: {card_id}"))?;
+
+        Ok(serde_json::json!({
+            "status": "ok",
+            "card": {
+                "id": card.id,
+                "title": card.title,
+                "step": card.step,
+                "priority": card.priority,
+                "blocked": card.blocked,
+            }
+        }))
+    }
+
+    async fn handle_update_project(
+        &self,
+        args: Value,
+        ctx: &ToolCallContext,
+    ) -> anyhow::Result<Value> {
+        let project_id = args
+            .get("project_id")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| anyhow::anyhow!("update_project requires 'project_id'"))?;
+
+        let update = UpdateProject {
+            name: args.get("name").and_then(|v| v.as_str()).map(|s| s.to_string()),
+            context: args.get("context").and_then(|v| v.as_str()).map(|s| s.to_string()),
+            worker_count: args.get("worker_count").and_then(|v| v.as_i64()).map(|n| n as i32),
+            status: args.get("status").and_then(|v| v.as_str()).map(|s| s.to_string()),
+            last_accessed_at: Some(chrono::Utc::now().to_rfc3339()),
+            ..Default::default()
+        };
+
+        let project = ctx
+            .db
+            .update_project(project_id, update)
+            .await?
+            .ok_or_else(|| anyhow::anyhow!("project not found: {project_id}"))?;
+
+        Ok(serde_json::json!({
+            "status": "ok",
+            "project": {
+                "id": project.id,
+                "name": project.name,
+                "status": project.status,
+                "workerCount": project.worker_count,
+            }
+        }))
+    }
+
+    async fn handle_create_project(
+        &self,
+        args: Value,
+        ctx: &ToolCallContext,
+    ) -> anyhow::Result<Value> {
+        let name = args
+            .get("name")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| anyhow::anyhow!("create_project requires 'name'"))?;
+
+        let folder_id = args
+            .get("folder_id")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| anyhow::anyhow!("create_project requires 'folder_id'"))?;
+
+        let context = args
+            .get("context")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+
+        let worker_count = args
+            .get("worker_count")
+            .and_then(|v| v.as_i64())
+            .unwrap_or(1) as i32;
+
+        let now = chrono::Utc::now().to_rfc3339();
+        let project = ctx
+            .db
+            .create_project(NewProject {
+                id: uuid::Uuid::new_v4().to_string(),
+                name: name.to_string(),
+                context,
+                folder_id: folder_id.to_string(),
+                worker_count,
+                status: "active".to_string(),
+                default_workflow: None,
+                model: None,
+                effort: None,
+                parallel_instructions: false,
+                created_at: now.clone(),
+                last_accessed_at: now,
+            })
+            .await?;
+
+        Ok(serde_json::json!({
+            "status": "ok",
+            "project": {
+                "id": project.id,
+                "name": project.name,
+                "status": project.status,
+                "workerCount": project.worker_count,
+            }
+        }))
+    }
+
+    async fn handle_pause_project(
+        &self,
+        args: Value,
+        ctx: &ToolCallContext,
+    ) -> anyhow::Result<Value> {
+        let project_id = args
+            .get("project_id")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| anyhow::anyhow!("pause_project requires 'project_id'"))?;
+
+        let update = UpdateProject {
+            status: Some("paused".to_string()),
+            last_accessed_at: Some(chrono::Utc::now().to_rfc3339()),
+            ..Default::default()
+        };
+
+        let project = ctx
+            .db
+            .update_project(project_id, update)
+            .await?
+            .ok_or_else(|| anyhow::anyhow!("project not found: {project_id}"))?;
+
+        Ok(serde_json::json!({
+            "status": "ok",
+            "project": {
+                "id": project.id,
+                "name": project.name,
+                "status": project.status,
+            }
+        }))
+    }
+
+    async fn handle_resume_project(
+        &self,
+        args: Value,
+        ctx: &ToolCallContext,
+    ) -> anyhow::Result<Value> {
+        let project_id = args
+            .get("project_id")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| anyhow::anyhow!("resume_project requires 'project_id'"))?;
+
+        let update = UpdateProject {
+            status: Some("active".to_string()),
+            last_accessed_at: Some(chrono::Utc::now().to_rfc3339()),
+            ..Default::default()
+        };
+
+        let project = ctx
+            .db
+            .update_project(project_id, update)
+            .await?
+            .ok_or_else(|| anyhow::anyhow!("project not found: {project_id}"))?;
+
+        Ok(serde_json::json!({
+            "status": "ok",
+            "project": {
+                "id": project.id,
+                "name": project.name,
+                "status": project.status,
+            }
+        }))
+    }
+
+    async fn handle_delete_card(
+        &self,
+        args: Value,
+        ctx: &ToolCallContext,
+    ) -> anyhow::Result<Value> {
+        let card_id = args
+            .get("card_id")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| anyhow::anyhow!("delete_card requires 'card_id'"))?;
+
+        let deleted = ctx.db.delete_card(card_id).await?;
+
+        if !deleted {
+            anyhow::bail!("card not found: {card_id}");
+        }
+
+        Ok(serde_json::json!({
+            "status": "ok",
+            "message": format!("Card {card_id} deleted"),
+        }))
+    }
+
+    async fn handle_move_card_to_done(
+        &self,
+        args: Value,
+        ctx: &ToolCallContext,
+    ) -> anyhow::Result<Value> {
+        let card_id = args
+            .get("card_id")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| anyhow::anyhow!("move_card_to_done requires 'card_id'"))?;
+
+        let update = UpdateCard {
+            step: Some("done".to_string()),
+            updated_at: Some(chrono::Utc::now().to_rfc3339()),
+            ..Default::default()
+        };
+
+        let card = ctx
+            .db
+            .update_card(card_id, update)
+            .await?
+            .ok_or_else(|| anyhow::anyhow!("card not found: {card_id}"))?;
+
+        Ok(serde_json::json!({
+            "status": "ok",
+            "card": {
+                "id": card.id,
+                "title": card.title,
+                "step": card.step,
+            }
+        }))
+    }
+
+    async fn handle_move_card_to_wont_do(
+        &self,
+        args: Value,
+        ctx: &ToolCallContext,
+    ) -> anyhow::Result<Value> {
+        let card_id = args
+            .get("card_id")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| anyhow::anyhow!("move_card_to_wont_do requires 'card_id'"))?;
+
+        let reason = args
+            .get("reason")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string());
+
+        let update = UpdateCard {
+            step: Some("wont_do".to_string()),
+            block_reason: Some(reason),
+            updated_at: Some(chrono::Utc::now().to_rfc3339()),
+            ..Default::default()
+        };
+
+        let card = ctx
+            .db
+            .update_card(card_id, update)
+            .await?
+            .ok_or_else(|| anyhow::anyhow!("card not found: {card_id}"))?;
+
+        Ok(serde_json::json!({
+            "status": "ok",
+            "card": {
+                "id": card.id,
+                "title": card.title,
+                "step": card.step,
+            }
+        }))
+    }
 }
 
 #[cfg(test)]
@@ -639,7 +1231,16 @@ mod tests {
         assert!(names.contains(&"list_projects"));
         assert!(names.contains(&"list_workflows"));
         assert!(names.contains(&"write_report"));
-        assert_eq!(names.len(), 9);
+        assert!(names.contains(&"attach_report_file"));
+        assert!(names.contains(&"update_card"));
+        assert!(names.contains(&"update_project"));
+        assert!(names.contains(&"create_project"));
+        assert!(names.contains(&"pause_project"));
+        assert!(names.contains(&"resume_project"));
+        assert!(names.contains(&"delete_card"));
+        assert!(names.contains(&"move_card_to_done"));
+        assert!(names.contains(&"move_card_to_wont_do"));
+        assert_eq!(names.len(), 18);
     }
 
     #[test]
@@ -698,7 +1299,11 @@ mod tests {
             serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
         assert_eq!(
             content["mcpServers"]["peckboard"]["url"],
-            "http://127.0.0.1:3333/api/internal/mcp"
+            "http://127.0.0.1:3333/mcp"
+        );
+        assert_eq!(
+            content["mcpServers"]["peckboard"]["type"],
+            "url"
         );
         assert_eq!(
             content["mcpServers"]["peckboard"]["headers"]["Authorization"],

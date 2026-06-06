@@ -70,9 +70,9 @@ pub async fn origin_check(request: Request, next: Next) -> Response {
         }
     }
 
-    // Also allow if path is /api/internal/mcp (checked separately for loopback)
+    // Also allow if path is /mcp (checked separately for loopback + token auth)
     let path = request.uri().path();
-    if path.starts_with("/api/internal/mcp") {
+    if path == "/mcp" {
         return next.run(request).await;
     }
 

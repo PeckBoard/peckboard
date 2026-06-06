@@ -177,7 +177,10 @@ async fn main() -> anyhow::Result<()> {
 
     // Graceful shutdown on SIGINT/SIGTERM
     let shutdown_state = state.clone();
-    axum::serve(listener, app)
+    axum::serve(
+        listener,
+        app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+    )
         .with_graceful_shutdown(async move {
             shutdown_signal().await;
             tracing::info!("Shutdown signal received, shutting down gracefully...");
@@ -214,7 +217,7 @@ async fn serve_https(
 ) {
     use tower::Service;
 
-    let mut make_service = app.into_make_service();
+    let mut make_service = app.into_make_service_with_connect_info::<std::net::SocketAddr>();
 
     loop {
         let (tcp_stream, remote_addr) = match listener.accept().await {

@@ -2,6 +2,7 @@ pub mod attachments;
 pub mod auth;
 pub mod folders;
 pub mod git;
+pub mod mcp;
 pub mod misc;
 pub mod notifications;
 pub mod projects;
@@ -18,6 +19,8 @@ pub fn api_router(state: Arc<AppState>) -> Router<Arc<AppState>> {
     Router::new()
         .route("/api/health", get(health))
         .route("/ws", get(ws_handler))
+        // MCP route -- no auth middleware, uses its own token auth + loopback gating
+        .merge(mcp::router(state.clone()))
         .merge(auth::router(state.clone()))
         .merge(folders::router(state.clone()))
         .merge(sessions::router(state.clone()))
