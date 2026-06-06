@@ -9,7 +9,7 @@ pub struct CliArgs {
     pub port: u16,
 
     /// HTTPS port
-    #[arg(long, default_value = "3334")]
+    #[arg(long, default_value = "3345")]
     pub https_port: u16,
 
     /// Bind address
