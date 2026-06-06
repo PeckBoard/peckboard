@@ -1,3 +1,4 @@
 pub mod middleware;
-
-// Password hashing (argon2) + token generation/validation
+pub mod password;
+pub mod rate_limit;
+pub mod token;

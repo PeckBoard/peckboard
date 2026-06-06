@@ -1,5 +1,442 @@
-// Project + card CRUD routes
-//
-// /api/projects              — list / create
-// /api/projects/:id          — get / update / delete / pause / resume
-// /api/projects/:id/cards    — list / create / update / delete cards
+use axum::{
+    Json, Router,
+    extract::{Path, Query, State},
+    http::StatusCode,
+    middleware,
+    response::IntoResponse,
+    routing::{get, post, put},
+};
+use serde::Deserialize;
+use std::sync::Arc;
+
+use crate::auth::middleware::require_auth;
+use crate::db::models::{NewCard, NewProject, UpdateCard, UpdateProject};
+use crate::state::AppState;
+
+// ── Request / query types ───────────────────────────────────────────
+
+#[derive(Deserialize)]
+struct CreateProjectRequest {
+    name: String,
+    folder_id: String,
+    context: String,
+    worker_count: i32,
+    model: Option<String>,
+    effort: Option<String>,
+    default_workflow: Option<String>,
+    parallel_instructions: bool,
+}
+
+#[derive(Deserialize)]
+struct ListProjectsQuery {
+    folder_id: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct UpdateProjectRequest {
+    name: Option<String>,
+    context: Option<String>,
+    worker_count: Option<i32>,
+    status: Option<String>,
+    default_workflow: Option<Option<String>>,
+    model: Option<Option<String>>,
+    effort: Option<Option<String>>,
+    parallel_instructions: Option<bool>,
+}
+
+#[derive(Deserialize)]
+struct CreateCardRequest {
+    title: String,
+    description: String,
+    step: String,
+    priority: i32,
+    workflow: Option<String>,
+    model: Option<String>,
+    effort: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct UpdateCardRequest {
+    title: Option<String>,
+    description: Option<String>,
+    step: Option<String>,
+    priority: Option<i32>,
+    workflow: Option<Option<String>>,
+    model: Option<Option<String>>,
+    effort: Option<Option<String>>,
+    worker_session_id: Option<Option<String>>,
+    last_worker_session_id: Option<Option<String>>,
+    handoff_context: Option<Option<String>>,
+    blocked: Option<bool>,
+    block_reason: Option<Option<String>>,
+}
+
+// ── Router ──────────────────────────────────────────────────────────
+
+pub fn router(state: Arc<AppState>) -> Router<Arc<AppState>> {
+    Router::new()
+        .route("/api/projects", post(create_project).get(list_projects))
+        .route(
+            "/api/projects/{id}",
+            get(get_project).put(update_project).delete(delete_project),
+        )
+        .route("/api/projects/{id}/pause", post(pause_project))
+        .route("/api/projects/{id}/resume", post(resume_project))
+        .route(
+            "/api/projects/{id}/cards",
+            post(create_card).get(list_cards),
+        )
+        .route(
+            "/api/projects/{id}/cards/{card_id}",
+            put(update_card).delete(delete_card),
+        )
+        .route_layer(middleware::from_fn_with_state(state, require_auth))
+}
+
+// ── Project handlers ────────────────────────────────────────────────
+
+/// POST /api/projects
+async fn create_project(
+    State(state): State<Arc<AppState>>,
+    Json(body): Json<CreateProjectRequest>,
+) -> impl IntoResponse {
+    let now = chrono::Utc::now().to_rfc3339();
+    let id = uuid::Uuid::new_v4().to_string();
+
+    let project = state
+        .db
+        .create_project(NewProject {
+            id,
+            name: body.name,
+            context: body.context,
+            folder_id: body.folder_id,
+            worker_count: body.worker_count,
+            status: "active".to_string(),
+            default_workflow: body.default_workflow,
+            model: body.model,
+            effort: body.effort,
+            parallel_instructions: body.parallel_instructions,
+            created_at: now.clone(),
+            last_accessed_at: now,
+        })
+        .await
+        .map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({ "error": e.to_string() })),
+            )
+        })?;
+
+    Ok::<_, (StatusCode, Json<serde_json::Value>)>((
+        StatusCode::CREATED,
+        Json(serde_json::json!(project)),
+    ))
+}
+
+/// GET /api/projects
+async fn list_projects(
+    State(state): State<Arc<AppState>>,
+    Query(params): Query<ListProjectsQuery>,
+) -> impl IntoResponse {
+    let projects = if let Some(folder_id) = params.folder_id {
+        state.db.list_projects_by_folder(&folder_id).await
+    } else {
+        state.db.list_projects().await
+    };
+
+    let projects = projects.map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({ "error": e.to_string() })),
+        )
+    })?;
+
+    Ok::<_, (StatusCode, Json<serde_json::Value>)>(Json(serde_json::json!(projects)))
+}
+
+/// GET /api/projects/:id
+async fn get_project(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> impl IntoResponse {
+    let project = state.db.get_project(&id).await.map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({ "error": e.to_string() })),
+        )
+    })?;
+
+    let project = match project {
+        Some(p) => p,
+        None => {
+            return Err((
+                StatusCode::NOT_FOUND,
+                Json(serde_json::json!({ "error": "project not found" })),
+            ))
+        }
+    };
+
+    let cards = state.db.list_cards_by_project(&id).await.map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({ "error": e.to_string() })),
+        )
+    })?;
+
+    Ok(Json(serde_json::json!({
+        "project": project,
+        "cards": cards,
+    })))
+}
+
+/// PUT /api/projects/:id
+async fn update_project(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+    Json(body): Json<UpdateProjectRequest>,
+) -> impl IntoResponse {
+    let update = UpdateProject {
+        name: body.name,
+        context: body.context,
+        worker_count: body.worker_count,
+        status: body.status,
+        default_workflow: body.default_workflow,
+        model: body.model,
+        effort: body.effort,
+        parallel_instructions: body.parallel_instructions,
+        last_accessed_at: Some(chrono::Utc::now().to_rfc3339()),
+    };
+
+    let project = state.db.update_project(&id, update).await.map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({ "error": e.to_string() })),
+        )
+    })?;
+
+    match project {
+        Some(p) => Ok(Json(serde_json::json!(p))),
+        None => Err((
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({ "error": "project not found" })),
+        )),
+    }
+}
+
+/// DELETE /api/projects/:id
+async fn delete_project(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> impl IntoResponse {
+    // Cascade: delete all cards first
+    state.db.delete_cards_by_project(&id).await.map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({ "error": e.to_string() })),
+        )
+    })?;
+
+    let deleted = state.db.delete_project(&id).await.map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({ "error": e.to_string() })),
+        )
+    })?;
+
+    if !deleted {
+        return Err((
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({ "error": "project not found" })),
+        ));
+    }
+
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// POST /api/projects/:id/pause
+async fn pause_project(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> impl IntoResponse {
+    let update = UpdateProject {
+        status: Some("paused".to_string()),
+        last_accessed_at: Some(chrono::Utc::now().to_rfc3339()),
+        ..Default::default()
+    };
+
+    let project = state.db.update_project(&id, update).await.map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({ "error": e.to_string() })),
+        )
+    })?;
+
+    match project {
+        Some(p) => Ok(Json(serde_json::json!(p))),
+        None => Err((
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({ "error": "project not found" })),
+        )),
+    }
+}
+
+/// POST /api/projects/:id/resume
+async fn resume_project(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> impl IntoResponse {
+    let update = UpdateProject {
+        status: Some("active".to_string()),
+        last_accessed_at: Some(chrono::Utc::now().to_rfc3339()),
+        ..Default::default()
+    };
+
+    let project = state.db.update_project(&id, update).await.map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({ "error": e.to_string() })),
+        )
+    })?;
+
+    match project {
+        Some(p) => Ok(Json(serde_json::json!(p))),
+        None => Err((
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({ "error": "project not found" })),
+        )),
+    }
+}
+
+// ── Card handlers ───────────────────────────────────────────────────
+
+/// POST /api/projects/:id/cards
+async fn create_card(
+    State(state): State<Arc<AppState>>,
+    Path(project_id): Path<String>,
+    Json(body): Json<CreateCardRequest>,
+) -> impl IntoResponse {
+    // Verify project exists
+    let project = state.db.get_project(&project_id).await.map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({ "error": e.to_string() })),
+        )
+    })?;
+
+    if project.is_none() {
+        return Err((
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({ "error": "project not found" })),
+        ));
+    }
+
+    let now = chrono::Utc::now().to_rfc3339();
+    let id = uuid::Uuid::new_v4().to_string();
+
+    let card = state
+        .db
+        .create_card(NewCard {
+            id,
+            project_id,
+            title: body.title,
+            description: body.description,
+            step: body.step,
+            priority: body.priority,
+            workflow: body.workflow,
+            model: body.model,
+            effort: body.effort,
+            created_at: now.clone(),
+            updated_at: now,
+        })
+        .await
+        .map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({ "error": e.to_string() })),
+            )
+        })?;
+
+    Ok::<_, (StatusCode, Json<serde_json::Value>)>((
+        StatusCode::CREATED,
+        Json(serde_json::json!(card)),
+    ))
+}
+
+/// GET /api/projects/:id/cards
+async fn list_cards(
+    State(state): State<Arc<AppState>>,
+    Path(project_id): Path<String>,
+) -> impl IntoResponse {
+    let cards = state
+        .db
+        .list_cards_by_project(&project_id)
+        .await
+        .map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({ "error": e.to_string() })),
+            )
+        })?;
+
+    Ok::<_, (StatusCode, Json<serde_json::Value>)>(Json(serde_json::json!(cards)))
+}
+
+/// PUT /api/projects/:id/cards/:card_id
+async fn update_card(
+    State(state): State<Arc<AppState>>,
+    Path((_project_id, card_id)): Path<(String, String)>,
+    Json(body): Json<UpdateCardRequest>,
+) -> impl IntoResponse {
+    let update = UpdateCard {
+        title: body.title,
+        description: body.description,
+        step: body.step,
+        priority: body.priority,
+        workflow: body.workflow,
+        model: body.model,
+        effort: body.effort,
+        worker_session_id: body.worker_session_id,
+        last_worker_session_id: body.last_worker_session_id,
+        handoff_context: body.handoff_context,
+        blocked: body.blocked,
+        block_reason: body.block_reason,
+        updated_at: Some(chrono::Utc::now().to_rfc3339()),
+    };
+
+    let card = state.db.update_card(&card_id, update).await.map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({ "error": e.to_string() })),
+        )
+    })?;
+
+    match card {
+        Some(c) => Ok(Json(serde_json::json!(c))),
+        None => Err((
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({ "error": "card not found" })),
+        )),
+    }
+}
+
+/// DELETE /api/projects/:id/cards/:card_id
+async fn delete_card(
+    State(state): State<Arc<AppState>>,
+    Path((_project_id, card_id)): Path<(String, String)>,
+) -> impl IntoResponse {
+    let deleted = state.db.delete_card(&card_id).await.map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({ "error": e.to_string() })),
+        )
+    })?;
+
+    if !deleted {
+        return Err((
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({ "error": "card not found" })),
+        ));
+    }
+
+    Ok(StatusCode::NO_CONTENT)
+}

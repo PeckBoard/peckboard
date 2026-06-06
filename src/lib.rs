@@ -6,6 +6,7 @@ pub mod frontend;
 pub mod plugin;
 pub mod provider;
 pub mod routes;
+pub mod security;
 pub mod service;
 pub mod state;
 pub mod worker;

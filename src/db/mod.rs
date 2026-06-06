@@ -1,5 +1,10 @@
+pub mod crud;
 pub mod docs;
 pub mod events;
+pub mod models;
+pub mod schema;
+#[cfg(test)]
+mod tests;
 
 use diesel::prelude::*;
 use diesel::sqlite::SqliteConnection;
@@ -33,6 +38,24 @@ impl Db {
         diesel::sql_query("PRAGMA journal_mode=WAL;")
             .execute(&mut conn)
             .ok();
+        diesel::sql_query("PRAGMA foreign_keys=ON;")
+            .execute(&mut conn)
+            .ok();
+
+        conn.run_pending_migrations(MIGRATIONS)
+            .map_err(|e| anyhow::anyhow!("migration failed: {e}"))?;
+
+        Ok(Db {
+            conn: Arc::new(Mutex::new(conn)),
+        })
+    }
+
+    /// Create an in-memory database for testing. Runs all migrations.
+    #[cfg(test)]
+    pub fn in_memory() -> anyhow::Result<Self> {
+        let mut conn = SqliteConnection::establish(":memory:")
+            .map_err(|e| anyhow::anyhow!("failed to open in-memory database: {e}"))?;
+
         diesel::sql_query("PRAGMA foreign_keys=ON;")
             .execute(&mut conn)
             .ok();

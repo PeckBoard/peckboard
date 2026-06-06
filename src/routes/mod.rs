@@ -1,23 +1,32 @@
+pub mod attachments;
 pub mod auth;
+pub mod folders;
 pub mod git;
 pub mod misc;
+pub mod notifications;
 pub mod projects;
 pub mod reports;
 pub mod sessions;
 
 use crate::frontend::static_handler;
 use crate::state::AppState;
+use crate::ws::handler::ws_handler;
 use axum::{Router, routing::get};
 use std::sync::Arc;
 
-pub fn api_router() -> Router<Arc<AppState>> {
+pub fn api_router(state: Arc<AppState>) -> Router<Arc<AppState>> {
     Router::new()
         .route("/api/health", get(health))
-        // Future: .merge(sessions::router())  — /api/sessions/*
-        //         .merge(projects::router())  — /api/projects/*
-        //         .merge(reports::router())   — /api/reports/*
-        //         .merge(git::router())       — /api/git/*
-        //         .merge(auth::router())      — /api/auth/*
+        .route("/ws", get(ws_handler))
+        .merge(auth::router(state.clone()))
+        .merge(folders::router(state.clone()))
+        .merge(sessions::router(state.clone()))
+        .merge(projects::router(state.clone()))
+        .merge(reports::router(state.clone()))
+        .merge(git::router(state.clone()))
+        .merge(attachments::router(state.clone()))
+        .merge(notifications::router(state.clone()))
+        .merge(misc::router(state))
         .fallback(static_handler)
 }
 
