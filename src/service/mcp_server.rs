@@ -586,6 +586,21 @@ impl McpToolRegistry {
                 }),
             },
             McpToolDef {
+                name: "delete_project".into(),
+                description: "Delete a project permanently. This cascades: all cards, worker sessions, and their events are removed.".into(),
+                input_schema: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "project_id": {
+                            "type": "string",
+                            "description": "ID of the project to delete"
+                        }
+                    },
+                    "required": ["project_id"],
+                    "additionalProperties": false
+                }),
+            },
+            McpToolDef {
                 name: "delete_card".into(),
                 description: "Delete a card permanently.".into(),
                 input_schema: serde_json::json!({
@@ -802,6 +817,7 @@ impl McpToolRegistry {
             "create_project" => self.handle_create_project(args, ctx).await,
             "pause_project" => self.handle_pause_project(args, ctx).await,
             "resume_project" => self.handle_resume_project(args, ctx).await,
+            "delete_project" => self.handle_delete_project(args, ctx).await,
             "delete_card" => self.handle_delete_card(args, ctx).await,
             "move_card_to_done" => self.handle_move_card_to_done(args, ctx).await,
             "move_card_to_wont_do" => self.handle_move_card_to_wont_do(args, ctx).await,
@@ -1695,6 +1711,65 @@ impl McpToolRegistry {
                 "name": project.name,
                 "status": project.status,
             }
+        }))
+    }
+
+    async fn handle_delete_project(
+        &self,
+        args: Value,
+        ctx: &ToolCallContext,
+    ) -> anyhow::Result<Value> {
+        let project_id = args
+            .get("project_id")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| anyhow::anyhow!("delete_project requires 'project_id'"))?;
+
+        tracing::info!(session_id = %ctx.session_id, project_id = %project_id, "MCP tool: delete_project");
+
+        // Verify project exists
+        let project = ctx.db.get_project(project_id).await?
+            .ok_or_else(|| anyhow::anyhow!("project not found: {project_id}"))?;
+
+        // Collect worker session IDs from cards
+        let cards = ctx.db.list_cards_by_project(project_id).await?;
+        let mut session_ids: Vec<String> = Vec::new();
+        for card in &cards {
+            if let Some(ref sid) = card.worker_session_id {
+                session_ids.push(sid.clone());
+            }
+            if let Some(ref sid) = card.last_worker_session_id {
+                session_ids.push(sid.clone());
+            }
+        }
+        session_ids.sort();
+        session_ids.dedup();
+
+        // Clear card FK refs first so we can delete sessions without FK errors
+        for card in &cards {
+            let _ = ctx.db.update_card(&card.id, crate::db::models::UpdateCard {
+                worker_session_id: Some(None),
+                last_worker_session_id: Some(None),
+                ..Default::default()
+            }).await;
+        }
+
+        // Now safe to delete sessions and their data
+        for sid in &session_ids {
+            let _ = ctx.db.delete_queued_message(sid).await;
+            let _ = ctx.db.delete_events_by_session(sid).await;
+            let _ = ctx.db.delete_session(sid).await;
+        }
+
+        // Delete all cards then the project
+        ctx.db.delete_cards_by_project(project_id).await?;
+        let deleted = ctx.db.delete_project(project_id).await?;
+        if !deleted {
+            anyhow::bail!("project not found: {project_id}");
+        }
+
+        Ok(serde_json::json!({
+            "status": "ok",
+            "message": format!("Project '{}' deleted ({} cards, {} sessions cascaded)", project.name, cards.len(), session_ids.len()),
         }))
     }
 

@@ -256,6 +256,7 @@ pub fn build_cli_args(
             "create_project",
             "pause_project",
             "resume_project",
+            "delete_project",
             "delete_card",
             "move_card_to_done",
             "move_card_to_wont_do",
