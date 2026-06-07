@@ -120,6 +120,10 @@ pub fn router(state: Arc<AppState>) -> Router<Arc<AppState>> {
             post(cancel_card_wont_do),
         )
         .route(
+            "/api/projects/{id}/cards/{card_id}/reports",
+            get(list_card_reports),
+        )
+        .route(
             "/api/projects/{id}/pending-questions",
             get(list_pending_questions),
         )
@@ -800,6 +804,63 @@ async fn cancel_card_wont_do(
         })?;
 
     Ok::<_, (StatusCode, Json<serde_json::Value>)>(Json(serde_json::json!({ "ok": true })))
+}
+
+/// GET /api/projects/:id/cards/:card_id/reports -- list reports written by this card's worker
+async fn list_card_reports(
+    State(_state): State<Arc<AppState>>,
+    Path((_project_id, card_id)): Path<(String, String)>,
+) -> impl IntoResponse {
+    let data_dir = dirs::home_dir()
+        .unwrap_or_else(|| std::path::PathBuf::from("."))
+        .join(".peckboard");
+    let reports_dir = data_dir.join("reports");
+
+    let mut reports = Vec::new();
+    if reports_dir.exists() {
+        if let Ok(folders) = std::fs::read_dir(&reports_dir) {
+            for folder_entry in folders.flatten() {
+                let folder_name = folder_entry.file_name().to_string_lossy().to_string();
+                if let Ok(files) = std::fs::read_dir(folder_entry.path()) {
+                    for file_entry in files.flatten() {
+                        let file_name = file_entry.file_name().to_string_lossy().to_string();
+                        if !file_name.ends_with(".md") { continue; }
+
+                        if let Ok(content) = std::fs::read_to_string(file_entry.path()) {
+                            if !content.starts_with("---") { continue; }
+                            let fm = content.splitn(3, "---").nth(1).unwrap_or("");
+                            let mut title = file_name.clone();
+                            let mut report_card_id = None;
+                            let mut date = String::new();
+
+                            for line in fm.lines() {
+                                if let Some(v) = line.strip_prefix("title: ") {
+                                    title = v.trim_matches('"').to_string();
+                                }
+                                if let Some(v) = line.strip_prefix("cardId: ") {
+                                    report_card_id = Some(v.trim_matches('"').to_string());
+                                }
+                                if let Some(v) = line.strip_prefix("date: ") {
+                                    date = v.trim_matches('"').to_string();
+                                }
+                            }
+
+                            if report_card_id.as_deref() == Some(&card_id) {
+                                reports.push(serde_json::json!({
+                                    "folder": folder_name,
+                                    "file": file_name,
+                                    "title": title,
+                                    "date": date,
+                                }));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    Json(serde_json::json!({ "reports": reports }))
 }
 
 /// GET /api/projects/:id/pending-questions -- list unresolved questions from worker sessions

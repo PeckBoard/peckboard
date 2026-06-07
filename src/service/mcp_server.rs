@@ -1204,6 +1204,13 @@ impl McpToolRegistry {
             None
         };
 
+        // Resolve card_id
+        let resolved_card_id = if ctx.card_id.is_some() {
+            ctx.card_id.clone()
+        } else {
+            ctx.db.get_session(&ctx.session_id).await.ok().flatten().and_then(|s| s.card_id)
+        };
+
         // Build markdown with YAML frontmatter
         let mut content = format!(
             "---\ntitle: \"{title}\"\ndate: \"{}\"\nsessionId: \"{}\"",
@@ -1212,6 +1219,9 @@ impl McpToolRegistry {
         );
         if let Some(ref pn) = project_name {
             content.push_str(&format!("\nprojectName: \"{pn}\""));
+        }
+        if let Some(ref cid) = resolved_card_id {
+            content.push_str(&format!("\ncardId: \"{cid}\""));
         }
         content.push_str("\n---\n\n");
         content.push_str(body);
@@ -1228,14 +1238,27 @@ impl McpToolRegistry {
                     "text": format!("Report written: {title}"),
                     "reportFolder": date_folder,
                     "reportFile": filename,
+                    "cardId": resolved_card_id,
                 }),
             )
             .await?;
+
+        // Broadcast card update so UI refreshes reports
+        if let Some(ref cid) = resolved_card_id {
+            if let Ok(Some(card)) = ctx.db.get_card(cid).await {
+                ctx.broadcaster.broadcast(crate::ws::broadcaster::WsEvent {
+                    event_type: "card-update".into(),
+                    session_id: card.project_id.clone(),
+                    data: serde_json::json!({ "card": card }),
+                });
+            }
+        }
 
         Ok(serde_json::json!({
             "status": "ok",
             "folder": date_folder,
             "file": filename,
+            "cardId": resolved_card_id,
         }))
     }
 

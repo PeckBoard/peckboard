@@ -98,6 +98,16 @@ export default function KanbanBoard({ projectId }: KanbanBoardProps) {
   const [dragOverStep, setDragOverStep] = useState<string | null>(null)
   const [cardMenuId, setCardMenuId] = useState<string | null>(null)
   const [editingCard, setEditingCard] = useState<Card | null>(null)
+  const [cardReports, setCardReports] = useState<{ folder: string; file: string; title: string; date: string }[]>([])
+
+  // Fetch reports when card detail is opened
+  useEffect(() => {
+    if (!selectedCard) { setCardReports([]); return }
+    authedFetch(`/api/projects/${projectId}/cards/${selectedCard.id}/reports`)
+      .then((r) => r.ok ? r.json() : null)
+      .then((data) => { if (data?.reports) setCardReports(data.reports) })
+      .catch(() => setCardReports([]))
+  }, [selectedCard, projectId])
 
   const [workflows, setWorkflows] = useState<WorkflowInfo[]>([])
   const [models, setModels] = useState<ModelInfo[]>([])
@@ -879,6 +889,25 @@ export default function KanbanBoard({ projectId }: KanbanBoardProps) {
                 <div className="card-detail-row">
                   <span className="card-detail-label">Handoff Context</span>
                   <span>{selectedCard.handoff_context}</span>
+                </div>
+              )}
+              {cardReports.length > 0 && (
+                <div className="card-detail-row" style={{ flexDirection: 'column', gap: 6 }}>
+                  <span className="card-detail-label">Reports ({cardReports.length})</span>
+                  <div className="card-reports-list">
+                    {cardReports.map((r) => (
+                      <button
+                        key={`${r.folder}/${r.file}`}
+                        className="card-report-link"
+                        onClick={() => {
+                          window.location.href = '/reports'
+                        }}
+                      >
+                        <span className="card-report-title">{r.title}</span>
+                        <span className="card-report-date">{r.date?.split('T')[0] ?? r.folder}</span>
+                      </button>
+                    ))}
+                  </div>
                 </div>
               )}
             </div>

@@ -585,8 +585,13 @@ pub async fn handle_worker_done(state: &Arc<AppState>, session_id: &str) {
 
                 // Send a follow-up message that explicitly asks the agent to respond
                 let follow_up = format!(
-                    "You have {} message(s) from other workers that need your attention. \
-                     Please review and respond to each one:\n\n{}",
+                    "IMPORTANT: You have {} message(s) from other workers that require your \
+                     response. For EACH message below:\n\
+                     1. Read and evaluate the message\n\
+                     2. If it's a finding, acknowledge it and note how it affects your work\n\
+                     3. If it's a question, respond using mcp__peckboard__send_worker_message\n\
+                     4. If it's a file change notification, re-read affected files before editing\n\n\
+                     You MUST acknowledge each message — do not ignore them.\n\n{}",
                     pending_msgs.len(),
                     pending_msgs
                         .iter()
