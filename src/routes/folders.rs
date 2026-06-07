@@ -17,6 +17,8 @@ use crate::state::AppState;
 struct CreateFolderRequest {
     name: String,
     path: String,
+    /// If true, create the directory on disk if it doesn't exist.
+    create: Option<bool>,
 }
 
 #[derive(Deserialize)]
@@ -44,14 +46,24 @@ async fn create_folder(
     State(state): State<Arc<AppState>>,
     Json(body): Json<CreateFolderRequest>,
 ) -> impl IntoResponse {
-    tracing::info!(name = %body.name, path = %body.path, "Creating folder");
-    // Validate that the path exists on disk
+    tracing::info!(name = %body.name, path = %body.path, create = body.create.unwrap_or(false), "Creating folder");
     let path = std::path::Path::new(&body.path);
     if !path.exists() {
-        return Err((
-            StatusCode::BAD_REQUEST,
-            Json(serde_json::json!({ "error": format!("path does not exist: {}", body.path) })),
-        ));
+        if body.create.unwrap_or(false) {
+            // Create the directory
+            if let Err(e) = std::fs::create_dir_all(path) {
+                return Err((
+                    StatusCode::BAD_REQUEST,
+                    Json(serde_json::json!({ "error": format!("failed to create directory: {}", e) })),
+                ));
+            }
+            tracing::info!(path = %body.path, "Created directory on disk");
+        } else {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({ "error": format!("path does not exist: {}. Set create: true to create it.", body.path) })),
+            ));
+        }
     }
 
     let now = chrono::Utc::now().to_rfc3339();

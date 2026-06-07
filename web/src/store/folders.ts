@@ -5,7 +5,7 @@ import { authedFetch } from './auth'
 interface FoldersState {
   folders: Folder[]
   fetchFolders: () => Promise<void>
-  createFolder: (name: string, path: string) => Promise<Folder>
+  createFolder: (name: string, path: string, create?: boolean) => Promise<Folder>
   deleteFolder: (id: string) => Promise<void>
 }
 
@@ -20,11 +20,11 @@ export const useFoldersStore = create<FoldersState>((set) => ({
     }
   },
 
-  createFolder: async (name: string, path: string) => {
+  createFolder: async (name: string, path: string, create?: boolean) => {
     const res = await authedFetch('/api/folders', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ name, path }),
+      body: JSON.stringify({ name, path, create: create || false }),
     })
     if (!res.ok) {
       const err = await res.json().catch(() => ({ error: 'Failed to create folder' }))

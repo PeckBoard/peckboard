@@ -10,6 +10,7 @@ export default function FoldersPage() {
 
   const [name, setName] = useState('')
   const [path, setPath] = useState('')
+  const [createDir, setCreateDir] = useState(false)
   const [error, setError] = useState('')
   const [creating, setCreating] = useState(false)
   const [deleteTarget, setDeleteTarget] = useState<Folder | null>(null)
@@ -26,9 +27,10 @@ export default function FoldersPage() {
     setCreating(true)
     setError('')
     try {
-      await createFolder(name.trim(), path.trim())
+      await createFolder(name.trim(), path.trim(), createDir)
       setName('')
       setPath('')
+      setCreateDir(false)
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to create folder')
     } finally {
@@ -137,6 +139,14 @@ export default function FoldersPage() {
             onChange={(e) => setPath(e.target.value)}
             onKeyDown={(e) => e.key === 'Enter' && handleCreate()}
           />
+          <label className="form-checkbox-label" style={{ fontSize: 'var(--text-sm)' }}>
+            <input
+              type="checkbox"
+              checked={createDir}
+              onChange={(e) => setCreateDir(e.target.checked)}
+            />
+            <span>Create directory if it doesn't exist</span>
+          </label>
           <button
             className="btn-primary"
             onClick={handleCreate}
