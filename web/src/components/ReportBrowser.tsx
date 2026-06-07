@@ -1,11 +1,15 @@
 import { useEffect, useState, useCallback } from 'react'
 import { authedFetch } from '../store/auth'
+import ReactMarkdown from 'react-markdown'
+import remarkGfm from 'remark-gfm'
 
 interface ReportEntry {
   folder: string
   file: string
   title: string
   date: string
+  sessionId?: string
+  projectName?: string
 }
 
 interface GroupedReports {
@@ -17,7 +21,13 @@ export default function ReportBrowser() {
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState('')
   const [expandedFolders, setExpandedFolders] = useState<Set<string>>(new Set())
-  const [activeReport, setActiveReport] = useState<{ folder: string; file: string } | null>(null)
+  const [activeReport, setActiveReport] = useState<{
+    folder: string
+    file: string
+    title?: string
+    sessionId?: string
+    projectName?: string
+  } | null>(null)
   const [reportContent, setReportContent] = useState('')
   const [loadingContent, setLoadingContent] = useState(false)
 
@@ -31,10 +41,8 @@ export default function ReportBrowser() {
         throw new Error(data.error || 'Failed to fetch reports')
       }
       const data = await res.json()
-      // Backend returns { reports: [...] }
       const list: ReportEntry[] = Array.isArray(data) ? data : (data.reports ?? [])
       setReports(list)
-      // Auto-expand all folders
       const folders = new Set(list.map((r: ReportEntry) => r.folder))
       setExpandedFolders(folders)
     } catch (err) {
@@ -51,22 +59,25 @@ export default function ReportBrowser() {
   const toggleFolder = (folder: string) => {
     setExpandedFolders((prev) => {
       const next = new Set(prev)
-      if (next.has(folder)) {
-        next.delete(folder)
-      } else {
-        next.add(folder)
-      }
+      if (next.has(folder)) next.delete(folder)
+      else next.add(folder)
       return next
     })
   }
 
-  const viewReport = async (folder: string, file: string) => {
-    setActiveReport({ folder, file })
+  const viewReport = async (report: ReportEntry) => {
+    setActiveReport({
+      folder: report.folder,
+      file: report.file,
+      title: report.title,
+      sessionId: report.sessionId,
+      projectName: report.projectName,
+    })
     setLoadingContent(true)
     setReportContent('')
     try {
       const res = await authedFetch(
-        `/api/reports/${encodeURIComponent(folder)}/${encodeURIComponent(file)}`,
+        `/api/reports/${encodeURIComponent(report.folder)}/${encodeURIComponent(report.file)}`,
       )
       if (!res.ok) throw new Error('Failed to load report')
       const data = await res.json()
@@ -86,15 +97,32 @@ export default function ReportBrowser() {
 
   if (activeReport) {
     return (
-      <div className="settings-page" style={{ maxWidth: 'none' }}>
-        <div style={{ display: 'flex', alignItems: 'center', gap: 12, marginBottom: 24 }}>
+      <div className="report-viewer">
+        <div className="report-viewer-header">
           <button className="btn-secondary" onClick={() => setActiveReport(null)}>
             &larr; Back
           </button>
-          <h2 style={{ margin: 0 }}>Report</h2>
+          <div className="report-viewer-meta">
+            <h2 className="report-viewer-title">{activeReport.title || activeReport.file}</h2>
+            <div className="report-viewer-info">
+              <span>{activeReport.folder}</span>
+              {activeReport.projectName && (
+                <span className="report-viewer-project">{activeReport.projectName}</span>
+              )}
+              {activeReport.sessionId && (
+                <button
+                  className="report-viewer-session-link"
+                  onClick={() => {
+                    window.location.href = `/sessions/${activeReport.sessionId}`
+                  }}
+                >
+                  View Session
+                </button>
+              )}
+            </div>
+          </div>
           <button
             className="btn-secondary"
-            style={{ marginLeft: 'auto' }}
             onClick={async () => {
               const res = await authedFetch(
                 `/api/reports/${encodeURIComponent(activeReport.folder)}/${encodeURIComponent(activeReport.file)}/download`,
@@ -117,16 +145,8 @@ export default function ReportBrowser() {
             <div className="loading-spinner" />
           </div>
         ) : (
-          <div
-            style={{
-              whiteSpace: 'pre-wrap',
-              fontFamily: 'var(--font)',
-              fontSize: 'var(--text-sm)',
-              lineHeight: 1.7,
-              color: 'var(--text)',
-            }}
-          >
-            {reportContent}
+          <div className="report-content">
+            <ReactMarkdown remarkPlugins={[remarkGfm]}>{reportContent}</ReactMarkdown>
           </div>
         )}
       </div>
@@ -150,10 +170,7 @@ export default function ReportBrowser() {
 
       {Object.keys(grouped).map((folder) => (
         <section key={folder} className="settings-section">
-          <h3
-            style={{ cursor: 'pointer', userSelect: 'none' }}
-            onClick={() => toggleFolder(folder)}
-          >
+          <h3 style={{ cursor: 'pointer', userSelect: 'none' }} onClick={() => toggleFolder(folder)}>
             <span style={{ display: 'inline-block', width: 16, fontSize: 10 }}>
               {expandedFolders.has(folder) ? '\u25BC' : '\u25B6'}
             </span>
@@ -162,28 +179,16 @@ export default function ReportBrowser() {
           {expandedFolders.has(folder) && (
             <div className="folder-list">
               {grouped[folder].map((r) => (
-                <div
-                  key={`${r.folder}/${r.file}`}
-                  className="folder-row"
-                  style={{ cursor: 'pointer' }}
-                >
+                <div key={`${r.folder}/${r.file}`} className="folder-row" style={{ cursor: 'pointer' }}>
                   <button
-                    style={{
-                      flex: 1,
-                      border: 'none',
-                      background: 'transparent',
-                      textAlign: 'left',
-                      cursor: 'pointer',
-                      padding: 0,
-                      font: 'inherit',
-                      color: 'inherit',
-                    }}
-                    onClick={() => viewReport(r.folder, r.file)}
+                    className="report-list-item"
+                    onClick={() => viewReport(r)}
                   >
                     <div className="folder-info">
                       <strong>{r.title || r.file}</strong>
                       <span className="folder-path">{r.date}</span>
                     </div>
+                    {r.projectName && <span className="report-list-project">{r.projectName}</span>}
                   </button>
                   <button
                     className="btn-secondary"

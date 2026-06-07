@@ -27,6 +27,12 @@ function fileToBase64(file: File): Promise<string> {
   })
 }
 
+interface ReportSuggestion {
+  folder: string
+  file: string
+  title: string
+}
+
 export default function InputBar({ sessionId }: InputBarProps) {
   const getDraft = useSessionsStore((s) => s.getDraft)
   const setDraft = useSessionsStore((s) => s.setDraft)
@@ -35,8 +41,26 @@ export default function InputBar({ sessionId }: InputBarProps) {
   const [sending, setSending] = useState(false)
   const [attachments, setAttachments] = useState<PendingAttachment[]>([])
   const [uploading, setUploading] = useState(false)
+  const [reportSuggestions, setReportSuggestions] = useState<ReportSuggestion[]>([])
+  const [showReportAutocomplete, setShowReportAutocomplete] = useState(false)
+  const [allReports, setAllReports] = useState<ReportSuggestion[]>([])
   const textareaRef = useRef<HTMLTextAreaElement>(null)
   const fileInputRef = useRef<HTMLInputElement>(null)
+
+  // Fetch report list for autocomplete
+  useEffect(() => {
+    authedFetch('/api/reports')
+      .then((res) => (res.ok ? res.json() : null))
+      .then((data) => {
+        const list = Array.isArray(data) ? data : (data?.reports ?? [])
+        setAllReports(list.map((r: ReportSuggestion & { date?: string }) => ({
+          folder: r.folder,
+          file: r.file,
+          title: r.title || r.file,
+        })))
+      })
+      .catch(() => {})
+  }, [])
 
   // Re-initialize draft when sessionId changes
   useEffect(() => {
@@ -61,6 +85,34 @@ export default function InputBar({ sessionId }: InputBarProps) {
     const val = e.target.value
     setText(val)
     setDraft(sessionId, val)
+
+    // Check for @report autocomplete trigger
+    const cursor = e.target.selectionStart ?? val.length
+    const before = val.slice(0, cursor)
+    const atMatch = before.match(/@(\S*)$/)
+    if (atMatch) {
+      const filter = atMatch[1].toLowerCase()
+      const filtered = allReports.filter((r) =>
+        r.title.toLowerCase().includes(filter) || r.file.toLowerCase().includes(filter)
+      )
+      setReportSuggestions(filtered.slice(0, 8))
+      setShowReportAutocomplete(filtered.length > 0)
+    } else {
+      setShowReportAutocomplete(false)
+    }
+  }
+
+  const insertReport = (report: ReportSuggestion) => {
+    const cursor = textareaRef.current?.selectionStart ?? text.length
+    const before = text.slice(0, cursor)
+    const after = text.slice(cursor)
+    const atIdx = before.lastIndexOf('@')
+    const ref = `[report:${report.folder}/${report.file}]`
+    const newText = before.slice(0, atIdx) + ref + after
+    setText(newText)
+    setDraft(sessionId, newText)
+    setShowReportAutocomplete(false)
+    textareaRef.current?.focus()
   }
 
   const handleFileSelect = useCallback(
@@ -128,6 +180,22 @@ export default function InputBar({ sessionId }: InputBarProps) {
 
   return (
     <div className="input-bar">
+      {/* Report autocomplete dropdown */}
+      {showReportAutocomplete && (
+        <div className="autocomplete-dropdown">
+          <div className="autocomplete-header">Reports — type to filter</div>
+          {reportSuggestions.map((r) => (
+            <button
+              key={`${r.folder}/${r.file}`}
+              className="autocomplete-item"
+              onMouseDown={(e) => { e.preventDefault(); insertReport(r) }}
+            >
+              <span className="autocomplete-item-title">{r.title}</span>
+              <span className="autocomplete-item-path">{r.folder}/{r.file}</span>
+            </button>
+          ))}
+        </div>
+      )}
       <div className="input-bar-inner">
         <input
           ref={fileInputRef}
