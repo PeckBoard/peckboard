@@ -840,7 +840,7 @@ impl McpToolRegistry {
             .append_event(&ctx.session_id, "question", event_data.clone())
             .await?;
 
-        // Also broadcast via WebSocket
+        // Broadcast as session event
         ctx.broadcaster.broadcast(crate::ws::broadcaster::WsEvent {
             event_type: "event".into(),
             session_id: ctx.session_id.clone(),
@@ -852,6 +852,22 @@ impl McpToolRegistry {
                 "data": event_data,
             }),
         });
+
+        // Broadcast as global worker-question event so the project page updates live
+        if is_worker {
+            if let Some(ref pid) = project_id_val {
+                ctx.broadcaster.broadcast(crate::ws::broadcaster::WsEvent {
+                    event_type: "worker-question".into(),
+                    session_id: pid.clone(),
+                    data: serde_json::json!({
+                        "eventId": event.id,
+                        "sessionId": ctx.session_id,
+                        "projectId": pid,
+                        "cardTitle": card_title,
+                    }),
+                });
+            }
+        }
 
         // Also emit the ask-user-requested event for worker intent derivation
         ctx.db

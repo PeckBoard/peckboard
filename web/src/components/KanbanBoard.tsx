@@ -138,6 +138,19 @@ export default function KanbanBoard({ projectId }: KanbanBoardProps) {
     return () => removeEventListener(listener)
   }, [addEventListener, removeEventListener, fetchPendingQuestions])
 
+  // Listen for worker-question events to refresh pending questions live
+  useEffect(() => {
+    const handler = (e: globalThis.Event) => {
+      const detail = (e as CustomEvent).detail
+      const pid = detail?.data?.projectId as string | undefined
+      if (pid === projectId) {
+        fetchPendingQuestions()
+      }
+    }
+    window.addEventListener('peckboard:worker-question', handler)
+    return () => window.removeEventListener('peckboard:worker-question', handler)
+  }, [projectId, fetchPendingQuestions])
+
   // Listen for card-update WebSocket events for live kanban updates
   useEffect(() => {
     const handler = (e: globalThis.Event) => {
@@ -156,6 +169,21 @@ export default function KanbanBoard({ projectId }: KanbanBoardProps) {
     }
     window.addEventListener('peckboard:card-update', handler)
     return () => window.removeEventListener('peckboard:card-update', handler)
+  }, [projectId])
+
+  // Listen for card-delete WebSocket events
+  useEffect(() => {
+    const handler = (e: globalThis.Event) => {
+      const detail = (e as CustomEvent).detail
+      const cardId = detail?.data?.cardId as string | undefined
+      const pid = detail?.data?.projectId as string | undefined
+      if (!cardId || pid !== projectId) return
+      useProjectsStore.setState((s) => ({
+        cards: s.cards.filter((c) => c.id !== cardId),
+      }))
+    }
+    window.addEventListener('peckboard:card-delete', handler)
+    return () => window.removeEventListener('peckboard:card-delete', handler)
   }, [projectId])
 
   const handleAnswerQuestion = async (pq: PendingQuestion) => {

@@ -440,6 +440,13 @@ async fn create_card(
             )
         })?;
 
+    // Broadcast card creation for live kanban
+    state.broadcaster.broadcast(crate::ws::broadcaster::WsEvent {
+        event_type: "card-update".into(),
+        session_id: card.project_id.clone(),
+        data: serde_json::json!({ "card": card }),
+    });
+
     Ok::<_, (StatusCode, Json<serde_json::Value>)>((
         StatusCode::CREATED,
         Json(serde_json::json!(card)),
@@ -600,6 +607,8 @@ async fn delete_card(
     Path((_project_id, card_id)): Path<(String, String)>,
 ) -> impl IntoResponse {
     tracing::info!(card_id = %card_id, "Deleting card");
+    // Get card before deletion for broadcast
+    let card_before = state.db.get_card(&card_id).await.ok().flatten();
     let deleted = state.db.delete_card(&card_id).await.map_err(|e| {
         (
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -612,6 +621,15 @@ async fn delete_card(
             StatusCode::NOT_FOUND,
             Json(serde_json::json!({ "error": "card not found" })),
         ));
+    }
+
+    // Broadcast card deletion for live kanban
+    if let Some(card) = card_before {
+        state.broadcaster.broadcast(crate::ws::broadcaster::WsEvent {
+            event_type: "card-delete".into(),
+            session_id: card.project_id.clone(),
+            data: serde_json::json!({ "cardId": card_id, "projectId": card.project_id }),
+        });
     }
 
     Ok(StatusCode::NO_CONTENT)
