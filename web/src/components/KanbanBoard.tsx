@@ -554,7 +554,7 @@ export default function KanbanBoard({ projectId }: KanbanBoardProps) {
                           placeholder="Type your answer... (@ to reference a report)"
                           value={answers[idx] ?? ''}
                           onChange={(e) => setQuestionAnswer(pq.eventId, idx, e.target.value)}
-                          onKeyDown={(e) => { if (e.key === 'Enter' && pq.questions.length === 1 && hasAnswers && !reportAutocomplete) handleAnswerQuestion(pq) }}
+                          onKeyDown={(e) => { if (e.key === 'Enter' && pq.questions.length === 1 && hasAnswers && !mentionAutocomplete) handleAnswerQuestion(pq) }}
                           onBlur={() => setTimeout(() => setMentionAutocomplete(null), 200)}
                           disabled={isSubmitting}
                           autoFocus
