@@ -99,7 +99,12 @@ export const useProjectsStore = create<ProjectsState>((set) => ({
       throw new Error(err.error || 'Failed to create card')
     }
     const card: Card = await res.json()
-    set((s) => ({ cards: [...s.cards, card] }))
+    // Upsert to avoid duplicates with WebSocket card-update broadcast
+    set((s) => {
+      const exists = s.cards.some((c) => c.id === card.id)
+      if (exists) return { cards: s.cards.map((c) => (c.id === card.id ? card : c)) }
+      return { cards: [...s.cards, card] }
+    })
     return card
   },
 
