@@ -86,6 +86,7 @@ async fn create_session(
     State(state): State<Arc<AppState>>,
     Json(body): Json<CreateSessionRequest>,
 ) -> impl IntoResponse {
+    tracing::info!(name = %body.name, folder_id = %body.folder_id, "Creating session");
     let now = chrono::Utc::now().to_rfc3339();
     let id = uuid::Uuid::new_v4().to_string();
 
@@ -123,6 +124,7 @@ async fn list_sessions(
     State(state): State<Arc<AppState>>,
     Query(params): Query<ListSessionsQuery>,
 ) -> impl IntoResponse {
+    tracing::info!(folder_id = ?params.folder_id, "Listing sessions");
     let sessions = if let Some(folder_id) = params.folder_id {
         state.db.list_plain_sessions_by_folder(&folder_id).await
     } else {
@@ -144,6 +146,7 @@ async fn get_session(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
 ) -> impl IntoResponse {
+    tracing::info!(session_id = %id, "Getting session");
     let session = state.db.get_session(&id).await.map_err(|e| {
         (
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -166,6 +169,7 @@ async fn update_session(
     Path(id): Path<String>,
     Json(body): Json<UpdateSessionRequest>,
 ) -> impl IntoResponse {
+    tracing::info!(session_id = %id, "Updating session");
     let update = UpdateSession {
         name: body.name,
         model: body.model,
@@ -197,6 +201,7 @@ async fn delete_session(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
 ) -> impl IntoResponse {
+    tracing::info!(session_id = %id, "Deleting session");
     // Delete associated events first
     state.db.delete_events_by_session(&id).await.map_err(|e| {
         (
@@ -238,6 +243,7 @@ async fn list_events(
     Path(id): Path<String>,
     Query(params): Query<EventsQuery>,
 ) -> impl IntoResponse {
+    tracing::info!(session_id = %id, after_seq = ?params.after_seq, "Listing events");
     let events = if let Some(after_seq) = params.after_seq {
         state.db.events_since(&id, after_seq).await
     } else {
@@ -280,6 +286,7 @@ async fn append_event(
     Path(id): Path<String>,
     Json(body): Json<AppendEventRequest>,
 ) -> impl IntoResponse {
+    tracing::info!(session_id = %id, kind = %body.kind, "Appending event");
     // Verify session exists
     let session = state.db.get_session(&id).await.map_err(|e| {
         (
@@ -482,6 +489,7 @@ async fn mark_read(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
 ) -> impl IntoResponse {
+    tracing::info!(session_id = %id, "Marking session as read");
     let session = state.db.get_session(&id).await.map_err(|e| {
         (
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -516,6 +524,7 @@ async fn clear_session(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
 ) -> impl IntoResponse {
+    tracing::info!(session_id = %id, "Clearing session");
     let session = state.db.get_session(&id).await.map_err(|e| {
         (
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -576,6 +585,7 @@ async fn send_message(
     Path(id): Path<String>,
     Json(body): Json<SendMessageRequest>,
 ) -> impl IntoResponse {
+    tracing::info!(session_id = %id, "Sending message");
     // Verify session exists
     let session = state.db.get_session(&id).await.map_err(|e| {
         (
@@ -762,6 +772,7 @@ async fn cancel_session(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
 ) -> impl IntoResponse {
+    tracing::info!(session_id = %id, "Cancelling session");
     let session = state.db.get_session(&id).await.map_err(|e| {
         (
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -818,6 +829,7 @@ async fn interrupt_session(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
 ) -> impl IntoResponse {
+    tracing::info!(session_id = %id, "Interrupting session");
     let session = state.db.get_session(&id).await.map_err(|e| {
         (
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -872,6 +884,7 @@ async fn get_session_status(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
 ) -> impl IntoResponse {
+    tracing::info!(session_id = %id, "Getting session status");
     let session = state.db.get_session(&id).await.map_err(|e| {
         (
             StatusCode::INTERNAL_SERVER_ERROR,

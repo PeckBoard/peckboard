@@ -123,6 +123,7 @@ async fn create_project(
     State(state): State<Arc<AppState>>,
     Json(body): Json<CreateProjectRequest>,
 ) -> impl IntoResponse {
+    tracing::info!(name = %body.name, folder_id = %body.folder_id, "Creating project");
     let now = chrono::Utc::now().to_rfc3339();
     let id = uuid::Uuid::new_v4().to_string();
 
@@ -161,6 +162,7 @@ async fn list_projects(
     State(state): State<Arc<AppState>>,
     Query(params): Query<ListProjectsQuery>,
 ) -> impl IntoResponse {
+    tracing::info!(folder_id = ?params.folder_id, "Listing projects");
     let projects = if let Some(folder_id) = params.folder_id {
         state.db.list_projects_by_folder(&folder_id).await
     } else {
@@ -182,6 +184,7 @@ async fn get_project(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
 ) -> impl IntoResponse {
+    tracing::info!(project_id = %id, "Getting project");
     let project = state.db.get_project(&id).await.map_err(|e| {
         (
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -218,6 +221,7 @@ async fn update_project(
     Path(id): Path<String>,
     Json(body): Json<UpdateProjectRequest>,
 ) -> impl IntoResponse {
+    tracing::info!(project_id = %id, "Updating project");
     let update = UpdateProject {
         name: body.name,
         context: body.context,
@@ -251,6 +255,7 @@ async fn delete_project(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
 ) -> impl IntoResponse {
+    tracing::info!(project_id = %id, "Deleting project");
     // Cascade: collect worker session IDs from cards, then clean up
     let cards = state.db.list_cards_by_project(&id).await.map_err(|e| {
         (
@@ -308,6 +313,7 @@ async fn pause_project(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
 ) -> impl IntoResponse {
+    tracing::info!(project_id = %id, "Pausing project");
     let update = UpdateProject {
         status: Some("paused".to_string()),
         last_accessed_at: Some(chrono::Utc::now().to_rfc3339()),
@@ -335,6 +341,7 @@ async fn resume_project(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
 ) -> impl IntoResponse {
+    tracing::info!(project_id = %id, "Resuming project");
     let update = UpdateProject {
         status: Some("active".to_string()),
         last_accessed_at: Some(chrono::Utc::now().to_rfc3339()),
@@ -365,6 +372,7 @@ async fn create_card(
     Path(project_id): Path<String>,
     Json(body): Json<CreateCardRequest>,
 ) -> impl IntoResponse {
+    tracing::info!(project_id = %project_id, title = %body.title, "Creating card");
     // Verify project exists
     let project = state.db.get_project(&project_id).await.map_err(|e| {
         (
@@ -417,6 +425,7 @@ async fn list_cards(
     State(state): State<Arc<AppState>>,
     Path(project_id): Path<String>,
 ) -> impl IntoResponse {
+    tracing::info!(project_id = %project_id, "Listing cards");
     let cards = state
         .db
         .list_cards_by_project(&project_id)
@@ -437,6 +446,7 @@ async fn update_card(
     Path((_project_id, card_id)): Path<(String, String)>,
     Json(body): Json<UpdateCardRequest>,
 ) -> impl IntoResponse {
+    tracing::info!(card_id = %card_id, "Updating card");
     // Fetch existing card for edit policy checks
     let existing = state.db.get_card(&card_id).await.map_err(|e| {
         (
@@ -536,6 +546,7 @@ async fn delete_card(
     State(state): State<Arc<AppState>>,
     Path((_project_id, card_id)): Path<(String, String)>,
 ) -> impl IntoResponse {
+    tracing::info!(card_id = %card_id, "Deleting card");
     let deleted = state.db.delete_card(&card_id).await.map_err(|e| {
         (
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -558,6 +569,7 @@ async fn stop_card_worker(
     State(state): State<Arc<AppState>>,
     Path((_project_id, card_id)): Path<(String, String)>,
 ) -> impl IntoResponse {
+    tracing::info!(card_id = %card_id, "Stopping card worker");
     let card = state.db.get_card(&card_id).await.map_err(|e| {
         (
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -593,6 +605,7 @@ async fn restart_card_worker(
     State(state): State<Arc<AppState>>,
     Path((_project_id, card_id)): Path<(String, String)>,
 ) -> impl IntoResponse {
+    tracing::info!(card_id = %card_id, "Restarting card worker");
     let card = state.db.get_card(&card_id).await.map_err(|e| {
         (
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -646,6 +659,7 @@ async fn cancel_card_wont_do(
     State(state): State<Arc<AppState>>,
     Path((_project_id, card_id)): Path<(String, String)>,
 ) -> impl IntoResponse {
+    tracing::info!(card_id = %card_id, "Cancelling card as wont_do");
     let card = state.db.get_card(&card_id).await.map_err(|e| {
         (
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -692,6 +706,7 @@ async fn list_pending_questions(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
 ) -> impl IntoResponse {
+    tracing::info!(project_id = %id, "Listing pending questions");
     let worker_sessions = state
         .db
         .list_worker_sessions_by_project(&id)

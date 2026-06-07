@@ -66,6 +66,7 @@ async fn upload_attachment(
     Path(session_id): Path<String>,
     Json(body): Json<UploadRequest>,
 ) -> impl IntoResponse {
+    tracing::info!(session_id = %session_id, filename = %body.filename, "Uploading attachment");
     // Validate extension
     let ext = match get_extension(&body.filename) {
         Some(e) if ALLOWED_EXTENSIONS.contains(&e.as_str()) => e,
@@ -142,6 +143,7 @@ async fn list_attachments(
     State(state): State<Arc<AppState>>,
     Path(session_id): Path<String>,
 ) -> impl IntoResponse {
+    tracing::info!(session_id = %session_id, "Listing attachments");
     let dir = state.config.data_dir.join("attachments").join(&session_id);
 
     let mut attachments: Vec<AttachmentInfo> = Vec::new();
@@ -191,6 +193,7 @@ async fn download_attachment(
     State(state): State<Arc<AppState>>,
     Path((session_id, aid)): Path<(String, String)>,
 ) -> impl IntoResponse {
+    tracing::info!(session_id = %session_id, attachment_id = %aid, "Downloading attachment");
     let dir = state.config.data_dir.join("attachments").join(&session_id);
 
     // Find the file matching this attachment id
@@ -252,6 +255,7 @@ async fn delete_attachment(
     State(state): State<Arc<AppState>>,
     Path((session_id, aid)): Path<(String, String)>,
 ) -> impl IntoResponse {
+    tracing::info!(session_id = %session_id, attachment_id = %aid, "Deleting attachment");
     let dir = state.config.data_dir.join("attachments").join(&session_id);
 
     let file_path = find_attachment_file(&dir, &aid).await;

@@ -84,6 +84,7 @@ async fn register(
     State(state): State<Arc<AppState>>,
     Json(body): Json<RegisterRequest>,
 ) -> impl IntoResponse {
+    tracing::info!(username = %body.username, "Registering user");
     // Only allow registration if no users exist
     let count = state.db.count_users().await.map_err(|e| {
         (
@@ -186,6 +187,7 @@ async fn login(
     State(state): State<Arc<AppState>>,
     Json(body): Json<LoginRequest>,
 ) -> impl IntoResponse {
+    tracing::info!(username = %body.username, "Login attempt");
     // Rate limiting by client IP
     let ip: std::net::IpAddr = "0.0.0.0".parse().unwrap();
 
@@ -215,6 +217,7 @@ async fn login(
     let user = match user {
         Some(u) => u,
         None => {
+            tracing::warn!(username = %body.username, "Login failed: user not found");
             state.login_limiter.record_failure(ip);
             return Err((
                 StatusCode::UNAUTHORIZED,
@@ -225,6 +228,7 @@ async fn login(
 
     // Verify password
     if !verify_password(&body.password, &user.password_hash) {
+        tracing::warn!(username = %body.username, "Login failed: bad password");
         state.login_limiter.record_failure(ip);
         return Err((
             StatusCode::UNAUTHORIZED,
@@ -288,6 +292,7 @@ async fn logout(
         .get::<AuthUser>()
         .expect("auth middleware should inject AuthUser");
 
+    tracing::info!(user_id = %auth_user.user_id, "Logging out");
     state
         .db
         .delete_auth_session(&auth_user.session_id)
@@ -330,6 +335,7 @@ async fn change_password(
         .expect("auth middleware should inject AuthUser")
         .clone();
 
+    tracing::info!(user_id = %auth_user.user_id, "Changing password");
     let body: ChangePasswordRequest = {
         let bytes = axum::body::to_bytes(request.into_body(), 1024 * 1024)
             .await

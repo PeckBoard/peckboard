@@ -44,6 +44,7 @@ async fn create_folder(
     State(state): State<Arc<AppState>>,
     Json(body): Json<CreateFolderRequest>,
 ) -> impl IntoResponse {
+    tracing::info!(name = %body.name, path = %body.path, "Creating folder");
     // Validate that the path exists on disk
     let path = std::path::Path::new(&body.path);
     if !path.exists() {
@@ -77,6 +78,7 @@ async fn create_folder(
 
 /// GET /api/folders
 async fn list_folders(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+    tracing::info!("Listing folders");
     let folders = state.db.list_folders().await.map_err(|e| {
         (
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -92,6 +94,7 @@ async fn delete_folder(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
 ) -> impl IntoResponse {
+    tracing::info!(folder_id = %id, "Deleting folder");
     // Check if sessions exist for this folder
     let sessions = state.db.list_sessions_by_folder(&id).await.map_err(|e| {
         (

@@ -653,6 +653,8 @@ impl McpToolRegistry {
             .as_deref()
             .ok_or_else(|| anyhow::anyhow!("complete_step requires card context"))?;
 
+        tracing::info!(session_id = %ctx.session_id, card_id = %card_id, "MCP tool: complete_step");
+
         let handoff_context = args
             .get("handoff_context")
             .and_then(|v| v.as_str())
@@ -686,6 +688,8 @@ impl McpToolRegistry {
             .as_deref()
             .ok_or_else(|| anyhow::anyhow!("finish_card requires card context"))?;
 
+        tracing::info!(session_id = %ctx.session_id, card_id = %card_id, "MCP tool: finish_card");
+
         let summary = args.get("summary").and_then(|v| v.as_str()).unwrap_or("");
 
         ctx.db
@@ -715,6 +719,8 @@ impl McpToolRegistry {
             .as_deref()
             .ok_or_else(|| anyhow::anyhow!("wont_do_card requires card context"))?;
 
+        tracing::info!(session_id = %ctx.session_id, card_id = %card_id, "MCP tool: wont_do_card");
+
         let reason = args
             .get("reason")
             .and_then(|v| v.as_str())
@@ -738,6 +744,8 @@ impl McpToolRegistry {
     }
 
     async fn handle_ask_user(&self, args: Value, ctx: &ToolCallContext) -> anyhow::Result<Value> {
+        tracing::info!(session_id = %ctx.session_id, "MCP tool: ask_user");
+
         // Support both old format (single "question" string) and new format ("questions" array)
         let questions_data =
             if let Some(questions) = args.get("questions").and_then(|v| v.as_array()) {
@@ -873,6 +881,8 @@ impl McpToolRegistry {
             .as_deref()
             .ok_or_else(|| anyhow::anyhow!("create_card requires project context"))?;
 
+        tracing::info!(session_id = %ctx.session_id, project_id = %project_id, "MCP tool: create_card");
+
         let title = args
             .get("title")
             .and_then(|v| v.as_str())
@@ -920,6 +930,8 @@ impl McpToolRegistry {
     }
 
     async fn handle_list_cards(&self, ctx: &ToolCallContext) -> anyhow::Result<Value> {
+        tracing::info!(session_id = %ctx.session_id, "MCP tool: list_cards");
+
         let project_id = ctx
             .project_id
             .as_deref()
@@ -944,6 +956,8 @@ impl McpToolRegistry {
     }
 
     async fn handle_list_projects(&self, ctx: &ToolCallContext) -> anyhow::Result<Value> {
+        tracing::info!(session_id = %ctx.session_id, "MCP tool: list_projects");
+
         let projects = ctx.db.list_projects().await?;
 
         let items: Vec<Value> = projects
@@ -961,7 +975,9 @@ impl McpToolRegistry {
         Ok(serde_json::json!({ "projects": items }))
     }
 
-    async fn handle_list_workflows(&self, _ctx: &ToolCallContext) -> anyhow::Result<Value> {
+    async fn handle_list_workflows(&self, ctx: &ToolCallContext) -> anyhow::Result<Value> {
+        tracing::info!(session_id = %ctx.session_id, "MCP tool: list_workflows");
+
         // Workflows are defined conventionally; return the default set.
         Ok(serde_json::json!({
             "workflows": [
@@ -1167,6 +1183,8 @@ impl McpToolRegistry {
             .and_then(|v| v.as_str())
             .ok_or_else(|| anyhow::anyhow!("update_card requires 'card_id'"))?;
 
+        tracing::info!(session_id = %ctx.session_id, card_id = %card_id, "MCP tool: update_card");
+
         let update = UpdateCard {
             title: args
                 .get("title")
@@ -1220,6 +1238,8 @@ impl McpToolRegistry {
             .and_then(|v| v.as_str())
             .ok_or_else(|| anyhow::anyhow!("update_project requires 'project_id'"))?;
 
+        tracing::info!(session_id = %ctx.session_id, project_id = %project_id, "MCP tool: update_project");
+
         let update = UpdateProject {
             name: args
                 .get("name")
@@ -1263,6 +1283,8 @@ impl McpToolRegistry {
         args: Value,
         ctx: &ToolCallContext,
     ) -> anyhow::Result<Value> {
+        tracing::info!(session_id = %ctx.session_id, "MCP tool: create_project");
+
         let name = args
             .get("name")
             .and_then(|v| v.as_str())
@@ -1324,6 +1346,8 @@ impl McpToolRegistry {
             .and_then(|v| v.as_str())
             .ok_or_else(|| anyhow::anyhow!("pause_project requires 'project_id'"))?;
 
+        tracing::info!(session_id = %ctx.session_id, project_id = %project_id, "MCP tool: pause_project");
+
         let update = UpdateProject {
             status: Some("paused".to_string()),
             last_accessed_at: Some(chrono::Utc::now().to_rfc3339()),
@@ -1355,6 +1379,8 @@ impl McpToolRegistry {
             .get("project_id")
             .and_then(|v| v.as_str())
             .ok_or_else(|| anyhow::anyhow!("resume_project requires 'project_id'"))?;
+
+        tracing::info!(session_id = %ctx.session_id, project_id = %project_id, "MCP tool: resume_project");
 
         let update = UpdateProject {
             status: Some("active".to_string()),
@@ -1388,6 +1414,8 @@ impl McpToolRegistry {
             .and_then(|v| v.as_str())
             .ok_or_else(|| anyhow::anyhow!("delete_card requires 'card_id'"))?;
 
+        tracing::info!(session_id = %ctx.session_id, card_id = %card_id, "MCP tool: delete_card");
+
         let deleted = ctx.db.delete_card(card_id).await?;
 
         if !deleted {
@@ -1409,6 +1437,8 @@ impl McpToolRegistry {
             .get("card_id")
             .and_then(|v| v.as_str())
             .ok_or_else(|| anyhow::anyhow!("move_card_to_done requires 'card_id'"))?;
+
+        tracing::info!(session_id = %ctx.session_id, card_id = %card_id, "MCP tool: move_card_to_done");
 
         let update = UpdateCard {
             step: Some("done".to_string()),
@@ -1441,6 +1471,8 @@ impl McpToolRegistry {
             .get("card_id")
             .and_then(|v| v.as_str())
             .ok_or_else(|| anyhow::anyhow!("move_card_to_wont_do requires 'card_id'"))?;
+
+        tracing::info!(session_id = %ctx.session_id, card_id = %card_id, "MCP tool: move_card_to_wont_do");
 
         let reason = args
             .get("reason")
@@ -1479,6 +1511,8 @@ impl McpToolRegistry {
             .project_id
             .as_deref()
             .ok_or_else(|| anyhow::anyhow!("notify_workers requires project context"))?;
+
+        tracing::info!(session_id = %ctx.session_id, project_id = %project_id, "MCP tool: notify_workers");
 
         let message = args
             .get("message")
