@@ -1,7 +1,8 @@
-import { useEffect, useState } from 'react'
+import { useCallback, useEffect, useState } from 'react'
 import { useProjectsStore } from '../store/projects'
+import { useWsStore } from '../store/ws'
 import { authedFetch } from '../store/auth'
-import type { Card } from '../types/api'
+import type { Card, Event } from '../types/api'
 import EditCardModal from './EditCardModal'
 
 const STEPS = [
@@ -40,6 +41,24 @@ function priorityBadge(priority: number) {
   return <span className={`priority-badge ${info.className}`}>{info.label}</span>
 }
 
+interface PendingQuestion {
+  eventId: string
+  sessionId: string
+  ts: number
+  questions: QuestionItem[]
+  cardId: string | null
+  cardTitle: string | null
+  cardDescription: string | null
+}
+
+interface QuestionItem {
+  question: string
+  header?: string
+  multiSelect?: boolean
+  options?: string[]
+  optionObjects?: { label: string; description?: string }[]
+}
+
 interface KanbanBoardProps {
   projectId: string
 }
@@ -71,6 +90,100 @@ export default function KanbanBoard({ projectId }: KanbanBoardProps) {
 
   const [workflows, setWorkflows] = useState<WorkflowInfo[]>([])
   const [models, setModels] = useState<ModelInfo[]>([])
+  const [pendingQuestions, setPendingQuestions] = useState<PendingQuestion[]>([])
+  const [questionAnswers, setQuestionAnswers] = useState<Record<string, Record<number, string>>>({})
+  const [submittingQuestion, setSubmittingQuestion] = useState<string | null>(null)
+
+  const addEventListener = useWsStore((s) => s.addEventListener)
+  const removeEventListener = useWsStore((s) => s.removeEventListener)
+
+  const fetchPendingQuestions = useCallback(async () => {
+    const res = await authedFetch(`/api/projects/${projectId}/pending-questions`)
+    if (res.ok) {
+      const data = await res.json()
+      setPendingQuestions(data.questions ?? [])
+    }
+  }, [projectId])
+
+  // Fetch pending questions on mount and when events arrive
+  useEffect(() => {
+    fetchPendingQuestions()
+  }, [fetchPendingQuestions])
+
+  // Listen for WebSocket events to refresh pending questions
+  useEffect(() => {
+    const listener = (event: Event) => {
+      if (event.kind === 'question' || event.kind === 'question-resolved') {
+        fetchPendingQuestions()
+      }
+    }
+    addEventListener(listener)
+    return () => removeEventListener(listener)
+  }, [addEventListener, removeEventListener, fetchPendingQuestions])
+
+  const handleAnswerQuestion = async (pq: PendingQuestion) => {
+    const answers = questionAnswers[pq.eventId] ?? {}
+    const hasAnswers = pq.questions.some((_, idx) => (answers[idx] ?? '').trim().length > 0)
+    if (!hasAnswers || submittingQuestion) return
+
+    setSubmittingQuestion(pq.eventId)
+    try {
+      const answerMap: Record<string, string> = {}
+      pq.questions.forEach((_, idx) => {
+        const val = (answers[idx] ?? '').trim()
+        if (val) answerMap[String(idx)] = val
+      })
+      await authedFetch(`/api/sessions/${pq.sessionId}/events`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          kind: 'question-resolved',
+          data: { question_id: pq.eventId, answers: answerMap },
+        }),
+      })
+      // Clear answers and refresh
+      setQuestionAnswers((prev) => { const next = { ...prev }; delete next[pq.eventId]; return next })
+      fetchPendingQuestions()
+    } finally {
+      setSubmittingQuestion(null)
+    }
+  }
+
+  const handleDismissQuestion = async (pq: PendingQuestion) => {
+    if (submittingQuestion) return
+    setSubmittingQuestion(pq.eventId)
+    try {
+      await authedFetch(`/api/sessions/${pq.sessionId}/events`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          kind: 'question-resolved',
+          data: { question_id: pq.eventId, rejected: true },
+        }),
+      })
+      fetchPendingQuestions()
+    } finally {
+      setSubmittingQuestion(null)
+    }
+  }
+
+  const setQuestionAnswer = (eventId: string, idx: number, value: string) => {
+    setQuestionAnswers((prev) => ({
+      ...prev,
+      [eventId]: { ...(prev[eventId] ?? {}), [idx]: value },
+    }))
+  }
+
+  const toggleQuestionMulti = (eventId: string, idx: number, option: string) => {
+    setQuestionAnswers((prev) => {
+      const current = (prev[eventId] ?? {})[idx] ?? ''
+      const selected = current ? current.split(',') : []
+      const next = selected.includes(option)
+        ? selected.filter((s) => s !== option)
+        : [...selected, option]
+      return { ...prev, [eventId]: { ...(prev[eventId] ?? {}), [idx]: next.join(',') } }
+    })
+  }
 
   useEffect(() => {
     fetchCards(projectId)
@@ -229,6 +342,78 @@ export default function KanbanBoard({ projectId }: KanbanBoardProps) {
           {showAddForm ? 'Cancel' : 'Add Card'}
         </button>
       </div>
+
+      {/* Pending worker questions */}
+      {pendingQuestions.length > 0 && (
+        <div className="worker-questions-section">
+          <div className="worker-questions-header">
+            <span className="worker-questions-icon">&#x2753;</span>
+            <span>{pendingQuestions.length} worker question{pendingQuestions.length > 1 ? 's' : ''} awaiting your answer</span>
+          </div>
+          {pendingQuestions.map((pq) => {
+            const answers = questionAnswers[pq.eventId] ?? {}
+            const isSubmitting = submittingQuestion === pq.eventId
+            return (
+              <div key={pq.eventId} className="worker-question-card">
+                <div className="worker-question-context">
+                  {pq.cardTitle && <span className="worker-question-card-title">{pq.cardTitle}</span>}
+                  {pq.cardDescription && <span className="worker-question-card-desc">{pq.cardDescription}</span>}
+                </div>
+                {pq.questions.map((q, idx) => (
+                  <div key={idx} className="question-item">
+                    {q.header && <div className="question-header">{q.header}</div>}
+                    <div className="question-card-text">{q.question}</div>
+                    {q.options && q.options.length > 0 ? (
+                      <div className="question-options">
+                        {q.options.map((opt, optIdx) => {
+                          const optObj = q.optionObjects?.[optIdx]
+                          return (
+                            <label key={opt} className="question-option-label">
+                              {q.multiSelect ? (
+                                <input
+                                  type="checkbox"
+                                  checked={(answers[idx] ?? '').split(',').includes(opt)}
+                                  onChange={() => toggleQuestionMulti(pq.eventId, idx, opt)}
+                                  disabled={isSubmitting}
+                                />
+                              ) : (
+                                <input
+                                  type="radio"
+                                  name={`wq-${pq.eventId}-${idx}`}
+                                  checked={answers[idx] === opt}
+                                  onChange={() => setQuestionAnswer(pq.eventId, idx, opt)}
+                                  disabled={isSubmitting}
+                                />
+                              )}
+                              <span className="question-option-text">
+                                <span>{opt}</span>
+                                {optObj?.description && <span className="question-option-desc">{optObj.description}</span>}
+                              </span>
+                            </label>
+                          )
+                        })}
+                      </div>
+                    ) : (
+                      <input
+                        className="question-input"
+                        type="text"
+                        placeholder="Type your answer..."
+                        value={answers[idx] ?? ''}
+                        onChange={(e) => setQuestionAnswer(pq.eventId, idx, e.target.value)}
+                        disabled={isSubmitting}
+                      />
+                    )}
+                  </div>
+                ))}
+                <div className="question-actions">
+                  <button className="btn-primary" onClick={() => handleAnswerQuestion(pq)} disabled={isSubmitting}>Submit</button>
+                  <button className="btn-secondary" onClick={() => handleDismissQuestion(pq)} disabled={isSubmitting}>Dismiss</button>
+                </div>
+              </div>
+            )
+          })}
+        </div>
+      )}
 
       {showAddForm && (
         <div className="kanban-add-form">

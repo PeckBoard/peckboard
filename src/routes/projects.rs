@@ -109,6 +109,10 @@ pub fn router(state: Arc<AppState>) -> Router<Arc<AppState>> {
             "/api/projects/{id}/cards/{card_id}/cancel-wont-do",
             post(cancel_card_wont_do),
         )
+        .route(
+            "/api/projects/{id}/pending-questions",
+            get(list_pending_questions),
+        )
         .route_layer(middleware::from_fn_with_state(state, require_auth))
 }
 
@@ -673,4 +677,75 @@ async fn cancel_card_wont_do(
         })?;
 
     Ok::<_, (StatusCode, Json<serde_json::Value>)>(Json(serde_json::json!({ "ok": true })))
+}
+
+/// GET /api/projects/:id/pending-questions -- list unresolved questions from worker sessions
+async fn list_pending_questions(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> impl IntoResponse {
+    let worker_sessions = state
+        .db
+        .list_worker_sessions_by_project(&id)
+        .await
+        .map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({ "error": e.to_string() })),
+            )
+        })?;
+
+    let mut pending_questions = Vec::new();
+
+    for session in &worker_sessions {
+        let events = state
+            .db
+            .list_events_by_session(&session.id, None)
+            .await
+            .unwrap_or_default();
+
+        // Collect resolved question IDs
+        let resolved_ids: std::collections::HashSet<String> = events
+            .iter()
+            .filter(|e| e.kind == "question-resolved")
+            .filter_map(|e| {
+                serde_json::from_str::<serde_json::Value>(&e.data)
+                    .ok()
+                    .and_then(|d| {
+                        d.get("question_id")
+                            .or(d.get("questionId"))
+                            .and_then(|v| v.as_str())
+                            .map(|s| s.to_string())
+                    })
+            })
+            .collect();
+
+        for event in &events {
+            if event.kind == "question" && !resolved_ids.contains(&event.id) {
+                if let Ok(data) = serde_json::from_str::<serde_json::Value>(&event.data) {
+                    pending_questions.push(serde_json::json!({
+                        "eventId": event.id,
+                        "sessionId": session.id,
+                        "ts": event.ts,
+                        "questions": data.get("questions"),
+                        "cardId": data.get("cardId"),
+                        "cardTitle": data.get("cardTitle"),
+                        "cardDescription": data.get("cardDescription"),
+                        "projectId": id,
+                    }));
+                }
+            }
+        }
+    }
+
+    // Sort oldest first
+    pending_questions.sort_by(|a, b| {
+        let ts_a = a.get("ts").and_then(|v| v.as_i64()).unwrap_or(0);
+        let ts_b = b.get("ts").and_then(|v| v.as_i64()).unwrap_or(0);
+        ts_a.cmp(&ts_b)
+    });
+
+    Ok::<_, (StatusCode, Json<serde_json::Value>)>(Json(
+        serde_json::json!({ "questions": pending_questions }),
+    ))
 }

@@ -764,11 +764,46 @@ impl McpToolRegistry {
                 ));
             };
 
-        let event_data = serde_json::json!({
+        // Look up card and project context for worker questions
+        let mut card_title = None;
+        let mut card_description = None;
+        let mut project_name = None;
+        let mut project_id_val = None;
+        if let Some(ref card_id) = ctx.card_id {
+            if let Ok(Some(card)) = ctx.db.get_card(card_id).await {
+                card_title = Some(card.title);
+                card_description = Some(card.description);
+            }
+        }
+        if let Some(ref pid) = ctx.project_id {
+            project_id_val = Some(pid.clone());
+            if let Ok(Some(project)) = ctx.db.get_project(pid).await {
+                project_name = Some(project.name);
+            }
+        }
+
+        // Check if this is a worker session
+        let is_worker = ctx.card_id.is_some();
+
+        let mut event_data = serde_json::json!({
             "questions": questions_data,
             "cardId": ctx.card_id,
+            "sessionId": ctx.session_id,
             "source": "mcp",
+            "isWorker": is_worker,
         });
+        if let Some(ref title) = card_title {
+            event_data["cardTitle"] = serde_json::Value::String(title.clone());
+        }
+        if let Some(ref desc) = card_description {
+            event_data["cardDescription"] = serde_json::Value::String(desc.clone());
+        }
+        if let Some(ref name) = project_name {
+            event_data["projectName"] = serde_json::Value::String(name.clone());
+        }
+        if let Some(ref pid) = project_id_val {
+            event_data["projectId"] = serde_json::Value::String(pid.clone());
+        }
 
         // Emit as a "question" event so the frontend renders the question card UI
         let event = ctx

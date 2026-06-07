@@ -118,6 +118,23 @@ impl Db {
         .await
     }
 
+    /// List worker sessions for a specific project.
+    pub async fn list_worker_sessions_by_project(
+        &self,
+        project_id: &str,
+    ) -> anyhow::Result<Vec<Session>> {
+        let project_id = project_id.to_string();
+        self.with_conn(move |conn| {
+            sessions::table
+                .filter(sessions::is_worker.eq(true))
+                .filter(sessions::project_id.eq(&project_id))
+                .select(Session::as_select())
+                .load(conn)
+                .map_err(Into::into)
+        })
+        .await
+    }
+
     pub async fn list_worker_sessions(&self) -> anyhow::Result<Vec<Session>> {
         self.with_conn(move |conn| {
             sessions::table

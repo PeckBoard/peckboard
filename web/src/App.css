@@ -2418,6 +2418,60 @@ select.form-input {
   flex-shrink: 0;
 }
 
+/* Worker questions on project page */
+.worker-questions-section {
+  background: var(--surface);
+  border: 1px solid var(--accent-muted);
+  border-radius: var(--radius-md);
+  margin-bottom: 16px;
+  overflow: hidden;
+}
+
+.worker-questions-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 16px;
+  background: var(--accent-subtle);
+  border-bottom: 1px solid var(--accent-muted);
+  font-size: var(--text-sm);
+  font-weight: 600;
+  color: var(--accent);
+}
+
+.worker-questions-icon {
+  font-size: 15px;
+}
+
+.worker-question-card {
+  padding: 16px;
+  border-bottom: 1px solid var(--border);
+}
+.worker-question-card:last-child {
+  border-bottom: none;
+}
+
+.worker-question-context {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  margin-bottom: 12px;
+  padding-bottom: 10px;
+  border-bottom: 1px solid var(--border);
+}
+
+.worker-question-card-title {
+  font-size: var(--text-sm);
+  font-weight: 600;
+  color: var(--text);
+}
+
+.worker-question-card-desc {
+  font-size: var(--text-xs);
+  color: var(--text3);
+  line-height: 1.4;
+}
+
 .kanban-add-form {
   display: flex;
   flex-direction: column;
