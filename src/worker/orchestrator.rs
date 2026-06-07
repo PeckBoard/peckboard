@@ -87,6 +87,15 @@ pub async fn check_and_spawn_workers(state: &Arc<AppState>) {
             .collect();
 
         let slots = (project.worker_count as usize) - active_workers;
+        tracing::info!(
+            project_id = %project.id,
+            project_name = %project.name,
+            active_workers = active_workers,
+            available_cards = available.len(),
+            slots = slots,
+            "Orchestrator check: project \"{}\"",
+            project.name
+        );
         for card in available.iter().take(slots) {
             if let Err(e) = spawn_worker_for_card(state, project, card).await {
                 tracing::error!(
