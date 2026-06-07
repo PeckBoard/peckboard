@@ -274,6 +274,7 @@ pub fn build_cli_args(
             "read_report",
             "read_worker_session",
             "list_worker_sessions",
+            "list_models",
         ];
         let allowed: Vec<String> = mcp_tools
             .iter()

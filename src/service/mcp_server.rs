@@ -207,6 +207,7 @@ pub struct ToolCallContext {
     pub card_id: Option<String>,
     pub db: Arc<Db>,
     pub broadcaster: Arc<crate::ws::broadcaster::Broadcaster>,
+    pub provider_registry: Option<Arc<crate::provider::registry::ProviderRegistry>>,
 }
 
 /// A single MCP tool definition.
@@ -634,6 +635,15 @@ impl McpToolRegistry {
                 }),
             },
             McpToolDef {
+                name: "list_models".into(),
+                description: "List all available AI models across all providers (including plugins). Use to see valid model IDs for card/project configuration.".into(),
+                input_schema: serde_json::json!({
+                    "type": "object",
+                    "properties": {},
+                    "additionalProperties": false
+                }),
+            },
+            McpToolDef {
                 name: "share_finding".into(),
                 description: "Share a finding, discovery, or insight with all other running workers. This can be anything valuable: research results, data patterns, bugs, architectural decisions, experimental observations, domain knowledge, constraints, or any information that may help other workers. Broadcasts a summary; workers can retrieve full detail and ask follow-up questions.".into(),
                 input_schema: serde_json::json!({
@@ -754,6 +764,7 @@ impl McpToolRegistry {
             "move_card_to_wont_do" => self.handle_move_card_to_wont_do(args, ctx).await,
             "notify_workers" => self.handle_notify_workers(args, ctx).await,
             "fetch_url" => self.handle_fetch_url(args, ctx).await,
+            "list_models" => self.handle_list_models(ctx).await,
             "list_project_reports" => self.handle_list_project_reports(ctx).await,
             "read_report" => self.handle_read_report(args, ctx).await,
             "read_worker_session" => self.handle_read_worker_session(args, ctx).await,
@@ -2340,6 +2351,39 @@ impl McpToolRegistry {
         }))
     }
 
+    async fn handle_list_models(&self, ctx: &ToolCallContext) -> anyhow::Result<Value> {
+        tracing::info!(session_id = %ctx.session_id, "MCP tool: list_models");
+
+        let registry = ctx.provider_registry.as_ref()
+            .ok_or_else(|| anyhow::anyhow!("provider registry not available"))?;
+
+        let all_models = registry.list_all_models().await;
+        let providers = registry.list_providers().await;
+
+        let models: Vec<Value> = all_models.iter().map(|(full_id, model)| {
+            serde_json::json!({
+                "id": full_id,
+                "model_id": model.id,
+                "display_name": model.display_name,
+                "capabilities": model.capabilities,
+            })
+        }).collect();
+
+        let provider_list: Vec<Value> = providers.iter().map(|p| {
+            serde_json::json!({
+                "id": p.id,
+                "display_name": p.display_name,
+                "model_count": p.models.len(),
+            })
+        }).collect();
+
+        Ok(serde_json::json!({
+            "models": models,
+            "providers": provider_list,
+            "total": models.len(),
+        }))
+    }
+
     async fn handle_list_worker_sessions(&self, ctx: &ToolCallContext) -> anyhow::Result<Value> {
         tracing::info!(session_id = %ctx.session_id, "MCP tool: list_worker_sessions");
 
@@ -2499,6 +2543,7 @@ mod tests {
             card_id: None,
             db,
             broadcaster: crate::ws::broadcaster::Broadcaster::new(),
+            provider_registry: None,
         };
 
         let result = registry
@@ -2518,6 +2563,7 @@ mod tests {
             card_id: None,
             db,
             broadcaster: crate::ws::broadcaster::Broadcaster::new(),
+            provider_registry: None,
         };
 
         let result = registry

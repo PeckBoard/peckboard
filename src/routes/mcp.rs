@@ -206,6 +206,7 @@ async fn mcp_handler(
                 card_id,
                 db: Arc::new(state.db.clone()),
                 broadcaster: state.broadcaster.clone(),
+                provider_registry: Some(state.provider_registry.clone()),
             };
 
             // ── Hook: mcp.tool.call.before ──
