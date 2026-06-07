@@ -36,7 +36,9 @@ export default function NewSessionModal({ onClose }: Props) {
   const [error, setError] = useState('')
   const [loading, setLoading] = useState(false)
 
-  useEffect(() => { fetchFolders() }, [fetchFolders])
+  useEffect(() => {
+    fetchFolders()
+  }, [fetchFolders])
 
   useEffect(() => {
     authedFetch('/api/models')
@@ -94,26 +96,64 @@ export default function NewSessionModal({ onClose }: Props) {
         <form onSubmit={handleSubmit}>
           <div className="form-field">
             <label className="form-label">Name</label>
-            <input className="form-input" value={name} onChange={(e) => setName(e.target.value)} placeholder="My session" autoFocus required />
+            <input
+              className="form-input"
+              value={name}
+              onChange={(e) => setName(e.target.value)}
+              placeholder="My session"
+              autoFocus
+              required
+            />
           </div>
           <div className="form-field">
             <label className="form-label">Folder</label>
             {folders.length > 0 ? (
-              <select className="form-input" value={folderId} onChange={(e) => setFolderId(e.target.value)}>
-                {folders.map((f) => <option key={f.id} value={f.id}>{f.name} — {f.path}</option>)}
+              <select
+                className="form-input"
+                value={folderId}
+                onChange={(e) => setFolderId(e.target.value)}
+              >
+                {folders.map((f) => (
+                  <option key={f.id} value={f.id}>
+                    {f.name} — {f.path}
+                  </option>
+                ))}
               </select>
             ) : (
-              <p style={{ fontSize: 'var(--text-sm)', color: 'var(--text3)' }}>No folders yet. Create one below.</p>
+              <p style={{ fontSize: 'var(--text-sm)', color: 'var(--text3)' }}>
+                No folders yet. Create one below.
+              </p>
             )}
-            <button type="button" className="form-link-btn" onClick={() => setShowNewFolder(!showNewFolder)}>
+            <button
+              type="button"
+              className="form-link-btn"
+              onClick={() => setShowNewFolder(!showNewFolder)}
+            >
               {showNewFolder ? 'Cancel' : '+ Add folder'}
             </button>
           </div>
           {showNewFolder && (
             <div className="form-inline-card">
-              <input className="form-input" placeholder="Folder name" value={newFolderName} onChange={(e) => setNewFolderName(e.target.value)} />
-              <input className="form-input" placeholder="/path/to/folder" value={newFolderPath} onChange={(e) => setNewFolderPath(e.target.value)} />
-              <button type="button" className="btn-secondary" onClick={handleCreateFolder} disabled={!newFolderName.trim() || !newFolderPath.trim()}>Create Folder</button>
+              <input
+                className="form-input"
+                placeholder="Folder name"
+                value={newFolderName}
+                onChange={(e) => setNewFolderName(e.target.value)}
+              />
+              <input
+                className="form-input"
+                placeholder="/path/to/folder"
+                value={newFolderPath}
+                onChange={(e) => setNewFolderPath(e.target.value)}
+              />
+              <button
+                type="button"
+                className="btn-secondary"
+                onClick={handleCreateFolder}
+                disabled={!newFolderName.trim() || !newFolderPath.trim()}
+              >
+                Create Folder
+              </button>
             </div>
           )}
           <div className="form-field">
@@ -123,7 +163,9 @@ export default function NewSessionModal({ onClose }: Props) {
               {providers.map((p) => (
                 <optgroup key={p.id} label={p.display_name}>
                   {p.models.map((m) => (
-                    <option key={m.id} value={m.id}>{m.display_name}</option>
+                    <option key={m.id} value={m.id}>
+                      {m.display_name}
+                    </option>
                   ))}
                 </optgroup>
               ))}
@@ -131,7 +173,11 @@ export default function NewSessionModal({ onClose }: Props) {
           </div>
           <div className="form-field">
             <label className="form-label">Effort</label>
-            <select className="form-input" value={effort} onChange={(e) => setEffort(e.target.value)}>
+            <select
+              className="form-input"
+              value={effort}
+              onChange={(e) => setEffort(e.target.value)}
+            >
               <option value="default">Default</option>
               <option value="low">Low</option>
               <option value="medium">Medium</option>
@@ -140,8 +186,14 @@ export default function NewSessionModal({ onClose }: Props) {
           </div>
           {error && <p className="form-error">{error}</p>}
           <div className="form-actions">
-            <button type="button" className="btn-secondary" onClick={onClose}>Cancel</button>
-            <button type="submit" className="btn-primary" disabled={loading || !name.trim() || !folderId}>
+            <button type="button" className="btn-secondary" onClick={onClose}>
+              Cancel
+            </button>
+            <button
+              type="submit"
+              className="btn-primary"
+              disabled={loading || !name.trim() || !folderId}
+            >
               {loading ? 'Creating...' : 'Create Session'}
             </button>
           </div>

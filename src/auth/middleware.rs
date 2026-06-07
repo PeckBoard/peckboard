@@ -53,7 +53,10 @@ pub async fn require_auth(
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap()
         .as_secs() as i64;
-    let _ = state.db.update_auth_session_last_used(&claims.jti, now).await;
+    let _ = state
+        .db
+        .update_auth_session_last_used(&claims.jti, now)
+        .await;
 
     // Inject auth context
     request.extensions_mut().insert(AuthUser {

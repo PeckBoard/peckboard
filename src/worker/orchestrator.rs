@@ -31,9 +31,7 @@ pub async fn check_and_spawn_workers(state: &Arc<AppState>) {
         // Count currently active workers
         let active_workers = cards
             .iter()
-            .filter(|c| {
-                c.worker_session_id.is_some() && c.step != "done" && c.step != "wont_do"
-            })
+            .filter(|c| c.worker_session_id.is_some() && c.step != "done" && c.step != "wont_do")
             .count();
 
         if active_workers >= project.worker_count as usize {
@@ -115,15 +113,28 @@ async fn spawn_worker_for_card(
     );
 
     // Check money-loop defense
-    let events = state.db.events_tail(&session.id, 64).await.unwrap_or_default();
+    let events = state
+        .db
+        .events_tail(&session.id, 64)
+        .await
+        .unwrap_or_default();
     let (crash_count, should_block) = pipeline::detect_retry_loop(&events);
     if should_block {
         // Block the card
-        let _ = state.db.update_card(&card.id, UpdateCard {
-            blocked: Some(true),
-            block_reason: Some(Some(format!("Money-loop defense: {} consecutive crashes", crash_count))),
-            ..Default::default()
-        }).await;
+        let _ = state
+            .db
+            .update_card(
+                &card.id,
+                UpdateCard {
+                    blocked: Some(true),
+                    block_reason: Some(Some(format!(
+                        "Money-loop defense: {} consecutive crashes",
+                        crash_count
+                    ))),
+                    ..Default::default()
+                },
+            )
+            .await;
         tracing::warn!(card_id = %card.id, crash_count, "Card blocked by money-loop defense");
         return Ok(());
     }
@@ -144,16 +155,22 @@ async fn spawn_worker_for_card(
         .await;
 
     // Hook: mcp.token.issue.after
-    state.plugins.dispatch(
-        "mcp.token.issue.after",
-        serde_json::json!({ "sessionId": &session_id, "projectId": &project.id }),
-    ).await;
+    state
+        .plugins
+        .dispatch(
+            "mcp.token.issue.after",
+            serde_json::json!({ "sessionId": &session_id, "projectId": &project.id }),
+        )
+        .await;
 
     // 4. Hook: mcp.config.write.before
-    let config_hook = state.plugins.dispatch(
-        "mcp.config.write.before",
-        serde_json::json!({ "sessionId": &session_id, "port": state.config.port }),
-    ).await;
+    let config_hook = state
+        .plugins
+        .dispatch(
+            "mcp.config.write.before",
+            serde_json::json!({ "sessionId": &session_id, "port": state.config.port }),
+        )
+        .await;
     if config_hook.is_cancelled() {
         tracing::info!(session_id = %session_id, "mcp.config.write.before cancelled by plugin");
         return Ok(());
@@ -167,25 +184,21 @@ async fn spawn_worker_for_card(
     )?;
 
     // Hook: mcp.config.write.after
-    state.plugins.dispatch(
-        "mcp.config.write.after",
-        serde_json::json!({ "sessionId": &session_id }),
-    ).await;
+    state
+        .plugins
+        .dispatch(
+            "mcp.config.write.after",
+            serde_json::json!({ "sessionId": &session_id }),
+        )
+        .await;
 
     // 5. Build worker prompt
-    let prompt = pipeline::build_worker_prompt(
-        project,
-        card,
-        &card.step,
-        card.handoff_context.as_deref(),
-    );
+    let prompt =
+        pipeline::build_worker_prompt(project, card, &card.step, card.handoff_context.as_deref());
 
     // 6. Build spawn config and send message
     let config = SpawnConfig {
-        model: session
-            .model
-            .clone()
-            .unwrap_or_else(|| "default".into()),
+        model: session.model.clone().unwrap_or_else(|| "default".into()),
         effort: session.effort.clone(),
         working_dir: folder.path.clone(),
         mcp_config_path: Some(mcp_config_path.to_string_lossy().to_string()),
@@ -419,16 +432,22 @@ pub async fn handle_worker_done(state: &Arc<AppState>, session_id: &str) {
 
     // Clean up MCP config and revoke tokens
     mcp_server::delete_mcp_config(&state.config.data_dir, session_id);
-    state.plugins.dispatch(
-        "mcp.config.delete.after",
-        serde_json::json!({ "sessionId": session_id }),
-    ).await;
+    state
+        .plugins
+        .dispatch(
+            "mcp.config.delete.after",
+            serde_json::json!({ "sessionId": session_id }),
+        )
+        .await;
 
     state.mcp_tokens.revoke_by_session(session_id).await;
-    state.plugins.dispatch(
-        "mcp.token.revoke.after",
-        serde_json::json!({ "sessionId": session_id }),
-    ).await;
+    state
+        .plugins
+        .dispatch(
+            "mcp.token.revoke.after",
+            serde_json::json!({ "sessionId": session_id }),
+        )
+        .await;
 
     // After handling, trigger another round of orchestration so freed slots
     // get filled.

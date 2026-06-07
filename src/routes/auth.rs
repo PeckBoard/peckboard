@@ -85,11 +85,12 @@ async fn register(
     Json(body): Json<RegisterRequest>,
 ) -> impl IntoResponse {
     // Only allow registration if no users exist
-    let count = state
-        .db
-        .count_users()
-        .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": e.to_string()}))))?;
+    let count = state.db.count_users().await.map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({"error": e.to_string()})),
+        )
+    })?;
 
     if count > 0 {
         return Err((
@@ -101,12 +102,18 @@ async fn register(
     if body.username.is_empty() || body.password.len() < 8 {
         return Err((
             StatusCode::BAD_REQUEST,
-            Json(serde_json::json!({"error": "username required and password must be at least 8 characters"})),
+            Json(
+                serde_json::json!({"error": "username required and password must be at least 8 characters"}),
+            ),
         ));
     }
 
-    let password_hash = hash_password(&body.password)
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": e.to_string()}))))?;
+    let password_hash = hash_password(&body.password).map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({"error": e.to_string()})),
+        )
+    })?;
 
     let now = chrono::Utc::now().to_rfc3339();
     let user_id = uuid::Uuid::new_v4().to_string();
@@ -123,12 +130,22 @@ async fn register(
             updated_at: now,
         })
         .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": e.to_string()}))))?;
+        .map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({"error": e.to_string()})),
+            )
+        })?;
 
     // Create auth session and token
     let session_id = uuid::Uuid::new_v4().to_string();
-    let (token, exp) = create_token(&state.jwt_secret, &user.id, &user.role, &session_id)
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": e.to_string()}))))?;
+    let (token, exp) =
+        create_token(&state.jwt_secret, &user.id, &user.role, &session_id).map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({"error": e.to_string()})),
+            )
+        })?;
 
     let now_ts = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -147,7 +164,12 @@ async fn register(
             ip_address: None,
         })
         .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": e.to_string()}))))?;
+        .map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({"error": e.to_string()})),
+            )
+        })?;
 
     Ok(Json(AuthResponse {
         token,
@@ -183,7 +205,12 @@ async fn login(
         .db
         .get_user_by_username(&body.username)
         .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": e.to_string()}))))?;
+        .map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({"error": e.to_string()})),
+            )
+        })?;
 
     let user = match user {
         Some(u) => u,
@@ -207,8 +234,13 @@ async fn login(
 
     // Create auth session and token
     let session_id = uuid::Uuid::new_v4().to_string();
-    let (token, exp) = create_token(&state.jwt_secret, &user.id, &user.role, &session_id)
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": e.to_string()}))))?;
+    let (token, exp) =
+        create_token(&state.jwt_secret, &user.id, &user.role, &session_id).map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({"error": e.to_string()})),
+            )
+        })?;
 
     let now_ts = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -227,7 +259,12 @@ async fn login(
             ip_address: None,
         })
         .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": e.to_string()}))))?;
+        .map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({"error": e.to_string()})),
+            )
+        })?;
 
     state.login_limiter.reset(ip);
 
@@ -296,9 +333,18 @@ async fn change_password(
     let body: ChangePasswordRequest = {
         let bytes = axum::body::to_bytes(request.into_body(), 1024 * 1024)
             .await
-            .map_err(|_| (StatusCode::BAD_REQUEST, Json(serde_json::json!({"error": "invalid body"}))))?;
-        serde_json::from_slice(&bytes)
-            .map_err(|_| (StatusCode::BAD_REQUEST, Json(serde_json::json!({"error": "invalid JSON"}))))?
+            .map_err(|_| {
+                (
+                    StatusCode::BAD_REQUEST,
+                    Json(serde_json::json!({"error": "invalid body"})),
+                )
+            })?;
+        serde_json::from_slice(&bytes).map_err(|_| {
+            (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({"error": "invalid JSON"})),
+            )
+        })?
     };
 
     if body.new_password.len() < 8 {
@@ -313,8 +359,16 @@ async fn change_password(
         .db
         .get_user(&auth_user.user_id)
         .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": e.to_string()}))))?
-        .ok_or((StatusCode::NOT_FOUND, Json(serde_json::json!({"error": "user not found"}))))?;
+        .map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({"error": e.to_string()})),
+            )
+        })?
+        .ok_or((
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({"error": "user not found"})),
+        ))?;
 
     if !verify_password(&body.current_password, &user.password_hash) {
         return Err((
@@ -324,8 +378,12 @@ async fn change_password(
     }
 
     // Hash new password and update
-    let new_hash = hash_password(&body.new_password)
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": e.to_string()}))))?;
+    let new_hash = hash_password(&body.new_password).map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({"error": e.to_string()})),
+        )
+    })?;
 
     let now = chrono::Utc::now().to_rfc3339();
     state
@@ -339,19 +397,34 @@ async fn change_password(
             },
         )
         .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": e.to_string()}))))?;
+        .map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({"error": e.to_string()})),
+            )
+        })?;
 
     // Revoke all existing auth sessions for this user
     state
         .db
         .delete_auth_sessions_by_user(&auth_user.user_id)
         .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": e.to_string()}))))?;
+        .map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({"error": e.to_string()})),
+            )
+        })?;
 
     // Issue fresh token
     let session_id = uuid::Uuid::new_v4().to_string();
-    let (token, exp) = create_token(&state.jwt_secret, &user.id, &user.role, &session_id)
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": e.to_string()}))))?;
+    let (token, exp) =
+        create_token(&state.jwt_secret, &user.id, &user.role, &session_id).map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({"error": e.to_string()})),
+            )
+        })?;
 
     let now_ts = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -370,7 +443,12 @@ async fn change_password(
             ip_address: None,
         })
         .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": e.to_string()}))))?;
+        .map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({"error": e.to_string()})),
+            )
+        })?;
 
     Ok(Json(AuthResponse {
         token,
@@ -428,12 +506,7 @@ async fn revoke_one(
         .expect("auth middleware should inject AuthUser");
 
     // Verify the session belongs to the caller (or caller is admin)
-    let session = state
-        .db
-        .get_auth_session(&session_id)
-        .await
-        .ok()
-        .flatten();
+    let session = state.db.get_auth_session(&session_id).await.ok().flatten();
 
     match session {
         Some(s) if s.user_id == auth_user.user_id || auth_user.is_admin() => {
@@ -481,19 +554,31 @@ async fn list_users(
 ) -> impl IntoResponse {
     let auth_user = request.extensions().get::<AuthUser>().unwrap();
     if !auth_user.is_admin() {
-        return Err((StatusCode::FORBIDDEN, Json(serde_json::json!({"error": "admin only"}))));
+        return Err((
+            StatusCode::FORBIDDEN,
+            Json(serde_json::json!({"error": "admin only"})),
+        ));
     }
 
-    let users = state.db.list_users().await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": e.to_string()}))))?;
+    let users = state.db.list_users().await.map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({"error": e.to_string()})),
+        )
+    })?;
 
-    let users_json: Vec<serde_json::Value> = users.iter().map(|u| serde_json::json!({
-        "id": u.id,
-        "username": u.username,
-        "email": u.email,
-        "role": u.role,
-        "created_at": u.created_at,
-    })).collect();
+    let users_json: Vec<serde_json::Value> = users
+        .iter()
+        .map(|u| {
+            serde_json::json!({
+                "id": u.id,
+                "username": u.username,
+                "email": u.email,
+                "role": u.role,
+                "created_at": u.created_at,
+            })
+        })
+        .collect();
 
     Ok(Json(serde_json::json!(users_json)))
 }
@@ -506,11 +591,18 @@ async fn get_user(
 ) -> impl IntoResponse {
     let auth_user = request.extensions().get::<AuthUser>().unwrap();
     if !auth_user.is_admin() && auth_user.user_id != id {
-        return Err((StatusCode::FORBIDDEN, Json(serde_json::json!({"error": "forbidden"}))));
+        return Err((
+            StatusCode::FORBIDDEN,
+            Json(serde_json::json!({"error": "forbidden"})),
+        ));
     }
 
-    let user = state.db.get_user(&id).await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": e.to_string()}))))?;
+    let user = state.db.get_user(&id).await.map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({"error": e.to_string()})),
+        )
+    })?;
 
     match user {
         Some(u) => Ok(Json(serde_json::json!({
@@ -520,7 +612,10 @@ async fn get_user(
             "role": u.role,
             "created_at": u.created_at,
         }))),
-        None => Err((StatusCode::NOT_FOUND, Json(serde_json::json!({"error": "user not found"})))),
+        None => Err((
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({"error": "user not found"})),
+        )),
     }
 }
 
@@ -531,41 +626,72 @@ async fn create_user(
 ) -> impl IntoResponse {
     let auth_user = request.extensions().get::<AuthUser>().unwrap().clone();
     if !auth_user.is_admin() {
-        return Err((StatusCode::FORBIDDEN, Json(serde_json::json!({"error": "admin only"}))));
+        return Err((
+            StatusCode::FORBIDDEN,
+            Json(serde_json::json!({"error": "admin only"})),
+        ));
     }
 
     let body: CreateUserRequest = {
-        let bytes = axum::body::to_bytes(request.into_body(), 1024 * 1024).await
-            .map_err(|_| (StatusCode::BAD_REQUEST, Json(serde_json::json!({"error": "invalid body"}))))?;
-        serde_json::from_slice(&bytes)
-            .map_err(|_| (StatusCode::BAD_REQUEST, Json(serde_json::json!({"error": "invalid JSON"}))))?
+        let bytes = axum::body::to_bytes(request.into_body(), 1024 * 1024)
+            .await
+            .map_err(|_| {
+                (
+                    StatusCode::BAD_REQUEST,
+                    Json(serde_json::json!({"error": "invalid body"})),
+                )
+            })?;
+        serde_json::from_slice(&bytes).map_err(|_| {
+            (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({"error": "invalid JSON"})),
+            )
+        })?
     };
 
     if body.username.is_empty() || body.password.len() < 8 {
-        return Err((StatusCode::BAD_REQUEST, Json(serde_json::json!({"error": "username required, password min 8 chars"}))));
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"error": "username required, password min 8 chars"})),
+        ));
     }
 
-    let password_hash = hash_password(&body.password)
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": e.to_string()}))))?;
+    let password_hash = hash_password(&body.password).map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({"error": e.to_string()})),
+        )
+    })?;
 
     let now = chrono::Utc::now().to_rfc3339();
-    let user = state.db.create_user(NewUser {
-        id: uuid::Uuid::new_v4().to_string(),
-        username: body.username,
-        email: body.email,
-        password_hash,
-        role: body.role.unwrap_or_else(|| "user".into()),
-        created_at: now.clone(),
-        updated_at: now,
-    }).await
-    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": e.to_string()}))))?;
+    let user = state
+        .db
+        .create_user(NewUser {
+            id: uuid::Uuid::new_v4().to_string(),
+            username: body.username,
+            email: body.email,
+            password_hash,
+            role: body.role.unwrap_or_else(|| "user".into()),
+            created_at: now.clone(),
+            updated_at: now,
+        })
+        .await
+        .map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({"error": e.to_string()})),
+            )
+        })?;
 
-    Ok((StatusCode::CREATED, Json(serde_json::json!({
-        "id": user.id,
-        "username": user.username,
-        "email": user.email,
-        "role": user.role,
-    }))))
+    Ok((
+        StatusCode::CREATED,
+        Json(serde_json::json!({
+            "id": user.id,
+            "username": user.username,
+            "email": user.email,
+            "role": user.role,
+        })),
+    ))
 }
 
 /// DELETE /api/users/:id — delete a user (admin only)
@@ -576,18 +702,31 @@ async fn delete_user(
 ) -> impl IntoResponse {
     let auth_user = request.extensions().get::<AuthUser>().unwrap();
     if !auth_user.is_admin() {
-        return Err((StatusCode::FORBIDDEN, Json(serde_json::json!({"error": "admin only"}))));
+        return Err((
+            StatusCode::FORBIDDEN,
+            Json(serde_json::json!({"error": "admin only"})),
+        ));
     }
 
     if auth_user.user_id == id {
-        return Err((StatusCode::BAD_REQUEST, Json(serde_json::json!({"error": "cannot delete yourself"}))));
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"error": "cannot delete yourself"})),
+        ));
     }
 
-    let deleted = state.db.delete_user(&id).await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": e.to_string()}))))?;
+    let deleted = state.db.delete_user(&id).await.map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({"error": e.to_string()})),
+        )
+    })?;
 
     if !deleted {
-        return Err((StatusCode::NOT_FOUND, Json(serde_json::json!({"error": "user not found"}))));
+        return Err((
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({"error": "user not found"})),
+        ));
     }
 
     Ok(StatusCode::NO_CONTENT)

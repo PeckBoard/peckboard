@@ -6,21 +6,13 @@ use crate::db::models::Event;
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum WorkerIntent {
     /// The agent requested completing the current step.
-    CompleteStep {
-        handoff_context: Option<String>,
-    },
+    CompleteStep { handoff_context: Option<String> },
     /// The agent requested finishing the card entirely.
-    Finish {
-        summary: Option<String>,
-    },
+    Finish { summary: Option<String> },
     /// The agent requested marking the card as won't-do.
-    WontDo {
-        reason: String,
-    },
+    WontDo { reason: String },
     /// The agent asked the user a question; block until answered.
-    AskUser {
-        question: String,
-    },
+    AskUser { question: String },
     /// No special request detected; continue normal operation.
     Continue,
 }
@@ -42,8 +34,7 @@ pub fn derive_worker_intent(events: &[Event]) -> Option<WorkerIntent> {
     for event in window.iter().rev() {
         match event.kind.as_str() {
             "complete-step-requested" => {
-                let data: serde_json::Value =
-                    serde_json::from_str(&event.data).unwrap_or_default();
+                let data: serde_json::Value = serde_json::from_str(&event.data).unwrap_or_default();
                 let handoff_context = data
                     .get("handoffContext")
                     .and_then(|v| v.as_str())
@@ -51,8 +42,7 @@ pub fn derive_worker_intent(events: &[Event]) -> Option<WorkerIntent> {
                 return Some(WorkerIntent::CompleteStep { handoff_context });
             }
             "finish-requested" => {
-                let data: serde_json::Value =
-                    serde_json::from_str(&event.data).unwrap_or_default();
+                let data: serde_json::Value = serde_json::from_str(&event.data).unwrap_or_default();
                 let summary = data
                     .get("summary")
                     .and_then(|v| v.as_str())
@@ -61,8 +51,7 @@ pub fn derive_worker_intent(events: &[Event]) -> Option<WorkerIntent> {
                 return Some(WorkerIntent::Finish { summary });
             }
             "wont-do-requested" => {
-                let data: serde_json::Value =
-                    serde_json::from_str(&event.data).unwrap_or_default();
+                let data: serde_json::Value = serde_json::from_str(&event.data).unwrap_or_default();
                 let reason = data
                     .get("reason")
                     .and_then(|v| v.as_str())
@@ -71,8 +60,7 @@ pub fn derive_worker_intent(events: &[Event]) -> Option<WorkerIntent> {
                 return Some(WorkerIntent::WontDo { reason });
             }
             "ask-user-requested" => {
-                let data: serde_json::Value =
-                    serde_json::from_str(&event.data).unwrap_or_default();
+                let data: serde_json::Value = serde_json::from_str(&event.data).unwrap_or_default();
                 let question = data
                     .get("question")
                     .and_then(|v| v.as_str())
@@ -92,8 +80,7 @@ pub fn derive_worker_intent(events: &[Event]) -> Option<WorkerIntent> {
 pub fn find_resume_conversation_id(events: &[Event]) -> Option<String> {
     for event in events.iter().rev() {
         if event.kind == "agent-start" {
-            let data: serde_json::Value =
-                serde_json::from_str(&event.data).unwrap_or_default();
+            let data: serde_json::Value = serde_json::from_str(&event.data).unwrap_or_default();
             if let Some(cid) = data.get("conversationId").and_then(|v| v.as_str()) {
                 if !cid.is_empty() {
                     return Some(cid.to_string());
@@ -141,7 +128,10 @@ mod tests {
     fn test_derive_intent_finish() {
         let events = vec![
             make_event("agent-start", r#"{"model":"opus"}"#),
-            make_event("finish-requested", r#"{"cardId":"c1","summary":"all done"}"#),
+            make_event(
+                "finish-requested",
+                r#"{"cardId":"c1","summary":"all done"}"#,
+            ),
         ];
         let intent = derive_worker_intent(&events);
         assert_eq!(

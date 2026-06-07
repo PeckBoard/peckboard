@@ -141,10 +141,7 @@ export default function SettingsPage() {
             className="hue-slider"
           />
           <span className="hue-value">{hue}</span>
-          <span
-            className="hue-preview"
-            style={{ backgroundColor: `hsl(${hue}, 72%, 50%)` }}
-          />
+          <span className="hue-preview" style={{ backgroundColor: `hsl(${hue}, 72%, 50%)` }} />
         </div>
       </section>
     </div>

@@ -70,8 +70,6 @@ impl Broadcaster {
     /// Check if any clients are subscribed to a session.
     pub async fn has_subscribers(&self, session_id: &str) -> bool {
         let subs = self.subscriptions.lock().await;
-        subs.get(session_id)
-            .map(|c| !c.is_empty())
-            .unwrap_or(false)
+        subs.get(session_id).map(|c| !c.is_empty()).unwrap_or(false)
     }
 }

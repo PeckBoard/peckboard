@@ -1,4 +1,4 @@
-import { defineConfig } from '@playwright/test';
+import { defineConfig } from '@playwright/test'
 
 /**
  * Playwright config for peckboard end-to-end tests.
@@ -13,8 +13,8 @@ import { defineConfig } from '@playwright/test';
  *
  * No `.spec.ts` files exist yet — this is the scaffolding only.
  */
-const PORT = process.env.PECKBOARD_E2E_PORT ?? '4444';
-const HTTPS_PORT = process.env.PECKBOARD_E2E_HTTPS_PORT ?? '4445';
+const PORT = process.env.PECKBOARD_E2E_PORT ?? '4444'
+const HTTPS_PORT = process.env.PECKBOARD_E2E_HTTPS_PORT ?? '4445'
 
 export default defineConfig({
   testDir: './tests',
@@ -40,4 +40,4 @@ export default defineConfig({
     stdout: 'pipe',
     stderr: 'pipe',
   },
-});
+})

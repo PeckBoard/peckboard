@@ -9,8 +9,14 @@ interface Props {
   onClose: () => void
 }
 
-interface WorkflowInfo { id: string; name: string }
-interface ModelInfo { id: string; display_name: string }
+interface WorkflowInfo {
+  id: string
+  name: string
+}
+interface ModelInfo {
+  id: string
+  display_name: string
+}
 
 const EFFORT_OPTIONS = [
   { value: '', label: 'Default' },
@@ -43,12 +49,16 @@ export default function EditCardModal({ projectId, card, onClose }: Props) {
 
   useEffect(() => {
     authedFetch('/api/workflows')
-      .then((res) => res.ok ? res.json() : null)
-      .then((data) => { if (data?.workflows) setWorkflows(data.workflows) })
+      .then((res) => (res.ok ? res.json() : null))
+      .then((data) => {
+        if (data?.workflows) setWorkflows(data.workflows)
+      })
       .catch(() => {})
     authedFetch('/api/models')
-      .then((res) => res.ok ? res.json() : null)
-      .then((data) => { if (data?.models) setModels(data.models) })
+      .then((res) => (res.ok ? res.json() : null))
+      .then((data) => {
+        if (data?.models) setModels(data.models)
+      })
       .catch(() => {})
   }, [])
 
@@ -88,15 +98,35 @@ export default function EditCardModal({ projectId, card, onClose }: Props) {
       <div className="modal-backdrop" onClick={onClose}>
         <div className="modal" onClick={(e) => e.stopPropagation()} style={{ maxWidth: 440 }}>
           <h2>Card Details</h2>
-          <p className="form-hint" style={{ marginBottom: 12 }}>Cards in terminal state (done / won't do) are read-only.</p>
+          <p className="form-hint" style={{ marginBottom: 12 }}>
+            Cards in terminal state (done / won't do) are read-only.
+          </p>
           <div className="card-detail-grid">
-            <div className="card-detail-row"><span className="card-detail-label">Title</span><span>{card.title}</span></div>
-            <div className="card-detail-row"><span className="card-detail-label">Step</span><span>{card.step}</span></div>
-            {card.description && <div className="card-detail-row"><span className="card-detail-label">Description</span><span>{card.description}</span></div>}
-            {card.workflow && <div className="card-detail-row"><span className="card-detail-label">Workflow</span><span>{card.workflow}</span></div>}
+            <div className="card-detail-row">
+              <span className="card-detail-label">Title</span>
+              <span>{card.title}</span>
+            </div>
+            <div className="card-detail-row">
+              <span className="card-detail-label">Step</span>
+              <span>{card.step}</span>
+            </div>
+            {card.description && (
+              <div className="card-detail-row">
+                <span className="card-detail-label">Description</span>
+                <span>{card.description}</span>
+              </div>
+            )}
+            {card.workflow && (
+              <div className="card-detail-row">
+                <span className="card-detail-label">Workflow</span>
+                <span>{card.workflow}</span>
+              </div>
+            )}
           </div>
           <div className="form-actions">
-            <button type="button" className="btn-secondary" onClick={onClose}>Close</button>
+            <button type="button" className="btn-secondary" onClick={onClose}>
+              Close
+            </button>
           </div>
         </div>
       </div>
@@ -110,10 +140,17 @@ export default function EditCardModal({ projectId, card, onClose }: Props) {
         <form onSubmit={handleSubmit}>
           <div className="form-field">
             <label className="form-label">Title</label>
-            <input className="form-input" value={title} onChange={(e) => setTitle(e.target.value)} required />
+            <input
+              className="form-input"
+              value={title}
+              onChange={(e) => setTitle(e.target.value)}
+              required
+            />
           </div>
           <div className="form-field">
-            <label className="form-label">Description {!isBacklog && <span className="optional">(locked)</span>}</label>
+            <label className="form-label">
+              Description {!isBacklog && <span className="optional">(locked)</span>}
+            </label>
             <textarea
               className="form-input"
               value={description}
@@ -125,35 +162,66 @@ export default function EditCardModal({ projectId, card, onClose }: Props) {
           </div>
           <div className="form-field">
             <label className="form-label">Priority</label>
-            <select className="form-input" value={priority} onChange={(e) => setPriority(Number(e.target.value))}>
+            <select
+              className="form-input"
+              value={priority}
+              onChange={(e) => setPriority(Number(e.target.value))}
+            >
               <option value={1}>High</option>
               <option value={2}>Medium</option>
               <option value={3}>Low</option>
             </select>
           </div>
           <div className="form-field">
-            <label className="form-label">Workflow {!isBacklog && <span className="optional">(locked)</span>}</label>
-            <select className="form-input" value={workflow} onChange={(e) => setWorkflow(e.target.value)} disabled={!isBacklog}>
+            <label className="form-label">
+              Workflow {!isBacklog && <span className="optional">(locked)</span>}
+            </label>
+            <select
+              className="form-input"
+              value={workflow}
+              onChange={(e) => setWorkflow(e.target.value)}
+              disabled={!isBacklog}
+            >
               <option value="">Default</option>
-              {workflows.map((w) => <option key={w.id} value={w.id}>{w.name}</option>)}
+              {workflows.map((w) => (
+                <option key={w.id} value={w.id}>
+                  {w.name}
+                </option>
+              ))}
             </select>
           </div>
           <div className="form-field">
             <label className="form-label">Model</label>
             <select className="form-input" value={model} onChange={(e) => setModel(e.target.value)}>
               <option value="">Default</option>
-              {models.map((m) => <option key={m.id} value={m.id}>{m.display_name}</option>)}
+              {models.map((m) => (
+                <option key={m.id} value={m.id}>
+                  {m.display_name}
+                </option>
+              ))}
             </select>
           </div>
           <div className="form-field">
             <label className="form-label">Effort</label>
-            <select className="form-input" value={effort} onChange={(e) => setEffort(e.target.value)}>
-              {EFFORT_OPTIONS.map((o) => <option key={o.value} value={o.value}>{o.label}</option>)}
+            <select
+              className="form-input"
+              value={effort}
+              onChange={(e) => setEffort(e.target.value)}
+            >
+              {EFFORT_OPTIONS.map((o) => (
+                <option key={o.value} value={o.value}>
+                  {o.label}
+                </option>
+              ))}
             </select>
           </div>
           <div className="form-field">
             <label className="form-checkbox-label">
-              <input type="checkbox" checked={blocked} onChange={(e) => setBlocked(e.target.checked)} />
+              <input
+                type="checkbox"
+                checked={blocked}
+                onChange={(e) => setBlocked(e.target.checked)}
+              />
               <span>Blocked</span>
             </label>
             {blocked && (
@@ -168,7 +236,9 @@ export default function EditCardModal({ projectId, card, onClose }: Props) {
           </div>
           {error && <p className="form-error">{error}</p>}
           <div className="form-actions">
-            <button type="button" className="btn-secondary" onClick={onClose}>Cancel</button>
+            <button type="button" className="btn-secondary" onClick={onClose}>
+              Cancel
+            </button>
             <button type="submit" className="btn-primary" disabled={loading || !title.trim()}>
               {loading ? 'Saving...' : 'Save'}
             </button>

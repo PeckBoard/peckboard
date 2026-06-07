@@ -1,5 +1,8 @@
 use axum::{
-    extract::{State, WebSocketUpgrade, ws::{Message, WebSocket}},
+    extract::{
+        State, WebSocketUpgrade,
+        ws::{Message, WebSocket},
+    },
     response::IntoResponse,
 };
 use futures_util::{SinkExt, StreamExt};
@@ -27,11 +30,20 @@ enum ClientFrame {
 #[derive(Debug, Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 enum ServerFrame {
-    AuthOk { user_id: String },
+    AuthOk {
+        user_id: String,
+    },
     #[allow(dead_code)]
-    Error { message: String },
-    Event { session_id: String, event: serde_json::Value },
-    ResumeComplete { session_id: String },
+    Error {
+        message: String,
+    },
+    Event {
+        session_id: String,
+        event: serde_json::Value,
+    },
+    ResumeComplete {
+        session_id: String,
+    },
 }
 
 /// WebSocket upgrade handler.
@@ -48,17 +60,16 @@ async fn handle_connection(socket: WebSocket, state: Arc<AppState>) {
 
     // Auth handshake: first frame must be auth within 10 seconds.
     let auth_result = timeout(Duration::from_secs(10), async {
-        while let Some(Ok(msg)) = receiver.next().await {
-            if let Message::Text(text) = msg {
-                if let Ok(ClientFrame::Auth { token }) = serde_json::from_str(&text) {
-                    return validate_token(&state.jwt_secret, &token)
-                        .map(|claims| (claims.sub, claims.jti))
-                        .ok();
-                }
-            }
+        let msg = receiver.next().await?.ok()?;
+        let Message::Text(text) = msg else {
             return None;
-        }
-        None
+        };
+        let ClientFrame::Auth { token } = serde_json::from_str(&text).ok()? else {
+            return None;
+        };
+        validate_token(&state.jwt_secret, &token)
+            .map(|claims| (claims.sub, claims.jti))
+            .ok()
     })
     .await;
 

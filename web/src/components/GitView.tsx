@@ -105,7 +105,7 @@ export default function GitView() {
     setActiveCommit(null)
     try {
       const res = await authedFetch(
-        `/api/git/commits/${encodeURIComponent(hash)}?path=${encodeURIComponent(repoPath)}`
+        `/api/git/commits/${encodeURIComponent(hash)}?path=${encodeURIComponent(repoPath)}`,
       )
       if (!res.ok) throw new Error('Failed to load commit')
       const data: CommitDetail = await res.json()
@@ -119,10 +119,19 @@ export default function GitView() {
 
   const statusColor = (status: string): string => {
     switch (status.toLowerCase()) {
-      case 'modified': case 'm': return 'var(--warning)'
-      case 'added': case 'a': case '?': case '??': return 'var(--success)'
-      case 'deleted': case 'd': return 'var(--danger)'
-      default: return 'var(--text2)'
+      case 'modified':
+      case 'm':
+        return 'var(--warning)'
+      case 'added':
+      case 'a':
+      case '?':
+      case '??':
+        return 'var(--success)'
+      case 'deleted':
+      case 'd':
+        return 'var(--danger)'
+      default:
+        return 'var(--text2)'
     }
   }
 
@@ -133,7 +142,9 @@ export default function GitView() {
       <section className="settings-section">
         <h3>Repository</h3>
         {loadingRepos ? (
-          <div className="chat-loading"><div className="loading-spinner" /></div>
+          <div className="chat-loading">
+            <div className="loading-spinner" />
+          </div>
         ) : discoveredRepos.length > 0 ? (
           <div className="folder-list" style={{ marginBottom: 12 }}>
             {discoveredRepos.map((repo) => (
@@ -143,7 +154,8 @@ export default function GitView() {
                 style={{
                   cursor: 'pointer',
                   width: '100%',
-                  border: repoPath === repo.path ? '1px solid var(--accent)' : '1px solid transparent',
+                  border:
+                    repoPath === repo.path ? '1px solid var(--accent)' : '1px solid transparent',
                   background: repoPath === repo.path ? 'var(--surface2)' : 'transparent',
                   borderRadius: 'var(--radius)',
                   textAlign: 'left',
@@ -157,7 +169,9 @@ export default function GitView() {
                   <strong style={{ fontSize: 'var(--text-sm)' }}>{repo.name}</strong>
                   <span className="folder-path">{repo.path}</span>
                 </div>
-                <span style={{ fontSize: 'var(--text-xs)', color: 'var(--text3)' }}>{repo.folder_name}</span>
+                <span style={{ fontSize: 'var(--text-xs)', color: 'var(--text3)' }}>
+                  {repo.folder_name}
+                </span>
               </button>
             ))}
           </div>
@@ -179,7 +193,11 @@ export default function GitView() {
             {loading ? 'Loading...' : 'Fetch'}
           </button>
         </form>
-        {error && <p className="form-error" style={{ marginTop: 8 }}>{error}</p>}
+        {error && (
+          <p className="form-error" style={{ marginTop: 8 }}>
+            {error}
+          </p>
+        )}
       </section>
 
       {fetched && (
@@ -206,7 +224,13 @@ export default function GitView() {
                     >
                       {f.status}
                     </span>
-                    <span style={{ fontFamily: 'var(--font-mono)', fontSize: 'var(--text-sm)', color: 'var(--text)' }}>
+                    <span
+                      style={{
+                        fontFamily: 'var(--font-mono)',
+                        fontSize: 'var(--text-sm)',
+                        color: 'var(--text)',
+                      }}
+                    >
                       {f.path}
                     </span>
                   </div>
@@ -225,17 +249,27 @@ export default function GitView() {
                   <div key={c.hash} className="folder-row" style={{ cursor: 'pointer' }}>
                     <button
                       style={{
-                        flex: 1, border: 'none', background: 'transparent', textAlign: 'left',
-                        cursor: 'pointer', padding: 0, font: 'inherit', color: 'inherit',
+                        flex: 1,
+                        border: 'none',
+                        background: 'transparent',
+                        textAlign: 'left',
+                        cursor: 'pointer',
+                        padding: 0,
+                        font: 'inherit',
+                        color: 'inherit',
                       }}
                       onClick={() => viewCommit(c.hash)}
                     >
                       <div className="folder-info">
                         <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-                          <span style={{
-                            fontFamily: 'var(--font-mono)', fontSize: 'var(--text-xs)',
-                            color: 'var(--accent)', fontWeight: 600,
-                          }}>
+                          <span
+                            style={{
+                              fontFamily: 'var(--font-mono)',
+                              fontSize: 'var(--text-xs)',
+                              color: 'var(--accent)',
+                              fontWeight: 600,
+                            }}
+                          >
                             {c.short_hash}
                           </span>
                           <strong style={{ fontSize: 'var(--text-sm)' }}>{c.message}</strong>
@@ -253,7 +287,9 @@ export default function GitView() {
 
           {loadingCommit && (
             <section className="settings-section">
-              <div className="chat-loading"><div className="loading-spinner" /></div>
+              <div className="chat-loading">
+                <div className="loading-spinner" />
+              </div>
             </section>
           )}
 
@@ -263,7 +299,9 @@ export default function GitView() {
               <div style={{ marginBottom: 12 }}>
                 <div className="settings-row">
                   <span className="settings-label">Hash</span>
-                  <span style={{ fontFamily: 'var(--font-mono)', fontSize: 'var(--text-xs)' }}>{activeCommit.hash}</span>
+                  <span style={{ fontFamily: 'var(--font-mono)', fontSize: 'var(--text-xs)' }}>
+                    {activeCommit.hash}
+                  </span>
                 </div>
                 <div className="settings-row">
                   <span className="settings-label">Author</span>

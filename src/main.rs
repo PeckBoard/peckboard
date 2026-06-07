@@ -114,7 +114,11 @@ async fn main() -> anyhow::Result<()> {
         let watchdog_db = state.db.clone();
         let watchdog_sm = SessionManager::new(state.provider_registry.clone());
         let watchdog_bc = state.broadcaster.clone();
-        tokio::spawn(watchdog::start_watchdog(watchdog_db, watchdog_sm, watchdog_bc));
+        tokio::spawn(watchdog::start_watchdog(
+            watchdog_db,
+            watchdog_sm,
+            watchdog_bc,
+        ));
         tracing::info!("Worker watchdog started");
     }
 
@@ -143,14 +147,17 @@ async fn main() -> anyhow::Result<()> {
                                 // can detect the dead worker.
                                 tracing::warn!(session_id = %sid, "Worker crashed");
                                 if let Some(card_id) = &session.card_id {
-                                    let _ = orchestrator_state.db.update_card(
-                                        card_id,
-                                        peckboard::db::models::UpdateCard {
-                                            worker_session_id: Some(None),
-                                            last_worker_session_id: Some(Some(sid.clone())),
-                                            ..Default::default()
-                                        },
-                                    ).await;
+                                    let _ = orchestrator_state
+                                        .db
+                                        .update_card(
+                                            card_id,
+                                            peckboard::db::models::UpdateCard {
+                                                worker_session_id: Some(None),
+                                                last_worker_session_id: Some(Some(sid.clone())),
+                                                ..Default::default()
+                                            },
+                                        )
+                                        .await;
                                 }
                             }
                             // After handling, fill freed worker slots
@@ -178,7 +185,11 @@ async fn main() -> anyhow::Result<()> {
                     let https_app = app.clone();
                     let https_listener = TcpListener::bind(&https_addr).await?;
                     tracing::info!("Peckboard listening on https://{https_addr}");
-                    Some(tokio::spawn(serve_https(https_listener, tls_acceptor, https_app)))
+                    Some(tokio::spawn(serve_https(
+                        https_listener,
+                        tls_acceptor,
+                        https_app,
+                    )))
                 }
                 Err(e) => {
                     tracing::warn!("Failed to load TLS config, HTTPS disabled: {e}");
@@ -198,14 +209,14 @@ async fn main() -> anyhow::Result<()> {
         listener,
         app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
     )
-        .with_graceful_shutdown(async move {
-            shutdown_signal().await;
-            tracing::info!("Shutdown signal received, shutting down gracefully...");
-            shutdown_state.session_manager.shutdown().await;
-            shutdown_state.plugins.shutdown().await;
-            tracing::info!("Shutdown complete");
-        })
-        .await?;
+    .with_graceful_shutdown(async move {
+        shutdown_signal().await;
+        tracing::info!("Shutdown signal received, shutting down gracefully...");
+        shutdown_state.session_manager.shutdown().await;
+        shutdown_state.plugins.shutdown().await;
+        tracing::info!("Shutdown complete");
+    })
+    .await?;
 
     // Stop mDNS advertisement
     if let Some(mdns) = mdns_handle {
@@ -267,11 +278,10 @@ async fn serve_https(
             let io = hyper_util::rt::TokioIo::new(tls_stream);
             let hyper_service = hyper_util::service::TowerToHyperService::new(service);
 
-            if let Err(e) = hyper_util::server::conn::auto::Builder::new(
-                hyper_util::rt::TokioExecutor::new(),
-            )
-            .serve_connection(io, hyper_service)
-            .await
+            if let Err(e) =
+                hyper_util::server::conn::auto::Builder::new(hyper_util::rt::TokioExecutor::new())
+                    .serve_connection(io, hyper_service)
+                    .await
             {
                 tracing::debug!("HTTPS connection error from {remote_addr}: {e}");
             }

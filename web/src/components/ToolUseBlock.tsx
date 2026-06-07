@@ -128,7 +128,13 @@ function formatOutput(output: Record<string, unknown>): string {
   return JSON.stringify(output, null, 2)
 }
 
-export default function ToolUseBlock({ toolName, input, output, error, isRunning }: ToolUseBlockProps) {
+export default function ToolUseBlock({
+  toolName,
+  input,
+  output,
+  error,
+  isRunning,
+}: ToolUseBlockProps) {
   const [expanded, setExpanded] = useState(false)
 
   const { icon, label } = getToolDisplay(toolName)
@@ -145,9 +151,7 @@ export default function ToolUseBlock({ toolName, input, output, error, isRunning
         {summary && <span className="tool-summary">{summary}</span>}
         {isRunning && <span className="tool-spinner" />}
         {error && <span className="tool-status-badge tool-badge-error">Error</span>}
-        {hasDetails && (
-          <span className={`tool-chevron ${expanded ? 'open' : ''}`}>&#9654;</span>
-        )}
+        {hasDetails && <span className={`tool-chevron ${expanded ? 'open' : ''}`}>&#9654;</span>}
       </button>
       {expanded && (
         <div className="tool-body">

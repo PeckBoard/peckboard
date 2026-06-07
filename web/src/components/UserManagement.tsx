@@ -44,7 +44,9 @@ export default function UserManagement() {
     }
   }, [])
 
-  useEffect(() => { fetchUsers() }, [fetchUsers])
+  useEffect(() => {
+    fetchUsers()
+  }, [fetchUsers])
 
   if (currentUser?.role !== 'admin') {
     return (
@@ -108,7 +110,9 @@ export default function UserManagement() {
   const formatDate = (dateStr: string): string => {
     try {
       return new Date(dateStr).toLocaleDateString(undefined, {
-        year: 'numeric', month: 'short', day: 'numeric',
+        year: 'numeric',
+        month: 'short',
+        day: 'numeric',
       })
     } catch {
       return dateStr
@@ -117,9 +121,12 @@ export default function UserManagement() {
 
   const roleBadgeClass = (role: string): string => {
     switch (role) {
-      case 'admin': return 'priority-high'
-      case 'user': return 'priority-low'
-      default: return 'priority-medium'
+      case 'admin':
+        return 'priority-high'
+      case 'user':
+        return 'priority-low'
+      default:
+        return 'priority-medium'
     }
   }
 
@@ -127,10 +134,21 @@ export default function UserManagement() {
     <div className="settings-page">
       <h2>User Management</h2>
 
-      {error && <p className="form-error" style={{ marginBottom: 16 }}>{error}</p>}
+      {error && (
+        <p className="form-error" style={{ marginBottom: 16 }}>
+          {error}
+        </p>
+      )}
 
       <section className="settings-section">
-        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 16 }}>
+        <div
+          style={{
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'space-between',
+            marginBottom: 16,
+          }}
+        >
           <h3 style={{ margin: 0, border: 'none', paddingBottom: 0 }}>Users</h3>
           <button className="create-btn" onClick={() => setShowCreate(!showCreate)}>
             {showCreate ? 'Cancel' : 'Create User'}
@@ -161,7 +179,9 @@ export default function UserManagement() {
               />
             </div>
             <div className="form-field">
-              <label className="form-label">Email <span className="optional">(optional)</span></label>
+              <label className="form-label">
+                Email <span className="optional">(optional)</span>
+              </label>
               <input
                 className="form-input"
                 type="email"
@@ -172,21 +192,35 @@ export default function UserManagement() {
             </div>
             <div className="form-field">
               <label className="form-label">Role</label>
-              <select className="form-input" value={newRole} onChange={(e) => setNewRole(e.target.value)}>
+              <select
+                className="form-input"
+                value={newRole}
+                onChange={(e) => setNewRole(e.target.value)}
+              >
                 <option value="user">User</option>
                 <option value="admin">Admin</option>
               </select>
             </div>
             <div className="form-actions">
-              <button className="btn-secondary" type="button" onClick={() => setShowCreate(false)}>Cancel</button>
-              <button className="btn-primary" type="submit" disabled={creating || !newUsername.trim() || !newPassword.trim()}>
+              <button className="btn-secondary" type="button" onClick={() => setShowCreate(false)}>
+                Cancel
+              </button>
+              <button
+                className="btn-primary"
+                type="submit"
+                disabled={creating || !newUsername.trim() || !newPassword.trim()}
+              >
                 {creating ? 'Creating...' : 'Create'}
               </button>
             </div>
           </form>
         )}
 
-        {loading && <div className="chat-loading"><div className="loading-spinner" /></div>}
+        {loading && (
+          <div className="chat-loading">
+            <div className="loading-spinner" />
+          </div>
+        )}
 
         {!loading && users.length === 0 && (
           <p style={{ color: 'var(--text3)', fontSize: 'var(--text-sm)' }}>No users found.</p>
@@ -199,9 +233,7 @@ export default function UserManagement() {
                 <div className="folder-info">
                   <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
                     <strong>{u.username}</strong>
-                    <span className={`priority-badge ${roleBadgeClass(u.role)}`}>
-                      {u.role}
-                    </span>
+                    <span className={`priority-badge ${roleBadgeClass(u.role)}`}>{u.role}</span>
                   </div>
                   <span className="folder-path">
                     {u.email ? `${u.email} \u00B7 ` : ''}Created {formatDate(u.created_at)}
@@ -213,7 +245,11 @@ export default function UserManagement() {
                       <div style={{ display: 'flex', gap: 4 }}>
                         <button
                           className="btn-primary"
-                          style={{ fontSize: 'var(--text-xs)', padding: '4px 10px', background: 'var(--danger)' }}
+                          style={{
+                            fontSize: 'var(--text-xs)',
+                            padding: '4px 10px',
+                            background: 'var(--danger)',
+                          }}
                           onClick={() => handleDelete(u.id)}
                         >
                           Confirm

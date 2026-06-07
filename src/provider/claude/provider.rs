@@ -95,8 +95,15 @@ impl AgentProvider for ClaudeProvider {
         let stdin_channels = self.stdin_channels.clone();
         let sid = session_id.clone();
         tokio::spawn(async move {
-            let is_completed =
-                process::stream_events(child, db, broadcaster, stdin_rx, stdin_tx_for_stream, allowed_dir).await;
+            let is_completed = process::stream_events(
+                child,
+                db,
+                broadcaster,
+                stdin_rx,
+                stdin_tx_for_stream,
+                allowed_dir,
+            )
+            .await;
 
             {
                 let mut map = processes.lock().await;
@@ -248,4 +255,3 @@ pub async fn register_claude_provider(registry: &ProviderRegistry) {
         )
         .await;
 }
-

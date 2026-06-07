@@ -15,9 +15,8 @@ use crate::state::AppState;
 const MAX_UPLOAD_SIZE: usize = 10 * 1024 * 1024; // 10 MB
 
 const ALLOWED_EXTENSIONS: &[&str] = &[
-    "txt", "md", "rs", "py", "js", "ts", "json", "toml", "yaml", "yml",
-    "html", "css", "csv", "log", "sh", "sql", "xml",
-    "png", "jpg", "jpeg", "gif", "svg", "pdf", "zip",
+    "txt", "md", "rs", "py", "js", "ts", "json", "toml", "yaml", "yml", "html", "css", "csv",
+    "log", "sh", "sql", "xml", "png", "jpg", "jpeg", "gif", "svg", "pdf", "zip",
 ];
 
 #[derive(Deserialize)]
@@ -100,11 +99,7 @@ async fn upload_attachment(
     // Build storage path: <dataDir>/attachments/<session_id>/<uuid>.<ext>
     let attachment_id = uuid::Uuid::new_v4().to_string();
     let stored_name = format!("{}.{}", attachment_id, ext);
-    let dir = state
-        .config
-        .data_dir
-        .join("attachments")
-        .join(&session_id);
+    let dir = state.config.data_dir.join("attachments").join(&session_id);
 
     tokio::fs::create_dir_all(&dir).await.map_err(|e| {
         (
@@ -147,11 +142,7 @@ async fn list_attachments(
     State(state): State<Arc<AppState>>,
     Path(session_id): Path<String>,
 ) -> impl IntoResponse {
-    let dir = state
-        .config
-        .data_dir
-        .join("attachments")
-        .join(&session_id);
+    let dir = state.config.data_dir.join("attachments").join(&session_id);
 
     let mut attachments: Vec<AttachmentInfo> = Vec::new();
 
@@ -159,9 +150,9 @@ async fn list_attachments(
         Ok(e) => e,
         Err(_) => {
             // Directory doesn't exist = no attachments
-            return Ok::<_, (StatusCode, Json<serde_json::Value>)>(Json(
-                serde_json::json!(attachments),
-            ));
+            return Ok::<_, (StatusCode, Json<serde_json::Value>)>(Json(serde_json::json!(
+                attachments
+            )));
         }
     };
 
@@ -183,11 +174,7 @@ async fn list_attachments(
             .await
             .unwrap_or_else(|_| name.clone());
 
-        let size = entry
-            .metadata()
-            .await
-            .map(|m| m.len())
-            .unwrap_or(0);
+        let size = entry.metadata().await.map(|m| m.len()).unwrap_or(0);
 
         attachments.push(AttachmentInfo {
             id,
@@ -204,11 +191,7 @@ async fn download_attachment(
     State(state): State<Arc<AppState>>,
     Path((session_id, aid)): Path<(String, String)>,
 ) -> impl IntoResponse {
-    let dir = state
-        .config
-        .data_dir
-        .join("attachments")
-        .join(&session_id);
+    let dir = state.config.data_dir.join("attachments").join(&session_id);
 
     // Find the file matching this attachment id
     let file_path = find_attachment_file(&dir, &aid).await;
@@ -269,11 +252,7 @@ async fn delete_attachment(
     State(state): State<Arc<AppState>>,
     Path((session_id, aid)): Path<(String, String)>,
 ) -> impl IntoResponse {
-    let dir = state
-        .config
-        .data_dir
-        .join("attachments")
-        .join(&session_id);
+    let dir = state.config.data_dir.join("attachments").join(&session_id);
 
     let file_path = find_attachment_file(&dir, &aid).await;
     let file_path = match file_path {
@@ -301,10 +280,7 @@ async fn delete_attachment(
 }
 
 /// Find the attachment file by id prefix (id.ext pattern) in the directory.
-async fn find_attachment_file(
-    dir: &std::path::Path,
-    aid: &str,
-) -> Option<std::path::PathBuf> {
+async fn find_attachment_file(dir: &std::path::Path, aid: &str) -> Option<std::path::PathBuf> {
     let mut entries = tokio::fs::read_dir(dir).await.ok()?;
     let prefix = format!("{}.", aid);
 

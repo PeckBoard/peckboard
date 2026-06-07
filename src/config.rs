@@ -33,9 +33,11 @@ impl Config {
     pub fn load() -> Self {
         let args = CliArgs::parse();
 
-        let data_dir = args
-            .data_dir
-            .unwrap_or_else(|| dirs::home_dir().expect("no home directory").join(".peckboard"));
+        let data_dir = args.data_dir.unwrap_or_else(|| {
+            dirs::home_dir()
+                .expect("no home directory")
+                .join(".peckboard")
+        });
 
         Config {
             port: args.port,

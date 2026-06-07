@@ -239,7 +239,10 @@ pub fn build_cli_args(
     if config.model != "default" {
         args.push("--model".to_string());
         // Strip provider prefix if present (e.g. "claude:claude-opus-4-8" → "claude-opus-4-8")
-        let model = config.model.strip_prefix("claude:").unwrap_or(&config.model);
+        let model = config
+            .model
+            .strip_prefix("claude:")
+            .unwrap_or(&config.model);
         args.push(model.to_string());
     }
 
@@ -263,13 +266,26 @@ pub fn build_cli_args(
 
         // Tell Claude which MCP tools are allowed
         let mcp_tools = [
-            "create_card", "list_projects", "list_workflows", "list_cards",
-            "write_report", "attach_report_file", "update_card", "update_project",
-            "create_project", "pause_project", "resume_project", "delete_card",
-            "move_card_to_done", "move_card_to_wont_do",
+            "create_card",
+            "list_projects",
+            "list_workflows",
+            "list_cards",
+            "write_report",
+            "attach_report_file",
+            "update_card",
+            "update_project",
+            "create_project",
+            "pause_project",
+            "resume_project",
+            "delete_card",
+            "move_card_to_done",
+            "move_card_to_wont_do",
             // Worker-only tools (harmless to allow for plain sessions — they just
             // fail with "requires card context" if called without one)
-            "complete_step", "finish_card", "wont_do_card", "ask_user",
+            "complete_step",
+            "finish_card",
+            "wont_do_card",
+            "ask_user",
         ];
         let allowed: Vec<String> = mcp_tools
             .iter()

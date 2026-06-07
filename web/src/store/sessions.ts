@@ -8,14 +8,18 @@ function loadDrafts(): Record<string, string> {
   try {
     const raw = localStorage.getItem(DRAFTS_KEY)
     if (raw) return JSON.parse(raw) as Record<string, string>
-  } catch { /* ignore */ }
+  } catch {
+    /* ignore */
+  }
   return {}
 }
 
 function saveDrafts(drafts: Record<string, string>) {
   try {
     localStorage.setItem(DRAFTS_KEY, JSON.stringify(drafts))
-  } catch { /* ignore */ }
+  } catch {
+    /* ignore */
+  }
 }
 
 interface SessionsState {
@@ -25,7 +29,12 @@ interface SessionsState {
   processing: Set<string>
   unreadSessions: Set<string>
   fetchSessions: () => Promise<void>
-  createSession: (name: string, folderId: string, model?: string, effort?: string) => Promise<Session>
+  createSession: (
+    name: string,
+    folderId: string,
+    model?: string,
+    effort?: string,
+  ) => Promise<Session>
   deleteSession: (id: string) => Promise<void>
   setActiveSession: (id: string | null) => void
   renameSession: (id: string, name: string) => Promise<void>

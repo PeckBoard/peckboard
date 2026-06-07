@@ -30,13 +30,34 @@ interface QuestionItem {
 type DisplayItem =
   | { type: 'user'; text: string; key: string; ts: number }
   | { type: 'assistant'; text: string; key: string; ts: number }
-  | { type: 'tool'; toolName: string; input?: Record<string, unknown>; output?: Record<string, unknown>; error?: string; isRunning: boolean; key: string }
+  | {
+      type: 'tool'
+      toolName: string
+      input?: Record<string, unknown>
+      output?: Record<string, unknown>
+      error?: string
+      isRunning: boolean
+      key: string
+    }
   | { type: 'status'; text: string; key: string; ts: number }
-  | { type: 'system'; text: string; key: string; reportFolder?: string; reportFile?: string; ts: number }
+  | {
+      type: 'system'
+      text: string
+      key: string
+      reportFolder?: string
+      reportFile?: string
+      ts: number
+    }
   | { type: 'step'; label: string; key: string }
   | { type: 'agent-start'; model: string; effort: string; ts: number; key: string }
   | { type: 'question'; questionId: string; questions: QuestionItem[]; key: string }
-  | { type: 'question-resolved'; questionId: string; questions: QuestionItem[]; answers: Record<string, unknown>; key: string }
+  | {
+      type: 'question-resolved'
+      questionId: string
+      questions: QuestionItem[]
+      answers: Record<string, unknown>
+      key: string
+    }
 
 /** Derive agent status from events for the toolbar indicator. */
 type AgentStatus = 'idle' | 'working' | 'tool' | 'crashed' | 'questioning'
@@ -49,17 +70,21 @@ function deriveAgentStatus(events: Event[]): AgentStatus {
     if (kind === 'question') {
       // Check if resolved later
       const qId = events[i].id
-      const resolved = events.slice(i + 1).some(
-        (e) => e.kind === 'question-resolved' && (e.data.question_id === qId || e.data.questionId === qId)
-      )
+      const resolved = events
+        .slice(i + 1)
+        .some(
+          (e) =>
+            e.kind === 'question-resolved' &&
+            (e.data.question_id === qId || e.data.questionId === qId),
+        )
       if (!resolved) return 'questioning'
     }
     if (kind === 'agent-tool-start') {
       // Check if ended later
       const toolUseId = (events[i].data.tool_use_id as string) ?? events[i].id
-      const ended = events.slice(i + 1).some(
-        (e) => e.kind === 'agent-tool-end' && (e.data.tool_use_id as string) === toolUseId
-      )
+      const ended = events
+        .slice(i + 1)
+        .some((e) => e.kind === 'agent-tool-end' && (e.data.tool_use_id as string) === toolUseId)
       if (!ended) return 'tool'
     }
     if (kind === 'agent-start') return 'working'
@@ -69,21 +94,31 @@ function deriveAgentStatus(events: Event[]): AgentStatus {
 
 function getStatusLabel(status: AgentStatus): string {
   switch (status) {
-    case 'idle': return 'Idle'
-    case 'working': return 'Working...'
-    case 'tool': return 'Using tool...'
-    case 'crashed': return 'Crashed'
-    case 'questioning': return 'Awaiting answer'
+    case 'idle':
+      return 'Idle'
+    case 'working':
+      return 'Working...'
+    case 'tool':
+      return 'Using tool...'
+    case 'crashed':
+      return 'Crashed'
+    case 'questioning':
+      return 'Awaiting answer'
   }
 }
 
 function getStatusDotClass(status: AgentStatus): string {
   switch (status) {
-    case 'idle': return 'status-dot status-dot-idle'
-    case 'working': return 'status-dot status-dot-working'
-    case 'tool': return 'status-dot status-dot-tool'
-    case 'crashed': return 'status-dot status-dot-crashed'
-    case 'questioning': return 'status-dot status-dot-questioning'
+    case 'idle':
+      return 'status-dot status-dot-idle'
+    case 'working':
+      return 'status-dot status-dot-working'
+    case 'tool':
+      return 'status-dot status-dot-tool'
+    case 'crashed':
+      return 'status-dot status-dot-crashed'
+    case 'questioning':
+      return 'status-dot status-dot-questioning'
   }
 }
 
@@ -125,7 +160,10 @@ function buildDisplayItems(events: Event[]): DisplayItem[] {
       }
       case 'agent-text': {
         const chunk = (ev.data.text as string) ?? ''
-        if (!assistantKey) { assistantKey = ev.id; assistantTs = ev.ts }
+        if (!assistantKey) {
+          assistantKey = ev.id
+          assistantTs = ev.ts
+        }
         assistantBuffer += chunk
         break
       }
@@ -156,7 +194,14 @@ function buildDisplayItems(events: Event[]): DisplayItem[] {
           const toolName = (ev.data.name as string) ?? (ev.data.tool_name as string) ?? 'tool'
           const errorText = ev.data.error as string | undefined
           const output = (ev.data.output as Record<string, unknown>) ?? undefined
-          items.push({ type: 'tool', toolName, output, error: errorText, isRunning: false, key: ev.id })
+          items.push({
+            type: 'tool',
+            toolName,
+            output,
+            error: errorText,
+            isRunning: false,
+            key: ev.id,
+          })
         }
         break
       }
@@ -174,10 +219,17 @@ function buildDisplayItems(events: Event[]): DisplayItem[] {
         if ((ev.data.status as string) === 'crashed') {
           const reason = (ev.data.reason as string) ?? 'unknown error'
           const stderr = ev.data.stderr as string | undefined
-          const crashText = stderr ? `Agent crashed: ${reason}\n\n${stderr}` : `Agent crashed: ${reason}`
+          const crashText = stderr
+            ? `Agent crashed: ${reason}\n\n${stderr}`
+            : `Agent crashed: ${reason}`
           items.push({ type: 'system', text: crashText, key: ev.id, ts: ev.ts })
         } else {
-          items.push({ type: 'status', text: 'Ready for your next message.', key: ev.id, ts: ev.ts })
+          items.push({
+            type: 'status',
+            text: 'Ready for your next message.',
+            key: ev.id,
+            ts: ev.ts,
+          })
         }
         break
       }
@@ -188,7 +240,8 @@ function buildDisplayItems(events: Event[]): DisplayItem[] {
       }
       case 'system': {
         flushAssistant()
-        const text = (ev.data.text as string) ?? (ev.data.message as string) ?? JSON.stringify(ev.data)
+        const text =
+          (ev.data.text as string) ?? (ev.data.message as string) ?? JSON.stringify(ev.data)
         const reportFolder = ev.data.reportFolder as string | undefined
         const reportFile = ev.data.reportFile as string | undefined
         items.push({ type: 'system', text, key: ev.id, reportFolder, reportFile, ts: ev.ts })
@@ -213,17 +266,26 @@ function buildDisplayItems(events: Event[]): DisplayItem[] {
             optionObjects: q.optionObjects,
           }))
         } else {
-          const text = (ev.data.text as string) ?? (ev.data.question as string) ?? JSON.stringify(ev.data)
+          const text =
+            (ev.data.text as string) ?? (ev.data.question as string) ?? JSON.stringify(ev.data)
           questions = [{ question: text }]
         }
 
         if (resolvedQuestions.has(ev.id)) {
           // Find the matching resolved event to get answers
           const resolvedEv = events.find(
-            (e) => e.kind === 'question-resolved' && ((e.data.question_id as string) === ev.id || (e.data.questionId as string) === ev.id)
+            (e) =>
+              e.kind === 'question-resolved' &&
+              ((e.data.question_id as string) === ev.id || (e.data.questionId as string) === ev.id),
           )
           const answers = (resolvedEv?.data.answers as Record<string, unknown>) ?? {}
-          items.push({ type: 'question-resolved', questionId: ev.id, questions, answers, key: ev.id })
+          items.push({
+            type: 'question-resolved',
+            questionId: ev.id,
+            questions,
+            answers,
+            key: ev.id,
+          })
         } else {
           items.push({ type: 'question', questionId: ev.id, questions, key: ev.id })
         }
@@ -242,10 +304,20 @@ function buildDisplayItems(events: Event[]): DisplayItem[] {
 
 function formatTime(ts: number): string {
   if (!ts) return ''
-  return new Date(ts).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit', second: '2-digit' })
+  return new Date(ts).toLocaleTimeString([], {
+    hour: 'numeric',
+    minute: '2-digit',
+    second: '2-digit',
+  })
 }
 
-function ResolvedQuestionCard({ questions, answers }: { questions: QuestionItem[]; answers: Record<string, unknown> }) {
+function ResolvedQuestionCard({
+  questions,
+  answers,
+}: {
+  questions: QuestionItem[]
+  answers: Record<string, unknown>
+}) {
   return (
     <div className="question-card question-resolved">
       <div className="question-card-title-bar">
@@ -253,7 +325,9 @@ function ResolvedQuestionCard({ questions, answers }: { questions: QuestionItem[
         <span className="question-card-title-text">Question answered</span>
       </div>
       {questions.map((q, idx) => {
-        const answer = String(answers[idx] ?? answers[String(idx)] ?? answers[q.question] ?? '(no answer)')
+        const answer = String(
+          answers[idx] ?? answers[String(idx)] ?? answers[q.question] ?? '(no answer)',
+        )
         return (
           <div key={idx} className="question-item">
             {q.header && <div className="question-header">{q.header}</div>}
@@ -266,7 +340,15 @@ function ResolvedQuestionCard({ questions, answers }: { questions: QuestionItem[
   )
 }
 
-function QuestionCard({ sessionId, questionId, questions }: { sessionId: string; questionId: string; questions: QuestionItem[] }) {
+function QuestionCard({
+  sessionId,
+  questionId,
+  questions,
+}: {
+  sessionId: string
+  questionId: string
+  questions: QuestionItem[]
+}) {
   const [answers, setAnswers] = useState<Record<number, string>>({})
   const [submitting, setSubmitting] = useState(false)
 
@@ -375,15 +457,21 @@ function QuestionCard({ sessionId, questionId, questions }: { sessionId: string;
               placeholder="Type your answer..."
               value={answers[idx] ?? ''}
               onChange={(e) => setAnswer(idx, e.target.value)}
-              onKeyDown={(e) => { if (e.key === 'Enter' && questions.length === 1) handleSubmit() }}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter' && questions.length === 1) handleSubmit()
+              }}
               disabled={submitting}
             />
           )}
         </div>
       ))}
       <div className="question-actions">
-        <button className="btn-primary" onClick={handleSubmit} disabled={!hasAnswers || submitting}>Submit</button>
-        <button className="btn-secondary" onClick={handleDismiss} disabled={submitting}>Dismiss</button>
+        <button className="btn-primary" onClick={handleSubmit} disabled={!hasAnswers || submitting}>
+          Submit
+        </button>
+        <button className="btn-secondary" onClick={handleDismiss} disabled={submitting}>
+          Dismiss
+        </button>
       </div>
     </div>
   )
@@ -399,7 +487,11 @@ export default function ChatView({ sessionId }: ChatViewProps) {
   const [loading, setLoading] = useState(true)
   const [sessionDetail, setSessionDetail] = useState<Session | null>(null)
   const [menuOpen, setMenuOpen] = useState(false)
-  const [confirmAction, setConfirmAction] = useState<{ title: string; message: string; onConfirm: () => void } | null>(null)
+  const [confirmAction, setConfirmAction] = useState<{
+    title: string
+    message: string
+    onConfirm: () => void
+  } | null>(null)
   const [modelDropdownOpen, setModelDropdownOpen] = useState(false)
   const [availableModels, setAvailableModels] = useState<ModelInfo[]>([])
   const scrollRef = useRef<HTMLDivElement>(null)
@@ -425,7 +517,9 @@ export default function ChatView({ sessionId }: ChatViewProps) {
         if (!cancelled && data) setSessionDetail(data)
       })
       .catch(() => {})
-    return () => { cancelled = true }
+    return () => {
+      cancelled = true
+    }
   }, [sessionId])
 
   // Close menu on outside click
@@ -562,7 +656,7 @@ export default function ChatView({ sessionId }: ChatViewProps) {
     const newName = window.prompt('Rename session:', currentName)
     if (newName && newName !== currentName) {
       await renameSession(sessionId, newName)
-      setSessionDetail((prev) => prev ? { ...prev, name: newName } : prev)
+      setSessionDetail((prev) => (prev ? { ...prev, name: newName } : prev))
     }
   }
 
@@ -651,14 +745,24 @@ export default function ChatView({ sessionId }: ChatViewProps) {
           {getStatusLabel(agentStatus)}
         </span>
         <div className="chat-toolbar-menu-wrapper" ref={menuRef}>
-          <button className="chat-toolbar-menu" onClick={() => setMenuOpen(!menuOpen)} type="button">
-            <svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor"><circle cx="8" cy="3" r="1.5" /><circle cx="8" cy="8" r="1.5" /><circle cx="8" cy="13" r="1.5" /></svg>
+          <button
+            className="chat-toolbar-menu"
+            onClick={() => setMenuOpen(!menuOpen)}
+            type="button"
+          >
+            <svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor">
+              <circle cx="8" cy="3" r="1.5" />
+              <circle cx="8" cy="8" r="1.5" />
+              <circle cx="8" cy="13" r="1.5" />
+            </svg>
           </button>
           {menuOpen && (
             <div className="chat-toolbar-dropdown">
               <button onClick={handleRename}>Rename</button>
               <button onClick={handleClear}>Clear</button>
-              <button className="danger" onClick={handleDelete}>Delete</button>
+              <button className="danger" onClick={handleDelete}>
+                Delete
+              </button>
             </div>
           )}
         </div>
@@ -694,7 +798,8 @@ export default function ChatView({ sessionId }: ChatViewProps) {
                   <div className="chat-agent-start">
                     <span className="chat-agent-start-label">Agent started</span>
                     <span className="chat-agent-start-detail">
-                      {item.model}{item.effort ? `, ${item.effort}` : ''}
+                      {item.model}
+                      {item.effort ? `, ${item.effort}` : ''}
                     </span>
                     <span className="chat-agent-start-time">{formatTime(item.ts)}</span>
                   </div>
@@ -757,7 +862,11 @@ export default function ChatView({ sessionId }: ChatViewProps) {
             case 'question':
               return (
                 <div key={item.key} className="chat-row chat-row-system">
-                  <QuestionCard sessionId={sessionId} questionId={item.questionId} questions={item.questions} />
+                  <QuestionCard
+                    sessionId={sessionId}
+                    questionId={item.questionId}
+                    questions={item.questions}
+                  />
                 </div>
               )
             case 'question-resolved':
@@ -773,7 +882,9 @@ export default function ChatView({ sessionId }: ChatViewProps) {
           <div className="chat-row chat-row-system">
             <div className="chat-thinking">
               <div className="chat-thinking-dots">
-                <span /><span /><span />
+                <span />
+                <span />
+                <span />
               </div>
               <span>Thinking...</span>
             </div>

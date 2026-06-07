@@ -32,11 +32,15 @@ export default function RegisterModal() {
   return (
     <div className="modal-backdrop">
       <div className="modal">
-        <h1 className="modal-brand">Peck<span>board</span></h1>
+        <h1 className="modal-brand">
+          Peck<span>board</span>
+        </h1>
         <p className="modal-subtitle">Set up the first admin account for Peckboard.</p>
         <form onSubmit={handleSubmit}>
           <div className="form-field">
-            <label className="form-label" htmlFor="reg-username">Username</label>
+            <label className="form-label" htmlFor="reg-username">
+              Username
+            </label>
             <input
               id="reg-username"
               className="form-input"
@@ -60,7 +64,9 @@ export default function RegisterModal() {
             />
           </div>
           <div className="form-field">
-            <label className="form-label" htmlFor="reg-password">Password</label>
+            <label className="form-label" htmlFor="reg-password">
+              Password
+            </label>
             <input
               id="reg-password"
               className="form-input"
@@ -72,7 +78,9 @@ export default function RegisterModal() {
             />
           </div>
           <div className="form-field">
-            <label className="form-label" htmlFor="reg-confirm">Confirm Password</label>
+            <label className="form-label" htmlFor="reg-confirm">
+              Confirm Password
+            </label>
             <input
               id="reg-confirm"
               className="form-input"

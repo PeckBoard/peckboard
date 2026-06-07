@@ -87,11 +87,10 @@ impl PushService {
     /// Create a new PushService, loading or generating VAPID keys
     /// persisted under `data_dir`.
     pub fn new(data_dir: &Path) -> Self {
-        let (public_key, private_key) =
-            load_or_create_vapid_keys(data_dir).unwrap_or_else(|e| {
-                tracing::warn!("Failed to load/create VAPID keys: {e}, using ephemeral keys");
-                generate_vapid_keys()
-            });
+        let (public_key, private_key) = load_or_create_vapid_keys(data_dir).unwrap_or_else(|e| {
+            tracing::warn!("Failed to load/create VAPID keys: {e}, using ephemeral keys");
+            generate_vapid_keys()
+        });
         PushService {
             vapid_public_key: public_key,
             vapid_private_key: private_key,

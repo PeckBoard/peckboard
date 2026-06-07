@@ -52,9 +52,14 @@ pub fn router(state: Arc<AppState>) -> Router<Arc<AppState>> {
         .route("/api/sessions", post(create_session).get(list_sessions))
         .route(
             "/api/sessions/{id}",
-            get(get_session).patch(update_session).delete(delete_session),
+            get(get_session)
+                .patch(update_session)
+                .delete(delete_session),
         )
-        .route("/api/sessions/{id}/events", get(list_events).post(append_event))
+        .route(
+            "/api/sessions/{id}/events",
+            get(list_events).post(append_event),
+        )
         .route("/api/sessions/{id}/read", post(mark_read))
         .route("/api/sessions/{id}/clear", post(clear_session))
         .route("/api/sessions/{id}/message", post(send_message))
@@ -318,44 +323,64 @@ async fn append_event(
         .await;
 
     // Broadcast the event to WebSocket subscribers
-    state.broadcaster.broadcast(crate::ws::broadcaster::WsEvent {
-        event_type: "event".into(),
-        session_id: id.clone(),
-        data: serde_json::json!({
-            "id": event.id,
-            "seq": event.seq,
-            "ts": event.ts,
-            "kind": event.kind,
-            "data": serde_json::from_str::<serde_json::Value>(&event.data).unwrap_or_default(),
-        }),
-    });
+    state
+        .broadcaster
+        .broadcast(crate::ws::broadcaster::WsEvent {
+            event_type: "event".into(),
+            session_id: id.clone(),
+            data: serde_json::json!({
+                "id": event.id,
+                "seq": event.seq,
+                "ts": event.ts,
+                "kind": event.kind,
+                "data": serde_json::from_str::<serde_json::Value>(&event.data).unwrap_or_default(),
+            }),
+        });
 
     // If this is a question-resolved event, resume the conversation with
     // the user's answers as a new message. The agent's ask_user MCP tool
     // already completed and the agent turn ended, so we need to start a
     // new turn with the answers.
     if event_kind == "question-resolved" {
-        let rejected = event_data.get("rejected").and_then(|v| v.as_bool()).unwrap_or(false);
-        let question_id = event_data.get("question_id").and_then(|v| v.as_str()).unwrap_or("");
+        let rejected = event_data
+            .get("rejected")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+        let question_id = event_data
+            .get("question_id")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
 
         // Build a human-readable answer message to resume the conversation
         let answer_text = if rejected {
             "The user dismissed the question without answering. The questions have been removed from the UI and are no longer visible. Do NOT say the questions are still up. If you still need answers, you must ask again using mcp__peckboard__ask_user.".to_string()
         } else {
-            let answers = event_data.get("answers").cloned().unwrap_or(serde_json::json!({}));
+            let answers = event_data
+                .get("answers")
+                .cloned()
+                .unwrap_or(serde_json::json!({}));
 
             // Look up original questions to build readable answer text
             let mut parts = Vec::new();
             if !question_id.is_empty() {
                 if let Ok(Some(q_event)) = state.db.get_event(question_id).await {
                     if let Ok(q_data) = serde_json::from_str::<serde_json::Value>(&q_event.data) {
-                        if let Some(questions_arr) = q_data.get("questions").and_then(|v| v.as_array()) {
+                        if let Some(questions_arr) =
+                            q_data.get("questions").and_then(|v| v.as_array())
+                        {
                             if let Some(answers_obj) = answers.as_object() {
                                 for (idx_str, value) in answers_obj {
                                     if let Ok(idx) = idx_str.parse::<usize>() {
                                         if let Some(q) = questions_arr.get(idx) {
-                                            let q_text = q.get("question").and_then(|v| v.as_str()).unwrap_or("Question");
-                                            parts.push(format!("**{}**: {}", q_text, value.as_str().unwrap_or("")));
+                                            let q_text = q
+                                                .get("question")
+                                                .and_then(|v| v.as_str())
+                                                .unwrap_or("Question");
+                                            parts.push(format!(
+                                                "**{}**: {}",
+                                                q_text,
+                                                value.as_str().unwrap_or("")
+                                            ));
                                         }
                                     }
                                 }
@@ -366,7 +391,10 @@ async fn append_event(
             }
 
             if parts.is_empty() {
-                format!("User answered: {}", serde_json::to_string(&answers).unwrap_or_default())
+                format!(
+                    "User answered: {}",
+                    serde_json::to_string(&answers).unwrap_or_default()
+                )
             } else {
                 format!("The user answered your questions (the question form has been removed from the UI):\n\n{}", parts.join("\n"))
             }
@@ -377,26 +405,29 @@ async fn append_event(
         let id_clone = id.clone();
         tokio::spawn(async move {
             // Append a user event for the answer
-            if let Ok(user_ev) = state_clone.db.append_event(
-                &id_clone,
-                "user",
-                serde_json::json!({"text": &answer_text}),
-            ).await {
-                state_clone.broadcaster.broadcast(crate::ws::broadcaster::WsEvent {
-                    event_type: "event".into(),
-                    session_id: id_clone.clone(),
-                    data: serde_json::json!({
-                        "id": user_ev.id,
-                        "seq": user_ev.seq,
-                        "ts": user_ev.ts,
-                        "kind": "user",
-                        "data": {"text": &answer_text},
-                    }),
-                });
+            if let Ok(user_ev) = state_clone
+                .db
+                .append_event(&id_clone, "user", serde_json::json!({"text": &answer_text}))
+                .await
+            {
+                state_clone
+                    .broadcaster
+                    .broadcast(crate::ws::broadcaster::WsEvent {
+                        event_type: "event".into(),
+                        session_id: id_clone.clone(),
+                        data: serde_json::json!({
+                            "id": user_ev.id,
+                            "seq": user_ev.seq,
+                            "ts": user_ev.ts,
+                            "kind": "user",
+                            "data": {"text": &answer_text},
+                        }),
+                    });
             }
 
             // Issue MCP token and build config for the resumed session
-            let mcp_token = state_clone.mcp_tokens
+            let mcp_token = state_clone
+                .mcp_tokens
                 .issue_token(id_clone.clone(), None)
                 .await;
             let mcp_config_path = crate::service::mcp_server::write_mcp_config(
@@ -404,7 +435,9 @@ async fn append_event(
                 &id_clone,
                 state_clone.config.port,
                 &mcp_token,
-            ).ok().map(|p| p.to_string_lossy().to_string());
+            )
+            .ok()
+            .map(|p| p.to_string_lossy().to_string());
 
             let config = SpawnConfig {
                 model: "default".into(),
@@ -417,8 +450,15 @@ async fn append_event(
                 metadata: serde_json::Value::Null,
             };
 
-            if let Err(e) = state_clone.session_manager
-                .send_message(&id_clone, &answer_text, &state_clone.db, &state_clone.broadcaster, config)
+            if let Err(e) = state_clone
+                .session_manager
+                .send_message(
+                    &id_clone,
+                    &answer_text,
+                    &state_clone.db,
+                    &state_clone.broadcaster,
+                    config,
+                )
                 .await
             {
                 tracing::error!(session_id = %id_clone, "Failed to resume session with answer: {e}");
@@ -754,17 +794,19 @@ async fn cancel_session(
             )
         })?;
 
-    state.broadcaster.broadcast(crate::ws::broadcaster::WsEvent {
-        event_type: "event".into(),
-        session_id: id,
-        data: serde_json::json!({
-            "id": event.id,
-            "seq": event.seq,
-            "ts": event.ts,
-            "kind": event.kind,
-            "data": serde_json::from_str::<serde_json::Value>(&event.data).unwrap_or_default(),
-        }),
-    });
+    state
+        .broadcaster
+        .broadcast(crate::ws::broadcaster::WsEvent {
+            event_type: "event".into(),
+            session_id: id,
+            data: serde_json::json!({
+                "id": event.id,
+                "seq": event.seq,
+                "ts": event.ts,
+                "kind": event.kind,
+                "data": serde_json::from_str::<serde_json::Value>(&event.data).unwrap_or_default(),
+            }),
+        });
 
     Ok::<_, (StatusCode, Json<serde_json::Value>)>(StatusCode::NO_CONTENT)
 }
@@ -808,17 +850,19 @@ async fn interrupt_session(
             )
         })?;
 
-    state.broadcaster.broadcast(crate::ws::broadcaster::WsEvent {
-        event_type: "event".into(),
-        session_id: id,
-        data: serde_json::json!({
-            "id": event.id,
-            "seq": event.seq,
-            "ts": event.ts,
-            "kind": event.kind,
-            "data": serde_json::from_str::<serde_json::Value>(&event.data).unwrap_or_default(),
-        }),
-    });
+    state
+        .broadcaster
+        .broadcast(crate::ws::broadcaster::WsEvent {
+            event_type: "event".into(),
+            session_id: id,
+            data: serde_json::json!({
+                "id": event.id,
+                "seq": event.seq,
+                "ts": event.ts,
+                "kind": event.kind,
+                "data": serde_json::from_str::<serde_json::Value>(&event.data).unwrap_or_default(),
+            }),
+        });
 
     Ok::<_, (StatusCode, Json<serde_json::Value>)>(StatusCode::NO_CONTENT)
 }
@@ -881,9 +925,7 @@ fn derive_status(events: &[crate::db::models::Event]) -> &'static str {
         // Only consider it if there is no agent-start after this end
         let agent_ended = last_agent_start.map_or(true, |s| s < end_idx);
         if agent_ended {
-            if let Ok(data) =
-                serde_json::from_str::<serde_json::Value>(&events[end_idx].data)
-            {
+            if let Ok(data) = serde_json::from_str::<serde_json::Value>(&events[end_idx].data) {
                 if data.get("status").and_then(|v| v.as_str()) == Some("crashed") {
                     return "crashed";
                 }

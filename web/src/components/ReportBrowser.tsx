@@ -44,7 +44,9 @@ export default function ReportBrowser() {
     }
   }, [])
 
-  useEffect(() => { fetchReports() }, [fetchReports])
+  useEffect(() => {
+    fetchReports()
+  }, [fetchReports])
 
   const toggleFolder = (folder: string) => {
     setExpandedFolders((prev) => {
@@ -63,7 +65,9 @@ export default function ReportBrowser() {
     setLoadingContent(true)
     setReportContent('')
     try {
-      const res = await authedFetch(`/api/reports/${encodeURIComponent(folder)}/${encodeURIComponent(file)}`)
+      const res = await authedFetch(
+        `/api/reports/${encodeURIComponent(folder)}/${encodeURIComponent(file)}`,
+      )
       if (!res.ok) throw new Error('Failed to load report')
       const data = await res.json()
       setReportContent(data.body ?? data.content ?? JSON.stringify(data, null, 2))
@@ -92,7 +96,9 @@ export default function ReportBrowser() {
             className="btn-secondary"
             style={{ marginLeft: 'auto' }}
             onClick={async () => {
-              const res = await authedFetch(`/api/reports/${encodeURIComponent(activeReport.folder)}/${encodeURIComponent(activeReport.file)}/download`)
+              const res = await authedFetch(
+                `/api/reports/${encodeURIComponent(activeReport.folder)}/${encodeURIComponent(activeReport.file)}/download`,
+              )
               if (!res.ok) return
               const blob = await res.blob()
               const url = URL.createObjectURL(blob)
@@ -107,9 +113,19 @@ export default function ReportBrowser() {
           </button>
         </div>
         {loadingContent ? (
-          <div className="chat-loading"><div className="loading-spinner" /></div>
+          <div className="chat-loading">
+            <div className="loading-spinner" />
+          </div>
         ) : (
-          <div style={{ whiteSpace: 'pre-wrap', fontFamily: 'var(--font)', fontSize: 'var(--text-sm)', lineHeight: 1.7, color: 'var(--text)' }}>
+          <div
+            style={{
+              whiteSpace: 'pre-wrap',
+              fontFamily: 'var(--font)',
+              fontSize: 'var(--text-sm)',
+              lineHeight: 1.7,
+              color: 'var(--text)',
+            }}
+          >
             {reportContent}
           </div>
         )}
@@ -121,7 +137,11 @@ export default function ReportBrowser() {
     <div className="settings-page">
       <h2>Reports</h2>
 
-      {loading && <div className="chat-loading"><div className="loading-spinner" /></div>}
+      {loading && (
+        <div className="chat-loading">
+          <div className="loading-spinner" />
+        </div>
+      )}
       {error && <p className="form-error">{error}</p>}
 
       {!loading && reports.length === 0 && !error && (
@@ -142,11 +162,21 @@ export default function ReportBrowser() {
           {expandedFolders.has(folder) && (
             <div className="folder-list">
               {grouped[folder].map((r) => (
-                <div key={`${r.folder}/${r.file}`} className="folder-row" style={{ cursor: 'pointer' }}>
+                <div
+                  key={`${r.folder}/${r.file}`}
+                  className="folder-row"
+                  style={{ cursor: 'pointer' }}
+                >
                   <button
                     style={{
-                      flex: 1, border: 'none', background: 'transparent', textAlign: 'left',
-                      cursor: 'pointer', padding: 0, font: 'inherit', color: 'inherit',
+                      flex: 1,
+                      border: 'none',
+                      background: 'transparent',
+                      textAlign: 'left',
+                      cursor: 'pointer',
+                      padding: 0,
+                      font: 'inherit',
+                      color: 'inherit',
                     }}
                     onClick={() => viewReport(r.folder, r.file)}
                   >
@@ -160,7 +190,9 @@ export default function ReportBrowser() {
                     style={{ fontSize: 'var(--text-xs)', padding: '4px 10px' }}
                     onClick={async (e) => {
                       e.stopPropagation()
-                      const res = await authedFetch(`/api/reports/${encodeURIComponent(r.folder)}/${encodeURIComponent(r.file)}/download`)
+                      const res = await authedFetch(
+                        `/api/reports/${encodeURIComponent(r.folder)}/${encodeURIComponent(r.file)}/download`,
+                      )
                       if (!res.ok) return
                       const blob = await res.blob()
                       const url = URL.createObjectURL(blob)

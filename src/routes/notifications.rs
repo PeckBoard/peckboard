@@ -43,19 +43,18 @@ struct QueueMessageRequest {
 // ── Router ─────────────────────────────────────────────────────────
 
 pub fn router(state: Arc<AppState>) -> Router<Arc<AppState>> {
-    let public = Router::new()
-        .route("/api/push/vapid-key", get(get_vapid_key));
+    let public = Router::new().route("/api/push/vapid-key", get(get_vapid_key));
 
     let protected = Router::new()
-        .route(
-            "/api/push/subscribe",
-            post(subscribe).delete(unsubscribe),
-        )
+        .route("/api/push/subscribe", post(subscribe).delete(unsubscribe))
         .route(
             "/api/announcements",
             get(list_announcements).post(create_announcement),
         )
-        .route("/api/announcements/{id}", axum::routing::delete(delete_announcement))
+        .route(
+            "/api/announcements/{id}",
+            axum::routing::delete(delete_announcement),
+        )
         .route(
             "/api/sessions/{id}/queue",
             post(upsert_queued_message)
@@ -70,9 +69,7 @@ pub fn router(state: Arc<AppState>) -> Router<Arc<AppState>> {
 // ── VAPID public key ──────────────────────────────────────────────
 
 /// GET /api/push/vapid-key — returns the VAPID public key for push subscriptions.
-async fn get_vapid_key(
-    State(state): State<Arc<AppState>>,
-) -> impl IntoResponse {
+async fn get_vapid_key(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     Json(serde_json::json!({
         "publicKey": state.push_service.vapid_public_key
     }))
@@ -138,9 +135,7 @@ async fn unsubscribe(
 // ── Announcements ──────────────────────────────────────────────────
 
 /// GET /api/announcements
-async fn list_announcements(
-    State(state): State<Arc<AppState>>,
-) -> impl IntoResponse {
+async fn list_announcements(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     let announcements = state.db.list_announcements().await.map_err(|e| {
         (
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -170,23 +165,22 @@ async fn create_announcement(
 
     // We already consumed `request` for the extension check, so we need to
     // extract the body manually.
-    let body: CreateAnnouncementRequest =
-        serde_json::from_slice(
-            &axum::body::to_bytes(request.into_body(), 1024 * 64)
-                .await
-                .map_err(|e| {
-                    (
-                        StatusCode::BAD_REQUEST,
-                        Json(serde_json::json!({ "error": e.to_string() })),
-                    )
-                })?,
+    let body: CreateAnnouncementRequest = serde_json::from_slice(
+        &axum::body::to_bytes(request.into_body(), 1024 * 64)
+            .await
+            .map_err(|e| {
+                (
+                    StatusCode::BAD_REQUEST,
+                    Json(serde_json::json!({ "error": e.to_string() })),
+                )
+            })?,
+    )
+    .map_err(|e| {
+        (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({ "error": e.to_string() })),
         )
-        .map_err(|e| {
-            (
-                StatusCode::BAD_REQUEST,
-                Json(serde_json::json!({ "error": e.to_string() })),
-            )
-        })?;
+    })?;
 
     let now = chrono::Utc::now().to_rfc3339();
     let id = uuid::Uuid::new_v4().to_string();
@@ -240,11 +234,13 @@ async fn delete_announcement(
         ));
     }
 
-    state.broadcaster.broadcast(crate::ws::broadcaster::WsEvent {
-        event_type: "announcement".into(),
-        session_id: String::new(),
-        data: serde_json::json!({ "action": "dismissed", "id": id }),
-    });
+    state
+        .broadcaster
+        .broadcast(crate::ws::broadcaster::WsEvent {
+            event_type: "announcement".into(),
+            session_id: String::new(),
+            data: serde_json::json!({ "action": "dismissed", "id": id }),
+        });
 
     Ok(StatusCode::NO_CONTENT)
 }
@@ -276,11 +272,13 @@ async fn upsert_queued_message(
             )
         })?;
 
-    state.broadcaster.broadcast(crate::ws::broadcaster::WsEvent {
-        event_type: "queue".into(),
-        session_id: broadcast_session_id,
-        data: serde_json::json!({ "action": "set", "text": broadcast_text }),
-    });
+    state
+        .broadcaster
+        .broadcast(crate::ws::broadcaster::WsEvent {
+            event_type: "queue".into(),
+            session_id: broadcast_session_id,
+            data: serde_json::json!({ "action": "set", "text": broadcast_text }),
+        });
 
     Ok::<_, (StatusCode, Json<serde_json::Value>)>((
         StatusCode::CREATED,
@@ -336,11 +334,13 @@ async fn delete_queued_message(
         ));
     }
 
-    state.broadcaster.broadcast(crate::ws::broadcaster::WsEvent {
-        event_type: "queue".into(),
-        session_id: session_id.clone(),
-        data: serde_json::json!({ "action": "deleted" }),
-    });
+    state
+        .broadcaster
+        .broadcast(crate::ws::broadcaster::WsEvent {
+            event_type: "queue".into(),
+            session_id: session_id.clone(),
+            data: serde_json::json!({ "action": "deleted" }),
+        });
 
     Ok(StatusCode::NO_CONTENT)
 }

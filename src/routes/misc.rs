@@ -1,10 +1,4 @@
-use axum::{
-    Json, Router,
-    extract::State,
-    middleware,
-    response::IntoResponse,
-    routing::get,
-};
+use axum::{Json, Router, extract::State, middleware, response::IntoResponse, routing::get};
 use serde::Deserialize;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -136,16 +130,23 @@ async fn put_keep_awake(Json(req): Json<KeepAwakeRequest>) -> impl IntoResponse 
                                             .args(["-i", "-w", &std::process::id().to_string()])
                                             .spawn()
                                         {
-                                            Ok(new_child) => { *child = new_child; }
+                                            Ok(new_child) => {
+                                                *child = new_child;
+                                            }
                                             Err(e) => {
-                                                tracing::error!("Failed to respawn caffeinate: {e}");
+                                                tracing::error!(
+                                                    "Failed to respawn caffeinate: {e}"
+                                                );
                                                 *guard = None;
                                                 break;
                                             }
                                         }
                                     }
                                     Ok(None) => {} // Still running
-                                    Err(_) => { *guard = None; break; }
+                                    Err(_) => {
+                                        *guard = None;
+                                        break;
+                                    }
                                 }
                             } else {
                                 break; // No process, stop watchdog

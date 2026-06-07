@@ -1,5 +1,6 @@
 use axum::{
-    Json, Router,
+    Json,
+    Router,
     extract::{Path, State},
     http::StatusCode,
     middleware,
@@ -38,8 +39,14 @@ struct UpdateReportBody {
 pub fn router(state: Arc<AppState>) -> Router<Arc<AppState>> {
     Router::new()
         .route("/api/reports", get(list_reports))
-        .route("/api/reports/{folder}/{file}", get(get_report).put(update_report))
-        .route("/api/reports/{folder}/{file}/download", get(download_report))
+        .route(
+            "/api/reports/{folder}/{file}",
+            get(get_report).put(update_report),
+        )
+        .route(
+            "/api/reports/{folder}/{file}/download",
+            get(download_report),
+        )
         .route_layer(middleware::from_fn_with_state(state, require_auth))
 }
 
@@ -58,9 +65,11 @@ async fn list_reports(State(state): State<Arc<AppState>>) -> impl IntoResponse {
                         for file_entry in files.flatten() {
                             let file_path = file_entry.path();
                             if file_path.extension().map_or(false, |e| e == "md") {
-                                let file_name = file_entry.file_name().to_string_lossy().to_string();
+                                let file_name =
+                                    file_entry.file_name().to_string_lossy().to_string();
                                 if let Ok(content) = std::fs::read_to_string(&file_path) {
-                                    let meta = parse_frontmatter(&content, &folder_name, &file_name);
+                                    let meta =
+                                        parse_frontmatter(&content, &folder_name, &file_name);
                                     reports.push(meta);
                                 }
                             }
@@ -136,8 +145,12 @@ async fn update_report(
         body.body.clone()
     };
 
-    std::fs::write(&file_path, new_content)
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": e.to_string()}))))?;
+    std::fs::write(&file_path, new_content).map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({"error": e.to_string()})),
+        )
+    })?;
 
     Ok(StatusCode::NO_CONTENT)
 }
@@ -162,8 +175,14 @@ async fn download_report(
             Ok((
                 StatusCode::OK,
                 [
-                    (axum::http::header::CONTENT_TYPE.as_str(), "text/markdown".to_string()),
-                    (axum::http::header::CONTENT_DISPOSITION.as_str(), disposition),
+                    (
+                        axum::http::header::CONTENT_TYPE.as_str(),
+                        "text/markdown".to_string(),
+                    ),
+                    (
+                        axum::http::header::CONTENT_DISPOSITION.as_str(),
+                        disposition,
+                    ),
                 ],
                 content,
             ))

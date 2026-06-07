@@ -159,11 +159,7 @@ impl McpTokenRegistry {
 
     /// Issue a new bearer token for the given session/project.
     /// Returns the raw token (caller must pass it to the worker).
-    pub async fn issue_token(
-        &self,
-        session_id: String,
-        project_id: Option<String>,
-    ) -> String {
+    pub async fn issue_token(&self, session_id: String, project_id: Option<String>) -> String {
         use rand::Rng;
         use sha2::Digest;
 
@@ -669,10 +665,7 @@ impl McpToolRegistry {
             .as_deref()
             .ok_or_else(|| anyhow::anyhow!("finish_card requires card context"))?;
 
-        let summary = args
-            .get("summary")
-            .and_then(|v| v.as_str())
-            .unwrap_or("");
+        let summary = args.get("summary").and_then(|v| v.as_str()).unwrap_or("");
 
         ctx.db
             .append_event(
@@ -723,51 +716,53 @@ impl McpToolRegistry {
         }))
     }
 
-    async fn handle_ask_user(
-        &self,
-        args: Value,
-        ctx: &ToolCallContext,
-    ) -> anyhow::Result<Value> {
+    async fn handle_ask_user(&self, args: Value, ctx: &ToolCallContext) -> anyhow::Result<Value> {
         // Support both old format (single "question" string) and new format ("questions" array)
-        let questions_data = if let Some(questions) = args.get("questions").and_then(|v| v.as_array()) {
-            // New structured format
-            let mut normalized = Vec::new();
-            for q in questions {
-                let question_text = q.get("question").and_then(|v| v.as_str()).unwrap_or("");
-                let header = q.get("header").and_then(|v| v.as_str());
-                let multi_select = q.get("multiSelect").and_then(|v| v.as_bool()).unwrap_or(false);
+        let questions_data =
+            if let Some(questions) = args.get("questions").and_then(|v| v.as_array()) {
+                // New structured format
+                let mut normalized = Vec::new();
+                for q in questions {
+                    let question_text = q.get("question").and_then(|v| v.as_str()).unwrap_or("");
+                    let header = q.get("header").and_then(|v| v.as_str());
+                    let multi_select = q
+                        .get("multiSelect")
+                        .and_then(|v| v.as_bool())
+                        .unwrap_or(false);
 
-                let mut options = Vec::new();
-                let mut option_objects = Vec::new();
-                if let Some(opts) = q.get("options").and_then(|v| v.as_array()) {
-                    for opt in opts {
-                        if let Some(label) = opt.get("label").and_then(|v| v.as_str()) {
-                            options.push(serde_json::Value::String(label.to_string()));
-                            option_objects.push(opt.clone());
+                    let mut options = Vec::new();
+                    let mut option_objects = Vec::new();
+                    if let Some(opts) = q.get("options").and_then(|v| v.as_array()) {
+                        for opt in opts {
+                            if let Some(label) = opt.get("label").and_then(|v| v.as_str()) {
+                                options.push(serde_json::Value::String(label.to_string()));
+                                option_objects.push(opt.clone());
+                            }
                         }
                     }
-                }
 
-                let mut entry = serde_json::json!({
-                    "question": question_text,
-                    "multiSelect": multi_select,
-                });
-                if let Some(h) = header {
-                    entry["header"] = serde_json::Value::String(h.to_string());
+                    let mut entry = serde_json::json!({
+                        "question": question_text,
+                        "multiSelect": multi_select,
+                    });
+                    if let Some(h) = header {
+                        entry["header"] = serde_json::Value::String(h.to_string());
+                    }
+                    if !options.is_empty() {
+                        entry["options"] = serde_json::Value::Array(options);
+                        entry["optionObjects"] = serde_json::Value::Array(option_objects);
+                    }
+                    normalized.push(entry);
                 }
-                if !options.is_empty() {
-                    entry["options"] = serde_json::Value::Array(options);
-                    entry["optionObjects"] = serde_json::Value::Array(option_objects);
-                }
-                normalized.push(entry);
-            }
-            serde_json::Value::Array(normalized)
-        } else if let Some(question) = args.get("question").and_then(|v| v.as_str()) {
-            // Old simple format — single text question
-            serde_json::json!([{ "question": question, "header": "Question" }])
-        } else {
-            return Err(anyhow::anyhow!("ask_user requires 'questions' array or 'question' string"));
-        };
+                serde_json::Value::Array(normalized)
+            } else if let Some(question) = args.get("question").and_then(|v| v.as_str()) {
+                // Old simple format — single text question
+                serde_json::json!([{ "question": question, "header": "Question" }])
+            } else {
+                return Err(anyhow::anyhow!(
+                    "ask_user requires 'questions' array or 'question' string"
+                ));
+            };
 
         let event_data = serde_json::json!({
             "questions": questions_data,
@@ -776,7 +771,8 @@ impl McpToolRegistry {
         });
 
         // Emit as a "question" event so the frontend renders the question card UI
-        let event = ctx.db
+        let event = ctx
+            .db
             .append_event(&ctx.session_id, "question", event_data.clone())
             .await?;
 
@@ -831,10 +827,7 @@ impl McpToolRegistry {
             .and_then(|v| v.as_str())
             .ok_or_else(|| anyhow::anyhow!("create_card requires 'description'"))?;
 
-        let priority = args
-            .get("priority")
-            .and_then(|v| v.as_i64())
-            .unwrap_or(100) as i32;
+        let priority = args.get("priority").and_then(|v| v.as_i64()).unwrap_or(100) as i32;
 
         let workflow = args
             .get("workflow")
@@ -951,11 +944,21 @@ impl McpToolRegistry {
         // Sanitize title for filename
         let sanitized: String = title
             .chars()
-            .map(|c| if c.is_alphanumeric() || c == '-' || c == '_' || c == ' ' { c } else { '_' })
+            .map(|c| {
+                if c.is_alphanumeric() || c == '-' || c == '_' || c == ' ' {
+                    c
+                } else {
+                    '_'
+                }
+            })
             .collect::<String>()
             .replace(' ', "-")
             .to_lowercase();
-        let sanitized = if sanitized.is_empty() { "report".to_string() } else { sanitized };
+        let sanitized = if sanitized.is_empty() {
+            "report".to_string()
+        } else {
+            sanitized
+        };
 
         // Collision avoidance
         let mut filename = format!("{sanitized}.md");
@@ -975,8 +978,11 @@ impl McpToolRegistry {
         };
 
         // Build markdown with YAML frontmatter
-        let mut content = format!("---\ntitle: \"{title}\"\ndate: \"{}\"\nsessionId: \"{}\"",
-            now.to_rfc3339(), ctx.session_id);
+        let mut content = format!(
+            "---\ntitle: \"{title}\"\ndate: \"{}\"\nsessionId: \"{}\"",
+            now.to_rfc3339(),
+            ctx.session_id
+        );
         if let Some(ref pn) = project_name {
             content.push_str(&format!("\nprojectName: \"{pn}\""));
         }
@@ -1071,10 +1077,7 @@ impl McpToolRegistry {
             .map_err(|e| anyhow::anyhow!("invalid base64 data: {e}"))?;
 
         if decoded.len() > MAX_DECODED_SIZE {
-            anyhow::bail!(
-                "file too large: {} bytes exceeds 10MB limit",
-                decoded.len()
-            );
+            anyhow::bail!("file too large: {} bytes exceeds 10MB limit", decoded.len());
         }
 
         // Write to <dataDir>/reports/<folder>/<file>.<ext>
@@ -1109,12 +1112,26 @@ impl McpToolRegistry {
             .ok_or_else(|| anyhow::anyhow!("update_card requires 'card_id'"))?;
 
         let update = UpdateCard {
-            title: args.get("title").and_then(|v| v.as_str()).map(|s| s.to_string()),
-            description: args.get("description").and_then(|v| v.as_str()).map(|s| s.to_string()),
-            priority: args.get("priority").and_then(|v| v.as_i64()).map(|n| n as i32),
-            step: args.get("step").and_then(|v| v.as_str()).map(|s| s.to_string()),
+            title: args
+                .get("title")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string()),
+            description: args
+                .get("description")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string()),
+            priority: args
+                .get("priority")
+                .and_then(|v| v.as_i64())
+                .map(|n| n as i32),
+            step: args
+                .get("step")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string()),
             blocked: args.get("blocked").and_then(|v| v.as_bool()),
-            block_reason: args.get("block_reason").map(|v| v.as_str().map(|s| s.to_string())),
+            block_reason: args
+                .get("block_reason")
+                .map(|v| v.as_str().map(|s| s.to_string())),
             updated_at: Some(chrono::Utc::now().to_rfc3339()),
             ..Default::default()
         };
@@ -1148,10 +1165,22 @@ impl McpToolRegistry {
             .ok_or_else(|| anyhow::anyhow!("update_project requires 'project_id'"))?;
 
         let update = UpdateProject {
-            name: args.get("name").and_then(|v| v.as_str()).map(|s| s.to_string()),
-            context: args.get("context").and_then(|v| v.as_str()).map(|s| s.to_string()),
-            worker_count: args.get("worker_count").and_then(|v| v.as_i64()).map(|n| n as i32),
-            status: args.get("status").and_then(|v| v.as_str()).map(|s| s.to_string()),
+            name: args
+                .get("name")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string()),
+            context: args
+                .get("context")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string()),
+            worker_count: args
+                .get("worker_count")
+                .and_then(|v| v.as_i64())
+                .map(|n| n as i32),
+            status: args
+                .get("status")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string()),
             last_accessed_at: Some(chrono::Utc::now().to_rfc3339()),
             ..Default::default()
         };
@@ -1393,7 +1422,11 @@ mod tests {
     #[test]
     fn test_tool_registry_has_all_tools() {
         let registry = McpToolRegistry::new();
-        let names: Vec<&str> = registry.tool_definitions().iter().map(|t| t.name.as_str()).collect();
+        let names: Vec<&str> = registry
+            .tool_definitions()
+            .iter()
+            .map(|t| t.name.as_str())
+            .collect();
 
         assert!(names.contains(&"complete_step"));
         assert!(names.contains(&"finish_card"));
@@ -1435,7 +1468,7 @@ mod tests {
             project_id: None,
             card_id: None,
             db,
-            broadcaster: std::sync::Arc::new(crate::ws::broadcaster::Broadcaster::new()),
+            broadcaster: crate::ws::broadcaster::Broadcaster::new(),
         };
 
         let result = registry
@@ -1454,7 +1487,7 @@ mod tests {
             project_id: None,
             card_id: None,
             db,
-            broadcaster: std::sync::Arc::new(crate::ws::broadcaster::Broadcaster::new()),
+            broadcaster: crate::ws::broadcaster::Broadcaster::new(),
         };
 
         let result = registry
@@ -1516,15 +1549,11 @@ mod tests {
     #[tokio::test]
     async fn test_token_registry_revoke_by_session() {
         let registry = McpTokenRegistry::new();
-        let t1 = registry
-            .issue_token("sess-1".into(), None)
-            .await;
+        let t1 = registry.issue_token("sess-1".into(), None).await;
         let t2 = registry
             .issue_token("sess-1".into(), Some("proj-b".into()))
             .await;
-        let t3 = registry
-            .issue_token("sess-2".into(), None)
-            .await;
+        let t3 = registry.issue_token("sess-2".into(), None).await;
 
         registry.revoke_by_session("sess-1").await;
 
