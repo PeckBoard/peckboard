@@ -1029,6 +1029,7 @@
 
 .question-input-wrapper {
   position: relative;
+  z-index: 99999;
 }
 
 .autocomplete-inline {
@@ -2716,7 +2717,7 @@ select.form-input {
 .question-dialog {
   max-width: 520px;
   padding: 0 !important;
-  overflow: hidden;
+  overflow: visible;
 }
 
 .question-dialog-header {
@@ -2762,7 +2763,8 @@ select.form-input {
 .question-dialog-body {
   padding: 20px 24px;
   max-height: 400px;
-  overflow-y: auto;
+  overflow-y: visible;
+  position: relative;
 }
 
 .question-dialog-footer {
