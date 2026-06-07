@@ -1625,13 +1625,28 @@ impl McpToolRegistry {
 
         tracing::info!(session_id = %ctx.session_id, card_id = %card_id, "MCP tool: delete_card");
 
-        // Get card before deletion for broadcast
+        // Get card before deletion for cascade cleanup
         let card = ctx
             .db
             .get_card(card_id)
             .await?
             .ok_or_else(|| anyhow::anyhow!("card not found: {card_id}"))?;
         let project_id = card.project_id.clone();
+
+        // Cascade: delete worker session events and sessions
+        let mut session_ids = Vec::new();
+        if let Some(ref sid) = card.worker_session_id {
+            session_ids.push(sid.clone());
+        }
+        if let Some(ref sid) = card.last_worker_session_id {
+            session_ids.push(sid.clone());
+        }
+        session_ids.sort();
+        session_ids.dedup();
+        for sid in &session_ids {
+            let _ = ctx.db.delete_events_by_session(sid).await;
+            let _ = ctx.db.delete_session(sid).await;
+        }
 
         let deleted = ctx.db.delete_card(card_id).await?;
         if !deleted {
