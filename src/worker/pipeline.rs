@@ -52,9 +52,11 @@ pub fn build_worker_prompt(
     prompt.push_str("- `list_cards` — List all cards in this project.\n");
     prompt.push_str("- `write_report` — Write a report or note for human review.\n");
     prompt.push_str(
-        "- `notify_workers` — **Cross-communication:** Broadcast a message to all other running \
-         workers in this project. Use this to inform them about file changes so they can avoid \
-         conflicts. Include the `files_changed` array with paths you modified.\n",
+        "- `mcp__peckboard__notify_workers` — **REQUIRED cross-communication:** Broadcast a \
+         message to all other running workers in this project about file changes.\n",
+    );
+    prompt.push_str(
+        "- `mcp__peckboard__fetch_url` — Fetch a URL server-side (use when WebFetch returns 403).\n",
     );
     prompt.push_str("\n");
 
@@ -66,13 +68,21 @@ pub fn build_worker_prompt(
          need information from the user, call `ask_user`.\n\n",
     );
     prompt.push_str(
-        "**IMPORTANT — Worker cross-communication:** After you modify, create, or delete any \
-         files, you MUST call `notify_workers` with a description of what changed and the list \
-         of file paths in `files_changed`. This prevents other workers from making conflicting \
-         edits to the same files. Do this after each batch of related file changes, not after \
-         every single edit. If you receive a notification from another worker, check whether \
-         their changes affect your work and adapt accordingly (e.g. re-read modified files \
-         before editing them).\n",
+        "## MANDATORY: Cross-Worker File Change Notifications\n\n\
+         You are one of multiple workers running in parallel on this project. \
+         Other workers are editing files at the same time as you.\n\n\
+         **EVERY TIME** you write, edit, or delete files, you MUST IMMEDIATELY call \
+         `mcp__peckboard__notify_workers` with:\n\
+         - `message`: what you changed and why\n\
+         - `files_changed`: array of file paths you modified\n\n\
+         Example:\n\
+         ```json\n\
+         {\"message\": \"Added JWT auth middleware\", \"files_changed\": [\"src/auth/mod.rs\", \"src/main.rs\"]}\n\
+         ```\n\n\
+         Do NOT skip this step. Failure to notify causes merge conflicts for other workers. \
+         Call it after each batch of related edits (not after every single line).\n\n\
+         If you receive a notification from another worker, re-read any files they changed \
+         before editing them yourself.\n",
     );
 
     prompt
