@@ -512,15 +512,28 @@ pub async fn handle_worker_done(state: &Arc<AppState>, session_id: &str) {
     let card = state.db.get_card(&card_id).await.ok().flatten();
     if let Some(ref card) = card {
         if card.step != "done" && card.step != "wont_do" && !card.blocked {
-            let events = state.db.events_tail(session_id, 20).await.unwrap_or_default();
+            let events = state
+                .db
+                .events_tail(session_id, 20)
+                .await
+                .unwrap_or_default();
             // Find the last agent-end, then check for worker messages after it
             let last_agent_end = events.iter().rposition(|e| e.kind == "agent-end");
             let has_pending_worker_msgs = if let Some(end_idx) = last_agent_end {
                 events[end_idx + 1..].iter().any(|e| {
-                    if e.kind != "user" { return false; }
+                    if e.kind != "user" {
+                        return false;
+                    }
                     if let Ok(data) = serde_json::from_str::<serde_json::Value>(&e.data) {
                         let source = data.get("source").and_then(|v| v.as_str()).unwrap_or("");
-                        matches!(source, "worker-communication" | "worker-finding" | "worker-message" | "worker-auto-notify" | "worker-notification")
+                        matches!(
+                            source,
+                            "worker-communication"
+                                | "worker-finding"
+                                | "worker-message"
+                                | "worker-auto-notify"
+                                | "worker-notification"
+                        )
                     } else {
                         false
                     }
@@ -538,52 +551,96 @@ pub async fn handle_worker_done(state: &Arc<AppState>, session_id: &str) {
 
                 // Collect the pending messages for the prompt
                 let pending_msgs: Vec<String> = if let Some(end_idx) = last_agent_end {
-                    events[end_idx + 1..].iter().filter_map(|e| {
-                        if e.kind != "user" { return None; }
-                        serde_json::from_str::<serde_json::Value>(&e.data).ok()
-                            .and_then(|d| {
-                                let source = d.get("source").and_then(|v| v.as_str()).unwrap_or("");
-                                if matches!(source, "worker-communication" | "worker-finding" | "worker-message" | "worker-auto-notify" | "worker-notification") {
-                                    d.get("text").and_then(|v| v.as_str()).map(|s| s.to_string())
-                                } else { None }
-                            })
-                    }).collect()
-                } else { Vec::new() };
+                    events[end_idx + 1..]
+                        .iter()
+                        .filter_map(|e| {
+                            if e.kind != "user" {
+                                return None;
+                            }
+                            serde_json::from_str::<serde_json::Value>(&e.data)
+                                .ok()
+                                .and_then(|d| {
+                                    let source =
+                                        d.get("source").and_then(|v| v.as_str()).unwrap_or("");
+                                    if matches!(
+                                        source,
+                                        "worker-communication"
+                                            | "worker-finding"
+                                            | "worker-message"
+                                            | "worker-auto-notify"
+                                            | "worker-notification"
+                                    ) {
+                                        d.get("text")
+                                            .and_then(|v| v.as_str())
+                                            .map(|s| s.to_string())
+                                    } else {
+                                        None
+                                    }
+                                })
+                        })
+                        .collect()
+                } else {
+                    Vec::new()
+                };
 
                 // Send a follow-up message that explicitly asks the agent to respond
                 let follow_up = format!(
                     "You have {} message(s) from other workers that need your attention. \
                      Please review and respond to each one:\n\n{}",
                     pending_msgs.len(),
-                    pending_msgs.iter().enumerate().map(|(i, m)| {
-                        format!("--- Message {} ---\n{}", i + 1, m)
-                    }).collect::<Vec<_>>().join("\n\n")
+                    pending_msgs
+                        .iter()
+                        .enumerate()
+                        .map(|(i, m)| { format!("--- Message {} ---\n{}", i + 1, m) })
+                        .collect::<Vec<_>>()
+                        .join("\n\n")
                 );
 
                 // Append as user event
-                let _ = state.db.append_event(
-                    session_id,
-                    "user",
-                    serde_json::json!({ "text": follow_up }),
-                ).await;
+                let _ = state
+                    .db
+                    .append_event(session_id, "user", serde_json::json!({ "text": follow_up }))
+                    .await;
 
                 // Issue MCP token and resume the session
-                let session_project_id = state.db.get_session(session_id).await
-                    .ok().flatten().and_then(|s| s.project_id);
-                let mcp_token = state.mcp_tokens
+                let session_project_id = state
+                    .db
+                    .get_session(session_id)
+                    .await
+                    .ok()
+                    .flatten()
+                    .and_then(|s| s.project_id);
+                let mcp_token = state
+                    .mcp_tokens
                     .issue_token(session_id.to_string(), session_project_id)
                     .await;
-                let folder = state.db.get_session(session_id).await.ok().flatten()
+                let folder = state
+                    .db
+                    .get_session(session_id)
+                    .await
+                    .ok()
+                    .flatten()
                     .and_then(|s| Some(s.folder_id));
                 let working_dir = if let Some(ref fid) = folder {
-                    state.db.get_folder(fid).await.ok().flatten().map(|f| f.path).unwrap_or_default()
-                } else { String::new() };
+                    state
+                        .db
+                        .get_folder(fid)
+                        .await
+                        .ok()
+                        .flatten()
+                        .map(|f| f.path)
+                        .unwrap_or_default()
+                } else {
+                    String::new()
+                };
                 let mcp_config_path = mcp_server::write_mcp_config(
                     &state.config.data_dir,
                     session_id,
                     state.config.port,
                     &mcp_token,
-                ).ok().map(|p| p.to_string_lossy().to_string());
+                )
+                .ok()
+                .map(|p| p.to_string_lossy().to_string());
 
                 let config = SpawnConfig {
                     model: "default".into(),
@@ -596,8 +653,15 @@ pub async fn handle_worker_done(state: &Arc<AppState>, session_id: &str) {
                     metadata: serde_json::json!({ "worker": true, "inter_worker_followup": true }),
                 };
 
-                if let Err(e) = state.session_manager
-                    .send_message(session_id, &follow_up, &state.db, &state.broadcaster, config)
+                if let Err(e) = state
+                    .session_manager
+                    .send_message(
+                        session_id,
+                        &follow_up,
+                        &state.db,
+                        &state.broadcaster,
+                        config,
+                    )
                     .await
                 {
                     tracing::error!(session_id = %session_id, "Failed to resume for inter-worker messages: {e}");
