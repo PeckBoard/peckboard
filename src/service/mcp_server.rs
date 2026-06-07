@@ -1709,16 +1709,15 @@ impl McpToolRegistry {
                 }
             }
 
-            // Queue the message for delivery after the worker's current turn
-            let now = chrono::Utc::now().to_rfc3339();
-            let _ = ctx
-                .db
-                .upsert_queued_message(crate::db::models::NewQueuedMessage {
-                    session_id: session.id.clone(),
-                    text: notification.clone(),
-                    queued_at: now,
-                })
-                .await;
+            // Append as user event so the agent sees it when resumed
+            let _ = ctx.db.append_event(
+                &session.id,
+                "user",
+                serde_json::json!({
+                    "text": notification,
+                    "source": "worker-notification",
+                }),
+            ).await;
 
             // Also append a system event so the notification appears in the
             // session's event log immediately (visible in UI)
@@ -1877,13 +1876,13 @@ impl McpToolRegistry {
                             if c.step == "done" || c.step == "wont_do" { continue; }
                         }
                     }
-                    let now = chrono::Utc::now().to_rfc3339();
-                    let _ = ctx.db.upsert_queued_message(
-                        crate::db::models::NewQueuedMessage {
-                            session_id: ws.id.clone(),
-                            text: msg.clone(),
-                            queued_at: now,
-                        },
+                    let _ = ctx.db.append_event(
+                        &ws.id,
+                        "user",
+                        serde_json::json!({
+                            "text": msg,
+                            "source": "worker-finding",
+                        }),
                     ).await;
                 }
             }
@@ -1965,13 +1964,14 @@ impl McpToolRegistry {
             message
         );
 
-        let now = chrono::Utc::now().to_rfc3339();
-        let _ = ctx.db.upsert_queued_message(
-            crate::db::models::NewQueuedMessage {
-                session_id: target_session_id.to_string(),
-                text: msg,
-                queued_at: now,
-            },
+        // Append as user event so the agent sees it when resumed
+        let _ = ctx.db.append_event(
+            target_session_id,
+            "user",
+            serde_json::json!({
+                "text": msg,
+                "source": "worker-message",
+            }),
         ).await;
 
         Ok(serde_json::json!({

@@ -338,13 +338,15 @@ pub async fn stream_events(
                                                             if c.step == "done" || c.step == "wont_do" { continue; }
                                                         }
                                                     }
-                                                    let now = chrono::Utc::now().to_rfc3339();
-                                                    let _ = db.upsert_queued_message(
-                                                        crate::db::models::NewQueuedMessage {
-                                                            session_id: ws.id.clone(),
-                                                            text: msg.clone(),
-                                                            queued_at: now,
-                                                        },
+                                                    // Append as user event so the agent sees it
+                                                    // when resumed via --resume
+                                                    let _ = db.append_event(
+                                                        &ws.id,
+                                                        "user",
+                                                        serde_json::json!({
+                                                            "text": msg,
+                                                            "source": "worker-auto-notify",
+                                                        }),
                                                     ).await;
                                                 }
                                                 tracing::info!(
