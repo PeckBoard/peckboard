@@ -19,9 +19,15 @@ import path from 'node:path'
 const E2E_USER = 'e2e-user'
 const E2E_PASS = 'e2e-password-1234'
 
+let cachedAuth: { token: string; auth: Record<string, string> } | null = null
+
+/** Authenticate once per spec file. The rate limiter sees all requests
+ *  from 127.0.0.1 as one client; re-authenticating in every test would
+ *  burn the budget within a single suite run. */
 async function authenticate(
   request: APIRequestContext,
 ): Promise<{ token: string; auth: Record<string, string> }> {
+  if (cachedAuth) return cachedAuth
   const status = await request.get('/api/auth/status')
   const { has_users } = (await status.json()) as { has_users: boolean }
   const endpoint = has_users ? '/api/auth/login' : '/api/auth/register'
@@ -30,7 +36,8 @@ async function authenticate(
   })
   expect(res.ok()).toBeTruthy()
   const { token } = (await res.json()) as { token: string }
-  return { token, auth: { Authorization: `Bearer ${token}` } }
+  cachedAuth = { token, auth: { Authorization: `Bearer ${token}` } }
+  return cachedAuth
 }
 
 async function seedFolderAndSession(
@@ -158,8 +165,15 @@ test.describe('tabs', () => {
     await expect(tab).toHaveCount(0)
 
     // Confirm server agrees: list_tabs returns no entry for this session.
+    // (Tiny wait so the optimistic-then-write DELETE has flushed.)
+    await page.waitForTimeout(200)
     const res = await request.get('/api/me/tabs', { headers: auth })
-    const tabs = (await res.json()) as Array<{ item_id: string }>
-    expect(tabs.find((t) => t.item_id === sessionId)).toBeUndefined()
+    expect(res.ok(), `GET tabs failed (${res.status()}): ${await res.text()}`).toBeTruthy()
+    const body = await res.json()
+    const tabList = Array.isArray(body) ? body : []
+    expect(
+      tabList.find((t: { item_id: string }) => t.item_id === sessionId),
+      `tab should be gone server-side; got: ${JSON.stringify(body)}`,
+    ).toBeUndefined()
   })
 })

@@ -74,7 +74,12 @@ async fn main() -> anyhow::Result<()> {
     plugins.load_all().await?;
 
     let jwt_secret = load_or_create_jwt_secret(&config.data_dir)?;
-    let login_limiter = RateLimiter::new(5);
+    // 60/min is plenty for a single-tenant LAN server; the previous 5
+    // was so aggressive that even a normal user with a few tabs open
+    // (each authenticating its own WS) could trip it. Rate-limiting
+    // still uses the (currently hardcoded) IP, so this is a per-host
+    // ceiling, not a per-account one.
+    let login_limiter = RateLimiter::new(60);
 
     let broadcaster = Broadcaster::new();
     let provider_registry = Arc::new(ProviderRegistry::new());
