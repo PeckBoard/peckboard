@@ -1,6 +1,7 @@
 use jsonwebtoken::{DecodingKey, EncodingKey, Header, Validation, decode, encode};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 const JWT_EXPIRY_SECS: u64 = 7 * 24 * 60 * 60; // 7 days
@@ -20,14 +21,49 @@ pub struct Claims {
     pub exp: u64,
 }
 
-/// Generate a JWT secret key. In production this should be persisted.
-/// For now, generates a random 256-bit key on startup.
+/// Generate a fresh 256-bit JWT secret key. Used the first time a
+/// server starts (when no on-disk key exists yet).
 pub fn generate_jwt_secret() -> Vec<u8> {
     use rand::Rng;
     let mut rng = rand::thread_rng();
     let mut key = vec![0u8; 32];
     rng.fill(&mut key[..]);
     key
+}
+
+/// Load the JWT secret from disk, or generate + persist one on first
+/// run. Persisting is what stops every server restart from invalidating
+/// every issued token — without this the user gets logged out every
+/// time the binary restarts.
+///
+/// Stored at `<data_dir>/jwt_secret` with `0600` permissions on Unix.
+pub fn load_or_create_jwt_secret(data_dir: &Path) -> anyhow::Result<Vec<u8>> {
+    let path = data_dir.join("jwt_secret");
+
+    if path.exists() {
+        let key = std::fs::read(&path)?;
+        if key.len() == 32 {
+            return Ok(key);
+        }
+        tracing::warn!(
+            "JWT secret at {} has unexpected length {}, regenerating",
+            path.display(),
+            key.len(),
+        );
+    }
+
+    std::fs::create_dir_all(data_dir)?;
+    let key = generate_jwt_secret();
+    std::fs::write(&path, &key)?;
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600));
+    }
+
+    tracing::info!("Generated new JWT secret at {}", path.display());
+    Ok(key)
 }
 
 /// Create a new JWT token.
@@ -119,5 +155,27 @@ mod tests {
         let h2 = hash_token(token);
         assert_eq!(h1, h2);
         assert_ne!(h1, hash_token("different-token"));
+    }
+
+    #[test]
+    fn test_jwt_secret_persists_across_loads() {
+        // Stops the regression where every server restart invalidated
+        // every issued token.
+        let dir = tempfile::tempdir().unwrap();
+        let secret1 = load_or_create_jwt_secret(dir.path()).unwrap();
+        let secret2 = load_or_create_jwt_secret(dir.path()).unwrap();
+        assert_eq!(secret1, secret2, "second load must return the same key");
+        assert_eq!(secret1.len(), 32);
+
+        let (token, _) = create_token(&secret1, "u", "admin", "s").unwrap();
+        assert!(validate_token(&secret2, &token).is_ok());
+    }
+
+    #[test]
+    fn test_jwt_secret_regenerated_when_truncated() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("jwt_secret"), b"too-short").unwrap();
+        let secret = load_or_create_jwt_secret(dir.path()).unwrap();
+        assert_eq!(secret.len(), 32);
     }
 }

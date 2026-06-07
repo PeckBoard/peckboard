@@ -1,7 +1,7 @@
 use clap::Parser;
 use peckboard::auth::rate_limit::RateLimiter;
 use peckboard::auth::reset::reset_user_password;
-use peckboard::auth::token::generate_jwt_secret;
+use peckboard::auth::token::load_or_create_jwt_secret;
 use peckboard::config::{CliArgs, Config};
 use peckboard::db::Db;
 use peckboard::plugin::manager::PluginManager;
@@ -73,7 +73,7 @@ async fn main() -> anyhow::Result<()> {
     let plugins = PluginManager::new(&config.data_dir);
     plugins.load_all().await?;
 
-    let jwt_secret = generate_jwt_secret();
+    let jwt_secret = load_or_create_jwt_secret(&config.data_dir)?;
     let login_limiter = RateLimiter::new(5);
 
     let broadcaster = Broadcaster::new();
