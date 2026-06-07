@@ -254,6 +254,8 @@ pub fn build_cli_args(
             "update_card",
             "update_project",
             "create_project",
+            "create_folder",
+            "list_folders",
             "pause_project",
             "resume_project",
             "delete_project",

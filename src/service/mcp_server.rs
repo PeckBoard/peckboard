@@ -7,7 +7,7 @@ use serde_json::Value;
 use tokio::sync::Mutex;
 
 use crate::db::Db;
-use crate::db::models::{NewCard, NewProject, UpdateCard, UpdateProject};
+use crate::db::models::{NewCard, NewFolder, NewProject, UpdateCard, UpdateProject};
 
 // ── MCP config file generation ────────────────────────────────────
 
@@ -529,8 +529,40 @@ impl McpToolRegistry {
                 }),
             },
             McpToolDef {
+                name: "list_folders".into(),
+                description: "List all folders (working directories) available for projects.".into(),
+                input_schema: serde_json::json!({
+                    "type": "object",
+                    "properties": {},
+                    "additionalProperties": false
+                }),
+            },
+            McpToolDef {
+                name: "create_folder".into(),
+                description: "Register a folder (working directory) for use with projects. Set create_if_missing=true to also create the directory on disk if it doesn't exist.".into(),
+                input_schema: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "name": {
+                            "type": "string",
+                            "description": "Display name for the folder"
+                        },
+                        "path": {
+                            "type": "string",
+                            "description": "Absolute filesystem path to the folder"
+                        },
+                        "create_if_missing": {
+                            "type": "boolean",
+                            "description": "If true, create the directory on disk when it doesn't exist (default false)"
+                        }
+                    },
+                    "required": ["name", "path"],
+                    "additionalProperties": false
+                }),
+            },
+            McpToolDef {
                 name: "create_project".into(),
-                description: "Create a new project in a folder.".into(),
+                description: "Create a new project in a folder. Provide either folder_id (existing folder) or folder_path (will look up by path, or create a new folder if path doesn't match any).".into(),
                 input_schema: serde_json::json!({
                     "type": "object",
                     "properties": {
@@ -540,7 +572,19 @@ impl McpToolRegistry {
                         },
                         "folder_id": {
                             "type": "string",
-                            "description": "Folder ID to create the project in"
+                            "description": "Folder ID to create the project in (use this OR folder_path)"
+                        },
+                        "folder_path": {
+                            "type": "string",
+                            "description": "Folder path: looks up by path; if no folder matches, registers one (and creates the dir on disk if create_folder_if_missing=true)"
+                        },
+                        "folder_name": {
+                            "type": "string",
+                            "description": "Folder display name; used when folder_path is given and a new folder needs to be registered (defaults to the basename of folder_path)"
+                        },
+                        "create_folder_if_missing": {
+                            "type": "boolean",
+                            "description": "When folder_path is given: create directory on disk if missing (default false)"
                         },
                         "context": {
                             "type": "string",
@@ -551,7 +595,7 @@ impl McpToolRegistry {
                             "description": "Number of concurrent workers (default 1)"
                         }
                     },
-                    "required": ["name", "folder_id"],
+                    "required": ["name"],
                     "additionalProperties": false
                 }),
             },
@@ -815,6 +859,8 @@ impl McpToolRegistry {
             "update_card" => self.handle_update_card(args, ctx).await,
             "update_project" => self.handle_update_project(args, ctx).await,
             "create_project" => self.handle_create_project(args, ctx).await,
+            "create_folder" => self.handle_create_folder(args, ctx).await,
+            "list_folders" => self.handle_list_folders(ctx).await,
             "pause_project" => self.handle_pause_project(args, ctx).await,
             "resume_project" => self.handle_resume_project(args, ctx).await,
             "delete_project" => self.handle_delete_project(args, ctx).await,
@@ -1586,6 +1632,99 @@ impl McpToolRegistry {
         }))
     }
 
+    async fn handle_list_folders(&self, ctx: &ToolCallContext) -> anyhow::Result<Value> {
+        tracing::info!(session_id = %ctx.session_id, "MCP tool: list_folders");
+        let folders = ctx.db.list_folders().await?;
+        let items: Vec<Value> = folders
+            .iter()
+            .map(|f| {
+                serde_json::json!({
+                    "id": f.id,
+                    "name": f.name,
+                    "path": f.path,
+                    "created_at": f.created_at,
+                })
+            })
+            .collect();
+        Ok(serde_json::json!({ "folders": items, "count": items.len() }))
+    }
+
+    async fn handle_create_folder(
+        &self,
+        args: Value,
+        ctx: &ToolCallContext,
+    ) -> anyhow::Result<Value> {
+        let name = args
+            .get("name")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| anyhow::anyhow!("create_folder requires 'name'"))?
+            .to_string();
+        let path = args
+            .get("path")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| anyhow::anyhow!("create_folder requires 'path'"))?
+            .to_string();
+        let create_if_missing = args
+            .get("create_if_missing")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+
+        tracing::info!(session_id = %ctx.session_id, name = %name, path = %path, create_if_missing, "MCP tool: create_folder");
+
+        let folder = self
+            .upsert_folder(ctx, &name, &path, create_if_missing)
+            .await?;
+        Ok(serde_json::json!({
+            "status": "ok",
+            "folder": {
+                "id": folder.id,
+                "name": folder.name,
+                "path": folder.path,
+            }
+        }))
+    }
+
+    /// Resolve a folder by path, or register a new one. If the path doesn't
+    /// exist on disk, optionally create the directory.
+    async fn upsert_folder(
+        &self,
+        ctx: &ToolCallContext,
+        name: &str,
+        path: &str,
+        create_if_missing: bool,
+    ) -> anyhow::Result<crate::db::models::Folder> {
+        // If a folder is already registered with this path, return it
+        let folders = ctx.db.list_folders().await?;
+        if let Some(existing) = folders.iter().find(|f| f.path == path) {
+            return Ok(existing.clone());
+        }
+
+        let dir = std::path::Path::new(path);
+        if !dir.exists() {
+            if create_if_missing {
+                std::fs::create_dir_all(dir)
+                    .map_err(|e| anyhow::anyhow!("failed to create directory '{path}': {e}"))?;
+                tracing::info!(path = %path, "Created directory on disk");
+            } else {
+                anyhow::bail!(
+                    "path does not exist: {path} (set create_if_missing=true to create it)"
+                );
+            }
+        }
+
+        let now = chrono::Utc::now().to_rfc3339();
+        let folder = ctx
+            .db
+            .create_folder(NewFolder {
+                id: uuid::Uuid::new_v4().to_string(),
+                name: name.to_string(),
+                path: path.to_string(),
+                created_at: now,
+            })
+            .await?;
+        Ok(folder)
+    }
+
     async fn handle_create_project(
         &self,
         args: Value,
@@ -1598,10 +1737,32 @@ impl McpToolRegistry {
             .and_then(|v| v.as_str())
             .ok_or_else(|| anyhow::anyhow!("create_project requires 'name'"))?;
 
-        let folder_id = args
-            .get("folder_id")
-            .and_then(|v| v.as_str())
-            .ok_or_else(|| anyhow::anyhow!("create_project requires 'folder_id'"))?;
+        // Resolve folder: prefer folder_id; else look up / create by folder_path.
+        let folder_id = if let Some(fid) = args.get("folder_id").and_then(|v| v.as_str()) {
+            fid.to_string()
+        } else if let Some(fp) = args.get("folder_path").and_then(|v| v.as_str()) {
+            let folder_name = args
+                .get("folder_name")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string())
+                .unwrap_or_else(|| {
+                    std::path::Path::new(fp)
+                        .file_name()
+                        .and_then(|n| n.to_str())
+                        .unwrap_or(fp)
+                        .to_string()
+                });
+            let create_if_missing = args
+                .get("create_folder_if_missing")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
+            let folder = self
+                .upsert_folder(ctx, &folder_name, fp, create_if_missing)
+                .await?;
+            folder.id
+        } else {
+            anyhow::bail!("create_project requires 'folder_id' or 'folder_path'");
+        };
 
         let context = args
             .get("context")
@@ -1621,7 +1782,7 @@ impl McpToolRegistry {
                 id: uuid::Uuid::new_v4().to_string(),
                 name: name.to_string(),
                 context,
-                folder_id: folder_id.to_string(),
+                folder_id: folder_id.clone(),
                 worker_count,
                 status: "active".to_string(),
                 default_workflow: None,
@@ -1642,6 +1803,7 @@ impl McpToolRegistry {
                 "name": project.name,
                 "status": project.status,
                 "workerCount": project.worker_count,
+                "folderId": folder_id,
             }
         }))
     }
@@ -1727,7 +1889,10 @@ impl McpToolRegistry {
         tracing::info!(session_id = %ctx.session_id, project_id = %project_id, "MCP tool: delete_project");
 
         // Verify project exists
-        let project = ctx.db.get_project(project_id).await?
+        let project = ctx
+            .db
+            .get_project(project_id)
+            .await?
             .ok_or_else(|| anyhow::anyhow!("project not found: {project_id}"))?;
 
         // Collect worker session IDs from cards
@@ -1746,11 +1911,17 @@ impl McpToolRegistry {
 
         // Clear card FK refs first so we can delete sessions without FK errors
         for card in &cards {
-            let _ = ctx.db.update_card(&card.id, crate::db::models::UpdateCard {
-                worker_session_id: Some(None),
-                last_worker_session_id: Some(None),
-                ..Default::default()
-            }).await;
+            let _ = ctx
+                .db
+                .update_card(
+                    &card.id,
+                    crate::db::models::UpdateCard {
+                        worker_session_id: Some(None),
+                        last_worker_session_id: Some(None),
+                        ..Default::default()
+                    },
+                )
+                .await;
         }
 
         // Now safe to delete sessions and their data
@@ -2707,9 +2878,12 @@ mod tests {
         assert!(names.contains(&"pause_project"));
         assert!(names.contains(&"resume_project"));
         assert!(names.contains(&"delete_card"));
+        assert!(names.contains(&"delete_project"));
         assert!(names.contains(&"move_card_to_done"));
         assert!(names.contains(&"move_card_to_wont_do"));
-        assert_eq!(names.len(), 28);
+        assert!(names.contains(&"create_folder"));
+        assert!(names.contains(&"list_folders"));
+        assert_eq!(names.len(), 31);
     }
 
     #[test]
