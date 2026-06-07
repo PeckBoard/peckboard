@@ -501,8 +501,13 @@ async fn append_event(
             }
 
             // Issue MCP token with project scope (for worker sessions)
-            let session_project_id = state_clone.db.get_session(&id_clone).await
-                .ok().flatten().and_then(|s| s.project_id);
+            let session_project_id = state_clone
+                .db
+                .get_session(&id_clone)
+                .await
+                .ok()
+                .flatten()
+                .and_then(|s| s.project_id);
             let mcp_token = state_clone
                 .mcp_tokens
                 .issue_token(id_clone.clone(), session_project_id)
@@ -1078,12 +1083,15 @@ async fn resolve_references(text: &str, state: &Arc<AppState>) -> String {
         let ref_session_id = cap[1].to_string();
 
         // Hook: session.reference.resolve
-        let hook_result = state.plugins.dispatch(
-            "session.reference.resolve",
-            serde_json::json!({
-                "referencedSessionId": &ref_session_id,
-            }),
-        ).await;
+        let hook_result = state
+            .plugins
+            .dispatch(
+                "session.reference.resolve",
+                serde_json::json!({
+                    "referencedSessionId": &ref_session_id,
+                }),
+            )
+            .await;
 
         if let crate::plugin::hooks::HookResult::Allowed(modified) = &hook_result {
             if let Some(custom) = modified.get("replacement").and_then(|v| v.as_str()) {
@@ -1096,7 +1104,12 @@ async fn resolve_references(text: &str, state: &Arc<AppState>) -> String {
             let session_name = &ref_session.name;
             let conv_id = ref_session.conversation_id.as_deref().unwrap_or("unknown");
             let card_info = if let Some(ref card_id) = ref_session.card_id {
-                state.db.get_card(card_id).await.ok().flatten()
+                state
+                    .db
+                    .get_card(card_id)
+                    .await
+                    .ok()
+                    .flatten()
                     .map(|c| format!(" (card: \"{}\")", c.title))
                     .unwrap_or_default()
             } else {
@@ -1111,7 +1124,10 @@ async fn resolve_references(text: &str, state: &Arc<AppState>) -> String {
             );
             session_replacements.push((full_match, replacement));
         } else {
-            session_replacements.push((full_match, format!("[session {} not found]", ref_session_id)));
+            session_replacements.push((
+                full_match,
+                format!("[session {} not found]", ref_session_id),
+            ));
         }
     }
     for (from, to) in session_replacements {
@@ -1128,7 +1144,12 @@ async fn resolve_references(text: &str, state: &Arc<AppState>) -> String {
         if parts.len() == 2 {
             let folder = parts[0];
             let file = parts[1];
-            let report_file = state.config.data_dir.join("reports").join(folder).join(file);
+            let report_file = state
+                .config
+                .data_dir
+                .join("reports")
+                .join(folder)
+                .join(file);
             if let Ok(content) = tokio::fs::read_to_string(&report_file).await {
                 let body = if content.starts_with("---") {
                     content.splitn(3, "---").nth(2).unwrap_or(&content).trim()
@@ -1140,12 +1161,18 @@ async fn resolve_references(text: &str, state: &Arc<AppState>) -> String {
                 } else {
                     body.to_string()
                 };
-                report_replacements.push((full_match, format!(
-                    "[Report: {}/{}]\n{}\n[End of report]",
-                    folder, file, truncated
-                )));
+                report_replacements.push((
+                    full_match,
+                    format!(
+                        "[Report: {}/{}]\n{}\n[End of report]",
+                        folder, file, truncated
+                    ),
+                ));
             } else {
-                report_replacements.push((full_match, format!("[report {}/{} not found]", folder, file)));
+                report_replacements.push((
+                    full_match,
+                    format!("[report {}/{} not found]", folder, file),
+                ));
             }
         }
     }

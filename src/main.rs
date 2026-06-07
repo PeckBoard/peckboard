@@ -1,6 +1,8 @@
+use clap::Parser;
 use peckboard::auth::rate_limit::RateLimiter;
+use peckboard::auth::reset::reset_user_password;
 use peckboard::auth::token::generate_jwt_secret;
-use peckboard::config::Config;
+use peckboard::config::{CliArgs, Config};
 use peckboard::db::Db;
 use peckboard::plugin::manager::PluginManager;
 use peckboard::provider::claude::register_claude_provider;
@@ -31,7 +33,25 @@ async fn main() -> anyhow::Result<()> {
         .with_env_filter(EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()))
         .init();
 
-    let config = Config::load();
+    let args = CliArgs::parse();
+
+    // Short-circuit CLI maintenance flows before any server startup.
+    if args.reset_password {
+        let username = args.user.clone();
+        let config = Config::from_args(args);
+        let db = Db::open(&config.data_dir)?;
+        let outcome = reset_user_password(&db, username.as_deref()).await?;
+        // stderr for the human note, stdout for just the credentials so
+        // it's easy to pipe `peckboard --reset-password | tail -1`.
+        eprintln!(
+            "Reset password for '{}' and revoked {} auth session(s).",
+            outcome.username, outcome.sessions_revoked,
+        );
+        println!("{}:{}", outcome.username, outcome.new_password);
+        return Ok(());
+    }
+
+    let config = Config::from_args(args);
     let addr = format!("{}:{}", config.host, config.port);
 
     let db = Db::open(&config.data_dir)?;

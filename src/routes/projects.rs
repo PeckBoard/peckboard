@@ -446,11 +446,13 @@ async fn create_card(
         })?;
 
     // Broadcast card creation for live kanban
-    state.broadcaster.broadcast(crate::ws::broadcaster::WsEvent {
-        event_type: "card-update".into(),
-        session_id: card.project_id.clone(),
-        data: serde_json::json!({ "card": card }),
-    });
+    state
+        .broadcaster
+        .broadcast(crate::ws::broadcaster::WsEvent {
+            event_type: "card-update".into(),
+            session_id: card.project_id.clone(),
+            data: serde_json::json!({ "card": card }),
+        });
 
     Ok::<_, (StatusCode, Json<serde_json::Value>)>((
         StatusCode::CREATED,
@@ -637,11 +639,13 @@ async fn delete_card(
 
     // Broadcast card deletion for live kanban
     if let Some(card) = card_before {
-        state.broadcaster.broadcast(crate::ws::broadcaster::WsEvent {
-            event_type: "card-delete".into(),
-            session_id: card.project_id.clone(),
-            data: serde_json::json!({ "cardId": card_id, "projectId": card.project_id }),
-        });
+        state
+            .broadcaster
+            .broadcast(crate::ws::broadcaster::WsEvent {
+                event_type: "card-delete".into(),
+                session_id: card.project_id.clone(),
+                data: serde_json::json!({ "cardId": card_id, "projectId": card.project_id }),
+            });
     }
 
     Ok(StatusCode::NO_CONTENT)
