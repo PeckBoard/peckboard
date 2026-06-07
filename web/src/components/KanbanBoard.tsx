@@ -97,8 +97,8 @@ export default function KanbanBoard({ projectId }: KanbanBoardProps) {
 
   const [workflows, setWorkflows] = useState<WorkflowInfo[]>([])
   const [models, setModels] = useState<ModelInfo[]>([])
-  const [allReports, setAllReports] = useState<{ folder: string; file: string; title: string }[]>([])
-  const [reportAutocomplete, setReportAutocomplete] = useState<{ eventId: string; idx: number; suggestions: { folder: string; file: string; title: string }[] } | null>(null)
+  const [allMentions, setAllMentions] = useState<{ type: 'report' | 'session'; label: string; detail: string; ref: string }[]>([])
+  const [mentionAutocomplete, setMentionAutocomplete] = useState<{ eventId: string; idx: number; suggestions: { type: 'report' | 'session'; label: string; detail: string; ref: string }[] } | null>(null)
   const [priorities, setPriorities] = useState<PriorityInfo[]>([
     { label: 'Critical', value: 0, description: 'Blocks everything' },
     { label: 'High', value: 1, description: 'Important' },
@@ -240,31 +240,30 @@ export default function KanbanBoard({ projectId }: KanbanBoardProps) {
 
     // Check for @ autocomplete trigger
     const atMatch = value.match(/@(\S*)$/)
-    if (atMatch && allReports.length > 0) {
+    if (atMatch && allMentions.length > 0) {
       const filter = atMatch[1].toLowerCase()
-      const filtered = allReports.filter((r) =>
-        r.title.toLowerCase().includes(filter) || r.file.toLowerCase().includes(filter)
-      ).slice(0, 6)
+      const filtered = allMentions.filter((m) =>
+        m.label.toLowerCase().includes(filter) || m.detail.toLowerCase().includes(filter)
+      ).slice(0, 8)
       if (filtered.length > 0) {
-        setReportAutocomplete({ eventId, idx, suggestions: filtered })
+        setMentionAutocomplete({ eventId, idx, suggestions: filtered })
       } else {
-        setReportAutocomplete(null)
+        setMentionAutocomplete(null)
       }
     } else {
-      setReportAutocomplete(null)
+      setMentionAutocomplete(null)
     }
   }
 
-  const insertReportInAnswer = (eventId: string, idx: number, report: { folder: string; file: string; title: string }) => {
+  const insertMentionInAnswer = (eventId: string, idx: number, mention: { ref: string }) => {
     const current = questionAnswers[eventId]?.[idx] ?? ''
     const atIdx = current.lastIndexOf('@')
-    const ref = `[report:${report.folder}/${report.file}]`
-    const newVal = current.slice(0, atIdx) + ref
+    const newVal = current.slice(0, atIdx) + mention.ref
     setQuestionAnswers((prev) => ({
       ...prev,
       [eventId]: { ...(prev[eventId] ?? {}), [idx]: newVal },
     }))
-    setReportAutocomplete(null)
+    setMentionAutocomplete(null)
   }
 
   const toggleQuestionMulti = (eventId: string, idx: number, option: string) => {
@@ -301,15 +300,26 @@ export default function KanbanBoard({ projectId }: KanbanBoardProps) {
         if (data?.priorities) setPriorities(data.priorities)
       })
       .catch(() => {})
+    const mentions: { type: 'report' | 'session'; label: string; detail: string; ref: string }[] = []
     authedFetch('/api/reports')
       .then((res) => (res.ok ? res.json() : null))
       .then((data) => {
         const list = Array.isArray(data) ? data : (data?.reports ?? [])
-        setAllReports(list.map((r: { folder: string; file: string; title?: string }) => ({
-          folder: r.folder, file: r.file, title: r.title || r.file,
-        })))
+        for (const r of list) {
+          mentions.push({ type: 'report', label: r.title || r.file, detail: `${r.folder}/${r.file}`, ref: `[report:${r.folder}/${r.file}]` })
+        }
       })
       .catch(() => {})
+    authedFetch('/api/sessions')
+      .then((res) => (res.ok ? res.json() : null))
+      .then((data) => {
+        const list = Array.isArray(data) ? data : (data?.sessions ?? data ?? [])
+        for (const s of list) {
+          mentions.push({ type: 'session', label: s.name || 'Untitled', detail: s.id, ref: `[session:${s.id}]` })
+        }
+        setAllMentions(mentions)
+      })
+      .catch(() => setAllMentions(mentions))
   }, [])
 
   // Map step aliases to canonical step names for display
@@ -545,21 +555,24 @@ export default function KanbanBoard({ projectId }: KanbanBoardProps) {
                           value={answers[idx] ?? ''}
                           onChange={(e) => setQuestionAnswer(pq.eventId, idx, e.target.value)}
                           onKeyDown={(e) => { if (e.key === 'Enter' && pq.questions.length === 1 && hasAnswers && !reportAutocomplete) handleAnswerQuestion(pq) }}
-                          onBlur={() => setTimeout(() => setReportAutocomplete(null), 200)}
+                          onBlur={() => setTimeout(() => setMentionAutocomplete(null), 200)}
                           disabled={isSubmitting}
                           autoFocus
                         />
-                        {reportAutocomplete && reportAutocomplete.eventId === pq.eventId && reportAutocomplete.idx === idx && (
+                        {mentionAutocomplete && mentionAutocomplete.eventId === pq.eventId && mentionAutocomplete.idx === idx && (
                           <div className="autocomplete-dropdown autocomplete-inline">
-                            <div className="autocomplete-header">Reports</div>
-                            {reportAutocomplete.suggestions.map((r) => (
+                            <div className="autocomplete-header">@ — reports &amp; sessions</div>
+                            {mentionAutocomplete.suggestions.map((m, i) => (
                               <button
-                                key={`${r.folder}/${r.file}`}
+                                key={`${m.type}-${m.detail}-${i}`}
                                 className="autocomplete-item"
-                                onMouseDown={(e) => { e.preventDefault(); insertReportInAnswer(pq.eventId, idx, r) }}
+                                onMouseDown={(e) => { e.preventDefault(); insertMentionInAnswer(pq.eventId, idx, m) }}
                               >
-                                <span className="autocomplete-item-title">{r.title}</span>
-                                <span className="autocomplete-item-path">{r.folder}/{r.file}</span>
+                                <span className="autocomplete-item-title">
+                                  <span className={`autocomplete-type-badge autocomplete-type-${m.type}`}>{m.type}</span>
+                                  {m.label}
+                                </span>
+                                <span className="autocomplete-item-path">{m.detail}</span>
                               </button>
                             ))}
                           </div>
