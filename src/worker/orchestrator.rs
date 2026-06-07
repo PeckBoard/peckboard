@@ -508,10 +508,11 @@ pub async fn handle_worker_done(state: &Arc<AppState>, session_id: &str) {
         .await;
 
     // Check if there are unprocessed inter-worker messages that arrived
-    // during this worker's turn. If so, resume the session to process them.
+    // during this worker's turn. Resume even if the card is done — the agent
+    // should still acknowledge messages from peers.
     let card = state.db.get_card(&card_id).await.ok().flatten();
-    if let Some(ref card) = card {
-        if card.step != "done" && card.step != "wont_do" && !card.blocked {
+    if let Some(ref _card) = card {
+        {
             let events = state
                 .db
                 .events_tail(session_id, 20)
