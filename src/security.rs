@@ -119,9 +119,9 @@ pub async fn repair_dangling_sessions(db: &crate::db::Db) -> anyhow::Result<u32>
         tracing::info!("Repaired {repaired} dangling session(s)");
     }
 
-    // Resume interrupted workers: find cards that still have worker_session_id
-    // set but whose worker process is gone (server restarted). Clear the ref
-    // so the orchestrator can re-spawn them.
+    // Resume interrupted workers: at startup no processes are running, so
+    // any non-terminal, non-blocked card with a worker_session_id has a dead
+    // worker. Clear the ref so the orchestrator can re-spawn them.
     let projects = db.list_projects().await.unwrap_or_default();
     let mut workers_recovered = 0u32;
 
@@ -132,60 +132,36 @@ pub async fn repair_dangling_sessions(db: &crate::db::Db) -> anyhow::Result<u32>
 
         let cards = db.list_cards_by_project(&project.id).await.unwrap_or_default();
         for card in &cards {
-            // Skip terminal cards
             if card.step == "done" || card.step == "wont_do" {
                 continue;
             }
-            // Skip cards without a worker assignment
             let session_id = match &card.worker_session_id {
                 Some(sid) => sid.clone(),
                 None => continue,
             };
-            // Skip blocked cards (user intentionally stopped)
             if card.blocked {
                 continue;
             }
 
-            // Check if the last event in the worker session indicates it was
-            // interrupted by server shutdown (not user-stopped)
-            let tail = db.events_tail(&session_id, 3).await.unwrap_or_default();
-            let was_server_shutdown = tail.iter().rev().any(|e| {
-                if e.kind == "agent-end" {
-                    if let Ok(data) = serde_json::from_str::<serde_json::Value>(&e.data) {
-                        let reason = data.get("reason").and_then(|v| v.as_str()).unwrap_or("");
-                        return reason == "server-shutdown" || reason == "peckboard-crash";
-                    }
-                }
-                false
-            });
-
-            // Check if there's an interrupt event from the user (explicit stop)
-            let user_interrupted = tail.iter().rev().any(|e| {
-                e.kind == "interrupt"
-                    && e.data.contains("user")
-            });
-
-            if was_server_shutdown && !user_interrupted {
-                // Clear worker_session_id so orchestrator can re-spawn
-                let now = chrono::Utc::now().to_rfc3339();
-                let _ = db
-                    .update_card(
-                        &card.id,
-                        crate::db::models::UpdateCard {
-                            worker_session_id: Some(None),
-                            updated_at: Some(now),
-                            ..Default::default()
-                        },
-                    )
-                    .await;
-                workers_recovered += 1;
-                tracing::info!(
-                    card_id = %card.id,
-                    session_id = %session_id,
-                    "Recovering interrupted worker for card \"{}\"",
-                    card.title
-                );
-            }
+            // At startup, no processes are alive. Clear the worker ref.
+            let now = chrono::Utc::now().to_rfc3339();
+            let _ = db
+                .update_card(
+                    &card.id,
+                    crate::db::models::UpdateCard {
+                        worker_session_id: Some(None),
+                        updated_at: Some(now),
+                        ..Default::default()
+                    },
+                )
+                .await;
+            workers_recovered += 1;
+            tracing::info!(
+                card_id = %card.id,
+                session_id = %session_id,
+                "Recovering interrupted worker for card \"{}\"",
+                card.title
+            );
         }
     }
 
