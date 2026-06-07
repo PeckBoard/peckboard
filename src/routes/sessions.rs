@@ -397,13 +397,44 @@ async fn append_event(
                 }
             }
 
-            if parts.is_empty() {
+            let answers_text = if parts.is_empty() {
                 format!(
                     "User answered: {}",
                     serde_json::to_string(&answers).unwrap_or_default()
                 )
             } else {
                 format!("The user answered your questions (the question form has been removed from the UI):\n\n{}", parts.join("\n"))
+            };
+
+            // Check if this is a worker session with more pending questions
+            let session_info = state.db.get_session(&id).await.ok().flatten();
+            let has_more = if let Some(ref sess) = session_info {
+                if sess.is_worker {
+                    if let Some(ref project_id) = sess.project_id {
+                        // Count remaining unresolved questions for this project
+                        let worker_sessions = state.db.list_worker_sessions_by_project(project_id).await.unwrap_or_default();
+                        let mut remaining = 0u32;
+                        for ws in &worker_sessions {
+                            let events = state.db.list_events_by_session(&ws.id, None).await.unwrap_or_default();
+                            let resolved_ids: std::collections::HashSet<String> = events.iter()
+                                .filter(|e| e.kind == "question-resolved")
+                                .filter_map(|e| serde_json::from_str::<serde_json::Value>(&e.data).ok()
+                                    .and_then(|d| d.get("question_id").or(d.get("questionId")).and_then(|v| v.as_str()).map(|s| s.to_string())))
+                                .collect();
+                            // Exclude the question we just answered
+                            remaining += events.iter()
+                                .filter(|e| e.kind == "question" && !resolved_ids.contains(&e.id) && e.id != question_id)
+                                .count() as u32;
+                        }
+                        remaining > 0
+                    } else { false }
+                } else { false }
+            } else { false };
+
+            if has_more {
+                format!("{}\n\n**Note:** The user is still answering other worker questions. More answers may follow shortly. Continue working with what you have — do not ask the same questions again.", answers_text)
+            } else {
+                answers_text
             }
         };
 

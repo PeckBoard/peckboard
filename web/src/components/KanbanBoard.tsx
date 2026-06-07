@@ -108,7 +108,6 @@ export default function KanbanBoard({ projectId }: KanbanBoardProps) {
   const [questionAnswers, setQuestionAnswers] = useState<Record<string, Record<number, string>>>({})
   const [submittingQuestion, setSubmittingQuestion] = useState<string | null>(null)
   const [questionDialogOpen, setQuestionDialogOpen] = useState(false)
-  const [questionIndex, setQuestionIndex] = useState(0)
 
   const addEventListener = useWsStore((s) => s.addEventListener)
   const removeEventListener = useWsStore((s) => s.removeEventListener)
@@ -405,13 +404,13 @@ export default function KanbanBoard({ projectId }: KanbanBoardProps) {
         </button>
       )}
 
-      {/* Question dialog — one at a time */}
+      {/* Question dialog — shows first pending question */}
       {questionDialogOpen && pendingQuestions.length > 0 && (() => {
-        const safeIdx = Math.min(questionIndex, pendingQuestions.length - 1)
-        const pq = pendingQuestions[safeIdx]
+        const pq = pendingQuestions[0]
         const answers = questionAnswers[pq.eventId] ?? {}
         const isSubmitting = submittingQuestion === pq.eventId
         const hasAnswers = pq.questions.some((_, idx) => (answers[idx] ?? '').trim().length > 0)
+        const remaining = pendingQuestions.length - 1
 
         return (
           <div className="modal-backdrop" onClick={() => setQuestionDialogOpen(false)}>
@@ -419,7 +418,9 @@ export default function KanbanBoard({ projectId }: KanbanBoardProps) {
               {/* Header with context */}
               <div className="question-dialog-header">
                 <div className="question-dialog-counter">
-                  Question {safeIdx + 1} of {pendingQuestions.length}
+                  {remaining > 0
+                    ? `${pendingQuestions.length} questions remaining`
+                    : 'Last question'}
                 </div>
                 {pq.cardTitle && (
                   <div className="question-dialog-context">
@@ -475,7 +476,7 @@ export default function KanbanBoard({ projectId }: KanbanBoardProps) {
                         placeholder="Type your answer..."
                         value={answers[idx] ?? ''}
                         onChange={(e) => setQuestionAnswer(pq.eventId, idx, e.target.value)}
-                        onKeyDown={(e) => { if (e.key === 'Enter' && pq.questions.length === 1) handleAnswerQuestion(pq) }}
+                        onKeyDown={(e) => { if (e.key === 'Enter' && pq.questions.length === 1 && hasAnswers) handleAnswerQuestion(pq) }}
                         disabled={isSubmitting}
                         autoFocus
                       />
@@ -484,34 +485,18 @@ export default function KanbanBoard({ projectId }: KanbanBoardProps) {
                 ))}
               </div>
 
-              {/* Footer with nav + actions */}
+              {/* Footer — submit or dismiss only */}
               <div className="question-dialog-footer">
-                <div className="question-dialog-nav">
-                  <button
-                    className="btn-secondary btn-sm"
-                    onClick={() => setQuestionIndex(Math.max(0, safeIdx - 1))}
-                    disabled={safeIdx === 0}
-                  >
-                    Back
-                  </button>
-                  <button
-                    className="btn-secondary btn-sm"
-                    onClick={() => setQuestionIndex(Math.min(pendingQuestions.length - 1, safeIdx + 1))}
-                    disabled={safeIdx >= pendingQuestions.length - 1}
-                  >
-                    Next
-                  </button>
-                </div>
-                <div className="question-dialog-actions">
-                  <button className="btn-secondary" onClick={() => handleDismissQuestion(pq)} disabled={isSubmitting}>Dismiss</button>
-                  <button className="btn-primary" onClick={() => {
-                    handleAnswerQuestion(pq)
-                    // After submit, stay on same index (next question slides in) or close if last
-                    if (pendingQuestions.length <= 1) setQuestionDialogOpen(false)
-                  }} disabled={!hasAnswers || isSubmitting}>
-                    {isSubmitting ? 'Submitting...' : 'Submit'}
-                  </button>
-                </div>
+                <button className="btn-secondary" onClick={async () => {
+                  await handleDismissQuestion(pq)
+                  if (pendingQuestions.length <= 1) setQuestionDialogOpen(false)
+                }} disabled={isSubmitting}>Dismiss</button>
+                <button className="btn-primary" onClick={async () => {
+                  await handleAnswerQuestion(pq)
+                  if (pendingQuestions.length <= 1) setQuestionDialogOpen(false)
+                }} disabled={!hasAnswers || isSubmitting}>
+                  {isSubmitting ? 'Submitting...' : 'Submit'}
+                </button>
               </div>
             </div>
           </div>
