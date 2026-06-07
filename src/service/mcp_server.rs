@@ -2156,13 +2156,9 @@ impl McpToolRegistry {
             if session.id == ctx.session_id {
                 continue;
             }
-            // Only notify sessions with active cards (not in terminal states)
-            if let Some(ref card_id) = session.card_id {
-                if let Ok(Some(card)) = ctx.db.get_card(card_id).await {
-                    if card.step == "done" || card.step == "wont_do" {
-                        continue;
-                    }
-                }
+            // Skip terminal cards — they don't need notifications
+            if self.is_session_terminal(ctx, session).await {
+                continue;
             }
 
             // Build the notification message
@@ -2359,12 +2355,8 @@ impl McpToolRegistry {
                     if ws.id == ctx.session_id {
                         continue;
                     }
-                    if let Some(ref cid) = ws.card_id {
-                        if let Ok(Some(c)) = ctx.db.get_card(cid).await {
-                            if c.step == "done" || c.step == "wont_do" {
-                                continue;
-                            }
-                        }
+                    if self.is_session_terminal(ctx, ws).await {
+                        continue;
                     }
                     self.deliver_to_worker(ctx, &ws.id, &msg).await;
                 }
@@ -2465,6 +2457,14 @@ impl McpToolRegistry {
             anyhow::bail!("target session is not a worker");
         }
 
+        // Reject sends to workers whose card is done or wont_do
+        if self.is_session_terminal(ctx, &target).await {
+            return Ok(serde_json::json!({
+                "status": "target_terminal",
+                "message": "Target worker's card is done or wont_do — message not delivered.",
+            }));
+        }
+
         let msg = format!(
             "[Worker message from \"{}\"] (NOT from the user — this is from another worker)\n\
              From session: {}\n\n{}\n\n\
@@ -2484,9 +2484,6 @@ impl McpToolRegistry {
         }))
     }
 
-    /// Helper: deliver a message to a worker session immediately.
-    /// Appends as a user event (for persistence) AND broadcasts for
-    /// immediate stdin delivery to a running agent.
     async fn handle_list_project_reports(&self, ctx: &ToolCallContext) -> anyhow::Result<Value> {
         tracing::info!(session_id = %ctx.session_id, "MCP tool: list_project_reports");
 
@@ -2787,6 +2784,26 @@ impl McpToolRegistry {
         }))
     }
 
+    /// Returns true if the worker session is associated with a card in a
+    /// terminal state (`done` or `wont_do`). Used to filter inter-worker
+    /// communication so finished cards don't get woken up.
+    async fn is_session_terminal(
+        &self,
+        ctx: &ToolCallContext,
+        session: &crate::db::models::Session,
+    ) -> bool {
+        let Some(card_id) = session.card_id.as_deref() else {
+            return false;
+        };
+        match ctx.db.get_card(card_id).await {
+            Ok(Some(card)) => card.step == "done" || card.step == "wont_do",
+            _ => false,
+        }
+    }
+
+    /// Deliver a message to a worker session immediately: append a user
+    /// event (so the agent sees it on resume) and broadcast for in-flight
+    /// stdin delivery to any running agent.
     async fn deliver_to_worker(
         &self,
         ctx: &ToolCallContext,
