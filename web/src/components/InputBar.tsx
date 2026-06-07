@@ -27,10 +27,11 @@ function fileToBase64(file: File): Promise<string> {
   })
 }
 
-interface ReportSuggestion {
-  folder: string
-  file: string
-  title: string
+interface AutocompleteSuggestion {
+  type: 'report' | 'session'
+  label: string
+  detail: string
+  ref: string
 }
 
 export default function InputBar({ sessionId }: InputBarProps) {
@@ -41,26 +42,48 @@ export default function InputBar({ sessionId }: InputBarProps) {
   const [sending, setSending] = useState(false)
   const [attachments, setAttachments] = useState<PendingAttachment[]>([])
   const [uploading, setUploading] = useState(false)
-  const [reportSuggestions, setReportSuggestions] = useState<ReportSuggestion[]>([])
-  const [showReportAutocomplete, setShowReportAutocomplete] = useState(false)
-  const [allReports, setAllReports] = useState<ReportSuggestion[]>([])
+  const [suggestions, setSuggestions] = useState<AutocompleteSuggestion[]>([])
+  const [showAutocomplete, setShowAutocomplete] = useState(false)
+  const [allSuggestions, setAllSuggestions] = useState<AutocompleteSuggestion[]>([])
   const textareaRef = useRef<HTMLTextAreaElement>(null)
   const fileInputRef = useRef<HTMLInputElement>(null)
 
-  // Fetch report list for autocomplete
+  // Fetch reports and sessions for autocomplete
   useEffect(() => {
+    const items: AutocompleteSuggestion[] = []
+
     authedFetch('/api/reports')
       .then((res) => (res.ok ? res.json() : null))
       .then((data) => {
         const list = Array.isArray(data) ? data : (data?.reports ?? [])
-        setAllReports(list.map((r: ReportSuggestion & { date?: string }) => ({
-          folder: r.folder,
-          file: r.file,
-          title: r.title || r.file,
-        })))
+        for (const r of list) {
+          items.push({
+            type: 'report',
+            label: r.title || r.file,
+            detail: `${r.folder}/${r.file}`,
+            ref: `[report:${r.folder}/${r.file}]`,
+          })
+        }
       })
       .catch(() => {})
-  }, [])
+
+    authedFetch('/api/sessions')
+      .then((res) => (res.ok ? res.json() : null))
+      .then((data) => {
+        const list = Array.isArray(data) ? data : (data?.sessions ?? data ?? [])
+        for (const s of list) {
+          if (s.id === sessionId) continue
+          items.push({
+            type: 'session',
+            label: s.name || 'Untitled',
+            detail: s.id,
+            ref: `[session:${s.id}]`,
+          })
+        }
+        setAllSuggestions(items)
+      })
+      .catch(() => setAllSuggestions(items))
+  }, [sessionId])
 
   // Re-initialize draft when sessionId changes
   useEffect(() => {
@@ -86,32 +109,31 @@ export default function InputBar({ sessionId }: InputBarProps) {
     setText(val)
     setDraft(sessionId, val)
 
-    // Check for @report autocomplete trigger
+    // Check for @ autocomplete trigger
     const cursor = e.target.selectionStart ?? val.length
     const before = val.slice(0, cursor)
     const atMatch = before.match(/@(\S*)$/)
     if (atMatch) {
       const filter = atMatch[1].toLowerCase()
-      const filtered = allReports.filter((r) =>
-        r.title.toLowerCase().includes(filter) || r.file.toLowerCase().includes(filter)
+      const filtered = allSuggestions.filter((s) =>
+        s.label.toLowerCase().includes(filter) || s.detail.toLowerCase().includes(filter)
       )
-      setReportSuggestions(filtered.slice(0, 8))
-      setShowReportAutocomplete(filtered.length > 0)
+      setSuggestions(filtered.slice(0, 10))
+      setShowAutocomplete(filtered.length > 0)
     } else {
-      setShowReportAutocomplete(false)
+      setShowAutocomplete(false)
     }
   }
 
-  const insertReport = (report: ReportSuggestion) => {
+  const insertSuggestion = (item: AutocompleteSuggestion) => {
     const cursor = textareaRef.current?.selectionStart ?? text.length
     const before = text.slice(0, cursor)
     const after = text.slice(cursor)
     const atIdx = before.lastIndexOf('@')
-    const ref = `[report:${report.folder}/${report.file}]`
-    const newText = before.slice(0, atIdx) + ref + after
+    const newText = before.slice(0, atIdx) + item.ref + after
     setText(newText)
     setDraft(sessionId, newText)
-    setShowReportAutocomplete(false)
+    setShowAutocomplete(false)
     textareaRef.current?.focus()
   }
 
@@ -180,18 +202,21 @@ export default function InputBar({ sessionId }: InputBarProps) {
 
   return (
     <div className="input-bar">
-      {/* Report autocomplete dropdown */}
-      {showReportAutocomplete && (
+      {/* Autocomplete dropdown for @mentions */}
+      {showAutocomplete && (
         <div className="autocomplete-dropdown">
-          <div className="autocomplete-header">Reports — type to filter</div>
-          {reportSuggestions.map((r) => (
+          <div className="autocomplete-header">@ — reports &amp; sessions</div>
+          {suggestions.map((s, i) => (
             <button
-              key={`${r.folder}/${r.file}`}
+              key={`${s.type}-${s.detail}-${i}`}
               className="autocomplete-item"
-              onMouseDown={(e) => { e.preventDefault(); insertReport(r) }}
+              onMouseDown={(e) => { e.preventDefault(); insertSuggestion(s) }}
             >
-              <span className="autocomplete-item-title">{r.title}</span>
-              <span className="autocomplete-item-path">{r.folder}/{r.file}</span>
+              <span className="autocomplete-item-title">
+                <span className={`autocomplete-type-badge autocomplete-type-${s.type}`}>{s.type}</span>
+                {s.label}
+              </span>
+              <span className="autocomplete-item-path">{s.detail}</span>
             </button>
           ))}
         </div>

@@ -1015,6 +1015,18 @@
   font-family: var(--font-mono);
 }
 
+.autocomplete-type-badge {
+  font-size: 9px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  padding: 1px 5px;
+  border-radius: var(--radius-sm);
+  margin-right: 6px;
+}
+.autocomplete-type-report { background: var(--accent-subtle); color: var(--accent); }
+.autocomplete-type-session { background: var(--success-bg); color: var(--success); }
+
 .question-input-wrapper {
   position: relative;
 }
