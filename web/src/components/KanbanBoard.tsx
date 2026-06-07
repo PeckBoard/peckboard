@@ -78,7 +78,6 @@ export default function KanbanBoard({ projectId }: KanbanBoardProps) {
   const [addTitle, setAddTitle] = useState('')
   const [addDescription, setAddDescription] = useState('')
   const [addPriority, setAddPriority] = useState(2)
-  const [addWorkflow, setAddWorkflow] = useState('')
   const [addModel, setAddModel] = useState('')
   const [addEffort, setAddEffort] = useState('')
   const [addSubmitting, setAddSubmitting] = useState(false)
@@ -215,14 +214,12 @@ export default function KanbanBoard({ projectId }: KanbanBoardProps) {
         description: addDescription.trim(),
         step: 'backlog',
         priority: addPriority,
-        workflow: addWorkflow || undefined,
         model: addModel || undefined,
         effort: addEffort || undefined,
       } as Partial<Card>)
       setAddTitle('')
       setAddDescription('')
       setAddPriority(2)
-      setAddWorkflow('')
       setAddModel('')
       setAddEffort('')
       setShowAddForm(false)
@@ -438,14 +435,6 @@ export default function KanbanBoard({ projectId }: KanbanBoardProps) {
               <option value={1}>High priority</option>
               <option value={2}>Medium priority</option>
               <option value={3}>Low priority</option>
-            </select>
-            <select value={addWorkflow} onChange={(e) => setAddWorkflow(e.target.value)}>
-              <option value="">Default workflow</option>
-              {workflows.map((w) => (
-                <option key={w.id} value={w.id}>
-                  {w.name}
-                </option>
-              ))}
             </select>
             <select value={addModel} onChange={(e) => setAddModel(e.target.value)}>
               <option value="">Default model</option>
