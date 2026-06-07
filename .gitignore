@@ -2,3 +2,6 @@
 .DS_Store
 node_modules/
 web/dist/
+.idea/
+web/test-results/
+web/playwright-report/

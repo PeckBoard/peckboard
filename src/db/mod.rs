@@ -51,7 +51,6 @@ impl Db {
     }
 
     /// Create an in-memory database for testing. Runs all migrations.
-    #[cfg(test)]
     pub fn in_memory() -> anyhow::Result<Self> {
         let mut conn = SqliteConnection::establish(":memory:")
             .map_err(|e| anyhow::anyhow!("failed to open in-memory database: {e}"))?;

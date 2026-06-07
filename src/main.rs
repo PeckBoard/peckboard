@@ -3,8 +3,9 @@ use peckboard::auth::token::generate_jwt_secret;
 use peckboard::config::Config;
 use peckboard::db::Db;
 use peckboard::plugin::manager::PluginManager;
-use peckboard::provider::claude::manager::SessionManager;
 use peckboard::provider::claude::register_claude_provider;
+use peckboard::provider::manager::SessionManager;
+use peckboard::provider::mock::register_mock_provider;
 use peckboard::provider::registry::ProviderRegistry;
 use peckboard::routes::api_router;
 use peckboard::security::{origin_check, repair_dangling_sessions, security_headers};
@@ -56,9 +57,10 @@ async fn main() -> anyhow::Result<()> {
     let login_limiter = RateLimiter::new(5);
 
     let broadcaster = Broadcaster::new();
-    let provider_registry = ProviderRegistry::new();
+    let provider_registry = Arc::new(ProviderRegistry::new());
     register_claude_provider(&provider_registry).await;
-    let session_manager = SessionManager::new();
+    register_mock_provider(&provider_registry).await;
+    let session_manager = SessionManager::new(provider_registry.clone());
 
     let mcp_tokens = McpTokenRegistry::new();
     let push_service = PushService::new(&config.data_dir);
@@ -110,7 +112,7 @@ async fn main() -> anyhow::Result<()> {
     // Start worker watchdog (orphan cleanup every 60s)
     {
         let watchdog_db = state.db.clone();
-        let watchdog_sm = SessionManager::new();
+        let watchdog_sm = SessionManager::new(state.provider_registry.clone());
         let watchdog_bc = state.broadcaster.clone();
         tokio::spawn(watchdog::start_watchdog(watchdog_db, watchdog_sm, watchdog_bc));
         tracing::info!("Worker watchdog started");

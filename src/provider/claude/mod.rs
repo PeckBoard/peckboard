@@ -1,7 +1,8 @@
-pub mod manager;
 pub mod process;
+pub mod provider;
 
-use crate::provider::registry::{ProviderInfo, ProviderRegistry};
+pub use provider::register_claude_provider;
+
 use crate::provider::stream::{ModelInfo, SpawnConfig};
 
 /// System prompt appended to every session to standardize how the agent
@@ -164,21 +165,8 @@ Always prefer asking over assuming. The user is remote and cannot see what you s
 You are restricted to the current working directory and its subdirectories. Do NOT read, write, edit, or access any files or directories outside of this project folder. Any attempt to access paths outside the project directory will be denied. All file paths must be within the project root.
 "#;
 
-/// Register the built-in Claude CLI provider in the registry.
-pub async fn register_claude_provider(registry: &ProviderRegistry) {
-    let models = discover_models();
-
-    registry
-        .register(ProviderInfo {
-            id: "claude".into(),
-            display_name: "Claude (CLI)".into(),
-            models,
-        })
-        .await;
-}
-
 /// Discover available Claude models.
-fn discover_models() -> Vec<ModelInfo> {
+pub(crate) fn discover_models() -> Vec<ModelInfo> {
     let mut models = vec![
         ModelInfo {
             id: "claude-opus-4-8".into(),

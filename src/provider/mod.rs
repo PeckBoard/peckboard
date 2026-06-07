@@ -1,4 +1,7 @@
+pub mod agent;
 pub mod claude;
+pub mod manager;
+pub mod mock;
 pub mod registry;
 pub mod stream;
 

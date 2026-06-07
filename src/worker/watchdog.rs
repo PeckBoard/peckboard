@@ -2,7 +2,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use crate::db::Db;
-use crate::provider::claude::manager::SessionManager;
+use crate::provider::manager::SessionManager;
 use crate::ws::broadcaster::Broadcaster;
 
 /// Start the worker watchdog loop. Runs every 60 seconds and cleans up orphaned
@@ -159,7 +159,9 @@ mod tests {
     #[tokio::test]
     async fn test_sweep_orphans_no_sessions() {
         let db = setup().await;
-        let sm = SessionManager::new();
+        let sm = SessionManager::new(std::sync::Arc::new(
+            crate::provider::registry::ProviderRegistry::new(),
+        ));
         // Should not panic with no worker sessions
         sweep_orphans(&db, &sm).await;
     }
@@ -167,7 +169,9 @@ mod tests {
     #[tokio::test]
     async fn test_sweep_orphans_cleans_no_card_session() {
         let db = setup().await;
-        let sm = SessionManager::new();
+        let sm = SessionManager::new(std::sync::Arc::new(
+            crate::provider::registry::ProviderRegistry::new(),
+        ));
         let ts = chrono::Utc::now().to_rfc3339();
 
         // Create a worker session with no card_id (orphaned worker)
@@ -199,7 +203,9 @@ mod tests {
     #[tokio::test]
     async fn test_sweep_orphans_keeps_valid_session() {
         let db = setup().await;
-        let sm = SessionManager::new();
+        let sm = SessionManager::new(std::sync::Arc::new(
+            crate::provider::registry::ProviderRegistry::new(),
+        ));
         let ts = chrono::Utc::now().to_rfc3339();
 
         // Create the worker session first (no card_id yet)
@@ -267,7 +273,9 @@ mod tests {
     #[tokio::test]
     async fn test_sweep_orphans_cleans_mismatched_session() {
         let db = setup().await;
-        let sm = SessionManager::new();
+        let sm = SessionManager::new(std::sync::Arc::new(
+            crate::provider::registry::ProviderRegistry::new(),
+        ));
         let ts = chrono::Utc::now().to_rfc3339();
 
         // Create two worker sessions
