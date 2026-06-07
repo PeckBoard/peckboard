@@ -1026,6 +1026,7 @@
 }
 .autocomplete-type-report { background: var(--accent-subtle); color: var(--accent); }
 .autocomplete-type-session { background: var(--success-bg); color: var(--success); }
+.autocomplete-type-card { background: var(--warning-bg); color: var(--warning); }
 
 .question-input-wrapper {
   position: relative;

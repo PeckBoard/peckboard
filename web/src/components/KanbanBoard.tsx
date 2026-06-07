@@ -97,8 +97,8 @@ export default function KanbanBoard({ projectId }: KanbanBoardProps) {
 
   const [workflows, setWorkflows] = useState<WorkflowInfo[]>([])
   const [models, setModels] = useState<ModelInfo[]>([])
-  const [allMentions, setAllMentions] = useState<{ type: 'report' | 'session'; label: string; detail: string; ref: string }[]>([])
-  const [mentionAutocomplete, setMentionAutocomplete] = useState<{ eventId: string; idx: number; suggestions: { type: 'report' | 'session'; label: string; detail: string; ref: string }[] } | null>(null)
+  const [allMentions, setAllMentions] = useState<{ type: string; label: string; detail: string; ref: string }[]>([])
+  const [mentionAutocomplete, setMentionAutocomplete] = useState<{ eventId: string; idx: number; suggestions: { type: string; label: string; detail: string; ref: string }[] } | null>(null)
   const [priorities, setPriorities] = useState<PriorityInfo[]>([
     { label: 'Critical', value: 0, description: 'Blocks everything' },
     { label: 'High', value: 1, description: 'Important' },
@@ -300,27 +300,31 @@ export default function KanbanBoard({ projectId }: KanbanBoardProps) {
         if (data?.priorities) setPriorities(data.priorities)
       })
       .catch(() => {})
-    const mentions: { type: 'report' | 'session'; label: string; detail: string; ref: string }[] = []
-    authedFetch('/api/reports')
-      .then((res) => (res.ok ? res.json() : null))
-      .then((data) => {
-        const list = Array.isArray(data) ? data : (data?.reports ?? [])
-        for (const r of list) {
-          mentions.push({ type: 'report', label: r.title || r.file, detail: `${r.folder}/${r.file}`, ref: `[report:${r.folder}/${r.file}]` })
+    // Fetch reports, sessions, and cards for @ autocomplete
+    Promise.all([
+      authedFetch('/api/reports').then((r) => r.ok ? r.json() : null).catch(() => null),
+      authedFetch('/api/sessions').then((r) => r.ok ? r.json() : null).catch(() => null),
+      authedFetch(`/api/projects/${projectId}/cards`).then((r) => r.ok ? r.json() : null).catch(() => null),
+    ]).then(([reportsData, sessionsData, cardsData]) => {
+      const items: { type: 'report' | 'session' | 'card'; label: string; detail: string; ref: string }[] = []
+      const reports = Array.isArray(reportsData) ? reportsData : (reportsData?.reports ?? [])
+      for (const r of reports) {
+        items.push({ type: 'report', label: r.title || r.file, detail: `${r.folder}/${r.file}`, ref: `[report:${r.folder}/${r.file}]` })
+      }
+      const sessions = Array.isArray(sessionsData) ? sessionsData : (sessionsData?.sessions ?? sessionsData ?? [])
+      for (const s of sessions) {
+        items.push({ type: 'session', label: s.name || 'Untitled', detail: s.id, ref: `[session:${s.id}]` })
+      }
+      const cardsList = Array.isArray(cardsData) ? cardsData : (cardsData?.cards ?? cardsData ?? [])
+      for (const c of cardsList) {
+        const sid = c.worker_session_id || c.last_worker_session_id
+        if (sid) {
+          items.push({ type: 'card', label: c.title, detail: `${c.step} — ${sid}`, ref: `[session:${sid}]` })
         }
-      })
-      .catch(() => {})
-    authedFetch('/api/sessions')
-      .then((res) => (res.ok ? res.json() : null))
-      .then((data) => {
-        const list = Array.isArray(data) ? data : (data?.sessions ?? data ?? [])
-        for (const s of list) {
-          mentions.push({ type: 'session', label: s.name || 'Untitled', detail: s.id, ref: `[session:${s.id}]` })
-        }
-        setAllMentions(mentions)
-      })
-      .catch(() => setAllMentions(mentions))
-  }, [])
+      }
+      setAllMentions(items)
+    })
+  }, [projectId])
 
   // Map step aliases to canonical step names for display
   const normalizeStep = (step: string) => {
