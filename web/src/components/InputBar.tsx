@@ -163,10 +163,15 @@ export default function InputBar({ sessionId }: InputBarProps) {
             <button
               key={`${s.type}-${s.detail}-${i}`}
               className="autocomplete-item"
-              onMouseDown={(e) => { e.preventDefault(); insertSuggestion(s) }}
+              onMouseDown={(e) => {
+                e.preventDefault()
+                insertSuggestion(s)
+              }}
             >
               <span className="autocomplete-item-title">
-                <span className={`autocomplete-type-badge autocomplete-type-${s.type}`}>{s.type}</span>
+                <span className={`autocomplete-type-badge autocomplete-type-${s.type}`}>
+                  {s.type}
+                </span>
                 {s.label}
               </span>
               <span className="autocomplete-item-path">{s.detail}</span>

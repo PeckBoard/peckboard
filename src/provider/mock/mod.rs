@@ -290,6 +290,30 @@ async fn run_scenario(
             .await;
             return false;
         }
+        "markdown" => {
+            // A single assistant text chunk containing markdown features the
+            // renderer is expected to handle: heading, bold, list, inline
+            // code, and a fenced code block with a language tag (so the
+            // syntax highlighter has something to colour).
+            let md = "# Hello from mock\n\n\
+                      This reply has **bold text**, a list, and a code block.\n\n\
+                      - first\n\
+                      - second\n\
+                      - third\n\n\
+                      Inline `mock:markdown` reference.\n\n\
+                      ```rust\n\
+                      fn main() {\n\
+                          println!(\"hi\");\n\
+                      }\n\
+                      ```\n";
+            emit_event(
+                db,
+                broadcaster,
+                session_id,
+                ProviderEvent::Text { text: md.into() },
+            )
+            .await;
+        }
         "ask" => {
             let req_id = uuid::Uuid::new_v4().to_string();
             emit_event(
@@ -368,6 +392,11 @@ pub async fn register_mock_provider(registry: &ProviderRegistry) {
             id: "ask".into(),
             display_name: "Mock: ask".into(),
             capabilities: vec!["mock".into(), "interactive".into()],
+        },
+        ModelInfo {
+            id: "markdown".into(),
+            display_name: "Mock: markdown".into(),
+            capabilities: vec!["mock".into(), "markdown".into()],
         },
     ];
 

@@ -17,9 +17,15 @@ export function useMentions(excludeSessionId?: string): MentionItem[] {
 
   useEffect(() => {
     Promise.all([
-      authedFetch('/api/reports').then((r) => (r.ok ? r.json() : null)).catch(() => null),
-      authedFetch('/api/sessions').then((r) => (r.ok ? r.json() : null)).catch(() => null),
-      authedFetch('/api/projects').then((r) => (r.ok ? r.json() : null)).catch(() => null),
+      authedFetch('/api/reports')
+        .then((r) => (r.ok ? r.json() : null))
+        .catch(() => null),
+      authedFetch('/api/sessions')
+        .then((r) => (r.ok ? r.json() : null))
+        .catch(() => null),
+      authedFetch('/api/projects')
+        .then((r) => (r.ok ? r.json() : null))
+        .catch(() => null),
     ]).then(async ([reportsData, sessionsData, projectsData]) => {
       const result: MentionItem[] = []
 
@@ -35,7 +41,9 @@ export function useMentions(excludeSessionId?: string): MentionItem[] {
       }
 
       // Sessions
-      const sessions = Array.isArray(sessionsData) ? sessionsData : (sessionsData?.sessions ?? sessionsData ?? [])
+      const sessions = Array.isArray(sessionsData)
+        ? sessionsData
+        : (sessionsData?.sessions ?? sessionsData ?? [])
       for (const s of sessions) {
         if (s.id === excludeSessionId) continue
         result.push({
@@ -47,7 +55,9 @@ export function useMentions(excludeSessionId?: string): MentionItem[] {
       }
 
       // Cards from all projects
-      const projects = Array.isArray(projectsData) ? projectsData : (projectsData?.projects ?? projectsData ?? [])
+      const projects = Array.isArray(projectsData)
+        ? projectsData
+        : (projectsData?.projects ?? projectsData ?? [])
       for (const p of projects) {
         try {
           const cardsRes = await authedFetch(`/api/projects/${p.id}/cards`)

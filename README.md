@@ -85,18 +85,32 @@ Full list of args, env vars, and `config.json` keys: `docs/architecture/config.m
 
 ## Develop
 
-Two processes, side by side:
+One command starts both processes:
 
 ```bash
-# Terminal 1 — backend with auto-restart on changes (optional: cargo install cargo-watch)
-cargo run
-
-# Terminal 2 — Vite dev server with HMR
-cd web
-npm run dev
+./scripts/dev.sh
 ```
 
-Vite proxies API and WebSocket traffic to the Axum backend. Edit React under `web/src/`, edit Rust under `src/`.
+This runs the Axum backend on `http://localhost:3333` (debug build, incremental — first start is slow, subsequent restarts are fast) and the Vite dev server on `http://localhost:5173` with HMR. Browse to **`http://localhost:5173`**: Vite proxies `/api/*` and `/ws` to the backend so the two behave as one app.
+
+Frontend edits hot-swap instantly. Backend edits require a manual restart — install `cargo-watch` if you want auto-restart:
+
+```bash
+cargo install cargo-watch
+cargo watch -x run
+```
+
+If you'd rather run the two by hand:
+
+```bash
+# Terminal 1
+cargo run
+
+# Terminal 2
+cd web && npm run dev
+```
+
+You only need `cargo build --release` for shipping the single embedded binary or for running the Playwright e2e suite (which boots the release binary). Edit React under `web/src/`, edit Rust under `src/`.
 
 ### Project layout
 

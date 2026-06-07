@@ -1570,10 +1570,7 @@ impl McpToolRegistry {
         };
 
         // Find all other worker sessions in the same project
-        let worker_sessions = ctx
-            .db
-            .list_worker_sessions_by_project(project_id)
-            .await?;
+        let worker_sessions = ctx.db.list_worker_sessions_by_project(project_id).await?;
 
         let mut notified_count = 0u32;
 
@@ -1686,7 +1683,7 @@ mod tests {
         assert!(names.contains(&"delete_card"));
         assert!(names.contains(&"move_card_to_done"));
         assert!(names.contains(&"move_card_to_wont_do"));
-        assert_eq!(names.len(), 18);
+        assert_eq!(names.len(), 19);
     }
 
     #[test]
