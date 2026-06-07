@@ -158,19 +158,24 @@ pub async fn stream_events(
                 continue;
             }
             event = broadcast_rx.recv() => {
-                // Check for inter-worker messages addressed to this session
                 if let Ok(ws_event) = event {
-                    if ws_event.event_type == "worker-stdin-deliver"
-                        && ws_event.session_id == session_id
-                    {
+                    if ws_event.session_id != session_id {
+                        // Not for us
+                    } else if ws_event.event_type == "worker-stdin-deliver" {
                         if let Some(text) = ws_event.data.get("text").and_then(|v| v.as_str()) {
                             tracing::info!(
                                 session_id = %session_id,
                                 "Delivering inter-worker message to running agent"
                             );
-                            // Write directly to stdin so the agent receives it immediately
                             write_stdin_line(&mut stdin_pipe, text, &session_id).await;
                         }
+                    } else if ws_event.event_type == "worker-interrupt" {
+                        tracing::info!(
+                            session_id = %session_id,
+                            "Interrupting agent for inter-worker communication"
+                        );
+                        // Send empty line to interrupt the CLI (simulates pressing Enter)
+                        write_stdin_line(&mut stdin_pipe, "", &session_id).await;
                     }
                 }
                 continue;

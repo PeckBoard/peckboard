@@ -2347,11 +2347,12 @@ impl McpToolRegistry {
             )
             .await;
 
-        // Broadcast for immediate delivery to running agent's stdin
+        // Broadcast interrupt to stop the agent's current turn, then the
+        // completion handler will re-spawn with the pending message
         ctx.broadcaster.broadcast(crate::ws::broadcaster::WsEvent {
-            event_type: "worker-stdin-deliver".into(),
+            event_type: "worker-interrupt".into(),
             session_id: target_session_id.to_string(),
-            data: serde_json::json!({ "text": message }),
+            data: serde_json::json!({ "reason": "inter-worker-message" }),
         });
     }
 
