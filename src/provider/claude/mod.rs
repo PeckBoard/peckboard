@@ -30,6 +30,10 @@ Each option in the `options` array is an object:
 | `label` | string | yes | The option text the user sees and selects |
 | `description` | string | yes | Help text shown below the label. ALWAYS include this — use a brief clarification or empty string "" if no extra detail is needed |
 
+## IMPORTANT: One question per call
+
+You MUST send exactly ONE question per `mcp__peckboard__ask_user` call. The UI shows questions one at a time as a dialog. If you have multiple questions, call the tool once for each question separately. Wait for the answer before asking the next question.
+
 ## Question types
 
 **Multiple choice (single select)** — user picks exactly one option:
@@ -41,7 +45,8 @@ Each option in the `options` array is an object:
     "options": [
       {"label": "PostgreSQL", "description": "Production-grade relational DB"},
       {"label": "SQLite", "description": "Lightweight, file-based"},
-      {"label": "MySQL", "description": "Popular open-source relational DB"}
+      {"label": "MySQL", "description": "Popular open-source relational DB"},
+      {"label": "Other", "description": "I'll type my preference"}
     ]
   }]
 }
@@ -74,63 +79,37 @@ Each option in the `options` array is an object:
 }
 ```
 
-**Mixed** — combine multiple question types in one call:
+**Yes/No confirmation:**
 ```json
 {
-  "questions": [
-    {
-      "question": "Which framework?",
-      "header": "Setup",
-      "options": [{"label": "React", "description": ""}, {"label": "Vue", "description": ""}, {"label": "Svelte", "description": ""}]
-    },
-    {
-      "question": "What should the app be called?",
-      "header": "Setup"
-    },
-    {
-      "question": "Which extras?",
-      "header": "Features",
-      "multiSelect": true,
-      "options": [{"label": "TypeScript", "description": ""}, {"label": "ESLint", "description": ""}, {"label": "Prettier", "description": ""}]
-    }
-  ]
+  "questions": [{
+    "question": "The file already exists. Should I overwrite it?",
+    "header": "Confirm",
+    "options": [
+      {"label": "Yes", "description": "Overwrite the existing file"},
+      {"label": "No", "description": "Keep the existing file"}
+    ]
+  }]
 }
 ```
 
 ## Answer format (what you receive back)
 
-After the user submits, you receive an `answers` object keyed by question text:
-```json
-{
-  "answers": {
-    "Which framework?": "React",
-    "What should the app be called?": "my-app",
-    "Which extras?": "TypeScript, ESLint"
-  }
-}
-```
-
+After the user submits, you receive the answer as text:
 - Single select: the selected label string
 - Multi select: selected labels joined with ", "
 - Fill-in-the-blank: the typed text
 
 ## Guidelines
 
-- ALWAYS use `mcp__peckboard__ask_user` instead of asking in plain text — never put questions in your text response
-- Group related questions in a single call — avoid multiple back-and-forth calls
-- Use `header` to visually categorize questions when you have 2+ questions
+- ALWAYS use `mcp__peckboard__ask_user` — never ask questions in plain text
+- ONE question per call — the UI shows a single-question dialog
+- If you need multiple answers, call the tool multiple times sequentially
 - Use `description` when the option label alone isn't self-explanatory
 - Prefer multiple choice over free-form when there is a known set of valid answers
+- For multiple choice, always include an "Other" option so the user can provide a custom answer
 - Keep questions concise and actionable
 - Wait for the user's response before proceeding — do not assume answers
-- For EVERY multiple choice question, always include an "Other" option as the last choice with a fill-in-the-blank follow-up question, so the user can provide a custom answer if none of the options fit. Example:
-  ```json
-  {"label": "Other", "description": "I'll specify in the next question"}
-  ```
-  Then add a follow-up fill-in-the-blank question like:
-  ```json
-  {"question": "If you chose Other above, what would you like instead?", "header": "Setup"}
-  ```
 
 # Proactive clarification
 
