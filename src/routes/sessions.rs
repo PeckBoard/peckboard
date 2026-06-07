@@ -680,6 +680,112 @@ async fn send_message(
         )
         .await;
 
+    // 1b. Resolve session references [session:id] in the message text.
+    // For Claude: include conversation_id so the agent can reference it.
+    // For other providers: inline a transcript summary.
+    let resolved_text = {
+        let mut text = body.text.clone();
+        let re = regex::Regex::new(r"\[session:([a-f0-9\-]+)\]").unwrap();
+        let mut replacements = Vec::new();
+
+        for cap in re.captures_iter(&text) {
+            let full_match = cap[0].to_string();
+            let ref_session_id = cap[1].to_string();
+
+            // Hook: session.reference.resolve — plugins can customize
+            let hook_result = state.plugins.dispatch(
+                "session.reference.resolve",
+                serde_json::json!({
+                    "sessionId": &id,
+                    "referencedSessionId": &ref_session_id,
+                }),
+            ).await;
+
+            if let crate::plugin::hooks::HookResult::Allowed(modified) = &hook_result {
+                if let Some(custom) = modified.get("replacement").and_then(|v| v.as_str()) {
+                    replacements.push((full_match, custom.to_string()));
+                    continue;
+                }
+            }
+
+            // Default resolution
+            if let Ok(Some(ref_session)) = state.db.get_session(&ref_session_id).await {
+                let session_name = &ref_session.name;
+                let conv_id = ref_session.conversation_id.as_deref().unwrap_or("unknown");
+
+                // Check if the referenced session is a worker with a card
+                let card_info = if let Some(ref card_id) = ref_session.card_id {
+                    state.db.get_card(card_id).await.ok().flatten()
+                        .map(|c| format!(" (card: \"{}\")", c.title))
+                        .unwrap_or_default()
+                } else {
+                    String::new()
+                };
+
+                // Build context based on provider type
+                let replacement = format!(
+                    "[Referenced session \"{}\"{} — conversation_id: {}. \
+                     To read this session's full history, you can resume it with \
+                     conversation_id \"{}\". The session contains the work and \
+                     context from that conversation.]",
+                    session_name, card_info, conv_id, conv_id
+                );
+                replacements.push((full_match, replacement));
+            } else {
+                replacements.push((full_match, format!("[session {} not found]", ref_session_id)));
+            }
+        }
+
+        for (from, to) in replacements {
+            text = text.replace(&from, &to);
+        }
+        text
+    };
+
+    // Also resolve report references [report:folder/file]
+    let resolved_text = {
+        let mut text = resolved_text;
+        let re = regex::Regex::new(r"\[report:([^\]]+)\]").unwrap();
+        let mut replacements = Vec::new();
+
+        for cap in re.captures_iter(&text) {
+            let full_match = cap[0].to_string();
+            let report_path = cap[1].to_string();
+            let parts: Vec<&str> = report_path.splitn(2, '/').collect();
+            if parts.len() == 2 {
+                let folder = parts[0];
+                let file = parts[1];
+                // Try to read the report content
+                let report_dir = state.config.data_dir.join("reports").join(folder);
+                let report_file = report_dir.join(file);
+                if let Ok(content) = tokio::fs::read_to_string(&report_file).await {
+                    // Strip frontmatter
+                    let body = if content.starts_with("---") {
+                        content.splitn(3, "---").nth(2).unwrap_or(&content).trim()
+                    } else {
+                        content.trim()
+                    };
+                    let truncated = if body.len() > 2000 {
+                        format!("{}... (truncated)", &body[..2000])
+                    } else {
+                        body.to_string()
+                    };
+                    replacements.push((full_match, format!(
+                        "[Report: {}/{}]\n{}\n[End of report]",
+                        folder, file, truncated
+                    )));
+                } else {
+                    replacements.push((full_match, format!("[report {}/{} not found]", folder, file)));
+                }
+            }
+        }
+
+        for (from, to) in replacements {
+            text = text.replace(&from, &to);
+        }
+        text
+    };
+
     // 2. Build spawn config — resolve model/effort with precedence:
     //    request body > session > card > project > "default"
     let (resolved_model, resolved_effort) = {
@@ -754,7 +860,7 @@ async fn send_message(
     // 3. Spawn the Claude CLI process in the background
     if let Err(e) = state
         .session_manager
-        .send_message(&id, &body.text, &state.db, &state.broadcaster, config)
+        .send_message(&id, &resolved_text, &state.db, &state.broadcaster, config)
         .await
     {
         tracing::error!(session_id = %id, "Failed to spawn claude process: {}", e);
