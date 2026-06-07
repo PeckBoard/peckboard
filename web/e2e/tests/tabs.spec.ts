@@ -158,7 +158,7 @@ test.describe('tabs', () => {
     await expect(tab).toBeVisible()
 
     await tab.click({ button: 'right' })
-    const closeBtn = page.locator('.tab-menu', { hasText: 'Close tab' })
+    const closeBtn = page.locator('.tab-menu button', { hasText: 'Close tab' })
     await expect(closeBtn).toBeVisible()
     await closeBtn.click()
 
@@ -175,5 +175,90 @@ test.describe('tabs', () => {
       tabList.find((t: { item_id: string }) => t.item_id === sessionId),
       `tab should be gone server-side; got: ${JSON.stringify(body)}`,
     ).toBeUndefined()
+  })
+
+  test('switching to an already-open tab does not reorder the strip', async ({
+    request,
+    page,
+    baseURL,
+  }) => {
+    // Regression test: clicking an existing tab used to bump it to the
+    // front via `last_active` MRU, which made the strip shuffle on every
+    // navigation. Now the order should only change when a brand-new tab
+    // is opened.
+    expect(baseURL).toBeTruthy()
+    const { token, auth } = await authenticate(request)
+    await clearTabs(request, auth)
+    const { sessionId: idA } = await seedFolderAndSession(request, auth, 'first-open')
+    const { sessionId: idB } = await seedFolderAndSession(request, auth, 'second-open')
+
+    await loadAt(page, token, `/sessions/${idA}`)
+    await page.evaluate((id) => {
+      history.pushState(null, '', `/sessions/${id}`)
+      window.dispatchEvent(new PopStateEvent('popstate'))
+    }, idB)
+
+    // Strip should be [second-open, first-open] (newest insertion first).
+    let openedTabs = page.locator('.tab-opened')
+    await expect(openedTabs).toHaveCount(2)
+    await expect(openedTabs.first()).toContainText('second-open')
+    await expect(openedTabs.nth(1)).toContainText('first-open')
+
+    // Switch back to A by clicking its tab in the strip. A must become
+    // active but B must stay at the front — clicking is selection, not
+    // reordering.
+    await openedTabs.nth(1).click()
+    openedTabs = page.locator('.tab-opened')
+    await expect(openedTabs).toHaveCount(2)
+    await expect(openedTabs.first()).toContainText('second-open')
+    await expect(openedTabs.first()).not.toHaveClass(/tab-active/)
+    await expect(openedTabs.nth(1)).toContainText('first-open')
+    await expect(openedTabs.nth(1)).toHaveClass(/tab-active/)
+  })
+
+  test('right-click → Delete session removes both the session and its tab', async ({
+    request,
+    page,
+    baseURL,
+  }) => {
+    // Regression test: deleting a session used to leave the tab dangling.
+    // The tab fell back to its placeholder label ("Session"), which the
+    // user saw as "the session got replaced with a new one named
+    // Session". Tab and session must disappear together.
+    expect(baseURL).toBeTruthy()
+    const { token, auth } = await authenticate(request)
+    await clearTabs(request, auth)
+    const { sessionId } = await seedFolderAndSession(request, auth, 'doomed')
+
+    await loadAt(page, token, `/sessions/${sessionId}`)
+    const tab = page.locator('.tab-opened', { hasText: 'doomed' })
+    await expect(tab).toBeVisible()
+
+    await tab.click({ button: 'right' })
+    const deleteBtn = page.locator('.tab-menu button', { hasText: 'Delete session' })
+    await expect(deleteBtn).toBeVisible()
+    await deleteBtn.click()
+
+    // ConfirmDialog appears. The danger button is labelled "Delete".
+    const confirmBtn = page.locator('.confirm-dialog-danger', { hasText: /^Delete$/ })
+    await expect(confirmBtn).toBeVisible()
+    await confirmBtn.click()
+
+    // No tab with this label, and crucially no orphan tab labelled
+    // "Session" (the placeholder for a tab whose session has been
+    // deleted out from under it).
+    await expect(page.locator('.tab-opened', { hasText: 'doomed' })).toHaveCount(0)
+    await expect(page.locator('.tab-opened', { hasText: /^Session$/ })).toHaveCount(0)
+
+    // Server-side too: both the session row and the user_tabs row must
+    // be gone, so a refetch (or a new device login) won't resurrect it.
+    await page.waitForTimeout(200)
+    const tabsRes = await request.get('/api/me/tabs', { headers: auth })
+    expect(tabsRes.ok()).toBeTruthy()
+    const tabsBody = (await tabsRes.json()) as Array<{ item_id: string }>
+    expect(tabsBody.find((t) => t.item_id === sessionId)).toBeUndefined()
+
+    const sessionRes = await request.get(`/api/sessions/${sessionId}`, { headers: auth })
+    expect(sessionRes.status()).toBe(404)
   })
 })

@@ -196,6 +196,17 @@ impl Db {
     pub async fn delete_session(&self, id: &str) -> anyhow::Result<bool> {
         let id = id.to_string();
         self.with_conn(move |conn| {
+            // Drop any user_tabs entries pointing at this session before
+            // deleting the session itself — there's no FK cascade since
+            // user_tabs is polymorphic (item_type + item_id), and the
+            // frontend tab strip would otherwise render orphan chips
+            // labelled "Session" when its name lookup misses.
+            diesel::delete(
+                user_tabs::table
+                    .filter(user_tabs::item_type.eq("session"))
+                    .filter(user_tabs::item_id.eq(&id)),
+            )
+            .execute(conn)?;
             let count = diesel::delete(sessions::table.find(&id)).execute(conn)?;
             Ok(count > 0)
         })
@@ -272,6 +283,14 @@ impl Db {
     pub async fn delete_project(&self, id: &str) -> anyhow::Result<bool> {
         let id = id.to_string();
         self.with_conn(move |conn| {
+            // Mirror delete_session: clean up orphan tab rows so the
+            // frontend strip doesn't keep showing a "Project" chip.
+            diesel::delete(
+                user_tabs::table
+                    .filter(user_tabs::item_type.eq("project"))
+                    .filter(user_tabs::item_id.eq(&id)),
+            )
+            .execute(conn)?;
             let count = diesel::delete(projects::table.find(&id)).execute(conn)?;
             Ok(count > 0)
         })

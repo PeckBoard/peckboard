@@ -129,4 +129,73 @@ test.describe('mobile layout', () => {
     expect(overflow.bodyOverflow).toContain('hidden')
     expect(overflow.rootOverflow).toContain('hidden')
   })
+
+  test('top nav is left-aligned (not centered) on phone widths', async ({
+    request,
+    page,
+    baseURL,
+  }) => {
+    expect(baseURL).toBeTruthy()
+    const { token, auth } = await authenticate(request)
+    const sessionId = await seedSession(request, auth)
+
+    await loadAt(page, token, `/sessions/${sessionId}`)
+
+    // The brand "P" tile should hug the left edge of the rail. Allow
+    // for the rail's own 8px horizontal padding (defined in App.css).
+    const railBox = await page.locator('.rail').boundingBox()
+    const brandBox = await page.locator('.rail-brand').boundingBox()
+    expect(railBox).not.toBeNull()
+    expect(brandBox).not.toBeNull()
+    if (!railBox || !brandBox) return
+    const leftGap = brandBox.x - railBox.x
+    expect(leftGap, `brand should sit near the left edge, was ${leftGap}px in`).toBeLessThan(24)
+  })
+
+  test('focusing an input pins window scroll to 0 (keyboard does not shove the page down)', async ({
+    request,
+    page,
+    baseURL,
+  }) => {
+    // Regression test: when the soft keyboard opened on iOS Safari, the
+    // window ended up at scrollY > 0 with the top toolbar shoved off
+    // screen. We pin scroll back to 0 whenever an editable element is
+    // focused. Playwright can't open a real soft keyboard, so we
+    // simulate the symptom — programmatic `window.scrollTo` while an
+    // input has focus — and assert the handler pins it back.
+    expect(baseURL).toBeTruthy()
+    const { token, auth } = await authenticate(request)
+    const sessionId = await seedSession(request, auth)
+
+    await loadAt(page, token, `/sessions/${sessionId}`)
+    const input = page.locator('.input-textarea')
+    await expect(input).toBeVisible({ timeout: 5_000 })
+    await input.click()
+    // Confirm focus actually landed — `click` is what reliably moves
+    // `document.activeElement` to the textarea under mobile emulation;
+    // `focus()` alone misses it.
+    await expect
+      .poll(async () => page.evaluate(() => document.activeElement?.tagName), {
+        timeout: 2_000,
+      })
+      .toBe('TEXTAREA')
+
+    // Provoke a window scroll like the iOS keyboard would. Without the
+    // pin, the page stays scrolled; with it, our `pinScrollIfFocused`
+    // listener resets to (0,0) on the next tick.
+    await page.evaluate(() => {
+      // Force the page to be scrollable for the duration of the test so
+      // `window.scrollTo` actually changes scrollY (our CSS pins
+      // `overflow: hidden` on html, which would otherwise no-op the
+      // scroll and make the regression undetectable here).
+      document.documentElement.style.setProperty('overflow', 'auto', 'important')
+      document.body.style.setProperty('overflow', 'auto', 'important')
+      document.body.style.minHeight = '4000px'
+      window.scrollTo(0, 500)
+    })
+
+    // Give the scroll listener a tick to fire.
+    await page.waitForFunction(() => window.scrollY === 0, undefined, { timeout: 2_000 })
+    expect(await page.evaluate(() => window.scrollY)).toBe(0)
+  })
 })

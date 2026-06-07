@@ -1,6 +1,7 @@
 import { create } from 'zustand'
 import type { Project, Card } from '../types/api'
 import { authedFetch } from './auth'
+import { useTabsStore } from './tabs'
 
 interface ProjectsState {
   projects: Project[]
@@ -71,6 +72,9 @@ export const useProjectsStore = create<ProjectsState>((set) => ({
       activeProjectId: s.activeProjectId === id ? null : s.activeProjectId,
       cards: s.activeProjectId === id ? [] : s.cards,
     }))
+    // Same reason as deleteSession: drop the orphan tab so it doesn't
+    // render with the "Project" fallback label.
+    useTabsStore.getState().removeTabsForItem('project', id)
   },
 
   setActiveProject: (id: string | null) => {

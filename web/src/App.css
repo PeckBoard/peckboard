@@ -3120,7 +3120,7 @@ select.form-input {
     flex-direction: row;
     gap: 2px;
     flex: 1;
-    justify-content: center;
+    justify-content: flex-start;
   }
   .rail-bottom {
     flex-direction: row;
@@ -3468,6 +3468,12 @@ select.form-input {
 }
 .tab-menu button:hover {
   background: var(--bg);
+}
+.tab-menu .tab-menu-danger {
+  color: var(--danger);
+}
+.tab-menu .tab-menu-danger:hover {
+  background: var(--danger-bg);
 }
 
 /* ── List view (sessions / projects inside main when no item active) ─ */

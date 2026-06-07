@@ -1,6 +1,7 @@
 import { create } from 'zustand'
 import type { Event, Session } from '../types/api'
 import { authedFetch } from './auth'
+import { useTabsStore } from './tabs'
 
 const DRAFTS_KEY = 'peckboard_drafts'
 
@@ -90,6 +91,11 @@ export const useSessionsStore = create<SessionsState>((set, get) => ({
       sessions: s.sessions.filter((sess) => sess.id !== id),
       activeSessionId: s.activeSessionId === id ? null : s.activeSessionId,
     }))
+    // Drop the tab for the now-deleted session so it doesn't render as
+    // a ghost chip labelled "Session" (the label falls back when the
+    // session row is gone). The backend also nukes its `user_tabs` row,
+    // so the next cross-device refetch stays consistent.
+    useTabsStore.getState().removeTabsForItem('session', id)
   },
 
   setActiveSession: (id: string | null) => {

@@ -8,6 +8,7 @@ interface TabBarProps {
   activeSessionId: string | null
   activeProjectId: string | null
   onOpenItem: (type: TabType, id: string) => void
+  onDeleteItem: (type: TabType, id: string) => void
 }
 
 /**
@@ -29,6 +30,7 @@ export default function TabBar({
   activeSessionId,
   activeProjectId,
   onOpenItem,
+  onDeleteItem,
 }: TabBarProps) {
   const tabs = useTabsStore((s) => s.tabs)
   const closeTab = useTabsStore((s) => s.closeTab)
@@ -65,6 +67,7 @@ export default function TabBar({
             unread={isUnread}
             onClick={() => onOpenItem(t.itemType, t.itemId)}
             onClose={() => closeTab(t.itemType, t.itemId)}
+            onDelete={() => onDeleteItem(t.itemType, t.itemId)}
           />
         )
       })}
@@ -81,6 +84,7 @@ function OpenedTab({
   unread,
   onClick,
   onClose,
+  onDelete,
 }: {
   type: TabType
   id: string
@@ -90,6 +94,7 @@ function OpenedTab({
   unread: boolean
   onClick: () => void
   onClose: () => void
+  onDelete: () => void
 }) {
   const [menuOpen, setMenuOpen] = useState(false)
   const longPressTimer = useRef<number | undefined>(undefined)
@@ -175,6 +180,17 @@ function OpenedTab({
             }}
           >
             Close tab
+          </button>
+          <button
+            role="menuitem"
+            className="tab-menu-danger"
+            onClick={(e) => {
+              e.stopPropagation()
+              setMenuOpen(false)
+              onDelete()
+            }}
+          >
+            {type === 'session' ? 'Delete session' : 'Delete project'}
           </button>
         </div>
       )}

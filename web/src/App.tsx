@@ -95,6 +95,7 @@ function App() {
   const processing = useSessionsStore((s) => s.processing)
   const unreadSessions = useSessionsStore((s) => s.unreadSessions)
   const activeProjectId = useProjectsStore((s) => s.activeProjectId)
+  const deleteProject = useProjectsStore((s) => s.deleteProject)
   const folders = useFoldersStore((s) => s.folders)
   const fetchFolders = useFoldersStore((s) => s.fetchFolders)
 
@@ -113,6 +114,7 @@ function App() {
   const [showNewProject, setShowNewProject] = useState(false)
   const [contextSession, setContextSession] = useState<string | null>(null)
   const [confirmDeleteId, setConfirmDeleteId] = useState<string | null>(null)
+  const [confirmDeleteProjectId, setConfirmDeleteProjectId] = useState<string | null>(null)
   const [announcement, setAnnouncement] = useState<Announcement | null>(null)
 
   // Navigate: update view + push URL
@@ -210,6 +212,29 @@ function App() {
         if (delta > 80) height = `${vv.height}px`
       }
       root.style.setProperty('--app-height', height)
+      // iOS Safari auto-scrolls the *layout* viewport so a focused
+      // input near the bottom stays in view above the keyboard. With
+      // our `html { overflow: hidden }` setup that scroll has nowhere
+      // to go on the document, but the window itself can still end up
+      // at a non-zero scrollY — which on mobile renders as "the page
+      // scrolled all the way down" with the top toolbar pushed
+      // off-screen. Pin it back to (0,0) whenever an editable element
+      // is focused — this catches both the immediate focusin scroll
+      // and the second-tick visualViewport scroll that iOS does once
+      // the keyboard has fully opened.
+      if (isEditableFocused() && (window.scrollX !== 0 || window.scrollY !== 0)) {
+        window.scrollTo(0, 0)
+      }
+    }
+
+    // iOS keeps trying to scroll the window after a focus even after we
+    // pin once in `update()` — typically a single follow-up tick. Keep
+    // forcing scroll back to (0,0) while an editable element is focused.
+    const pinScrollIfFocused = () => {
+      if (!isEditableFocused()) return
+      if (window.scrollX !== 0 || window.scrollY !== 0) {
+        window.scrollTo(0, 0)
+      }
     }
 
     update()
@@ -218,6 +243,7 @@ function App() {
     window.addEventListener('resize', update)
     window.addEventListener('focus', update)
     window.addEventListener('blur', update)
+    window.addEventListener('scroll', pinScrollIfFocused, { passive: true })
     document.addEventListener('focusin', update)
     document.addEventListener('focusout', update)
     document.addEventListener('visibilitychange', update)
@@ -228,6 +254,7 @@ function App() {
       window.removeEventListener('resize', update)
       window.removeEventListener('focus', update)
       window.removeEventListener('blur', update)
+      window.removeEventListener('scroll', pinScrollIfFocused)
       document.removeEventListener('focusin', update)
       document.removeEventListener('focusout', update)
       document.removeEventListener('visibilitychange', update)
@@ -312,6 +339,16 @@ function App() {
       /* ignore */
     }
     setConfirmDeleteId(null)
+  }
+
+  const confirmDeleteProject = async () => {
+    if (!confirmDeleteProjectId) return
+    try {
+      await deleteProject(confirmDeleteProjectId)
+    } catch {
+      /* ignore */
+    }
+    setConfirmDeleteProjectId(null)
   }
 
   return (
@@ -500,6 +537,10 @@ function App() {
               navigate('projects', id)
             }
           }}
+          onDeleteItem={(type, id) => {
+            if (type === 'session') setConfirmDeleteId(id)
+            else setConfirmDeleteProjectId(id)
+          }}
         />
         {announcement && (
           <div className="announcement-banner">
@@ -610,6 +651,17 @@ function App() {
           danger
           onConfirm={confirmDelete}
           onCancel={() => setConfirmDeleteId(null)}
+        />
+      )}
+      {confirmDeleteProjectId && (
+        <ConfirmDialog
+          title="Delete project"
+          message="Delete this project and all its cards?"
+          confirmLabel="Delete"
+          cancelLabel="Cancel"
+          danger
+          onConfirm={confirmDeleteProject}
+          onCancel={() => setConfirmDeleteProjectId(null)}
         />
       )}
     </div>

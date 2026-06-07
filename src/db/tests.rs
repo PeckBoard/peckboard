@@ -497,6 +497,110 @@ mod tests {
         assert_eq!(db.list_announcements().await.unwrap().len(), 0);
     }
 
+    // ── delete_session cascades to user_tabs ──────────────────────
+
+    #[tokio::test]
+    async fn test_delete_session_clears_user_tabs() {
+        // Tabs are polymorphic (item_type + item_id) so there is no FK
+        // cascade. Without an explicit cleanup the frontend tab strip
+        // renders an orphan chip labelled "Session" — guard against
+        // regression here at the DB layer.
+        let db = test_db();
+        let ts = now();
+
+        db.create_folder(NewFolder {
+            id: "f".into(),
+            name: "F".into(),
+            path: "/tmp/f".into(),
+            created_at: ts.clone(),
+        })
+        .await
+        .unwrap();
+        db.create_user(NewUser {
+            id: "u".into(),
+            username: "u".into(),
+            email: None,
+            password_hash: "h".into(),
+            role: "user".into(),
+            created_at: ts.clone(),
+            updated_at: ts.clone(),
+        })
+        .await
+        .unwrap();
+        db.create_session(NewSession {
+            id: "s".into(),
+            name: "S".into(),
+            folder_id: "f".into(),
+            model: None,
+            effort: None,
+            is_worker: false,
+            project_id: None,
+            card_id: None,
+            conversation_id: None,
+            created_at: ts.clone(),
+            last_activity: ts.clone(),
+        })
+        .await
+        .unwrap();
+        db.upsert_user_tab("u", "session", "s").await.unwrap();
+        assert_eq!(db.list_user_tabs("u").await.unwrap().len(), 1);
+
+        assert!(db.delete_session("s").await.unwrap());
+        assert!(
+            db.list_user_tabs("u").await.unwrap().is_empty(),
+            "user_tabs row for the deleted session should be gone"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_delete_project_clears_user_tabs() {
+        let db = test_db();
+        let ts = now();
+
+        db.create_folder(NewFolder {
+            id: "f".into(),
+            name: "F".into(),
+            path: "/tmp/f".into(),
+            created_at: ts.clone(),
+        })
+        .await
+        .unwrap();
+        db.create_user(NewUser {
+            id: "u".into(),
+            username: "u".into(),
+            email: None,
+            password_hash: "h".into(),
+            role: "user".into(),
+            created_at: ts.clone(),
+            updated_at: ts.clone(),
+        })
+        .await
+        .unwrap();
+        db.create_project(NewProject {
+            id: "p".into(),
+            name: "P".into(),
+            context: "".into(),
+            folder_id: "f".into(),
+            worker_count: 1,
+            status: "active".into(),
+            default_workflow: None,
+            model: None,
+            effort: None,
+            parallel_instructions: false,
+            auto_notify_changes: false,
+            worker_communication: false,
+            created_at: ts.clone(),
+            last_accessed_at: ts.clone(),
+        })
+        .await
+        .unwrap();
+        db.upsert_user_tab("u", "project", "p").await.unwrap();
+        assert_eq!(db.list_user_tabs("u").await.unwrap().len(), 1);
+
+        assert!(db.delete_project("p").await.unwrap());
+        assert!(db.list_user_tabs("u").await.unwrap().is_empty());
+    }
+
     // ── Delete non-existent returns false ─────────────────────────
 
     #[tokio::test]
