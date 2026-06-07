@@ -972,7 +972,7 @@
   box-shadow: var(--shadow-overlay);
   max-height: 240px;
   overflow-y: auto;
-  z-index: 50;
+  z-index: 99999;
   margin-bottom: 4px;
 }
 
