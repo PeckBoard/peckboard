@@ -619,6 +619,45 @@ impl McpToolRegistry {
                     "additionalProperties": false
                 }),
             },
+            McpToolDef {
+                name: "share_finding".into(),
+                description: "Share a finding with all other running workers in the project. Broadcasts a summary; other workers can retrieve the full detail via get_finding_details.".into(),
+                input_schema: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "summary": { "type": "string", "description": "Brief summary of the finding (shown to all workers)" },
+                        "detail": { "type": "string", "description": "Full detail (available on request via get_finding_details)" },
+                        "tags": { "type": "array", "items": { "type": "string" }, "description": "Optional tags for categorization" }
+                    },
+                    "required": ["summary", "detail"],
+                    "additionalProperties": false
+                }),
+            },
+            McpToolDef {
+                name: "get_finding_details".into(),
+                description: "Retrieve the full detail of a finding shared by another worker.".into(),
+                input_schema: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "finding_id": { "type": "string", "description": "The finding event ID" }
+                    },
+                    "required": ["finding_id"],
+                    "additionalProperties": false
+                }),
+            },
+            McpToolDef {
+                name: "send_worker_message".into(),
+                description: "Send a direct message to another worker session. The message is queued and delivered on their next turn. Useful for asking follow-up questions about a finding.".into(),
+                input_schema: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "target_session_id": { "type": "string", "description": "The session ID of the worker to message" },
+                        "message": { "type": "string", "description": "The message to send" }
+                    },
+                    "required": ["target_session_id", "message"],
+                    "additionalProperties": false
+                }),
+            },
         ];
 
         McpToolRegistry { tools }
@@ -657,6 +696,9 @@ impl McpToolRegistry {
             "move_card_to_wont_do" => self.handle_move_card_to_wont_do(args, ctx).await,
             "notify_workers" => self.handle_notify_workers(args, ctx).await,
             "fetch_url" => self.handle_fetch_url(args, ctx).await,
+            "share_finding" => self.handle_share_finding(args, ctx).await,
+            "get_finding_details" => self.handle_get_finding_details(args, ctx).await,
+            "send_worker_message" => self.handle_send_worker_message(args, ctx).await,
             _ => anyhow::bail!("unknown tool: {tool_name}"),
         }
     }
@@ -1378,6 +1420,8 @@ impl McpToolRegistry {
                 model: None,
                 effort: None,
                 parallel_instructions: false,
+                auto_notify_changes: true,
+                worker_communication: true,
                 created_at: now.clone(),
                 last_accessed_at: now,
             })
@@ -1740,6 +1784,188 @@ impl McpToolRegistry {
             "content": truncated,
             "length": truncated.len(),
         }))
+    }
+
+    async fn handle_share_finding(
+        &self,
+        args: Value,
+        ctx: &ToolCallContext,
+    ) -> anyhow::Result<Value> {
+        let summary = args.get("summary").and_then(|v| v.as_str())
+            .ok_or_else(|| anyhow::anyhow!("share_finding requires 'summary'"))?;
+        let detail = args.get("detail").and_then(|v| v.as_str())
+            .ok_or_else(|| anyhow::anyhow!("share_finding requires 'detail'"))?;
+        let tags = args.get("tags").and_then(|v| v.as_array())
+            .map(|a| a.iter().filter_map(|v| v.as_str().map(|s| s.to_string())).collect::<Vec<_>>())
+            .unwrap_or_default();
+
+        tracing::info!(session_id = %ctx.session_id, "MCP tool: share_finding");
+
+        // Check worker_communication is enabled
+        let project_id = self.resolve_project_id(ctx).await;
+        if let Some(ref pid) = project_id {
+            if let Ok(Some(project)) = ctx.db.get_project(pid).await {
+                if !project.worker_communication {
+                    return Ok(serde_json::json!({
+                        "status": "disabled",
+                        "message": "Inter-worker communication is disabled for this project"
+                    }));
+                }
+            }
+        }
+
+        let card_title = self.resolve_card_title(ctx).await;
+
+        // Store the finding as an event
+        let finding_data = serde_json::json!({
+            "summary": summary,
+            "detail": detail,
+            "tags": tags,
+            "fromSessionId": ctx.session_id,
+            "fromCardTitle": card_title,
+            "projectId": project_id,
+        });
+        let event = ctx.db.append_event(&ctx.session_id, "worker-finding", finding_data).await?;
+
+        // Broadcast summary to other workers
+        if let Some(ref pid) = project_id {
+            if let Ok(workers) = ctx.db.list_worker_sessions_by_project(pid).await {
+                let msg = format!(
+                    "[Finding from worker on \"{}\"] {}\n\nFinding ID: {} — call get_finding_details to see full detail.",
+                    card_title.as_deref().unwrap_or("unknown"),
+                    summary,
+                    event.id
+                );
+                for ws in &workers {
+                    if ws.id == ctx.session_id { continue; }
+                    if let Some(ref cid) = ws.card_id {
+                        if let Ok(Some(c)) = ctx.db.get_card(cid).await {
+                            if c.step == "done" || c.step == "wont_do" { continue; }
+                        }
+                    }
+                    let now = chrono::Utc::now().to_rfc3339();
+                    let _ = ctx.db.upsert_queued_message(
+                        crate::db::models::NewQueuedMessage {
+                            session_id: ws.id.clone(),
+                            text: msg.clone(),
+                            queued_at: now,
+                        },
+                    ).await;
+                }
+            }
+        }
+
+        Ok(serde_json::json!({
+            "status": "ok",
+            "finding_id": event.id,
+            "message": "Finding shared with other workers"
+        }))
+    }
+
+    async fn handle_get_finding_details(
+        &self,
+        args: Value,
+        ctx: &ToolCallContext,
+    ) -> anyhow::Result<Value> {
+        let finding_id = args.get("finding_id").and_then(|v| v.as_str())
+            .ok_or_else(|| anyhow::anyhow!("get_finding_details requires 'finding_id'"))?;
+
+        tracing::info!(session_id = %ctx.session_id, finding_id = %finding_id, "MCP tool: get_finding_details");
+
+        let event = ctx.db.get_event(finding_id).await?
+            .ok_or_else(|| anyhow::anyhow!("finding not found: {finding_id}"))?;
+
+        if event.kind != "worker-finding" {
+            anyhow::bail!("event {finding_id} is not a finding");
+        }
+
+        let data: Value = serde_json::from_str(&event.data)?;
+        Ok(serde_json::json!({
+            "status": "ok",
+            "finding_id": finding_id,
+            "summary": data.get("summary"),
+            "detail": data.get("detail"),
+            "tags": data.get("tags"),
+            "from_session_id": data.get("fromSessionId"),
+            "from_card_title": data.get("fromCardTitle"),
+        }))
+    }
+
+    async fn handle_send_worker_message(
+        &self,
+        args: Value,
+        ctx: &ToolCallContext,
+    ) -> anyhow::Result<Value> {
+        let target_session_id = args.get("target_session_id").and_then(|v| v.as_str())
+            .ok_or_else(|| anyhow::anyhow!("send_worker_message requires 'target_session_id'"))?;
+        let message = args.get("message").and_then(|v| v.as_str())
+            .ok_or_else(|| anyhow::anyhow!("send_worker_message requires 'message'"))?;
+
+        tracing::info!(session_id = %ctx.session_id, target = %target_session_id, "MCP tool: send_worker_message");
+
+        // Check worker_communication is enabled
+        let project_id = self.resolve_project_id(ctx).await;
+        if let Some(ref pid) = project_id {
+            if let Ok(Some(project)) = ctx.db.get_project(pid).await {
+                if !project.worker_communication {
+                    return Ok(serde_json::json!({
+                        "status": "disabled",
+                        "message": "Inter-worker communication is disabled for this project"
+                    }));
+                }
+            }
+        }
+
+        let card_title = self.resolve_card_title(ctx).await;
+
+        // Verify target is a valid worker session
+        let target = ctx.db.get_session(target_session_id).await?
+            .ok_or_else(|| anyhow::anyhow!("target session not found"))?;
+        if !target.is_worker {
+            anyhow::bail!("target session is not a worker");
+        }
+
+        let msg = format!(
+            "[Worker message from \"{}\"] (NOT from the user — this is from another worker)\n\n{}",
+            card_title.as_deref().unwrap_or("unknown worker"),
+            message
+        );
+
+        let now = chrono::Utc::now().to_rfc3339();
+        let _ = ctx.db.upsert_queued_message(
+            crate::db::models::NewQueuedMessage {
+                session_id: target_session_id.to_string(),
+                text: msg,
+                queued_at: now,
+            },
+        ).await;
+
+        Ok(serde_json::json!({
+            "status": "ok",
+            "message": format!("Message sent to worker session {}", target_session_id)
+        }))
+    }
+
+    /// Helper: resolve project_id from context or session lookup
+    async fn resolve_project_id(&self, ctx: &ToolCallContext) -> Option<String> {
+        if ctx.project_id.is_some() {
+            return ctx.project_id.clone();
+        }
+        ctx.db.get_session(&ctx.session_id).await.ok().flatten().and_then(|s| s.project_id)
+    }
+
+    /// Helper: resolve card title from context or session lookup
+    async fn resolve_card_title(&self, ctx: &ToolCallContext) -> Option<String> {
+        let card_id = if ctx.card_id.is_some() {
+            ctx.card_id.clone()
+        } else {
+            ctx.db.get_session(&ctx.session_id).await.ok().flatten().and_then(|s| s.card_id)
+        };
+        if let Some(ref cid) = card_id {
+            ctx.db.get_card(cid).await.ok().flatten().map(|c| c.title)
+        } else {
+            None
+        }
     }
 }
 

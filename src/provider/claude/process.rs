@@ -311,42 +311,48 @@ pub async fn stream_events(
                     ProviderEvent::Text { .. } | ProviderEvent::Completed { .. } => {
                         if !pending_file_changes.is_empty() {
                             let changes = std::mem::take(&mut pending_file_changes);
-                            // Look up session to find project context
                             if let Ok(Some(session)) = db.get_session(&session_id).await {
                                 if session.is_worker {
                                     if let Some(ref project_id) = session.project_id {
-                                        let card_title = if let Some(ref card_id) = session.card_id {
-                                            db.get_card(card_id).await.ok().flatten().map(|c| c.title)
-                                        } else { None };
+                                        // Check if auto_notify_changes is enabled for this project
+                                        let auto_notify = db.get_project(project_id).await
+                                            .ok().flatten()
+                                            .map(|p| p.auto_notify_changes)
+                                            .unwrap_or(true);
 
-                                        // Find other active worker sessions
-                                        if let Ok(workers) = db.list_worker_sessions_by_project(project_id).await {
-                                            let msg = format!(
-                                                "[Auto] Worker on \"{}\" modified: {}",
-                                                card_title.as_deref().unwrap_or("unknown"),
-                                                changes.join(", ")
-                                            );
-                                            for ws in &workers {
-                                                if ws.id == session_id { continue; }
-                                                if let Some(ref cid) = ws.card_id {
-                                                    if let Ok(Some(c)) = db.get_card(cid).await {
-                                                        if c.step == "done" || c.step == "wont_do" { continue; }
+                                        if auto_notify {
+                                            let card_title = if let Some(ref card_id) = session.card_id {
+                                                db.get_card(card_id).await.ok().flatten().map(|c| c.title)
+                                            } else { None };
+
+                                            if let Ok(workers) = db.list_worker_sessions_by_project(project_id).await {
+                                                let msg = format!(
+                                                    "[Auto] Worker on \"{}\" modified: {}",
+                                                    card_title.as_deref().unwrap_or("unknown"),
+                                                    changes.join(", ")
+                                                );
+                                                for ws in &workers {
+                                                    if ws.id == session_id { continue; }
+                                                    if let Some(ref cid) = ws.card_id {
+                                                        if let Ok(Some(c)) = db.get_card(cid).await {
+                                                            if c.step == "done" || c.step == "wont_do" { continue; }
+                                                        }
                                                     }
+                                                    let now = chrono::Utc::now().to_rfc3339();
+                                                    let _ = db.upsert_queued_message(
+                                                        crate::db::models::NewQueuedMessage {
+                                                            session_id: ws.id.clone(),
+                                                            text: msg.clone(),
+                                                            queued_at: now,
+                                                        },
+                                                    ).await;
                                                 }
-                                                let now = chrono::Utc::now().to_rfc3339();
-                                                let _ = db.upsert_queued_message(
-                                                    crate::db::models::NewQueuedMessage {
-                                                        session_id: ws.id.clone(),
-                                                        text: msg.clone(),
-                                                        queued_at: now,
-                                                    },
-                                                ).await;
+                                                tracing::info!(
+                                                    session_id = %session_id,
+                                                    files = ?changes,
+                                                    "Auto-notified workers of file changes"
+                                                );
                                             }
-                                            tracing::info!(
-                                                session_id = %session_id,
-                                                files = ?changes,
-                                                "Auto-notified workers of file changes"
-                                            );
                                         }
                                     }
                                 }

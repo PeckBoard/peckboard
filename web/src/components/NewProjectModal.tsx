@@ -41,6 +41,8 @@ export default function NewProjectModal({ onClose }: Props) {
   const [model, setModel] = useState('')
   const [effort, setEffort] = useState('')
   const [parallelInstructions, setParallelInstructions] = useState(false)
+  const [autoNotifyChanges, setAutoNotifyChanges] = useState(true)
+  const [workerCommunication, setWorkerCommunication] = useState(true)
   const [showAdvanced, setShowAdvanced] = useState(false)
   const [error, setError] = useState('')
   const [loading, setLoading] = useState(false)
@@ -90,6 +92,8 @@ export default function NewProjectModal({ onClose }: Props) {
         model: model || undefined,
         effort: effort || undefined,
         parallel_instructions: parallelInstructions,
+        auto_notify_changes: autoNotifyChanges,
+        worker_communication: workerCommunication,
       } as Record<string, unknown>)
       setActiveProject(project.id)
       onClose()
@@ -238,6 +242,33 @@ export default function NewProjectModal({ onClose }: Props) {
                 <p className="form-hint">
                   Appends guidance on git worktrees, dependency isolation, and test isolation to
                   worker prompts. Enable when running multiple workers.
+                </p>
+              </div>
+              <div className="form-field">
+                <label className="form-checkbox-label">
+                  <input
+                    type="checkbox"
+                    checked={autoNotifyChanges}
+                    onChange={(e) => setAutoNotifyChanges(e.target.checked)}
+                  />
+                  <span>Auto-notify file changes</span>
+                </label>
+                <p className="form-hint">
+                  Automatically notify other workers when files are modified. Prevents merge
+                  conflicts.
+                </p>
+              </div>
+              <div className="form-field">
+                <label className="form-checkbox-label">
+                  <input
+                    type="checkbox"
+                    checked={workerCommunication}
+                    onChange={(e) => setWorkerCommunication(e.target.checked)}
+                  />
+                  <span>Inter-worker communication</span>
+                </label>
+                <p className="form-hint">
+                  Allow workers to share findings and send messages to each other.
                 </p>
               </div>
             </div>

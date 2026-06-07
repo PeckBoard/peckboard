@@ -28,10 +28,18 @@ struct CreateProjectRequest {
     default_workflow: Option<String>,
     #[serde(default)]
     parallel_instructions: bool,
+    #[serde(default = "default_true")]
+    auto_notify_changes: bool,
+    #[serde(default = "default_true")]
+    worker_communication: bool,
 }
 
 fn default_worker_count() -> i32 {
     1
+}
+
+fn default_true() -> bool {
+    true
 }
 
 #[derive(Deserialize)]
@@ -49,6 +57,8 @@ struct UpdateProjectRequest {
     model: Option<Option<String>>,
     effort: Option<Option<String>>,
     parallel_instructions: Option<bool>,
+    auto_notify_changes: Option<bool>,
+    worker_communication: Option<bool>,
 }
 
 #[derive(Deserialize)]
@@ -140,6 +150,8 @@ async fn create_project(
             model: body.model,
             effort: body.effort,
             parallel_instructions: body.parallel_instructions,
+            auto_notify_changes: body.auto_notify_changes,
+            worker_communication: body.worker_communication,
             created_at: now.clone(),
             last_accessed_at: now,
         })
@@ -231,6 +243,8 @@ async fn update_project(
         model: body.model,
         effort: body.effort,
         parallel_instructions: body.parallel_instructions,
+        auto_notify_changes: body.auto_notify_changes,
+        worker_communication: body.worker_communication,
         last_accessed_at: Some(chrono::Utc::now().to_rfc3339()),
     };
 

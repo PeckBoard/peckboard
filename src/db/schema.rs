@@ -38,6 +38,8 @@ diesel::table! {
         model -> Nullable<Text>,
         effort -> Nullable<Text>,
         parallel_instructions -> Bool,
+        auto_notify_changes -> Bool,
+        worker_communication -> Bool,
         created_at -> Text,
         last_accessed_at -> Text,
     }

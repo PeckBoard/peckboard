@@ -267,6 +267,9 @@ pub fn build_cli_args(
             "ask_user",
             "notify_workers",
             "fetch_url",
+            "share_finding",
+            "get_finding_details",
+            "send_worker_message",
         ];
         let allowed: Vec<String> = mcp_tools
             .iter()

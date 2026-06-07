@@ -84,6 +84,8 @@ pub struct Project {
     pub model: Option<String>,
     pub effort: Option<String>,
     pub parallel_instructions: bool,
+    pub auto_notify_changes: bool,
+    pub worker_communication: bool,
     pub created_at: String,
     pub last_accessed_at: String,
 }
@@ -101,6 +103,8 @@ pub struct NewProject {
     pub model: Option<String>,
     pub effort: Option<String>,
     pub parallel_instructions: bool,
+    pub auto_notify_changes: bool,
+    pub worker_communication: bool,
     pub created_at: String,
     pub last_accessed_at: String,
 }
@@ -116,6 +120,8 @@ pub struct UpdateProject {
     pub model: Option<Option<String>>,
     pub effort: Option<Option<String>>,
     pub parallel_instructions: Option<bool>,
+    pub auto_notify_changes: Option<bool>,
+    pub worker_communication: Option<bool>,
     pub last_accessed_at: Option<String>,
 }
 

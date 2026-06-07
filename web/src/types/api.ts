@@ -32,6 +32,8 @@ export interface Project {
   model: string | null
   effort: string | null
   parallel_instructions: boolean
+  auto_notify_changes: boolean
+  worker_communication: boolean
   created_at: string
   last_accessed_at: string
 }
