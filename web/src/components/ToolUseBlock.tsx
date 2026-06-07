@@ -8,47 +8,46 @@ interface ToolUseBlockProps {
   isRunning?: boolean
 }
 
-/** Map tool names to icons and friendly labels */
-function getToolDisplay(toolName: string): { icon: string; label: string } {
+/** Map tool names to friendly labels. Per-tool emoji icons were removed
+ *  in favour of a single shared chevron \u2014 the chevron doubles as the
+ *  expand/collapse affordance, so every tool row stays visually flat. */
+function getToolLabel(toolName: string): string {
   switch (toolName) {
     case 'Bash':
-      return { icon: '\u{25B6}', label: 'Terminal' }
+      return 'Terminal'
     case 'Read':
-      return { icon: '\u{1F4C4}', label: 'Read file' }
+      return 'Read file'
     case 'Write':
-      return { icon: '\u{270F}\uFE0F', label: 'Write file' }
+      return 'Write file'
     case 'Edit':
-      return { icon: '\u{270F}\uFE0F', label: 'Edit file' }
+      return 'Edit file'
     case 'Grep':
-      return { icon: '\u{1F50D}', label: 'Search content' }
+      return 'Search content'
     case 'Glob':
-      return { icon: '\u{1F4C2}', label: 'Find files' }
+      return 'Find files'
     case 'ToolSearch':
-      return { icon: '\u{1F50D}', label: 'Tool search' }
+      return 'Tool search'
     case 'Agent':
-      return { icon: '\u{1F916}', label: 'Sub-agent' }
+      return 'Sub-agent'
     case 'WebFetch':
-      return { icon: '\u{1F310}', label: 'Fetch URL' }
+      return 'Fetch URL'
     case 'WebSearch':
-      return { icon: '\u{1F310}', label: 'Web search' }
+      return 'Web search'
     case 'NotebookEdit':
-      return { icon: '\u{1F4D3}', label: 'Edit notebook' }
+      return 'Edit notebook'
     case 'TaskCreate':
     case 'TaskUpdate':
     case 'TaskGet':
     case 'TaskList':
-      return { icon: '\u{2611}\uFE0F', label: toolName.replace('Task', 'Task ') }
+      return toolName.replace('Task', 'Task ')
     default:
-      // MCP tools: strip mcp__peckboard__ prefix
       if (toolName.startsWith('mcp__peckboard__')) {
-        const name = toolName.replace('mcp__peckboard__', '').replace(/_/g, ' ')
-        return { icon: '\u{1F527}', label: name }
+        return toolName.replace('mcp__peckboard__', '').replace(/_/g, ' ')
       }
       if (toolName.startsWith('mcp__')) {
-        const name = toolName.replace(/^mcp__[^_]+__/, '').replace(/_/g, ' ')
-        return { icon: '\u{1F527}', label: name }
+        return toolName.replace(/^mcp__[^_]+__/, '').replace(/_/g, ' ')
       }
-      return { icon: '\u{2699}\uFE0F', label: toolName }
+      return toolName
   }
 }
 
@@ -137,7 +136,7 @@ export default function ToolUseBlock({
 }: ToolUseBlockProps) {
   const [expanded, setExpanded] = useState(false)
 
-  const { icon, label } = getToolDisplay(toolName)
+  const label = getToolLabel(toolName)
   const summary = getSummary(toolName, input)
   const hasDetails = (input && Object.keys(input).length > 0) || output || error
 
@@ -146,12 +145,16 @@ export default function ToolUseBlock({
   return (
     <div className={`tool-block ${statusClass}`}>
       <button className="tool-header" onClick={() => hasDetails && setExpanded((v) => !v)}>
-        <span className="tool-icon">{icon}</span>
+        <span
+          className={`tool-chevron ${expanded ? 'open' : ''} ${hasDetails ? '' : 'tool-chevron-leaf'}`}
+          aria-hidden="true"
+        >
+          &#9654;
+        </span>
         <span className="tool-label">{label}</span>
         {summary && <span className="tool-summary">{summary}</span>}
         {isRunning && <span className="tool-spinner" />}
         {error && <span className="tool-status-badge tool-badge-error">Error</span>}
-        {hasDetails && <span className={`tool-chevron ${expanded ? 'open' : ''}`}>&#9654;</span>}
       </button>
       {expanded && (
         <div className="tool-body">

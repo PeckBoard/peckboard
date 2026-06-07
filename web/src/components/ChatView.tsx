@@ -668,18 +668,10 @@ export default function ChatView({ sessionId }: ChatViewProps) {
 
   const agentStatus = deriveAgentStatus(events)
 
-  // Show thinking when:
-  // 1. Agent is actively working but no text has arrived yet (last display item is agent-start)
-  // 2. Last event is 'user' (message just sent, CLI hasn't started yet)
-  const showThinking = (() => {
-    if (displayItems.length === 0) return false
-    const lastDisplay = displayItems[displayItems.length - 1].type
-    // After agent-start but before first text/tool
-    if (agentWorking && lastDisplay === 'agent-start') return true
-    // User just sent, waiting for CLI to boot (last raw event is 'user')
-    if (events.length > 0 && events[events.length - 1].kind === 'user') return true
-    return false
-  })()
+  // Always show the thinking indicator while the agent is working —
+  // even when text or tool blocks are streaming above it. The indicator
+  // is the user's only persistent signal that the session is still busy.
+  const showThinking = agentWorking
 
   // Toolbar actions
   const handleRename = async () => {
