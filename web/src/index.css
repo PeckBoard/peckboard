@@ -162,11 +162,25 @@
 
 html {
   height: 100%;
-  height: var(--app-height, 100vh);
+  /* dvh = dynamic viewport, accounts for mobile browser chrome shrinking.
+     vh fallback for very old browsers. */
+  height: 100vh;
+  height: 100dvh;
+  /* Stop the page itself from scrolling / pinch-zooming. The app
+     scrolls its own panes (chat, lists, tab strip). */
+  overflow: hidden;
+  overscroll-behavior: none;
+  /* Mobile Safari sometimes auto-inflates text on rotation; pin it. */
+  -webkit-text-size-adjust: 100%;
+  text-size-adjust: 100%;
+  /* Prevent double-tap-to-zoom. */
+  touch-action: manipulation;
 }
 
 body {
   height: 100%;
+  width: 100%;
+  overflow: hidden;
   font-family: var(--font);
   font-size: var(--text-base);
   line-height: var(--leading);
@@ -178,6 +192,8 @@ body {
 
 #root {
   height: 100%;
+  width: 100%;
+  overflow: hidden;
 }
 
 a {

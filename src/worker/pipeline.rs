@@ -203,6 +203,8 @@ mod tests {
             model: None,
             effort: None,
             parallel_instructions: false,
+            auto_notify_changes: true,
+            worker_communication: false,
             created_at: "2025-01-01T00:00:00Z".into(),
             last_accessed_at: "2025-01-01T00:00:00Z".into(),
         }

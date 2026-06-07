@@ -145,6 +145,8 @@ mod tests {
             model: None,
             effort: None,
             parallel_instructions: false,
+            auto_notify_changes: true,
+            worker_communication: false,
             created_at: ts.clone(),
             last_accessed_at: ts.clone(),
         })

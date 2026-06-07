@@ -6,6 +6,8 @@
 .shell {
   display: flex;
   height: 100%;
+  width: 100%;
+  max-width: 100%;
   overflow: hidden;
 }
 
@@ -304,6 +306,7 @@
   display: flex;
   flex-direction: column;
   min-width: 0;
+  max-width: 100%;
   overflow: hidden;
   background: var(--bg);
 }
@@ -3273,6 +3276,15 @@ select.form-input {
   background: var(--surface);
   scrollbar-width: thin;
   flex-shrink: 0;
+  /* Keep the strip inside the content column so it doesn't push the
+     page horizontally on mobile. */
+  max-width: 100%;
+  width: 100%;
+  /* Native momentum scrolling on iOS for the tab strip. */
+  -webkit-overflow-scrolling: touch;
+  /* Allow horizontal scroll on the strip without taking over the
+     vertical scroll gesture on the page. */
+  overscroll-behavior-x: contain;
 }
 .tabbar-divider {
   width: 1px;
