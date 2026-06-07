@@ -109,14 +109,20 @@ pub async fn check_and_spawn_workers(state: &Arc<AppState>) {
         // Check for worker sessions with pending inter-worker messages
         // that finished but weren't re-spawned
         if project.worker_communication {
-            let worker_sessions = state.db.list_worker_sessions_by_project(&project.id).await.unwrap_or_default();
+            let worker_sessions = state
+                .db
+                .list_worker_sessions_by_project(&project.id)
+                .await
+                .unwrap_or_default();
             for ws in &worker_sessions {
                 // Skip sessions that have a running process
                 if state.session_manager.is_running(&ws.id).await {
                     continue;
                 }
                 let events = state.db.events_tail(&ws.id, 20).await.unwrap_or_default();
-                if events.is_empty() { continue; }
+                if events.is_empty() {
+                    continue;
+                }
 
                 let last = &events[events.len() - 1];
                 // If last event is a worker-communication user message, the agent
@@ -124,28 +130,54 @@ pub async fn check_and_spawn_workers(state: &Arc<AppState>) {
                 if last.kind == "user" {
                     if let Ok(data) = serde_json::from_str::<serde_json::Value>(&last.data) {
                         let source = data.get("source").and_then(|v| v.as_str()).unwrap_or("");
-                        if matches!(source, "worker-communication" | "worker-finding" | "worker-message" | "worker-notification") {
-                            let text = data.get("text").and_then(|v| v.as_str()).unwrap_or("").to_string();
+                        if matches!(
+                            source,
+                            "worker-communication"
+                                | "worker-finding"
+                                | "worker-message"
+                                | "worker-notification"
+                        ) {
+                            let text = data
+                                .get("text")
+                                .and_then(|v| v.as_str())
+                                .unwrap_or("")
+                                .to_string();
                             tracing::info!(
                                 session_id = %ws.id,
                                 "Orchestrator: found pending worker message, resuming session"
                             );
 
                             let session_project_id = ws.project_id.clone();
-                            let mcp_token = state.mcp_tokens
+                            let mcp_token = state
+                                .mcp_tokens
                                 .issue_token(ws.id.clone(), session_project_id)
                                 .await;
-                            let working_dir = state.db.get_folder(&ws.folder_id).await
-                                .ok().flatten().map(|f| f.path).unwrap_or_default();
+                            let working_dir = state
+                                .db
+                                .get_folder(&ws.folder_id)
+                                .await
+                                .ok()
+                                .flatten()
+                                .map(|f| f.path)
+                                .unwrap_or_default();
                             let mcp_config_path = mcp_server::write_mcp_config(
-                                &state.config.data_dir, &ws.id, state.config.port, &mcp_token,
-                            ).ok().map(|p| p.to_string_lossy().to_string());
+                                &state.config.data_dir,
+                                &ws.id,
+                                state.config.port,
+                                &mcp_token,
+                            )
+                            .ok()
+                            .map(|p| p.to_string_lossy().to_string());
 
                             let prompt = format!(
                                 "IMPORTANT: You have a message from another worker that requires your response. \
-                                 You MUST acknowledge and respond:\n\n{}", text
+                                 You MUST acknowledge and respond:\n\n{}",
+                                text
                             );
-                            let _ = state.db.append_event(&ws.id, "user", serde_json::json!({ "text": prompt })).await;
+                            let _ = state
+                                .db
+                                .append_event(&ws.id, "user", serde_json::json!({ "text": prompt }))
+                                .await;
 
                             let config = SpawnConfig {
                                 model: "default".into(),
@@ -158,8 +190,15 @@ pub async fn check_and_spawn_workers(state: &Arc<AppState>) {
                                 metadata: serde_json::json!({ "worker": true, "inter_worker_followup": true }),
                             };
 
-                            if let Err(e) = state.session_manager
-                                .send_message(&ws.id, &prompt, &state.db, &state.broadcaster, config)
+                            if let Err(e) = state
+                                .session_manager
+                                .send_message(
+                                    &ws.id,
+                                    &prompt,
+                                    &state.db,
+                                    &state.broadcaster,
+                                    config,
+                                )
                                 .await
                             {
                                 tracing::error!(session_id = %ws.id, "Failed to resume for pending message: {e}");
@@ -593,29 +632,53 @@ pub async fn handle_worker_done(state: &Arc<AppState>, session_id: &str) {
             // Count worker messages that arrived during the last turn
             let start_idx = last_agent_start.unwrap_or(0);
             let end_idx = last_agent_end.unwrap_or(events.len());
-            let worker_msgs_during_turn: Vec<&crate::db::models::Event> = events[start_idx..end_idx]
+            let worker_msgs_during_turn: Vec<&crate::db::models::Event> = events
+                [start_idx..end_idx]
                 .iter()
                 .filter(|e| {
-                    if e.kind != "user" { return false; }
+                    if e.kind != "user" {
+                        return false;
+                    }
                     if let Ok(data) = serde_json::from_str::<serde_json::Value>(&e.data) {
                         let source = data.get("source").and_then(|v| v.as_str()).unwrap_or("");
-                        matches!(source, "worker-communication" | "worker-finding" | "worker-message" | "worker-notification")
-                    } else { false }
+                        matches!(
+                            source,
+                            "worker-communication"
+                                | "worker-finding"
+                                | "worker-message"
+                                | "worker-notification"
+                        )
+                    } else {
+                        false
+                    }
                 })
                 .collect();
 
             // Also check for messages after the last agent-end (arrived post-completion)
             let msgs_after_end: Vec<&crate::db::models::Event> = if end_idx < events.len() {
-                events[end_idx + 1..].iter()
+                events[end_idx + 1..]
+                    .iter()
                     .filter(|e| {
-                        if e.kind != "user" { return false; }
+                        if e.kind != "user" {
+                            return false;
+                        }
                         if let Ok(data) = serde_json::from_str::<serde_json::Value>(&e.data) {
                             let source = data.get("source").and_then(|v| v.as_str()).unwrap_or("");
-                            matches!(source, "worker-communication" | "worker-finding" | "worker-message" | "worker-notification")
-                        } else { false }
+                            matches!(
+                                source,
+                                "worker-communication"
+                                    | "worker-finding"
+                                    | "worker-message"
+                                    | "worker-notification"
+                            )
+                        } else {
+                            false
+                        }
                     })
                     .collect()
-            } else { Vec::new() };
+            } else {
+                Vec::new()
+            };
 
             // Check if the agent sent any send_worker_message calls during this turn
             // (indicating it DID respond to some messages)
@@ -637,14 +700,21 @@ pub async fn handle_worker_done(state: &Arc<AppState>, session_id: &str) {
 
                 // Collect ALL unresponded messages (during turn + after)
                 let all_unresponded: Vec<&crate::db::models::Event> = worker_msgs_during_turn
-                    .iter().chain(msgs_after_end.iter()).copied().collect();
+                    .iter()
+                    .chain(msgs_after_end.iter())
+                    .copied()
+                    .collect();
 
                 let pending_msgs: Vec<String> = all_unresponded
                     .iter()
                     .filter_map(|e| {
                         serde_json::from_str::<serde_json::Value>(&e.data)
                             .ok()
-                            .and_then(|d| d.get("text").and_then(|v| v.as_str()).map(|s| s.to_string()))
+                            .and_then(|d| {
+                                d.get("text")
+                                    .and_then(|v| v.as_str())
+                                    .map(|s| s.to_string())
+                            })
                     })
                     .collect();
 

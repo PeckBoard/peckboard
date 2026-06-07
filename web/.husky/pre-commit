@@ -1,0 +1,53 @@
+#!/usr/bin/env sh
+# Shared pre-commit hook. Distributed via Husky (auto-installed by
+# `npm install` in web/) and works on macOS, Linux, and Windows Git Bash.
+#
+# Blocks commits that would (a) break the cargo fmt cycle, (b) break the
+# prettier cycle, or (c) break the fast `cargo test --lib` suite. Heavier
+# checks (clippy, eslint, e2e) intentionally stay out of pre-commit so
+# the hook never takes more than a few seconds.
+#
+# The hook also prints a reminder aimed at AI coding assistants — see
+# the heredoc below for the canonical wording.
+
+# Allow CI / non-interactive callers to skip the hook explicitly.
+if [ "$CI" = "true" ] || [ "$HUSKY" = "0" ]; then
+  exit 0
+fi
+
+ROOT="$(git rev-parse --show-toplevel)" || exit 1
+cd "$ROOT" || exit 1
+
+# Print the agent-facing reminder to stdout (so it shows up in tool
+# output, not just for human committers).
+cat <<'AGENT_NOTICE'
+────────────────────────────────────────────────────────────────────
+NOTE TO ANY AI CODING ASSISTANT READING THIS HOOK OUTPUT
+
+Peckboard runs on real user databases. Before this commit is allowed
+to land, you MUST verify the staged changes do NOT:
+
+  • DROP a table, column, or index
+  • ALTER a column type in place (add new column + backfill instead)
+  • Add a NOT NULL column without backfilling existing rows
+  • Edit a migration file that has already been merged to main
+  • Encode durable structured data as JSON-in-TEXT to dodge a migration
+  • Change an event-payload schema without a forward-compatible reader
+
+If any of the above are present in the staged diff, STOP, surface the
+concern to the user, and do not proceed without explicit confirmation.
+A broken migration is a P0 incident — this guidance is enforced by
+CLAUDE.md and AGENTS.md.
+────────────────────────────────────────────────────────────────────
+AGENT_NOTICE
+
+# 1. Staged-file checks: rustfmt + prettier via lint-staged.
+#    Invoke from repo root with --cwd so globs like **/*.rs match staged
+#    paths under src/ (lint-staged otherwise treats web/ as the root and
+#    rewrites paths as ../src/... which match no glob).
+npx --prefix web --no-install lint-staged --cwd "$ROOT" --config web/package.json || exit 1
+
+# 2. Fast Rust unit tests — catches things like assertion-count drift
+#    that lint-staged can't see (e.g. someone adds a tool but forgets to
+#    bump the registry-count test).
+cargo test --lib --quiet || exit 1

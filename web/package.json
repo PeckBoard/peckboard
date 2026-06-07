@@ -11,7 +11,12 @@
     "format:check": "prettier --check .",
     "preview": "vite preview",
     "e2e": "playwright test",
-    "e2e:install": "playwright install --with-deps chromium"
+    "e2e:install": "playwright install --with-deps chromium",
+    "prepare": "cd .. && husky web/.husky"
+  },
+  "lint-staged": {
+    "**/*.rs": "rustfmt --check --edition 2024",
+    "**/*.{ts,tsx,js,jsx,mjs,cjs,css,html,json,md}": "prettier --check"
   },
   "dependencies": {
     "react": "^19.2.6",
@@ -33,6 +38,8 @@
     "eslint-plugin-react-hooks": "^7.1.1",
     "eslint-plugin-react-refresh": "^0.5.2",
     "globals": "^17.6.0",
+    "husky": "^9.1.7",
+    "lint-staged": "^17.0.7",
     "prettier": "^3.3.3",
     "typescript": "~6.0.2",
     "typescript-eslint": "^8.59.2",

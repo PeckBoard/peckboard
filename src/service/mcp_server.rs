@@ -1093,14 +1093,19 @@ impl McpToolRegistry {
         ctx: &ToolCallContext,
     ) -> anyhow::Result<Value> {
         // Accept project_id from args (for chat sessions) or context (for workers)
-        let project_id = args.get("project_id").and_then(|v| v.as_str()).map(|s| s.to_string())
+        let project_id = args
+            .get("project_id")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string())
             .or_else(|| ctx.project_id.clone())
             .or_else(|| {
                 // Fallback: resolve from session
                 // (can't await here, handled below)
                 None
             })
-            .ok_or_else(|| anyhow::anyhow!("create_card requires 'project_id' parameter or project context"))?;
+            .ok_or_else(|| {
+                anyhow::anyhow!("create_card requires 'project_id' parameter or project context")
+            })?;
         let project_id = project_id.as_str();
 
         tracing::info!(session_id = %ctx.session_id, project_id = %project_id, "MCP tool: create_card");
@@ -1117,9 +1122,18 @@ impl McpToolRegistry {
 
         let priority = args.get("priority").and_then(|v| v.as_i64()).unwrap_or(3) as i32;
 
-        let workflow = args.get("workflow").and_then(|v| v.as_str()).map(|s| s.to_string());
-        let model = args.get("model").and_then(|v| v.as_str()).map(|s| s.to_string());
-        let effort = args.get("effort").and_then(|v| v.as_str()).map(|s| s.to_string());
+        let workflow = args
+            .get("workflow")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string());
+        let model = args
+            .get("model")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string());
+        let effort = args
+            .get("effort")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string());
 
         let now = chrono::Utc::now().to_rfc3339();
         let card = ctx
@@ -1160,9 +1174,14 @@ impl McpToolRegistry {
     async fn handle_list_cards(&self, args: Value, ctx: &ToolCallContext) -> anyhow::Result<Value> {
         tracing::info!(session_id = %ctx.session_id, "MCP tool: list_cards");
 
-        let project_id = args.get("project_id").and_then(|v| v.as_str()).map(|s| s.to_string())
+        let project_id = args
+            .get("project_id")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string())
             .or_else(|| ctx.project_id.clone())
-            .ok_or_else(|| anyhow::anyhow!("list_cards requires 'project_id' parameter or project context"))?;
+            .ok_or_else(|| {
+                anyhow::anyhow!("list_cards requires 'project_id' parameter or project context")
+            })?;
 
         let cards = ctx.db.list_cards_by_project(&project_id).await?;
 
@@ -1292,7 +1311,12 @@ impl McpToolRegistry {
         let resolved_card_id = if ctx.card_id.is_some() {
             ctx.card_id.clone()
         } else {
-            ctx.db.get_session(&ctx.session_id).await.ok().flatten().and_then(|s| s.card_id)
+            ctx.db
+                .get_session(&ctx.session_id)
+                .await
+                .ok()
+                .flatten()
+                .and_then(|s| s.card_id)
         };
 
         // Build markdown with YAML frontmatter
@@ -1706,11 +1730,17 @@ impl McpToolRegistry {
         session_ids.dedup();
 
         // Clear card's FK references to sessions first
-        let _ = ctx.db.update_card(card_id, crate::db::models::UpdateCard {
-            worker_session_id: Some(None),
-            last_worker_session_id: Some(None),
-            ..Default::default()
-        }).await;
+        let _ = ctx
+            .db
+            .update_card(
+                card_id,
+                crate::db::models::UpdateCard {
+                    worker_session_id: Some(None),
+                    last_worker_session_id: Some(None),
+                    ..Default::default()
+                },
+            )
+            .await;
 
         // Now safe to delete sessions and their data
         for sid in &session_ids {
@@ -2430,28 +2460,36 @@ impl McpToolRegistry {
     async fn handle_list_models(&self, ctx: &ToolCallContext) -> anyhow::Result<Value> {
         tracing::info!(session_id = %ctx.session_id, "MCP tool: list_models");
 
-        let registry = ctx.provider_registry.as_ref()
+        let registry = ctx
+            .provider_registry
+            .as_ref()
             .ok_or_else(|| anyhow::anyhow!("provider registry not available"))?;
 
         let all_models = registry.list_all_models().await;
         let providers = registry.list_providers().await;
 
-        let models: Vec<Value> = all_models.iter().map(|(full_id, model)| {
-            serde_json::json!({
-                "id": full_id,
-                "model_id": model.id,
-                "display_name": model.display_name,
-                "capabilities": model.capabilities,
+        let models: Vec<Value> = all_models
+            .iter()
+            .map(|(full_id, model)| {
+                serde_json::json!({
+                    "id": full_id,
+                    "model_id": model.id,
+                    "display_name": model.display_name,
+                    "capabilities": model.capabilities,
+                })
             })
-        }).collect();
+            .collect();
 
-        let provider_list: Vec<Value> = providers.iter().map(|p| {
-            serde_json::json!({
-                "id": p.id,
-                "display_name": p.display_name,
-                "model_count": p.models.len(),
+        let provider_list: Vec<Value> = providers
+            .iter()
+            .map(|p| {
+                serde_json::json!({
+                    "id": p.id,
+                    "display_name": p.display_name,
+                    "model_count": p.models.len(),
+                })
             })
-        }).collect();
+            .collect();
 
         Ok(serde_json::json!({
             "models": models,
@@ -2596,7 +2634,7 @@ mod tests {
         assert!(names.contains(&"delete_card"));
         assert!(names.contains(&"move_card_to_done"));
         assert!(names.contains(&"move_card_to_wont_do"));
-        assert_eq!(names.len(), 27);
+        assert_eq!(names.len(), 28);
     }
 
     #[test]

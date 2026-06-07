@@ -644,17 +644,27 @@ async fn delete_card(
     // Cascade: clear FK refs, delete worker sessions and events
     if let Some(ref card) = card_before {
         let mut sids = Vec::new();
-        if let Some(ref s) = card.worker_session_id { sids.push(s.clone()); }
-        if let Some(ref s) = card.last_worker_session_id { sids.push(s.clone()); }
+        if let Some(ref s) = card.worker_session_id {
+            sids.push(s.clone());
+        }
+        if let Some(ref s) = card.last_worker_session_id {
+            sids.push(s.clone());
+        }
         sids.sort();
         sids.dedup();
 
         // Clear card FK references first
-        let _ = state.db.update_card(&card_id, crate::db::models::UpdateCard {
-            worker_session_id: Some(None),
-            last_worker_session_id: Some(None),
-            ..Default::default()
-        }).await;
+        let _ = state
+            .db
+            .update_card(
+                &card_id,
+                crate::db::models::UpdateCard {
+                    worker_session_id: Some(None),
+                    last_worker_session_id: Some(None),
+                    ..Default::default()
+                },
+            )
+            .await;
 
         for sid in &sids {
             let _ = state.db.delete_queued_message(sid).await;
@@ -846,10 +856,14 @@ async fn list_card_reports(
                 if let Ok(files) = std::fs::read_dir(folder_entry.path()) {
                     for file_entry in files.flatten() {
                         let file_name = file_entry.file_name().to_string_lossy().to_string();
-                        if !file_name.ends_with(".md") { continue; }
+                        if !file_name.ends_with(".md") {
+                            continue;
+                        }
 
                         if let Ok(content) = std::fs::read_to_string(file_entry.path()) {
-                            if !content.starts_with("---") { continue; }
+                            if !content.starts_with("---") {
+                                continue;
+                            }
                             let fm = content.splitn(3, "---").nth(1).unwrap_or("");
                             let mut title = file_name.clone();
                             let mut report_card_id = None;
