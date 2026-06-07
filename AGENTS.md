@@ -38,18 +38,29 @@ fresh `mktemp -d` data dir, so each run starts from a clean state.
 
 ## Running the Binary While Iterating
 
-**Always launch ad-hoc / scratch runs against a fresh tmp data dir,
-not the user's real install** — unless the user explicitly asks you
-to use theirs:
+**Always launch ad-hoc / scratch runs against a fresh tmp data dir
+_and_ on a random high port, not the user's real install** — unless
+the user explicitly asks you to use theirs:
 
 ```bash
-./target/release/peckboard --data-dir "$(mktemp -d)"
+PORT=$((20000 + RANDOM % 10000))
+./target/release/peckboard \
+  --data-dir "$(mktemp -d)" \
+  --port "$PORT" \
+  --https-port "$((PORT + 1))"
 ```
 
 The user's default data dir holds their real cards, sessions, and DB.
 An in-development binary may write data the released version can't
 read, or apply a migration that corrupts it. Default to a tmp dir
 every time.
+
+The user's real instance is usually already bound to the default
+ports (`3344` / `3345`). Picking a random high port avoids
+`Address already in use` failures _and_ ensures any traffic you
+generate while testing can't accidentally reach the user's live
+session. Pair the random port with the tmp dir — never one without
+the other.
 
 **Never blanket-kill `peckboard` processes.** The user may have their
 own instance running alongside yours. If you need to stop a server
