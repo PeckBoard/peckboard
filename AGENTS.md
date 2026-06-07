@@ -1,4 +1,4 @@
-# Peckboard — Claude working notes
+# Peckboard — Claude Working Notes
 
 Project layout, tooling commands, and the workflow Claude should follow
 when changing this repo.
@@ -36,7 +36,7 @@ Run from the repo root unless noted.
 The Playwright `webServer` block boots `target/release/peckboard` with a
 fresh `mktemp -d` data dir, so each run starts from a clean state.
 
-## Running the binary while iterating
+## Running the Binary While Iterating
 
 **Always launch ad-hoc / scratch runs against a fresh tmp data dir,
 not the user's real install** — unless the user explicitly asks you
@@ -58,7 +58,7 @@ match on the `--data-dir` path you launched it with — and kill only
 that one. Do not run `pkill peckboard` / `killall peckboard` /
 `fuser -k <port>`; those will take down the user's session.
 
-## Definition of done
+## Definition of Done
 
 **After making code changes, run the full verification cycle and fix
 anything it surfaces before reporting done:**
@@ -74,7 +74,7 @@ If a step fails because of something _unrelated_ to the current change
 (pre-existing backlog), call it out explicitly rather than silently
 ignoring it.
 
-## Tests for new features
+## Tests for New Features
 
 Add tests **proportional to the change** — enough to lock in
 behaviour, not enough to slow future refactors:
@@ -108,7 +108,7 @@ migration that drops a column, drops a table, alters types, or runs
 incorrectly on existing DBs is a P0 incident.** Migrations have
 already silently corrupted live databases once on this project.
 
-### Think hard before adding one — but use real schema when you do
+### Think Hard Before Adding One — but Use Real Schema When You Do
 
 **Migrations are unavoidable; treat the decision to add one as
 weighty, not the way you express it.** Don't dodge a migration by
@@ -135,7 +135,7 @@ is only appropriate for genuinely free-form data the application
 never queries against (e.g. opaque provider-event payloads in
 `events.data`).
 
-### When you must add one
+### When You Must Add One
 
 Treat it like a one-way door — every shipped migration runs forever
 on old DBs and can never be deleted. So:
@@ -151,7 +151,7 @@ on old DBs and can never be deleted. So:
 - Provide a working `down.sql`. You will need it locally even if you
   never run it in production.
 
-### Hard rules
+### Hard Rules
 
 1. **Version numbers MUST be globally unique.** Diesel keys applied
    migrations by the numeric prefix (`00000000000003` in
@@ -180,7 +180,7 @@ on old DBs and can never be deleted. So:
    data dir before merging, not just `mktemp -d`. Most migration
    breakage only surfaces when the table already has rows.
 
-### Required workflow when adding a migration
+### Required Workflow When Adding a Migration
 
 ```bash
 mkdir migrations/$(date +%s)_what_this_does
@@ -193,7 +193,7 @@ cargo test --lib                  # in-memory migrations + schema tests
 If `cargo build` fails with "duplicate migration version", rename the
 new migration. Don't suppress the check.
 
-### Backfilling a botched migration
+### Backfilling a Botched Migration
 
 If you discover a column / table that should exist but doesn't on some
 DBs, **do not** rely on a new migration to add it (it'll fail on DBs
@@ -212,3 +212,12 @@ and is required to be idempotent.
 - New providers go in `src/provider/<name>/` and register themselves
   via a `register_<name>_provider(&registry)` function called from
   `main.rs`.
+- **Markdown headings use Title Case** (AP-leaning). Capitalize
+  principal words; always capitalize the first and last word. Keep
+  articles, coordinating conjunctions, and short prepositions
+  lowercase mid-title (`a`, `an`, `the`, `and`, `but`, `or`, `for`,
+  `of`, `to`, `in`, `on`, `at`, `by`, `with`, `from`, etc.). Preserve
+  identifier-shaped tokens verbatim: inline code, ALL-CAPS emphasis
+  (`READ THIS BEFORE ADDING ONE`), acronyms (`HTTP`, `MCP`),
+  mixed-case names (`ESLint`, `GitHub`), and digit+letter tokens
+  (`e2e`, `OAuth2`).
