@@ -658,6 +658,50 @@ impl McpToolRegistry {
                     "additionalProperties": false
                 }),
             },
+            McpToolDef {
+                name: "list_project_reports".into(),
+                description: "List all reports written by workers in the same project. Returns report titles, dates, and paths so you can read them.".into(),
+                input_schema: serde_json::json!({
+                    "type": "object",
+                    "properties": {},
+                    "additionalProperties": false
+                }),
+            },
+            McpToolDef {
+                name: "read_report".into(),
+                description: "Read the full content of a report by its folder and file path.".into(),
+                input_schema: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "folder": { "type": "string", "description": "Report folder (e.g. 2026-06-07)" },
+                        "file": { "type": "string", "description": "Report filename (e.g. my-report.md)" }
+                    },
+                    "required": ["folder", "file"],
+                    "additionalProperties": false
+                }),
+            },
+            McpToolDef {
+                name: "read_worker_session".into(),
+                description: "Read the event history of another worker session in the same project. Use to understand what another worker did, see their tool calls, and review their work.".into(),
+                input_schema: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "session_id": { "type": "string", "description": "The worker session ID to read" },
+                        "last_n": { "type": "integer", "description": "Number of recent events to return (default 50, max 200)" }
+                    },
+                    "required": ["session_id"],
+                    "additionalProperties": false
+                }),
+            },
+            McpToolDef {
+                name: "list_worker_sessions".into(),
+                description: "List all worker sessions in the same project with their card titles and status. Use to find sessions you can read or message.".into(),
+                input_schema: serde_json::json!({
+                    "type": "object",
+                    "properties": {},
+                    "additionalProperties": false
+                }),
+            },
         ];
 
         McpToolRegistry { tools }
@@ -696,6 +740,10 @@ impl McpToolRegistry {
             "move_card_to_wont_do" => self.handle_move_card_to_wont_do(args, ctx).await,
             "notify_workers" => self.handle_notify_workers(args, ctx).await,
             "fetch_url" => self.handle_fetch_url(args, ctx).await,
+            "list_project_reports" => self.handle_list_project_reports(ctx).await,
+            "read_report" => self.handle_read_report(args, ctx).await,
+            "read_worker_session" => self.handle_read_worker_session(args, ctx).await,
+            "list_worker_sessions" => self.handle_list_worker_sessions(ctx).await,
             "share_finding" => self.handle_share_finding(args, ctx).await,
             "get_finding_details" => self.handle_get_finding_details(args, ctx).await,
             "send_worker_message" => self.handle_send_worker_message(args, ctx).await,
@@ -1994,6 +2042,208 @@ impl McpToolRegistry {
     /// Helper: deliver a message to a worker session immediately.
     /// Appends as a user event (for persistence) AND broadcasts for
     /// immediate stdin delivery to a running agent.
+    async fn handle_list_project_reports(&self, ctx: &ToolCallContext) -> anyhow::Result<Value> {
+        tracing::info!(session_id = %ctx.session_id, "MCP tool: list_project_reports");
+
+        let project_id = self.resolve_project_id(ctx).await;
+        let project_name = if let Some(ref pid) = project_id {
+            ctx.db.get_project(pid).await.ok().flatten().map(|p| p.name)
+        } else { None };
+
+        // Scan reports directory for reports matching this project
+        let data_dir = dirs::home_dir().unwrap_or_else(|| std::path::PathBuf::from(".")).join(".peckboard");
+        let reports_dir = data_dir.join("reports");
+
+        let mut reports = Vec::new();
+        if reports_dir.exists() {
+            if let Ok(folders) = std::fs::read_dir(&reports_dir) {
+                for folder_entry in folders.flatten() {
+                    let folder_name = folder_entry.file_name().to_string_lossy().to_string();
+                    if let Ok(files) = std::fs::read_dir(folder_entry.path()) {
+                        for file_entry in files.flatten() {
+                            let file_name = file_entry.file_name().to_string_lossy().to_string();
+                            if !file_name.ends_with(".md") { continue; }
+
+                            // Read frontmatter to check project match
+                            if let Ok(content) = std::fs::read_to_string(file_entry.path()) {
+                                let mut title = file_name.clone();
+                                let mut session_id = None;
+                                let mut report_project = None;
+
+                                if content.starts_with("---") {
+                                    if let Some(fm) = content.splitn(3, "---").nth(1) {
+                                        for line in fm.lines() {
+                                            if let Some(v) = line.strip_prefix("title: ") {
+                                                title = v.trim_matches('"').to_string();
+                                            }
+                                            if let Some(v) = line.strip_prefix("sessionId: ") {
+                                                session_id = Some(v.trim_matches('"').to_string());
+                                            }
+                                            if let Some(v) = line.strip_prefix("projectName: ") {
+                                                report_project = Some(v.trim_matches('"').to_string());
+                                            }
+                                        }
+                                    }
+                                }
+
+                                // Include if project matches or no filter
+                                let matches = match (&project_name, &report_project) {
+                                    (Some(pn), Some(rp)) => pn == rp,
+                                    (None, _) => true,
+                                    _ => true,
+                                };
+                                if matches {
+                                    reports.push(serde_json::json!({
+                                        "folder": folder_name,
+                                        "file": file_name,
+                                        "title": title,
+                                        "sessionId": session_id,
+                                        "projectName": report_project,
+                                    }));
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        Ok(serde_json::json!({ "reports": reports, "count": reports.len() }))
+    }
+
+    async fn handle_read_report(&self, args: Value, ctx: &ToolCallContext) -> anyhow::Result<Value> {
+        let folder = args.get("folder").and_then(|v| v.as_str())
+            .ok_or_else(|| anyhow::anyhow!("read_report requires 'folder'"))?;
+        let file = args.get("file").and_then(|v| v.as_str())
+            .ok_or_else(|| anyhow::anyhow!("read_report requires 'file'"))?;
+
+        tracing::info!(session_id = %ctx.session_id, folder = %folder, file = %file, "MCP tool: read_report");
+
+        // Sanitize to prevent path traversal
+        if folder.contains("..") || file.contains("..") || folder.contains('/') || file.contains('/') {
+            anyhow::bail!("invalid path");
+        }
+
+        let data_dir = dirs::home_dir().unwrap_or_else(|| std::path::PathBuf::from(".")).join(".peckboard");
+        let path = data_dir.join("reports").join(folder).join(file);
+
+        let content = tokio::fs::read_to_string(&path).await
+            .map_err(|_| anyhow::anyhow!("report not found: {folder}/{file}"))?;
+
+        // Strip frontmatter for the body
+        let body = if content.starts_with("---") {
+            content.splitn(3, "---").nth(2).unwrap_or(&content).trim().to_string()
+        } else {
+            content
+        };
+
+        Ok(serde_json::json!({
+            "status": "ok",
+            "folder": folder,
+            "file": file,
+            "content": body,
+        }))
+    }
+
+    async fn handle_read_worker_session(&self, args: Value, ctx: &ToolCallContext) -> anyhow::Result<Value> {
+        let target_session_id = args.get("session_id").and_then(|v| v.as_str())
+            .ok_or_else(|| anyhow::anyhow!("read_worker_session requires 'session_id'"))?;
+        let last_n = args.get("last_n").and_then(|v| v.as_i64()).unwrap_or(50).min(200) as i64;
+
+        tracing::info!(session_id = %ctx.session_id, target = %target_session_id, "MCP tool: read_worker_session");
+
+        // Verify target is in the same project
+        let my_project = self.resolve_project_id(ctx).await;
+        let target_session = ctx.db.get_session(target_session_id).await?
+            .ok_or_else(|| anyhow::anyhow!("session not found"))?;
+
+        if my_project.is_some() && target_session.project_id != my_project {
+            anyhow::bail!("cannot read sessions from other projects");
+        }
+
+        let card_title = if let Some(ref cid) = target_session.card_id {
+            ctx.db.get_card(cid).await.ok().flatten().map(|c| c.title)
+        } else { None };
+
+        let events = ctx.db.events_tail(target_session_id, last_n).await?;
+
+        let summary: Vec<Value> = events.iter().map(|e| {
+            let data: Value = serde_json::from_str(&e.data).unwrap_or_default();
+            let mut entry = serde_json::json!({
+                "seq": e.seq,
+                "kind": e.kind,
+                "ts": e.ts,
+            });
+            // Include key fields based on event kind
+            match e.kind.as_str() {
+                "user" => { entry["text"] = data.get("text").cloned().unwrap_or_default(); }
+                "agent-text" => { entry["text"] = data.get("text").cloned().unwrap_or_default(); }
+                "agent-tool-start" => {
+                    entry["tool"] = data.get("name").cloned().unwrap_or_default();
+                    entry["input"] = data.get("input").cloned().unwrap_or_default();
+                }
+                "agent-tool-end" => {
+                    entry["error"] = data.get("error").cloned().unwrap_or_default();
+                }
+                "agent-start" => {
+                    entry["model"] = data.get("model").cloned().unwrap_or_default();
+                }
+                "agent-end" => {
+                    entry["status"] = data.get("status").cloned().unwrap_or_default();
+                }
+                _ => { entry["data"] = data; }
+            }
+            entry
+        }).collect();
+
+        Ok(serde_json::json!({
+            "status": "ok",
+            "session_id": target_session_id,
+            "session_name": target_session.name,
+            "card_title": card_title,
+            "is_worker": target_session.is_worker,
+            "event_count": summary.len(),
+            "events": summary,
+        }))
+    }
+
+    async fn handle_list_worker_sessions(&self, ctx: &ToolCallContext) -> anyhow::Result<Value> {
+        tracing::info!(session_id = %ctx.session_id, "MCP tool: list_worker_sessions");
+
+        let project_id = self.resolve_project_id(ctx).await
+            .ok_or_else(|| anyhow::anyhow!("no project context"))?;
+
+        let workers = ctx.db.list_worker_sessions_by_project(&project_id).await?;
+
+        let mut items = Vec::new();
+        for ws in &workers {
+            let card_info = if let Some(ref cid) = ws.card_id {
+                ctx.db.get_card(cid).await.ok().flatten().map(|c| serde_json::json!({
+                    "id": c.id,
+                    "title": c.title,
+                    "step": c.step,
+                    "priority": c.priority,
+                    "blocked": c.blocked,
+                }))
+            } else { None };
+
+            items.push(serde_json::json!({
+                "session_id": ws.id,
+                "session_name": ws.name,
+                "card": card_info,
+                "is_current": ws.id == ctx.session_id,
+                "last_activity": ws.last_activity,
+            }));
+        }
+
+        Ok(serde_json::json!({
+            "status": "ok",
+            "project_id": project_id,
+            "workers": items,
+            "count": items.len(),
+        }))
+    }
+
     async fn deliver_to_worker(
         &self,
         ctx: &ToolCallContext,

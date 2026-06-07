@@ -66,6 +66,21 @@ pub fn build_worker_prompt(
     prompt.push_str(
         "- `mcp__peckboard__fetch_url` — Fetch a URL server-side (use when WebFetch returns 403).\n",
     );
+    prompt.push_str(
+        "- `mcp__peckboard__list_worker_sessions` — List all worker sessions in this project \
+         with their card titles, steps, and status. See who's working on what.\n",
+    );
+    prompt.push_str(
+        "- `mcp__peckboard__read_worker_session` — Read another worker's session history to \
+         understand their work, see their tool calls, and review decisions. Requires session_id.\n",
+    );
+    prompt.push_str(
+        "- `mcp__peckboard__list_project_reports` — List all reports written by workers in this \
+         project. See what other workers have documented.\n",
+    );
+    prompt.push_str(
+        "- `mcp__peckboard__read_report` — Read the full content of a report by folder/file.\n",
+    );
     prompt.push_str("\n");
 
     prompt.push_str("## Instructions\n\n");
@@ -84,6 +99,18 @@ pub fn build_worker_prompt(
          other workers immediately.\n\n\
          **If you receive a file change notification**, re-read those files before editing \
          them to avoid conflicts.\n\n\
+         ## Project Visibility\n\n\
+         You have full visibility into the project:\n\
+         - **Cards**: call `list_cards` to see all cards, their steps, and priorities\n\
+         - **Other workers**: call `mcp__peckboard__list_worker_sessions` to see who's \
+         working on what, their card assignments, and status\n\
+         - **Worker history**: call `mcp__peckboard__read_worker_session` to read another \
+         worker's session and understand their approach, decisions, and progress\n\
+         - **Reports**: call `mcp__peckboard__list_project_reports` to see reports from \
+         all workers, then `mcp__peckboard__read_report` to read them\n\n\
+         Use these tools proactively to coordinate, avoid duplication, and build on \
+         other workers' work. Review relevant reports before starting work that \
+         might overlap.\n\n\
          ## Sharing Findings & Knowledge\n\n\
          Share anything that could be valuable to other workers — this is not limited to \
          code changes. Share:\n\

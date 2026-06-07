@@ -270,6 +270,10 @@ pub fn build_cli_args(
             "share_finding",
             "get_finding_details",
             "send_worker_message",
+            "list_project_reports",
+            "read_report",
+            "read_worker_session",
+            "list_worker_sessions",
         ];
         let allowed: Vec<String> = mcp_tools
             .iter()
