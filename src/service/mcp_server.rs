@@ -993,7 +993,7 @@ impl McpToolRegistry {
             .and_then(|v| v.as_str())
             .ok_or_else(|| anyhow::anyhow!("create_card requires 'description'"))?;
 
-        let priority = args.get("priority").and_then(|v| v.as_i64()).unwrap_or(100) as i32;
+        let priority = args.get("priority").and_then(|v| v.as_i64()).unwrap_or(3) as i32;
 
         let workflow = args
             .get("workflow")
@@ -1008,7 +1008,7 @@ impl McpToolRegistry {
                 project_id: project_id.to_string(),
                 title: title.to_string(),
                 description: description.to_string(),
-                step: "todo".to_string(),
+                step: "backlog".to_string(),
                 priority,
                 workflow,
                 model: None,
@@ -1017,6 +1017,13 @@ impl McpToolRegistry {
                 updated_at: now,
             })
             .await?;
+
+        // Broadcast for live kanban
+        ctx.broadcaster.broadcast(crate::ws::broadcaster::WsEvent {
+            event_type: "card-update".into(),
+            session_id: project_id.to_string(),
+            data: serde_json::json!({ "card": card }),
+        });
 
         Ok(serde_json::json!({
             "status": "ok",
@@ -1316,6 +1323,12 @@ impl McpToolRegistry {
             .await?
             .ok_or_else(|| anyhow::anyhow!("card not found: {card_id}"))?;
 
+        ctx.broadcaster.broadcast(crate::ws::broadcaster::WsEvent {
+            event_type: "card-update".into(),
+            session_id: card.project_id.clone(),
+            data: serde_json::json!({ "card": card }),
+        });
+
         Ok(serde_json::json!({
             "status": "ok",
             "card": {
@@ -1518,11 +1531,20 @@ impl McpToolRegistry {
 
         tracing::info!(session_id = %ctx.session_id, card_id = %card_id, "MCP tool: delete_card");
 
-        let deleted = ctx.db.delete_card(card_id).await?;
+        // Get card before deletion for broadcast
+        let card = ctx.db.get_card(card_id).await?.ok_or_else(|| anyhow::anyhow!("card not found: {card_id}"))?;
+        let project_id = card.project_id.clone();
 
+        let deleted = ctx.db.delete_card(card_id).await?;
         if !deleted {
             anyhow::bail!("card not found: {card_id}");
         }
+
+        ctx.broadcaster.broadcast(crate::ws::broadcaster::WsEvent {
+            event_type: "card-delete".into(),
+            session_id: project_id.clone(),
+            data: serde_json::json!({ "cardId": card_id, "projectId": project_id }),
+        });
 
         Ok(serde_json::json!({
             "status": "ok",
@@ -1553,6 +1575,12 @@ impl McpToolRegistry {
             .update_card(card_id, update)
             .await?
             .ok_or_else(|| anyhow::anyhow!("card not found: {card_id}"))?;
+
+        ctx.broadcaster.broadcast(crate::ws::broadcaster::WsEvent {
+            event_type: "card-update".into(),
+            session_id: card.project_id.clone(),
+            data: serde_json::json!({ "card": card }),
+        });
 
         Ok(serde_json::json!({
             "status": "ok",
@@ -1593,6 +1621,12 @@ impl McpToolRegistry {
             .update_card(card_id, update)
             .await?
             .ok_or_else(|| anyhow::anyhow!("card not found: {card_id}"))?;
+
+        ctx.broadcaster.broadcast(crate::ws::broadcaster::WsEvent {
+            event_type: "card-update".into(),
+            session_id: card.project_id.clone(),
+            data: serde_json::json!({ "card": card }),
+        });
 
         Ok(serde_json::json!({
             "status": "ok",
