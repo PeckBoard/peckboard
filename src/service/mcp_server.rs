@@ -1709,31 +1709,8 @@ impl McpToolRegistry {
                 }
             }
 
-            // Append as user event so the agent sees it when resumed
-            let _ = ctx.db.append_event(
-                &session.id,
-                "user",
-                serde_json::json!({
-                    "text": notification,
-                    "source": "worker-notification",
-                }),
-            ).await;
-
-            // Also append a system event so the notification appears in the
-            // session's event log immediately (visible in UI)
-            let _ = ctx
-                .db
-                .append_event(
-                    &session.id,
-                    "system",
-                    serde_json::json!({
-                        "text": notification,
-                        "source": "worker-notification",
-                        "fromSessionId": ctx.session_id,
-                        "fromCardTitle": sender_card_title,
-                    }),
-                )
-                .await;
+            // Deliver immediately to running worker + persist
+            self.deliver_to_worker(ctx, &session.id, &notification).await;
 
             // Broadcast so the frontend sees it in real-time
             ctx.broadcaster.broadcast(crate::ws::broadcaster::WsEvent {
@@ -1876,14 +1853,7 @@ impl McpToolRegistry {
                             if c.step == "done" || c.step == "wont_do" { continue; }
                         }
                     }
-                    let _ = ctx.db.append_event(
-                        &ws.id,
-                        "user",
-                        serde_json::json!({
-                            "text": msg,
-                            "source": "worker-finding",
-                        }),
-                    ).await;
+                    self.deliver_to_worker(ctx, &ws.id, &msg).await;
                 }
             }
         }
@@ -1964,20 +1934,35 @@ impl McpToolRegistry {
             message
         );
 
-        // Append as user event so the agent sees it when resumed
-        let _ = ctx.db.append_event(
-            target_session_id,
-            "user",
-            serde_json::json!({
-                "text": msg,
-                "source": "worker-message",
-            }),
-        ).await;
+        // Deliver immediately to running worker + persist
+        self.deliver_to_worker(ctx, target_session_id, &msg).await;
 
         Ok(serde_json::json!({
             "status": "ok",
             "message": format!("Message sent to worker session {}", target_session_id)
         }))
+    }
+
+    /// Helper: deliver a message to a worker session immediately.
+    /// Appends as a user event (for persistence) AND broadcasts for
+    /// immediate stdin delivery to a running agent.
+    async fn deliver_to_worker(&self, ctx: &ToolCallContext, target_session_id: &str, message: &str) {
+        // Append as user event for persistence (agent sees it on resume)
+        let _ = ctx.db.append_event(
+            target_session_id,
+            "user",
+            serde_json::json!({
+                "text": message,
+                "source": "worker-communication",
+            }),
+        ).await;
+
+        // Broadcast for immediate delivery to running agent's stdin
+        ctx.broadcaster.broadcast(crate::ws::broadcaster::WsEvent {
+            event_type: "worker-stdin-deliver".into(),
+            session_id: target_session_id.to_string(),
+            data: serde_json::json!({ "text": message }),
+        });
     }
 
     /// Helper: resolve project_id from context or session lookup

@@ -130,6 +130,9 @@ pub async fn stream_events(
     let mut lines = reader.lines();
     let mut stdin_rx = stdin_rx;
 
+    // Subscribe to broadcasts for immediate inter-worker message delivery
+    let mut broadcast_rx = broadcaster.subscribe_all();
+
     // Track state for mapping stream-json events
     let mut conversation_id: Option<String> = None;
     let mut model_name: Option<String> = None;
@@ -137,8 +140,8 @@ pub async fn stream_events(
     let mut emitted_start = false;
 
     // Track file-modifying tool calls for auto cross-worker notification
-    let mut pending_file_changes: Vec<String> = Vec::new(); // file paths from Write/Edit tools
-    let mut pending_tool_names: std::collections::HashMap<String, (String, Option<String>)> = std::collections::HashMap::new(); // tool_use_id -> (tool_name, file_path)
+    let mut pending_file_changes: Vec<String> = Vec::new();
+    let mut pending_tool_names: std::collections::HashMap<String, (String, Option<String>)> = std::collections::HashMap::new();
 
     loop {
         let line = tokio::select! {
@@ -151,6 +154,24 @@ pub async fn stream_events(
             Some(text) = stdin_rx.recv() => {
                 // External caller (e.g. question-resolved) wants to write to stdin
                 write_stdin_line(&mut stdin_pipe, &text, &session_id).await;
+                continue;
+            }
+            event = broadcast_rx.recv() => {
+                // Check for inter-worker messages addressed to this session
+                if let Ok(ws_event) = event {
+                    if ws_event.event_type == "worker-stdin-deliver"
+                        && ws_event.session_id == session_id
+                    {
+                        if let Some(text) = ws_event.data.get("text").and_then(|v| v.as_str()) {
+                            tracing::info!(
+                                session_id = %session_id,
+                                "Delivering inter-worker message to running agent"
+                            );
+                            // Write directly to stdin so the agent receives it immediately
+                            write_stdin_line(&mut stdin_pipe, text, &session_id).await;
+                        }
+                    }
+                }
                 continue;
             }
         };
@@ -338,8 +359,7 @@ pub async fn stream_events(
                                                             if c.step == "done" || c.step == "wont_do" { continue; }
                                                         }
                                                     }
-                                                    // Append as user event so the agent sees it
-                                                    // when resumed via --resume
+                                                    // Persist as user event
                                                     let _ = db.append_event(
                                                         &ws.id,
                                                         "user",
@@ -348,6 +368,12 @@ pub async fn stream_events(
                                                             "source": "worker-auto-notify",
                                                         }),
                                                     ).await;
+                                                    // Broadcast for immediate stdin delivery
+                                                    broadcaster.broadcast(WsEvent {
+                                                        event_type: "worker-stdin-deliver".into(),
+                                                        session_id: ws.id.clone(),
+                                                        data: serde_json::json!({ "text": msg }),
+                                                    });
                                                 }
                                                 tracing::info!(
                                                     session_id = %session_id,
