@@ -90,22 +90,37 @@ migration that drops a column, drops a table, alters types, or runs
 incorrectly on existing DBs is a P0 incident.** Migrations have
 already silently corrupted live databases once on this project.
 
-### Default position: don't add a migration
+### Think hard before adding one — but use real schema when you do
 
-Most schema changes are avoidable. **Before reaching for ALTER /
-CREATE / DROP, ask:**
+**Migrations are unavoidable; treat the decision to add one as
+weighty, not the way you express it.** Don't dodge a migration by
+stuffing typed data into a JSON blob — schema-on-write protections
+(types, NOT NULL, FKs, UNIQUE, indexes) exist for a reason and we
+lose all of them inside a `TEXT` column. JSON-in-TEXT is technical
+debt that compounds: every query needs string parsing, every
+filter/index is impossible without a generated column, and bugs that
+schema would have caught at write time turn into silent corruption.
 
-- Can this be a new JSON field inside an existing `TEXT` column
-  (e.g. `events.data`, `projects.context`)? Almost everything we
-  store has a JSON escape hatch — use it.
-- Can this be derived at query time instead of stored?
-- Is this state really durable, or can it live in localStorage / a
-  Zustand store / a runtime cache?
-- Will future requirements likely need more fields here? If yes,
-  pick a representation that doesn't need a migration each time
-  (a `metadata JSON` blob, an EAV side-table, etc.).
+Before reaching for ALTER / CREATE, ask:
 
-Migrations should be the path of last resort, not the first instinct.
+- **Is this state actually durable?** If it's per-user-per-browser
+  (theme, layout prefs) or per-session ephemeral, it belongs in
+  localStorage / sessionStorage / a Zustand store, not the DB.
+- **Can it be derived at query time?** Aggregations, denormalised
+  copies, and "summary" fields are often cheaper to compute than to
+  store and keep in sync.
+- **Is the data shape really this volatile?** If you find yourself
+  needing five migrations for one feature, the schema is wrong;
+  step back and redesign so the columns generalise (e.g. an event
+  log with `kind` + typed payload tables, instead of bolting a new
+  flag onto a wide row each release).
+
+Once you've decided it's real, durable, structured state, **add a
+proper column or table.** Use the right type. Add the constraint.
+Add the index. JSON is appropriate only for genuinely free-form
+data the application never queries against (e.g. opaque
+provider-event payloads in `events.data`, where the producer's
+schema isn't ours to define).
 
 ### When you must add one
 
