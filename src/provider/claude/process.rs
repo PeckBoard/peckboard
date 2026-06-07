@@ -333,9 +333,11 @@ pub async fn stream_events(
                     ProviderEvent::ToolEnd {
                         tool_use_id, error, ..
                     } => {
-                        if error.is_none() {
-                            if let Some((name, file_path)) = pending_tool_names.remove(tool_use_id)
-                            {
+                        // Always drop the pending entry on any end (success or
+                        // error) so the post-exit synthetic-end sweep only
+                        // covers truly orphaned tools.
+                        if let Some((name, file_path)) = pending_tool_names.remove(tool_use_id) {
+                            if error.is_none() {
                                 if let Some(path) = file_path {
                                     if name == "Write" || name == "Edit" {
                                         pending_file_changes.push(path);
@@ -439,6 +441,32 @@ pub async fn stream_events(
 
     // Wait for the process to exit and capture the exit code
     let exit_status = process.child.wait().await;
+
+    // Close any tools we saw start but never saw end. If the CLI exits
+    // (cleanly or otherwise) with outstanding tool_use blocks, the user
+    // would otherwise see a spinner that never resolves. Emit synthetic
+    // ToolEnd events so the event log is self-consistent.
+    if !pending_tool_names.is_empty() {
+        tracing::warn!(
+            session_id = %session_id,
+            count = pending_tool_names.len(),
+            "CLI exited with open tool_use blocks; emitting synthetic ToolEnd"
+        );
+        let orphans: Vec<String> = pending_tool_names.keys().cloned().collect();
+        for tool_use_id in orphans {
+            emit_event(
+                &db,
+                &broadcaster,
+                &session_id,
+                ProviderEvent::ToolEnd {
+                    tool_use_id,
+                    output: None,
+                    error: Some("tool did not return a result before agent ended".into()),
+                },
+            )
+            .await;
+        }
+    }
 
     // Read any remaining stderr
     let stderr_text = if let Some(stderr) = stderr {

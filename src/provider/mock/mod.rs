@@ -266,6 +266,35 @@ async fn run_scenario(
             )
             .await;
         }
+        "tool-orphan-crash" => {
+            // Emit a ToolStart with no matching ToolEnd, then crash. Used
+            // to verify the UI doesn't leave a tool-block spinner running
+            // forever when the agent dies before the tool returns.
+            emit_event(
+                db,
+                broadcaster,
+                session_id,
+                ProviderEvent::ToolStart {
+                    tool_use_id: format!("tool-{}", uuid::Uuid::new_v4()),
+                    name: "Bash".into(),
+                    input: serde_json::json!({ "command": "sleep forever" }),
+                },
+            )
+            .await;
+            tick().await;
+            emit_event(
+                db,
+                broadcaster,
+                session_id,
+                ProviderEvent::Crashed {
+                    reason: "mock orphan-tool crash".into(),
+                    exit_code: Some(1),
+                    stderr: None,
+                },
+            )
+            .await;
+            return false;
+        }
         "crash" => {
             emit_event(
                 db,
@@ -387,6 +416,11 @@ pub async fn register_mock_provider(registry: &ProviderRegistry) {
             id: "crash".into(),
             display_name: "Mock: crash".into(),
             capabilities: vec!["mock".into()],
+        },
+        ModelInfo {
+            id: "tool-orphan-crash".into(),
+            display_name: "Mock: tool start without end then crash".into(),
+            capabilities: vec!["mock".into(), "tools".into()],
         },
         ModelInfo {
             id: "ask".into(),

@@ -84,11 +84,16 @@ function deriveAgentStatus(events: Event[]): AgentStatus {
       if (!resolved) return 'questioning'
     }
     if (kind === 'agent-tool-start') {
-      // Check if ended later
-      const toolUseId = (events[i].data.tool_use_id as string) ?? events[i].id
-      const ended = events
-        .slice(i + 1)
-        .some((e) => e.kind === 'agent-tool-end' && (e.data.tool_use_id as string) === toolUseId)
+      // Check if ended later. Backend emits camelCase `toolUseId`; tolerate
+      // the snake_case spelling too in case older events use it.
+      const startData = events[i].data
+      const toolUseId =
+        (startData.toolUseId as string) ?? (startData.tool_use_id as string) ?? events[i].id
+      const ended = events.slice(i + 1).some((e) => {
+        if (e.kind !== 'agent-tool-end') return false
+        const endId = (e.data.toolUseId as string) ?? (e.data.tool_use_id as string)
+        return endId === toolUseId
+      })
       if (!ended) return 'tool'
     }
     if (kind === 'agent-start') return 'working'
@@ -124,6 +129,27 @@ function getStatusDotClass(status: AgentStatus): string {
     case 'questioning':
       return 'status-dot status-dot-questioning'
   }
+}
+
+/** Mark any tool blocks still flagged as running as ended (with a fallback
+ * error message). Defends against the agent dying mid-tool, or any other
+ * code path that drops the matching agent-tool-end. */
+function closeOpenTools(
+  items: DisplayItem[],
+  openTools: Map<string, number>,
+  reason: string,
+): void {
+  for (const idx of openTools.values()) {
+    const item = items[idx]
+    if (item?.type === 'tool' && item.isRunning) {
+      items[idx] = {
+        ...item,
+        isRunning: false,
+        error: item.error ?? reason,
+      }
+    }
+  }
+  openTools.clear()
 }
 
 function buildDisplayItems(events: Event[]): DisplayItem[] {
@@ -220,6 +246,7 @@ function buildDisplayItems(events: Event[]): DisplayItem[] {
       }
       case 'agent-end': {
         flushAssistant()
+        closeOpenTools(items, openTools, 'agent ended before tool completed')
         if ((ev.data.status as string) === 'crashed') {
           const reason = (ev.data.reason as string) ?? 'unknown error'
           const stderr = ev.data.stderr as string | undefined
@@ -239,6 +266,7 @@ function buildDisplayItems(events: Event[]): DisplayItem[] {
       }
       case 'interrupt': {
         flushAssistant()
+        closeOpenTools(items, openTools, 'interrupted')
         items.push({ type: 'system', text: 'Interrupted', key: ev.id, ts: ev.ts })
         break
       }
