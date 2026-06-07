@@ -5,6 +5,7 @@ import { authedFetch } from '../store/auth'
 import { useMentions, filterMentions } from '../hooks/useMentions'
 import type { Card, Event } from '../types/api'
 import EditCardModal from './EditCardModal'
+import WorkerComms from './WorkerComms'
 
 const STEPS = [
   { key: 'backlog', label: 'Backlog' },
@@ -98,6 +99,7 @@ export default function KanbanBoard({ projectId }: KanbanBoardProps) {
   const [dragOverStep, setDragOverStep] = useState<string | null>(null)
   const [cardMenuId, setCardMenuId] = useState<string | null>(null)
   const [editingCard, setEditingCard] = useState<Card | null>(null)
+  const [showComms, setShowComms] = useState(false)
   const [cardReports, setCardReports] = useState<{ folder: string; file: string; title: string; date: string }[]>([])
 
   // Fetch reports when card detail is opened
@@ -447,6 +449,10 @@ export default function KanbanBoard({ projectId }: KanbanBoardProps) {
   // Only show wont_do column if there are cards in it
   const visibleSteps = STEPS.filter((s) => s.key !== 'wont_do' || cardsByStep('wont_do').length > 0)
 
+  if (showComms) {
+    return <WorkerComms projectId={projectId} onClose={() => setShowComms(false)} />
+  }
+
   return (
     <div className="kanban-board">
       <div className="kanban-board-header">
@@ -468,6 +474,9 @@ export default function KanbanBoard({ projectId }: KanbanBoardProps) {
             </button>
           </div>
         )}
+        <button className="btn-secondary" onClick={() => setShowComms(true)} title="View worker communications">
+          Comms
+        </button>
         <button className="btn-primary" onClick={() => setShowAddForm(!showAddForm)}>
           {showAddForm ? 'Cancel' : 'Add Card'}
         </button>
