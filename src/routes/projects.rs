@@ -639,8 +639,30 @@ async fn delete_card(
     Path((_project_id, card_id)): Path<(String, String)>,
 ) -> impl IntoResponse {
     tracing::info!(card_id = %card_id, "Deleting card");
-    // Get card before deletion for broadcast
     let card_before = state.db.get_card(&card_id).await.ok().flatten();
+
+    // Cascade: clear FK refs, delete worker sessions and events
+    if let Some(ref card) = card_before {
+        let mut sids = Vec::new();
+        if let Some(ref s) = card.worker_session_id { sids.push(s.clone()); }
+        if let Some(ref s) = card.last_worker_session_id { sids.push(s.clone()); }
+        sids.sort();
+        sids.dedup();
+
+        // Clear card FK references first
+        let _ = state.db.update_card(&card_id, crate::db::models::UpdateCard {
+            worker_session_id: Some(None),
+            last_worker_session_id: Some(None),
+            ..Default::default()
+        }).await;
+
+        for sid in &sids {
+            let _ = state.db.delete_queued_message(sid).await;
+            let _ = state.db.delete_events_by_session(sid).await;
+            let _ = state.db.delete_session(sid).await;
+        }
+    }
+
     let deleted = state.db.delete_card(&card_id).await.map_err(|e| {
         (
             StatusCode::INTERNAL_SERVER_ERROR,

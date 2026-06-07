@@ -1633,7 +1633,7 @@ impl McpToolRegistry {
             .ok_or_else(|| anyhow::anyhow!("card not found: {card_id}"))?;
         let project_id = card.project_id.clone();
 
-        // Cascade: delete worker session events and sessions
+        // Cascade: clear card refs, delete queued messages, events, sessions
         let mut session_ids = Vec::new();
         if let Some(ref sid) = card.worker_session_id {
             session_ids.push(sid.clone());
@@ -1643,7 +1643,17 @@ impl McpToolRegistry {
         }
         session_ids.sort();
         session_ids.dedup();
+
+        // Clear card's FK references to sessions first
+        let _ = ctx.db.update_card(card_id, crate::db::models::UpdateCard {
+            worker_session_id: Some(None),
+            last_worker_session_id: Some(None),
+            ..Default::default()
+        }).await;
+
+        // Now safe to delete sessions and their data
         for sid in &session_ids {
+            let _ = ctx.db.delete_queued_message(sid).await;
             let _ = ctx.db.delete_events_by_session(sid).await;
             let _ = ctx.db.delete_session(sid).await;
         }
