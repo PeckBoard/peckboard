@@ -23,32 +23,100 @@ pub fn write_mcp_config(
     std::fs::create_dir_all(&mcp_dir)?;
     let config_path = mcp_dir.join(format!("{session_id}.json"));
 
-    // Write a tiny proxy script that bridges stdio ↔ HTTP for MCP.
-    // Claude CLI requires command/args format (stdio subprocess).
-    let proxy_path = mcp_dir.join("mcp-proxy.sh");
-    if !proxy_path.exists() {
-        let proxy_script = "#!/bin/bash\n\
-            # Peckboard MCP stdio-to-HTTP proxy\n\
-            while IFS= read -r line; do\n\
-            \tcurl -s -X POST \\\n\
-            \t\t-H 'Content-Type: application/json' \\\n\
-            \t\t-H \"Authorization: Bearer $PECKBOARD_TOKEN\" \\\n\
-            \t\t-d \"$line\" \\\n\
-            \t\t\"$PECKBOARD_MCP_URL\" 2>/dev/null\n\
-            done\n";
-        std::fs::write(&proxy_path, proxy_script)?;
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(&proxy_path, std::fs::Permissions::from_mode(0o755))?;
-        }
+    // Write a Node.js MCP stdio-to-HTTP proxy that properly implements the
+    // MCP protocol including the initialize handshake. The bash curl approach
+    // doesn't handle MCP protocol negotiations.
+    let proxy_path = mcp_dir.join("mcp-proxy.mjs");
+    // Always rewrite to pick up fixes
+    let proxy_script = r#"#!/usr/bin/env node
+import { createInterface } from 'readline';
+import { request } from 'http';
+
+const TOKEN = process.env.PECKBOARD_TOKEN;
+const URL = process.env.PECKBOARD_MCP_URL;
+const parsed = new globalThis.URL(URL);
+
+const SERVER_INFO = {
+  name: "peckboard",
+  version: "1.0.0",
+};
+const CAPABILITIES = { tools: {} };
+
+function send(obj) {
+  process.stdout.write(JSON.stringify(obj) + '\n');
+}
+
+function httpPost(body) {
+  return new Promise((resolve, reject) => {
+    const req = request({
+      hostname: parsed.hostname,
+      port: parsed.port,
+      path: parsed.pathname,
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${TOKEN}`,
+      },
+    }, (res) => {
+      let data = '';
+      res.on('data', (c) => data += c);
+      res.on('end', () => {
+        try { resolve(JSON.parse(data)); }
+        catch { resolve({ error: { code: -32000, message: data } }); }
+      });
+    });
+    req.on('error', reject);
+    req.write(body);
+    req.end();
+  });
+}
+
+const rl = createInterface({ input: process.stdin });
+rl.on('line', async (line) => {
+  if (!line.trim()) return;
+  let msg;
+  try { msg = JSON.parse(line); } catch { return; }
+
+  // Handle MCP protocol messages locally
+  if (msg.method === 'initialize') {
+    send({
+      jsonrpc: '2.0',
+      id: msg.id,
+      result: {
+        protocolVersion: msg.params?.protocolVersion || '2024-11-05',
+        serverInfo: SERVER_INFO,
+        capabilities: CAPABILITIES,
+      },
+    });
+    return;
+  }
+
+  if (msg.method === 'notifications/initialized') {
+    // No response needed for notifications
+    return;
+  }
+
+  // Forward everything else to the HTTP backend
+  try {
+    const result = await httpPost(line);
+    send(result);
+  } catch (e) {
+    send({ jsonrpc: '2.0', id: msg.id, error: { code: -32000, message: String(e) } });
+  }
+});
+"#;
+    std::fs::write(&proxy_path, proxy_script)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&proxy_path, std::fs::Permissions::from_mode(0o755))?;
     }
 
     let config = serde_json::json!({
         "mcpServers": {
             "peckboard": {
-                "command": proxy_path.to_string_lossy(),
-                "args": [],
+                "command": "node",
+                "args": [proxy_path.to_string_lossy()],
                 "env": {
                     "PECKBOARD_TOKEN": token,
                     "PECKBOARD_MCP_URL": format!("http://127.0.0.1:{http_port}/mcp")
@@ -142,6 +210,7 @@ pub struct ToolCallContext {
     pub project_id: Option<String>,
     pub card_id: Option<String>,
     pub db: Arc<Db>,
+    pub broadcaster: Arc<crate::ws::broadcaster::Broadcaster>,
 }
 
 /// A single MCP tool definition.
@@ -205,16 +274,37 @@ impl McpToolRegistry {
             },
             McpToolDef {
                 name: "ask_user".into(),
-                description: "Ask the user a question and block until they respond.".into(),
+                description: "Ask the user one or more questions with multiple choice or fill-in-the-blank answers. The UI renders interactive controls. The tool returns when the user submits their answers.".into(),
                 input_schema: serde_json::json!({
                     "type": "object",
                     "properties": {
-                        "question": {
-                            "type": "string",
-                            "description": "The question to ask the user"
+                        "questions": {
+                            "type": "array",
+                            "description": "Array of questions to ask",
+                            "items": {
+                                "type": "object",
+                                "properties": {
+                                    "question": { "type": "string", "description": "The question text" },
+                                    "header": { "type": "string", "description": "Category label (e.g. Setup, Input, Configuration)" },
+                                    "multiSelect": { "type": "boolean", "description": "true for checkboxes (multi), false for radio buttons (single). Default false." },
+                                    "options": {
+                                        "type": "array",
+                                        "description": "If provided, renders as multiple choice. Omit for free-form text input.",
+                                        "items": {
+                                            "type": "object",
+                                            "properties": {
+                                                "label": { "type": "string", "description": "Option text" },
+                                                "description": { "type": "string", "description": "Help text below the label" }
+                                            },
+                                            "required": ["label", "description"]
+                                        }
+                                    }
+                                },
+                                "required": ["question", "header"]
+                            }
                         }
                     },
-                    "required": ["question"],
+                    "required": ["questions"],
                     "additionalProperties": false
                 }),
             },
@@ -638,17 +728,78 @@ impl McpToolRegistry {
         args: Value,
         ctx: &ToolCallContext,
     ) -> anyhow::Result<Value> {
-        let question = args
-            .get("question")
-            .and_then(|v| v.as_str())
-            .ok_or_else(|| anyhow::anyhow!("ask_user requires 'question' argument"))?;
+        // Support both old format (single "question" string) and new format ("questions" array)
+        let questions_data = if let Some(questions) = args.get("questions").and_then(|v| v.as_array()) {
+            // New structured format
+            let mut normalized = Vec::new();
+            for q in questions {
+                let question_text = q.get("question").and_then(|v| v.as_str()).unwrap_or("");
+                let header = q.get("header").and_then(|v| v.as_str());
+                let multi_select = q.get("multiSelect").and_then(|v| v.as_bool()).unwrap_or(false);
 
+                let mut options = Vec::new();
+                let mut option_objects = Vec::new();
+                if let Some(opts) = q.get("options").and_then(|v| v.as_array()) {
+                    for opt in opts {
+                        if let Some(label) = opt.get("label").and_then(|v| v.as_str()) {
+                            options.push(serde_json::Value::String(label.to_string()));
+                            option_objects.push(opt.clone());
+                        }
+                    }
+                }
+
+                let mut entry = serde_json::json!({
+                    "question": question_text,
+                    "multiSelect": multi_select,
+                });
+                if let Some(h) = header {
+                    entry["header"] = serde_json::Value::String(h.to_string());
+                }
+                if !options.is_empty() {
+                    entry["options"] = serde_json::Value::Array(options);
+                    entry["optionObjects"] = serde_json::Value::Array(option_objects);
+                }
+                normalized.push(entry);
+            }
+            serde_json::Value::Array(normalized)
+        } else if let Some(question) = args.get("question").and_then(|v| v.as_str()) {
+            // Old simple format — single text question
+            serde_json::json!([{ "question": question, "header": "Question" }])
+        } else {
+            return Err(anyhow::anyhow!("ask_user requires 'questions' array or 'question' string"));
+        };
+
+        let event_data = serde_json::json!({
+            "questions": questions_data,
+            "cardId": ctx.card_id,
+            "source": "mcp",
+        });
+
+        // Emit as a "question" event so the frontend renders the question card UI
+        let event = ctx.db
+            .append_event(&ctx.session_id, "question", event_data.clone())
+            .await?;
+
+        // Also broadcast via WebSocket
+        ctx.broadcaster.broadcast(crate::ws::broadcaster::WsEvent {
+            event_type: "event".into(),
+            session_id: ctx.session_id.clone(),
+            data: serde_json::json!({
+                "id": event.id,
+                "seq": event.seq,
+                "ts": event.ts,
+                "kind": "question",
+                "data": event_data,
+            }),
+        });
+
+        // Also emit the ask-user-requested event for worker intent derivation
         ctx.db
             .append_event(
                 &ctx.session_id,
                 "ask-user-requested",
                 serde_json::json!({
-                    "question": question,
+                    "questionEventId": event.id,
                     "cardId": ctx.card_id,
                 }),
             )
@@ -656,7 +807,7 @@ impl McpToolRegistry {
 
         Ok(serde_json::json!({
             "status": "ok",
-            "message": "Question sent to user"
+            "message": "Question sent to user. They will see interactive controls to answer."
         }))
     }
 
@@ -1284,6 +1435,7 @@ mod tests {
             project_id: None,
             card_id: None,
             db,
+            broadcaster: std::sync::Arc::new(crate::ws::broadcaster::Broadcaster::new()),
         };
 
         let result = registry
@@ -1302,6 +1454,7 @@ mod tests {
             project_id: None,
             card_id: None,
             db,
+            broadcaster: std::sync::Arc::new(crate::ws::broadcaster::Broadcaster::new()),
         };
 
         let result = registry

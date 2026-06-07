@@ -208,6 +208,7 @@ async fn mcp_handler(
                 project_id: token_project_id,
                 card_id,
                 db: Arc::new(state.db.clone()),
+                broadcaster: state.broadcaster.clone(),
             };
 
             // ── Hook: mcp.tool.call.before ──

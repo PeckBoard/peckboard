@@ -19,12 +19,19 @@ use crate::state::AppState;
 struct CreateProjectRequest {
     name: String,
     folder_id: String,
+    #[serde(default)]
     context: String,
+    #[serde(default = "default_worker_count")]
     worker_count: i32,
     model: Option<String>,
     effort: Option<String>,
     default_workflow: Option<String>,
+    #[serde(default)]
     parallel_instructions: bool,
+}
+
+fn default_worker_count() -> i32 {
+    1
 }
 
 #[derive(Deserialize)]
@@ -89,6 +96,18 @@ pub fn router(state: Arc<AppState>) -> Router<Arc<AppState>> {
         .route(
             "/api/projects/{id}/cards/{card_id}",
             put(update_card).delete(delete_card),
+        )
+        .route(
+            "/api/projects/{id}/cards/{card_id}/stop",
+            post(stop_card_worker),
+        )
+        .route(
+            "/api/projects/{id}/cards/{card_id}/restart",
+            post(restart_card_worker),
+        )
+        .route(
+            "/api/projects/{id}/cards/{card_id}/cancel-wont-do",
+            post(cancel_card_wont_do),
         )
         .route_layer(middleware::from_fn_with_state(state, require_auth))
 }
@@ -432,20 +451,34 @@ async fn update_card(
         }
     };
 
-    // Reject all updates if card is in a terminal state
-    if existing.step == "done" || existing.step == "wont_do" {
-        return Err((
-            StatusCode::FORBIDDEN,
-            Json(serde_json::json!({ "error": "card is in terminal state" })),
-        ));
-    }
+    let is_terminal = existing.step == "done" || existing.step == "wont_do";
 
-    // Reject updates to backlog-only fields after leaving backlog
-    if existing.step != "backlog" {
-        if body.workflow.is_some() || body.model.is_some() || body.effort.is_some() {
+    // Terminal cards: only allow step changes (to reopen/move) and nothing else
+    if is_terminal {
+        let only_step = body.step.is_some()
+            && body.title.is_none()
+            && body.description.is_none()
+            && body.priority.is_none()
+            && body.workflow.is_none()
+            && body.model.is_none()
+            && body.effort.is_none()
+            && body.blocked.is_none()
+            && body.block_reason.is_none();
+        if !only_step {
             return Err((
                 StatusCode::FORBIDDEN,
-                Json(serde_json::json!({ "error": "field locked after leaving backlog" })),
+                Json(serde_json::json!({ "error": "card is in terminal state — only step changes allowed" })),
+            ));
+        }
+    }
+
+    // Reject updates to backlog-only fields (description, workflow) after leaving backlog.
+    // Model, effort, title, priority, blocked, block_reason remain editable in any non-terminal state.
+    if existing.step != "backlog" && !is_terminal {
+        if body.workflow.is_some() || body.description.is_some() {
+            return Err((
+                StatusCode::FORBIDDEN,
+                Json(serde_json::json!({ "error": "description and workflow are locked after leaving backlog" })),
             ));
         }
     }
@@ -502,4 +535,89 @@ async fn delete_card(
     }
 
     Ok(StatusCode::NO_CONTENT)
+}
+
+/// POST /api/projects/:id/cards/:card_id/stop -- stop the card's active worker
+async fn stop_card_worker(
+    State(state): State<Arc<AppState>>,
+    Path((_project_id, card_id)): Path<(String, String)>,
+) -> impl IntoResponse {
+    let card = state.db.get_card(&card_id).await.map_err(|e| {
+        (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({ "error": e.to_string() })))
+    })?;
+    let card = card.ok_or((StatusCode::NOT_FOUND, Json(serde_json::json!({ "error": "card not found" }))))?;
+
+    if let Some(session_id) = &card.worker_session_id {
+        state.session_manager.cancel(session_id).await;
+        state.db.update_card(&card_id, crate::db::models::UpdateCard {
+            worker_session_id: Some(None),
+            last_worker_session_id: Some(Some(session_id.clone())),
+            ..Default::default()
+        }).await.ok();
+    }
+
+    Ok::<_, (StatusCode, Json<serde_json::Value>)>(Json(serde_json::json!({ "ok": true })))
+}
+
+/// POST /api/projects/:id/cards/:card_id/restart -- restart the card's worker
+async fn restart_card_worker(
+    State(state): State<Arc<AppState>>,
+    Path((_project_id, card_id)): Path<(String, String)>,
+) -> impl IntoResponse {
+    let card = state.db.get_card(&card_id).await.map_err(|e| {
+        (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({ "error": e.to_string() })))
+    })?;
+    let card = card.ok_or((StatusCode::NOT_FOUND, Json(serde_json::json!({ "error": "card not found" }))))?;
+
+    // Stop existing worker if running
+    if let Some(session_id) = &card.worker_session_id {
+        state.session_manager.cancel(session_id).await;
+        state.db.update_card(&card_id, crate::db::models::UpdateCard {
+            worker_session_id: Some(None),
+            last_worker_session_id: Some(Some(session_id.clone())),
+            ..Default::default()
+        }).await.ok();
+    }
+
+    // Unblock if blocked
+    if card.blocked {
+        state.db.update_card(&card_id, crate::db::models::UpdateCard {
+            blocked: Some(false),
+            block_reason: Some(None),
+            ..Default::default()
+        }).await.ok();
+    }
+
+    // The watchdog/orchestrator will pick up the unassigned card on next cycle
+    Ok::<_, (StatusCode, Json<serde_json::Value>)>(Json(serde_json::json!({ "ok": true })))
+}
+
+/// POST /api/projects/:id/cards/:card_id/cancel-wont-do -- cancel worker and mark card as wont_do
+async fn cancel_card_wont_do(
+    State(state): State<Arc<AppState>>,
+    Path((_project_id, card_id)): Path<(String, String)>,
+) -> impl IntoResponse {
+    let card = state.db.get_card(&card_id).await.map_err(|e| {
+        (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({ "error": e.to_string() })))
+    })?;
+    let card = card.ok_or((StatusCode::NOT_FOUND, Json(serde_json::json!({ "error": "card not found" }))))?;
+
+    // Stop existing worker
+    if let Some(session_id) = &card.worker_session_id {
+        state.session_manager.cancel(session_id).await;
+    }
+
+    // Move card to wont_do
+    state.db.update_card(&card_id, crate::db::models::UpdateCard {
+        step: Some("wont_do".into()),
+        worker_session_id: Some(None),
+        last_worker_session_id: card.worker_session_id.map(Some),
+        blocked: Some(false),
+        block_reason: Some(None),
+        ..Default::default()
+    }).await.map_err(|e| {
+        (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({ "error": e.to_string() })))
+    })?;
+
+    Ok::<_, (StatusCode, Json<serde_json::Value>)>(Json(serde_json::json!({ "ok": true })))
 }

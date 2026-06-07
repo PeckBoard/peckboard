@@ -8,6 +8,7 @@ interface ProjectsState {
   cards: Card[]
   fetchProjects: () => Promise<void>
   createProject: (data: Partial<Project>) => Promise<Project>
+  updateProject: (id: string, data: Partial<Project>) => Promise<Project>
   deleteProject: (id: string) => Promise<void>
   setActiveProject: (id: string | null) => void
   fetchCards: (projectId: string) => Promise<void>
@@ -41,6 +42,21 @@ export const useProjectsStore = create<ProjectsState>((set) => ({
     }
     const project: Project = await res.json()
     set((s) => ({ projects: [...s.projects, project] }))
+    return project
+  },
+
+  updateProject: async (id: string, data: Partial<Project>) => {
+    const res = await authedFetch(`/api/projects/${id}`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(data),
+    })
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({ error: 'Failed to update project' }))
+      throw new Error(err.error || 'Failed to update project')
+    }
+    const project: Project = await res.json()
+    set((s) => ({ projects: s.projects.map((p) => (p.id === id ? project : p)) }))
     return project
   },
 

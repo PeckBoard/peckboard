@@ -11,12 +11,19 @@ interface ChatViewProps {
   sessionId: string
 }
 
+/** Option object from an AskUserQuestion, with optional description */
+interface QuestionOption {
+  label: string
+  description?: string
+}
+
 /** Structured question within a question event */
 interface QuestionItem {
   question: string
   header?: string
   multiSelect?: boolean
   options?: string[]
+  optionObjects?: QuestionOption[]
 }
 
 /** A display item derived from one or more raw events. */
@@ -106,6 +113,7 @@ function buildDisplayItems(events: Event[]): DisplayItem[] {
 
   // Track open tools by their tool_use_id
   const openTools = new Map<string, number>() // tool_use_id -> index in items
+  const seenToolIds = new Set<string>() // dedupe tool starts from streaming + snapshot
 
   for (const ev of events) {
     switch (ev.kind) {
@@ -126,6 +134,9 @@ function buildDisplayItems(events: Event[]): DisplayItem[] {
         const toolName = (ev.data.name as string) ?? (ev.data.tool_name as string) ?? 'tool'
         const input = (ev.data.input as Record<string, unknown>) ?? undefined
         const toolUseId = (ev.data.toolUseId as string) ?? (ev.data.tool_use_id as string) ?? ev.id
+        // Skip duplicate tool starts (CLI emits both streaming + snapshot events)
+        if (seenToolIds.has(toolUseId)) break
+        seenToolIds.add(toolUseId)
         const idx = items.length
         items.push({ type: 'tool', toolName, input, isRunning: true, key: ev.id })
         openTools.set(toolUseId, idx)
@@ -199,6 +210,7 @@ function buildDisplayItems(events: Event[]): DisplayItem[] {
             header: q.header,
             multiSelect: q.multiSelect,
             options: q.options,
+            optionObjects: q.optionObjects,
           }))
         } else {
           const text = (ev.data.text as string) ?? (ev.data.question as string) ?? JSON.stringify(ev.data)
@@ -236,15 +248,20 @@ function formatTime(ts: number): string {
 function ResolvedQuestionCard({ questions, answers }: { questions: QuestionItem[]; answers: Record<string, unknown> }) {
   return (
     <div className="question-card question-resolved">
-      {questions.map((q, idx) => (
-        <div key={idx} className="question-item">
-          {q.header && <div className="question-header">{q.header}</div>}
-          <div className="question-card-text">{q.question}</div>
-          <div className="question-answer-display">
-            {String(answers[idx] ?? answers[String(idx)] ?? '(no answer)')}
+      <div className="question-card-title-bar">
+        <span className="question-card-icon">&#x2611;&#xFE0F;</span>
+        <span className="question-card-title-text">Question answered</span>
+      </div>
+      {questions.map((q, idx) => {
+        const answer = String(answers[idx] ?? answers[String(idx)] ?? answers[q.question] ?? '(no answer)')
+        return (
+          <div key={idx} className="question-item">
+            {q.header && <div className="question-header">{q.header}</div>}
+            <div className="question-card-text">{q.question}</div>
+            <div className="question-answer-display">{answer}</div>
           </div>
-        </div>
-      ))}
+        )
+      })}
     </div>
   )
 }
@@ -310,34 +327,46 @@ function QuestionCard({ sessionId, questionId, questions }: { sessionId: string;
   }
 
   return (
-    <div className="question-card">
+    <div className="question-card question-active">
+      <div className="question-card-title-bar">
+        <span className="question-card-icon">&#x2753;</span>
+        <span className="question-card-title-text">Input needed</span>
+      </div>
       {questions.map((q, idx) => (
         <div key={idx} className="question-item">
           {q.header && <div className="question-header">{q.header}</div>}
           <div className="question-card-text">{q.question}</div>
-          {q.options ? (
+          {q.options && q.options.length > 0 ? (
             <div className="question-options">
-              {q.options.map((opt) => (
-                <label key={opt} className="question-option-label">
-                  {q.multiSelect ? (
-                    <input
-                      type="checkbox"
-                      checked={(answers[idx] ?? '').split(',').includes(opt)}
-                      onChange={() => toggleMulti(idx, opt)}
-                      disabled={submitting}
-                    />
-                  ) : (
-                    <input
-                      type="radio"
-                      name={`question-${questionId}-${idx}`}
-                      checked={answers[idx] === opt}
-                      onChange={() => setAnswer(idx, opt)}
-                      disabled={submitting}
-                    />
-                  )}
-                  <span>{opt}</span>
-                </label>
-              ))}
+              {q.options.map((opt, optIdx) => {
+                const optObj = q.optionObjects?.[optIdx]
+                return (
+                  <label key={opt} className="question-option-label">
+                    {q.multiSelect ? (
+                      <input
+                        type="checkbox"
+                        checked={(answers[idx] ?? '').split(',').includes(opt)}
+                        onChange={() => toggleMulti(idx, opt)}
+                        disabled={submitting}
+                      />
+                    ) : (
+                      <input
+                        type="radio"
+                        name={`question-${questionId}-${idx}`}
+                        checked={answers[idx] === opt}
+                        onChange={() => setAnswer(idx, opt)}
+                        disabled={submitting}
+                      />
+                    )}
+                    <span className="question-option-text">
+                      <span className="question-option-label-text">{opt}</span>
+                      {optObj?.description && (
+                        <span className="question-option-desc">{optObj.description}</span>
+                      )}
+                    </span>
+                  </label>
+                )
+              })}
             </div>
           ) : (
             <input
@@ -499,12 +528,14 @@ export default function ChatView({ sessionId }: ChatViewProps) {
 
   const displayItems = buildDisplayItems(events)
 
-  // Determine if agent is working
+  // Determine if agent is working (includes waiting for CLI to start after user sends)
   const agentWorking = (() => {
     for (let i = events.length - 1; i >= 0; i--) {
       const kind = events[i].kind
       if (kind === 'agent-start') return true
       if (kind === 'agent-end') return false
+      // User sent a message but CLI hasn't started yet — still "working"
+      if (kind === 'user') return true
     }
     return false
   })()

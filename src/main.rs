@@ -125,18 +125,33 @@ async fn main() -> anyhow::Result<()> {
             let orchestrator_state = state.clone();
             tokio::spawn(async move {
                 while let Some(completion) = rx.recv().await {
-                    if !completion.completed {
-                        continue;
-                    }
                     let sid = completion.session_id.clone();
                     match orchestrator_state.db.get_session(&sid).await {
                         Ok(Some(session)) if session.is_worker => {
-                            tracing::info!(session_id = %sid, "Worker completed, running handle_worker_done");
-                            peckboard::worker::orchestrator::handle_worker_done(
-                                &orchestrator_state,
-                                &sid,
-                            )
-                            .await;
+                            if completion.completed {
+                                tracing::info!(session_id = %sid, "Worker completed, running handle_worker_done");
+                                peckboard::worker::orchestrator::handle_worker_done(
+                                    &orchestrator_state,
+                                    &sid,
+                                )
+                                .await;
+                            } else {
+                                // Worker crashed — clear worker_session_id so
+                                // the orchestrator can re-spawn or the watchdog
+                                // can detect the dead worker.
+                                tracing::warn!(session_id = %sid, "Worker crashed");
+                                if let Some(card_id) = &session.card_id {
+                                    let _ = orchestrator_state.db.update_card(
+                                        card_id,
+                                        peckboard::db::models::UpdateCard {
+                                            worker_session_id: Some(None),
+                                            last_worker_session_id: Some(Some(sid.clone())),
+                                            ..Default::default()
+                                        },
+                                    ).await;
+                                }
+                            }
+                            // After handling, fill freed worker slots
                             peckboard::worker::orchestrator::check_and_spawn_workers(
                                 &orchestrator_state,
                             )

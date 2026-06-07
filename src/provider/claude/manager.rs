@@ -133,16 +133,17 @@ impl SessionManager {
         let (stdin_tx, stdin_rx) = tokio::sync::mpsc::channel::<String>(32);
         {
             let mut channels = stdin_channels.lock().await;
-            channels.insert(sid.clone(), stdin_tx);
+            channels.insert(sid.clone(), stdin_tx.clone());
         }
 
         // We need to move `child` into the background task
         let sid_for_task = sid.clone();
         let stdin_channels_for_task = stdin_channels.clone();
         let completion_tx = self.completion_tx.clone();
+        let allowed_dir = spawn_config.working_dir.clone();
         tokio::spawn(async move {
             // Run the event stream to completion
-            let is_completed = process::stream_events(child, db_clone, broadcaster_clone, stdin_rx).await;
+            let is_completed = process::stream_events(child, db_clone, broadcaster_clone, stdin_rx, stdin_tx, allowed_dir).await;
 
             // Clean up the process entry and stdin channel
             let mut map = processes.lock().await;

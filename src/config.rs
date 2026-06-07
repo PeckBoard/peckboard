@@ -5,7 +5,7 @@ use std::path::PathBuf;
 #[command(name = "peckboard", about = "Remote Claude Code control panel")]
 pub struct CliArgs {
     /// HTTP port
-    #[arg(long, default_value = "3333")]
+    #[arg(long, default_value = "3344")]
     pub port: u16,
 
     /// HTTPS port

@@ -438,8 +438,8 @@ pub async fn handle_worker_done(state: &Arc<AppState>, session_id: &str) {
 /// Return the default workflow step order.
 fn default_workflow_steps() -> Vec<String> {
     vec![
-        "todo".into(),
-        "in-progress".into(),
+        "backlog".into(),
+        "in_progress".into(),
         "review".into(),
         "done".into(),
     ]

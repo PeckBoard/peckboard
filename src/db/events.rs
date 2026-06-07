@@ -91,6 +91,20 @@ impl Db {
         .await
     }
 
+    /// Get a single event by its ID.
+    pub async fn get_event(&self, event_id: &str) -> anyhow::Result<Option<Event>> {
+        let event_id = event_id.to_string();
+        self.with_conn(move |conn| {
+            events::table
+                .filter(events::id.eq(&event_id))
+                .select(Event::as_select())
+                .first(conn)
+                .optional()
+                .map_err(Into::into)
+        })
+        .await
+    }
+
     /// Get the latest seq number for a session, or None if no events exist.
     pub async fn latest_seq(&self, session_id: &str) -> anyhow::Result<Option<i32>> {
         let session_id = session_id.to_string();

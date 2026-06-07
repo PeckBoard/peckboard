@@ -65,7 +65,12 @@ pub async fn origin_check(request: Request, next: Next) -> Response {
             .or_else(|| origin_val.strip_prefix("https://"))
             .unwrap_or(origin_val);
 
-        if origin_host.eq_ignore_ascii_case(host_str) {
+        // Compare hostnames only (strip port) — allows different ports on same host
+        // (e.g. Vite dev server on :5173 talking to backend on :3333)
+        let origin_hostname = origin_host.split(':').next().unwrap_or(origin_host);
+        let host_hostname = host_str.split(':').next().unwrap_or(host_str);
+
+        if origin_hostname.eq_ignore_ascii_case(host_hostname) {
             return next.run(request).await;
         }
     }

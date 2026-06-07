@@ -94,6 +94,8 @@ pub async fn stream_events(
     db: Db,
     broadcaster: Arc<Broadcaster>,
     stdin_rx: tokio::sync::mpsc::Receiver<String>,
+    stdin_tx: tokio::sync::mpsc::Sender<String>,
+    allowed_dir: String,
 ) -> bool {
     let session_id = process.session_id.clone();
 
@@ -116,38 +118,16 @@ pub async fn stream_events(
         }
     };
 
-    // Spawn a task that reads from the stdin channel and writes to the
-    // child's stdin pipe. This lets callers (e.g. question-resolved route)
-    // feed answers into the running process.
-    let stdin_handle = process.child.stdin.take();
-    let stdin_session_id = session_id.clone();
-    let stdin_task = tokio::spawn(async move {
-        let mut rx = stdin_rx;
-        if let Some(mut stdin) = stdin_handle {
-            while let Some(text) = rx.recv().await {
-                if let Err(e) = stdin.write_all(text.as_bytes()).await {
-                    tracing::warn!(
-                        session_id = %stdin_session_id,
-                        "Failed to write to process stdin: {e}"
-                    );
-                    break;
-                }
-                if let Err(e) = stdin.write_all(b"\n").await {
-                    tracing::warn!(
-                        session_id = %stdin_session_id,
-                        "Failed to write newline to stdin: {e}"
-                    );
-                    break;
-                }
-                let _ = stdin.flush().await;
-            }
-        }
-    });
+    // Take the stdin handle — we'll write to it directly from the stream loop
+    // for control_responses (low latency) and via the channel for external
+    // callers (e.g. question-resolved route handler).
+    let mut stdin_pipe = process.child.stdin.take();
 
     let stderr = process.child.stderr.take();
 
     let reader = BufReader::new(stdout);
     let mut lines = reader.lines();
+    let mut stdin_rx = stdin_rx;
 
     // Track state for mapping stream-json events
     let mut conversation_id: Option<String> = None;
@@ -155,7 +135,22 @@ pub async fn stream_events(
     let mut current_tool_id: Option<String> = None;
     let mut emitted_start = false;
 
-    while let Ok(Some(line)) = lines.next_line().await {
+    loop {
+      let line = tokio::select! {
+          result = lines.next_line() => {
+              match result {
+                  Ok(Some(line)) => line,
+                  _ => break, // stdout closed
+              }
+          }
+          Some(text) = stdin_rx.recv() => {
+              // External caller (e.g. question-resolved) wants to write to stdin
+              write_stdin_line(&mut stdin_pipe, &text, &session_id).await;
+              continue;
+          }
+      };
+
+      {
         let line = line.trim().to_string();
         if line.is_empty() {
             continue;
@@ -174,6 +169,95 @@ pub async fn stream_events(
             }
         };
 
+        // Handle control_request events directly (need stdin access for auto-allow)
+        if json.get("type").and_then(|v| v.as_str()) == Some("control_request") {
+            let request = json.get("request");
+            let request_id = json.get("request_id").and_then(|v| v.as_str()).unwrap_or("");
+            let subtype = request.and_then(|r| r.get("subtype")).and_then(|v| v.as_str()).unwrap_or("");
+            let tool_name = request.and_then(|r| r.get("tool_name")).and_then(|v| v.as_str()).unwrap_or("");
+
+            if subtype == "can_use_tool" && tool_name == "AskUserQuestion" {
+                // Parse and normalize questions from the input
+                let input = request.and_then(|r| r.get("input"));
+                let tool_use_id = request
+                    .and_then(|r| r.get("tool_use_id"))
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
+                let questions = normalize_questions(input);
+
+                let event_data = serde_json::json!({
+                    "requestId": request_id,
+                    "toolUseId": tool_use_id,
+                    "questions": questions,
+                });
+
+                // Emit as a "question" event
+                if let Ok(db_event) = db.append_event(&session_id, "question", event_data.clone()).await {
+                    let now = chrono::Utc::now().to_rfc3339();
+                    let _ = db.update_session(
+                        &session_id,
+                        crate::db::models::UpdateSession {
+                            last_activity: Some(now),
+                            ..Default::default()
+                        },
+                    ).await;
+                    broadcaster.broadcast(WsEvent {
+                        event_type: "event".into(),
+                        session_id: session_id.clone(),
+                        data: serde_json::json!({
+                            "id": db_event.id,
+                            "seq": db_event.seq,
+                            "ts": db_event.ts,
+                            "kind": "question",
+                            "data": event_data,
+                        }),
+                    });
+                }
+            } else if subtype == "can_use_tool" {
+                let input = request
+                    .and_then(|r| r.get("input"))
+                    .cloned()
+                    .unwrap_or(serde_json::json!({}));
+
+                // Check if the tool is trying to access paths outside the allowed directory
+                let denied = check_path_violation(tool_name, &input, &allowed_dir);
+
+                let frame = if let Some(reason) = denied {
+                    tracing::warn!(
+                        session_id = %session_id,
+                        tool = tool_name,
+                        "Denied tool use: {}",
+                        reason
+                    );
+                    serde_json::json!({
+                        "type": "control_response",
+                        "response": {
+                            "subtype": "success",
+                            "request_id": request_id,
+                            "response": {
+                                "behavior": "deny",
+                                "message": reason,
+                            }
+                        }
+                    })
+                } else {
+                    serde_json::json!({
+                        "type": "control_response",
+                        "response": {
+                            "subtype": "success",
+                            "request_id": request_id,
+                            "response": {
+                                "behavior": "allow",
+                                "updatedInput": input,
+                            }
+                        }
+                    })
+                };
+                write_stdin_line(&mut stdin_pipe, &frame.to_string(), &session_id).await;
+            }
+            continue;
+        }
+
         // Extract events based on the stream-json type field
         let events = parse_stream_json(
             &json,
@@ -186,10 +270,11 @@ pub async fn stream_events(
         for event in events {
             emit_event(&db, &broadcaster, &session_id, event).await;
         }
-    }
+      } // end inner block
+    } // end loop
 
-    // Stdout has closed; abort the stdin forwarding task
-    stdin_task.abort();
+    // Drop stdin pipe to signal EOF to the child process
+    drop(stdin_pipe);
 
     // Wait for the process to exit and capture the exit code
     let exit_status = process.child.wait().await;
@@ -526,6 +611,43 @@ fn parse_stream_json(
             }
         }
 
+        // ── user message (contains tool results) ─────────────────
+        "user" => {
+            if let Some(msg) = json.get("message") {
+                if let Some(content) = msg.get("content").and_then(|v| v.as_array()) {
+                    for block in content {
+                        let block_type =
+                            block.get("type").and_then(|v| v.as_str()).unwrap_or("");
+                        if block_type == "tool_result" {
+                            let tool_id = block
+                                .get("tool_use_id")
+                                .and_then(|v| v.as_str())
+                                .unwrap_or("")
+                                .to_string();
+                            let output = block
+                                .get("content")
+                                .and_then(|v| v.as_str())
+                                .map(|s| s.to_string());
+                            let is_error = block
+                                .get("is_error")
+                                .and_then(|v| v.as_bool())
+                                .unwrap_or(false);
+                            let error = if is_error {
+                                output.clone()
+                            } else {
+                                None
+                            };
+                            events.push(ProviderEvent::ToolEnd {
+                                tool_use_id: tool_id,
+                                output: if is_error { None } else { output },
+                                error,
+                            });
+                        }
+                    }
+                }
+            }
+        }
+
         // ── result ───────────────────────────────────────────────
         "result" => {
             // CLI uses "session_id" in result events
@@ -558,6 +680,189 @@ fn parse_stream_json(
     }
 
     events
+}
+
+/// Write a line to the child process's stdin pipe.
+async fn write_stdin_line(
+    stdin: &mut Option<tokio::process::ChildStdin>,
+    text: &str,
+    session_id: &str,
+) {
+    if let Some(pipe) = stdin.as_mut() {
+        if let Err(e) = pipe.write_all(text.as_bytes()).await {
+            tracing::warn!(session_id = %session_id, "Failed to write to stdin: {e}");
+            return;
+        }
+        if let Err(e) = pipe.write_all(b"\n").await {
+            tracing::warn!(session_id = %session_id, "Failed to write newline to stdin: {e}");
+            return;
+        }
+        if let Err(e) = pipe.flush().await {
+            tracing::warn!(session_id = %session_id, "Failed to flush stdin: {e}");
+        }
+    } else {
+        tracing::warn!(session_id = %session_id, "No stdin pipe available");
+    }
+}
+
+/// Check if a tool's input references paths outside the allowed directory.
+/// Returns Some(reason) if the tool should be denied, None if allowed.
+fn check_path_violation(tool_name: &str, input: &serde_json::Value, allowed_dir: &str) -> Option<String> {
+    if allowed_dir.is_empty() {
+        return None;
+    }
+
+    let allowed = match std::path::Path::new(allowed_dir).canonicalize() {
+        Ok(p) => p,
+        Err(_) => return None, // Can't resolve allowed dir, skip check
+    };
+
+    // Extract file paths from tool input based on tool name
+    let paths_to_check: Vec<String> = match tool_name {
+        "Read" | "Write" | "Edit" => {
+            let mut paths = Vec::new();
+            if let Some(p) = input.get("file_path").and_then(|v| v.as_str()) {
+                paths.push(p.to_string());
+            }
+            paths
+        }
+        "Glob" | "Grep" => {
+            let mut paths = Vec::new();
+            if let Some(p) = input.get("path").and_then(|v| v.as_str()) {
+                paths.push(p.to_string());
+            }
+            paths
+        }
+        "Bash" => {
+            // For Bash, check the command for obvious path references
+            // This is a best-effort check — can't fully parse shell commands
+            if let Some(cmd) = input.get("command").and_then(|v| v.as_str()) {
+                // Check for cd to outside directory
+                let suspicious_patterns = ["cd /", "cd ~/", "cd ..", "rm -rf /", "cat /etc"];
+                for pattern in &suspicious_patterns {
+                    if cmd.contains(pattern) {
+                        // Try to extract the target path from cd commands
+                        if cmd.starts_with("cd ") {
+                            let target = cmd.trim_start_matches("cd ").split_whitespace().next().unwrap_or("");
+                            if !target.is_empty() {
+                                let target_path = if target.starts_with('/') {
+                                    std::path::PathBuf::from(target)
+                                } else {
+                                    std::path::Path::new(allowed_dir).join(target)
+                                };
+                                if let Ok(resolved) = target_path.canonicalize() {
+                                    if !resolved.starts_with(&allowed) {
+                                        return Some(format!(
+                                            "Access denied: path '{}' is outside the project folder '{}'",
+                                            target, allowed_dir
+                                        ));
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            return None; // Bash commands are complex; allow unless clearly violating
+        }
+        "NotebookEdit" => {
+            let mut paths = Vec::new();
+            if let Some(p) = input.get("notebook_path").and_then(|v| v.as_str()) {
+                paths.push(p.to_string());
+            }
+            paths
+        }
+        _ => return None, // Unknown tool, allow
+    };
+
+    for path_str in &paths_to_check {
+        let path = std::path::Path::new(path_str);
+        // Resolve relative paths against the allowed directory
+        let resolved = if path.is_absolute() {
+            match path.canonicalize() {
+                Ok(p) => p,
+                // File may not exist yet (Write), resolve parent
+                Err(_) => {
+                    if let Some(parent) = path.parent() {
+                        match parent.canonicalize() {
+                            Ok(p) => p.join(path.file_name().unwrap_or_default()),
+                            Err(_) => path.to_path_buf(),
+                        }
+                    } else {
+                        path.to_path_buf()
+                    }
+                }
+            }
+        } else {
+            // Relative paths are relative to working dir — should be within allowed
+            match std::path::Path::new(allowed_dir).join(path).canonicalize() {
+                Ok(p) => p,
+                Err(_) => continue, // Can't resolve, allow
+            }
+        };
+
+        if !resolved.starts_with(&allowed) {
+            return Some(format!(
+                "Access denied: path '{}' is outside the project folder '{}'",
+                path_str, allowed_dir
+            ));
+        }
+    }
+
+    None
+}
+
+/// Normalize the questions array from an AskUserQuestion control_request input.
+///
+/// The CLI sends questions as:
+/// ```json
+/// { "questions": [{ "question": "...", "header": "...", "multiSelect": false,
+///     "options": [{ "label": "A", "description": "..." }] }] }
+/// ```
+///
+/// We normalize options to simple label strings for the frontend, preserving
+/// the full structure for the control_response answer frame.
+fn normalize_questions(input: Option<&serde_json::Value>) -> serde_json::Value {
+    let empty = serde_json::json!([]);
+    let raw_questions = match input.and_then(|i| i.get("questions")).and_then(|q| q.as_array()) {
+        Some(q) => q,
+        None => return empty,
+    };
+
+    let mut result = Vec::new();
+    for q in raw_questions {
+        let question_text = match q.get("question").and_then(|v| v.as_str()) {
+            Some(t) => t,
+            None => continue,
+        };
+
+        let header = q.get("header").and_then(|v| v.as_str());
+        let multi_select = q.get("multiSelect").and_then(|v| v.as_bool()).unwrap_or(false);
+
+        let mut option_labels = Vec::new();
+        let mut option_objects = Vec::new();
+        if let Some(options) = q.get("options").and_then(|v| v.as_array()) {
+            for opt in options {
+                if let Some(label) = opt.get("label").and_then(|v| v.as_str()) {
+                    option_labels.push(serde_json::Value::String(label.to_string()));
+                    option_objects.push(opt.clone());
+                }
+            }
+        }
+
+        let mut entry = serde_json::json!({
+            "question": question_text,
+            "multiSelect": multi_select,
+            "options": option_labels,
+            "optionObjects": option_objects,
+        });
+        if let Some(h) = header {
+            entry["header"] = serde_json::Value::String(h.to_string());
+        }
+        result.push(entry);
+    }
+
+    serde_json::Value::Array(result)
 }
 
 /// Persist a `ProviderEvent` to the database and broadcast it via WebSocket.
