@@ -107,6 +107,8 @@ export default function KanbanBoard({ projectId }: KanbanBoardProps) {
   const [pendingQuestions, setPendingQuestions] = useState<PendingQuestion[]>([])
   const [questionAnswers, setQuestionAnswers] = useState<Record<string, Record<number, string>>>({})
   const [submittingQuestion, setSubmittingQuestion] = useState<string | null>(null)
+  const [questionDialogOpen, setQuestionDialogOpen] = useState(false)
+  const [questionIndex, setQuestionIndex] = useState(0)
 
   const addEventListener = useWsStore((s) => s.addEventListener)
   const removeEventListener = useWsStore((s) => s.removeEventListener)
@@ -392,22 +394,46 @@ export default function KanbanBoard({ projectId }: KanbanBoardProps) {
         </button>
       </div>
 
-      {/* Pending worker questions */}
-      {pendingQuestions.length > 0 && (
-        <div className="worker-questions-section">
-          <div className="worker-questions-header">
-            <span className="worker-questions-icon">&#x2753;</span>
-            <span>{pendingQuestions.length} worker question{pendingQuestions.length > 1 ? 's' : ''} awaiting your answer</span>
-          </div>
-          {pendingQuestions.map((pq) => {
-            const answers = questionAnswers[pq.eventId] ?? {}
-            const isSubmitting = submittingQuestion === pq.eventId
-            return (
-              <div key={pq.eventId} className="worker-question-card">
-                <div className="worker-question-context">
-                  {pq.cardTitle && <span className="worker-question-card-title">{pq.cardTitle}</span>}
-                  {pq.cardDescription && <span className="worker-question-card-desc">{pq.cardDescription}</span>}
+      {/* Pending worker questions — trigger button */}
+      {pendingQuestions.length > 0 && !questionDialogOpen && (
+        <button
+          className="worker-questions-trigger"
+          onClick={() => { setQuestionIndex(0); setQuestionDialogOpen(true) }}
+        >
+          <span className="worker-questions-icon">&#x2753;</span>
+          <span>{pendingQuestions.length} worker question{pendingQuestions.length > 1 ? 's' : ''} need your answer</span>
+        </button>
+      )}
+
+      {/* Question dialog — one at a time */}
+      {questionDialogOpen && pendingQuestions.length > 0 && (() => {
+        const safeIdx = Math.min(questionIndex, pendingQuestions.length - 1)
+        const pq = pendingQuestions[safeIdx]
+        const answers = questionAnswers[pq.eventId] ?? {}
+        const isSubmitting = submittingQuestion === pq.eventId
+        const hasAnswers = pq.questions.some((_, idx) => (answers[idx] ?? '').trim().length > 0)
+
+        return (
+          <div className="modal-backdrop" onClick={() => setQuestionDialogOpen(false)}>
+            <div className="modal question-dialog" onClick={(e) => e.stopPropagation()} style={{ maxWidth: 520 }}>
+              {/* Header with context */}
+              <div className="question-dialog-header">
+                <div className="question-dialog-counter">
+                  Question {safeIdx + 1} of {pendingQuestions.length}
                 </div>
+                {pq.cardTitle && (
+                  <div className="question-dialog-context">
+                    <span className="question-dialog-card-label">Card:</span>
+                    <span className="question-dialog-card-title">{pq.cardTitle}</span>
+                  </div>
+                )}
+                {pq.cardDescription && (
+                  <div className="question-dialog-card-desc">{pq.cardDescription}</div>
+                )}
+              </div>
+
+              {/* Question content */}
+              <div className="question-dialog-body">
                 {pq.questions.map((q, idx) => (
                   <div key={idx} className="question-item">
                     {q.header && <div className="question-header">{q.header}</div>}
@@ -449,20 +475,48 @@ export default function KanbanBoard({ projectId }: KanbanBoardProps) {
                         placeholder="Type your answer..."
                         value={answers[idx] ?? ''}
                         onChange={(e) => setQuestionAnswer(pq.eventId, idx, e.target.value)}
+                        onKeyDown={(e) => { if (e.key === 'Enter' && pq.questions.length === 1) handleAnswerQuestion(pq) }}
                         disabled={isSubmitting}
+                        autoFocus
                       />
                     )}
                   </div>
                 ))}
-                <div className="question-actions">
-                  <button className="btn-primary" onClick={() => handleAnswerQuestion(pq)} disabled={isSubmitting}>Submit</button>
+              </div>
+
+              {/* Footer with nav + actions */}
+              <div className="question-dialog-footer">
+                <div className="question-dialog-nav">
+                  <button
+                    className="btn-secondary btn-sm"
+                    onClick={() => setQuestionIndex(Math.max(0, safeIdx - 1))}
+                    disabled={safeIdx === 0}
+                  >
+                    Back
+                  </button>
+                  <button
+                    className="btn-secondary btn-sm"
+                    onClick={() => setQuestionIndex(Math.min(pendingQuestions.length - 1, safeIdx + 1))}
+                    disabled={safeIdx >= pendingQuestions.length - 1}
+                  >
+                    Next
+                  </button>
+                </div>
+                <div className="question-dialog-actions">
                   <button className="btn-secondary" onClick={() => handleDismissQuestion(pq)} disabled={isSubmitting}>Dismiss</button>
+                  <button className="btn-primary" onClick={() => {
+                    handleAnswerQuestion(pq)
+                    // After submit, stay on same index (next question slides in) or close if last
+                    if (pendingQuestions.length <= 1) setQuestionDialogOpen(false)
+                  }} disabled={!hasAnswers || isSubmitting}>
+                    {isSubmitting ? 'Submitting...' : 'Submit'}
+                  </button>
                 </div>
               </div>
-            )
-          })}
-        </div>
-      )}
+            </div>
+          </div>
+        )
+      })()}
 
       {showAddForm && (
         <div className="kanban-add-form">
