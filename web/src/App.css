@@ -1111,7 +1111,20 @@
   transition: all var(--transition);
   display: flex;
   position: relative;
+  animation: cardSlideIn 0.3s ease-out;
 }
+
+@keyframes cardSlideIn {
+  from {
+    opacity: 0;
+    transform: translateY(-8px) scale(0.97);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+}
+
 .kanban-card:hover {
   border-color: var(--border-strong);
   box-shadow: var(--shadow);
@@ -1123,7 +1136,8 @@
   border-left: 3px solid var(--danger);
 }
 .kanban-column.drag-over {
-  background: var(--surface2);
+  background: var(--accent-subtle);
+  box-shadow: inset 0 0 0 2px var(--accent-muted);
   border-color: var(--accent);
 }
 .kanban-card-top {

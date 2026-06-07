@@ -489,7 +489,7 @@ export default function KanbanBoard({ projectId }: KanbanBoardProps) {
             <div className="kanban-cards">
               {cardsByStep(step.key).map((card) => (
                 <div
-                  key={card.id}
+                  key={`${card.id}-${card.step}`}
                   className={`kanban-card ${card.blocked ? 'blocked' : ''}${draggingCardId === card.id ? ' dragging' : ''}`}
                   draggable={true}
                   onDragStart={(e) => handleDragStart(e, card)}
