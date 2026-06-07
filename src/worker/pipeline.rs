@@ -52,8 +52,16 @@ pub fn build_worker_prompt(
     prompt.push_str("- `list_cards` — List all cards in this project.\n");
     prompt.push_str("- `write_report` — Write a report or note for human review.\n");
     prompt.push_str(
-        "- `mcp__peckboard__notify_workers` — **REQUIRED cross-communication:** Broadcast a \
-         message to all other running workers in this project about file changes.\n",
+        "- `mcp__peckboard__share_finding` — Share a discovery or insight with other workers. \
+         Include a summary and detail. Do NOT use for file changes (those are auto-detected).\n",
+    );
+    prompt.push_str(
+        "- `mcp__peckboard__send_worker_message` — Send a direct message to another worker by \
+         session ID. Use for follow-up questions about shared findings.\n",
+    );
+    prompt.push_str(
+        "- `mcp__peckboard__get_finding_details` — Retrieve the full detail of a finding shared \
+         by another worker.\n",
     );
     prompt.push_str(
         "- `mcp__peckboard__fetch_url` — Fetch a URL server-side (use when WebFetch returns 403).\n",
@@ -68,21 +76,20 @@ pub fn build_worker_prompt(
          need information from the user, call `ask_user`.\n\n",
     );
     prompt.push_str(
-        "## MANDATORY: Cross-Worker File Change Notifications\n\n\
+        "## Parallel Worker Awareness\n\n\
          You are one of multiple workers running in parallel on this project. \
          Other workers are editing files at the same time as you.\n\n\
-         **EVERY TIME** you write, edit, or delete files, you MUST IMMEDIATELY call \
-         `mcp__peckboard__notify_workers` with:\n\
-         - `message`: what you changed and why\n\
-         - `files_changed`: array of file paths you modified\n\n\
-         Example:\n\
-         ```json\n\
-         {\"message\": \"Added JWT auth middleware\", \"files_changed\": [\"src/auth/mod.rs\", \"src/main.rs\"]}\n\
-         ```\n\n\
-         Do NOT skip this step. Failure to notify causes merge conflicts for other workers. \
-         Call it after each batch of related edits (not after every single line).\n\n\
-         If you receive a notification from another worker, re-read any files they changed \
-         before editing them yourself.\n",
+         **File change notifications are automatic** — you do NOT need to manually notify \
+         about file changes. The system auto-detects when you modify files and notifies \
+         other workers immediately.\n\n\
+         **If you receive a notification** that another worker modified files you're working \
+         with, re-read those files before editing them to avoid conflicts.\n\n\
+         **Share findings** — if you discover something useful to other workers (e.g. an \
+         architectural pattern, a bug, a convention), call `mcp__peckboard__share_finding` \
+         with a summary and detail. Other workers can request more info.\n\n\
+         **Direct messages** — if you need to ask another worker a question or respond to \
+         their finding, use `mcp__peckboard__send_worker_message`. Messages from other \
+         workers will be clearly labeled as NOT from the user.\n",
     );
 
     prompt
