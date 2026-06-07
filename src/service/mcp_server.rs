@@ -1727,7 +1727,10 @@ impl McpToolRegistry {
         tracing::info!(session_id = %ctx.session_id, project_id = %project_id, "MCP tool: delete_project");
 
         // Verify project exists
-        let project = ctx.db.get_project(project_id).await?
+        let project = ctx
+            .db
+            .get_project(project_id)
+            .await?
             .ok_or_else(|| anyhow::anyhow!("project not found: {project_id}"))?;
 
         // Collect worker session IDs from cards
@@ -1746,11 +1749,17 @@ impl McpToolRegistry {
 
         // Clear card FK refs first so we can delete sessions without FK errors
         for card in &cards {
-            let _ = ctx.db.update_card(&card.id, crate::db::models::UpdateCard {
-                worker_session_id: Some(None),
-                last_worker_session_id: Some(None),
-                ..Default::default()
-            }).await;
+            let _ = ctx
+                .db
+                .update_card(
+                    &card.id,
+                    crate::db::models::UpdateCard {
+                        worker_session_id: Some(None),
+                        last_worker_session_id: Some(None),
+                        ..Default::default()
+                    },
+                )
+                .await;
         }
 
         // Now safe to delete sessions and their data
@@ -2709,7 +2718,8 @@ mod tests {
         assert!(names.contains(&"delete_card"));
         assert!(names.contains(&"move_card_to_done"));
         assert!(names.contains(&"move_card_to_wont_do"));
-        assert_eq!(names.len(), 28);
+        assert!(names.contains(&"delete_project"));
+        assert_eq!(names.len(), 29);
     }
 
     #[test]
