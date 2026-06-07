@@ -340,7 +340,7 @@ async fn append_event(
 
         // Build a human-readable answer message to resume the conversation
         let answer_text = if rejected {
-            "The user dismissed the question without answering.".to_string()
+            "The user dismissed the question without answering. The questions have been removed from the UI and are no longer visible. Do NOT say the questions are still up. If you still need answers, you must ask again using mcp__peckboard__ask_user.".to_string()
         } else {
             let answers = event_data.get("answers").cloned().unwrap_or(serde_json::json!({}));
 
@@ -368,7 +368,7 @@ async fn append_event(
             if parts.is_empty() {
                 format!("User answered: {}", serde_json::to_string(&answers).unwrap_or_default())
             } else {
-                format!("Here are the user's answers:\n\n{}", parts.join("\n"))
+                format!("The user answered your questions (the question form has been removed from the UI):\n\n{}", parts.join("\n"))
             }
         };
 
