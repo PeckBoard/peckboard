@@ -1131,10 +1131,12 @@
 }
 
 .autocomplete-inline {
-  position: absolute;
-  bottom: 100%;
-  left: 0;
-  right: 0;
+  position: fixed;
+  left: 50%;
+  transform: translateX(-50%);
+  width: 460px;
+  max-width: 90vw;
+  bottom: auto;
   margin-bottom: 4px;
 }
 
@@ -2851,10 +2853,14 @@ select.form-input {
 .question-dialog {
   max-width: 520px;
   padding: 0 !important;
-  overflow: visible;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+  max-height: 80vh;
 }
 
 .question-dialog-header {
+  flex-shrink: 0;
   padding: 20px 24px 16px;
   border-bottom: 1px solid var(--border);
   background: var(--surface2);
@@ -2896,12 +2902,13 @@ select.form-input {
 
 .question-dialog-body {
   padding: 20px 24px;
-  max-height: 400px;
-  overflow-y: visible;
-  position: relative;
+  flex: 1;
+  overflow-y: auto;
+  min-height: 0;
 }
 
 .question-dialog-footer {
+  flex-shrink: 0;
   display: flex;
   align-items: center;
   justify-content: space-between;
