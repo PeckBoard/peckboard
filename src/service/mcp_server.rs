@@ -1774,7 +1774,7 @@ mod tests {
         assert!(names.contains(&"delete_card"));
         assert!(names.contains(&"move_card_to_done"));
         assert!(names.contains(&"move_card_to_wont_do"));
-        assert_eq!(names.len(), 19);
+        assert_eq!(names.len(), 20);
     }
 
     #[test]
