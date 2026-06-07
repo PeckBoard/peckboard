@@ -507,9 +507,48 @@ pub async fn handle_worker_done(state: &Arc<AppState>, session_id: &str) {
         )
         .await;
 
-    // After handling, trigger another round of orchestration so freed slots
-    // get filled.
-    let _ = project_id; // used implicitly above
+    // Check if there are unprocessed inter-worker messages that arrived
+    // during this worker's turn. If so, resume the session to process them.
+    let card = state.db.get_card(&card_id).await.ok().flatten();
+    if let Some(ref card) = card {
+        if card.step != "done" && card.step != "wont_do" && !card.blocked {
+            let events = state.db.events_tail(session_id, 20).await.unwrap_or_default();
+            // Find the last agent-end, then check for worker messages after it
+            let last_agent_end = events.iter().rposition(|e| e.kind == "agent-end");
+            let has_pending_worker_msgs = if let Some(end_idx) = last_agent_end {
+                events[end_idx + 1..].iter().any(|e| {
+                    if e.kind != "user" { return false; }
+                    if let Ok(data) = serde_json::from_str::<serde_json::Value>(&e.data) {
+                        let source = data.get("source").and_then(|v| v.as_str()).unwrap_or("");
+                        matches!(source, "worker-communication" | "worker-finding" | "worker-message" | "worker-auto-notify" | "worker-notification")
+                    } else {
+                        false
+                    }
+                })
+            } else {
+                false
+            };
+
+            if has_pending_worker_msgs {
+                tracing::info!(
+                    session_id = %session_id,
+                    card_id = %card_id,
+                    "Pending inter-worker messages detected, re-spawning worker"
+                );
+                // Clear worker_session_id so orchestrator picks it up
+                let _ = state.db.update_card(
+                    &card_id,
+                    UpdateCard {
+                        worker_session_id: Some(None),
+                        updated_at: Some(chrono::Utc::now().to_rfc3339()),
+                        ..Default::default()
+                    },
+                ).await;
+            }
+        }
+    }
+
+    let _ = project_id;
 }
 
 /// Return the default workflow step order.
