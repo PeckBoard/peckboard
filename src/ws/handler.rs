@@ -182,12 +182,25 @@ async fn handle_connection(socket: WebSocket, state: Arc<AppState>) {
             // Handle broadcast events
             event = broadcast_rx.recv() => {
                 if let Ok(ws_event) = event {
-                    // Check if this client is subscribed to this session
-                    if state.broadcaster.has_subscribers(&ws_event.session_id).await {
-                        let frame = ServerFrame::Event {
-                            session_id: ws_event.session_id.clone(),
-                            event: ws_event.data,
-                        };
+                    // Global events (card-update, announcement, queue) go to all clients
+                    let is_global = matches!(
+                        ws_event.event_type.as_str(),
+                        "card-update" | "announcement" | "queue"
+                    );
+
+                    let should_send = if is_global {
+                        true
+                    } else {
+                        state.broadcaster.has_subscribers(&ws_event.session_id).await
+                    };
+
+                    if should_send {
+                        let frame = serde_json::json!({
+                            "type": ws_event.event_type,
+                            "session_id": ws_event.session_id,
+                            "event": ws_event.data,
+                            "data": ws_event.data,
+                        });
                         if sender.send(Message::Text(
                             serde_json::to_string(&frame).unwrap().into()
                         )).await.is_err() {
