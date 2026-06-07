@@ -3332,6 +3332,50 @@ select.form-input {
 .tab-wrap {
   position: relative;
   flex-shrink: 0;
+  display: inline-flex;
+  align-items: center;
+}
+.tab-wrap .tab {
+  padding-right: 4px;
+}
+.tab-close {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 18px;
+  height: 18px;
+  margin-right: 6px;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--text3);
+  font-size: 11px;
+  line-height: 1;
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  opacity: 0;
+  transition:
+    opacity 0.12s ease,
+    background 0.12s ease,
+    color 0.12s ease;
+}
+.tab-wrap:hover .tab-close,
+.tab-wrap:focus-within .tab-close,
+.tab-active + .tab-close,
+.tab-wrap:has(.tab-active) .tab-close {
+  opacity: 1;
+}
+.tab-close:hover {
+  background: var(--surface2, var(--bg-hover, var(--surface)));
+  color: var(--text);
+}
+@media (max-width: 768px) {
+  .tab-close {
+    display: none;
+  }
+  .tab-wrap .tab {
+    padding-right: 12px;
+  }
 }
 .tab {
   display: inline-flex;

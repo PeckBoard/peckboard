@@ -100,14 +100,21 @@ export default function KanbanBoard({ projectId }: KanbanBoardProps) {
   const [cardMenuId, setCardMenuId] = useState<string | null>(null)
   const [editingCard, setEditingCard] = useState<Card | null>(null)
   const [showComms, setShowComms] = useState(false)
-  const [cardReports, setCardReports] = useState<{ folder: string; file: string; title: string; date: string }[]>([])
+  const [cardReports, setCardReports] = useState<
+    { folder: string; file: string; title: string; date: string }[]
+  >([])
 
   // Fetch reports when card detail is opened
   useEffect(() => {
-    if (!selectedCard) { setCardReports([]); return }
+    if (!selectedCard) {
+      setCardReports([])
+      return
+    }
     authedFetch(`/api/projects/${projectId}/cards/${selectedCard.id}/reports`)
-      .then((r) => r.ok ? r.json() : null)
-      .then((data) => { if (data?.reports) setCardReports(data.reports) })
+      .then((r) => (r.ok ? r.json() : null))
+      .then((data) => {
+        if (data?.reports) setCardReports(data.reports)
+      })
       .catch(() => setCardReports([]))
   }, [selectedCard, projectId])
 
@@ -474,7 +481,11 @@ export default function KanbanBoard({ projectId }: KanbanBoardProps) {
             </button>
           </div>
         )}
-        <button className="btn-secondary" onClick={() => setShowComms(true)} title="View worker communications">
+        <button
+          className="btn-secondary"
+          onClick={() => setShowComms(true)}
+          title="View worker communications"
+        >
           Comms
         </button>
         <button className="btn-primary" onClick={() => setShowAddForm(!showAddForm)}>
@@ -913,7 +924,9 @@ export default function KanbanBoard({ projectId }: KanbanBoardProps) {
                         }}
                       >
                         <span className="card-report-title">{r.title}</span>
-                        <span className="card-report-date">{r.date?.split('T')[0] ?? r.folder}</span>
+                        <span className="card-report-date">
+                          {r.date?.split('T')[0] ?? r.folder}
+                        </span>
                       </button>
                     ))}
                   </div>

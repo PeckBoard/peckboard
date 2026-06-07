@@ -28,24 +28,36 @@ interface WorkerCommsProps {
 
 function formatTime(ts: number): string {
   if (!ts) return ''
-  return new Date(ts).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit', second: '2-digit' })
+  return new Date(ts).toLocaleTimeString([], {
+    hour: 'numeric',
+    minute: '2-digit',
+    second: '2-digit',
+  })
 }
 
 function msgTypeIcon(type: string): string {
   switch (type) {
-    case 'finding': return '\u{1F4A1}'
-    case 'auto-notify': return '\u{1F4C1}'
-    case 'notification': return '\u{1F514}'
-    default: return '\u{1F4AC}'
+    case 'finding':
+      return '\u{1F4A1}'
+    case 'auto-notify':
+      return '\u{1F4C1}'
+    case 'notification':
+      return '\u{1F514}'
+    default:
+      return '\u{1F4AC}'
   }
 }
 
 function msgTypeLabel(type: string): string {
   switch (type) {
-    case 'finding': return 'Finding'
-    case 'auto-notify': return 'File Change'
-    case 'notification': return 'Notification'
-    default: return 'Message'
+    case 'finding':
+      return 'Finding'
+    case 'auto-notify':
+      return 'File Change'
+    case 'notification':
+      return 'Notification'
+    default:
+      return 'Message'
   }
 }
 
@@ -100,7 +112,9 @@ export default function WorkerComms({ projectId, onClose }: WorkerCommsProps) {
             let toName: string | null = w.card_title ?? w.name
 
             // Parse sender from the message text
-            const fromMatch = text.match(/\[(?:Worker message from|Shared finding from worker on|Auto\] Worker on) "([^"]+)"/)
+            const fromMatch = text.match(
+              /\[(?:Worker message from|Shared finding from worker on|Auto\] Worker on) "([^"]+)"/,
+            )
             if (fromMatch) fromName = fromMatch[1]
 
             const sessionMatch = text.match(/From session: ([a-f0-9-]+)/)
@@ -131,7 +145,9 @@ export default function WorkerComms({ projectId, onClose }: WorkerCommsProps) {
               text: displayText,
             })
           }
-        } catch { /* skip */ }
+        } catch {
+          /* skip */
+        }
       }
 
       // Sort by time
@@ -149,7 +165,11 @@ export default function WorkerComms({ projectId, onClose }: WorkerCommsProps) {
   // Auto-refresh on WebSocket events
   useEffect(() => {
     const listener = (event: Event) => {
-      if (event.kind === 'user' && typeof event.data.source === 'string' && event.data.source.startsWith('worker-')) {
+      if (
+        event.kind === 'user' &&
+        typeof event.data.source === 'string' &&
+        event.data.source.startsWith('worker-')
+      ) {
         fetchComms()
       }
     }
@@ -172,7 +192,16 @@ export default function WorkerComms({ projectId, onClose }: WorkerCommsProps) {
   }, [messages])
 
   // Build a color map for workers
-  const colors = ['#3b82f6', '#10b981', '#f59e0b', '#ef4444', '#8b5cf6', '#ec4899', '#06b6d4', '#84cc16']
+  const colors = [
+    '#3b82f6',
+    '#10b981',
+    '#f59e0b',
+    '#ef4444',
+    '#8b5cf6',
+    '#ec4899',
+    '#06b6d4',
+    '#84cc16',
+  ]
   const workerColors: Record<string, string> = {}
   workers.forEach((w, i) => {
     workerColors[w.session_id] = colors[i % colors.length]
@@ -186,7 +215,9 @@ export default function WorkerComms({ projectId, onClose }: WorkerCommsProps) {
   return (
     <div className="worker-comms">
       <div className="worker-comms-header">
-        <button className="btn-secondary" onClick={onClose}>&larr; Back to Board</button>
+        <button className="btn-secondary" onClick={onClose}>
+          &larr; Back to Board
+        </button>
         <h2>Worker Communications</h2>
         <span className="worker-comms-count">{messages.length} messages</span>
       </div>
@@ -195,7 +226,10 @@ export default function WorkerComms({ projectId, onClose }: WorkerCommsProps) {
       <div className="worker-comms-legend">
         {workers.map((w) => (
           <div key={w.session_id} className="worker-comms-legend-item">
-            <span className="worker-comms-dot" style={{ background: getColor(w.card_title ?? w.name, w.session_id) }} />
+            <span
+              className="worker-comms-dot"
+              style={{ background: getColor(w.card_title ?? w.name, w.session_id) }}
+            />
             <span className="worker-comms-legend-name">{w.card_title ?? w.name}</span>
             {w.step && <span className="worker-comms-legend-step">{w.step}</span>}
           </div>
@@ -204,7 +238,11 @@ export default function WorkerComms({ projectId, onClose }: WorkerCommsProps) {
 
       {/* Messages timeline */}
       <div className="worker-comms-timeline" ref={scrollRef}>
-        {loading && <div className="chat-loading"><div className="loading-spinner" /></div>}
+        {loading && (
+          <div className="chat-loading">
+            <div className="loading-spinner" />
+          </div>
+        )}
         {!loading && messages.length === 0 && (
           <div className="worker-comms-empty">No inter-worker communications yet.</div>
         )}
@@ -212,11 +250,19 @@ export default function WorkerComms({ projectId, onClose }: WorkerCommsProps) {
           <div key={msg.id} className="worker-comms-msg">
             <div className="worker-comms-msg-header">
               <span className="worker-comms-msg-icon">{msgTypeIcon(msg.type)}</span>
-              <span className="worker-comms-msg-from" style={{ color: getColor(msg.from_name, msg.from_session) }}>
+              <span
+                className="worker-comms-msg-from"
+                style={{ color: getColor(msg.from_name, msg.from_session) }}
+              >
                 {msg.from_name}
               </span>
               <span className="worker-comms-msg-arrow">&rarr;</span>
-              <span className="worker-comms-msg-to" style={{ color: msg.to_session ? getColor(msg.to_name ?? '', msg.to_session) : undefined }}>
+              <span
+                className="worker-comms-msg-to"
+                style={{
+                  color: msg.to_session ? getColor(msg.to_name ?? '', msg.to_session) : undefined,
+                }}
+              >
                 {msg.to_name ?? 'All Workers'}
               </span>
               <span className="worker-comms-msg-type">{msgTypeLabel(msg.type)}</span>

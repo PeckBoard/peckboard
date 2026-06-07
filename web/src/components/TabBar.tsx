@@ -18,9 +18,11 @@ interface TabBarProps {
  * the strip can use all of its horizontal space for tabs, which matters
  * on mobile where the rail is the bottom toolbar.
  *
- * Close UX: long-press on touch, right-click on mouse → a small context
- * menu offers Close. The X-on-every-tab pattern is too noisy on mobile
- * given how narrow tab chips need to be.
+ * Close UX:
+ *   Desktop: an X button on each tab (visible on hover/active);
+ *     also right-click → context menu with Close.
+ *   Mobile:  long-press → context menu with Close. The X is hidden
+ *     under the 768px breakpoint to keep tab chips compact.
  */
 export default function TabBar({
   view,
@@ -150,6 +152,17 @@ function OpenedTab({
           <span className="tab-dot tab-dot-unread" aria-label="unread" />
         ) : null}
         <span className="tab-label">{label}</span>
+      </button>
+      <button
+        className="tab-close"
+        aria-label={`Close ${label}`}
+        title="Close tab"
+        onClick={(e) => {
+          e.stopPropagation()
+          onClose()
+        }}
+      >
+        &#10005;
       </button>
       {menuOpen && (
         <div className="tab-menu" role="menu">
