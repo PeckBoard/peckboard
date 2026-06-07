@@ -19,6 +19,17 @@ pub struct CliArgs {
     /// Data directory
     #[arg(long, env = "PECKBOARD_DATA_DIR")]
     pub data_dir: Option<PathBuf>,
+
+    /// Reset a user's password to a freshly-generated random value,
+    /// revoke their auth sessions, print the new password, and exit.
+    /// If --user is omitted and exactly one user exists, that user is
+    /// reset; otherwise --user is required.
+    #[arg(long)]
+    pub reset_password: bool,
+
+    /// Username for --reset-password.
+    #[arg(long, requires = "reset_password")]
+    pub user: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -31,8 +42,10 @@ pub struct Config {
 
 impl Config {
     pub fn load() -> Self {
-        let args = CliArgs::parse();
+        Self::from_args(CliArgs::parse())
+    }
 
+    pub fn from_args(args: CliArgs) -> Self {
         let data_dir = args.data_dir.unwrap_or_else(|| {
             dirs::home_dir()
                 .expect("no home directory")

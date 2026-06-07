@@ -75,7 +75,8 @@ Browse to:
 ```bash
 peckboard --port 8080 --https-port 8443
 peckboard --data-dir ./tmp-data        # throwaway profile
-peckboard --reset-password              # wipe auth, print new password, exit
+peckboard --reset-password              # reset the single user's password, print it, exit
+peckboard --reset-password --user alice # reset a specific user (required when >1 user exists)
 peckboard --reset-mdns-name             # regenerate mDNS hostname
 peckboard --log-level debug
 peckboard --json                        # JSON log output

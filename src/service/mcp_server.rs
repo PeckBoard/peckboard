@@ -822,7 +822,12 @@ impl McpToolRegistry {
         let resolved_card_id = if ctx.card_id.is_some() {
             ctx.card_id.clone()
         } else {
-            ctx.db.get_session(&ctx.session_id).await.ok().flatten().and_then(|s| s.card_id)
+            ctx.db
+                .get_session(&ctx.session_id)
+                .await
+                .ok()
+                .flatten()
+                .and_then(|s| s.card_id)
         };
         if let Some(ref card_id) = resolved_card_id {
             if let Ok(Some(card)) = ctx.db.get_card(card_id).await {
@@ -834,7 +839,12 @@ impl McpToolRegistry {
         let resolved_project_id = if ctx.project_id.is_some() {
             ctx.project_id.clone()
         } else {
-            ctx.db.get_session(&ctx.session_id).await.ok().flatten().and_then(|s| s.project_id)
+            ctx.db
+                .get_session(&ctx.session_id)
+                .await
+                .ok()
+                .flatten()
+                .and_then(|s| s.project_id)
         };
         if let Some(ref pid) = resolved_project_id {
             project_id_val = Some(pid.clone());
