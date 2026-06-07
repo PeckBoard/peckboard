@@ -130,6 +130,15 @@ diesel::table! {
     }
 }
 
+diesel::table! {
+    user_tabs (user_id, item_type, item_id) {
+        user_id -> Text,
+        item_type -> Text,
+        item_id -> Text,
+        last_active -> Text,
+    }
+}
+
 diesel::joinable!(sessions -> folders (folder_id));
 diesel::joinable!(sessions -> projects (project_id));
 diesel::joinable!(projects -> folders (folder_id));
@@ -137,6 +146,8 @@ diesel::joinable!(cards -> projects (project_id));
 diesel::joinable!(events -> sessions (session_id));
 diesel::joinable!(auth_sessions -> users (user_id));
 diesel::joinable!(queued_messages -> sessions (session_id));
+
+diesel::joinable!(user_tabs -> users (user_id));
 
 diesel::allow_tables_to_appear_in_same_query!(
     folders,
@@ -149,4 +160,5 @@ diesel::allow_tables_to_appear_in_same_query!(
     push_subscriptions,
     queued_messages,
     announcements,
+    user_tabs,
 );

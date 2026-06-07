@@ -54,14 +54,18 @@ async fn create_folder(
             if let Err(e) = std::fs::create_dir_all(path) {
                 return Err((
                     StatusCode::BAD_REQUEST,
-                    Json(serde_json::json!({ "error": format!("failed to create directory: {}", e) })),
+                    Json(
+                        serde_json::json!({ "error": format!("failed to create directory: {}", e) }),
+                    ),
                 ));
             }
             tracing::info!(path = %body.path, "Created directory on disk");
         } else {
             return Err((
                 StatusCode::BAD_REQUEST,
-                Json(serde_json::json!({ "error": format!("path does not exist: {}. Set create: true to create it.", body.path) })),
+                Json(
+                    serde_json::json!({ "error": format!("path does not exist: {}. Set create: true to create it.", body.path) }),
+                ),
             ));
         }
     }

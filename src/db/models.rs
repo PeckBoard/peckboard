@@ -330,3 +330,14 @@ pub struct NewAnnouncement {
     pub detail: Option<String>,
     pub created_at: String,
 }
+
+// ── User tabs ────────────────────────────────────────────────────────
+
+#[derive(Queryable, Selectable, Insertable, Serialize, Deserialize, Debug, Clone)]
+#[diesel(table_name = user_tabs)]
+pub struct UserTab {
+    pub user_id: String,
+    pub item_type: String,
+    pub item_id: String,
+    pub last_active: String,
+}
