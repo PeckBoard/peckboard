@@ -3002,9 +3002,17 @@ select.form-input {
   color: var(--text);
   transition: background var(--transition);
 }
-.card-report-link:hover { background: var(--surface-hover); }
-.card-report-title { font-size: var(--text-sm); font-weight: 500; }
-.card-report-date { font-size: var(--text-xs); color: var(--text3); }
+.card-report-link:hover {
+  background: var(--surface-hover);
+}
+.card-report-title {
+  font-size: var(--text-sm);
+  font-weight: 500;
+}
+.card-report-date {
+  font-size: var(--text-xs);
+  color: var(--text3);
+}
 
 .card-detail-actions {
   display: flex;
@@ -3145,6 +3153,7 @@ select.form-input {
   .rail-separator {
     width: 1px;
     height: 24px;
+    background: var(--border);
     margin: 0 4px;
   }
   .rail-avatar {
@@ -3316,11 +3325,6 @@ select.form-input {
      vertical scroll gesture on the page. */
   overscroll-behavior-x: contain;
 }
-.tabbar-divider {
-  width: 1px;
-  background: var(--border);
-  margin: 6px 6px;
-}
 .tab-wrap {
   position: relative;
   flex-shrink: 0;
@@ -3349,9 +3353,6 @@ select.form-input {
 .tab-active {
   color: var(--text);
   border-bottom-color: var(--accent);
-  font-weight: 500;
-}
-.tab-fixed {
   font-weight: 500;
 }
 .tab-opened {

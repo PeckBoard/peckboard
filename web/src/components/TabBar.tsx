@@ -7,16 +7,16 @@ interface TabBarProps {
   view: 'sessions' | 'projects' | 'folders' | 'settings' | 'reports' | 'git' | 'users'
   activeSessionId: string | null
   activeProjectId: string | null
-  onOpenList: (type: TabType) => void
   onOpenItem: (type: TabType, id: string) => void
 }
 
 /**
- * Top tab strip. Two fixed leftmost tabs (Sessions / Projects) navigate
- * to the corresponding list views. After that come the user's opened
- * items — sessions and projects mixed together in MRU order, persisted
- * server-side via `useTabsStore` so the same set shows up on every
- * device.
+ * Top tab strip showing the user's opened sessions and projects mixed
+ * together in MRU order, persisted server-side via `useTabsStore` so
+ * the same set shows up on every device. The Sessions / Projects list
+ * entries live in the navigation rail — keeping them out of here means
+ * the strip can use all of its horizontal space for tabs, which matters
+ * on mobile where the rail is the bottom toolbar.
  *
  * Close UX: long-press on touch, right-click on mouse → a small context
  * menu offers Close. The X-on-every-tab pattern is too noisy on mobile
@@ -26,7 +26,6 @@ export default function TabBar({
   view,
   activeSessionId,
   activeProjectId,
-  onOpenList,
   onOpenItem,
 }: TabBarProps) {
   const tabs = useTabsStore((s) => s.tabs)
@@ -39,24 +38,10 @@ export default function TabBar({
   const sessionMap = new Map(sessions.map((s) => [s.id, s]))
   const projectMap = new Map(projects.map((p) => [p.id, p]))
 
-  // Active state for the two fixed tabs: only when on the list view
-  // (no specific item open).
-  const sessionsListActive = view === 'sessions' && !activeSessionId
-  const projectsListActive = view === 'projects' && !activeProjectId
+  if (tabs.length === 0) return null
 
   return (
     <div className="tabbar" role="tablist" aria-label="Open tabs">
-      <FixedTab
-        label="Sessions"
-        active={sessionsListActive}
-        onClick={() => onOpenList('session')}
-      />
-      <FixedTab
-        label="Projects"
-        active={projectsListActive}
-        onClick={() => onOpenList('project')}
-      />
-      <div className="tabbar-divider" aria-hidden="true" />
       {tabs.map((t) => {
         const isActive =
           (t.itemType === 'session' && view === 'sessions' && activeSessionId === t.itemId) ||
@@ -82,27 +67,6 @@ export default function TabBar({
         )
       })}
     </div>
-  )
-}
-
-function FixedTab({
-  label,
-  active,
-  onClick,
-}: {
-  label: string
-  active: boolean
-  onClick: () => void
-}) {
-  return (
-    <button
-      role="tab"
-      aria-selected={active}
-      className={`tab tab-fixed ${active ? 'tab-active' : ''}`}
-      onClick={onClick}
-    >
-      {label}
-    </button>
   )
 }
 

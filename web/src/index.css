@@ -79,7 +79,10 @@
   --header-h: 52px;
   --sidebar-w: 260px;
   --safe-bottom: env(safe-area-inset-bottom, 0px);
-  --app-height: 100vh;
+  /* Live app height — overridden in JS via `visualViewport` so the UI
+     shrinks above the on-screen keyboard. Defaults to `100dvh` for the
+     pre-JS paint and as a non-mobile fallback. */
+  --app-height: 100dvh;
 }
 
 /* ─── Dark mode ─── */
@@ -161,11 +164,11 @@
 }
 
 html {
-  height: 100%;
-  /* dvh = dynamic viewport, accounts for mobile browser chrome shrinking.
-     vh fallback for very old browsers. */
-  height: 100vh;
-  height: 100dvh;
+  /* `--app-height` is kept in sync with `visualViewport` in App.tsx —
+     this is what makes the page shrink above the on-screen keyboard
+     so the top toolbar doesn't scroll off. Falls back to `100dvh`
+     before JS runs. */
+  height: var(--app-height);
   /* Stop the page itself from scrolling / pinch-zooming. The app
      scrolls its own panes (chat, lists, tab strip). */
   overflow: hidden;
