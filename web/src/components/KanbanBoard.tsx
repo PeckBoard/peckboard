@@ -397,7 +397,7 @@ export default function KanbanBoard({ projectId }: KanbanBoardProps) {
       {pendingQuestions.length > 0 && !questionDialogOpen && (
         <button
           className="worker-questions-trigger"
-          onClick={() => { setQuestionIndex(0); setQuestionDialogOpen(true) }}
+          onClick={() => setQuestionDialogOpen(true)}
         >
           <span className="worker-questions-icon">&#x2753;</span>
           <span>{pendingQuestions.length} worker question{pendingQuestions.length > 1 ? 's' : ''} need your answer</span>
