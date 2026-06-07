@@ -170,7 +170,10 @@ export default function ReportBrowser() {
 
       {Object.keys(grouped).map((folder) => (
         <section key={folder} className="settings-section">
-          <h3 style={{ cursor: 'pointer', userSelect: 'none' }} onClick={() => toggleFolder(folder)}>
+          <h3
+            style={{ cursor: 'pointer', userSelect: 'none' }}
+            onClick={() => toggleFolder(folder)}
+          >
             <span style={{ display: 'inline-block', width: 16, fontSize: 10 }}>
               {expandedFolders.has(folder) ? '\u25BC' : '\u25B6'}
             </span>
@@ -179,11 +182,12 @@ export default function ReportBrowser() {
           {expandedFolders.has(folder) && (
             <div className="folder-list">
               {grouped[folder].map((r) => (
-                <div key={`${r.folder}/${r.file}`} className="folder-row" style={{ cursor: 'pointer' }}>
-                  <button
-                    className="report-list-item"
-                    onClick={() => viewReport(r)}
-                  >
+                <div
+                  key={`${r.folder}/${r.file}`}
+                  className="folder-row"
+                  style={{ cursor: 'pointer' }}
+                >
+                  <button className="report-list-item" onClick={() => viewReport(r)}>
                     <div className="folder-info">
                       <strong>{r.title || r.file}</strong>
                       <span className="folder-path">{r.date}</span>

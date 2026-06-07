@@ -130,7 +130,10 @@ pub async fn repair_dangling_sessions(db: &crate::db::Db) -> anyhow::Result<u32>
             continue;
         }
 
-        let cards = db.list_cards_by_project(&project.id).await.unwrap_or_default();
+        let cards = db
+            .list_cards_by_project(&project.id)
+            .await
+            .unwrap_or_default();
         for card in &cards {
             if card.step == "done" || card.step == "wont_do" {
                 continue;

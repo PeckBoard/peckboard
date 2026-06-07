@@ -592,6 +592,91 @@
   border-radius: 16px 16px 16px 4px;
 }
 
+/* Markdown content inside assistant bubbles.
+   The bubble defaults to `white-space: pre-wrap` for plain-text agents;
+   markdown handles its own whitespace via block elements, so reset it
+   here and style the elements ReactMarkdown emits. */
+.chat-markdown {
+  white-space: normal;
+}
+.chat-markdown > :first-child {
+  margin-top: 0;
+}
+.chat-markdown > :last-child {
+  margin-bottom: 0;
+}
+.chat-markdown p {
+  margin: 0.4em 0;
+}
+.chat-markdown h1,
+.chat-markdown h2,
+.chat-markdown h3,
+.chat-markdown h4,
+.chat-markdown h5,
+.chat-markdown h6 {
+  margin: 0.6em 0 0.3em;
+  line-height: 1.25;
+}
+.chat-markdown h1 {
+  font-size: 1.3em;
+}
+.chat-markdown h2 {
+  font-size: 1.2em;
+}
+.chat-markdown h3 {
+  font-size: 1.1em;
+}
+.chat-markdown ul,
+.chat-markdown ol {
+  margin: 0.4em 0;
+  padding-left: 1.5em;
+}
+.chat-markdown li {
+  margin: 0.15em 0;
+}
+.chat-markdown blockquote {
+  margin: 0.4em 0;
+  padding: 0.2em 0.8em;
+  border-left: 3px solid var(--border);
+  color: var(--text2);
+}
+.chat-markdown a {
+  color: var(--accent);
+}
+.chat-markdown :not(pre) > code {
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 0 4px;
+  font-size: 0.9em;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+}
+.chat-markdown pre {
+  margin: 0.5em 0;
+  padding: 0.7em 0.9em;
+  border-radius: 8px;
+  overflow-x: auto;
+  /* highlight.js github-dark stylesheet sets its own background; we
+     just guarantee the surrounding chrome matches the chat surface. */
+  border: 1px solid var(--border);
+}
+.chat-markdown pre code {
+  background: transparent;
+  border: 0;
+  padding: 0;
+  font-size: 0.85em;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+}
+.chat-markdown table {
+  border-collapse: collapse;
+  margin: 0.4em 0;
+}
+.chat-markdown th,
+.chat-markdown td {
+  border: 1px solid var(--border);
+  padding: 4px 8px;
+}
+
 .chat-status {
   font-size: var(--text-xs);
   color: var(--text3);
@@ -1024,9 +1109,18 @@
   border-radius: var(--radius-sm);
   margin-right: 6px;
 }
-.autocomplete-type-report { background: var(--accent-subtle); color: var(--accent); }
-.autocomplete-type-session { background: var(--success-bg); color: var(--success); }
-.autocomplete-type-card { background: var(--warning-bg); color: var(--warning); }
+.autocomplete-type-report {
+  background: var(--accent-subtle);
+  color: var(--accent);
+}
+.autocomplete-type-session {
+  background: var(--success-bg);
+  color: var(--success);
+}
+.autocomplete-type-card {
+  background: var(--warning-bg);
+  color: var(--warning);
+}
 
 .question-input-wrapper {
   position: relative;
@@ -1190,7 +1284,9 @@
   text-align: left;
   width: 100%;
   font-family: inherit;
-  transition: all 0.3s ease, box-shadow 0.15s ease;
+  transition:
+    all 0.3s ease,
+    box-shadow 0.15s ease;
   display: flex;
   position: relative;
   animation: cardGrowIn 0.35s cubic-bezier(0.34, 1.56, 0.64, 1);
@@ -1927,14 +2023,40 @@
   color: var(--text);
 }
 
-.report-content h1 { font-size: var(--text-xl); font-weight: 700; margin: 24px 0 12px; border-bottom: 1px solid var(--border); padding-bottom: 8px; }
-.report-content h2 { font-size: var(--text-lg); font-weight: 700; margin: 20px 0 10px; }
-.report-content h3 { font-size: var(--text-base); font-weight: 700; margin: 16px 0 8px; }
-.report-content h4 { font-size: var(--text-sm); font-weight: 700; margin: 12px 0 6px; }
+.report-content h1 {
+  font-size: var(--text-xl);
+  font-weight: 700;
+  margin: 24px 0 12px;
+  border-bottom: 1px solid var(--border);
+  padding-bottom: 8px;
+}
+.report-content h2 {
+  font-size: var(--text-lg);
+  font-weight: 700;
+  margin: 20px 0 10px;
+}
+.report-content h3 {
+  font-size: var(--text-base);
+  font-weight: 700;
+  margin: 16px 0 8px;
+}
+.report-content h4 {
+  font-size: var(--text-sm);
+  font-weight: 700;
+  margin: 12px 0 6px;
+}
 
-.report-content p { margin: 0 0 12px; }
-.report-content ul, .report-content ol { margin: 0 0 12px; padding-left: 24px; }
-.report-content li { margin-bottom: 4px; }
+.report-content p {
+  margin: 0 0 12px;
+}
+.report-content ul,
+.report-content ol {
+  margin: 0 0 12px;
+  padding-left: 24px;
+}
+.report-content li {
+  margin-bottom: 4px;
+}
 
 .report-content code {
   font-family: var(--font-mono);
@@ -1975,7 +2097,8 @@
   font-size: var(--text-xs);
 }
 
-.report-content th, .report-content td {
+.report-content th,
+.report-content td {
   border: 1px solid var(--border);
   padding: 8px 10px;
   text-align: left;
@@ -2709,10 +2832,17 @@ select.form-input {
   border-color: var(--accent);
 }
 @keyframes questionPulse {
-  0%, 100% { box-shadow: 0 0 0 0 var(--accent-subtle); }
-  50% { box-shadow: 0 0 0 4px var(--accent-subtle); }
+  0%,
+  100% {
+    box-shadow: 0 0 0 0 var(--accent-subtle);
+  }
+  50% {
+    box-shadow: 0 0 0 4px var(--accent-subtle);
+  }
 }
-.worker-questions-icon { font-size: 16px; }
+.worker-questions-icon {
+  font-size: 16px;
+}
 
 /* Question dialog */
 .question-dialog {

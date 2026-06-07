@@ -1,4 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
+import ReactMarkdown from 'react-markdown'
+import remarkGfm from 'remark-gfm'
+import rehypeHighlight from 'rehype-highlight'
 import type { Event, Session } from '../types/api'
 import { authedFetch } from '../store/auth'
 import { useWsStore } from '../store/ws'
@@ -6,6 +9,7 @@ import { useSessionsStore } from '../store/sessions'
 import InputBar from './InputBar'
 import ToolUseBlock from './ToolUseBlock'
 import ConfirmDialog from './ConfirmDialog'
+import 'highlight.js/styles/github-dark.css'
 
 interface ChatViewProps {
   sessionId: string
@@ -787,7 +791,21 @@ export default function ChatView({ sessionId }: ChatViewProps) {
               return (
                 <div key={item.key} className="chat-row chat-row-assistant">
                   <div className="chat-bubble chat-bubble-assistant">
-                    {item.text}
+                    <div className="chat-markdown">
+                      <ReactMarkdown
+                        remarkPlugins={[remarkGfm]}
+                        rehypePlugins={[rehypeHighlight]}
+                        components={{
+                          a: ({ href, children }) => (
+                            <a href={href} target="_blank" rel="noreferrer noopener">
+                              {children}
+                            </a>
+                          ),
+                        }}
+                      >
+                        {item.text}
+                      </ReactMarkdown>
+                    </div>
                     <div className="chat-time">{formatTime(item.ts)}</div>
                   </div>
                 </div>

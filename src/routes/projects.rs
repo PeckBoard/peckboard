@@ -378,19 +378,24 @@ async fn create_card(
     if !crate::routes::misc::is_valid_priority(body.priority) {
         return Err((
             StatusCode::BAD_REQUEST,
-            Json(serde_json::json!({ "error": format!("invalid priority: {}. Use GET /api/priorities for valid values.", body.priority) })),
+            Json(
+                serde_json::json!({ "error": format!("invalid priority: {}. Use GET /api/priorities for valid values.", body.priority) }),
+            ),
         ));
     }
 
     // Hook: card.create.before — plugins can validate or modify
-    let hook_result = state.plugins.dispatch(
-        "card.create.before",
-        serde_json::json!({
-            "projectId": project_id,
-            "title": body.title,
-            "priority": body.priority,
-        }),
-    ).await;
+    let hook_result = state
+        .plugins
+        .dispatch(
+            "card.create.before",
+            serde_json::json!({
+                "projectId": project_id,
+                "title": body.title,
+                "priority": body.priority,
+            }),
+        )
+        .await;
     if let crate::plugin::hooks::HookResult::Cancelled { plugin, reason } = &hook_result {
         tracing::info!(plugin = %plugin, reason = %reason, "card.create.before cancelled");
         return Err((
@@ -486,19 +491,24 @@ async fn update_card(
         if !crate::routes::misc::is_valid_priority(priority) {
             return Err((
                 StatusCode::BAD_REQUEST,
-                Json(serde_json::json!({ "error": format!("invalid priority: {priority}. Use GET /api/priorities for valid values.") })),
+                Json(
+                    serde_json::json!({ "error": format!("invalid priority: {priority}. Use GET /api/priorities for valid values.") }),
+                ),
             ));
         }
     }
 
     // Hook: card.update.before
-    let hook_result = state.plugins.dispatch(
-        "card.update.before",
-        serde_json::json!({
-            "cardId": card_id,
-            "updates": serde_json::to_value(&body).unwrap_or_default(),
-        }),
-    ).await;
+    let hook_result = state
+        .plugins
+        .dispatch(
+            "card.update.before",
+            serde_json::json!({
+                "cardId": card_id,
+                "updates": serde_json::to_value(&body).unwrap_or_default(),
+            }),
+        )
+        .await;
     if let crate::plugin::hooks::HookResult::Cancelled { plugin, reason } = &hook_result {
         tracing::info!(plugin = %plugin, reason = %reason, "card.update.before cancelled");
         return Err((
@@ -587,11 +597,13 @@ async fn update_card(
     match card {
         Some(c) => {
             // Broadcast card update for live kanban
-            state.broadcaster.broadcast(crate::ws::broadcaster::WsEvent {
-                event_type: "card-update".into(),
-                session_id: c.project_id.clone(),
-                data: serde_json::json!({ "card": c }),
-            });
+            state
+                .broadcaster
+                .broadcast(crate::ws::broadcaster::WsEvent {
+                    event_type: "card-update".into(),
+                    session_id: c.project_id.clone(),
+                    data: serde_json::json!({ "card": c }),
+                });
             Ok(Json(serde_json::json!(c)))
         }
         None => Err((

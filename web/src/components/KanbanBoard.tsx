@@ -42,10 +42,13 @@ function priorityBadge(priority: number, priorities: PriorityInfo[]) {
   const p = priorities.find((pr) => pr.value === priority)
   const label = p?.label ?? `P${priority}`
   const className =
-    priority <= 0 ? 'priority-critical' :
-    priority <= 1 ? 'priority-high' :
-    priority <= 2 ? 'priority-medium' :
-    'priority-low'
+    priority <= 0
+      ? 'priority-critical'
+      : priority <= 1
+        ? 'priority-high'
+        : priority <= 2
+          ? 'priority-medium'
+          : 'priority-low'
   return <span className={`priority-badge ${className}`}>{label}</span>
 }
 
@@ -99,7 +102,11 @@ export default function KanbanBoard({ projectId }: KanbanBoardProps) {
   const [workflows, setWorkflows] = useState<WorkflowInfo[]>([])
   const [models, setModels] = useState<ModelInfo[]>([])
   const allMentions = useMentions()
-  const [mentionAutocomplete, setMentionAutocomplete] = useState<{ eventId: string; idx: number; suggestions: ReturnType<typeof filterMentions> } | null>(null)
+  const [mentionAutocomplete, setMentionAutocomplete] = useState<{
+    eventId: string
+    idx: number
+    suggestions: ReturnType<typeof filterMentions>
+  } | null>(null)
   const [priorities, setPriorities] = useState<PriorityInfo[]>([
     { label: 'Critical', value: 0, description: 'Blocks everything' },
     { label: 'High', value: 1, description: 'Important' },
@@ -208,7 +215,11 @@ export default function KanbanBoard({ projectId }: KanbanBoardProps) {
         }),
       })
       // Clear answers and refresh
-      setQuestionAnswers((prev) => { const next = { ...prev }; delete next[pq.eventId]; return next })
+      setQuestionAnswers((prev) => {
+        const next = { ...prev }
+        delete next[pq.eventId]
+        return next
+      })
       fetchPendingQuestions()
     } finally {
       setSubmittingQuestion(null)
@@ -303,10 +314,14 @@ export default function KanbanBoard({ projectId }: KanbanBoardProps) {
   // Map step aliases to canonical step names for display
   const normalizeStep = (step: string) => {
     switch (step) {
-      case 'todo': return 'backlog'
-      case 'in-progress': return 'in_progress'
-      case 'wont-do': return 'wont_do'
-      default: return step
+      case 'todo':
+        return 'backlog'
+      case 'in-progress':
+        return 'in_progress'
+      case 'wont-do':
+        return 'wont_do'
+      default:
+        return step
     }
   }
   const cardsByStep = (step: string) => cards.filter((c) => normalizeStep(c.step) === step)
@@ -450,139 +465,178 @@ export default function KanbanBoard({ projectId }: KanbanBoardProps) {
 
       {/* Pending worker questions — trigger button */}
       {pendingQuestions.length > 0 && !questionDialogOpen && (
-        <button
-          className="worker-questions-trigger"
-          onClick={() => setQuestionDialogOpen(true)}
-        >
+        <button className="worker-questions-trigger" onClick={() => setQuestionDialogOpen(true)}>
           <span className="worker-questions-icon">&#x2753;</span>
-          <span>{pendingQuestions.length} worker question{pendingQuestions.length > 1 ? 's' : ''} need your answer</span>
+          <span>
+            {pendingQuestions.length} worker question{pendingQuestions.length > 1 ? 's' : ''} need
+            your answer
+          </span>
         </button>
       )}
 
       {/* Question dialog — shows first pending question */}
-      {questionDialogOpen && pendingQuestions.length > 0 && (() => {
-        const pq = pendingQuestions[0]
-        const answers = questionAnswers[pq.eventId] ?? {}
-        const isSubmitting = submittingQuestion === pq.eventId
-        const hasAnswers = pq.questions.some((_, idx) => (answers[idx] ?? '').trim().length > 0)
-        const remaining = pendingQuestions.length - 1
+      {questionDialogOpen &&
+        pendingQuestions.length > 0 &&
+        (() => {
+          const pq = pendingQuestions[0]
+          const answers = questionAnswers[pq.eventId] ?? {}
+          const isSubmitting = submittingQuestion === pq.eventId
+          const hasAnswers = pq.questions.some((_, idx) => (answers[idx] ?? '').trim().length > 0)
+          const remaining = pendingQuestions.length - 1
 
-        return (
-          <div className="modal-backdrop" onClick={() => setQuestionDialogOpen(false)}>
-            <div className="modal question-dialog" onClick={(e) => e.stopPropagation()} style={{ maxWidth: 520 }}>
-              {/* Header with context */}
-              <div className="question-dialog-header">
-                <div className="question-dialog-counter">
-                  {remaining > 0
-                    ? `${pendingQuestions.length} questions remaining`
-                    : 'Last question'}
-                </div>
-                {pq.cardTitle && (
-                  <div className="question-dialog-context">
-                    <span className="question-dialog-card-label">Card:</span>
-                    <span className="question-dialog-card-title">{pq.cardTitle}</span>
+          return (
+            <div className="modal-backdrop" onClick={() => setQuestionDialogOpen(false)}>
+              <div
+                className="modal question-dialog"
+                onClick={(e) => e.stopPropagation()}
+                style={{ maxWidth: 520 }}
+              >
+                {/* Header with context */}
+                <div className="question-dialog-header">
+                  <div className="question-dialog-counter">
+                    {remaining > 0
+                      ? `${pendingQuestions.length} questions remaining`
+                      : 'Last question'}
                   </div>
-                )}
-                {pq.cardDescription && (
-                  <div className="question-dialog-card-desc">{pq.cardDescription}</div>
-                )}
-              </div>
+                  {pq.cardTitle && (
+                    <div className="question-dialog-context">
+                      <span className="question-dialog-card-label">Card:</span>
+                      <span className="question-dialog-card-title">{pq.cardTitle}</span>
+                    </div>
+                  )}
+                  {pq.cardDescription && (
+                    <div className="question-dialog-card-desc">{pq.cardDescription}</div>
+                  )}
+                </div>
 
-              {/* Question content */}
-              <div className="question-dialog-body">
-                {pq.questions.map((q, idx) => (
-                  <div key={idx} className="question-item">
-                    {q.header && <div className="question-header">{q.header}</div>}
-                    <div className="question-card-text">{q.question}</div>
-                    {q.options && q.options.length > 0 ? (
-                      <div className="question-options">
-                        {q.options.map((opt, optIdx) => {
-                          const optObj = q.optionObjects?.[optIdx]
-                          return (
-                            <label key={opt} className="question-option-label">
-                              {q.multiSelect ? (
-                                <input
-                                  type="checkbox"
-                                  checked={(answers[idx] ?? '').split(',').includes(opt)}
-                                  onChange={() => toggleQuestionMulti(pq.eventId, idx, opt)}
-                                  disabled={isSubmitting}
-                                />
-                              ) : (
-                                <input
-                                  type="radio"
-                                  name={`wq-${pq.eventId}-${idx}`}
-                                  checked={answers[idx] === opt}
-                                  onChange={() => setQuestionAnswer(pq.eventId, idx, opt)}
-                                  disabled={isSubmitting}
-                                />
-                              )}
-                              <span className="question-option-text">
-                                <span>{opt}</span>
-                                {optObj?.description && <span className="question-option-desc">{optObj.description}</span>}
-                              </span>
-                            </label>
-                          )
-                        })}
-                      </div>
-                    ) : (
-                      <div className="question-input-wrapper">
-                        <input
-                          className="question-input"
-                          type="text"
-                          placeholder="Type your answer... (@ to reference a report)"
-                          value={answers[idx] ?? ''}
-                          onChange={(e) => setQuestionAnswer(pq.eventId, idx, e.target.value)}
-                          onKeyDown={(e) => { if (e.key === 'Enter' && pq.questions.length === 1 && hasAnswers && !mentionAutocomplete) handleAnswerQuestion(pq) }}
-                          onBlur={() => setTimeout(() => setMentionAutocomplete(null), 200)}
-                          disabled={isSubmitting}
-                          autoFocus
-                        />
-                        {mentionAutocomplete && mentionAutocomplete.eventId === pq.eventId && mentionAutocomplete.idx === idx && (
-                          <div className="autocomplete-dropdown autocomplete-inline">
-                            <div className="autocomplete-header">@ — reports &amp; sessions</div>
-                            {mentionAutocomplete.suggestions.map((m, i) => (
-                              <button
-                                key={`${m.type}-${m.detail}-${i}`}
-                                className="autocomplete-item"
-                                onMouseDown={(e) => { e.preventDefault(); insertMentionInAnswer(pq.eventId, idx, m) }}
-                              >
-                                <span className="autocomplete-item-title">
-                                  <span className={`autocomplete-type-badge autocomplete-type-${m.type}`}>{m.type}</span>
-                                  {m.label}
+                {/* Question content */}
+                <div className="question-dialog-body">
+                  {pq.questions.map((q, idx) => (
+                    <div key={idx} className="question-item">
+                      {q.header && <div className="question-header">{q.header}</div>}
+                      <div className="question-card-text">{q.question}</div>
+                      {q.options && q.options.length > 0 ? (
+                        <div className="question-options">
+                          {q.options.map((opt, optIdx) => {
+                            const optObj = q.optionObjects?.[optIdx]
+                            return (
+                              <label key={opt} className="question-option-label">
+                                {q.multiSelect ? (
+                                  <input
+                                    type="checkbox"
+                                    checked={(answers[idx] ?? '').split(',').includes(opt)}
+                                    onChange={() => toggleQuestionMulti(pq.eventId, idx, opt)}
+                                    disabled={isSubmitting}
+                                  />
+                                ) : (
+                                  <input
+                                    type="radio"
+                                    name={`wq-${pq.eventId}-${idx}`}
+                                    checked={answers[idx] === opt}
+                                    onChange={() => setQuestionAnswer(pq.eventId, idx, opt)}
+                                    disabled={isSubmitting}
+                                  />
+                                )}
+                                <span className="question-option-text">
+                                  <span>{opt}</span>
+                                  {optObj?.description && (
+                                    <span className="question-option-desc">
+                                      {optObj.description}
+                                    </span>
+                                  )}
                                 </span>
-                                <span className="autocomplete-item-path">{m.detail}</span>
-                              </button>
-                            ))}
-                          </div>
-                        )}
-                      </div>
-                    )}
-                  </div>
-                ))}
-              </div>
-
-              {/* Footer */}
-              <div className="question-dialog-footer">
-                <div className="question-dialog-left-actions">
-                  <button className="btn-secondary" onClick={() => setQuestionDialogOpen(false)}>
-                    Answer Later
-                  </button>
-                  <button className="btn-secondary btn-danger-text" onClick={async () => {
-                    await handleDismissQuestion(pq)
-                    if (pendingQuestions.length <= 1) setQuestionDialogOpen(false)
-                  }} disabled={isSubmitting}>Dismiss</button>
+                              </label>
+                            )
+                          })}
+                        </div>
+                      ) : (
+                        <div className="question-input-wrapper">
+                          <input
+                            className="question-input"
+                            type="text"
+                            placeholder="Type your answer... (@ to reference a report)"
+                            value={answers[idx] ?? ''}
+                            onChange={(e) => setQuestionAnswer(pq.eventId, idx, e.target.value)}
+                            onKeyDown={(e) => {
+                              if (
+                                e.key === 'Enter' &&
+                                pq.questions.length === 1 &&
+                                hasAnswers &&
+                                !mentionAutocomplete
+                              )
+                                handleAnswerQuestion(pq)
+                            }}
+                            onBlur={() => setTimeout(() => setMentionAutocomplete(null), 200)}
+                            disabled={isSubmitting}
+                            autoFocus
+                          />
+                          {mentionAutocomplete &&
+                            mentionAutocomplete.eventId === pq.eventId &&
+                            mentionAutocomplete.idx === idx && (
+                              <div className="autocomplete-dropdown autocomplete-inline">
+                                <div className="autocomplete-header">
+                                  @ — reports &amp; sessions
+                                </div>
+                                {mentionAutocomplete.suggestions.map((m, i) => (
+                                  <button
+                                    key={`${m.type}-${m.detail}-${i}`}
+                                    className="autocomplete-item"
+                                    onMouseDown={(e) => {
+                                      e.preventDefault()
+                                      insertMentionInAnswer(pq.eventId, idx, m)
+                                    }}
+                                  >
+                                    <span className="autocomplete-item-title">
+                                      <span
+                                        className={`autocomplete-type-badge autocomplete-type-${m.type}`}
+                                      >
+                                        {m.type}
+                                      </span>
+                                      {m.label}
+                                    </span>
+                                    <span className="autocomplete-item-path">{m.detail}</span>
+                                  </button>
+                                ))}
+                              </div>
+                            )}
+                        </div>
+                      )}
+                    </div>
+                  ))}
                 </div>
-                <button className="btn-primary" onClick={async () => {
-                  await handleAnswerQuestion(pq)
-                  if (pendingQuestions.length <= 1) setQuestionDialogOpen(false)
-                }} disabled={!hasAnswers || isSubmitting}>
-                  {isSubmitting ? 'Submitting...' : 'Submit'}
-                </button>
+
+                {/* Footer */}
+                <div className="question-dialog-footer">
+                  <div className="question-dialog-left-actions">
+                    <button className="btn-secondary" onClick={() => setQuestionDialogOpen(false)}>
+                      Answer Later
+                    </button>
+                    <button
+                      className="btn-secondary btn-danger-text"
+                      onClick={async () => {
+                        await handleDismissQuestion(pq)
+                        if (pendingQuestions.length <= 1) setQuestionDialogOpen(false)
+                      }}
+                      disabled={isSubmitting}
+                    >
+                      Dismiss
+                    </button>
+                  </div>
+                  <button
+                    className="btn-primary"
+                    onClick={async () => {
+                      await handleAnswerQuestion(pq)
+                      if (pendingQuestions.length <= 1) setQuestionDialogOpen(false)
+                    }}
+                    disabled={!hasAnswers || isSubmitting}
+                  >
+                    {isSubmitting ? 'Submitting...' : 'Submit'}
+                  </button>
+                </div>
               </div>
             </div>
-          </div>
-        )
-      })()}
+          )
+        })()}
 
       {showAddForm && (
         <div className="kanban-add-form">
@@ -605,7 +659,9 @@ export default function KanbanBoard({ projectId }: KanbanBoardProps) {
           <div className="kanban-add-row">
             <select value={addPriority} onChange={(e) => setAddPriority(Number(e.target.value))}>
               {priorities.map((p) => (
-                <option key={p.value} value={p.value}>{p.label}</option>
+                <option key={p.value} value={p.value}>
+                  {p.label}
+                </option>
               ))}
             </select>
             <select value={addWorkflow} onChange={(e) => setAddWorkflow(e.target.value)}>

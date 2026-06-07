@@ -1,4 +1,7 @@
 import { test, expect, type APIRequestContext } from '@playwright/test'
+import { mkdtempSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import path from 'node:path'
 
 /**
  * End-to-end smoke test for the mock agent provider.
@@ -125,10 +128,12 @@ test('mock:happy-path streams the scripted event sequence over WS', async ({
 
   const { token, authHeader } = await authenticate(request)
 
-  // Folder must point at a path that exists on the server's filesystem.
+  // Folder path must be unique per test (UNIQUE on folders.path) and
+  // must exist on disk (validated by the backend).
+  const folderPath = mkdtempSync(path.join(tmpdir(), 'peckboard-e2e-mock-'))
   const folderRes = await request.post('/api/folders', {
     headers: authHeader,
-    data: { name: 'e2e-mock', path: '/tmp' },
+    data: { name: 'e2e-mock', path: folderPath },
   })
   expect(folderRes.ok(), `create folder failed: ${await folderRes.text()}`).toBeTruthy()
   const folder = (await folderRes.json()) as { id: string }
