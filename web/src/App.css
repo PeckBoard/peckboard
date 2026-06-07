@@ -2776,6 +2776,18 @@ select.form-input {
   background: var(--surface2);
 }
 
+.question-dialog-left-actions {
+  display: flex;
+  gap: 8px;
+}
+
+.btn-danger-text {
+  color: var(--danger) !important;
+}
+.btn-danger-text:hover {
+  background: var(--danger-bg) !important;
+}
+
 .question-dialog-nav {
   display: flex;
   gap: 6px;

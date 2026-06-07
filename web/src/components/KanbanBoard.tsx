@@ -570,12 +570,17 @@ export default function KanbanBoard({ projectId }: KanbanBoardProps) {
                 ))}
               </div>
 
-              {/* Footer — submit or dismiss only */}
+              {/* Footer */}
               <div className="question-dialog-footer">
-                <button className="btn-secondary" onClick={async () => {
-                  await handleDismissQuestion(pq)
-                  if (pendingQuestions.length <= 1) setQuestionDialogOpen(false)
-                }} disabled={isSubmitting}>Dismiss</button>
+                <div className="question-dialog-left-actions">
+                  <button className="btn-secondary" onClick={() => setQuestionDialogOpen(false)}>
+                    Answer Later
+                  </button>
+                  <button className="btn-secondary btn-danger-text" onClick={async () => {
+                    await handleDismissQuestion(pq)
+                    if (pendingQuestions.length <= 1) setQuestionDialogOpen(false)
+                  }} disabled={isSubmitting}>Dismiss</button>
+                </div>
                 <button className="btn-primary" onClick={async () => {
                   await handleAnswerQuestion(pq)
                   if (pendingQuestions.length <= 1) setQuestionDialogOpen(false)
