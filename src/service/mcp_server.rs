@@ -218,9 +218,48 @@ pub struct McpToolDef {
     pub input_schema: Value,
 }
 
+/// Rate limiter for inter-worker communication per project.
+struct CommRateLimiter {
+    /// (project_id, window_start) -> count
+    counts: std::sync::Mutex<std::collections::HashMap<String, (std::time::Instant, u32)>>,
+    max_per_window: u32,
+    window_secs: u64,
+}
+
+impl CommRateLimiter {
+    fn new(max_per_window: u32, window_secs: u64) -> Self {
+        CommRateLimiter {
+            counts: std::sync::Mutex::new(std::collections::HashMap::new()),
+            max_per_window,
+            window_secs,
+        }
+    }
+
+    /// Check if a call is allowed. Returns Ok(remaining) or Err(seconds_until_reset).
+    fn check(&self, project_id: &str) -> Result<u32, u64> {
+        let mut counts = self.counts.lock().unwrap();
+        let now = std::time::Instant::now();
+        let window = std::time::Duration::from_secs(self.window_secs);
+
+        let entry = counts.entry(project_id.to_string()).or_insert((now, 0));
+        if now.duration_since(entry.0) >= window {
+            // Reset window
+            *entry = (now, 1);
+            Ok(self.max_per_window - 1)
+        } else if entry.1 < self.max_per_window {
+            entry.1 += 1;
+            Ok(self.max_per_window - entry.1)
+        } else {
+            let reset_in = self.window_secs - now.duration_since(entry.0).as_secs();
+            Err(reset_in)
+        }
+    }
+}
+
 /// Registry of MCP tools exposed to workers via stdio MCP server.
 pub struct McpToolRegistry {
     tools: Vec<McpToolDef>,
+    comm_limiter: CommRateLimiter,
 }
 
 impl McpToolRegistry {
@@ -728,7 +767,11 @@ impl McpToolRegistry {
             },
         ];
 
-        McpToolRegistry { tools }
+        McpToolRegistry {
+            tools,
+            // 20 inter-worker messages per project per 60 seconds
+            comm_limiter: CommRateLimiter::new(20, 60),
+        }
     }
 
     /// Return the list of tool definitions (for MCP tools/list).
@@ -1791,6 +1834,15 @@ impl McpToolRegistry {
 
         tracing::info!(session_id = %ctx.session_id, project_id = %project_id, "MCP tool: notify_workers");
 
+        // Rate limit check
+        if let Err(reset_in) = self.comm_limiter.check(project_id) {
+            return Ok(serde_json::json!({
+                "status": "rate_limited",
+                "message": format!("Inter-worker communication rate limit reached. Try again in {reset_in} seconds. Limit: {} messages per {} seconds per project.", self.comm_limiter.max_per_window, self.comm_limiter.window_secs),
+                "retry_after_seconds": reset_in,
+            }));
+        }
+
         let message = args
             .get("message")
             .and_then(|v| v.as_str())
@@ -1966,8 +2018,20 @@ impl McpToolRegistry {
 
         tracing::info!(session_id = %ctx.session_id, "MCP tool: share_finding");
 
-        // Check worker_communication is enabled
         let project_id = self.resolve_project_id(ctx).await;
+
+        // Rate limit check
+        if let Some(ref pid) = project_id {
+            if let Err(reset_in) = self.comm_limiter.check(pid) {
+                return Ok(serde_json::json!({
+                    "status": "rate_limited",
+                    "message": format!("Inter-worker communication rate limit reached. Try again in {reset_in} seconds. Limit: {} messages per {} seconds per project.", self.comm_limiter.max_per_window, self.comm_limiter.window_secs),
+                    "retry_after_seconds": reset_in,
+                }));
+            }
+        }
+
+        // Check worker_communication is enabled
         if let Some(ref pid) = project_id {
             if let Ok(Some(project)) = ctx.db.get_project(pid).await {
                 if !project.worker_communication {
@@ -2088,8 +2152,20 @@ impl McpToolRegistry {
 
         tracing::info!(session_id = %ctx.session_id, target = %target_session_id, "MCP tool: send_worker_message");
 
-        // Check worker_communication is enabled
         let project_id = self.resolve_project_id(ctx).await;
+
+        // Rate limit check
+        if let Some(ref pid) = project_id {
+            if let Err(reset_in) = self.comm_limiter.check(pid) {
+                return Ok(serde_json::json!({
+                    "status": "rate_limited",
+                    "message": format!("Inter-worker communication rate limit reached. Try again in {reset_in} seconds. Limit: {} messages per {} seconds per project.", self.comm_limiter.max_per_window, self.comm_limiter.window_secs),
+                    "retry_after_seconds": reset_in,
+                }));
+            }
+        }
+
+        // Check worker_communication is enabled
         if let Some(ref pid) = project_id {
             if let Ok(Some(project)) = ctx.db.get_project(pid).await {
                 if !project.worker_communication {
