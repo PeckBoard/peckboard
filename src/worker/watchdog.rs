@@ -47,7 +47,9 @@ async fn sweep_orphans(db: &Db, session_manager: &SessionManager) {
                 match db.get_card(card_id).await {
                     Ok(Some(card)) => {
                         // Card exists but doesn't reference this session
+                        // (check both current and last worker session)
                         card.worker_session_id.as_deref() != Some(&session.id)
+                            && card.last_worker_session_id.as_deref() != Some(&session.id)
                     }
                     Ok(None) => {
                         // Card doesn't exist
