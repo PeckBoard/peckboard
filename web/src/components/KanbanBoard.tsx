@@ -121,6 +121,26 @@ export default function KanbanBoard({ projectId }: KanbanBoardProps) {
     return () => removeEventListener(listener)
   }, [addEventListener, removeEventListener, fetchPendingQuestions])
 
+  // Listen for card-update WebSocket events for live kanban updates
+  useEffect(() => {
+    const handler = (e: globalThis.Event) => {
+      const detail = (e as CustomEvent).detail
+      const card = detail?.data?.card as Card | undefined
+      if (!card || card.project_id !== projectId) return
+      // Update the card in place in the store
+      useProjectsStore.setState((s) => {
+        const exists = s.cards.some((c) => c.id === card.id)
+        if (exists) {
+          return { cards: s.cards.map((c) => (c.id === card.id ? card : c)) }
+        } else {
+          return { cards: [...s.cards, card] }
+        }
+      })
+    }
+    window.addEventListener('peckboard:card-update', handler)
+    return () => window.removeEventListener('peckboard:card-update', handler)
+  }, [projectId])
+
   const handleAnswerQuestion = async (pq: PendingQuestion) => {
     const answers = questionAnswers[pq.eventId] ?? {}
     const hasAnswers = pq.questions.some((_, idx) => (answers[idx] ?? '').trim().length > 0)
@@ -204,7 +224,16 @@ export default function KanbanBoard({ projectId }: KanbanBoardProps) {
       .catch(() => {})
   }, [])
 
-  const cardsByStep = (step: string) => cards.filter((c) => c.step === step)
+  // Map step aliases to canonical step names for display
+  const normalizeStep = (step: string) => {
+    switch (step) {
+      case 'todo': return 'backlog'
+      case 'in-progress': return 'in_progress'
+      case 'wont-do': return 'wont_do'
+      default: return step
+    }
+  }
+  const cardsByStep = (step: string) => cards.filter((c) => normalizeStep(c.step) === step)
 
   const handleAddCard = async () => {
     if (!addTitle.trim() || addSubmitting) return

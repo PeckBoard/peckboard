@@ -74,6 +74,9 @@ export const useProjectsStore = create<ProjectsState>((set) => ({
   },
 
   setActiveProject: (id: string | null) => {
+    const current = useProjectsStore.getState().activeProjectId
+    // Don't clear cards if re-selecting the same project
+    if (id === current) return
     set({ activeProjectId: id, cards: [] })
   },
 

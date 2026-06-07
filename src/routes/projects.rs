@@ -515,7 +515,15 @@ async fn update_card(
     })?;
 
     match card {
-        Some(c) => Ok(Json(serde_json::json!(c))),
+        Some(c) => {
+            // Broadcast card update for live kanban
+            state.broadcaster.broadcast(crate::ws::broadcaster::WsEvent {
+                event_type: "card-update".into(),
+                session_id: c.project_id.clone(),
+                data: serde_json::json!({ "card": c }),
+            });
+            Ok(Json(serde_json::json!(c)))
+        }
         None => Err((
             StatusCode::NOT_FOUND,
             Json(serde_json::json!({ "error": "card not found" })),

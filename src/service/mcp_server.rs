@@ -580,6 +580,26 @@ impl McpToolRegistry {
                     "additionalProperties": false
                 }),
             },
+            McpToolDef {
+                name: "notify_workers".into(),
+                description: "Broadcast a message to all other running workers in the same project. Use this to inform other workers about file changes, shared state updates, or coordination needs. Other workers will receive your message before their next action.".into(),
+                input_schema: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "message": {
+                            "type": "string",
+                            "description": "The message to broadcast (e.g. 'Modified src/auth/mod.rs — added JWT validation middleware')"
+                        },
+                        "files_changed": {
+                            "type": "array",
+                            "description": "List of file paths that were modified, created, or deleted",
+                            "items": { "type": "string" }
+                        }
+                    },
+                    "required": ["message"],
+                    "additionalProperties": false
+                }),
+            },
         ];
 
         McpToolRegistry { tools }
@@ -616,6 +636,7 @@ impl McpToolRegistry {
             "delete_card" => self.handle_delete_card(args, ctx).await,
             "move_card_to_done" => self.handle_move_card_to_done(args, ctx).await,
             "move_card_to_wont_do" => self.handle_move_card_to_wont_do(args, ctx).await,
+            "notify_workers" => self.handle_notify_workers(args, ctx).await,
             _ => anyhow::bail!("unknown tool: {tool_name}"),
         }
     }
@@ -1446,6 +1467,128 @@ impl McpToolRegistry {
                 "title": card.title,
                 "step": card.step,
             }
+        }))
+    }
+
+    async fn handle_notify_workers(
+        &self,
+        args: Value,
+        ctx: &ToolCallContext,
+    ) -> anyhow::Result<Value> {
+        let project_id = ctx
+            .project_id
+            .as_deref()
+            .ok_or_else(|| anyhow::anyhow!("notify_workers requires project context"))?;
+
+        let message = args
+            .get("message")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| anyhow::anyhow!("notify_workers requires 'message'"))?;
+
+        let files_changed: Vec<String> = args
+            .get("files_changed")
+            .and_then(|v| v.as_array())
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                    .collect()
+            })
+            .unwrap_or_default();
+
+        // Get the card title for context
+        let sender_card_title = if let Some(ref card_id) = ctx.card_id {
+            ctx.db
+                .get_card(card_id)
+                .await
+                .ok()
+                .flatten()
+                .map(|c| c.title)
+        } else {
+            None
+        };
+
+        // Find all other worker sessions in the same project
+        let worker_sessions = ctx
+            .db
+            .list_worker_sessions_by_project(project_id)
+            .await?;
+
+        let mut notified_count = 0u32;
+
+        for session in &worker_sessions {
+            // Skip the sender's own session
+            if session.id == ctx.session_id {
+                continue;
+            }
+            // Only notify sessions with active cards (not in terminal states)
+            if let Some(ref card_id) = session.card_id {
+                if let Ok(Some(card)) = ctx.db.get_card(card_id).await {
+                    if card.step == "done" || card.step == "wont_do" {
+                        continue;
+                    }
+                }
+            }
+
+            // Build the notification message
+            let mut notification = format!(
+                "[Worker Cross-Communication] From worker on card \"{}\":\n\n{}",
+                sender_card_title.as_deref().unwrap_or("unknown"),
+                message
+            );
+            if !files_changed.is_empty() {
+                notification.push_str("\n\nFiles changed:\n");
+                for f in &files_changed {
+                    notification.push_str(&format!("  - {f}\n"));
+                }
+            }
+
+            // Queue the message for delivery after the worker's current turn
+            let now = chrono::Utc::now().to_rfc3339();
+            let _ = ctx
+                .db
+                .upsert_queued_message(crate::db::models::NewQueuedMessage {
+                    session_id: session.id.clone(),
+                    text: notification.clone(),
+                    queued_at: now,
+                })
+                .await;
+
+            // Also append a system event so the notification appears in the
+            // session's event log immediately (visible in UI)
+            let _ = ctx
+                .db
+                .append_event(
+                    &session.id,
+                    "system",
+                    serde_json::json!({
+                        "text": notification,
+                        "source": "worker-notification",
+                        "fromSessionId": ctx.session_id,
+                        "fromCardTitle": sender_card_title,
+                    }),
+                )
+                .await;
+
+            // Broadcast so the frontend sees it in real-time
+            ctx.broadcaster.broadcast(crate::ws::broadcaster::WsEvent {
+                event_type: "event".into(),
+                session_id: session.id.clone(),
+                data: serde_json::json!({
+                    "kind": "system",
+                    "data": {
+                        "text": notification,
+                        "source": "worker-notification",
+                    },
+                }),
+            });
+
+            notified_count += 1;
+        }
+
+        Ok(serde_json::json!({
+            "status": "ok",
+            "workers_notified": notified_count,
+            "message": format!("Notified {} other worker(s) in this project", notified_count)
         }))
     }
 }

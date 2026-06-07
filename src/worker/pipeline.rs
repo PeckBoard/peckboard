@@ -51,6 +51,11 @@ pub fn build_worker_prompt(
     prompt.push_str("- `create_card` — Create a new card in this project.\n");
     prompt.push_str("- `list_cards` — List all cards in this project.\n");
     prompt.push_str("- `write_report` — Write a report or note for human review.\n");
+    prompt.push_str(
+        "- `notify_workers` — **Cross-communication:** Broadcast a message to all other running \
+         workers in this project. Use this to inform them about file changes so they can avoid \
+         conflicts. Include the `files_changed` array with paths you modified.\n",
+    );
     prompt.push_str("\n");
 
     prompt.push_str("## Instructions\n\n");
@@ -58,7 +63,16 @@ pub fn build_worker_prompt(
         "Work on the current step. When you are done, call `complete_step` with a handoff \
          context describing what you accomplished. If this is the final step, call `finish_card` \
          instead. If you cannot complete the task, call `wont_do_card` with a reason. If you \
-         need information from the user, call `ask_user`.\n",
+         need information from the user, call `ask_user`.\n\n",
+    );
+    prompt.push_str(
+        "**IMPORTANT — Worker cross-communication:** After you modify, create, or delete any \
+         files, you MUST call `notify_workers` with a description of what changed and the list \
+         of file paths in `files_changed`. This prevents other workers from making conflicting \
+         edits to the same files. Do this after each batch of related file changes, not after \
+         every single edit. If you receive a notification from another worker, check whether \
+         their changes affect your work and adapt accordingly (e.g. re-read modified files \
+         before editing them).\n",
     );
 
     prompt

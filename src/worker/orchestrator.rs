@@ -6,6 +6,43 @@ use crate::service::mcp_server;
 use crate::state::AppState;
 use crate::worker::pipeline;
 use crate::worker::scheduler::{self, WorkerIntent};
+use crate::ws::broadcaster::WsEvent;
+
+/// Broadcast a card update via WebSocket so the project page gets live updates.
+fn broadcast_card_update(state: &AppState, card_id: &str, project_id: &str) {
+    let db = state.db.clone();
+    let broadcaster = state.broadcaster.clone();
+    let card_id = card_id.to_string();
+    let project_id = project_id.to_string();
+    tokio::spawn(async move {
+        if let Ok(Some(card)) = db.get_card(&card_id).await {
+            broadcaster.broadcast(WsEvent {
+                event_type: "card-update".into(),
+                session_id: project_id,
+                data: serde_json::json!({
+                    "card": {
+                        "id": card.id,
+                        "project_id": card.project_id,
+                        "title": card.title,
+                        "description": card.description,
+                        "step": card.step,
+                        "priority": card.priority,
+                        "workflow": card.workflow,
+                        "model": card.model,
+                        "effort": card.effort,
+                        "worker_session_id": card.worker_session_id,
+                        "last_worker_session_id": card.last_worker_session_id,
+                        "handoff_context": card.handoff_context,
+                        "blocked": card.blocked,
+                        "block_reason": card.block_reason,
+                        "created_at": card.created_at,
+                        "updated_at": card.updated_at,
+                    }
+                }),
+            });
+        }
+    });
+}
 
 /// Scan all active projects, find cards that need workers, and spawn them.
 ///
@@ -217,7 +254,12 @@ async fn spawn_worker_for_card(
         .send_message(&session_id, &prompt, &state.db, &state.broadcaster, config)
         .await?;
 
-    // 7. Update card.worker_session_id
+    // 7. Update card: assign worker and move to in_progress if in backlog
+    let new_step = if card.step == "backlog" || card.step == "todo" {
+        Some("in_progress".to_string())
+    } else {
+        None
+    };
     state
         .db
         .update_card(
@@ -225,6 +267,7 @@ async fn spawn_worker_for_card(
             UpdateCard {
                 worker_session_id: Some(Some(session_id.clone())),
                 last_worker_session_id: Some(Some(session_id.clone())),
+                step: new_step.clone(),
                 updated_at: Some(now),
                 ..Default::default()
             },
@@ -236,6 +279,9 @@ async fn spawn_worker_for_card(
         card_id = %card.id,
         "Worker spawned and card assigned"
     );
+
+    // Broadcast card update to project page
+    broadcast_card_update(state, &card.id, &project.id);
 
     Ok(())
 }
@@ -429,6 +475,9 @@ pub async fn handle_worker_done(state: &Arc<AppState>, session_id: &str) {
             );
         }
     }
+
+    // Broadcast card update to project page
+    broadcast_card_update(state, &card_id, &project_id);
 
     // Clean up MCP config and revoke tokens
     mcp_server::delete_mcp_config(&state.config.data_dir, session_id);

@@ -125,6 +125,11 @@ export const useWsStore = create<WsState>((set, get) => ({
         return
       }
 
+      if (msg.type === 'card-update') {
+        window.dispatchEvent(new CustomEvent('peckboard:card-update', { detail: msg }))
+        return
+      }
+
       if (msg.type === 'event') {
         // Server sends { type: "event", session_id: "...", event: { id, seq, ts, kind, data } }
         const sessionId = msg.session_id as string
