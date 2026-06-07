@@ -2,6 +2,7 @@ import { useCallback, useRef, useState, useEffect } from 'react'
 import type { KeyboardEvent, ChangeEvent } from 'react'
 import { authedFetch } from '../store/auth'
 import { useSessionsStore } from '../store/sessions'
+import { useMentions, filterMentions, type MentionItem } from '../hooks/useMentions'
 
 interface InputBarProps {
   sessionId: string
@@ -18,7 +19,6 @@ function fileToBase64(file: File): Promise<string> {
     const reader = new FileReader()
     reader.onload = () => {
       const result = reader.result as string
-      // Strip the data URL prefix (e.g. "data:image/png;base64,")
       const base64 = result.split(',')[1] ?? result
       resolve(base64)
     }
@@ -27,63 +27,19 @@ function fileToBase64(file: File): Promise<string> {
   })
 }
 
-interface AutocompleteSuggestion {
-  type: 'report' | 'session'
-  label: string
-  detail: string
-  ref: string
-}
-
 export default function InputBar({ sessionId }: InputBarProps) {
   const getDraft = useSessionsStore((s) => s.getDraft)
   const setDraft = useSessionsStore((s) => s.setDraft)
+  const allMentions = useMentions(sessionId)
 
   const [text, setText] = useState(() => getDraft(sessionId))
   const [sending, setSending] = useState(false)
   const [attachments, setAttachments] = useState<PendingAttachment[]>([])
   const [uploading, setUploading] = useState(false)
-  const [suggestions, setSuggestions] = useState<AutocompleteSuggestion[]>([])
+  const [suggestions, setSuggestions] = useState<MentionItem[]>([])
   const [showAutocomplete, setShowAutocomplete] = useState(false)
-  const [allSuggestions, setAllSuggestions] = useState<AutocompleteSuggestion[]>([])
   const textareaRef = useRef<HTMLTextAreaElement>(null)
   const fileInputRef = useRef<HTMLInputElement>(null)
-
-  // Fetch reports and sessions for autocomplete
-  useEffect(() => {
-    const items: AutocompleteSuggestion[] = []
-
-    authedFetch('/api/reports')
-      .then((res) => (res.ok ? res.json() : null))
-      .then((data) => {
-        const list = Array.isArray(data) ? data : (data?.reports ?? [])
-        for (const r of list) {
-          items.push({
-            type: 'report',
-            label: r.title || r.file,
-            detail: `${r.folder}/${r.file}`,
-            ref: `[report:${r.folder}/${r.file}]`,
-          })
-        }
-      })
-      .catch(() => {})
-
-    authedFetch('/api/sessions')
-      .then((res) => (res.ok ? res.json() : null))
-      .then((data) => {
-        const list = Array.isArray(data) ? data : (data?.sessions ?? data ?? [])
-        for (const s of list) {
-          if (s.id === sessionId) continue
-          items.push({
-            type: 'session',
-            label: s.name || 'Untitled',
-            detail: s.id,
-            ref: `[session:${s.id}]`,
-          })
-        }
-        setAllSuggestions(items)
-      })
-      .catch(() => setAllSuggestions(items))
-  }, [sessionId])
 
   // Re-initialize draft when sessionId changes
   useEffect(() => {
@@ -114,18 +70,15 @@ export default function InputBar({ sessionId }: InputBarProps) {
     const before = val.slice(0, cursor)
     const atMatch = before.match(/@(\S*)$/)
     if (atMatch) {
-      const filter = atMatch[1].toLowerCase()
-      const filtered = allSuggestions.filter((s) =>
-        s.label.toLowerCase().includes(filter) || s.detail.toLowerCase().includes(filter)
-      )
-      setSuggestions(filtered.slice(0, 10))
+      const filtered = filterMentions(allMentions, atMatch[1])
+      setSuggestions(filtered)
       setShowAutocomplete(filtered.length > 0)
     } else {
       setShowAutocomplete(false)
     }
   }
 
-  const insertSuggestion = (item: AutocompleteSuggestion) => {
+  const insertSuggestion = (item: MentionItem) => {
     const cursor = textareaRef.current?.selectionStart ?? text.length
     const before = text.slice(0, cursor)
     const after = text.slice(cursor)
