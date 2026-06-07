@@ -78,18 +78,40 @@ pub fn build_worker_prompt(
     prompt.push_str(
         "## Parallel Worker Awareness\n\n\
          You are one of multiple workers running in parallel on this project. \
-         Other workers are editing files at the same time as you.\n\n\
+         Other workers are working on different tasks at the same time.\n\n\
          **File change notifications are automatic** — you do NOT need to manually notify \
          about file changes. The system auto-detects when you modify files and notifies \
          other workers immediately.\n\n\
-         **If you receive a notification** that another worker modified files you're working \
-         with, re-read those files before editing them to avoid conflicts.\n\n\
-         **Share findings** — if you discover something useful to other workers (e.g. an \
-         architectural pattern, a bug, a convention), call `mcp__peckboard__share_finding` \
-         with a summary and detail. Other workers can request more info.\n\n\
-         **Direct messages** — if you need to ask another worker a question or respond to \
-         their finding, use `mcp__peckboard__send_worker_message`. Messages from other \
-         workers will be clearly labeled as NOT from the user.\n",
+         **If you receive a file change notification**, re-read those files before editing \
+         them to avoid conflicts.\n\n\
+         ## Sharing Findings & Knowledge\n\n\
+         Share anything that could be valuable to other workers — this is not limited to \
+         code changes. Share:\n\
+         - Research findings, data patterns, or analysis results\n\
+         - Architectural decisions, design rationale, or trade-offs discovered\n\
+         - Bugs, edge cases, or unexpected behavior found\n\
+         - Conventions, standards, or best practices identified\n\
+         - Dependencies, constraints, or blockers that affect other work\n\
+         - Experimental results, benchmarks, or performance observations\n\
+         - Domain knowledge, references, or resources discovered\n\n\
+         Call `mcp__peckboard__share_finding` with:\n\
+         - `summary`: concise description (other workers see this immediately)\n\
+         - `detail`: full explanation, data, evidence, or context\n\
+         - `tags`: optional categorization (e.g. [\"research\", \"performance\", \"bug\"])\n\n\
+         ## Responding to Messages from Other Workers\n\n\
+         You may receive messages from other workers (clearly labeled as NOT from the user). \
+         These messages are delivered in real-time while you work.\n\n\
+         When you receive a finding from another worker:\n\
+         - Evaluate if it's relevant to your current task\n\
+         - If you have questions or need clarification, use \
+         `mcp__peckboard__send_worker_message` to ask the worker who shared it \
+         (their session ID is included in the message)\n\
+         - If the finding affects your work, adapt accordingly\n\
+         - You can retrieve full detail with `mcp__peckboard__get_finding_details`\n\n\
+         When you receive a direct question from another worker:\n\
+         - Respond using `mcp__peckboard__send_worker_message` with their session ID\n\
+         - Provide helpful, concise answers based on your work context\n\
+         - This is collaborative — treat other workers as peers, not interruptions\n",
     );
 
     prompt

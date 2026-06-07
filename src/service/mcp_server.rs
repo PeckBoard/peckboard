@@ -621,7 +621,7 @@ impl McpToolRegistry {
             },
             McpToolDef {
                 name: "share_finding".into(),
-                description: "Share a finding with all other running workers in the project. Broadcasts a summary; other workers can retrieve the full detail via get_finding_details.".into(),
+                description: "Share a finding, discovery, or insight with all other running workers. This can be anything valuable: research results, data patterns, bugs, architectural decisions, experimental observations, domain knowledge, constraints, or any information that may help other workers. Broadcasts a summary; workers can retrieve full detail and ask follow-up questions.".into(),
                 input_schema: serde_json::json!({
                     "type": "object",
                     "properties": {
@@ -1840,11 +1840,18 @@ impl McpToolRegistry {
         // Broadcast summary to other workers
         if let Some(ref pid) = project_id {
             if let Ok(workers) = ctx.db.list_worker_sessions_by_project(pid).await {
+                let tags_str = if tags.is_empty() { String::new() } else { format!(" [{}]", tags.join(", ")) };
                 let msg = format!(
-                    "[Finding from worker on \"{}\"] {}\n\nFinding ID: {} — call get_finding_details to see full detail.",
+                    "[Shared finding from worker on \"{}\"]{}\n\n{}\n\n\
+                     — Finding ID: {} (call mcp__peckboard__get_finding_details to see full detail)\n\
+                     — From session: {} (use mcp__peckboard__send_worker_message to ask follow-up questions)\n\n\
+                     If this finding is relevant to your work, review the detail. \
+                     If you have questions, send a message to the worker above.",
                     card_title.as_deref().unwrap_or("unknown"),
+                    tags_str,
                     summary,
-                    event.id
+                    event.id,
+                    ctx.session_id
                 );
                 for ws in &workers {
                     if ws.id == ctx.session_id { continue; }
@@ -1929,9 +1936,13 @@ impl McpToolRegistry {
         }
 
         let msg = format!(
-            "[Worker message from \"{}\"] (NOT from the user — this is from another worker)\n\n{}",
+            "[Worker message from \"{}\"] (NOT from the user — this is from another worker)\n\
+             From session: {}\n\n{}\n\n\
+             To reply, call mcp__peckboard__send_worker_message with target_session_id: \"{}\"",
             card_title.as_deref().unwrap_or("unknown worker"),
-            message
+            ctx.session_id,
+            message,
+            ctx.session_id
         );
 
         // Deliver immediately to running worker + persist
