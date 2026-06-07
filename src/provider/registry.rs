@@ -1,6 +1,9 @@
 use std::collections::HashMap;
+use std::sync::Arc;
+
 use tokio::sync::Mutex;
 
+use super::agent::AgentProvider;
 use super::stream::ModelInfo;
 
 /// Registered provider metadata.
@@ -11,9 +14,17 @@ pub struct ProviderInfo {
     pub models: Vec<ModelInfo>,
 }
 
+struct RegisteredProvider {
+    info: ProviderInfo,
+    provider: Arc<dyn AgentProvider>,
+}
+
 /// Registry of all available AI providers and their models.
+///
+/// Holds both the metadata (for `/api/models`) and the trait object that
+/// the dispatcher uses to actually drive a run.
 pub struct ProviderRegistry {
-    providers: Mutex<HashMap<String, ProviderInfo>>,
+    providers: Mutex<HashMap<String, RegisteredProvider>>,
 }
 
 impl ProviderRegistry {
@@ -23,8 +34,9 @@ impl ProviderRegistry {
         }
     }
 
-    /// Register a provider. Overwrites if the same ID already exists.
-    pub async fn register(&self, info: ProviderInfo) {
+    /// Register a provider implementation along with its metadata.
+    /// Overwrites if the same ID already exists.
+    pub async fn register(&self, provider: Arc<dyn AgentProvider>, info: ProviderInfo) {
         let mut providers = self.providers.lock().await;
         tracing::info!(
             "Registered provider '{}' ({}) with {} models",
@@ -32,32 +44,38 @@ impl ProviderRegistry {
             info.display_name,
             info.models.len()
         );
-        providers.insert(info.id.clone(), info);
+        providers.insert(
+            info.id.clone(),
+            RegisteredProvider { info, provider },
+        );
     }
 
-    /// Get a provider by ID.
-    pub async fn get_provider(&self, id: &str) -> Option<ProviderInfo> {
+    /// Get provider metadata by ID.
+    pub async fn get_info(&self, id: &str) -> Option<ProviderInfo> {
         let providers = self.providers.lock().await;
-        providers.get(id).cloned()
+        providers.get(id).map(|r| r.info.clone())
     }
 
-    /// List all registered providers.
+    /// Get the provider implementation by ID.
+    pub async fn get_provider(&self, id: &str) -> Option<Arc<dyn AgentProvider>> {
+        let providers = self.providers.lock().await;
+        providers.get(id).map(|r| r.provider.clone())
+    }
+
+    /// List all registered providers' metadata.
     pub async fn list_providers(&self) -> Vec<ProviderInfo> {
         let providers = self.providers.lock().await;
-        providers.values().cloned().collect()
+        providers.values().map(|r| r.info.clone()).collect()
     }
 
     /// List all models across all providers, with provider:model format IDs.
     pub async fn list_all_models(&self) -> Vec<(String, ModelInfo)> {
         let providers = self.providers.lock().await;
         let mut models = Vec::new();
-        for provider in providers.values() {
-            for model in &provider.models {
-                let full_id = format!("{}:{}", provider.id, model.id);
-                models.push((
-                    full_id,
-                    model.clone(),
-                ));
+        for registered in providers.values() {
+            for model in &registered.info.models {
+                let full_id = format!("{}:{}", registered.info.id, model.id);
+                models.push((full_id, model.clone()));
             }
         }
         models
@@ -76,38 +94,42 @@ impl ProviderRegistry {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::provider::mock::MockProvider;
 
     #[tokio::test]
     async fn test_register_and_list() {
         let registry = ProviderRegistry::new();
 
         registry
-            .register(ProviderInfo {
-                id: "claude".into(),
-                display_name: "Claude".into(),
-                models: vec![
-                    ModelInfo {
-                        id: "opus".into(),
-                        display_name: "Claude Opus".into(),
-                        capabilities: vec!["code".into(), "reasoning".into()],
-                    },
-                    ModelInfo {
-                        id: "sonnet".into(),
-                        display_name: "Claude Sonnet".into(),
-                        capabilities: vec!["code".into()],
-                    },
-                ],
-            })
+            .register(
+                Arc::new(MockProvider::new()),
+                ProviderInfo {
+                    id: "claude".into(),
+                    display_name: "Claude".into(),
+                    models: vec![
+                        ModelInfo {
+                            id: "opus".into(),
+                            display_name: "Claude Opus".into(),
+                            capabilities: vec!["code".into(), "reasoning".into()],
+                        },
+                        ModelInfo {
+                            id: "sonnet".into(),
+                            display_name: "Claude Sonnet".into(),
+                            capabilities: vec!["code".into()],
+                        },
+                    ],
+                },
+            )
             .await;
 
         let providers = registry.list_providers().await;
         assert_eq!(providers.len(), 1);
         assert_eq!(providers[0].models.len(), 2);
 
-        let claude = registry.get_provider("claude").await;
+        let claude = registry.get_info("claude").await;
         assert!(claude.is_some());
 
-        let missing = registry.get_provider("openai").await;
+        let missing = registry.get_info("openai").await;
         assert!(missing.is_none());
     }
 
@@ -116,15 +138,18 @@ mod tests {
         let registry = ProviderRegistry::new();
 
         registry
-            .register(ProviderInfo {
-                id: "claude".into(),
-                display_name: "Claude".into(),
-                models: vec![ModelInfo {
-                    id: "opus".into(),
-                    display_name: "Opus".into(),
-                    capabilities: vec![],
-                }],
-            })
+            .register(
+                Arc::new(MockProvider::new()),
+                ProviderInfo {
+                    id: "claude".into(),
+                    display_name: "Claude".into(),
+                    models: vec![ModelInfo {
+                        id: "opus".into(),
+                        display_name: "Opus".into(),
+                        capabilities: vec![],
+                    }],
+                },
+            )
             .await;
 
         let models = registry.list_all_models().await;

@@ -1,24 +1,12 @@
-pub mod manager;
 pub mod process;
+pub mod provider;
 
-use crate::provider::registry::{ProviderInfo, ProviderRegistry};
+pub use provider::register_claude_provider;
+
 use crate::provider::stream::{ModelInfo, SpawnConfig};
 
-/// Register the built-in Claude CLI provider in the registry.
-pub async fn register_claude_provider(registry: &ProviderRegistry) {
-    let models = discover_models();
-
-    registry
-        .register(ProviderInfo {
-            id: "claude".into(),
-            display_name: "Claude (CLI)".into(),
-            models,
-        })
-        .await;
-}
-
 /// Discover available Claude models.
-fn discover_models() -> Vec<ModelInfo> {
+pub(crate) fn discover_models() -> Vec<ModelInfo> {
     let mut models = vec![
         ModelInfo {
             id: "claude-opus-4-8".into(),

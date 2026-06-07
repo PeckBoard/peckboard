@@ -5,6 +5,7 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::{Child, Command};
 
 use crate::db::Db;
+use crate::provider::agent::emit_event;
 use crate::provider::stream::ProviderEvent;
 use crate::ws::broadcaster::{Broadcaster, WsEvent};
 
@@ -558,86 +559,6 @@ fn parse_stream_json(
     }
 
     events
-}
-
-/// Persist a `ProviderEvent` to the database and broadcast it via WebSocket.
-async fn emit_event(
-    db: &Db,
-    broadcaster: &Broadcaster,
-    session_id: &str,
-    event: ProviderEvent,
-) {
-    let kind = event.event_kind().to_string();
-    let data = event.event_data();
-
-    match db.append_event(session_id, &kind, data.clone()).await {
-        Ok(db_event) => {
-            // Update last_activity
-            let now = chrono::Utc::now().to_rfc3339();
-            let _ = db
-                .update_session(
-                    session_id,
-                    crate::db::models::UpdateSession {
-                        last_activity: Some(now),
-                        ..Default::default()
-                    },
-                )
-                .await;
-
-            // If this is a Completed event with a conversation_id, persist it on the session
-            if let ProviderEvent::Completed {
-                conversation_id: Some(ref cid),
-            } = event
-            {
-                let _ = db
-                    .update_session(
-                        session_id,
-                        crate::db::models::UpdateSession {
-                            conversation_id: Some(Some(cid.clone())),
-                            ..Default::default()
-                        },
-                    )
-                    .await;
-            }
-
-            // If this is a Started event with a conversation_id, persist it too
-            if let ProviderEvent::Started {
-                conversation_id: Some(ref cid),
-                ..
-            } = event
-            {
-                let _ = db
-                    .update_session(
-                        session_id,
-                        crate::db::models::UpdateSession {
-                            conversation_id: Some(Some(cid.clone())),
-                            ..Default::default()
-                        },
-                    )
-                    .await;
-            }
-
-            broadcaster.broadcast(WsEvent {
-                event_type: "event".into(),
-                session_id: session_id.to_string(),
-                data: serde_json::json!({
-                    "id": db_event.id,
-                    "seq": db_event.seq,
-                    "ts": db_event.ts,
-                    "kind": db_event.kind,
-                    "data": serde_json::from_str::<serde_json::Value>(&db_event.data).unwrap_or_default(),
-                }),
-            });
-        }
-        Err(e) => {
-            tracing::error!(
-                session_id = session_id,
-                kind = %kind,
-                "Failed to persist event: {}",
-                e
-            );
-        }
-    }
 }
 
 /// Kill the Claude CLI process. Sends SIGTERM first, waits up to 5 seconds,
