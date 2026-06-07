@@ -4,7 +4,7 @@ A remote control panel for [Claude Code](https://claude.com/claude-code). Peckbo
 
 Ships as a **single executable binary** — frontend assets, database migrations, and TLS certs are all embedded or generated at runtime. Drop the binary on a host, run it, point a browser at it.
 
-## What's in the box
+## What's in the Box
 
 - **Pluggable agent providers** — sessions are driven by any registered `AgentProvider`; built-ins are the real Claude CLI (`claude:*` model ids) and a scripted `mock:*` provider for tests and offline dev
 - **Sessions** — spawn agent subprocesses with streaming JSON output; resume, interrupt, replay
@@ -59,6 +59,7 @@ The resulting binary is `target/release/peckboard`.
 ```
 
 On first launch Peckboard will:
+
 1. Create the data directory (default `~/.peckboard/`)
 2. Run embedded Diesel migrations against `peckboard.db`
 3. Generate a self-signed TLS cert under `certs/`
@@ -66,11 +67,12 @@ On first launch Peckboard will:
 5. Show the registration page on the web UI — the first user becomes admin
 
 Browse to:
+
 - `http://localhost:3333` — HTTP
 - `https://localhost:3345` — HTTPS (accept the self-signed cert)
 - `https://<name>.local:3345` — from any device on the LAN
 
-### Common flags
+### Common Flags
 
 ```bash
 peckboard --port 8080 --https-port 8443
@@ -113,7 +115,7 @@ cd web && npm run dev
 
 You only need `cargo build --release` for shipping the single embedded binary or for running the Playwright e2e suite (which boots the release binary). Edit React under `web/src/`, edit Rust under `src/`.
 
-### Project layout
+### Project Layout
 
 ```
 src/
@@ -144,7 +146,7 @@ docs/frontend/      frontend design notes
 docs/tasks/         active task scratchpads
 ```
 
-## Data directory
+## Data Directory
 
 Everything Peckboard writes lives under `--data-dir` (default `~/.peckboard/`):
 
@@ -159,7 +161,7 @@ Everything Peckboard writes lives under `--data-dir` (default `~/.peckboard/`):
   plugins/            drop .wasm plugin files here
 ```
 
-## Tests, lint, format
+## Tests, Lint, Format
 
 Backend:
 

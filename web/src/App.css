@@ -896,19 +896,13 @@
    Tool Use Block
    ═══════════════════════════════════════════════════ */
 
+/* Tool rows are intentionally borderless / bg-less — vertical space is
+   tight in the chat scroll. Spacing between consecutive rows comes from
+   the parent flex `gap` on `.chat-messages`, not from padding here. */
 .tool-block {
-  border: 1px solid var(--border);
-  border-radius: var(--radius-md);
-  overflow: hidden;
   font-size: var(--text-sm);
-  max-width: 72%;
-  background: var(--surface);
-}
-.tool-block.tool-error {
-  border-color: var(--danger-border);
-}
-.tool-block.tool-running {
-  border-color: var(--accent-muted);
+  max-width: 100%;
+  background: transparent;
 }
 
 .tool-header {
@@ -916,34 +910,29 @@
   align-items: center;
   gap: 8px;
   width: 100%;
-  padding: 7px 12px;
+  padding: 2px 0;
   border: none;
   background: transparent;
   cursor: pointer;
   font-size: var(--text-xs);
   color: var(--text2);
   text-align: left;
-  transition: background var(--transition);
+  transition: color var(--transition);
 }
 .tool-header:hover {
-  background: var(--surface2);
+  color: var(--text);
 }
 .tool-error .tool-header {
-  background: var(--danger-bg);
+  color: var(--danger);
 }
 .tool-running .tool-header {
-  background: var(--accent-subtle);
+  color: var(--accent);
 }
 
-.tool-icon {
-  font-size: 13px;
-  flex-shrink: 0;
-  line-height: 1;
-}
 .tool-label {
   font-weight: 600;
   font-size: var(--text-xs);
-  color: var(--text2);
+  color: inherit;
   white-space: nowrap;
 }
 .tool-summary {
@@ -957,14 +946,19 @@
 }
 
 .tool-chevron {
-  margin-left: auto;
   font-size: 9px;
   color: var(--text3);
   transition: transform var(--transition);
   flex-shrink: 0;
+  width: 10px;
+  text-align: center;
 }
 .tool-chevron.open {
   transform: rotate(90deg);
+}
+/* Leaf rows (no details) keep the chevron slot reserved so labels align. */
+.tool-chevron-leaf {
+  visibility: hidden;
 }
 
 .tool-spinner {
@@ -1007,8 +1001,8 @@
 }
 
 .tool-body {
-  padding: 10px 12px;
-  border-top: 1px solid var(--border);
+  /* Indent under the chevron + gap so the body lines up with the label. */
+  padding: 6px 0 6px 18px;
 }
 .tool-section {
   margin-bottom: 10px;
@@ -3002,9 +2996,17 @@ select.form-input {
   color: var(--text);
   transition: background var(--transition);
 }
-.card-report-link:hover { background: var(--surface-hover); }
-.card-report-title { font-size: var(--text-sm); font-weight: 500; }
-.card-report-date { font-size: var(--text-xs); color: var(--text3); }
+.card-report-link:hover {
+  background: var(--surface-hover);
+}
+.card-report-title {
+  font-size: var(--text-sm);
+  font-weight: 500;
+}
+.card-report-date {
+  font-size: var(--text-xs);
+  color: var(--text3);
+}
 
 .card-detail-actions {
   display: flex;
@@ -3096,19 +3098,21 @@ select.form-input {
    ═══════════════════════════════════════════════════ */
 
 @media (max-width: 768px) {
-  /* Shell: stack vertically, rail becomes bottom bar */
+  /* Shell: stack vertically, rail on top, tabbar on bottom */
   .shell {
-    flex-direction: column-reverse;
+    flex-direction: column;
   }
 
-  /* Rail → bottom tab bar */
+  /* Rail → top toolbar. `min-height` (not `height`) so the bar grows
+     by the iPhone notch / status-bar safe area instead of being pushed
+     under it (`viewport-fit=cover` is set in index.html). */
   .rail {
     width: 100%;
-    height: 56px;
+    min-height: 56px;
     flex-direction: row;
     border-right: none;
-    border-top: 1px solid var(--border);
-    padding: 0 8px;
+    border-bottom: 1px solid var(--border);
+    padding: env(safe-area-inset-top, 0px) 8px 0;
     overflow-x: auto;
     flex-shrink: 0;
   }
@@ -3133,6 +3137,8 @@ select.form-input {
     width: 42px;
     height: 42px;
   }
+  /* Active underline stays on the bottom edge of rail buttons — that's
+     the edge that points at the page content below. */
   .rail-btn.active::before {
     left: 50%;
     top: auto;
@@ -3142,9 +3148,20 @@ select.form-input {
     height: 3px;
     border-radius: 2px 2px 0 0;
   }
+
+  /* Tab strip moves to the bottom on mobile, below the content.
+     Uses flex `order` so we don't have to reorder the JSX (the
+     other children of `.content` keep their default order). */
+  .tabbar {
+    order: 99;
+    border-bottom: none;
+    border-top: 1px solid var(--border);
+    padding-bottom: env(safe-area-inset-bottom, 0px);
+  }
   .rail-separator {
     width: 1px;
     height: 24px;
+    background: var(--border);
     margin: 0 4px;
   }
   .rail-avatar {
@@ -3199,10 +3216,6 @@ select.form-input {
   }
 
   /* Tool blocks full width */
-  .tool-block {
-    max-width: 100%;
-  }
-
   /* Kanban columns scroll horizontally */
   .kanban-columns {
     overflow-x: auto;
@@ -3267,8 +3280,8 @@ select.form-input {
 /* Small phones */
 @media (max-width: 480px) {
   .rail {
-    height: 48px;
-    padding: 0 4px;
+    min-height: 48px;
+    padding: env(safe-area-inset-top, 0px) 4px 0;
   }
   .rail-btn {
     width: 36px;
@@ -3316,11 +3329,6 @@ select.form-input {
      vertical scroll gesture on the page. */
   overscroll-behavior-x: contain;
 }
-.tabbar-divider {
-  width: 1px;
-  background: var(--border);
-  margin: 6px 6px;
-}
 .tab-wrap {
   position: relative;
   flex-shrink: 0;
@@ -3349,9 +3357,6 @@ select.form-input {
 .tab-active {
   color: var(--text);
   border-bottom-color: var(--accent);
-  font-weight: 500;
-}
-.tab-fixed {
   font-weight: 500;
 }
 .tab-opened {

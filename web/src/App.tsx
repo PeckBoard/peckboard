@@ -20,7 +20,7 @@ import ReportBrowser from './components/ReportBrowser'
 import GitView from './components/GitView'
 import UserManagement from './components/UserManagement'
 import TabBar from './components/TabBar'
-import { startTabsAutoSync, useTabsStore, type TabType } from './store/tabs'
+import { startTabsAutoSync, useTabsStore } from './store/tabs'
 import './App.css'
 
 type View = 'sessions' | 'projects' | 'folders' | 'settings' | 'reports' | 'git' | 'users'
@@ -177,6 +177,63 @@ function App() {
     }
   }, [])
 
+  // Track the on-screen keyboard via `visualViewport` and shrink the app
+  // to the visible region so the top of the UI doesn't scroll off when
+  // an input is focused. Plain `100dvh` doesn't reliably react to the
+  // keyboard on iOS Safari.
+  //
+  // iPad gotcha: in Stage Manager / Split View, the *system* keyboard
+  // belongs to another app while our `visualViewport.height` still
+  // reports the shrunk size. We must only apply the shrink when *we*
+  // own the keyboard — gated on `document.hasFocus()` AND an editable
+  // element being focused inside our document. Otherwise leave height
+  // at `window.innerHeight`.
+  useEffect(() => {
+    const root = document.documentElement
+    const vv = window.visualViewport
+
+    const isEditableFocused = (): boolean => {
+      const el = document.activeElement as HTMLElement | null
+      if (!el || el === document.body) return false
+      const tag = el.tagName
+      if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') return true
+      return el.isContentEditable
+    }
+
+    const update = () => {
+      let height = `${window.innerHeight}px`
+      if (vv && document.hasFocus() && isEditableFocused()) {
+        const delta = window.innerHeight - vv.height
+        // Threshold filters out non-keyboard chrome shifts (e.g. iOS
+        // URL bar) which we want `100dvh` semantics for, not a hard
+        // pixel pin.
+        if (delta > 80) height = `${vv.height}px`
+      }
+      root.style.setProperty('--app-height', height)
+    }
+
+    update()
+    vv?.addEventListener('resize', update)
+    vv?.addEventListener('scroll', update)
+    window.addEventListener('resize', update)
+    window.addEventListener('focus', update)
+    window.addEventListener('blur', update)
+    document.addEventListener('focusin', update)
+    document.addEventListener('focusout', update)
+    document.addEventListener('visibilitychange', update)
+
+    return () => {
+      vv?.removeEventListener('resize', update)
+      vv?.removeEventListener('scroll', update)
+      window.removeEventListener('resize', update)
+      window.removeEventListener('focus', update)
+      window.removeEventListener('blur', update)
+      document.removeEventListener('focusin', update)
+      document.removeEventListener('focusout', update)
+      document.removeEventListener('visibilitychange', update)
+    }
+  }, [])
+
   useEffect(() => {
     checkAuth()
   }, [checkAuth])
@@ -259,11 +316,56 @@ function App() {
 
   return (
     <div className="shell">
-      {/* Navigation Rail — only the "other" views; Sessions / Projects
-          are driven by the TabBar at the top of the content area. */}
+      {/* Navigation Rail. Sessions / Projects live here so the top tab
+          strip can use all of its horizontal space for opened tabs —
+          critical on mobile, where the rail becomes a bottom toolbar. */}
       <nav className="rail">
         <div className="rail-top">
           <div className="rail-brand">P</div>
+          <button
+            className={`rail-btn ${view === 'sessions' && !activeSessionId ? 'active' : ''}`}
+            onClick={() => {
+              setActiveSession(null)
+              navigate('sessions', null)
+            }}
+            title="Sessions"
+          >
+            <svg
+              width="18"
+              height="18"
+              viewBox="0 0 24 24"
+              fill="none"
+              stroke="currentColor"
+              strokeWidth="2"
+              strokeLinecap="round"
+              strokeLinejoin="round"
+            >
+              <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z" />
+            </svg>
+          </button>
+          <button
+            className={`rail-btn ${view === 'projects' && !activeProjectId ? 'active' : ''}`}
+            onClick={() => {
+              setActiveProject(null)
+              navigate('projects', null)
+            }}
+            title="Projects"
+          >
+            <svg
+              width="18"
+              height="18"
+              viewBox="0 0 24 24"
+              fill="none"
+              stroke="currentColor"
+              strokeWidth="2"
+              strokeLinecap="round"
+              strokeLinejoin="round"
+            >
+              <rect x="3" y="3" width="7" height="18" rx="1" />
+              <rect x="14" y="3" width="7" height="11" rx="1" />
+            </svg>
+          </button>
+          <div className="rail-separator" aria-hidden="true" />
           <button
             className={`rail-btn ${view === 'folders' ? 'active' : ''}`}
             onClick={() => navigate('folders')}
@@ -389,15 +491,6 @@ function App() {
           view={view}
           activeSessionId={activeSessionId}
           activeProjectId={activeProjectId}
-          onOpenList={(type: TabType) => {
-            if (type === 'session') {
-              setActiveSession(null)
-              navigate('sessions', null)
-            } else {
-              setActiveProject(null)
-              navigate('projects', null)
-            }
-          }}
           onOpenItem={(type, id) => {
             if (type === 'session') {
               setActiveSession(id)

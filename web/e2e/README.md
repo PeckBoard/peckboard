@@ -1,4 +1,4 @@
-# Peckboard e2e tests
+# Peckboard e2e Tests
 
 Playwright scaffolding. No specs exist yet — this directory only holds the
 infrastructure that future tests will share.
@@ -16,7 +16,7 @@ npm run e2e                 # runs anything in web/e2e/tests/
 suite runs. The Playwright `webServer` block then launches the binary with
 a fresh `mktemp -d` data dir so prior runs cannot bleed into the next.
 
-## Using the mock provider
+## Using the Mock Provider
 
 The binary registers the `mock` agent provider alongside `claude`, which
 means tests can drive deterministic agent runs without needing the real
