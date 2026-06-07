@@ -798,13 +798,25 @@ impl McpToolRegistry {
         let mut card_description = None;
         let mut project_name = None;
         let mut project_id_val = None;
-        if let Some(ref card_id) = ctx.card_id {
+        // Get card_id from context or fall back to session lookup
+        let resolved_card_id = if ctx.card_id.is_some() {
+            ctx.card_id.clone()
+        } else {
+            ctx.db.get_session(&ctx.session_id).await.ok().flatten().and_then(|s| s.card_id)
+        };
+        if let Some(ref card_id) = resolved_card_id {
             if let Ok(Some(card)) = ctx.db.get_card(card_id).await {
                 card_title = Some(card.title);
                 card_description = Some(card.description);
             }
         }
-        if let Some(ref pid) = ctx.project_id {
+        // Get project_id from context or fall back to session lookup
+        let resolved_project_id = if ctx.project_id.is_some() {
+            ctx.project_id.clone()
+        } else {
+            ctx.db.get_session(&ctx.session_id).await.ok().flatten().and_then(|s| s.project_id)
+        };
+        if let Some(ref pid) = resolved_project_id {
             project_id_val = Some(pid.clone());
             if let Ok(Some(project)) = ctx.db.get_project(pid).await {
                 project_name = Some(project.name);
@@ -812,7 +824,7 @@ impl McpToolRegistry {
         }
 
         // Check if this is a worker session
-        let is_worker = ctx.card_id.is_some();
+        let is_worker = resolved_card_id.is_some();
 
         let mut event_data = serde_json::json!({
             "questions": questions_data,

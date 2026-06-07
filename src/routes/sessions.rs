@@ -463,10 +463,12 @@ async fn append_event(
                     });
             }
 
-            // Issue MCP token and build config for the resumed session
+            // Issue MCP token with project scope (for worker sessions)
+            let session_project_id = state_clone.db.get_session(&id_clone).await
+                .ok().flatten().and_then(|s| s.project_id);
             let mcp_token = state_clone
                 .mcp_tokens
-                .issue_token(id_clone.clone(), None)
+                .issue_token(id_clone.clone(), session_project_id)
                 .await;
             let mcp_config_path = crate::service::mcp_server::write_mcp_config(
                 &state_clone.config.data_dir,
