@@ -2927,3 +2927,204 @@ select.form-input {
   background: var(--surface2);
   color: var(--text);
 }
+
+/* ═══════════════════════════════════════════════════
+   MOBILE RESPONSIVE
+   ═══════════════════════════════════════════════════ */
+
+@media (max-width: 768px) {
+  /* Shell: stack vertically, rail becomes bottom bar */
+  .shell {
+    flex-direction: column-reverse;
+  }
+
+  /* Rail → bottom tab bar */
+  .rail {
+    width: 100%;
+    height: 56px;
+    flex-direction: row;
+    border-right: none;
+    border-top: 1px solid var(--border);
+    padding: 0 8px;
+    overflow-x: auto;
+    flex-shrink: 0;
+  }
+  .rail-top {
+    flex-direction: row;
+    gap: 2px;
+    flex: 1;
+    justify-content: center;
+  }
+  .rail-bottom {
+    flex-direction: row;
+    gap: 4px;
+  }
+  .rail-brand {
+    margin-bottom: 0;
+    margin-right: 8px;
+    width: 30px;
+    height: 30px;
+    font-size: 14px;
+  }
+  .rail-btn {
+    width: 42px;
+    height: 42px;
+  }
+  .rail-btn.active::before {
+    left: 50%;
+    top: auto;
+    bottom: -4px;
+    transform: translateX(-50%);
+    width: 20px;
+    height: 3px;
+    border-radius: 2px 2px 0 0;
+  }
+  .rail-separator {
+    width: 1px;
+    height: 24px;
+    margin: 0 4px;
+  }
+  .rail-avatar {
+    width: 30px;
+    height: 30px;
+    font-size: 11px;
+  }
+  .rail-status {
+    display: none;
+  }
+
+  /* Panel → full width overlay */
+  .panel {
+    position: fixed;
+    top: 0;
+    left: 0;
+    right: 0;
+    bottom: 56px;
+    width: 100%;
+    z-index: 30;
+    border-right: none;
+    transition: transform 0.2s ease;
+  }
+  .panel.panel-hidden-mobile {
+    transform: translateX(-100%);
+    pointer-events: none;
+  }
+
+  /* Content → full width */
+  .content {
+    flex: 1;
+    min-height: 0;
+  }
+
+  /* Chat bubbles full width */
+  .chat-bubble {
+    max-width: 90%;
+  }
+
+  /* Chat toolbar */
+  .chat-toolbar {
+    flex-wrap: wrap;
+    gap: 6px;
+  }
+  .chat-toolbar-name {
+    font-size: var(--text-sm);
+  }
+
+  /* Input bar */
+  .input-bar {
+    padding: 8px 12px;
+  }
+
+  /* Tool blocks full width */
+  .tool-block {
+    max-width: 100%;
+  }
+
+  /* Kanban columns scroll horizontally */
+  .kanban-columns {
+    overflow-x: auto;
+    -webkit-overflow-scrolling: touch;
+  }
+  .kanban-column {
+    min-width: 200px;
+  }
+
+  /* Kanban header stack */
+  .kanban-board-header {
+    flex-wrap: wrap;
+    gap: 8px;
+  }
+  .kanban-project-info {
+    flex-wrap: wrap;
+  }
+
+  /* Add card form */
+  .kanban-add-row {
+    flex-direction: column;
+  }
+  .kanban-add-row select {
+    min-width: auto;
+  }
+
+  /* Modals full width on mobile */
+  .modal {
+    max-width: calc(100vw - 32px) !important;
+    max-height: calc(100vh - 100px);
+    overflow-y: auto;
+  }
+
+  /* Question dialog */
+  .question-dialog {
+    max-width: calc(100vw - 32px) !important;
+  }
+
+  /* Settings/Reports pages */
+  .settings-page {
+    padding: 16px;
+  }
+
+  /* Autocomplete */
+  .autocomplete-dropdown {
+    left: 12px;
+    right: 12px;
+  }
+
+  /* Empty state */
+  .empty-state {
+    padding: 24px;
+  }
+
+  /* Worker question trigger */
+  .worker-questions-trigger {
+    font-size: var(--text-xs);
+    padding: 10px 12px;
+  }
+}
+
+/* Small phones */
+@media (max-width: 480px) {
+  .rail {
+    height: 48px;
+    padding: 0 4px;
+  }
+  .rail-btn {
+    width: 36px;
+    height: 36px;
+  }
+  .rail-brand {
+    width: 26px;
+    height: 26px;
+    font-size: 12px;
+    margin-right: 4px;
+  }
+  .chat-bubble {
+    max-width: 95%;
+    font-size: var(--text-sm);
+  }
+  .modal {
+    padding: 20px !important;
+  }
+  .kanban-column {
+    min-width: 160px;
+  }
+}

@@ -107,6 +107,7 @@ function App() {
   // Parse initial route
   const initialRoute = useMemo(() => parseRoute(), [])
   const [view, setViewRaw] = useState<View>(initialRoute.view)
+  const [mobilePanel, setMobilePanel] = useState(true)
   const [showNewSession, setShowNewSession] = useState(false)
   const [showNewProject, setShowNewProject] = useState(false)
   const [contextSession, setContextSession] = useState<string | null>(null)
@@ -148,22 +149,28 @@ function App() {
     return () => window.removeEventListener('popstate', onPopState)
   }, [setActiveSession, setActiveProject])
 
-  // When activeSessionId changes, update URL if on sessions view
+  // When activeSessionId changes, update URL and hide panel on mobile
   useEffect(() => {
     if (view === 'sessions') {
       const path = activeSessionId ? `/sessions/${activeSessionId}` : '/'
       if (window.location.pathname !== path) {
         history.pushState(null, '', path)
       }
+      if (activeSessionId && window.innerWidth <= 768) {
+        setMobilePanel(false)
+      }
     }
   }, [view, activeSessionId])
 
-  // When activeProjectId changes, update URL if on projects view
+  // When activeProjectId changes, update URL and hide panel on mobile
   useEffect(() => {
     if (view === 'projects') {
       const path = activeProjectId ? `/projects/${activeProjectId}` : '/projects'
       if (window.location.pathname !== path) {
         history.pushState(null, '', path)
+      }
+      if (activeProjectId && window.innerWidth <= 768) {
+        setMobilePanel(false)
       }
     }
   }, [view, activeProjectId])
@@ -245,7 +252,7 @@ function App() {
           <div className="rail-brand">P</div>
           <button
             className={`rail-btn ${view === 'sessions' ? 'active' : ''}`}
-            onClick={() => navigate('sessions')}
+            onClick={() => { navigate('sessions'); setMobilePanel(true) }}
             title="Sessions"
           >
             <svg
@@ -263,7 +270,7 @@ function App() {
           </button>
           <button
             className={`rail-btn ${view === 'projects' ? 'active' : ''}`}
-            onClick={() => navigate('projects')}
+            onClick={() => { navigate('projects'); setMobilePanel(true) }}
             title="Projects"
           >
             <svg
@@ -404,7 +411,7 @@ function App() {
 
       {/* Sidebar Panel */}
       {(view === 'sessions' || view === 'projects') && (
-        <aside className="panel">
+        <aside className={`panel ${!mobilePanel ? 'panel-hidden-mobile' : ''}`}>
           {view === 'sessions' && (
             <>
               <div className="panel-header">
