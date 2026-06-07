@@ -82,6 +82,20 @@ async fn main() -> anyhow::Result<()> {
     peckboard::worker::orchestrator::check_and_spawn_workers(&state).await;
     tracing::info!("Worker orchestrator startup check complete");
 
+    // Run orchestrator on a 5-second interval to pick up new cards quickly
+    {
+        let orch_state = state.clone();
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(std::time::Duration::from_secs(5));
+            interval.tick().await; // skip immediate first tick (already ran above)
+            loop {
+                interval.tick().await;
+                peckboard::worker::orchestrator::check_and_spawn_workers(&orch_state).await;
+            }
+        });
+        tracing::info!("Worker orchestrator loop started (5s interval)");
+    }
+
     let app = api_router(state.clone())
         .layer(axum::extract::DefaultBodyLimit::max(20 * 1024 * 1024))
         .layer(middleware::from_fn(security_headers))
