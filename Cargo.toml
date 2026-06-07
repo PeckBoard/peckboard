@@ -69,3 +69,9 @@ reqwest = "0.13.4"
 rustls = "0.23.40"
 tempfile = "3.27.0"
 time = "0.3.47"
+
+# Trim debug info so `target/debug` doesn't fill the disk every few
+# builds. Backtraces still show file:line; we lose pretty struct
+# inspection inside a debugger, which we rarely use.
+[profile.dev]
+debug = "line-tables-only"

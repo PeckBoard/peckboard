@@ -19,6 +19,8 @@ import ConfirmDialog from './components/ConfirmDialog'
 import ReportBrowser from './components/ReportBrowser'
 import GitView from './components/GitView'
 import UserManagement from './components/UserManagement'
+import TabBar from './components/TabBar'
+import { startTabsAutoSync, useTabsStore, type TabType } from './store/tabs'
 import './App.css'
 
 type View = 'sessions' | 'projects' | 'folders' | 'settings' | 'reports' | 'git' | 'users'
@@ -107,7 +109,6 @@ function App() {
   // Parse initial route
   const initialRoute = useMemo(() => parseRoute(), [])
   const [view, setViewRaw] = useState<View>(initialRoute.view)
-  const [mobilePanel, setMobilePanel] = useState(true)
   const [showNewSession, setShowNewSession] = useState(false)
   const [showNewProject, setShowNewProject] = useState(false)
   const [contextSession, setContextSession] = useState<string | null>(null)
@@ -149,28 +150,22 @@ function App() {
     return () => window.removeEventListener('popstate', onPopState)
   }, [setActiveSession, setActiveProject])
 
-  // When activeSessionId changes, update URL and hide panel on mobile
+  // When activeSessionId changes, update URL.
   useEffect(() => {
     if (view === 'sessions') {
       const path = activeSessionId ? `/sessions/${activeSessionId}` : '/'
       if (window.location.pathname !== path) {
         history.pushState(null, '', path)
       }
-      if (activeSessionId && window.innerWidth <= 768) {
-        setMobilePanel(false)
-      }
     }
   }, [view, activeSessionId])
 
-  // When activeProjectId changes, update URL and hide panel on mobile
+  // When activeProjectId changes, update URL.
   useEffect(() => {
     if (view === 'projects') {
       const path = activeProjectId ? `/projects/${activeProjectId}` : '/projects'
       if (window.location.pathname !== path) {
         history.pushState(null, '', path)
-      }
-      if (activeProjectId && window.innerWidth <= 768) {
-        setMobilePanel(false)
       }
     }
   }, [view, activeProjectId])
@@ -191,6 +186,8 @@ function App() {
       connect()
       fetchSessions()
       fetchFolders()
+      useTabsStore.getState().fetchTabs()
+      const stopTabsSync = startTabsAutoSync()
       // Fetch announcements
       authedFetch('/api/announcements')
         .then((res) => (res.ok ? res.json() : []))
@@ -202,9 +199,25 @@ function App() {
         .catch(() => {})
       return () => {
         disconnect()
+        stopTabsSync()
       }
     }
   }, [authenticated, connect, disconnect, fetchSessions, fetchFolders])
+
+  // Open / promote a tab whenever the user activates a session or
+  // project — this is what makes "MRU + cross-device sync" Just Work,
+  // because every navigation goes through these state changes (whether
+  // it came from a tab click, the rail, a URL load, or back/forward).
+  useEffect(() => {
+    if (authenticated && activeSessionId) {
+      useTabsStore.getState().openTab('session', activeSessionId)
+    }
+  }, [authenticated, activeSessionId])
+  useEffect(() => {
+    if (authenticated && activeProjectId) {
+      useTabsStore.getState().openTab('project', activeProjectId)
+    }
+  }, [authenticated, activeProjectId])
 
   if (!initialized) {
     return (
@@ -246,50 +259,11 @@ function App() {
 
   return (
     <div className="shell">
-      {/* Navigation Rail */}
+      {/* Navigation Rail — only the "other" views; Sessions / Projects
+          are driven by the TabBar at the top of the content area. */}
       <nav className="rail">
         <div className="rail-top">
           <div className="rail-brand">P</div>
-          <button
-            className={`rail-btn ${view === 'sessions' ? 'active' : ''}`}
-            onClick={() => { navigate('sessions'); setMobilePanel(true) }}
-            title="Sessions"
-          >
-            <svg
-              width="18"
-              height="18"
-              viewBox="0 0 24 24"
-              fill="none"
-              stroke="currentColor"
-              strokeWidth="2"
-              strokeLinecap="round"
-              strokeLinejoin="round"
-            >
-              <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z" />
-            </svg>
-          </button>
-          <button
-            className={`rail-btn ${view === 'projects' ? 'active' : ''}`}
-            onClick={() => { navigate('projects'); setMobilePanel(true) }}
-            title="Projects"
-          >
-            <svg
-              width="18"
-              height="18"
-              viewBox="0 0 24 24"
-              fill="none"
-              stroke="currentColor"
-              strokeWidth="2"
-              strokeLinecap="round"
-              strokeLinejoin="round"
-            >
-              <rect x="3" y="3" width="7" height="7" />
-              <rect x="14" y="3" width="7" height="7" />
-              <rect x="3" y="14" width="7" height="7" />
-              <rect x="14" y="14" width="7" height="7" />
-            </svg>
-          </button>
-          <div className="rail-separator" />
           <button
             className={`rail-btn ${view === 'folders' ? 'active' : ''}`}
             onClick={() => navigate('folders')}
@@ -409,81 +383,31 @@ function App() {
         </div>
       </nav>
 
-      {/* Sidebar Panel */}
-      {(view === 'sessions' || view === 'projects') && (
-        <aside className={`panel ${!mobilePanel ? 'panel-hidden-mobile' : ''}`}>
-          {view === 'sessions' && (
-            <>
-              <div className="panel-header">
-                <h2 className="panel-title">Sessions</h2>
-                <button
-                  className="panel-action"
-                  onClick={() => setShowNewSession(true)}
-                  title="New session"
-                >
-                  +
-                </button>
-              </div>
-              <div className="panel-list">
-                {sessions.map((s) => (
-                  <div
-                    key={s.id}
-                    className={`panel-item-row ${s.id === activeSessionId ? 'active' : ''}`}
-                  >
-                    <button
-                      className="panel-item"
-                      onClick={() => {
-                        setActiveSession(s.id)
-                        setContextSession(null)
-                      }}
-                    >
-                      {processing.has(s.id) && <span className="processing-dot" />}
-                      {!processing.has(s.id) && unreadSessions.has(s.id) && (
-                        <span className="unread-dot" />
-                      )}
-                      <span className="panel-item-name">{s.name}</span>
-                      <span className="panel-item-meta">
-                        {folderMap.get(s.folder_id) && (
-                          <span className="panel-item-tag">{folderMap.get(s.folder_id)}</span>
-                        )}
-                        <span className="panel-item-time">
-                          {formatRelativeTime(s.last_activity)}
-                        </span>
-                      </span>
-                    </button>
-                    <button
-                      className="panel-item-menu"
-                      onClick={(e) => {
-                        e.stopPropagation()
-                        setContextSession(contextSession === s.id ? null : s.id)
-                      }}
-                    >
-                      ···
-                    </button>
-                    {contextSession === s.id && (
-                      <div className="panel-item-dropdown">
-                        <button onClick={() => handleDeleteSession(s.id)}>Delete session</button>
-                      </div>
-                    )}
-                  </div>
-                ))}
-                {sessions.length === 0 && (
-                  <div className="panel-empty">
-                    <p>No sessions yet</p>
-                    <button className="panel-empty-action" onClick={() => setShowNewSession(true)}>
-                      Create your first session
-                    </button>
-                  </div>
-                )}
-              </div>
-            </>
-          )}
-          {view === 'projects' && <ProjectList onNewProject={() => setShowNewProject(true)} />}
-        </aside>
-      )}
-
       {/* Main Content */}
       <main className="content">
+        <TabBar
+          view={view}
+          activeSessionId={activeSessionId}
+          activeProjectId={activeProjectId}
+          onOpenList={(type: TabType) => {
+            if (type === 'session') {
+              setActiveSession(null)
+              navigate('sessions', null)
+            } else {
+              setActiveProject(null)
+              navigate('projects', null)
+            }
+          }}
+          onOpenItem={(type, id) => {
+            if (type === 'session') {
+              setActiveSession(id)
+              navigate('sessions', id)
+            } else {
+              setActiveProject(id)
+              navigate('projects', id)
+            }
+          }}
+        />
         {announcement && (
           <div className="announcement-banner">
             <div className="announcement-content">
@@ -499,51 +423,80 @@ function App() {
           (activeSessionId ? (
             <ChatView sessionId={activeSessionId} />
           ) : (
-            <div className="empty-state">
-              <div className="empty-icon">
-                <svg
-                  width="48"
-                  height="48"
-                  viewBox="0 0 24 24"
-                  fill="none"
-                  stroke="currentColor"
-                  strokeWidth="1.5"
+            <div className="list-view">
+              <div className="list-view-header">
+                <h2 className="list-view-title">Sessions</h2>
+                <button
+                  className="list-view-action"
+                  onClick={() => setShowNewSession(true)}
+                  title="New session"
                 >
-                  <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z" />
-                </svg>
+                  + New session
+                </button>
               </div>
-              <h3 className="empty-title">No session selected</h3>
-              <p className="empty-desc">Choose a session from the sidebar or create a new one.</p>
-              <button className="empty-action" onClick={() => setShowNewSession(true)}>
-                New Session
-              </button>
+              <div className="list-view-body">
+                {sessions.map((s) => (
+                  <div
+                    key={s.id}
+                    className={`list-view-row ${s.id === activeSessionId ? 'active' : ''}`}
+                  >
+                    <button
+                      className="list-view-item"
+                      onClick={() => {
+                        setActiveSession(s.id)
+                        setContextSession(null)
+                      }}
+                    >
+                      {processing.has(s.id) && <span className="processing-dot" />}
+                      {!processing.has(s.id) && unreadSessions.has(s.id) && (
+                        <span className="unread-dot" />
+                      )}
+                      <span className="list-view-name">{s.name}</span>
+                      <span className="list-view-meta">
+                        {folderMap.get(s.folder_id) && (
+                          <span className="list-view-tag">{folderMap.get(s.folder_id)}</span>
+                        )}
+                        <span className="list-view-time">
+                          {formatRelativeTime(s.last_activity)}
+                        </span>
+                      </span>
+                    </button>
+                    <button
+                      className="list-view-menu"
+                      onClick={(e) => {
+                        e.stopPropagation()
+                        setContextSession(contextSession === s.id ? null : s.id)
+                      }}
+                    >
+                      ···
+                    </button>
+                    {contextSession === s.id && (
+                      <div className="list-view-dropdown">
+                        <button onClick={() => handleDeleteSession(s.id)}>Delete session</button>
+                      </div>
+                    )}
+                  </div>
+                ))}
+                {sessions.length === 0 && (
+                  <div className="list-view-empty">
+                    <p>No sessions yet</p>
+                    <button
+                      className="list-view-empty-action"
+                      onClick={() => setShowNewSession(true)}
+                    >
+                      Create your first session
+                    </button>
+                  </div>
+                )}
+              </div>
             </div>
           ))}
         {view === 'projects' &&
           (activeProjectId ? (
             <KanbanBoard projectId={activeProjectId} />
           ) : (
-            <div className="empty-state">
-              <div className="empty-icon">
-                <svg
-                  width="48"
-                  height="48"
-                  viewBox="0 0 24 24"
-                  fill="none"
-                  stroke="currentColor"
-                  strokeWidth="1.5"
-                >
-                  <rect x="3" y="3" width="7" height="7" />
-                  <rect x="14" y="3" width="7" height="7" />
-                  <rect x="3" y="14" width="7" height="7" />
-                  <rect x="14" y="14" width="7" height="7" />
-                </svg>
-              </div>
-              <h3 className="empty-title">No project selected</h3>
-              <p className="empty-desc">Select a project or create a new one.</p>
-              <button className="empty-action" onClick={() => setShowNewProject(true)}>
-                New Project
-              </button>
+            <div className="list-view">
+              <ProjectList onNewProject={() => setShowNewProject(true)} />
             </div>
           ))}
         {view === 'folders' && <FoldersPage />}

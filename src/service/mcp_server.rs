@@ -1532,7 +1532,11 @@ impl McpToolRegistry {
         tracing::info!(session_id = %ctx.session_id, card_id = %card_id, "MCP tool: delete_card");
 
         // Get card before deletion for broadcast
-        let card = ctx.db.get_card(card_id).await?.ok_or_else(|| anyhow::anyhow!("card not found: {card_id}"))?;
+        let card = ctx
+            .db
+            .get_card(card_id)
+            .await?
+            .ok_or_else(|| anyhow::anyhow!("card not found: {card_id}"))?;
         let project_id = card.project_id.clone();
 
         let deleted = ctx.db.delete_card(card_id).await?;
@@ -1710,7 +1714,8 @@ impl McpToolRegistry {
             }
 
             // Deliver immediately to running worker + persist
-            self.deliver_to_worker(ctx, &session.id, &notification).await;
+            self.deliver_to_worker(ctx, &session.id, &notification)
+                .await;
 
             // Broadcast so the frontend sees it in real-time
             ctx.broadcaster.broadcast(crate::ws::broadcaster::WsEvent {
@@ -1735,11 +1740,7 @@ impl McpToolRegistry {
         }))
     }
 
-    async fn handle_fetch_url(
-        &self,
-        args: Value,
-        ctx: &ToolCallContext,
-    ) -> anyhow::Result<Value> {
+    async fn handle_fetch_url(&self, args: Value, ctx: &ToolCallContext) -> anyhow::Result<Value> {
         let url = args
             .get("url")
             .and_then(|v| v.as_str())
@@ -1773,7 +1774,10 @@ impl McpToolRegistry {
         // Strip HTML tags for a rough text extraction
         let text = if body.contains('<') && body.contains('>') {
             // Simple HTML tag stripping
-            let re = regex::Regex::new(r"<script[^>]*>[\s\S]*?</script>|<style[^>]*>[\s\S]*?</style>|<[^>]+>").unwrap();
+            let re = regex::Regex::new(
+                r"<script[^>]*>[\s\S]*?</script>|<style[^>]*>[\s\S]*?</style>|<[^>]+>",
+            )
+            .unwrap();
             let stripped = re.replace_all(&body, " ");
             // Collapse whitespace
             let ws_re = regex::Regex::new(r"\s+").unwrap();
@@ -1783,7 +1787,11 @@ impl McpToolRegistry {
         };
 
         let truncated = if text.len() > max_length {
-            format!("{}... (truncated at {} chars)", &text[..max_length], max_length)
+            format!(
+                "{}... (truncated at {} chars)",
+                &text[..max_length],
+                max_length
+            )
         } else {
             text
         };
@@ -1801,12 +1809,22 @@ impl McpToolRegistry {
         args: Value,
         ctx: &ToolCallContext,
     ) -> anyhow::Result<Value> {
-        let summary = args.get("summary").and_then(|v| v.as_str())
+        let summary = args
+            .get("summary")
+            .and_then(|v| v.as_str())
             .ok_or_else(|| anyhow::anyhow!("share_finding requires 'summary'"))?;
-        let detail = args.get("detail").and_then(|v| v.as_str())
+        let detail = args
+            .get("detail")
+            .and_then(|v| v.as_str())
             .ok_or_else(|| anyhow::anyhow!("share_finding requires 'detail'"))?;
-        let tags = args.get("tags").and_then(|v| v.as_array())
-            .map(|a| a.iter().filter_map(|v| v.as_str().map(|s| s.to_string())).collect::<Vec<_>>())
+        let tags = args
+            .get("tags")
+            .and_then(|v| v.as_array())
+            .map(|a| {
+                a.iter()
+                    .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                    .collect::<Vec<_>>()
+            })
             .unwrap_or_default();
 
         tracing::info!(session_id = %ctx.session_id, "MCP tool: share_finding");
@@ -1835,7 +1853,10 @@ impl McpToolRegistry {
             "fromCardTitle": card_title,
             "projectId": project_id,
         });
-        let event = ctx.db.append_event(&ctx.session_id, "worker-finding", finding_data).await?;
+        let event = ctx
+            .db
+            .append_event(&ctx.session_id, "worker-finding", finding_data)
+            .await?;
 
         // Broadcast summary to other workers
         if let Some(ref pid) = project_id {
@@ -1847,10 +1868,14 @@ impl McpToolRegistry {
                     event.id
                 );
                 for ws in &workers {
-                    if ws.id == ctx.session_id { continue; }
+                    if ws.id == ctx.session_id {
+                        continue;
+                    }
                     if let Some(ref cid) = ws.card_id {
                         if let Ok(Some(c)) = ctx.db.get_card(cid).await {
-                            if c.step == "done" || c.step == "wont_do" { continue; }
+                            if c.step == "done" || c.step == "wont_do" {
+                                continue;
+                            }
                         }
                     }
                     self.deliver_to_worker(ctx, &ws.id, &msg).await;
@@ -1870,12 +1895,17 @@ impl McpToolRegistry {
         args: Value,
         ctx: &ToolCallContext,
     ) -> anyhow::Result<Value> {
-        let finding_id = args.get("finding_id").and_then(|v| v.as_str())
+        let finding_id = args
+            .get("finding_id")
+            .and_then(|v| v.as_str())
             .ok_or_else(|| anyhow::anyhow!("get_finding_details requires 'finding_id'"))?;
 
         tracing::info!(session_id = %ctx.session_id, finding_id = %finding_id, "MCP tool: get_finding_details");
 
-        let event = ctx.db.get_event(finding_id).await?
+        let event = ctx
+            .db
+            .get_event(finding_id)
+            .await?
             .ok_or_else(|| anyhow::anyhow!("finding not found: {finding_id}"))?;
 
         if event.kind != "worker-finding" {
@@ -1899,9 +1929,13 @@ impl McpToolRegistry {
         args: Value,
         ctx: &ToolCallContext,
     ) -> anyhow::Result<Value> {
-        let target_session_id = args.get("target_session_id").and_then(|v| v.as_str())
+        let target_session_id = args
+            .get("target_session_id")
+            .and_then(|v| v.as_str())
             .ok_or_else(|| anyhow::anyhow!("send_worker_message requires 'target_session_id'"))?;
-        let message = args.get("message").and_then(|v| v.as_str())
+        let message = args
+            .get("message")
+            .and_then(|v| v.as_str())
             .ok_or_else(|| anyhow::anyhow!("send_worker_message requires 'message'"))?;
 
         tracing::info!(session_id = %ctx.session_id, target = %target_session_id, "MCP tool: send_worker_message");
@@ -1922,7 +1956,10 @@ impl McpToolRegistry {
         let card_title = self.resolve_card_title(ctx).await;
 
         // Verify target is a valid worker session
-        let target = ctx.db.get_session(target_session_id).await?
+        let target = ctx
+            .db
+            .get_session(target_session_id)
+            .await?
             .ok_or_else(|| anyhow::anyhow!("target session not found"))?;
         if !target.is_worker {
             anyhow::bail!("target session is not a worker");
@@ -1946,16 +1983,24 @@ impl McpToolRegistry {
     /// Helper: deliver a message to a worker session immediately.
     /// Appends as a user event (for persistence) AND broadcasts for
     /// immediate stdin delivery to a running agent.
-    async fn deliver_to_worker(&self, ctx: &ToolCallContext, target_session_id: &str, message: &str) {
+    async fn deliver_to_worker(
+        &self,
+        ctx: &ToolCallContext,
+        target_session_id: &str,
+        message: &str,
+    ) {
         // Append as user event for persistence (agent sees it on resume)
-        let _ = ctx.db.append_event(
-            target_session_id,
-            "user",
-            serde_json::json!({
-                "text": message,
-                "source": "worker-communication",
-            }),
-        ).await;
+        let _ = ctx
+            .db
+            .append_event(
+                target_session_id,
+                "user",
+                serde_json::json!({
+                    "text": message,
+                    "source": "worker-communication",
+                }),
+            )
+            .await;
 
         // Broadcast for immediate delivery to running agent's stdin
         ctx.broadcaster.broadcast(crate::ws::broadcaster::WsEvent {
@@ -1970,7 +2015,12 @@ impl McpToolRegistry {
         if ctx.project_id.is_some() {
             return ctx.project_id.clone();
         }
-        ctx.db.get_session(&ctx.session_id).await.ok().flatten().and_then(|s| s.project_id)
+        ctx.db
+            .get_session(&ctx.session_id)
+            .await
+            .ok()
+            .flatten()
+            .and_then(|s| s.project_id)
     }
 
     /// Helper: resolve card title from context or session lookup
@@ -1978,7 +2028,12 @@ impl McpToolRegistry {
         let card_id = if ctx.card_id.is_some() {
             ctx.card_id.clone()
         } else {
-            ctx.db.get_session(&ctx.session_id).await.ok().flatten().and_then(|s| s.card_id)
+            ctx.db
+                .get_session(&ctx.session_id)
+                .await
+                .ok()
+                .flatten()
+                .and_then(|s| s.card_id)
         };
         if let Some(ref cid) = card_id {
             ctx.db.get_card(cid).await.ok().flatten().map(|c| c.title)

@@ -141,7 +141,8 @@ pub async fn stream_events(
 
     // Track file-modifying tool calls for auto cross-worker notification
     let mut pending_file_changes: Vec<String> = Vec::new();
-    let mut pending_tool_names: std::collections::HashMap<String, (String, Option<String>)> = std::collections::HashMap::new();
+    let mut pending_tool_names: std::collections::HashMap<String, (String, Option<String>)> =
+        std::collections::HashMap::new();
 
     loop {
         let line = tokio::select! {
@@ -310,16 +311,26 @@ pub async fn stream_events(
             for event in &events {
                 // Track file-modifying tools for cross-worker notification
                 match event {
-                    ProviderEvent::ToolStart { tool_use_id, name, input } => {
+                    ProviderEvent::ToolStart {
+                        tool_use_id,
+                        name,
+                        input,
+                    } => {
                         let file_path = match name.as_str() {
-                            "Write" | "Edit" => input.get("file_path").and_then(|v| v.as_str()).map(|s| s.to_string()),
+                            "Write" | "Edit" => input
+                                .get("file_path")
+                                .and_then(|v| v.as_str())
+                                .map(|s| s.to_string()),
                             _ => None,
                         };
                         pending_tool_names.insert(tool_use_id.clone(), (name.clone(), file_path));
                     }
-                    ProviderEvent::ToolEnd { tool_use_id, error, .. } => {
+                    ProviderEvent::ToolEnd {
+                        tool_use_id, error, ..
+                    } => {
                         if error.is_none() {
-                            if let Some((name, file_path)) = pending_tool_names.remove(tool_use_id) {
+                            if let Some((name, file_path)) = pending_tool_names.remove(tool_use_id)
+                            {
                                 if let Some(path) = file_path {
                                     if name == "Write" || name == "Edit" {
                                         pending_file_changes.push(path);
@@ -336,38 +347,59 @@ pub async fn stream_events(
                                 if session.is_worker {
                                     if let Some(ref project_id) = session.project_id {
                                         // Check if auto_notify_changes is enabled for this project
-                                        let auto_notify = db.get_project(project_id).await
-                                            .ok().flatten()
+                                        let auto_notify = db
+                                            .get_project(project_id)
+                                            .await
+                                            .ok()
+                                            .flatten()
                                             .map(|p| p.auto_notify_changes)
                                             .unwrap_or(true);
 
                                         if auto_notify {
-                                            let card_title = if let Some(ref card_id) = session.card_id {
-                                                db.get_card(card_id).await.ok().flatten().map(|c| c.title)
-                                            } else { None };
+                                            let card_title =
+                                                if let Some(ref card_id) = session.card_id {
+                                                    db.get_card(card_id)
+                                                        .await
+                                                        .ok()
+                                                        .flatten()
+                                                        .map(|c| c.title)
+                                                } else {
+                                                    None
+                                                };
 
-                                            if let Ok(workers) = db.list_worker_sessions_by_project(project_id).await {
+                                            if let Ok(workers) =
+                                                db.list_worker_sessions_by_project(project_id).await
+                                            {
                                                 let msg = format!(
                                                     "[Auto] Worker on \"{}\" modified: {}",
                                                     card_title.as_deref().unwrap_or("unknown"),
                                                     changes.join(", ")
                                                 );
                                                 for ws in &workers {
-                                                    if ws.id == session_id { continue; }
+                                                    if ws.id == session_id {
+                                                        continue;
+                                                    }
                                                     if let Some(ref cid) = ws.card_id {
-                                                        if let Ok(Some(c)) = db.get_card(cid).await {
-                                                            if c.step == "done" || c.step == "wont_do" { continue; }
+                                                        if let Ok(Some(c)) = db.get_card(cid).await
+                                                        {
+                                                            if c.step == "done"
+                                                                || c.step == "wont_do"
+                                                            {
+                                                                continue;
+                                                            }
                                                         }
                                                     }
                                                     // Persist as user event
-                                                    let _ = db.append_event(
-                                                        &ws.id,
-                                                        "user",
-                                                        serde_json::json!({
-                                                            "text": msg,
-                                                            "source": "worker-auto-notify",
-                                                        }),
-                                                    ).await;
+                                                    let _ = db
+                                                        .append_event(
+                                                            &ws.id,
+                                                            "user",
+                                                            serde_json::json!({
+                                                                "text": msg,
+                                                                "source": "worker-auto-notify",
+                                                            }),
+                                                        )
+                                                        .await;
                                                     // Broadcast for immediate stdin delivery
                                                     broadcaster.broadcast(WsEvent {
                                                         event_type: "worker-stdin-deliver".into(),
