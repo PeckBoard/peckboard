@@ -70,11 +70,7 @@ impl Db {
     }
 
     /// Get the last N events for a session (tail query).
-    pub async fn events_tail(
-        &self,
-        session_id: &str,
-        limit: i64,
-    ) -> anyhow::Result<Vec<Event>> {
+    pub async fn events_tail(&self, session_id: &str, limit: i64) -> anyhow::Result<Vec<Event>> {
         let session_id = session_id.to_string();
         self.with_conn(move |conn| {
             // Get the last N events by ordering desc and limiting, then reverse.
@@ -188,9 +184,13 @@ mod tests {
         let db = setup().await;
 
         for i in 1..=5 {
-            db.append_event("s1", "agent-text", serde_json::json!({"text": format!("chunk {i}")}))
-                .await
-                .unwrap();
+            db.append_event(
+                "s1",
+                "agent-text",
+                serde_json::json!({"text": format!("chunk {i}")}),
+            )
+            .await
+            .unwrap();
         }
 
         let since_2 = db.events_since("s1", 2).await.unwrap();

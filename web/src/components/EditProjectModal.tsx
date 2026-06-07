@@ -8,8 +8,14 @@ interface Props {
   onClose: () => void
 }
 
-interface WorkflowInfo { id: string; name: string }
-interface ModelInfo { id: string; display_name: string }
+interface WorkflowInfo {
+  id: string
+  name: string
+}
+interface ModelInfo {
+  id: string
+  display_name: string
+}
 
 const EFFORT_OPTIONS = [
   { value: '', label: 'Default' },
@@ -38,12 +44,16 @@ export default function EditProjectModal({ project, onClose }: Props) {
 
   useEffect(() => {
     authedFetch('/api/workflows')
-      .then((res) => res.ok ? res.json() : null)
-      .then((data) => { if (data?.workflows) setWorkflows(data.workflows) })
+      .then((res) => (res.ok ? res.json() : null))
+      .then((data) => {
+        if (data?.workflows) setWorkflows(data.workflows)
+      })
       .catch(() => {})
     authedFetch('/api/models')
-      .then((res) => res.ok ? res.json() : null)
-      .then((data) => { if (data?.models) setModels(data.models) })
+      .then((res) => (res.ok ? res.json() : null))
+      .then((data) => {
+        if (data?.models) setModels(data.models)
+      })
       .catch(() => {})
   }, [])
 
@@ -80,45 +90,90 @@ export default function EditProjectModal({ project, onClose }: Props) {
         <form onSubmit={handleSubmit}>
           <div className="form-field">
             <label className="form-label">Name</label>
-            <input className="form-input" value={name} onChange={(e) => setName(e.target.value)} required />
+            <input
+              className="form-input"
+              value={name}
+              onChange={(e) => setName(e.target.value)}
+              required
+            />
           </div>
           <div className="form-field">
             <label className="form-label">Context</label>
-            <textarea className="form-input" value={context} onChange={(e) => setContext(e.target.value)} placeholder="Project context for workers..." rows={3} style={{ resize: 'vertical' }} />
+            <textarea
+              className="form-input"
+              value={context}
+              onChange={(e) => setContext(e.target.value)}
+              placeholder="Project context for workers..."
+              rows={3}
+              style={{ resize: 'vertical' }}
+            />
           </div>
           <div className="form-field">
             <label className="form-label">Worker count</label>
-            <input className="form-input" type="number" min={1} max={10} value={workerCount} onChange={(e) => setWorkerCount(Number(e.target.value))} />
+            <input
+              className="form-input"
+              type="number"
+              min={1}
+              max={10}
+              value={workerCount}
+              onChange={(e) => setWorkerCount(Number(e.target.value))}
+            />
           </div>
           <div className="form-field">
             <label className="form-label">Default workflow</label>
-            <select className="form-input" value={defaultWorkflow} onChange={(e) => setDefaultWorkflow(e.target.value)}>
+            <select
+              className="form-input"
+              value={defaultWorkflow}
+              onChange={(e) => setDefaultWorkflow(e.target.value)}
+            >
               <option value="">None</option>
-              {workflows.map((w) => <option key={w.id} value={w.id}>{w.name}</option>)}
+              {workflows.map((w) => (
+                <option key={w.id} value={w.id}>
+                  {w.name}
+                </option>
+              ))}
             </select>
           </div>
           <div className="form-field">
             <label className="form-label">Model</label>
             <select className="form-input" value={model} onChange={(e) => setModel(e.target.value)}>
               <option value="">Default</option>
-              {models.map((m) => <option key={m.id} value={m.id}>{m.display_name}</option>)}
+              {models.map((m) => (
+                <option key={m.id} value={m.id}>
+                  {m.display_name}
+                </option>
+              ))}
             </select>
           </div>
           <div className="form-field">
             <label className="form-label">Effort</label>
-            <select className="form-input" value={effort} onChange={(e) => setEffort(e.target.value)}>
-              {EFFORT_OPTIONS.map((o) => <option key={o.value} value={o.value}>{o.label}</option>)}
+            <select
+              className="form-input"
+              value={effort}
+              onChange={(e) => setEffort(e.target.value)}
+            >
+              {EFFORT_OPTIONS.map((o) => (
+                <option key={o.value} value={o.value}>
+                  {o.label}
+                </option>
+              ))}
             </select>
           </div>
           <div className="form-field">
             <label className="form-checkbox-label">
-              <input type="checkbox" checked={parallelInstructions} onChange={(e) => setParallelInstructions(e.target.checked)} />
+              <input
+                type="checkbox"
+                checked={parallelInstructions}
+                onChange={(e) => setParallelInstructions(e.target.checked)}
+              />
               <span>Parallel-workflow instructions</span>
             </label>
           </div>
           {error && <p className="form-error">{error}</p>}
           <div className="form-actions">
-            <button type="button" className="btn-secondary" onClick={onClose}>Cancel</button>
+            <button type="button" className="btn-secondary" onClick={onClose}>
+              Cancel
+            </button>
             <button type="submit" className="btn-primary" disabled={loading || !name.trim()}>
               {loading ? 'Saving...' : 'Save'}
             </button>

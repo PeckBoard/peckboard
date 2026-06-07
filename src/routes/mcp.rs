@@ -166,10 +166,7 @@ async fn mcp_handler(
         }
         "tools/call" => {
             let params = body.params.unwrap_or(serde_json::json!({}));
-            let tool_name = params
-                .get("name")
-                .and_then(|v| v.as_str())
-                .unwrap_or("");
+            let tool_name = params.get("name").and_then(|v| v.as_str()).unwrap_or("");
             let arguments = params
                 .get("arguments")
                 .cloned()
@@ -213,14 +210,17 @@ async fn mcp_handler(
 
             // ── Hook: mcp.tool.call.before ──
             let mut final_args = arguments;
-            let hook_result = state.plugins.dispatch(
-                "mcp.tool.call.before",
-                serde_json::json!({
-                    "sessionId": &ctx.session_id,
-                    "toolName": tool_name,
-                    "args": &final_args,
-                }),
-            ).await;
+            let hook_result = state
+                .plugins
+                .dispatch(
+                    "mcp.tool.call.before",
+                    serde_json::json!({
+                        "sessionId": &ctx.session_id,
+                        "toolName": tool_name,
+                        "args": &final_args,
+                    }),
+                )
+                .await;
 
             if let crate::plugin::hooks::HookResult::Cancelled { plugin, reason } = &hook_result {
                 tracing::info!(plugin = %plugin, reason = %reason, "mcp.tool.call.before cancelled");
@@ -243,14 +243,17 @@ async fn mcp_handler(
             match registry.handle_tool_call(tool_name, final_args, &ctx).await {
                 Ok(result) => {
                     // ── Hook: mcp.tool.call.after ──
-                    state.plugins.dispatch(
-                        "mcp.tool.call.after",
-                        serde_json::json!({
-                            "sessionId": &ctx.session_id,
-                            "toolName": tool_name,
-                            "result": &result,
-                        }),
-                    ).await;
+                    state
+                        .plugins
+                        .dispatch(
+                            "mcp.tool.call.after",
+                            serde_json::json!({
+                                "sessionId": &ctx.session_id,
+                                "toolName": tool_name,
+                                "result": &result,
+                            }),
+                        )
+                        .await;
 
                     let content = serde_json::json!([{
                         "type": "text",
@@ -266,22 +269,21 @@ async fn mcp_handler(
                 }
                 Err(e) => {
                     // ── Hook: mcp.tool.call.failed ──
-                    state.plugins.dispatch(
-                        "mcp.tool.call.failed",
-                        serde_json::json!({
-                            "sessionId": &ctx.session_id,
-                            "toolName": tool_name,
-                            "reason": e.to_string(),
-                        }),
-                    ).await;
+                    state
+                        .plugins
+                        .dispatch(
+                            "mcp.tool.call.failed",
+                            serde_json::json!({
+                                "sessionId": &ctx.session_id,
+                                "toolName": tool_name,
+                                "reason": e.to_string(),
+                            }),
+                        )
+                        .await;
 
                     (
                         StatusCode::OK,
-                        rpc_json(JsonRpcResponse::error(
-                            body.id,
-                            -32000,
-                            e.to_string(),
-                        )),
+                        rpc_json(JsonRpcResponse::error(body.id, -32000, e.to_string())),
                     )
                 }
             }
@@ -311,11 +313,10 @@ fn extract_bearer(headers: &HeaderMap) -> Option<String> {
 fn extract_target_project_id(tool_name: &str, args: &Value) -> Option<String> {
     match tool_name {
         // Tools that reference a project_id directly
-        "update_project" | "pause_project" | "resume_project" => {
-            args.get("project_id")
-                .and_then(|v| v.as_str())
-                .map(|s| s.to_string())
-        }
+        "update_project" | "pause_project" | "resume_project" => args
+            .get("project_id")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string()),
         // Tools that reference a card; we'd need to look up the card's project
         // to fully enforce, but the card_id-based tools are already scoped
         // through ctx.project_id in the handler. For create_project the folder
@@ -332,10 +333,7 @@ mod tests {
     #[test]
     fn test_extract_bearer() {
         let mut headers = HeaderMap::new();
-        headers.insert(
-            header::AUTHORIZATION,
-            "Bearer abc123".parse().unwrap(),
-        );
+        headers.insert(header::AUTHORIZATION, "Bearer abc123".parse().unwrap());
         assert_eq!(extract_bearer(&headers), Some("abc123".to_string()));
     }
 
@@ -369,22 +367,13 @@ mod tests {
         );
 
         // Tools that don't directly reference project_id
-        assert_eq!(
-            extract_target_project_id("list_cards", &args),
-            None
-        );
-        assert_eq!(
-            extract_target_project_id("create_card", &args),
-            None
-        );
+        assert_eq!(extract_target_project_id("list_cards", &args), None);
+        assert_eq!(extract_target_project_id("create_card", &args), None);
     }
 
     #[test]
     fn test_jsonrpc_response_success() {
-        let resp = JsonRpcResponse::success(
-            serde_json::json!(1),
-            serde_json::json!({"ok": true}),
-        );
+        let resp = JsonRpcResponse::success(serde_json::json!(1), serde_json::json!({"ok": true}));
         assert_eq!(resp.jsonrpc, "2.0");
         assert!(resp.result.is_some());
         assert!(resp.error.is_none());
@@ -392,11 +381,7 @@ mod tests {
 
     #[test]
     fn test_jsonrpc_response_error() {
-        let resp = JsonRpcResponse::error(
-            serde_json::json!(1),
-            -32600,
-            "bad request".into(),
-        );
+        let resp = JsonRpcResponse::error(serde_json::json!(1), -32600, "bad request".into());
         assert_eq!(resp.jsonrpc, "2.0");
         assert!(resp.result.is_none());
         assert!(resp.error.is_some());

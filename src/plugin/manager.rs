@@ -38,7 +38,10 @@ impl PluginManager {
     pub async fn load_all(&self) -> anyhow::Result<()> {
         if !self.plugins_dir.exists() {
             std::fs::create_dir_all(&self.plugins_dir)?;
-            info!("Created plugins directory at {}", self.plugins_dir.display());
+            info!(
+                "Created plugins directory at {}",
+                self.plugins_dir.display()
+            );
             return Ok(());
         }
 
@@ -106,11 +109,7 @@ impl PluginManager {
     ///
     /// Plugins are called in load order. If any plugin cancels, dispatch stops.
     /// If a plugin modifies the payload, the modified version is passed to the next.
-    pub async fn dispatch(
-        &self,
-        hook: &str,
-        payload: serde_json::Value,
-    ) -> HookResult {
+    pub async fn dispatch(&self, hook: &str, payload: serde_json::Value) -> HookResult {
         let mut plugins = self.plugins.lock().await;
         let mut current_payload = payload;
 
@@ -157,10 +156,7 @@ impl PluginManager {
                     }
                 },
                 Err(e) => {
-                    warn!(
-                        "Plugin '{}' failed on hook '{}': {e}",
-                        loaded.name, hook
-                    );
+                    warn!("Plugin '{}' failed on hook '{}': {e}", loaded.name, hook);
                     // Plugin failure doesn't block the operation
                 }
             }

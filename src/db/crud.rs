@@ -102,7 +102,11 @@ impl Db {
     }
 
     /// Move all sessions from one folder to another.
-    pub async fn move_sessions_to_folder(&self, from_folder_id: &str, to_folder_id: &str) -> anyhow::Result<usize> {
+    pub async fn move_sessions_to_folder(
+        &self,
+        from_folder_id: &str,
+        to_folder_id: &str,
+    ) -> anyhow::Result<usize> {
         let from = from_folder_id.to_string();
         let to = to_folder_id.to_string();
         self.with_conn(move |conn| {
@@ -138,7 +142,10 @@ impl Db {
         .await
     }
 
-    pub async fn list_plain_sessions_by_folder(&self, folder_id: &str) -> anyhow::Result<Vec<Session>> {
+    pub async fn list_plain_sessions_by_folder(
+        &self,
+        folder_id: &str,
+    ) -> anyhow::Result<Vec<Session>> {
         let folder_id = folder_id.to_string();
         self.with_conn(move |conn| {
             sessions::table
@@ -152,7 +159,11 @@ impl Db {
         .await
     }
 
-    pub async fn update_session(&self, id: &str, update: UpdateSession) -> anyhow::Result<Option<Session>> {
+    pub async fn update_session(
+        &self,
+        id: &str,
+        update: UpdateSession,
+    ) -> anyhow::Result<Option<Session>> {
         let id = id.to_string();
         self.with_conn(move |conn| {
             diesel::update(sessions::table.find(&id))
@@ -224,7 +235,11 @@ impl Db {
         .await
     }
 
-    pub async fn update_project(&self, id: &str, update: UpdateProject) -> anyhow::Result<Option<Project>> {
+    pub async fn update_project(
+        &self,
+        id: &str,
+        update: UpdateProject,
+    ) -> anyhow::Result<Option<Project>> {
         let id = id.to_string();
         self.with_conn(move |conn| {
             diesel::update(projects::table.find(&id))
@@ -437,13 +452,8 @@ impl Db {
     }
 
     pub async fn count_users(&self) -> anyhow::Result<i64> {
-        self.with_conn(move |conn| {
-            users::table
-                .count()
-                .get_result(conn)
-                .map_err(Into::into)
-        })
-        .await
+        self.with_conn(move |conn| users::table.count().get_result(conn).map_err(Into::into))
+            .await
     }
 
     // ── Auth Sessions ────────────────────────────────────────────────
@@ -472,7 +482,11 @@ impl Db {
         .await
     }
 
-    pub async fn update_auth_session_last_used(&self, id: &str, last_used_at: i64) -> anyhow::Result<bool> {
+    pub async fn update_auth_session_last_used(
+        &self,
+        id: &str,
+        last_used_at: i64,
+    ) -> anyhow::Result<bool> {
         let id = id.to_string();
         self.with_conn(move |conn| {
             let count = diesel::update(auth_sessions::table.find(&id))
@@ -530,7 +544,10 @@ impl Db {
         .await
     }
 
-    pub async fn list_auth_sessions_by_user(&self, user_id: &str) -> anyhow::Result<Vec<AuthSession>> {
+    pub async fn list_auth_sessions_by_user(
+        &self,
+        user_id: &str,
+    ) -> anyhow::Result<Vec<AuthSession>> {
         let user_id = user_id.to_string();
         self.with_conn(move |conn| {
             auth_sessions::table
@@ -545,7 +562,10 @@ impl Db {
 
     // ── Push Subscriptions ───────────────────────────────────────────
 
-    pub async fn create_push_subscription(&self, new: NewPushSubscription) -> anyhow::Result<PushSubscription> {
+    pub async fn create_push_subscription(
+        &self,
+        new: NewPushSubscription,
+    ) -> anyhow::Result<PushSubscription> {
         self.with_conn(move |conn| {
             diesel::insert_into(push_subscriptions::table)
                 .values(&new)
@@ -577,7 +597,10 @@ impl Db {
 
     // ── Queued Messages ──────────────────────────────────────────────
 
-    pub async fn upsert_queued_message(&self, new: NewQueuedMessage) -> anyhow::Result<QueuedMessage> {
+    pub async fn upsert_queued_message(
+        &self,
+        new: NewQueuedMessage,
+    ) -> anyhow::Result<QueuedMessage> {
         self.with_conn(move |conn| {
             diesel::replace_into(queued_messages::table)
                 .values(&new)
@@ -588,7 +611,10 @@ impl Db {
         .await
     }
 
-    pub async fn get_queued_message(&self, session_id: &str) -> anyhow::Result<Option<QueuedMessage>> {
+    pub async fn get_queued_message(
+        &self,
+        session_id: &str,
+    ) -> anyhow::Result<Option<QueuedMessage>> {
         let session_id = session_id.to_string();
         self.with_conn(move |conn| {
             queued_messages::table

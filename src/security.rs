@@ -20,7 +20,7 @@ pub async fn security_headers(request: Request, next: Next) -> Response {
              img-src 'self' data: blob:; \
              connect-src 'self'; \
              frame-ancestors 'none'; \
-             object-src 'none'"
+             object-src 'none'",
         ),
     );
 
@@ -29,10 +29,7 @@ pub async fn security_headers(request: Request, next: Next) -> Response {
         HeaderValue::from_static("nosniff"),
     );
 
-    headers.insert(
-        "X-Frame-Options",
-        HeaderValue::from_static("DENY"),
-    );
+    headers.insert("X-Frame-Options", HeaderValue::from_static("DENY"));
 
     headers.insert(
         "Referrer-Policy",
@@ -113,10 +110,7 @@ pub async fn repair_dangling_sessions(db: &crate::db::Db) -> anyhow::Result<u32>
                 )
                 .await?;
                 repaired += 1;
-                tracing::warn!(
-                    "Repaired dangling agent-start for session {}",
-                    session.id
-                );
+                tracing::warn!("Repaired dangling agent-start for session {}", session.id);
             }
         }
     }

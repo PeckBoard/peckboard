@@ -27,9 +27,7 @@ pub enum ProviderEvent {
         error: Option<String>,
     },
     /// Agent finished normally.
-    Completed {
-        conversation_id: Option<String>,
-    },
+    Completed { conversation_id: Option<String> },
     /// Agent failed / crashed.
     Crashed {
         reason: String,
@@ -155,7 +153,10 @@ mod tests {
             .event_kind(),
             "agent-start"
         );
-        assert_eq!(ProviderEvent::Text { text: "hi".into() }.event_kind(), "agent-text");
+        assert_eq!(
+            ProviderEvent::Text { text: "hi".into() }.event_kind(),
+            "agent-text"
+        );
         assert_eq!(
             ProviderEvent::Completed {
                 conversation_id: None
@@ -176,7 +177,9 @@ mod tests {
 
     #[test]
     fn test_event_data_serialization() {
-        let event = ProviderEvent::Text { text: "hello".into() };
+        let event = ProviderEvent::Text {
+            text: "hello".into(),
+        };
         let data = event.event_data();
         assert_eq!(data["text"], "hello");
 

@@ -12,8 +12,14 @@ const STEPS = [
   { key: 'wont_do', label: "Won't Do" },
 ] as const
 
-interface WorkflowInfo { id: string; name: string }
-interface ModelInfo { id: string; display_name: string }
+interface WorkflowInfo {
+  id: string
+  name: string
+}
+interface ModelInfo {
+  id: string
+  display_name: string
+}
 
 const EFFORT_OPTIONS = [
   { value: '', label: 'Default' },
@@ -72,12 +78,16 @@ export default function KanbanBoard({ projectId }: KanbanBoardProps) {
 
   useEffect(() => {
     authedFetch('/api/workflows')
-      .then((res) => res.ok ? res.json() : null)
-      .then((data) => { if (data?.workflows) setWorkflows(data.workflows) })
+      .then((res) => (res.ok ? res.json() : null))
+      .then((data) => {
+        if (data?.workflows) setWorkflows(data.workflows)
+      })
       .catch(() => {})
     authedFetch('/api/models')
-      .then((res) => res.ok ? res.json() : null)
-      .then((data) => { if (data?.models) setModels(data.models) })
+      .then((res) => (res.ok ? res.json() : null))
+      .then((data) => {
+        if (data?.models) setModels(data.models)
+      })
       .catch(() => {})
   }, [])
 
@@ -141,7 +151,9 @@ export default function KanbanBoard({ projectId }: KanbanBoardProps) {
 
   const handleCancelWontDo = async (card: Card) => {
     setCardMenuId(null)
-    await authedFetch(`/api/projects/${projectId}/cards/${card.id}/cancel-wont-do`, { method: 'POST' })
+    await authedFetch(`/api/projects/${projectId}/cards/${card.id}/cancel-wont-do`, {
+      method: 'POST',
+    })
     fetchCards(projectId)
   }
 
@@ -179,7 +191,7 @@ export default function KanbanBoard({ projectId }: KanbanBoardProps) {
     if (!cardId || fromStep === targetStep) return
 
     useProjectsStore.setState((s) => ({
-      cards: s.cards.map((c) => c.id === cardId ? { ...c, step: targetStep } : c),
+      cards: s.cards.map((c) => (c.id === cardId ? { ...c, step: targetStep } : c)),
     }))
 
     try {
@@ -190,9 +202,7 @@ export default function KanbanBoard({ projectId }: KanbanBoardProps) {
   }
 
   // Only show wont_do column if there are cards in it
-  const visibleSteps = STEPS.filter(
-    (s) => s.key !== 'wont_do' || cardsByStep('wont_do').length > 0
-  )
+  const visibleSteps = STEPS.filter((s) => s.key !== 'wont_do' || cardsByStep('wont_do').length > 0)
 
   return (
     <div className="kanban-board">
@@ -202,8 +212,14 @@ export default function KanbanBoard({ projectId }: KanbanBoardProps) {
             <h2 className="kanban-project-name">{project.name}</h2>
             <span className={`status-badge status-${project.status}`}>{project.status}</span>
             <button
-              className={project.status === 'paused' ? 'btn-primary btn-sm' : 'btn-secondary btn-sm'}
-              onClick={() => updateProject(projectId, { status: project.status === 'paused' ? 'active' : 'paused' } as Record<string, unknown>)}
+              className={
+                project.status === 'paused' ? 'btn-primary btn-sm' : 'btn-secondary btn-sm'
+              }
+              onClick={() =>
+                updateProject(projectId, {
+                  status: project.status === 'paused' ? 'active' : 'paused',
+                } as Record<string, unknown>)
+              }
             >
               {project.status === 'paused' ? 'Resume' : 'Pause'}
             </button>
@@ -221,7 +237,9 @@ export default function KanbanBoard({ projectId }: KanbanBoardProps) {
             placeholder="Card title"
             value={addTitle}
             onChange={(e) => setAddTitle(e.target.value)}
-            onKeyDown={(e) => { if (e.key === 'Enter' && !e.shiftKey) handleAddCard() }}
+            onKeyDown={(e) => {
+              if (e.key === 'Enter' && !e.shiftKey) handleAddCard()
+            }}
             autoFocus
           />
           <textarea
@@ -238,17 +256,33 @@ export default function KanbanBoard({ projectId }: KanbanBoardProps) {
             </select>
             <select value={addWorkflow} onChange={(e) => setAddWorkflow(e.target.value)}>
               <option value="">Default workflow</option>
-              {workflows.map((w) => <option key={w.id} value={w.id}>{w.name}</option>)}
+              {workflows.map((w) => (
+                <option key={w.id} value={w.id}>
+                  {w.name}
+                </option>
+              ))}
             </select>
             <select value={addModel} onChange={(e) => setAddModel(e.target.value)}>
               <option value="">Default model</option>
-              {models.map((m) => <option key={m.id} value={m.id}>{m.display_name}</option>)}
+              {models.map((m) => (
+                <option key={m.id} value={m.id}>
+                  {m.display_name}
+                </option>
+              ))}
             </select>
             <select value={addEffort} onChange={(e) => setAddEffort(e.target.value)}>
-              {EFFORT_OPTIONS.map((o) => <option key={o.value} value={o.value}>{o.label} effort</option>)}
+              {EFFORT_OPTIONS.map((o) => (
+                <option key={o.value} value={o.value}>
+                  {o.label} effort
+                </option>
+              ))}
             </select>
           </div>
-          <button className="btn-primary" onClick={handleAddCard} disabled={!addTitle.trim() || addSubmitting}>
+          <button
+            className="btn-primary"
+            onClick={handleAddCard}
+            disabled={!addTitle.trim() || addSubmitting}
+          >
             {addSubmitting ? 'Creating...' : 'Create Card'}
           </button>
         </div>
@@ -293,29 +327,66 @@ export default function KanbanBoard({ projectId }: KanbanBoardProps) {
                   <div className="kanban-card-actions">
                     <button
                       className="kanban-card-menu-btn"
-                      onClick={(e) => { e.stopPropagation(); setCardMenuId(cardMenuId === card.id ? null : card.id) }}
+                      onClick={(e) => {
+                        e.stopPropagation()
+                        setCardMenuId(cardMenuId === card.id ? null : card.id)
+                      }}
                     >
                       ...
                     </button>
                     {cardMenuId === card.id && (
                       <div className="kanban-card-menu">
                         {(card.worker_session_id || card.last_worker_session_id) && (
-                          <button onClick={() => handleViewSession((card.worker_session_id || card.last_worker_session_id)!)}>
+                          <button
+                            onClick={() =>
+                              handleViewSession(
+                                (card.worker_session_id || card.last_worker_session_id)!,
+                              )
+                            }
+                          >
                             View Session
                           </button>
                         )}
-                        <button onClick={() => { setCardMenuId(null); setEditingCard(card) }}>Edit</button>
-                        <button onClick={() => { setCardMenuId(null); setSelectedCard(card) }}>Details</button>
+                        <button
+                          onClick={() => {
+                            setCardMenuId(null)
+                            setEditingCard(card)
+                          }}
+                        >
+                          Edit
+                        </button>
+                        <button
+                          onClick={() => {
+                            setCardMenuId(null)
+                            setSelectedCard(card)
+                          }}
+                        >
+                          Details
+                        </button>
                         {card.worker_session_id && (
                           <button onClick={() => handleStopWorker(card)}>Stop Worker</button>
                         )}
-                        {!card.worker_session_id && card.step !== 'done' && card.step !== 'wont_do' && (
-                          <button onClick={() => handleRestartWorker(card)}>Restart Worker</button>
-                        )}
+                        {!card.worker_session_id &&
+                          card.step !== 'done' &&
+                          card.step !== 'wont_do' && (
+                            <button onClick={() => handleRestartWorker(card)}>
+                              Restart Worker
+                            </button>
+                          )}
                         {card.step !== 'done' && card.step !== 'wont_do' && (
-                          <button className="danger" onClick={() => handleCancelWontDo(card)}>Cancel as Won't Do</button>
+                          <button className="danger" onClick={() => handleCancelWontDo(card)}>
+                            Cancel as Won't Do
+                          </button>
                         )}
-                        <button className="danger" onClick={() => { setCardMenuId(null); setConfirmDeleteId(card.id) }}>Delete</button>
+                        <button
+                          className="danger"
+                          onClick={() => {
+                            setCardMenuId(null)
+                            setConfirmDeleteId(card.id)
+                          }}
+                        >
+                          Delete
+                        </button>
                       </div>
                     )}
                   </div>
@@ -330,10 +401,16 @@ export default function KanbanBoard({ projectId }: KanbanBoardProps) {
         <div className="modal-backdrop" onClick={() => setConfirmDeleteId(null)}>
           <div className="modal" onClick={(e) => e.stopPropagation()} style={{ maxWidth: 360 }}>
             <h2>Delete card?</h2>
-            <p style={{ fontSize: 'var(--text-sm)', color: 'var(--text2)' }}>This will stop any active worker and permanently delete the card.</p>
+            <p style={{ fontSize: 'var(--text-sm)', color: 'var(--text2)' }}>
+              This will stop any active worker and permanently delete the card.
+            </p>
             <div className="form-actions" style={{ marginTop: 16 }}>
-              <button className="btn-secondary" onClick={() => setConfirmDeleteId(null)}>Cancel</button>
-              <button className="btn-danger" onClick={() => handleDeleteCard(confirmDeleteId)}>Delete</button>
+              <button className="btn-secondary" onClick={() => setConfirmDeleteId(null)}>
+                Cancel
+              </button>
+              <button className="btn-danger" onClick={() => handleDeleteCard(confirmDeleteId)}>
+                Delete
+              </button>
             </div>
           </div>
         </div>
@@ -346,7 +423,9 @@ export default function KanbanBoard({ projectId }: KanbanBoardProps) {
             <div className="card-detail-grid">
               <div className="card-detail-row">
                 <span className="card-detail-label">Step</span>
-                <span>{STEPS.find((s) => s.key === selectedCard.step)?.label ?? selectedCard.step}</span>
+                <span>
+                  {STEPS.find((s) => s.key === selectedCard.step)?.label ?? selectedCard.step}
+                </span>
               </div>
               <div className="card-detail-row">
                 <span className="card-detail-label">Priority</span>
@@ -397,12 +476,18 @@ export default function KanbanBoard({ projectId }: KanbanBoardProps) {
               {(selectedCard.worker_session_id || selectedCard.last_worker_session_id) && (
                 <button
                   className="btn-secondary"
-                  onClick={() => handleViewSession((selectedCard.worker_session_id || selectedCard.last_worker_session_id)!)}
+                  onClick={() =>
+                    handleViewSession(
+                      (selectedCard.worker_session_id || selectedCard.last_worker_session_id)!,
+                    )
+                  }
                 >
                   View Session
                 </button>
               )}
-              <button className="btn-secondary" onClick={() => setSelectedCard(null)}>Close</button>
+              <button className="btn-secondary" onClick={() => setSelectedCard(null)}>
+                Close
+              </button>
             </div>
           </div>
         </div>
@@ -412,7 +497,10 @@ export default function KanbanBoard({ projectId }: KanbanBoardProps) {
         <EditCardModal
           projectId={projectId}
           card={editingCard}
-          onClose={() => { setEditingCard(null); fetchCards(projectId) }}
+          onClose={() => {
+            setEditingCard(null)
+            fetchCards(projectId)
+          }}
         />
       )}
     </div>

@@ -49,7 +49,9 @@ export default function ProjectList({ onNewProject }: ProjectListProps) {
       <div className="project-list-header">
         <h2>Projects</h2>
         {onNewProject && (
-          <button className="create-btn" onClick={onNewProject}>+ New</button>
+          <button className="create-btn" onClick={onNewProject}>
+            + New
+          </button>
         )}
       </div>
 
@@ -57,35 +59,46 @@ export default function ProjectList({ onNewProject }: ProjectListProps) {
         {projects.map((project) => {
           const cardCount = project.id === activeProjectId ? cards.length : null
           return (
-            <li
-              key={project.id}
-              className={project.id === activeProjectId ? 'active' : ''}
-            >
+            <li key={project.id} className={project.id === activeProjectId ? 'active' : ''}>
               <button className="project-list-item" onClick={() => setActiveProject(project.id)}>
                 <span className="project-name">{project.name}</span>
-                <span className={`status-badge status-${project.status}`}>
-                  {project.status}
-                </span>
-                {cardCount !== null && (
-                  <span className="card-count">{cardCount} cards</span>
-                )}
+                <span className={`status-badge status-${project.status}`}>{project.status}</span>
+                {cardCount !== null && <span className="card-count">{cardCount} cards</span>}
               </button>
               <div className="project-list-actions">
                 <button
                   className="project-menu-btn"
-                  onClick={(e) => { e.stopPropagation(); setMenuOpen(menuOpen === project.id ? null : project.id) }}
+                  onClick={(e) => {
+                    e.stopPropagation()
+                    setMenuOpen(menuOpen === project.id ? null : project.id)
+                  }}
                 >
-                  <svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor"><circle cx="8" cy="3" r="1.5" /><circle cx="8" cy="8" r="1.5" /><circle cx="8" cy="13" r="1.5" /></svg>
+                  <svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor">
+                    <circle cx="8" cy="3" r="1.5" />
+                    <circle cx="8" cy="8" r="1.5" />
+                    <circle cx="8" cy="13" r="1.5" />
+                  </svg>
                 </button>
                 {menuOpen === project.id && (
                   <div className="project-menu-dropdown">
-                    <button onClick={() => { setMenuOpen(null); setEditingProject(project.id) }}>
+                    <button
+                      onClick={() => {
+                        setMenuOpen(null)
+                        setEditingProject(project.id)
+                      }}
+                    >
                       Edit
                     </button>
                     <button onClick={() => handleTogglePause(project.id, project.status)}>
                       {project.status === 'paused' ? 'Resume' : 'Pause'}
                     </button>
-                    <button className="danger" onClick={() => { setMenuOpen(null); setConfirmDelete(project.id) }}>
+                    <button
+                      className="danger"
+                      onClick={() => {
+                        setMenuOpen(null)
+                        setConfirmDelete(project.id)
+                      }}
+                    >
                       Delete
                     </button>
                   </div>
@@ -97,12 +110,13 @@ export default function ProjectList({ onNewProject }: ProjectListProps) {
         {projects.length === 0 && <li className="empty">No projects yet</li>}
       </ul>
 
-      {editingProject && (() => {
-        const proj = projects.find((p) => p.id === editingProject)
-        return proj ? (
-          <EditProjectModal project={proj} onClose={() => setEditingProject(null)} />
-        ) : null
-      })()}
+      {editingProject &&
+        (() => {
+          const proj = projects.find((p) => p.id === editingProject)
+          return proj ? (
+            <EditProjectModal project={proj} onClose={() => setEditingProject(null)} />
+          ) : null
+        })()}
 
       {confirmDelete && (
         <ConfirmDialog

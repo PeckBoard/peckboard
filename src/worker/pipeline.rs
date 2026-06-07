@@ -205,9 +205,7 @@ mod tests {
 
     #[test]
     fn test_detect_retry_loop_no_crashes() {
-        let events = vec![
-            make_event("agent-end", r#"{"status":"complete"}"#),
-        ];
+        let events = vec![make_event("agent-end", r#"{"status":"complete"}"#)];
         let (count, blocked) = detect_retry_loop(&events);
         assert_eq!(count, 0);
         assert!(!blocked);

@@ -44,10 +44,7 @@ impl ProviderRegistry {
             info.display_name,
             info.models.len()
         );
-        providers.insert(
-            info.id.clone(),
-            RegisteredProvider { info, provider },
-        );
+        providers.insert(info.id.clone(), RegisteredProvider { info, provider });
     }
 
     /// Get provider metadata by ID.

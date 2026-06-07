@@ -173,11 +173,7 @@ impl SessionManager {
 
     /// Scan the event tail for a conversation_id in agent-start or agent-end
     /// events. Used as a fallback when `session.conversation_id` is empty.
-    async fn find_conversation_id_from_events(
-        &self,
-        db: &Db,
-        session_id: &str,
-    ) -> Option<String> {
+    async fn find_conversation_id_from_events(&self, db: &Db, session_id: &str) -> Option<String> {
         let tail = db.events_tail(session_id, 50).await.ok()?;
 
         for event in tail.iter().rev() {

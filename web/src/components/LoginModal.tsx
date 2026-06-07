@@ -25,11 +25,15 @@ export default function LoginModal() {
   return (
     <div className="modal-backdrop">
       <div className="modal">
-        <h1 className="modal-brand">Peck<span>board</span></h1>
+        <h1 className="modal-brand">
+          Peck<span>board</span>
+        </h1>
         <p className="modal-subtitle">Sign in to your account</p>
         <form onSubmit={handleSubmit}>
           <div className="form-field">
-            <label className="form-label" htmlFor="login-username">Username</label>
+            <label className="form-label" htmlFor="login-username">
+              Username
+            </label>
             <input
               id="login-username"
               className="form-input"
@@ -41,7 +45,9 @@ export default function LoginModal() {
             />
           </div>
           <div className="form-field">
-            <label className="form-label" htmlFor="login-password">Password</label>
+            <label className="form-label" htmlFor="login-password">
+              Password
+            </label>
             <input
               id="login-password"
               className="form-input"
@@ -51,14 +57,19 @@ export default function LoginModal() {
               required
             />
           </div>
-          <div className="form-field" style={{ flexDirection: 'row', alignItems: 'center', gap: '0.5rem' }}>
+          <div
+            className="form-field"
+            style={{ flexDirection: 'row', alignItems: 'center', gap: '0.5rem' }}
+          >
             <input
               id="login-remember"
               type="checkbox"
               checked={rememberMe}
               onChange={(e) => setRememberMe(e.target.checked)}
             />
-            <label className="form-label" htmlFor="login-remember" style={{ margin: 0 }}>Remember me</label>
+            <label className="form-label" htmlFor="login-remember" style={{ margin: 0 }}>
+              Remember me
+            </label>
           </div>
           {error && <p className="form-error">{error}</p>}
           <button className="btn-primary" type="submit" disabled={loading}>

@@ -17,7 +17,9 @@ export default function FoldersPage() {
   const [moveTargetId, setMoveTargetId] = useState('')
   const [deleting, setDeleting] = useState(false)
 
-  useEffect(() => { fetchFolders() }, [fetchFolders])
+  useEffect(() => {
+    fetchFolders()
+  }, [fetchFolders])
 
   const handleCreate = async () => {
     if (!name.trim() || !path.trim()) return
@@ -106,7 +108,9 @@ export default function FoldersPage() {
                 <strong>{f.name}</strong>
                 <span className="folder-path">{f.path}</span>
               </div>
-              <button className="folder-delete" onClick={() => handleDeleteClick(f)} title="Delete">&times;</button>
+              <button className="folder-delete" onClick={() => handleDeleteClick(f)} title="Delete">
+                &times;
+              </button>
             </div>
           ))}
           {folders.length === 0 && (
@@ -120,14 +124,33 @@ export default function FoldersPage() {
       <section className="settings-section">
         <h3>Add Folder</h3>
         <div className="folder-create-fields">
-          <input className="form-input" placeholder="Name (e.g. My Workspace)" value={name} onChange={(e) => setName(e.target.value)} />
-          <input className="form-input" placeholder="Path (e.g. /Users/me/projects)" value={path} onChange={(e) => setPath(e.target.value)}
-            onKeyDown={(e) => e.key === 'Enter' && handleCreate()} />
-          <button className="btn-primary" onClick={handleCreate} disabled={creating || !name.trim() || !path.trim()} style={{ alignSelf: 'flex-start' }}>
+          <input
+            className="form-input"
+            placeholder="Name (e.g. My Workspace)"
+            value={name}
+            onChange={(e) => setName(e.target.value)}
+          />
+          <input
+            className="form-input"
+            placeholder="Path (e.g. /Users/me/projects)"
+            value={path}
+            onChange={(e) => setPath(e.target.value)}
+            onKeyDown={(e) => e.key === 'Enter' && handleCreate()}
+          />
+          <button
+            className="btn-primary"
+            onClick={handleCreate}
+            disabled={creating || !name.trim() || !path.trim()}
+            style={{ alignSelf: 'flex-start' }}
+          >
             {creating ? 'Adding...' : 'Add Folder'}
           </button>
         </div>
-        {error && <p className="form-error" style={{ marginTop: 8 }}>{error}</p>}
+        {error && (
+          <p className="form-error" style={{ marginTop: 8 }}>
+            {error}
+          </p>
+        )}
       </section>
 
       {/* Delete folder dialog — shown when folder has sessions */}
@@ -136,7 +159,8 @@ export default function FoldersPage() {
           <div className="modal" onClick={(e) => e.stopPropagation()}>
             <h2>Delete "{deleteTarget.name}"</h2>
             <p className="modal-subtitle">
-              This folder has {deleteSessionCount} session{deleteSessionCount !== 1 ? 's' : ''}. Choose how to proceed:
+              This folder has {deleteSessionCount} session{deleteSessionCount !== 1 ? 's' : ''}.
+              Choose how to proceed:
             </p>
 
             <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
@@ -147,7 +171,10 @@ export default function FoldersPage() {
                 disabled={deleting}
               >
                 <strong>Delete all sessions</strong>
-                <span>Permanently delete all sessions and their events in this folder, then delete the folder.</span>
+                <span>
+                  Permanently delete all sessions and their events in this folder, then delete the
+                  folder.
+                </span>
               </button>
 
               {/* Option 2: Move sessions */}
@@ -156,12 +183,24 @@ export default function FoldersPage() {
                   <div className="folder-delete-option-move">
                     <strong>Move sessions to another folder</strong>
                     <div style={{ display: 'flex', gap: 8, marginTop: 8 }}>
-                      <select className="form-input" value={moveTargetId} onChange={(e) => setMoveTargetId(e.target.value)} style={{ flex: 1 }}>
+                      <select
+                        className="form-input"
+                        value={moveTargetId}
+                        onChange={(e) => setMoveTargetId(e.target.value)}
+                        style={{ flex: 1 }}
+                      >
                         {otherFolders.map((f) => (
-                          <option key={f.id} value={f.id}>{f.name}</option>
+                          <option key={f.id} value={f.id}>
+                            {f.name}
+                          </option>
                         ))}
                       </select>
-                      <button className="btn-primary" onClick={handleMoveThenDelete} disabled={deleting || !moveTargetId} style={{ whiteSpace: 'nowrap' }}>
+                      <button
+                        className="btn-primary"
+                        onClick={handleMoveThenDelete}
+                        disabled={deleting || !moveTargetId}
+                        style={{ whiteSpace: 'nowrap' }}
+                      >
                         Move & Delete
                       </button>
                     </div>
@@ -170,7 +209,11 @@ export default function FoldersPage() {
               )}
 
               {/* Option 3: Cancel */}
-              <button className="btn-secondary" onClick={() => setDeleteTarget(null)} style={{ alignSelf: 'flex-start' }}>
+              <button
+                className="btn-secondary"
+                onClick={() => setDeleteTarget(null)}
+                style={{ alignSelf: 'flex-start' }}
+              >
                 Cancel
               </button>
             </div>

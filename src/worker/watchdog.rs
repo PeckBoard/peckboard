@@ -7,7 +7,11 @@ use crate::ws::broadcaster::Broadcaster;
 
 /// Start the worker watchdog loop. Runs every 60 seconds and cleans up orphaned
 /// worker sessions whose associated cards no longer reference them.
-pub async fn start_watchdog(db: Db, session_manager: SessionManager, broadcaster: Arc<Broadcaster>) {
+pub async fn start_watchdog(
+    db: Db,
+    session_manager: SessionManager,
+    broadcaster: Arc<Broadcaster>,
+) {
     let mut interval = tokio::time::interval(Duration::from_secs(60));
     // The broadcaster is kept for future use (e.g., notifying on cleanup).
     let _broadcaster = broadcaster;
@@ -98,16 +102,10 @@ async fn sweep_orphans(db: &Db, session_manager: &SessionManager) {
                     );
                 }
                 Ok(false) => {
-                    tracing::debug!(
-                        "Watchdog: session {} already deleted",
-                        session.id
-                    );
+                    tracing::debug!("Watchdog: session {} already deleted", session.id);
                 }
                 Err(e) => {
-                    tracing::error!(
-                        "Watchdog: failed to delete session {}: {e}",
-                        session.id
-                    );
+                    tracing::error!("Watchdog: failed to delete session {}: {e}", session.id);
                 }
             }
         }

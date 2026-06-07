@@ -400,10 +400,11 @@ mod tests {
         let all = db.list_push_subscriptions().await.unwrap();
         assert_eq!(all.len(), 1);
 
-        assert!(db
-            .delete_push_subscription("https://push.example.com/sub1")
-            .await
-            .unwrap());
+        assert!(
+            db.delete_push_subscription("https://push.example.com/sub1")
+                .await
+                .unwrap()
+        );
         assert_eq!(db.list_push_subscriptions().await.unwrap().len(), 0);
     }
 

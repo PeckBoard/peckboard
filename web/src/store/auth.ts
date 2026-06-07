@@ -21,10 +21,7 @@ function clearToken(): void {
 }
 
 /** Fetch wrapper that attaches JWT and handles 401 by clearing auth state. */
-export async function authedFetch(
-  input: RequestInfo | URL,
-  init?: RequestInit,
-): Promise<Response> {
+export async function authedFetch(input: RequestInfo | URL, init?: RequestInit): Promise<Response> {
   const token = getToken()
   const headers = new Headers(init?.headers)
   if (token) {

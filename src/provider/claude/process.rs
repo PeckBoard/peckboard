@@ -137,141 +137,155 @@ pub async fn stream_events(
     let mut emitted_start = false;
 
     loop {
-      let line = tokio::select! {
-          result = lines.next_line() => {
-              match result {
-                  Ok(Some(line)) => line,
-                  _ => break, // stdout closed
-              }
-          }
-          Some(text) = stdin_rx.recv() => {
-              // External caller (e.g. question-resolved) wants to write to stdin
-              write_stdin_line(&mut stdin_pipe, &text, &session_id).await;
-              continue;
-          }
-      };
-
-      {
-        let line = line.trim().to_string();
-        if line.is_empty() {
-            continue;
-        }
-
-        let json: serde_json::Value = match serde_json::from_str(&line) {
-            Ok(v) => v,
-            Err(e) => {
-                tracing::warn!(
-                    session_id = %session_id,
-                    "Non-JSON line from claude: {} (error: {})",
-                    &line[..line.len().min(200)],
-                    e
-                );
+        let line = tokio::select! {
+            result = lines.next_line() => {
+                match result {
+                    Ok(Some(line)) => line,
+                    _ => break, // stdout closed
+                }
+            }
+            Some(text) = stdin_rx.recv() => {
+                // External caller (e.g. question-resolved) wants to write to stdin
+                write_stdin_line(&mut stdin_pipe, &text, &session_id).await;
                 continue;
             }
         };
 
-        // Handle control_request events directly (need stdin access for auto-allow)
-        if json.get("type").and_then(|v| v.as_str()) == Some("control_request") {
-            let request = json.get("request");
-            let request_id = json.get("request_id").and_then(|v| v.as_str()).unwrap_or("");
-            let subtype = request.and_then(|r| r.get("subtype")).and_then(|v| v.as_str()).unwrap_or("");
-            let tool_name = request.and_then(|r| r.get("tool_name")).and_then(|v| v.as_str()).unwrap_or("");
+        {
+            let line = line.trim().to_string();
+            if line.is_empty() {
+                continue;
+            }
 
-            if subtype == "can_use_tool" && tool_name == "AskUserQuestion" {
-                // Parse and normalize questions from the input
-                let input = request.and_then(|r| r.get("input"));
-                let tool_use_id = request
-                    .and_then(|r| r.get("tool_use_id"))
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("");
-                let questions = normalize_questions(input);
-
-                let event_data = serde_json::json!({
-                    "requestId": request_id,
-                    "toolUseId": tool_use_id,
-                    "questions": questions,
-                });
-
-                // Emit as a "question" event
-                if let Ok(db_event) = db.append_event(&session_id, "question", event_data.clone()).await {
-                    let now = chrono::Utc::now().to_rfc3339();
-                    let _ = db.update_session(
-                        &session_id,
-                        crate::db::models::UpdateSession {
-                            last_activity: Some(now),
-                            ..Default::default()
-                        },
-                    ).await;
-                    broadcaster.broadcast(WsEvent {
-                        event_type: "event".into(),
-                        session_id: session_id.clone(),
-                        data: serde_json::json!({
-                            "id": db_event.id,
-                            "seq": db_event.seq,
-                            "ts": db_event.ts,
-                            "kind": "question",
-                            "data": event_data,
-                        }),
-                    });
-                }
-            } else if subtype == "can_use_tool" {
-                let input = request
-                    .and_then(|r| r.get("input"))
-                    .cloned()
-                    .unwrap_or(serde_json::json!({}));
-
-                // Check if the tool is trying to access paths outside the allowed directory
-                let denied = check_path_violation(tool_name, &input, &allowed_dir);
-
-                let frame = if let Some(reason) = denied {
+            let json: serde_json::Value = match serde_json::from_str(&line) {
+                Ok(v) => v,
+                Err(e) => {
                     tracing::warn!(
                         session_id = %session_id,
-                        tool = tool_name,
-                        "Denied tool use: {}",
-                        reason
+                        "Non-JSON line from claude: {} (error: {})",
+                        &line[..line.len().min(200)],
+                        e
                     );
-                    serde_json::json!({
-                        "type": "control_response",
-                        "response": {
-                            "subtype": "success",
-                            "request_id": request_id,
+                    continue;
+                }
+            };
+
+            // Handle control_request events directly (need stdin access for auto-allow)
+            if json.get("type").and_then(|v| v.as_str()) == Some("control_request") {
+                let request = json.get("request");
+                let request_id = json
+                    .get("request_id")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
+                let subtype = request
+                    .and_then(|r| r.get("subtype"))
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
+                let tool_name = request
+                    .and_then(|r| r.get("tool_name"))
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
+
+                if subtype == "can_use_tool" && tool_name == "AskUserQuestion" {
+                    // Parse and normalize questions from the input
+                    let input = request.and_then(|r| r.get("input"));
+                    let tool_use_id = request
+                        .and_then(|r| r.get("tool_use_id"))
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("");
+                    let questions = normalize_questions(input);
+
+                    let event_data = serde_json::json!({
+                        "requestId": request_id,
+                        "toolUseId": tool_use_id,
+                        "questions": questions,
+                    });
+
+                    // Emit as a "question" event
+                    if let Ok(db_event) = db
+                        .append_event(&session_id, "question", event_data.clone())
+                        .await
+                    {
+                        let now = chrono::Utc::now().to_rfc3339();
+                        let _ = db
+                            .update_session(
+                                &session_id,
+                                crate::db::models::UpdateSession {
+                                    last_activity: Some(now),
+                                    ..Default::default()
+                                },
+                            )
+                            .await;
+                        broadcaster.broadcast(WsEvent {
+                            event_type: "event".into(),
+                            session_id: session_id.clone(),
+                            data: serde_json::json!({
+                                "id": db_event.id,
+                                "seq": db_event.seq,
+                                "ts": db_event.ts,
+                                "kind": "question",
+                                "data": event_data,
+                            }),
+                        });
+                    }
+                } else if subtype == "can_use_tool" {
+                    let input = request
+                        .and_then(|r| r.get("input"))
+                        .cloned()
+                        .unwrap_or(serde_json::json!({}));
+
+                    // Check if the tool is trying to access paths outside the allowed directory
+                    let denied = check_path_violation(tool_name, &input, &allowed_dir);
+
+                    let frame = if let Some(reason) = denied {
+                        tracing::warn!(
+                            session_id = %session_id,
+                            tool = tool_name,
+                            "Denied tool use: {}",
+                            reason
+                        );
+                        serde_json::json!({
+                            "type": "control_response",
                             "response": {
-                                "behavior": "deny",
-                                "message": reason,
+                                "subtype": "success",
+                                "request_id": request_id,
+                                "response": {
+                                    "behavior": "deny",
+                                    "message": reason,
+                                }
                             }
-                        }
-                    })
-                } else {
-                    serde_json::json!({
-                        "type": "control_response",
-                        "response": {
-                            "subtype": "success",
-                            "request_id": request_id,
+                        })
+                    } else {
+                        serde_json::json!({
+                            "type": "control_response",
                             "response": {
-                                "behavior": "allow",
-                                "updatedInput": input,
+                                "subtype": "success",
+                                "request_id": request_id,
+                                "response": {
+                                    "behavior": "allow",
+                                    "updatedInput": input,
+                                }
                             }
-                        }
-                    })
-                };
-                write_stdin_line(&mut stdin_pipe, &frame.to_string(), &session_id).await;
+                        })
+                    };
+                    write_stdin_line(&mut stdin_pipe, &frame.to_string(), &session_id).await;
+                }
+                continue;
             }
-            continue;
-        }
 
-        // Extract events based on the stream-json type field
-        let events = parse_stream_json(
-            &json,
-            &mut conversation_id,
-            &mut model_name,
-            &mut current_tool_id,
-            &mut emitted_start,
-        );
+            // Extract events based on the stream-json type field
+            let events = parse_stream_json(
+                &json,
+                &mut conversation_id,
+                &mut model_name,
+                &mut current_tool_id,
+                &mut emitted_start,
+            );
 
-        for event in events {
-            emit_event(&db, &broadcaster, &session_id, event).await;
-        }
-      } // end inner block
+            for event in events {
+                emit_event(&db, &broadcaster, &session_id, event).await;
+            }
+        } // end inner block
     } // end loop
 
     // Drop stdin pipe to signal EOF to the child process
@@ -303,9 +317,7 @@ pub async fn stream_events(
                 &db,
                 &broadcaster,
                 &session_id,
-                ProviderEvent::Completed {
-                    conversation_id,
-                },
+                ProviderEvent::Completed { conversation_id },
             )
             .await;
             true
@@ -422,25 +434,21 @@ fn parse_stream_json(
 ) -> Vec<ProviderEvent> {
     let mut events = Vec::new();
 
-    let msg_type = json
-        .get("type")
-        .and_then(|v| v.as_str())
-        .unwrap_or("");
+    let msg_type = json.get("type").and_then(|v| v.as_str()).unwrap_or("");
 
     match msg_type {
         // ── system init ──────────────────────────────────────────
         "system" => {
-            let subtype = json
-                .get("subtype")
-                .and_then(|v| v.as_str())
-                .unwrap_or("");
+            let subtype = json.get("subtype").and_then(|v| v.as_str()).unwrap_or("");
 
             if subtype == "init" {
                 if let Some(model) = json.get("model").and_then(|v| v.as_str()) {
                     *model_name = Some(model.to_string());
                 }
                 // CLI uses "session_id" as the resumable conversation identifier
-                if let Some(cid) = json.get("session_id").and_then(|v| v.as_str())
+                if let Some(cid) = json
+                    .get("session_id")
+                    .and_then(|v| v.as_str())
                     .or_else(|| json.get("conversation_id").and_then(|v| v.as_str()))
                 {
                     *conversation_id = Some(cid.to_string());
@@ -545,13 +553,10 @@ fn parse_stream_json(
             if let Some(msg) = json.get("message") {
                 if let Some(content) = msg.get("content").and_then(|v| v.as_array()) {
                     for block in content {
-                        let block_type =
-                            block.get("type").and_then(|v| v.as_str()).unwrap_or("");
+                        let block_type = block.get("type").and_then(|v| v.as_str()).unwrap_or("");
                         match block_type {
                             "text" => {
-                                if let Some(text) =
-                                    block.get("text").and_then(|v| v.as_str())
-                                {
+                                if let Some(text) = block.get("text").and_then(|v| v.as_str()) {
                                     if !text.is_empty() {
                                         events.push(ProviderEvent::Text {
                                             text: text.to_string(),
@@ -594,11 +599,7 @@ fn parse_stream_json(
                                     .get("is_error")
                                     .and_then(|v| v.as_bool())
                                     .unwrap_or(false);
-                                let error = if is_error {
-                                    output.clone()
-                                } else {
-                                    None
-                                };
+                                let error = if is_error { output.clone() } else { None };
                                 events.push(ProviderEvent::ToolEnd {
                                     tool_use_id: tool_id,
                                     output: if is_error { None } else { output },
@@ -617,8 +618,7 @@ fn parse_stream_json(
             if let Some(msg) = json.get("message") {
                 if let Some(content) = msg.get("content").and_then(|v| v.as_array()) {
                     for block in content {
-                        let block_type =
-                            block.get("type").and_then(|v| v.as_str()).unwrap_or("");
+                        let block_type = block.get("type").and_then(|v| v.as_str()).unwrap_or("");
                         if block_type == "tool_result" {
                             let tool_id = block
                                 .get("tool_use_id")
@@ -633,11 +633,7 @@ fn parse_stream_json(
                                 .get("is_error")
                                 .and_then(|v| v.as_bool())
                                 .unwrap_or(false);
-                            let error = if is_error {
-                                output.clone()
-                            } else {
-                                None
-                            };
+                            let error = if is_error { output.clone() } else { None };
                             events.push(ProviderEvent::ToolEnd {
                                 tool_use_id: tool_id,
                                 output: if is_error { None } else { output },
@@ -652,7 +648,9 @@ fn parse_stream_json(
         // ── result ───────────────────────────────────────────────
         "result" => {
             // CLI uses "session_id" in result events
-            if let Some(cid) = json.get("session_id").and_then(|v| v.as_str())
+            if let Some(cid) = json
+                .get("session_id")
+                .and_then(|v| v.as_str())
                 .or_else(|| json.get("conversation_id").and_then(|v| v.as_str()))
             {
                 *conversation_id = Some(cid.to_string());
@@ -673,10 +671,7 @@ fn parse_stream_json(
         }
 
         _ => {
-            tracing::debug!(
-                msg_type = msg_type,
-                "Unhandled stream-json type"
-            );
+            tracing::debug!(msg_type = msg_type, "Unhandled stream-json type");
         }
     }
 
@@ -708,7 +703,11 @@ async fn write_stdin_line(
 
 /// Check if a tool's input references paths outside the allowed directory.
 /// Returns Some(reason) if the tool should be denied, None if allowed.
-fn check_path_violation(tool_name: &str, input: &serde_json::Value, allowed_dir: &str) -> Option<String> {
+fn check_path_violation(
+    tool_name: &str,
+    input: &serde_json::Value,
+    allowed_dir: &str,
+) -> Option<String> {
     if allowed_dir.is_empty() {
         return None;
     }
@@ -744,7 +743,11 @@ fn check_path_violation(tool_name: &str, input: &serde_json::Value, allowed_dir:
                     if cmd.contains(pattern) {
                         // Try to extract the target path from cd commands
                         if cmd.starts_with("cd ") {
-                            let target = cmd.trim_start_matches("cd ").split_whitespace().next().unwrap_or("");
+                            let target = cmd
+                                .trim_start_matches("cd ")
+                                .split_whitespace()
+                                .next()
+                                .unwrap_or("");
                             if !target.is_empty() {
                                 let target_path = if target.starts_with('/') {
                                     std::path::PathBuf::from(target)
@@ -825,7 +828,10 @@ fn check_path_violation(tool_name: &str, input: &serde_json::Value, allowed_dir:
 /// the full structure for the control_response answer frame.
 fn normalize_questions(input: Option<&serde_json::Value>) -> serde_json::Value {
     let empty = serde_json::json!([]);
-    let raw_questions = match input.and_then(|i| i.get("questions")).and_then(|q| q.as_array()) {
+    let raw_questions = match input
+        .and_then(|i| i.get("questions"))
+        .and_then(|q| q.as_array())
+    {
         Some(q) => q,
         None => return empty,
     };
@@ -838,7 +844,10 @@ fn normalize_questions(input: Option<&serde_json::Value>) -> serde_json::Value {
         };
 
         let header = q.get("header").and_then(|v| v.as_str());
-        let multi_select = q.get("multiSelect").and_then(|v| v.as_bool()).unwrap_or(false);
+        let multi_select = q
+            .get("multiSelect")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
 
         let mut option_labels = Vec::new();
         let mut option_objects = Vec::new();
@@ -890,11 +899,8 @@ pub async fn kill_process(mut process: ClaudeProcess) {
         }
 
         // Wait up to 5 seconds for graceful exit
-        let wait_result = tokio::time::timeout(
-            std::time::Duration::from_secs(5),
-            process.child.wait(),
-        )
-        .await;
+        let wait_result =
+            tokio::time::timeout(std::time::Duration::from_secs(5), process.child.wait()).await;
 
         match wait_result {
             Ok(Ok(status)) => {
@@ -979,7 +985,9 @@ mod tests {
         let events = parse_stream_json(&json, &mut cid, &mut model, &mut tool_id, &mut started);
 
         assert_eq!(events.len(), 1);
-        assert!(matches!(&events[0], ProviderEvent::Started { model, .. } if model == "claude-sonnet-4-20250514"));
+        assert!(
+            matches!(&events[0], ProviderEvent::Started { model, .. } if model == "claude-sonnet-4-20250514")
+        );
         assert_eq!(cid.as_deref(), Some("conv-abc123"));
         assert!(started);
     }
@@ -1088,7 +1096,9 @@ mod tests {
         let events = parse_stream_json(&json, &mut cid, &mut model, &mut tool_id, &mut started);
 
         assert_eq!(events.len(), 1);
-        assert!(matches!(&events[0], ProviderEvent::Started { model, .. } if model == "claude-sonnet-4-20250514"));
+        assert!(
+            matches!(&events[0], ProviderEvent::Started { model, .. } if model == "claude-sonnet-4-20250514")
+        );
         assert!(started);
     }
 
@@ -1136,7 +1146,9 @@ mod tests {
         let events = parse_stream_json(&json, &mut cid, &mut model, &mut tool_id, &mut started);
 
         assert_eq!(events.len(), 2);
-        assert!(matches!(&events[0], ProviderEvent::Text { text } if text == "Here is the answer."));
+        assert!(
+            matches!(&events[0], ProviderEvent::Text { text } if text == "Here is the answer.")
+        );
         assert!(matches!(
             &events[1],
             ProviderEvent::ToolStart { tool_use_id, name, .. }

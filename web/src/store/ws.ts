@@ -12,12 +12,18 @@ function loadLastSeqs(): Record<string, number> {
   try {
     const raw = sessionStorage.getItem(SEQ_KEY)
     if (raw) return JSON.parse(raw)
-  } catch { /* ignore */ }
+  } catch {
+    /* ignore */
+  }
   return {}
 }
 
 function saveLastSeqs(seqs: Record<string, number>) {
-  try { sessionStorage.setItem(SEQ_KEY, JSON.stringify(seqs)) } catch { /* ignore */ }
+  try {
+    sessionStorage.setItem(SEQ_KEY, JSON.stringify(seqs))
+  } catch {
+    /* ignore */
+  }
 }
 
 interface WsState {
@@ -67,7 +73,10 @@ export const useWsStore = create<WsState>((set, get) => ({
     intentionalClose = false
     clearReconnectTimer()
 
-    if (socket && (socket.readyState === WebSocket.OPEN || socket.readyState === WebSocket.CONNECTING)) {
+    if (
+      socket &&
+      (socket.readyState === WebSocket.OPEN || socket.readyState === WebSocket.CONNECTING)
+    ) {
       return
     }
 
