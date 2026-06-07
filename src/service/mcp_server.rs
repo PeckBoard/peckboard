@@ -600,6 +600,25 @@ impl McpToolRegistry {
                     "additionalProperties": false
                 }),
             },
+            McpToolDef {
+                name: "fetch_url".into(),
+                description: "Fetch a URL from peckboard's server (bypasses bot protection that blocks the CLI's WebFetch). Use this when WebFetch returns 403 or is blocked. Returns the page text content.".into(),
+                input_schema: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "url": {
+                            "type": "string",
+                            "description": "The URL to fetch"
+                        },
+                        "max_length": {
+                            "type": "integer",
+                            "description": "Max response length in chars (default 10000)"
+                        }
+                    },
+                    "required": ["url"],
+                    "additionalProperties": false
+                }),
+            },
         ];
 
         McpToolRegistry { tools }
@@ -637,6 +656,7 @@ impl McpToolRegistry {
             "move_card_to_done" => self.handle_move_card_to_done(args, ctx).await,
             "move_card_to_wont_do" => self.handle_move_card_to_wont_do(args, ctx).await,
             "notify_workers" => self.handle_notify_workers(args, ctx).await,
+            "fetch_url" => self.handle_fetch_url(args, ctx).await,
             _ => anyhow::bail!("unknown tool: {tool_name}"),
         }
     }
@@ -1648,6 +1668,67 @@ impl McpToolRegistry {
             "status": "ok",
             "workers_notified": notified_count,
             "message": format!("Notified {} other worker(s) in this project", notified_count)
+        }))
+    }
+
+    async fn handle_fetch_url(
+        &self,
+        args: Value,
+        ctx: &ToolCallContext,
+    ) -> anyhow::Result<Value> {
+        let url = args
+            .get("url")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| anyhow::anyhow!("fetch_url requires 'url'"))?;
+
+        let max_length = args
+            .get("max_length")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(10000) as usize;
+
+        tracing::info!(session_id = %ctx.session_id, url = %url, "MCP tool: fetch_url");
+
+        let client = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(15))
+            .user_agent("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
+            .build()?;
+
+        let response = client.get(url).send().await?;
+        let status = response.status().as_u16();
+
+        if !response.status().is_success() {
+            return Ok(serde_json::json!({
+                "status": "error",
+                "http_status": status,
+                "message": format!("HTTP {status}")
+            }));
+        }
+
+        let body = response.text().await?;
+
+        // Strip HTML tags for a rough text extraction
+        let text = if body.contains('<') && body.contains('>') {
+            // Simple HTML tag stripping
+            let re = regex::Regex::new(r"<script[^>]*>[\s\S]*?</script>|<style[^>]*>[\s\S]*?</style>|<[^>]+>").unwrap();
+            let stripped = re.replace_all(&body, " ");
+            // Collapse whitespace
+            let ws_re = regex::Regex::new(r"\s+").unwrap();
+            ws_re.replace_all(&stripped, " ").trim().to_string()
+        } else {
+            body
+        };
+
+        let truncated = if text.len() > max_length {
+            format!("{}... (truncated at {} chars)", &text[..max_length], max_length)
+        } else {
+            text
+        };
+
+        Ok(serde_json::json!({
+            "status": "ok",
+            "http_status": status,
+            "content": truncated,
+            "length": truncated.len(),
         }))
     }
 }

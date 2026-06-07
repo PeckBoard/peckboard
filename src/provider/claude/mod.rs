@@ -266,6 +266,7 @@ pub fn build_cli_args(
             "wont_do_card",
             "ask_user",
             "notify_workers",
+            "fetch_url",
         ];
         let allowed: Vec<String> = mcp_tools
             .iter()
