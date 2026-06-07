@@ -306,10 +306,14 @@ impl McpToolRegistry {
             },
             McpToolDef {
                 name: "create_card".into(),
-                description: "Create a new card in the current project.".into(),
+                description: "Create a new card in a project. Uses current project context if available, or pass project_id explicitly.".into(),
                 input_schema: serde_json::json!({
                     "type": "object",
                     "properties": {
+                        "project_id": {
+                            "type": "string",
+                            "description": "Project ID (optional if in a worker session with project context)"
+                        },
                         "title": {
                             "type": "string",
                             "description": "Card title"
@@ -333,10 +337,12 @@ impl McpToolRegistry {
             },
             McpToolDef {
                 name: "list_cards".into(),
-                description: "List all cards in the current project.".into(),
+                description: "List all cards in a project. Uses current project context if available, or pass project_id explicitly.".into(),
                 input_schema: serde_json::json!({
                     "type": "object",
-                    "properties": {},
+                    "properties": {
+                        "project_id": { "type": "string", "description": "Project ID (optional if in a worker session with project context)" }
+                    },
                     "additionalProperties": false
                 }),
             },
@@ -725,7 +731,7 @@ impl McpToolRegistry {
             "wont_do_card" => self.handle_wont_do_card(args, ctx).await,
             "ask_user" => self.handle_ask_user(args, ctx).await,
             "create_card" => self.handle_create_card(args, ctx).await,
-            "list_cards" => self.handle_list_cards(ctx).await,
+            "list_cards" => self.handle_list_cards(args, ctx).await,
             "list_projects" => self.handle_list_projects(ctx).await,
             "list_workflows" => self.handle_list_workflows(ctx).await,
             "write_report" => self.handle_write_report(args, ctx).await,
@@ -1024,10 +1030,16 @@ impl McpToolRegistry {
         args: Value,
         ctx: &ToolCallContext,
     ) -> anyhow::Result<Value> {
-        let project_id = ctx
-            .project_id
-            .as_deref()
-            .ok_or_else(|| anyhow::anyhow!("create_card requires project context"))?;
+        // Accept project_id from args (for chat sessions) or context (for workers)
+        let project_id = args.get("project_id").and_then(|v| v.as_str()).map(|s| s.to_string())
+            .or_else(|| ctx.project_id.clone())
+            .or_else(|| {
+                // Fallback: resolve from session
+                // (can't await here, handled below)
+                None
+            })
+            .ok_or_else(|| anyhow::anyhow!("create_card requires 'project_id' parameter or project context"))?;
+        let project_id = project_id.as_str();
 
         tracing::info!(session_id = %ctx.session_id, project_id = %project_id, "MCP tool: create_card");
 
@@ -1084,15 +1096,14 @@ impl McpToolRegistry {
         }))
     }
 
-    async fn handle_list_cards(&self, ctx: &ToolCallContext) -> anyhow::Result<Value> {
+    async fn handle_list_cards(&self, args: Value, ctx: &ToolCallContext) -> anyhow::Result<Value> {
         tracing::info!(session_id = %ctx.session_id, "MCP tool: list_cards");
 
-        let project_id = ctx
-            .project_id
-            .as_deref()
-            .ok_or_else(|| anyhow::anyhow!("list_cards requires project context"))?;
+        let project_id = args.get("project_id").and_then(|v| v.as_str()).map(|s| s.to_string())
+            .or_else(|| ctx.project_id.clone())
+            .ok_or_else(|| anyhow::anyhow!("list_cards requires 'project_id' parameter or project context"))?;
 
-        let cards = ctx.db.list_cards_by_project(project_id).await?;
+        let cards = ctx.db.list_cards_by_project(&project_id).await?;
 
         let items: Vec<Value> = cards
             .iter()
@@ -1100,14 +1111,21 @@ impl McpToolRegistry {
                 serde_json::json!({
                     "id": c.id,
                     "title": c.title,
+                    "description": c.description,
                     "step": c.step,
                     "priority": c.priority,
                     "blocked": c.blocked,
+                    "block_reason": c.block_reason,
+                    "workflow": c.workflow,
+                    "model": c.model,
+                    "effort": c.effort,
+                    "worker_session_id": c.worker_session_id,
+                    "has_worker": c.worker_session_id.is_some(),
                 })
             })
             .collect();
 
-        Ok(serde_json::json!({ "cards": items }))
+        Ok(serde_json::json!({ "cards": items, "count": items.len(), "project_id": project_id }))
     }
 
     async fn handle_list_projects(&self, ctx: &ToolCallContext) -> anyhow::Result<Value> {
@@ -1121,13 +1139,18 @@ impl McpToolRegistry {
                 serde_json::json!({
                     "id": p.id,
                     "name": p.name,
+                    "context": p.context,
+                    "folder_id": p.folder_id,
                     "status": p.status,
-                    "workerCount": p.worker_count,
+                    "worker_count": p.worker_count,
+                    "default_workflow": p.default_workflow,
+                    "model": p.model,
+                    "effort": p.effort,
                 })
             })
             .collect();
 
-        Ok(serde_json::json!({ "projects": items }))
+        Ok(serde_json::json!({ "projects": items, "count": items.len() }))
     }
 
     async fn handle_list_workflows(&self, ctx: &ToolCallContext) -> anyhow::Result<Value> {
