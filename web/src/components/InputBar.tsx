@@ -32,6 +32,9 @@ export default function InputBar({ sessionId }: InputBarProps) {
   const setDraft = useSessionsStore((s) => s.setDraft)
   const allMentions = useMentions(sessionId)
 
+  // The parent passes a `key={sessionId}` so this component remounts
+  // per session — that handles the "reset on session change" case
+  // without an effect that synchronously calls setState.
   const [text, setText] = useState(() => getDraft(sessionId))
   const [sending, setSending] = useState(false)
   const [attachments, setAttachments] = useState<PendingAttachment[]>([])
@@ -40,12 +43,6 @@ export default function InputBar({ sessionId }: InputBarProps) {
   const [showAutocomplete, setShowAutocomplete] = useState(false)
   const textareaRef = useRef<HTMLTextAreaElement>(null)
   const fileInputRef = useRef<HTMLInputElement>(null)
-
-  // Re-initialize draft when sessionId changes
-  useEffect(() => {
-    setText(getDraft(sessionId))
-    setAttachments([])
-  }, [sessionId, getDraft])
 
   const resizeTextarea = useCallback(() => {
     const ta = textareaRef.current

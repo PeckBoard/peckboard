@@ -203,13 +203,6 @@ async fn move_sessions_then_delete(
         ));
     }
 
-    let sessions = state.db.list_sessions_by_folder(&id).await.map_err(|e| {
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(serde_json::json!({ "error": e.to_string() })),
-        )
-    })?;
-
     // Move all sessions to target folder
     let moved = state
         .db

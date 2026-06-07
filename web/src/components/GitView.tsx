@@ -1,101 +1,41 @@
-import { useState, useCallback, useEffect } from 'react'
+import { useState, useEffect } from 'react'
 import { authedFetch } from '../store/auth'
-
-interface FileStatus {
-  path: string
-  status: string
-}
-
-interface Commit {
-  hash: string
-  short_hash: string
-  author: string
-  date: string
-  message: string
-}
-
-interface CommitDetail {
-  hash: string
-  author: string
-  date: string
-  message: string
-  diff: string
-}
-
-interface DiscoveredRepo {
-  name: string
-  path: string
-  folder_id: string
-  folder_name: string
-}
+import { useGitStore, type CommitDetail, type DiscoveredRepo } from '../store/git'
 
 export default function GitView() {
+  const discoveredRepos = useGitStore((s) => s.discoveredRepos)
+  const loadingRepos = useGitStore((s) => s.loadingRepos)
+  const fileStatuses = useGitStore((s) => s.fileStatuses)
+  const commits = useGitStore((s) => s.commits)
+  const fetchedPath = useGitStore((s) => s.fetchedPath)
+  const loadingStatus = useGitStore((s) => s.loadingStatus)
+  const statusError = useGitStore((s) => s.statusError)
+  const fetchRepos = useGitStore((s) => s.fetchRepos)
+  const fetchStatus = useGitStore((s) => s.fetchStatus)
+
   const [repoPath, setRepoPath] = useState('')
-  const [fileStatuses, setFileStatuses] = useState<FileStatus[]>([])
-  const [commits, setCommits] = useState<Commit[]>([])
-  const [loading, setLoading] = useState(false)
-  const [error, setError] = useState('')
   const [activeCommit, setActiveCommit] = useState<CommitDetail | null>(null)
   const [loadingCommit, setLoadingCommit] = useState(false)
-  const [fetched, setFetched] = useState(false)
-  const [discoveredRepos, setDiscoveredRepos] = useState<DiscoveredRepo[]>([])
-  const [loadingRepos, setLoadingRepos] = useState(false)
+  const [commitError, setCommitError] = useState('')
+
+  const loading = loadingStatus
+  const fetched = fetchedPath !== null
+  const error = statusError || commitError
 
   useEffect(() => {
-    setLoadingRepos(true)
-    authedFetch('/api/git/repos')
-      .then(async (res) => {
-        if (res.ok) {
-          const repos: DiscoveredRepo[] = await res.json()
-          setDiscoveredRepos(repos)
-        }
-      })
-      .catch(() => {
-        /* ignore scan errors */
-      })
-      .finally(() => setLoadingRepos(false))
-  }, [])
+    fetchRepos()
+  }, [fetchRepos])
 
   const selectRepo = (repo: DiscoveredRepo) => {
     setRepoPath(repo.path)
+    setActiveCommit(null)
     fetchStatus(repo.path)
   }
-
-  const fetchStatus = useCallback(async (path: string) => {
-    setLoading(true)
-    setError('')
-    setFetched(false)
-    setActiveCommit(null)
-    try {
-      const [statusRes, commitsRes] = await Promise.all([
-        authedFetch(`/api/git/status?path=${encodeURIComponent(path)}`),
-        authedFetch(`/api/git/commits?path=${encodeURIComponent(path)}&limit=20`),
-      ])
-
-      if (!statusRes.ok) {
-        const data = await statusRes.json().catch(() => ({ error: 'Failed to fetch git status' }))
-        throw new Error(data.error || 'Failed to fetch git status')
-      }
-      if (!commitsRes.ok) {
-        const data = await commitsRes.json().catch(() => ({ error: 'Failed to fetch commits' }))
-        throw new Error(data.error || 'Failed to fetch commits')
-      }
-
-      const statusData: FileStatus[] = await statusRes.json()
-      const commitsData: Commit[] = await commitsRes.json()
-      setFileStatuses(statusData)
-      setCommits(commitsData)
-      setFetched(true)
-    } catch (err) {
-      setError(err instanceof Error ? err.message : 'Failed to fetch git data')
-    } finally {
-      setLoading(false)
-    }
-  }, [])
 
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault()
     if (repoPath.trim()) {
+      setActiveCommit(null)
       fetchStatus(repoPath.trim())
     }
   }
@@ -103,6 +43,7 @@ export default function GitView() {
   const viewCommit = async (hash: string) => {
     setLoadingCommit(true)
     setActiveCommit(null)
+    setCommitError('')
     try {
       const res = await authedFetch(
         `/api/git/commits/${encodeURIComponent(hash)}?path=${encodeURIComponent(repoPath)}`,
@@ -111,7 +52,7 @@ export default function GitView() {
       const data: CommitDetail = await res.json()
       setActiveCommit(data)
     } catch {
-      setError('Failed to load commit details')
+      setCommitError('Failed to load commit details')
     } finally {
       setLoadingCommit(false)
     }

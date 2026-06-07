@@ -1,26 +1,25 @@
-import { useEffect, useState, useCallback } from 'react'
+import { useEffect, useState } from 'react'
 import { authedFetch } from '../store/auth'
+import { useReportsStore, type ReportEntry } from '../store/reports'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
-
-interface ReportEntry {
-  folder: string
-  file: string
-  title: string
-  date: string
-  sessionId?: string
-  projectName?: string
-}
 
 interface GroupedReports {
   [folder: string]: ReportEntry[]
 }
 
 export default function ReportBrowser() {
-  const [reports, setReports] = useState<ReportEntry[]>([])
-  const [loading, setLoading] = useState(true)
-  const [error, setError] = useState('')
-  const [expandedFolders, setExpandedFolders] = useState<Set<string>>(new Set())
+  const reports = useReportsStore((s) => s.reports)
+  const loading = useReportsStore((s) => s.loading)
+  const error = useReportsStore((s) => s.error)
+  const fetchReports = useReportsStore((s) => s.fetchReports)
+
+  // Folders expanded by default once reports load; track which the user
+  // has explicitly collapsed so a re-fetch doesn't undo their action.
+  const [collapsedFolders, setCollapsedFolders] = useState<Set<string>>(new Set())
+  const allFolders = new Set(reports.map((r) => r.folder))
+  const expandedFolders = new Set([...allFolders].filter((f) => !collapsedFolders.has(f)))
+
   const [activeReport, setActiveReport] = useState<{
     folder: string
     file: string
@@ -31,33 +30,12 @@ export default function ReportBrowser() {
   const [reportContent, setReportContent] = useState('')
   const [loadingContent, setLoadingContent] = useState(false)
 
-  const fetchReports = useCallback(async () => {
-    setLoading(true)
-    setError('')
-    try {
-      const res = await authedFetch('/api/reports')
-      if (!res.ok) {
-        const data = await res.json().catch(() => ({ error: 'Failed to fetch reports' }))
-        throw new Error(data.error || 'Failed to fetch reports')
-      }
-      const data = await res.json()
-      const list: ReportEntry[] = Array.isArray(data) ? data : (data.reports ?? [])
-      setReports(list)
-      const folders = new Set(list.map((r: ReportEntry) => r.folder))
-      setExpandedFolders(folders)
-    } catch (err) {
-      setError(err instanceof Error ? err.message : 'Failed to fetch reports')
-    } finally {
-      setLoading(false)
-    }
-  }, [])
-
   useEffect(() => {
     fetchReports()
   }, [fetchReports])
 
   const toggleFolder = (folder: string) => {
-    setExpandedFolders((prev) => {
+    setCollapsedFolders((prev) => {
       const next = new Set(prev)
       if (next.has(folder)) next.delete(folder)
       else next.add(folder)

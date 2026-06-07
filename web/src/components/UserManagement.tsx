@@ -1,19 +1,18 @@
-import { useEffect, useState, useCallback } from 'react'
-import { useAuthStore, authedFetch } from '../store/auth'
-
-interface UserRecord {
-  id: string
-  username: string
-  email: string | null
-  role: string
-  created_at: string
-}
+import { useEffect, useState } from 'react'
+import { useAuthStore } from '../store/auth'
+import { useUsersStore } from '../store/users'
 
 export default function UserManagement() {
   const currentUser = useAuthStore((s) => s.user)
-  const [users, setUsers] = useState<UserRecord[]>([])
-  const [loading, setLoading] = useState(true)
-  const [error, setError] = useState('')
+  const users = useUsersStore((s) => s.users)
+  const loading = useUsersStore((s) => s.loading)
+  const storeError = useUsersStore((s) => s.error)
+  const fetchUsers = useUsersStore((s) => s.fetchUsers)
+  const createUserAction = useUsersStore((s) => s.createUser)
+  const deleteUserAction = useUsersStore((s) => s.deleteUser)
+
+  const [localError, setLocalError] = useState('')
+  const error = localError || storeError
 
   // Create form
   const [showCreate, setShowCreate] = useState(false)
@@ -25,24 +24,6 @@ export default function UserManagement() {
 
   // Delete confirm
   const [deleteTarget, setDeleteTarget] = useState<string | null>(null)
-
-  const fetchUsers = useCallback(async () => {
-    setLoading(true)
-    setError('')
-    try {
-      const res = await authedFetch('/api/users')
-      if (!res.ok) {
-        const data = await res.json().catch(() => ({ error: 'Failed to fetch users' }))
-        throw new Error(data.error || 'Failed to fetch users')
-      }
-      const data: UserRecord[] = await res.json()
-      setUsers(data)
-    } catch (err) {
-      setError(err instanceof Error ? err.message : 'Failed to fetch users')
-    } finally {
-      setLoading(false)
-    }
-  }, [])
 
   useEffect(() => {
     fetchUsers()
@@ -61,49 +42,33 @@ export default function UserManagement() {
     e.preventDefault()
     if (!newUsername.trim() || !newPassword.trim()) return
     setCreating(true)
-    setError('')
+    setLocalError('')
     try {
-      const body: Record<string, string> = {
+      await createUserAction({
         username: newUsername.trim(),
         password: newPassword,
         role: newRole,
-      }
-      if (newEmail.trim()) body.email = newEmail.trim()
-
-      const res = await authedFetch('/api/users', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(body),
+        email: newEmail.trim() || undefined,
       })
-      if (!res.ok) {
-        const data = await res.json().catch(() => ({ error: 'Failed to create user' }))
-        throw new Error(data.error || 'Failed to create user')
-      }
       setNewUsername('')
       setNewPassword('')
       setNewEmail('')
       setNewRole('user')
       setShowCreate(false)
-      fetchUsers()
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Failed to create user')
+      setLocalError(err instanceof Error ? err.message : 'Failed to create user')
     } finally {
       setCreating(false)
     }
   }
 
   const handleDelete = async (id: string) => {
-    setError('')
+    setLocalError('')
     try {
-      const res = await authedFetch(`/api/users/${id}`, { method: 'DELETE' })
-      if (!res.ok) {
-        const data = await res.json().catch(() => ({ error: 'Failed to delete user' }))
-        throw new Error(data.error || 'Failed to delete user')
-      }
+      await deleteUserAction(id)
       setDeleteTarget(null)
-      fetchUsers()
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Failed to delete user')
+      setLocalError(err instanceof Error ? err.message : 'Failed to delete user')
     }
   }
 

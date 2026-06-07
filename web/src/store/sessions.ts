@@ -29,7 +29,11 @@ interface SessionsState {
   inputDrafts: Record<string, string>
   processing: Set<string>
   unreadSessions: Set<string>
+  eventsBySession: Record<string, Event[]>
+  loadingEventsBySession: Record<string, boolean>
   fetchSessions: () => Promise<void>
+  fetchEvents: (sessionId: string) => Promise<void>
+  appendEvent: (event: Event) => void
   createSession: (
     name: string,
     folderId: string,
@@ -54,6 +58,8 @@ export const useSessionsStore = create<SessionsState>((set, get) => ({
   inputDrafts: loadDrafts(),
   processing: new Set<string>(),
   unreadSessions: new Set<string>(),
+  eventsBySession: {},
+  loadingEventsBySession: {},
 
   fetchSessions: async () => {
     const res = await authedFetch('/api/sessions')
@@ -61,6 +67,38 @@ export const useSessionsStore = create<SessionsState>((set, get) => ({
       const sessions: Session[] = await res.json()
       set({ sessions })
     }
+  },
+
+  fetchEvents: async (sessionId: string) => {
+    set((s) => ({
+      loadingEventsBySession: { ...s.loadingEventsBySession, [sessionId]: true },
+      eventsBySession: { ...s.eventsBySession, [sessionId]: [] },
+    }))
+    try {
+      const res = await authedFetch(`/api/sessions/${sessionId}/events`)
+      const events: Event[] = res.ok ? await res.json() : []
+      set((s) => ({
+        eventsBySession: { ...s.eventsBySession, [sessionId]: events },
+        loadingEventsBySession: { ...s.loadingEventsBySession, [sessionId]: false },
+      }))
+    } catch {
+      set((s) => ({
+        loadingEventsBySession: { ...s.loadingEventsBySession, [sessionId]: false },
+      }))
+    }
+  },
+
+  appendEvent: (event: Event) => {
+    set((s) => {
+      const existing = s.eventsBySession[event.session_id] ?? []
+      if (existing.some((e) => e.id === event.id)) return s
+      return {
+        eventsBySession: {
+          ...s.eventsBySession,
+          [event.session_id]: [...existing, event],
+        },
+      }
+    })
   },
 
   createSession: async (name: string, folderId: string, model?: string, effort?: string) => {
@@ -87,10 +125,15 @@ export const useSessionsStore = create<SessionsState>((set, get) => ({
       const err = await res.json().catch(() => ({ error: 'Failed to delete session' }))
       throw new Error(err.error || 'Failed to delete session')
     }
-    set((s) => ({
-      sessions: s.sessions.filter((sess) => sess.id !== id),
-      activeSessionId: s.activeSessionId === id ? null : s.activeSessionId,
-    }))
+    set((s) => {
+      const { [id]: _drop, ...remainingEvents } = s.eventsBySession
+      void _drop
+      return {
+        sessions: s.sessions.filter((sess) => sess.id !== id),
+        activeSessionId: s.activeSessionId === id ? null : s.activeSessionId,
+        eventsBySession: remainingEvents,
+      }
+    })
     // Drop the tab for the now-deleted session so it doesn't render as
     // a ghost chip labelled "Session" (the label falls back when the
     // session row is gone). The backend also nukes its `user_tabs` row,
@@ -126,6 +169,9 @@ export const useSessionsStore = create<SessionsState>((set, get) => ({
       const err = await res.json().catch(() => ({ error: 'Failed to clear session' }))
       throw new Error(err.error || 'Failed to clear session')
     }
+    set((s) => ({
+      eventsBySession: { ...s.eventsBySession, [id]: [] },
+    }))
   },
 
   cancelSession: async (id: string) => {

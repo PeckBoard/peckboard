@@ -3,10 +3,37 @@ import type { Project, Card } from '../types/api'
 import { authedFetch } from './auth'
 import { useTabsStore } from './tabs'
 
+export interface CardReport {
+  folder: string
+  file: string
+  title: string
+  date: string
+}
+
+export interface PendingQuestionItem {
+  question: string
+  header?: string
+  multiSelect?: boolean
+  options?: string[]
+  optionObjects?: { label: string; description?: string }[]
+}
+
+export interface PendingQuestion {
+  eventId: string
+  sessionId: string
+  ts: number
+  questions: PendingQuestionItem[]
+  cardId: string | null
+  cardTitle: string | null
+  cardDescription: string | null
+}
+
 interface ProjectsState {
   projects: Project[]
   activeProjectId: string | null
   cards: Card[]
+  cardReportsByCard: Record<string, CardReport[]>
+  pendingQuestionsByProject: Record<string, PendingQuestion[]>
   fetchProjects: () => Promise<void>
   createProject: (data: Partial<Project>) => Promise<Project>
   updateProject: (id: string, data: Partial<Project>) => Promise<Project>
@@ -16,12 +43,17 @@ interface ProjectsState {
   createCard: (projectId: string, data: Partial<Card>) => Promise<Card>
   updateCard: (projectId: string, cardId: string, data: Partial<Card>) => Promise<Card>
   deleteCard: (projectId: string, cardId: string) => Promise<void>
+  fetchCardReports: (projectId: string, cardId: string) => Promise<void>
+  clearCardReports: (cardId: string) => void
+  fetchPendingQuestions: (projectId: string) => Promise<void>
 }
 
 export const useProjectsStore = create<ProjectsState>((set) => ({
   projects: [],
   activeProjectId: null,
   cards: [],
+  cardReportsByCard: {},
+  pendingQuestionsByProject: {},
 
   fetchProjects: async () => {
     const res = await authedFetch('/api/projects')
@@ -135,6 +167,56 @@ export const useProjectsStore = create<ProjectsState>((set) => ({
       const err = await res.json().catch(() => ({ error: 'Failed to delete card' }))
       throw new Error(err.error || 'Failed to delete card')
     }
-    set((s) => ({ cards: s.cards.filter((c) => c.id !== cardId) }))
+    set((s) => {
+      const { [cardId]: _drop, ...remaining } = s.cardReportsByCard
+      void _drop
+      return {
+        cards: s.cards.filter((c) => c.id !== cardId),
+        cardReportsByCard: remaining,
+      }
+    })
+  },
+
+  fetchCardReports: async (projectId: string, cardId: string) => {
+    try {
+      const res = await authedFetch(`/api/projects/${projectId}/cards/${cardId}/reports`)
+      if (!res.ok) {
+        set((s) => ({
+          cardReportsByCard: { ...s.cardReportsByCard, [cardId]: [] },
+        }))
+        return
+      }
+      const data = await res.json()
+      const reports: CardReport[] = data?.reports ?? []
+      set((s) => ({
+        cardReportsByCard: { ...s.cardReportsByCard, [cardId]: reports },
+      }))
+    } catch {
+      set((s) => ({
+        cardReportsByCard: { ...s.cardReportsByCard, [cardId]: [] },
+      }))
+    }
+  },
+
+  clearCardReports: (cardId: string) => {
+    set((s) => {
+      const { [cardId]: _drop, ...remaining } = s.cardReportsByCard
+      void _drop
+      return { cardReportsByCard: remaining }
+    })
+  },
+
+  fetchPendingQuestions: async (projectId: string) => {
+    try {
+      const res = await authedFetch(`/api/projects/${projectId}/pending-questions`)
+      if (!res.ok) return
+      const data = await res.json()
+      const questions: PendingQuestion[] = data?.questions ?? []
+      set((s) => ({
+        pendingQuestionsByProject: { ...s.pendingQuestionsByProject, [projectId]: questions },
+      }))
+    } catch {
+      /* ignore */
+    }
   },
 }))

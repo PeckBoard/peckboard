@@ -1,21 +1,10 @@
 import { useEffect, useState, type FormEvent } from 'react'
 import { useSessionsStore } from '../store/sessions'
 import { useFoldersStore } from '../store/folders'
-import { authedFetch } from '../store/auth'
+import { useResourcesStore } from '../store/resources'
 
 interface Props {
   onClose: () => void
-}
-
-interface ModelInfo {
-  id: string
-  display_name: string
-}
-
-interface ProviderInfo {
-  id: string
-  display_name: string
-  models: ModelInfo[]
 }
 
 export default function NewSessionModal({ onClose }: Props) {
@@ -24,12 +13,15 @@ export default function NewSessionModal({ onClose }: Props) {
   const folders = useFoldersStore((s) => s.folders)
   const fetchFolders = useFoldersStore((s) => s.fetchFolders)
   const createFolder = useFoldersStore((s) => s.createFolder)
+  const providers = useResourcesStore((s) => s.providers)
+  const fetchModels = useResourcesStore((s) => s.fetchModels)
 
   const [name, setName] = useState('')
-  const [folderId, setFolderId] = useState('')
+  // Same derived-default pattern as NewProjectModal — see comment there.
+  const [chosenFolderId, setChosenFolderId] = useState<string | null>(null)
+  const folderId = chosenFolderId ?? folders[0]?.id ?? ''
   const [model, setModel] = useState('')
   const [effort, setEffort] = useState('default')
-  const [providers, setProviders] = useState<ProviderInfo[]>([])
   const [newFolderName, setNewFolderName] = useState('')
   const [newFolderPath, setNewFolderPath] = useState('')
   const [showNewFolder, setShowNewFolder] = useState(false)
@@ -41,22 +33,14 @@ export default function NewSessionModal({ onClose }: Props) {
   }, [fetchFolders])
 
   useEffect(() => {
-    authedFetch('/api/models')
-      .then((res) => (res.ok ? res.json() : null))
-      .then((data) => {
-        if (data?.providers) setProviders(data.providers as ProviderInfo[])
-      })
-      .catch(() => {})
-  }, [])
-  useEffect(() => {
-    if (folders.length > 0 && !folderId) setFolderId(folders[0].id)
-  }, [folders, folderId])
+    fetchModels()
+  }, [fetchModels])
 
   const handleCreateFolder = async () => {
     if (!newFolderName.trim() || !newFolderPath.trim()) return
     try {
       const folder = await createFolder(newFolderName.trim(), newFolderPath.trim())
-      setFolderId(folder.id)
+      setChosenFolderId(folder.id)
       setShowNewFolder(false)
       setNewFolderName('')
       setNewFolderPath('')
@@ -111,7 +95,7 @@ export default function NewSessionModal({ onClose }: Props) {
               <select
                 className="form-input"
                 value={folderId}
-                onChange={(e) => setFolderId(e.target.value)}
+                onChange={(e) => setChosenFolderId(e.target.value)}
               >
                 {folders.map((f) => (
                   <option key={f.id} value={f.id}>

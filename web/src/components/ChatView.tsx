@@ -15,6 +15,10 @@ interface ChatViewProps {
   sessionId: string
 }
 
+// Stable empty array so subscribers don't see a new reference every render
+// when there are no events yet for a given session.
+const EMPTY_EVENTS: Event[] = []
+
 /** Option object from an AskUserQuestion, with optional description */
 interface QuestionOption {
   label: string
@@ -515,8 +519,10 @@ interface ModelInfo {
 }
 
 export default function ChatView({ sessionId }: ChatViewProps) {
-  const [events, setEvents] = useState<Event[]>([])
-  const [loading, setLoading] = useState(true)
+  const events = useSessionsStore((s) => s.eventsBySession[sessionId] ?? EMPTY_EVENTS)
+  const loading = useSessionsStore((s) => s.loadingEventsBySession[sessionId] ?? true)
+  const fetchEvents = useSessionsStore((s) => s.fetchEvents)
+  const appendEvent = useSessionsStore((s) => s.appendEvent)
   const [sessionDetail, setSessionDetail] = useState<Session | null>(null)
   const [menuOpen, setMenuOpen] = useState(false)
   const [confirmAction, setConfirmAction] = useState<{
@@ -592,25 +598,10 @@ export default function ChatView({ sessionId }: ChatViewProps) {
   }, [modelDropdownOpen, availableModels.length])
 
   // Fetch initial events
-  const fetchEvents = useCallback(() => {
-    setLoading(true)
-    setEvents([])
-    userScrolledUp.current = false
-
-    authedFetch(`/api/sessions/${sessionId}/events`)
-      .then((res) => (res.ok ? res.json() : []))
-      .then((data: Event[]) => {
-        setEvents(data)
-        setLoading(false)
-      })
-      .catch(() => {
-        setLoading(false)
-      })
-  }, [sessionId])
-
   useEffect(() => {
-    fetchEvents()
-  }, [fetchEvents])
+    userScrolledUp.current = false
+    fetchEvents(sessionId)
+  }, [sessionId, fetchEvents])
 
   // Subscribe to WS events for this session
   useEffect(() => {
@@ -618,11 +609,7 @@ export default function ChatView({ sessionId }: ChatViewProps) {
 
     const listener = (event: Event) => {
       if (event.session_id === sessionId) {
-        setEvents((prev) => {
-          // Dedupe by id
-          if (prev.some((e) => e.id === event.id)) return prev
-          return [...prev, event]
-        })
+        appendEvent(event)
       }
     }
 
@@ -632,7 +619,7 @@ export default function ChatView({ sessionId }: ChatViewProps) {
       removeEventListener(listener)
       unsubscribe(sessionId)
     }
-  }, [sessionId, subscribe, unsubscribe, addEventListener, removeEventListener])
+  }, [sessionId, subscribe, unsubscribe, addEventListener, removeEventListener, appendEvent])
 
   // Scroll handling
   const handleScroll = useCallback(() => {
@@ -692,7 +679,7 @@ export default function ChatView({ sessionId }: ChatViewProps) {
       onConfirm: async () => {
         setConfirmAction(null)
         await clearSession(sessionId)
-        fetchEvents()
+        fetchEvents(sessionId)
       },
     })
   }
@@ -939,7 +926,10 @@ export default function ChatView({ sessionId }: ChatViewProps) {
         </div>
       )}
 
-      <InputBar sessionId={sessionId} agentWorking={agentWorking} />
+      {/* `key` forces a fresh InputBar per session — drafts and any
+          pending attachments belong to the session that started them
+          and shouldn't bleed across switches. */}
+      <InputBar key={sessionId} sessionId={sessionId} agentWorking={agentWorking} />
       {confirmAction && (
         <ConfirmDialog
           title={confirmAction.title}

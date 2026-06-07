@@ -1,11 +1,17 @@
-import { useCallback, useEffect, useState } from 'react'
-import { useProjectsStore } from '../store/projects'
+import { useEffect, useState } from 'react'
+import { useProjectsStore, type CardReport, type PendingQuestion } from '../store/projects'
+import { useResourcesStore } from '../store/resources'
 import { useWsStore } from '../store/ws'
 import { authedFetch } from '../store/auth'
 import { useMentions, filterMentions } from '../hooks/useMentions'
 import type { Card, Event } from '../types/api'
 import EditCardModal from './EditCardModal'
 import WorkerComms from './WorkerComms'
+
+// Stable references for empty selector results so subscribers don't
+// re-render on every store update with an empty array/list.
+const EMPTY_REPORTS: CardReport[] = []
+const EMPTY_QUESTIONS: PendingQuestion[] = []
 
 const STEPS = [
   { key: 'backlog', label: 'Backlog' },
@@ -14,15 +20,6 @@ const STEPS = [
   { key: 'done', label: 'Done' },
   { key: 'wont_do', label: "Won't Do" },
 ] as const
-
-interface WorkflowInfo {
-  id: string
-  name: string
-}
-interface ModelInfo {
-  id: string
-  display_name: string
-}
 
 const EFFORT_OPTIONS = [
   { value: '', label: 'Default' },
@@ -51,24 +48,6 @@ function priorityBadge(priority: number, priorities: PriorityInfo[]) {
           ? 'priority-medium'
           : 'priority-low'
   return <span className={`priority-badge ${className}`}>{label}</span>
-}
-
-interface PendingQuestion {
-  eventId: string
-  sessionId: string
-  ts: number
-  questions: QuestionItem[]
-  cardId: string | null
-  cardTitle: string | null
-  cardDescription: string | null
-}
-
-interface QuestionItem {
-  question: string
-  header?: string
-  multiSelect?: boolean
-  options?: string[]
-  optionObjects?: { label: string; description?: string }[]
 }
 
 interface KanbanBoardProps {
@@ -100,26 +79,19 @@ export default function KanbanBoard({ projectId }: KanbanBoardProps) {
   const [cardMenuId, setCardMenuId] = useState<string | null>(null)
   const [editingCard, setEditingCard] = useState<Card | null>(null)
   const [showComms, setShowComms] = useState(false)
-  const [cardReports, setCardReports] = useState<
-    { folder: string; file: string; title: string; date: string }[]
-  >([])
+  const cardReports = useProjectsStore((s) =>
+    selectedCard ? (s.cardReportsByCard[selectedCard.id] ?? EMPTY_REPORTS) : EMPTY_REPORTS,
+  )
+  const fetchCardReports = useProjectsStore((s) => s.fetchCardReports)
 
   // Fetch reports when card detail is opened
   useEffect(() => {
-    if (!selectedCard) {
-      setCardReports([])
-      return
-    }
-    authedFetch(`/api/projects/${projectId}/cards/${selectedCard.id}/reports`)
-      .then((r) => (r.ok ? r.json() : null))
-      .then((data) => {
-        if (data?.reports) setCardReports(data.reports)
-      })
-      .catch(() => setCardReports([]))
-  }, [selectedCard, projectId])
+    if (!selectedCard) return
+    fetchCardReports(projectId, selectedCard.id)
+  }, [selectedCard, projectId, fetchCardReports])
 
-  const [workflows, setWorkflows] = useState<WorkflowInfo[]>([])
-  const [models, setModels] = useState<ModelInfo[]>([])
+  const workflows = useResourcesStore((s) => s.workflows)
+  const models = useResourcesStore((s) => s.models)
   const allMentions = useMentions()
   const [mentionAutocomplete, setMentionAutocomplete] = useState<{
     eventId: string
@@ -133,7 +105,10 @@ export default function KanbanBoard({ projectId }: KanbanBoardProps) {
     { label: 'Low', value: 3, description: 'Nice to have' },
     { label: 'Backlog', value: 4, description: 'Someday' },
   ])
-  const [pendingQuestions, setPendingQuestions] = useState<PendingQuestion[]>([])
+  const pendingQuestions = useProjectsStore(
+    (s) => s.pendingQuestionsByProject[projectId] ?? EMPTY_QUESTIONS,
+  )
+  const fetchPendingQuestions = useProjectsStore((s) => s.fetchPendingQuestions)
   const [questionAnswers, setQuestionAnswers] = useState<Record<string, Record<number, string>>>({})
   const [submittingQuestion, setSubmittingQuestion] = useState<string | null>(null)
   const [questionDialogOpen, setQuestionDialogOpen] = useState(false)
@@ -141,29 +116,21 @@ export default function KanbanBoard({ projectId }: KanbanBoardProps) {
   const addEventListener = useWsStore((s) => s.addEventListener)
   const removeEventListener = useWsStore((s) => s.removeEventListener)
 
-  const fetchPendingQuestions = useCallback(async () => {
-    const res = await authedFetch(`/api/projects/${projectId}/pending-questions`)
-    if (res.ok) {
-      const data = await res.json()
-      setPendingQuestions(data.questions ?? [])
-    }
-  }, [projectId])
-
   // Fetch pending questions on mount and when events arrive
   useEffect(() => {
-    fetchPendingQuestions()
-  }, [fetchPendingQuestions])
+    fetchPendingQuestions(projectId)
+  }, [fetchPendingQuestions, projectId])
 
   // Listen for WebSocket events to refresh pending questions
   useEffect(() => {
     const listener = (event: Event) => {
       if (event.kind === 'question' || event.kind === 'question-resolved') {
-        fetchPendingQuestions()
+        fetchPendingQuestions(projectId)
       }
     }
     addEventListener(listener)
     return () => removeEventListener(listener)
-  }, [addEventListener, removeEventListener, fetchPendingQuestions])
+  }, [addEventListener, removeEventListener, fetchPendingQuestions, projectId])
 
   // Listen for worker-question events to refresh pending questions live
   useEffect(() => {
@@ -171,7 +138,7 @@ export default function KanbanBoard({ projectId }: KanbanBoardProps) {
       const detail = (e as CustomEvent).detail
       const pid = detail?.data?.projectId as string | undefined
       if (pid === projectId) {
-        fetchPendingQuestions()
+        fetchPendingQuestions(projectId)
       }
     }
     window.addEventListener('peckboard:worker-question', handler)
@@ -239,7 +206,7 @@ export default function KanbanBoard({ projectId }: KanbanBoardProps) {
         delete next[pq.eventId]
         return next
       })
-      fetchPendingQuestions()
+      fetchPendingQuestions(projectId)
     } finally {
       setSubmittingQuestion(null)
     }
@@ -257,7 +224,7 @@ export default function KanbanBoard({ projectId }: KanbanBoardProps) {
           data: { question_id: pq.eventId, rejected: true },
         }),
       })
-      fetchPendingQuestions()
+      fetchPendingQuestions(projectId)
     } finally {
       setSubmittingQuestion(null)
     }
@@ -309,26 +276,18 @@ export default function KanbanBoard({ projectId }: KanbanBoardProps) {
     fetchCards(projectId)
   }, [projectId, fetchCards])
 
+  const fetchWorkflows = useResourcesStore((s) => s.fetchWorkflows)
+  const fetchModels = useResourcesStore((s) => s.fetchModels)
   useEffect(() => {
-    authedFetch('/api/workflows')
-      .then((res) => (res.ok ? res.json() : null))
-      .then((data) => {
-        if (data?.workflows) setWorkflows(data.workflows)
-      })
-      .catch(() => {})
-    authedFetch('/api/models')
-      .then((res) => (res.ok ? res.json() : null))
-      .then((data) => {
-        if (data?.models) setModels(data.models)
-      })
-      .catch(() => {})
+    fetchWorkflows()
+    fetchModels()
     authedFetch('/api/priorities')
       .then((res) => (res.ok ? res.json() : null))
       .then((data) => {
         if (data?.priorities) setPriorities(data.priorities)
       })
       .catch(() => {})
-  }, [projectId])
+  }, [fetchWorkflows, fetchModels])
 
   // Map step aliases to canonical step names for display
   const normalizeStep = (step: string) => {
@@ -386,7 +345,9 @@ export default function KanbanBoard({ projectId }: KanbanBoardProps) {
   const handleViewSession = (sessionId: string) => {
     setCardMenuId(null)
     setSelectedCard(null)
-    window.location.href = `/sessions/${sessionId}`
+    // location.assign mutates via a method call (not a property write),
+    // which the immutability lint accepts.
+    window.location.assign(`/sessions/${sessionId}`)
   }
 
   const handleStopWorker = async (card: Card) => {
@@ -920,7 +881,7 @@ export default function KanbanBoard({ projectId }: KanbanBoardProps) {
                         key={`${r.folder}/${r.file}`}
                         className="card-report-link"
                         onClick={() => {
-                          window.location.href = '/reports'
+                          window.location.assign('/reports')
                         }}
                       >
                         <span className="card-report-title">{r.title}</span>

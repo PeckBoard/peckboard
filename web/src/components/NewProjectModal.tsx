@@ -1,21 +1,10 @@
 import { useEffect, useState, type FormEvent } from 'react'
 import { useProjectsStore } from '../store/projects'
 import { useFoldersStore } from '../store/folders'
-import { authedFetch } from '../store/auth'
+import { useResourcesStore } from '../store/resources'
 
 interface Props {
   onClose: () => void
-}
-
-interface WorkflowInfo {
-  id: string
-  name: string
-  steps: string[]
-}
-
-interface ModelInfo {
-  id: string
-  display_name: string
 }
 
 const EFFORT_OPTIONS = [
@@ -32,9 +21,17 @@ export default function NewProjectModal({ onClose }: Props) {
   const setActiveProject = useProjectsStore((s) => s.setActiveProject)
   const folders = useFoldersStore((s) => s.folders)
   const fetchFolders = useFoldersStore((s) => s.fetchFolders)
+  const workflows = useResourcesStore((s) => s.workflows)
+  const models = useResourcesStore((s) => s.models)
+  const fetchWorkflows = useResourcesStore((s) => s.fetchWorkflows)
+  const fetchModels = useResourcesStore((s) => s.fetchModels)
 
   const [name, setName] = useState('')
-  const [folderId, setFolderId] = useState('')
+  // `chosenFolderId` is what the user explicitly picked; until they pick,
+  // we fall back to the first available folder. Derived in render so the
+  // default updates the moment folders load — no effect needed.
+  const [chosenFolderId, setChosenFolderId] = useState<string | null>(null)
+  const folderId = chosenFolderId ?? folders[0]?.id ?? ''
   const [context, setContext] = useState('')
   const [workerCount, setWorkerCount] = useState(1)
   const [defaultWorkflow, setDefaultWorkflow] = useState('')
@@ -47,32 +44,14 @@ export default function NewProjectModal({ onClose }: Props) {
   const [error, setError] = useState('')
   const [loading, setLoading] = useState(false)
 
-  const [workflows, setWorkflows] = useState<WorkflowInfo[]>([])
-  const [models, setModels] = useState<ModelInfo[]>([])
-
   useEffect(() => {
     fetchFolders()
   }, [fetchFolders])
-  useEffect(() => {
-    if (folders.length > 0 && !folderId) setFolderId(folders[0].id)
-  }, [folders, folderId])
 
-  // Fetch workflows and models on mount
   useEffect(() => {
-    authedFetch('/api/workflows')
-      .then((res) => (res.ok ? res.json() : null))
-      .then((data) => {
-        if (data?.workflows) setWorkflows(data.workflows)
-      })
-      .catch(() => {})
-
-    authedFetch('/api/models')
-      .then((res) => (res.ok ? res.json() : null))
-      .then((data) => {
-        if (data?.models) setModels(data.models)
-      })
-      .catch(() => {})
-  }, [])
+    fetchWorkflows()
+    fetchModels()
+  }, [fetchWorkflows, fetchModels])
 
   const handleSubmit = async (e: FormEvent) => {
     e.preventDefault()
@@ -126,7 +105,7 @@ export default function NewProjectModal({ onClose }: Props) {
               <select
                 className="form-input"
                 value={folderId}
-                onChange={(e) => setFolderId(e.target.value)}
+                onChange={(e) => setChosenFolderId(e.target.value)}
               >
                 {folders.map((f) => (
                   <option key={f.id} value={f.id}>

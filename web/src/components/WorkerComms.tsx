@@ -1,25 +1,7 @@
-import { useCallback, useEffect, useRef, useState } from 'react'
-import { authedFetch } from '../store/auth'
+import { useEffect, useRef } from 'react'
 import { useWsStore } from '../store/ws'
+import { useWorkerCommsStore } from '../store/workerComms'
 import type { Event } from '../types/api'
-
-interface WorkerInfo {
-  session_id: string
-  name: string
-  card_title: string | null
-  step: string | null
-}
-
-interface CommMessage {
-  id: string
-  ts: number
-  from_session: string
-  from_name: string
-  to_session: string | null // null = broadcast
-  to_name: string | null
-  type: 'message' | 'finding' | 'auto-notify' | 'notification'
-  text: string
-}
 
 interface WorkerCommsProps {
   projectId: string
@@ -62,105 +44,17 @@ function msgTypeLabel(type: string): string {
 }
 
 export default function WorkerComms({ projectId, onClose }: WorkerCommsProps) {
-  const [workers, setWorkers] = useState<WorkerInfo[]>([])
-  const [messages, setMessages] = useState<CommMessage[]>([])
-  const [loading, setLoading] = useState(true)
+  const workers = useWorkerCommsStore((s) => s.workersByProject[projectId] ?? [])
+  const messages = useWorkerCommsStore((s) => s.messagesByProject[projectId] ?? [])
+  const loading = useWorkerCommsStore((s) => s.loadingByProject[projectId] ?? true)
+  const fetchComms = useWorkerCommsStore((s) => s.fetchComms)
   const scrollRef = useRef<HTMLDivElement>(null)
   const addEventListener = useWsStore((s) => s.addEventListener)
   const removeEventListener = useWsStore((s) => s.removeEventListener)
 
-  const fetchComms = useCallback(async () => {
-    setLoading(true)
-    try {
-      // Get worker sessions
-      const sessRes = await authedFetch(`/api/projects/${projectId}`)
-      const projData = sessRes.ok ? await sessRes.json() : null
-      const cards = projData?.cards ?? []
-
-      // Build worker map from cards that have worker sessions
-      const workerMap: Record<string, WorkerInfo> = {}
-      for (const c of cards) {
-        for (const sid of [c.worker_session_id, c.last_worker_session_id]) {
-          if (sid && !workerMap[sid]) {
-            workerMap[sid] = {
-              session_id: sid,
-              name: `worker: ${c.title}`,
-              card_title: c.title,
-              step: c.step,
-            }
-          }
-        }
-      }
-      setWorkers(Object.values(workerMap))
-
-      // Scan worker sessions for communication events
-      const comms: CommMessage[] = []
-      for (const w of Object.values(workerMap)) {
-        try {
-          const evRes = await authedFetch(`/api/sessions/${w.session_id}/events`)
-          if (!evRes.ok) continue
-          const events: Event[] = await evRes.json()
-          for (const e of events) {
-            if (e.kind !== 'user') continue
-            const source = (e.data.source as string) ?? ''
-            if (!source.startsWith('worker-')) continue
-
-            const text = (e.data.text as string) ?? ''
-            let fromName = 'Unknown'
-            let fromSession = ''
-            let toSession: string | null = w.session_id
-            let toName: string | null = w.card_title ?? w.name
-
-            // Parse sender from the message text
-            const fromMatch = text.match(
-              /\[(?:Worker message from|Shared finding from worker on|Auto\] Worker on) "([^"]+)"/,
-            )
-            if (fromMatch) fromName = fromMatch[1]
-
-            const sessionMatch = text.match(/From session: ([a-f0-9-]+)/)
-            if (sessionMatch) fromSession = sessionMatch[1]
-
-            if (source === 'worker-auto-notify') {
-              const autoMatch = text.match(/Worker on "([^"]+)" modified/)
-              if (autoMatch) fromName = autoMatch[1]
-              fromSession = '' // broadcast
-            }
-
-            let type: CommMessage['type'] = 'message'
-            if (source === 'worker-finding') type = 'finding'
-            else if (source === 'worker-auto-notify') type = 'auto-notify'
-            else if (source === 'worker-notification') type = 'notification'
-
-            // Truncate text for display
-            const displayText = text.length > 300 ? text.slice(0, 297) + '...' : text
-
-            comms.push({
-              id: e.id,
-              ts: e.ts,
-              from_session: fromSession,
-              from_name: fromName,
-              to_session: toSession,
-              to_name: toName,
-              type,
-              text: displayText,
-            })
-          }
-        } catch {
-          /* skip */
-        }
-      }
-
-      // Sort by time
-      comms.sort((a, b) => a.ts - b.ts)
-      setMessages(comms)
-    } finally {
-      setLoading(false)
-    }
-  }, [projectId])
-
   useEffect(() => {
-    fetchComms()
-  }, [fetchComms])
+    fetchComms(projectId)
+  }, [fetchComms, projectId])
 
   // Auto-refresh on WebSocket events
   useEffect(() => {
@@ -170,19 +64,19 @@ export default function WorkerComms({ projectId, onClose }: WorkerCommsProps) {
         typeof event.data.source === 'string' &&
         event.data.source.startsWith('worker-')
       ) {
-        fetchComms()
+        fetchComms(projectId)
       }
     }
     addEventListener(listener)
     return () => removeEventListener(listener)
-  }, [addEventListener, removeEventListener, fetchComms])
+  }, [addEventListener, removeEventListener, fetchComms, projectId])
 
   // Listen for worker-stdin-deliver broadcasts for live updates
   useEffect(() => {
-    const handler = () => fetchComms()
+    const handler = () => fetchComms(projectId)
     window.addEventListener('peckboard:card-update', handler)
     return () => window.removeEventListener('peckboard:card-update', handler)
-  }, [fetchComms])
+  }, [fetchComms, projectId])
 
   // Scroll to bottom on new messages
   useEffect(() => {
