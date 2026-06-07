@@ -46,8 +46,16 @@ export default function EditCardModal({ projectId, card, onClose }: Props) {
 
   const [workflows, setWorkflows] = useState<WorkflowInfo[]>([])
   const [models, setModels] = useState<ModelInfo[]>([])
+  const [priorities, setPriorities] = useState<{ label: string; value: number }[]>([
+    { label: 'Critical', value: 0 }, { label: 'High', value: 1 },
+    { label: 'Medium', value: 2 }, { label: 'Low', value: 3 }, { label: 'Backlog', value: 4 },
+  ])
 
   useEffect(() => {
+    authedFetch('/api/priorities')
+      .then((res) => (res.ok ? res.json() : null))
+      .then((data) => { if (data?.priorities) setPriorities(data.priorities) })
+      .catch(() => {})
     authedFetch('/api/workflows')
       .then((res) => (res.ok ? res.json() : null))
       .then((data) => {
@@ -167,9 +175,9 @@ export default function EditCardModal({ projectId, card, onClose }: Props) {
               value={priority}
               onChange={(e) => setPriority(Number(e.target.value))}
             >
-              <option value={1}>High</option>
-              <option value={2}>Medium</option>
-              <option value={3}>Low</option>
+              {priorities.map((p) => (
+                <option key={p.value} value={p.value}>{p.label}</option>
+              ))}
             </select>
           </div>
           <div className="form-field">

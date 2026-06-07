@@ -62,7 +62,7 @@ struct CreateCardRequest {
     effort: Option<String>,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, serde::Serialize)]
 struct UpdateCardRequest {
     title: Option<String>,
     description: Option<String>,
@@ -373,6 +373,32 @@ async fn create_card(
     Json(body): Json<CreateCardRequest>,
 ) -> impl IntoResponse {
     tracing::info!(project_id = %project_id, title = %body.title, "Creating card");
+
+    // Validate priority
+    if !crate::routes::misc::is_valid_priority(body.priority) {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({ "error": format!("invalid priority: {}. Use GET /api/priorities for valid values.", body.priority) })),
+        ));
+    }
+
+    // Hook: card.create.before — plugins can validate or modify
+    let hook_result = state.plugins.dispatch(
+        "card.create.before",
+        serde_json::json!({
+            "projectId": project_id,
+            "title": body.title,
+            "priority": body.priority,
+        }),
+    ).await;
+    if let crate::plugin::hooks::HookResult::Cancelled { plugin, reason } = &hook_result {
+        tracing::info!(plugin = %plugin, reason = %reason, "card.create.before cancelled");
+        return Err((
+            StatusCode::FORBIDDEN,
+            Json(serde_json::json!({ "error": format!("blocked by plugin {plugin}: {reason}") })),
+        ));
+    }
+
     // Verify project exists
     let project = state.db.get_project(&project_id).await.map_err(|e| {
         (
@@ -447,6 +473,33 @@ async fn update_card(
     Json(body): Json<UpdateCardRequest>,
 ) -> impl IntoResponse {
     tracing::info!(card_id = %card_id, "Updating card");
+
+    // Validate priority if being updated
+    if let Some(priority) = body.priority {
+        if !crate::routes::misc::is_valid_priority(priority) {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({ "error": format!("invalid priority: {priority}. Use GET /api/priorities for valid values.") })),
+            ));
+        }
+    }
+
+    // Hook: card.update.before
+    let hook_result = state.plugins.dispatch(
+        "card.update.before",
+        serde_json::json!({
+            "cardId": card_id,
+            "updates": serde_json::to_value(&body).unwrap_or_default(),
+        }),
+    ).await;
+    if let crate::plugin::hooks::HookResult::Cancelled { plugin, reason } = &hook_result {
+        tracing::info!(plugin = %plugin, reason = %reason, "card.update.before cancelled");
+        return Err((
+            StatusCode::FORBIDDEN,
+            Json(serde_json::json!({ "error": format!("blocked by plugin {plugin}: {reason}") })),
+        ));
+    }
+
     // Fetch existing card for edit policy checks
     let existing = state.db.get_card(&card_id).await.map_err(|e| {
         (

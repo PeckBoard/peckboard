@@ -13,9 +13,25 @@ pub fn router(state: Arc<AppState>) -> Router<Arc<AppState>> {
     Router::new()
         .route("/api/models", get(list_models))
         .route("/api/workflows", get(list_workflows))
+        .route("/api/priorities", get(list_priorities))
         .route("/api/keep-awake", get(get_keep_awake).put(put_keep_awake))
         .route("/api/config", get(get_config).put(put_config))
         .route_layer(middleware::from_fn_with_state(state, require_auth))
+}
+
+/// The canonical set of card priorities. Plugins can extend via the
+/// `card.priorities.list` hook.
+pub const DEFAULT_PRIORITIES: &[(&str, i32, &str)] = &[
+    ("Critical", 0, "Blocks everything, fix immediately"),
+    ("High", 1, "Important, do soon"),
+    ("Medium", 2, "Normal priority"),
+    ("Low", 3, "Nice to have"),
+    ("Backlog", 4, "Someday / maybe"),
+];
+
+/// Validate that a priority value is in the allowed set.
+pub fn is_valid_priority(value: i32) -> bool {
+    DEFAULT_PRIORITIES.iter().any(|(_, v, _)| *v == value)
 }
 
 /// GET /api/models — list all available models across providers
@@ -67,6 +83,36 @@ async fn list_workflows() -> impl IntoResponse {
             },
         ]
     }))
+}
+
+/// GET /api/priorities — list card priority levels
+async fn list_priorities(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+    let mut priorities: Vec<serde_json::Value> = DEFAULT_PRIORITIES
+        .iter()
+        .map(|(label, value, description)| {
+            serde_json::json!({
+                "label": label,
+                "value": value,
+                "description": description,
+            })
+        })
+        .collect();
+
+    // Hook: card.priorities.list — plugins can add/modify priorities
+    let hook_result = state
+        .plugins
+        .dispatch(
+            "card.priorities.list",
+            serde_json::json!({ "priorities": priorities }),
+        )
+        .await;
+    if let crate::plugin::hooks::HookResult::Allowed(modified) = hook_result {
+        if let Some(p) = modified.get("priorities").and_then(|v| v.as_array()) {
+            priorities = p.clone();
+        }
+    }
+
+    Json(serde_json::json!({ "priorities": priorities }))
 }
 
 /// GET /api/keep-awake — returns keep-awake status

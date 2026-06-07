@@ -31,14 +31,21 @@ const EFFORT_OPTIONS = [
   { value: 'max', label: 'Max' },
 ]
 
-function priorityBadge(priority: number) {
-  const map: Record<number, { label: string; className: string }> = {
-    1: { label: 'High', className: 'priority-high' },
-    2: { label: 'Medium', className: 'priority-medium' },
-    3: { label: 'Low', className: 'priority-low' },
-  }
-  const info = map[priority] || { label: `P${priority}`, className: 'priority-low' }
-  return <span className={`priority-badge ${info.className}`}>{info.label}</span>
+interface PriorityInfo {
+  label: string
+  value: number
+  description: string
+}
+
+function priorityBadge(priority: number, priorities: PriorityInfo[]) {
+  const p = priorities.find((pr) => pr.value === priority)
+  const label = p?.label ?? `P${priority}`
+  const className =
+    priority <= 0 ? 'priority-critical' :
+    priority <= 1 ? 'priority-high' :
+    priority <= 2 ? 'priority-medium' :
+    'priority-low'
+  return <span className={`priority-badge ${className}`}>{label}</span>
 }
 
 interface PendingQuestion {
@@ -90,6 +97,13 @@ export default function KanbanBoard({ projectId }: KanbanBoardProps) {
 
   const [workflows, setWorkflows] = useState<WorkflowInfo[]>([])
   const [models, setModels] = useState<ModelInfo[]>([])
+  const [priorities, setPriorities] = useState<PriorityInfo[]>([
+    { label: 'Critical', value: 0, description: 'Blocks everything' },
+    { label: 'High', value: 1, description: 'Important' },
+    { label: 'Medium', value: 2, description: 'Normal' },
+    { label: 'Low', value: 3, description: 'Nice to have' },
+    { label: 'Backlog', value: 4, description: 'Someday' },
+  ])
   const [pendingQuestions, setPendingQuestions] = useState<PendingQuestion[]>([])
   const [questionAnswers, setQuestionAnswers] = useState<Record<string, Record<number, string>>>({})
   const [submittingQuestion, setSubmittingQuestion] = useState<string | null>(null)
@@ -220,6 +234,12 @@ export default function KanbanBoard({ projectId }: KanbanBoardProps) {
       .then((res) => (res.ok ? res.json() : null))
       .then((data) => {
         if (data?.models) setModels(data.models)
+      })
+      .catch(() => {})
+    authedFetch('/api/priorities')
+      .then((res) => (res.ok ? res.json() : null))
+      .then((data) => {
+        if (data?.priorities) setPriorities(data.priorities)
       })
       .catch(() => {})
   }, [])
@@ -464,9 +484,9 @@ export default function KanbanBoard({ projectId }: KanbanBoardProps) {
           />
           <div className="kanban-add-row">
             <select value={addPriority} onChange={(e) => setAddPriority(Number(e.target.value))}>
-              <option value={1}>High priority</option>
-              <option value={2}>Medium priority</option>
-              <option value={3}>Low priority</option>
+              {priorities.map((p) => (
+                <option key={p.value} value={p.value}>{p.label}</option>
+              ))}
             </select>
             <select value={addWorkflow} onChange={(e) => setAddWorkflow(e.target.value)}>
               <option value="">Default workflow</option>
@@ -527,7 +547,7 @@ export default function KanbanBoard({ projectId }: KanbanBoardProps) {
                   <div className="kanban-card-top" onClick={() => setSelectedCard(card)}>
                     <div className="kanban-card-header">
                       <span className="kanban-card-title">{card.title}</span>
-                      {priorityBadge(card.priority)}
+                      {priorityBadge(card.priority, priorities)}
                     </div>
                     {card.blocked && (
                       <div className="blocked-indicator">
@@ -643,7 +663,7 @@ export default function KanbanBoard({ projectId }: KanbanBoardProps) {
               </div>
               <div className="card-detail-row">
                 <span className="card-detail-label">Priority</span>
-                {priorityBadge(selectedCard.priority)}
+                {priorityBadge(selectedCard.priority, priorities)}
               </div>
               {selectedCard.workflow && (
                 <div className="card-detail-row">

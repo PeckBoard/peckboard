@@ -1231,6 +1231,10 @@
   letter-spacing: 0.03em;
   flex-shrink: 0;
 }
+.priority-critical {
+  background: var(--danger);
+  color: var(--text-inverse);
+}
 .priority-high {
   background: var(--danger-bg);
   color: var(--danger);
