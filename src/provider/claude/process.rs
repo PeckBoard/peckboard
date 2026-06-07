@@ -136,6 +136,10 @@ pub async fn stream_events(
     let mut current_tool_id: Option<String> = None;
     let mut emitted_start = false;
 
+    // Track file-modifying tool calls for auto cross-worker notification
+    let mut pending_file_changes: Vec<String> = Vec::new(); // file paths from Write/Edit tools
+    let mut pending_tool_names: std::collections::HashMap<String, (String, Option<String>)> = std::collections::HashMap::new(); // tool_use_id -> (tool_name, file_path)
+
     loop {
         let line = tokio::select! {
             result = lines.next_line() => {
@@ -281,6 +285,77 @@ pub async fn stream_events(
                 &mut current_tool_id,
                 &mut emitted_start,
             );
+
+            for event in &events {
+                // Track file-modifying tools for cross-worker notification
+                match event {
+                    ProviderEvent::ToolStart { tool_use_id, name, input } => {
+                        let file_path = match name.as_str() {
+                            "Write" | "Edit" => input.get("file_path").and_then(|v| v.as_str()).map(|s| s.to_string()),
+                            _ => None,
+                        };
+                        pending_tool_names.insert(tool_use_id.clone(), (name.clone(), file_path));
+                    }
+                    ProviderEvent::ToolEnd { tool_use_id, error, .. } => {
+                        if error.is_none() {
+                            if let Some((name, file_path)) = pending_tool_names.remove(tool_use_id) {
+                                if let Some(path) = file_path {
+                                    if name == "Write" || name == "Edit" {
+                                        pending_file_changes.push(path);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    // When the agent produces text or ends, flush accumulated file changes
+                    ProviderEvent::Text { .. } | ProviderEvent::Completed { .. } => {
+                        if !pending_file_changes.is_empty() {
+                            let changes = std::mem::take(&mut pending_file_changes);
+                            // Look up session to find project context
+                            if let Ok(Some(session)) = db.get_session(&session_id).await {
+                                if session.is_worker {
+                                    if let Some(ref project_id) = session.project_id {
+                                        let card_title = if let Some(ref card_id) = session.card_id {
+                                            db.get_card(card_id).await.ok().flatten().map(|c| c.title)
+                                        } else { None };
+
+                                        // Find other active worker sessions
+                                        if let Ok(workers) = db.list_worker_sessions_by_project(project_id).await {
+                                            let msg = format!(
+                                                "[Auto] Worker on \"{}\" modified: {}",
+                                                card_title.as_deref().unwrap_or("unknown"),
+                                                changes.join(", ")
+                                            );
+                                            for ws in &workers {
+                                                if ws.id == session_id { continue; }
+                                                if let Some(ref cid) = ws.card_id {
+                                                    if let Ok(Some(c)) = db.get_card(cid).await {
+                                                        if c.step == "done" || c.step == "wont_do" { continue; }
+                                                    }
+                                                }
+                                                let now = chrono::Utc::now().to_rfc3339();
+                                                let _ = db.upsert_queued_message(
+                                                    crate::db::models::NewQueuedMessage {
+                                                        session_id: ws.id.clone(),
+                                                        text: msg.clone(),
+                                                        queued_at: now,
+                                                    },
+                                                ).await;
+                                            }
+                                            tracing::info!(
+                                                session_id = %session_id,
+                                                files = ?changes,
+                                                "Auto-notified workers of file changes"
+                                            );
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+            }
 
             for event in events {
                 emit_event(&db, &broadcaster, &session_id, event).await;
