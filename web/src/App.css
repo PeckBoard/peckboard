@@ -1015,6 +1015,18 @@
   font-family: var(--font-mono);
 }
 
+.question-input-wrapper {
+  position: relative;
+}
+
+.autocomplete-inline {
+  position: absolute;
+  bottom: 100%;
+  left: 0;
+  right: 0;
+  margin-bottom: 4px;
+}
+
 .input-bar {
   border-top: 1px solid var(--border);
   padding: 12px 24px;

@@ -97,6 +97,8 @@ export default function KanbanBoard({ projectId }: KanbanBoardProps) {
 
   const [workflows, setWorkflows] = useState<WorkflowInfo[]>([])
   const [models, setModels] = useState<ModelInfo[]>([])
+  const [allReports, setAllReports] = useState<{ folder: string; file: string; title: string }[]>([])
+  const [reportAutocomplete, setReportAutocomplete] = useState<{ eventId: string; idx: number; suggestions: { folder: string; file: string; title: string }[] } | null>(null)
   const [priorities, setPriorities] = useState<PriorityInfo[]>([
     { label: 'Critical', value: 0, description: 'Blocks everything' },
     { label: 'High', value: 1, description: 'Important' },
@@ -207,6 +209,34 @@ export default function KanbanBoard({ projectId }: KanbanBoardProps) {
       ...prev,
       [eventId]: { ...(prev[eventId] ?? {}), [idx]: value },
     }))
+
+    // Check for @ autocomplete trigger
+    const atMatch = value.match(/@(\S*)$/)
+    if (atMatch && allReports.length > 0) {
+      const filter = atMatch[1].toLowerCase()
+      const filtered = allReports.filter((r) =>
+        r.title.toLowerCase().includes(filter) || r.file.toLowerCase().includes(filter)
+      ).slice(0, 6)
+      if (filtered.length > 0) {
+        setReportAutocomplete({ eventId, idx, suggestions: filtered })
+      } else {
+        setReportAutocomplete(null)
+      }
+    } else {
+      setReportAutocomplete(null)
+    }
+  }
+
+  const insertReportInAnswer = (eventId: string, idx: number, report: { folder: string; file: string; title: string }) => {
+    const current = questionAnswers[eventId]?.[idx] ?? ''
+    const atIdx = current.lastIndexOf('@')
+    const ref = `[report:${report.folder}/${report.file}]`
+    const newVal = current.slice(0, atIdx) + ref
+    setQuestionAnswers((prev) => ({
+      ...prev,
+      [eventId]: { ...(prev[eventId] ?? {}), [idx]: newVal },
+    }))
+    setReportAutocomplete(null)
   }
 
   const toggleQuestionMulti = (eventId: string, idx: number, option: string) => {
@@ -241,6 +271,15 @@ export default function KanbanBoard({ projectId }: KanbanBoardProps) {
       .then((res) => (res.ok ? res.json() : null))
       .then((data) => {
         if (data?.priorities) setPriorities(data.priorities)
+      })
+      .catch(() => {})
+    authedFetch('/api/reports')
+      .then((res) => (res.ok ? res.json() : null))
+      .then((data) => {
+        const list = Array.isArray(data) ? data : (data?.reports ?? [])
+        setAllReports(list.map((r: { folder: string; file: string; title?: string }) => ({
+          folder: r.folder, file: r.file, title: r.title || r.file,
+        })))
       })
       .catch(() => {})
   }, [])
@@ -470,16 +509,34 @@ export default function KanbanBoard({ projectId }: KanbanBoardProps) {
                         })}
                       </div>
                     ) : (
-                      <input
-                        className="question-input"
-                        type="text"
-                        placeholder="Type your answer..."
-                        value={answers[idx] ?? ''}
-                        onChange={(e) => setQuestionAnswer(pq.eventId, idx, e.target.value)}
-                        onKeyDown={(e) => { if (e.key === 'Enter' && pq.questions.length === 1 && hasAnswers) handleAnswerQuestion(pq) }}
-                        disabled={isSubmitting}
-                        autoFocus
-                      />
+                      <div className="question-input-wrapper">
+                        <input
+                          className="question-input"
+                          type="text"
+                          placeholder="Type your answer... (@ to reference a report)"
+                          value={answers[idx] ?? ''}
+                          onChange={(e) => setQuestionAnswer(pq.eventId, idx, e.target.value)}
+                          onKeyDown={(e) => { if (e.key === 'Enter' && pq.questions.length === 1 && hasAnswers && !reportAutocomplete) handleAnswerQuestion(pq) }}
+                          onBlur={() => setTimeout(() => setReportAutocomplete(null), 200)}
+                          disabled={isSubmitting}
+                          autoFocus
+                        />
+                        {reportAutocomplete && reportAutocomplete.eventId === pq.eventId && reportAutocomplete.idx === idx && (
+                          <div className="autocomplete-dropdown autocomplete-inline">
+                            <div className="autocomplete-header">Reports</div>
+                            {reportAutocomplete.suggestions.map((r) => (
+                              <button
+                                key={`${r.folder}/${r.file}`}
+                                className="autocomplete-item"
+                                onMouseDown={(e) => { e.preventDefault(); insertReportInAnswer(pq.eventId, idx, r) }}
+                              >
+                                <span className="autocomplete-item-title">{r.title}</span>
+                                <span className="autocomplete-item-path">{r.folder}/{r.file}</span>
+                              </button>
+                            ))}
+                          </div>
+                        )}
+                      </div>
                     )}
                   </div>
                 ))}
