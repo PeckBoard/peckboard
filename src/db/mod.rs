@@ -2,6 +2,7 @@ pub mod crud;
 pub mod docs;
 pub mod events;
 pub mod models;
+pub mod repair;
 pub mod schema;
 #[cfg(test)]
 mod tests;
@@ -45,6 +46,12 @@ impl Db {
         conn.run_pending_migrations(MIGRATIONS)
             .map_err(|e| anyhow::anyhow!("migration failed: {e}"))?;
 
+        // Heal any schema drift left over from past migration mishaps
+        // (e.g. the 00000000000002_* collision that left some DBs
+        // missing project columns). Runs after diesel migrations so a
+        // freshly-created DB always lands here as a no-op.
+        repair::ensure_schema(&mut conn)?;
+
         Ok(Db {
             conn: Arc::new(Mutex::new(conn)),
         })
@@ -61,6 +68,8 @@ impl Db {
 
         conn.run_pending_migrations(MIGRATIONS)
             .map_err(|e| anyhow::anyhow!("migration failed: {e}"))?;
+
+        repair::ensure_schema(&mut conn)?;
 
         Ok(Db {
             conn: Arc::new(Mutex::new(conn)),

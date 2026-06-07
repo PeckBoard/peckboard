@@ -83,6 +83,105 @@ test per distinct user-visible behaviour, not one per code branch. If
 the change is a pure backend refactor with no user-visible surface,
 say so explicitly instead.
 
+## Migrations — READ THIS BEFORE ADDING ONE
+
+**Peckboard runs on real user data. Data loss is not acceptable. A
+migration that drops a column, drops a table, alters types, or runs
+incorrectly on existing DBs is a P0 incident.** Migrations have
+already silently corrupted live databases once on this project.
+
+### Default position: don't add a migration
+
+Most schema changes are avoidable. **Before reaching for ALTER /
+CREATE / DROP, ask:**
+
+- Can this be a new JSON field inside an existing `TEXT` column
+  (e.g. `events.data`, `projects.context`)? Almost everything we
+  store has a JSON escape hatch — use it.
+- Can this be derived at query time instead of stored?
+- Is this state really durable, or can it live in localStorage / a
+  Zustand store / a runtime cache?
+- Will future requirements likely need more fields here? If yes,
+  pick a representation that doesn't need a migration each time
+  (a `metadata JSON` blob, an EAV side-table, etc.).
+
+Migrations should be the path of last resort, not the first instinct.
+
+### When you must add one
+
+Treat it like a one-way door. Every migration shipped is permanent;
+you can never delete the file because it has to keep running for old
+DBs. So:
+
+- Make the change as small as possible. Don't bundle unrelated columns.
+- **Never DROP** in a forward migration without an explicit
+  conversation about acceptable data loss. Prefer to leave the
+  obsolete column unused and remove it (if ever) much later.
+- **Never change a column's type** in-place. Add a new column,
+  backfill, switch reads, leave the old column.
+- Backfill rows in the same migration when the new column is
+  `NOT NULL` — otherwise existing rows blow up at write time.
+- Provide a working `down.sql`. You will need it locally even if you
+  never run it in production.
+
+### Hard rules
+
+### Hard rules
+
+1. **Version numbers MUST be globally unique.** Diesel keys applied
+   migrations by the numeric prefix (`00000000000003` in
+   `00000000000003_user_tabs`). Two directories with the same prefix —
+   even with different names — make diesel mark the version applied
+   after running one of them and silently skip the other. `build.rs`
+   fails compilation if it detects duplicates, but you still need to
+   pick a number nobody else is using:
+   - If working with parallel branches/contributors, use a Unix
+     timestamp prefix (`date +%s` → `1717891234_*`) instead of
+     sequential numbers.
+   - Pull `origin/main` before adding a migration and check the
+     highest existing version number.
+
+2. **`CREATE TABLE` / `CREATE INDEX` must include `IF NOT EXISTS`.**
+   Cheap insurance against a duplicate-version migration getting
+   re-run on a DB that already has the object.
+
+3. **`ALTER TABLE … ADD COLUMN` cannot be made idempotent in SQLite.**
+   If you need to add a column, also add a defensive check in
+   `src/db/repair.rs::ensure_schema()` that adds the column on startup
+   if missing. This is the only way to safely heal DBs from older
+   versions when migrations have gone wrong.
+
+4. **Never edit a migration after it has been merged.** Add a new one.
+   Diesel decides whether to run by version, not by content; editing
+   an already-applied migration produces silent schema drift between
+   fresh and existing DBs.
+
+5. **Test with a non-empty DB.** Run the binary against an existing
+   data dir before merging, not just `mktemp -d`. Most migration
+   breakage only surfaces when the table already has rows or the
+   schema is mid-evolution.
+
+### Required workflow when adding a migration
+
+```bash
+mkdir migrations/$(date +%s)_what_this_does
+# write up.sql + down.sql (both with IF NOT EXISTS where supported)
+cargo build                       # build.rs rejects duplicate versions
+cargo test --lib                  # in-memory migrations + schema tests
+./target/release/peckboard --data-dir ~/.peckboard-test  # against a real DB
+```
+
+If `cargo build` fails with "duplicate migration version", rename the
+new migration. Don't suppress the check.
+
+### Backfilling a botched migration
+
+If you discover a column / table that should exist but doesn't on some
+DBs, **do not** rely on a new migration to add it (it'll fail on DBs
+that already have the column). Add the check to
+`src/db/repair.rs::ensure_schema()`; that runs after diesel migrations
+and is required to be idempotent.
+
 ## Conventions
 
 - Model ids carry a provider prefix (`claude:`, `mock:`). Bare model

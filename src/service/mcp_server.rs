@@ -1909,7 +1909,11 @@ impl McpToolRegistry {
         // Broadcast summary to other workers
         if let Some(ref pid) = project_id {
             if let Ok(workers) = ctx.db.list_worker_sessions_by_project(pid).await {
-                let tags_str = if tags.is_empty() { String::new() } else { format!(" [{}]", tags.join(", ")) };
+                let tags_str = if tags.is_empty() {
+                    String::new()
+                } else {
+                    format!(" [{}]", tags.join(", "))
+                };
                 let msg = format!(
                     "[Shared finding from worker on \"{}\"]{}\n\n{}\n\n\
                      — Finding ID: {} (call mcp__peckboard__get_finding_details to see full detail)\n\
@@ -2048,10 +2052,14 @@ impl McpToolRegistry {
         let project_id = self.resolve_project_id(ctx).await;
         let project_name = if let Some(ref pid) = project_id {
             ctx.db.get_project(pid).await.ok().flatten().map(|p| p.name)
-        } else { None };
+        } else {
+            None
+        };
 
         // Scan reports directory for reports matching this project
-        let data_dir = dirs::home_dir().unwrap_or_else(|| std::path::PathBuf::from(".")).join(".peckboard");
+        let data_dir = dirs::home_dir()
+            .unwrap_or_else(|| std::path::PathBuf::from("."))
+            .join(".peckboard");
         let reports_dir = data_dir.join("reports");
 
         let mut reports = Vec::new();
@@ -2062,7 +2070,9 @@ impl McpToolRegistry {
                     if let Ok(files) = std::fs::read_dir(folder_entry.path()) {
                         for file_entry in files.flatten() {
                             let file_name = file_entry.file_name().to_string_lossy().to_string();
-                            if !file_name.ends_with(".md") { continue; }
+                            if !file_name.ends_with(".md") {
+                                continue;
+                            }
 
                             // Read frontmatter to check project match
                             if let Ok(content) = std::fs::read_to_string(file_entry.path()) {
@@ -2080,7 +2090,8 @@ impl McpToolRegistry {
                                                 session_id = Some(v.trim_matches('"').to_string());
                                             }
                                             if let Some(v) = line.strip_prefix("projectName: ") {
-                                                report_project = Some(v.trim_matches('"').to_string());
+                                                report_project =
+                                                    Some(v.trim_matches('"').to_string());
                                             }
                                         }
                                     }
@@ -2111,28 +2122,48 @@ impl McpToolRegistry {
         Ok(serde_json::json!({ "reports": reports, "count": reports.len() }))
     }
 
-    async fn handle_read_report(&self, args: Value, ctx: &ToolCallContext) -> anyhow::Result<Value> {
-        let folder = args.get("folder").and_then(|v| v.as_str())
+    async fn handle_read_report(
+        &self,
+        args: Value,
+        ctx: &ToolCallContext,
+    ) -> anyhow::Result<Value> {
+        let folder = args
+            .get("folder")
+            .and_then(|v| v.as_str())
             .ok_or_else(|| anyhow::anyhow!("read_report requires 'folder'"))?;
-        let file = args.get("file").and_then(|v| v.as_str())
+        let file = args
+            .get("file")
+            .and_then(|v| v.as_str())
             .ok_or_else(|| anyhow::anyhow!("read_report requires 'file'"))?;
 
         tracing::info!(session_id = %ctx.session_id, folder = %folder, file = %file, "MCP tool: read_report");
 
         // Sanitize to prevent path traversal
-        if folder.contains("..") || file.contains("..") || folder.contains('/') || file.contains('/') {
+        if folder.contains("..")
+            || file.contains("..")
+            || folder.contains('/')
+            || file.contains('/')
+        {
             anyhow::bail!("invalid path");
         }
 
-        let data_dir = dirs::home_dir().unwrap_or_else(|| std::path::PathBuf::from(".")).join(".peckboard");
+        let data_dir = dirs::home_dir()
+            .unwrap_or_else(|| std::path::PathBuf::from("."))
+            .join(".peckboard");
         let path = data_dir.join("reports").join(folder).join(file);
 
-        let content = tokio::fs::read_to_string(&path).await
+        let content = tokio::fs::read_to_string(&path)
+            .await
             .map_err(|_| anyhow::anyhow!("report not found: {folder}/{file}"))?;
 
         // Strip frontmatter for the body
         let body = if content.starts_with("---") {
-            content.splitn(3, "---").nth(2).unwrap_or(&content).trim().to_string()
+            content
+                .splitn(3, "---")
+                .nth(2)
+                .unwrap_or(&content)
+                .trim()
+                .to_string()
         } else {
             content
         };
@@ -2145,16 +2176,29 @@ impl McpToolRegistry {
         }))
     }
 
-    async fn handle_read_worker_session(&self, args: Value, ctx: &ToolCallContext) -> anyhow::Result<Value> {
-        let target_session_id = args.get("session_id").and_then(|v| v.as_str())
+    async fn handle_read_worker_session(
+        &self,
+        args: Value,
+        ctx: &ToolCallContext,
+    ) -> anyhow::Result<Value> {
+        let target_session_id = args
+            .get("session_id")
+            .and_then(|v| v.as_str())
             .ok_or_else(|| anyhow::anyhow!("read_worker_session requires 'session_id'"))?;
-        let last_n = args.get("last_n").and_then(|v| v.as_i64()).unwrap_or(50).min(200) as i64;
+        let last_n = args
+            .get("last_n")
+            .and_then(|v| v.as_i64())
+            .unwrap_or(50)
+            .min(200) as i64;
 
         tracing::info!(session_id = %ctx.session_id, target = %target_session_id, "MCP tool: read_worker_session");
 
         // Verify target is in the same project
         let my_project = self.resolve_project_id(ctx).await;
-        let target_session = ctx.db.get_session(target_session_id).await?
+        let target_session = ctx
+            .db
+            .get_session(target_session_id)
+            .await?
             .ok_or_else(|| anyhow::anyhow!("session not found"))?;
 
         if my_project.is_some() && target_session.project_id != my_project {
@@ -2163,38 +2207,49 @@ impl McpToolRegistry {
 
         let card_title = if let Some(ref cid) = target_session.card_id {
             ctx.db.get_card(cid).await.ok().flatten().map(|c| c.title)
-        } else { None };
+        } else {
+            None
+        };
 
         let events = ctx.db.events_tail(target_session_id, last_n).await?;
 
-        let summary: Vec<Value> = events.iter().map(|e| {
-            let data: Value = serde_json::from_str(&e.data).unwrap_or_default();
-            let mut entry = serde_json::json!({
-                "seq": e.seq,
-                "kind": e.kind,
-                "ts": e.ts,
-            });
-            // Include key fields based on event kind
-            match e.kind.as_str() {
-                "user" => { entry["text"] = data.get("text").cloned().unwrap_or_default(); }
-                "agent-text" => { entry["text"] = data.get("text").cloned().unwrap_or_default(); }
-                "agent-tool-start" => {
-                    entry["tool"] = data.get("name").cloned().unwrap_or_default();
-                    entry["input"] = data.get("input").cloned().unwrap_or_default();
+        let summary: Vec<Value> = events
+            .iter()
+            .map(|e| {
+                let data: Value = serde_json::from_str(&e.data).unwrap_or_default();
+                let mut entry = serde_json::json!({
+                    "seq": e.seq,
+                    "kind": e.kind,
+                    "ts": e.ts,
+                });
+                // Include key fields based on event kind
+                match e.kind.as_str() {
+                    "user" => {
+                        entry["text"] = data.get("text").cloned().unwrap_or_default();
+                    }
+                    "agent-text" => {
+                        entry["text"] = data.get("text").cloned().unwrap_or_default();
+                    }
+                    "agent-tool-start" => {
+                        entry["tool"] = data.get("name").cloned().unwrap_or_default();
+                        entry["input"] = data.get("input").cloned().unwrap_or_default();
+                    }
+                    "agent-tool-end" => {
+                        entry["error"] = data.get("error").cloned().unwrap_or_default();
+                    }
+                    "agent-start" => {
+                        entry["model"] = data.get("model").cloned().unwrap_or_default();
+                    }
+                    "agent-end" => {
+                        entry["status"] = data.get("status").cloned().unwrap_or_default();
+                    }
+                    _ => {
+                        entry["data"] = data;
+                    }
                 }
-                "agent-tool-end" => {
-                    entry["error"] = data.get("error").cloned().unwrap_or_default();
-                }
-                "agent-start" => {
-                    entry["model"] = data.get("model").cloned().unwrap_or_default();
-                }
-                "agent-end" => {
-                    entry["status"] = data.get("status").cloned().unwrap_or_default();
-                }
-                _ => { entry["data"] = data; }
-            }
-            entry
-        }).collect();
+                entry
+            })
+            .collect();
 
         Ok(serde_json::json!({
             "status": "ok",
@@ -2210,7 +2265,9 @@ impl McpToolRegistry {
     async fn handle_list_worker_sessions(&self, ctx: &ToolCallContext) -> anyhow::Result<Value> {
         tracing::info!(session_id = %ctx.session_id, "MCP tool: list_worker_sessions");
 
-        let project_id = self.resolve_project_id(ctx).await
+        let project_id = self
+            .resolve_project_id(ctx)
+            .await
             .ok_or_else(|| anyhow::anyhow!("no project context"))?;
 
         let workers = ctx.db.list_worker_sessions_by_project(&project_id).await?;
@@ -2218,14 +2275,18 @@ impl McpToolRegistry {
         let mut items = Vec::new();
         for ws in &workers {
             let card_info = if let Some(ref cid) = ws.card_id {
-                ctx.db.get_card(cid).await.ok().flatten().map(|c| serde_json::json!({
-                    "id": c.id,
-                    "title": c.title,
-                    "step": c.step,
-                    "priority": c.priority,
-                    "blocked": c.blocked,
-                }))
-            } else { None };
+                ctx.db.get_card(cid).await.ok().flatten().map(|c| {
+                    serde_json::json!({
+                        "id": c.id,
+                        "title": c.title,
+                        "step": c.step,
+                        "priority": c.priority,
+                        "blocked": c.blocked,
+                    })
+                })
+            } else {
+                None
+            };
 
             items.push(serde_json::json!({
                 "session_id": ws.id,
@@ -2335,7 +2396,7 @@ mod tests {
         assert!(names.contains(&"delete_card"));
         assert!(names.contains(&"move_card_to_done"));
         assert!(names.contains(&"move_card_to_wont_do"));
-        assert_eq!(names.len(), 23);
+        assert_eq!(names.len(), 27);
     }
 
     #[test]
