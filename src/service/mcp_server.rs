@@ -329,6 +329,14 @@ impl McpToolRegistry {
                         "workflow": {
                             "type": "string",
                             "description": "Optional workflow override"
+                        },
+                        "model": {
+                            "type": "string",
+                            "description": "Optional model override (e.g. claude-opus-4-8)"
+                        },
+                        "effort": {
+                            "type": "string",
+                            "description": "Optional effort level (low, medium, high, xhigh, max)"
                         }
                     },
                     "required": ["title", "description"],
@@ -1055,10 +1063,9 @@ impl McpToolRegistry {
 
         let priority = args.get("priority").and_then(|v| v.as_i64()).unwrap_or(3) as i32;
 
-        let workflow = args
-            .get("workflow")
-            .and_then(|v| v.as_str())
-            .map(|s| s.to_string());
+        let workflow = args.get("workflow").and_then(|v| v.as_str()).map(|s| s.to_string());
+        let model = args.get("model").and_then(|v| v.as_str()).map(|s| s.to_string());
+        let effort = args.get("effort").and_then(|v| v.as_str()).map(|s| s.to_string());
 
         let now = chrono::Utc::now().to_rfc3339();
         let card = ctx
@@ -1071,8 +1078,8 @@ impl McpToolRegistry {
                 step: "backlog".to_string(),
                 priority,
                 workflow,
-                model: None,
-                effort: None,
+                model,
+                effort,
                 created_at: now.clone(),
                 updated_at: now,
             })
