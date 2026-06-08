@@ -2477,6 +2477,7 @@ dependencies = [
  "libsqlite3-sys",
  "mdns-sd",
  "mime_guess",
+ "p256",
  "rand 0.8.6",
  "rcgen",
  "regex",

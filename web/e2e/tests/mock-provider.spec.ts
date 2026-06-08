@@ -25,15 +25,12 @@ type AuthBundle = {
 }
 
 async function authenticate(request: APIRequestContext): Promise<AuthBundle> {
-  const status = await request.get('/api/auth/status')
-  expect(status.ok()).toBeTruthy()
-  const { has_users } = (await status.json()) as { has_users: boolean }
-
-  const credentials = { username: E2E_USER, password: E2E_PASS }
-  const endpoint = has_users ? '/api/auth/login' : '/api/auth/register'
-
-  const res = await request.post(endpoint, { data: credentials })
-  expect(res.ok(), `auth via ${endpoint} failed: ${await res.text()}`).toBeTruthy()
+  // The server auto-bootstraps the admin from PECKBOARD_BOOTSTRAP_*
+  // env vars at first start (see playwright.config.ts); we just log in.
+  const res = await request.post('/api/auth/login', {
+    data: { username: E2E_USER, password: E2E_PASS },
+  })
+  expect(res.ok(), `login failed: ${await res.text()}`).toBeTruthy()
   const { token } = (await res.json()) as { token: string }
 
   return { token, authHeader: { Authorization: `Bearer ${token}` } }

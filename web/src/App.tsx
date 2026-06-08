@@ -7,7 +7,6 @@ import { useSessionsStore } from './store/sessions'
 import { useProjectsStore } from './store/projects'
 import { useFoldersStore } from './store/folders'
 import LoginModal from './components/LoginModal'
-import RegisterModal from './components/RegisterModal'
 import ChatView from './components/ChatView'
 import ProjectList from './components/ProjectList'
 import KanbanBoard from './components/KanbanBoard'
@@ -80,7 +79,6 @@ function formatRelativeTime(dateStr: string): string {
 function App() {
   const initialized = useAuthStore((s) => s.initialized)
   const authenticated = useAuthStore((s) => s.authenticated)
-  const needsRegistration = useAuthStore((s) => s.needsRegistration)
   const user = useAuthStore((s) => s.user)
   const checkAuth = useAuthStore((s) => s.checkAuth)
   const logout = useAuthStore((s) => s.logout)
@@ -312,7 +310,6 @@ function App() {
     )
   }
 
-  if (needsRegistration) return <RegisterModal />
   if (!authenticated) return <LoginModal />
 
   const dismissAnnouncement = async () => {

@@ -1,4 +1,4 @@
-use jsonwebtoken::{DecodingKey, EncodingKey, Header, Validation, decode, encode};
+use jsonwebtoken::{Algorithm, DecodingKey, EncodingKey, Header, Validation, decode, encode};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::path::Path;
@@ -88,12 +88,12 @@ pub fn create_token(
         exp,
     };
 
-    let token = encode(
-        &Header::default(),
-        &claims,
-        &EncodingKey::from_secret(secret),
-    )
-    .map_err(|e| anyhow::anyhow!("failed to create JWT: {e}"))?;
+    // Pin the algorithm explicitly so a future swap of the secret type
+    // (HMAC → public key) can't quietly downgrade signing, and so the
+    // decode side has a single fixed expectation to match.
+    let header = Header::new(Algorithm::HS256);
+    let token = encode(&header, &claims, &EncodingKey::from_secret(secret))
+        .map_err(|e| anyhow::anyhow!("failed to create JWT: {e}"))?;
 
     Ok((token, exp))
 }
@@ -101,7 +101,11 @@ pub fn create_token(
 /// Validate a JWT token and return its claims.
 /// Does NOT check server-side session revocation — caller must do that.
 pub fn validate_token(secret: &[u8], token: &str) -> anyhow::Result<Claims> {
-    let mut validation = Validation::default();
+    // Pin to HS256 on decode. Without this, `Validation::default()`
+    // would accept any algorithm the token's `alg` header claims —
+    // including the `none` family attacks against poorly-written
+    // jsonwebtoken consumers.
+    let mut validation = Validation::new(Algorithm::HS256);
     validation.validate_exp = true;
 
     let data = decode::<Claims>(token, &DecodingKey::from_secret(secret), &validation)

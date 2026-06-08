@@ -38,47 +38,35 @@ export async function authedFetch(input: RequestInfo | URL, init?: RequestInit):
 interface AuthState {
   initialized: boolean
   authenticated: boolean
-  needsRegistration: boolean
   user: { id: string; username: string; role: string } | null
   clearAuth: () => void
   checkAuth: () => Promise<void>
   login: (username: string, password: string, rememberMe?: boolean) => Promise<void>
   logout: () => Promise<void>
-  register: (username: string, password: string, email?: string) => Promise<void>
 }
 
 export const useAuthStore = create<AuthState>((set) => ({
   initialized: false,
   authenticated: false,
-  needsRegistration: false,
   user: null,
 
   clearAuth: () => set({ authenticated: false, user: null }),
 
   checkAuth: async () => {
     try {
-      // First check if any users exist
-      const statusRes = await fetch('/api/auth/status')
-      if (statusRes.ok) {
-        const status = await statusRes.json()
-        if (!status.has_users) {
-          set({ needsRegistration: true, initialized: true, authenticated: false, user: null })
-          return
-        }
-      }
-
-      // If we have a token, try to validate it
+      // Self-service registration is gone; the server auto-creates the
+      // sole admin on first start. We only need to probe the token.
       const token = getToken()
       if (token) {
         const meRes = await authedFetch('/api/auth/me')
         if (meRes.ok) {
           const user = await meRes.json()
-          set({ authenticated: true, user, needsRegistration: false, initialized: true })
+          set({ authenticated: true, user, initialized: true })
           return
         }
       }
 
-      set({ authenticated: false, user: null, needsRegistration: false, initialized: true })
+      set({ authenticated: false, user: null, initialized: true })
     } catch {
       set({ authenticated: false, user: null, initialized: true })
     }
@@ -96,7 +84,7 @@ export const useAuthStore = create<AuthState>((set) => ({
     }
     const data = await res.json()
     setToken(data.token, rememberMe)
-    set({ authenticated: true, user: data.user, needsRegistration: false })
+    set({ authenticated: true, user: data.user })
   },
 
   logout: async () => {
@@ -107,22 +95,5 @@ export const useAuthStore = create<AuthState>((set) => ({
     }
     clearToken()
     set({ authenticated: false, user: null })
-  },
-
-  register: async (username, password, email?) => {
-    const body: Record<string, string> = { username, password }
-    if (email) body.email = email
-    const res = await fetch('/api/auth/register', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(body),
-    })
-    if (!res.ok) {
-      const err = await res.json().catch(() => ({ error: 'Registration failed' }))
-      throw new Error(err.error || 'Registration failed')
-    }
-    const data = await res.json()
-    setToken(data.token, true)
-    set({ authenticated: true, user: data.user, needsRegistration: false })
   },
 }))

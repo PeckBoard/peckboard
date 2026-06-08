@@ -22,10 +22,9 @@ let cachedAuth: { token: string; auth: Record<string, string> } | null = null
 
 async function authenticate(request: APIRequestContext) {
   if (cachedAuth) return cachedAuth
-  const status = await request.get('/api/auth/status')
-  const { has_users } = (await status.json()) as { has_users: boolean }
-  const endpoint = has_users ? '/api/auth/login' : '/api/auth/register'
-  const res = await request.post(endpoint, {
+  // The server auto-bootstraps the admin from PECKBOARD_BOOTSTRAP_*
+  // env vars at first start (see playwright.config.ts); we just log in.
+  const res = await request.post('/api/auth/login', {
     data: { username: E2E_USER, password: E2E_PASS },
   })
   expect(res.ok()).toBeTruthy()
