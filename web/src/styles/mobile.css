@@ -1,0 +1,523 @@
+/* ═══════════════════════════════════════════════════
+   MOBILE RESPONSIVE
+   ═══════════════════════════════════════════════════ */
+
+@media (max-width: 768px) {
+  /* Shell: stack vertically, rail on top, tabbar on bottom */
+  .shell {
+    flex-direction: column;
+  }
+
+  /* Rail → top toolbar. `min-height` (not `height`) so the bar grows
+     by the iPhone notch / status-bar safe area instead of being pushed
+     under it (`viewport-fit=cover` is set in index.html). */
+  .rail {
+    width: 100%;
+    min-height: 56px;
+    flex-direction: row;
+    border-right: none;
+    border-bottom: 1px solid var(--border);
+    padding: env(safe-area-inset-top, 0px) 8px 0;
+    overflow-x: auto;
+    flex-shrink: 0;
+  }
+  .rail-top {
+    flex-direction: row;
+    gap: 2px;
+    flex: 1;
+    justify-content: flex-start;
+  }
+  .rail-bottom {
+    flex-direction: row;
+    gap: 4px;
+  }
+  .rail-brand {
+    margin-bottom: 0;
+    margin-right: 8px;
+    width: 30px;
+    height: 30px;
+    font-size: 14px;
+  }
+  .rail-btn {
+    width: 42px;
+    height: 42px;
+  }
+  /* Active underline stays on the bottom edge of rail buttons — that's
+     the edge that points at the page content below. */
+  .rail-btn.active::before {
+    left: 50%;
+    top: auto;
+    bottom: -4px;
+    transform: translateX(-50%);
+    width: 20px;
+    height: 3px;
+    border-radius: 2px 2px 0 0;
+  }
+
+  /* Tab strip moves to the bottom on mobile, below the content.
+     Uses flex `order` so we don't have to reorder the JSX (the
+     other children of `.content` keep their default order). */
+  .tabbar {
+    order: 99;
+    border-bottom: none;
+    border-top: 1px solid var(--border);
+    padding-bottom: env(safe-area-inset-bottom, 0px);
+  }
+  .rail-separator {
+    width: 1px;
+    height: 24px;
+    background: var(--border);
+    margin: 0 4px;
+  }
+  .rail-avatar {
+    width: 30px;
+    height: 30px;
+    font-size: 11px;
+  }
+  .rail-status {
+    display: none;
+  }
+
+  /* Panel → full width overlay */
+  .panel {
+    position: fixed;
+    top: 0;
+    left: 0;
+    right: 0;
+    bottom: 56px;
+    width: 100%;
+    z-index: 30;
+    border-right: none;
+    transition: transform 0.2s ease;
+  }
+  .panel.panel-hidden-mobile {
+    transform: translateX(-100%);
+    pointer-events: none;
+  }
+
+  /* Content → full width */
+  .content {
+    flex: 1;
+    min-height: 0;
+  }
+
+  /* Chat bubbles full width */
+  .chat-bubble {
+    max-width: 90%;
+  }
+
+  /* Chat toolbar */
+  .chat-toolbar {
+    flex-wrap: wrap;
+    gap: 6px;
+  }
+  .chat-toolbar-name {
+    font-size: var(--text-sm);
+  }
+
+  /* Input bar */
+  .input-bar {
+    padding: 8px 12px;
+  }
+
+  /* Tool blocks full width */
+  /* Kanban columns scroll horizontally */
+  .kanban-columns {
+    overflow-x: auto;
+    -webkit-overflow-scrolling: touch;
+  }
+  .kanban-column {
+    min-width: 200px;
+  }
+
+  /* Kanban header stack */
+  .kanban-board-header {
+    flex-wrap: wrap;
+    gap: 8px;
+  }
+  .kanban-project-info {
+    flex-wrap: wrap;
+  }
+
+  /* Add card form */
+  .kanban-add-row {
+    flex-direction: column;
+  }
+  .kanban-add-row select {
+    min-width: auto;
+  }
+
+  /* Modals full width on mobile */
+  .modal {
+    max-width: calc(100vw - 32px) !important;
+    max-height: calc(100vh - 100px);
+    overflow-y: auto;
+  }
+
+  /* Question dialog */
+  .question-dialog {
+    max-width: calc(100vw - 32px) !important;
+  }
+
+  /* Settings/Reports pages */
+  .settings-page {
+    padding: 16px;
+  }
+
+  /* Autocomplete */
+  .autocomplete-dropdown {
+    left: 12px;
+    right: 12px;
+  }
+
+  /* Empty state */
+  .empty-state {
+    padding: 24px;
+  }
+
+  /* Worker question trigger */
+  .worker-questions-trigger {
+    font-size: var(--text-xs);
+    padding: 10px 12px;
+  }
+}
+
+/* Small phones */
+@media (max-width: 480px) {
+  .rail {
+    min-height: 48px;
+    padding: env(safe-area-inset-top, 0px) 4px 0;
+  }
+  .rail-btn {
+    width: 36px;
+    height: 36px;
+  }
+  .rail-brand {
+    width: 26px;
+    height: 26px;
+    font-size: 12px;
+    margin-right: 4px;
+  }
+  .chat-bubble {
+    max-width: 95%;
+    font-size: var(--text-sm);
+  }
+  .modal {
+    padding: 20px !important;
+  }
+  .kanban-column {
+    min-width: 160px;
+  }
+}
+
+/* ── Tab bar ─────────────────────────────────────────────────────────
+   Top tab strip that replaces the old session/project sidebar. Two
+   fixed leftmost tabs (Sessions / Projects) navigate to list views;
+   the rest are opened sessions/projects mixed together in MRU order. */
+.tabbar {
+  display: flex;
+  align-items: stretch;
+  flex-wrap: nowrap;
+  overflow-x: auto;
+  overflow-y: visible;
+  border-bottom: 1px solid var(--border);
+  background: var(--surface);
+  scrollbar-width: thin;
+  flex-shrink: 0;
+  /* Keep the strip inside the content column so it doesn't push the
+     page horizontally on mobile. */
+  max-width: 100%;
+  width: 100%;
+  /* Native momentum scrolling on iOS for the tab strip. */
+  -webkit-overflow-scrolling: touch;
+  /* Allow horizontal scroll on the strip without taking over the
+     vertical scroll gesture on the page. */
+  overscroll-behavior-x: contain;
+}
+.tab-wrap {
+  position: relative;
+  flex-shrink: 0;
+  display: inline-flex;
+  align-items: center;
+}
+.tab-wrap .tab {
+  padding-right: 4px;
+}
+.tab-close {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 18px;
+  height: 18px;
+  margin-right: 6px;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--text3);
+  font-size: 11px;
+  line-height: 1;
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  opacity: 0;
+  transition:
+    opacity 0.12s ease,
+    background 0.12s ease,
+    color 0.12s ease;
+}
+.tab-wrap:hover .tab-close,
+.tab-wrap:focus-within .tab-close,
+.tab-active + .tab-close,
+.tab-wrap:has(.tab-active) .tab-close {
+  opacity: 1;
+}
+.tab-close:hover {
+  background: var(--surface2, var(--bg-hover, var(--surface)));
+  color: var(--text);
+}
+@media (max-width: 768px) {
+  .tab-close {
+    display: none;
+  }
+  .tab-wrap .tab {
+    padding-right: 12px;
+  }
+}
+.tab {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 0 12px;
+  height: 36px;
+  border: 0;
+  background: transparent;
+  color: var(--text2);
+  font-size: var(--text-sm);
+  font-family: inherit;
+  cursor: pointer;
+  border-bottom: 2px solid transparent;
+  white-space: nowrap;
+  user-select: none;
+  -webkit-user-select: none;
+}
+.tab:hover {
+  color: var(--text);
+  background: var(--bg-hover, var(--bg));
+}
+.tab-active {
+  color: var(--text);
+  border-bottom-color: var(--accent);
+  font-weight: 500;
+}
+.tab-opened {
+  max-width: 200px;
+}
+.tab-label {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.tab-icon {
+  color: var(--text3);
+  font-size: 12px;
+  font-weight: 700;
+}
+.tab-icon-project {
+  color: var(--warning);
+}
+.tab-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+.tab-dot-running {
+  background: var(--accent);
+  animation: tab-dot-pulse 1.4s ease-in-out infinite;
+}
+.tab-dot-unread {
+  background: var(--success);
+}
+@keyframes tab-dot-pulse {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.4;
+  }
+}
+.tab-menu {
+  position: absolute;
+  top: 100%;
+  left: 8px;
+  z-index: 10;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.16);
+  min-width: 140px;
+  padding: 4px;
+}
+.tab-menu button {
+  display: block;
+  width: 100%;
+  padding: 8px 12px;
+  background: transparent;
+  border: 0;
+  text-align: left;
+  font-family: inherit;
+  font-size: var(--text-sm);
+  color: var(--text);
+  cursor: pointer;
+  border-radius: var(--radius-xs, 4px);
+}
+.tab-menu button:hover {
+  background: var(--bg);
+}
+.tab-menu .tab-menu-danger {
+  color: var(--danger);
+}
+.tab-menu .tab-menu-danger:hover {
+  background: var(--danger-bg);
+}
+
+/* ── List view (sessions / projects inside main when no item active) ─ */
+.list-view {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-height: 0;
+}
+.list-view-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 16px 20px;
+  border-bottom: 1px solid var(--border);
+}
+.list-view-title {
+  margin: 0;
+  font-size: var(--text-lg);
+  font-weight: 600;
+}
+.list-view-action {
+  padding: 6px 12px;
+  background: var(--accent);
+  color: var(--text-inverse);
+  border: 0;
+  border-radius: var(--radius-sm);
+  font-size: var(--text-sm);
+  font-family: inherit;
+  cursor: pointer;
+}
+.list-view-body {
+  flex: 1;
+  overflow-y: auto;
+  padding: 8px;
+}
+.list-view-row {
+  position: relative;
+  display: flex;
+  align-items: center;
+  padding: 2px 4px;
+}
+.list-view-item {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 12px;
+  background: transparent;
+  border: 0;
+  border-radius: var(--radius-sm);
+  text-align: left;
+  font-family: inherit;
+  font-size: var(--text-sm);
+  color: var(--text);
+  cursor: pointer;
+}
+.list-view-item:hover {
+  background: var(--bg);
+}
+.list-view-row.active .list-view-item {
+  background: var(--accent-subtle);
+  color: var(--accent);
+}
+.list-view-name {
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.list-view-meta {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: var(--text-xs);
+  color: var(--text3);
+}
+.list-view-tag {
+  padding: 2px 6px;
+  background: var(--bg);
+  border-radius: var(--radius-xs, 4px);
+}
+.list-view-time {
+  font-variant-numeric: tabular-nums;
+}
+.list-view-menu {
+  background: transparent;
+  border: 0;
+  color: var(--text3);
+  font-size: 16px;
+  padding: 8px 10px;
+  cursor: pointer;
+  border-radius: var(--radius-sm);
+}
+.list-view-menu:hover {
+  background: var(--bg);
+  color: var(--text);
+}
+.list-view-dropdown {
+  position: absolute;
+  top: 100%;
+  right: 8px;
+  z-index: 10;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.16);
+  min-width: 160px;
+  padding: 4px;
+}
+.list-view-dropdown button {
+  display: block;
+  width: 100%;
+  padding: 8px 12px;
+  background: transparent;
+  border: 0;
+  text-align: left;
+  font-family: inherit;
+  font-size: var(--text-sm);
+  color: var(--danger);
+  cursor: pointer;
+  border-radius: var(--radius-xs, 4px);
+}
+.list-view-dropdown button:hover {
+  background: var(--bg);
+}
+.list-view-empty {
+  padding: 32px 16px;
+  text-align: center;
+  color: var(--text3);
+}
+.list-view-empty-action {
+  margin-top: 12px;
+  padding: 8px 16px;
+  background: var(--accent);
+  color: var(--text-inverse);
+  border: 0;
+  border-radius: var(--radius-sm);
+  font-family: inherit;
+  font-size: var(--text-sm);
+  cursor: pointer;
+}

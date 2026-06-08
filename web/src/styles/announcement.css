@@ -1,0 +1,51 @@
+/* ═══════════════════════════════════════════════════
+   Announcement Banner
+   ═══════════════════════════════════════════════════ */
+
+.announcement-banner {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 10px 20px;
+  background: var(--accent-subtle);
+  border-bottom: 1px solid var(--accent);
+  flex-shrink: 0;
+}
+
+.announcement-content {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: var(--text-sm);
+  color: var(--text);
+  min-width: 0;
+}
+
+.announcement-content strong {
+  flex-shrink: 0;
+}
+
+.announcement-content span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.announcement-dismiss {
+  padding: 4px 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--surface);
+  color: var(--text2);
+  font-size: var(--text-xs);
+  font-weight: 500;
+  cursor: pointer;
+  flex-shrink: 0;
+  transition: all var(--transition);
+}
+
+.announcement-dismiss:hover {
+  background: var(--surface2);
+  color: var(--text);
+}

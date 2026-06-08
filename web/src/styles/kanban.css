@@ -1,0 +1,314 @@
+/* ═══════════════════════════════════════════════════
+   Kanban Board
+   ═══════════════════════════════════════════════════ */
+
+.kanban-board {
+  flex: 1;
+  overflow-x: auto;
+  padding: 20px;
+}
+.kanban-columns {
+  display: flex;
+  gap: 12px;
+  min-height: 100%;
+}
+.kanban-column {
+  flex: 1;
+  min-width: 240px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  padding: 12px;
+  display: flex;
+  flex-direction: column;
+}
+.kanban-column-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 12px;
+  padding: 0 4px;
+}
+.kanban-column-header h3 {
+  margin: 0;
+  font-size: var(--text-xs);
+  font-weight: 700;
+  color: var(--text2);
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+}
+.kanban-count {
+  font-size: 11px;
+  background: var(--surface2);
+  color: var(--text3);
+  padding: 1px 8px;
+  border-radius: var(--radius-full);
+  font-weight: 700;
+}
+.kanban-cards {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  flex: 1;
+}
+.kanban-card {
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  padding: 0;
+  text-align: left;
+  width: 100%;
+  font-family: inherit;
+  transition:
+    all 0.3s ease,
+    box-shadow 0.15s ease;
+  display: flex;
+  position: relative;
+  animation: cardGrowIn 0.35s cubic-bezier(0.34, 1.56, 0.64, 1);
+  transform-origin: center center;
+}
+
+@keyframes cardGrowIn {
+  0% {
+    opacity: 0;
+    transform: scale(0.3);
+    max-height: 0;
+  }
+  60% {
+    opacity: 1;
+    transform: scale(1.03);
+  }
+  100% {
+    opacity: 1;
+    transform: scale(1);
+    max-height: 200px;
+  }
+}
+
+.kanban-card:hover {
+  border-color: var(--border-strong);
+  box-shadow: var(--shadow);
+}
+.kanban-card.dragging {
+  opacity: 0.5;
+}
+.kanban-card.blocked {
+  border-left: 3px solid var(--danger);
+}
+.kanban-column.drag-over {
+  background: var(--accent-subtle);
+  box-shadow: inset 0 0 0 2px var(--accent-muted);
+  border-color: var(--accent);
+}
+.card-thought-bubble {
+  position: absolute;
+  top: -9px;
+  right: 12px;
+  z-index: 5;
+  max-width: 80%;
+  padding: 3px 8px;
+  background: var(--accent-subtle);
+  color: var(--accent);
+  border: 1px solid var(--accent-muted);
+  border-radius: 11px;
+  font-size: 10px;
+  line-height: 1.3;
+  font-weight: 500;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  box-shadow: var(--shadow);
+  pointer-events: none;
+  animation: thoughtBubbleIn 0.22s ease;
+}
+/* Comic-style trailing dots so it reads as a thought bubble. */
+.card-thought-bubble::before,
+.card-thought-bubble::after {
+  content: '';
+  position: absolute;
+  right: 10px;
+  border-radius: 50%;
+  background: var(--accent-subtle);
+  border: 1px solid var(--accent-muted);
+}
+.card-thought-bubble::before {
+  width: 5px;
+  height: 5px;
+  bottom: -4px;
+}
+.card-thought-bubble::after {
+  width: 3px;
+  height: 3px;
+  right: 6px;
+  bottom: -8px;
+}
+@keyframes thoughtBubbleIn {
+  from {
+    opacity: 0;
+    transform: translateY(4px) scale(0.92);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+}
+.kanban-card-top {
+  flex: 1;
+  padding: 10px 12px;
+  cursor: pointer;
+  min-width: 0;
+}
+.kanban-card-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 8px;
+}
+.kanban-card-title {
+  font-size: var(--text-sm);
+  font-weight: 500;
+  color: var(--text);
+  line-height: 1.35;
+}
+.kanban-card-worker {
+  font-size: 10px;
+  color: var(--accent);
+  font-weight: 600;
+  margin-top: 6px;
+}
+.kanban-card-actions {
+  position: relative;
+  flex-shrink: 0;
+  padding: 6px 4px 0 0;
+}
+.kanban-card-menu-btn {
+  background: none;
+  border: none;
+  color: var(--text3);
+  cursor: pointer;
+  font-size: 14px;
+  padding: 2px 6px;
+  border-radius: var(--radius);
+  opacity: 0;
+  transition: opacity var(--transition);
+  font-weight: 700;
+  letter-spacing: 1px;
+}
+.kanban-card:hover .kanban-card-menu-btn {
+  opacity: 1;
+}
+.kanban-card-menu-btn:hover {
+  background: var(--surface2);
+  color: var(--text);
+}
+.kanban-card-menu {
+  position: absolute;
+  right: 0;
+  top: 100%;
+  z-index: 10;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  box-shadow: var(--shadow-md);
+  min-width: 120px;
+  overflow: hidden;
+}
+.kanban-card-menu button {
+  display: block;
+  width: 100%;
+  text-align: left;
+  padding: 8px 12px;
+  border: none;
+  background: transparent;
+  font-size: var(--text-sm);
+  color: var(--text);
+  cursor: pointer;
+}
+.kanban-card-menu button:hover {
+  background: var(--surface-hover);
+}
+.kanban-card-menu button.danger {
+  color: var(--danger);
+}
+.kanban-card-menu button.danger:hover {
+  background: var(--danger-bg);
+}
+
+.priority-badge {
+  font-size: 10px;
+  font-weight: 700;
+  padding: 2px 7px;
+  border-radius: var(--radius-sm);
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+  flex-shrink: 0;
+}
+.priority-critical {
+  background: var(--danger);
+  color: var(--text-inverse);
+}
+.priority-high {
+  background: var(--danger-bg);
+  color: var(--danger);
+}
+.priority-medium {
+  background: var(--warning-bg);
+  color: var(--warning);
+}
+.priority-low {
+  background: var(--success-bg);
+  color: var(--success);
+}
+.blocked-indicator {
+  font-size: var(--text-xs);
+  color: var(--danger);
+  margin-top: 8px;
+  font-weight: 500;
+}
+.waiting-indicator {
+  font-size: var(--text-xs);
+  color: var(--warning);
+  margin-top: 8px;
+  font-weight: 500;
+}
+.dep-done {
+  color: var(--success);
+}
+.dep-pending {
+  color: var(--warning);
+}
+
+.card-detail-grid {
+  margin: 16px 0;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+.card-detail-row {
+  display: flex;
+  gap: 12px;
+  font-size: var(--text-sm);
+}
+.card-detail-label {
+  font-weight: 700;
+  color: var(--text3);
+  min-width: 90px;
+  font-size: var(--text-xs);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  padding-top: 2px;
+}
+.close-btn {
+  padding: 8px 20px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--surface);
+  color: var(--text);
+  font-size: var(--text-sm);
+  font-weight: 500;
+  cursor: pointer;
+  transition: all var(--transition);
+}
+.close-btn:hover {
+  background: var(--surface2);
+}

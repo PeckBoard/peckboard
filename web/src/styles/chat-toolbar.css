@@ -1,0 +1,182 @@
+/* ═══════════════════════════════════════════════════
+   Chat Toolbar
+   ═══════════════════════════════════════════════════ */
+
+.chat-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 24px;
+  border-bottom: 1px solid var(--border);
+  background: var(--surface);
+  flex-shrink: 0;
+  min-height: 44px;
+}
+
+.chat-toolbar-name {
+  font-size: var(--text-sm);
+  font-weight: 700;
+  color: var(--text);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.chat-toolbar-model-wrapper {
+  position: relative;
+  flex-shrink: 0;
+}
+
+.chat-toolbar-model {
+  font-size: 10px;
+  font-weight: 600;
+  padding: 2px 8px;
+  border-radius: var(--radius-full);
+  background: var(--surface2);
+  color: var(--text3);
+  flex-shrink: 0;
+  border: 1px solid transparent;
+  cursor: pointer;
+  transition: all var(--transition);
+}
+
+.chat-toolbar-model:hover {
+  border-color: var(--border);
+  color: var(--text2);
+}
+
+.chat-model-dropdown {
+  max-height: 300px;
+  overflow-y: auto;
+  min-width: 220px;
+}
+
+.chat-model-dropdown button.active {
+  background: var(--accent-subtle);
+  color: var(--accent);
+  font-weight: 600;
+}
+
+.chat-model-loading {
+  padding: 12px;
+  font-size: var(--text-xs);
+  color: var(--text3);
+  text-align: center;
+}
+
+.chat-toolbar-status {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: var(--text-xs);
+  color: var(--text2);
+  margin-left: auto;
+  flex-shrink: 0;
+}
+
+.chat-toolbar-menu-wrapper {
+  position: relative;
+  flex-shrink: 0;
+}
+
+.chat-toolbar-menu {
+  width: 30px;
+  height: 30px;
+  border: none;
+  border-radius: var(--radius);
+  background: transparent;
+  color: var(--text3);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  transition: all var(--transition);
+}
+
+.chat-toolbar-menu:hover {
+  background: var(--surface-hover);
+  color: var(--text);
+}
+
+.chat-toolbar-dropdown {
+  position: absolute;
+  right: 0;
+  top: 100%;
+  margin-top: 4px;
+  z-index: 50;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  box-shadow: var(--shadow-lg);
+  padding: 4px;
+  min-width: 140px;
+}
+
+.chat-toolbar-dropdown button {
+  display: block;
+  width: 100%;
+  padding: 7px 12px;
+  border: none;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  font-size: var(--text-sm);
+  color: var(--text);
+  cursor: pointer;
+  text-align: left;
+  transition: background var(--transition);
+}
+
+.chat-toolbar-dropdown button:hover {
+  background: var(--surface-hover);
+}
+
+.chat-toolbar-dropdown button.danger {
+  color: var(--danger);
+}
+
+.chat-toolbar-dropdown button.danger:hover {
+  background: var(--danger-bg);
+}
+
+/* ─── Status Dot ─── */
+
+.status-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: var(--radius-full);
+  flex-shrink: 0;
+}
+
+.status-dot-idle {
+  background: var(--text3);
+  opacity: 0.5;
+}
+
+.status-dot-working {
+  background: var(--success);
+  animation: pulse-dot 1.5s ease-in-out infinite;
+}
+
+.status-dot-tool {
+  background: var(--accent);
+}
+
+.status-dot-crashed {
+  background: var(--danger);
+}
+
+.status-dot-questioning {
+  background: var(--warning);
+}
+
+@keyframes pulse-dot {
+  0%,
+  100% {
+    opacity: 1;
+    transform: scale(1);
+  }
+  50% {
+    opacity: 0.5;
+    transform: scale(0.85);
+  }
+}

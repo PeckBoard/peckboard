@@ -1,0 +1,204 @@
+/* ═══════════════════════════════════════════════════
+   Project List (inside panel)
+   ═══════════════════════════════════════════════════ */
+
+.project-list-container {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+}
+.project-list-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 16px 16px 12px;
+  flex-shrink: 0;
+}
+.project-list-header h2 {
+  margin: 0;
+  font-size: var(--text-sm);
+  font-weight: 700;
+  color: var(--text);
+}
+.create-btn {
+  font-size: var(--text-xs);
+  padding: 4px 10px;
+  border: 1px solid var(--accent);
+  border-radius: var(--radius);
+  background: transparent;
+  color: var(--accent);
+  cursor: pointer;
+  font-weight: 600;
+  transition: all var(--transition);
+}
+.create-btn:hover {
+  background: var(--accent);
+  color: var(--text-inverse);
+}
+.create-form {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin: 0 12px 12px;
+  padding: 12px;
+  background: var(--surface2);
+  border-radius: var(--radius-md);
+}
+.create-form input {
+  padding: 7px 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--surface);
+  color: var(--text);
+  font-size: var(--text-sm);
+  outline: none;
+}
+.create-form input:focus {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 2px var(--accent-subtle);
+}
+.create-form button[type='submit'] {
+  padding: 7px;
+  border: none;
+  border-radius: var(--radius);
+  background: var(--accent);
+  color: var(--text-inverse);
+  font-size: var(--text-sm);
+  font-weight: 600;
+  cursor: pointer;
+}
+.create-form button[type='submit']:hover:not(:disabled) {
+  background: var(--accent-hover);
+}
+.create-form button[type='submit']:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+.project-list {
+  list-style: none;
+  flex: 1;
+  overflow-y: auto;
+  padding: 0 8px 8px;
+}
+.project-list li {
+  display: flex;
+  align-items: center;
+  position: relative;
+}
+.project-list-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex: 1;
+  text-align: left;
+  padding: 9px 12px;
+  border: none;
+  border-radius: var(--radius);
+  background: transparent;
+  font-size: var(--text-sm);
+  color: var(--text);
+  cursor: pointer;
+  transition: background var(--transition);
+  min-width: 0;
+}
+.project-list-item:hover {
+  background: var(--surface-hover);
+}
+.project-list li.active .project-list-item {
+  background: var(--accent-subtle);
+  color: var(--accent);
+  font-weight: 500;
+}
+.project-name {
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.status-badge {
+  font-size: 10px;
+  padding: 1px 6px;
+  border-radius: var(--radius-full);
+  font-weight: 600;
+  text-transform: capitalize;
+}
+.status-active {
+  background: var(--success-bg);
+  color: var(--success);
+}
+.status-paused {
+  background: var(--warning-bg);
+  color: var(--warning);
+}
+.status-archived {
+  background: var(--surface3);
+  color: var(--text3);
+}
+.card-count {
+  font-size: var(--text-xs);
+  color: var(--text3);
+  white-space: nowrap;
+}
+.project-list li.active .status-badge,
+.project-list li.active .card-count {
+  opacity: 0.8;
+}
+.project-list li.empty {
+  font-size: var(--text-sm);
+  color: var(--text3);
+  padding: 8px 12px;
+}
+.project-list-actions {
+  position: relative;
+  flex-shrink: 0;
+}
+.project-menu-btn {
+  background: none;
+  border: none;
+  color: var(--text3);
+  cursor: pointer;
+  padding: 4px;
+  border-radius: var(--radius);
+  opacity: 0;
+  transition: opacity var(--transition);
+}
+.project-list li:hover .project-menu-btn,
+.project-menu-btn:focus {
+  opacity: 1;
+}
+.project-menu-btn:hover {
+  background: var(--surface2);
+  color: var(--text);
+}
+.project-menu-dropdown {
+  position: absolute;
+  right: 0;
+  top: 100%;
+  z-index: 10;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  box-shadow: var(--shadow-md);
+  min-width: 100px;
+  overflow: hidden;
+}
+.project-menu-dropdown button {
+  display: block;
+  width: 100%;
+  text-align: left;
+  padding: 8px 12px;
+  border: none;
+  background: transparent;
+  font-size: var(--text-sm);
+  color: var(--text);
+  cursor: pointer;
+}
+.project-menu-dropdown button:hover {
+  background: var(--surface-hover);
+}
+.project-menu-dropdown button.danger {
+  color: var(--danger);
+}
+.project-menu-dropdown button.danger:hover {
+  background: var(--danger-bg);
+}

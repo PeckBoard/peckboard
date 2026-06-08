@@ -1,0 +1,72 @@
+/* ═══════════════════════════════════════════════════
+   Settings Page
+   ═══════════════════════════════════════════════════ */
+
+.settings-page {
+  padding: 40px 48px;
+  max-width: 640px;
+  overflow-y: auto;
+}
+.settings-page h2 {
+  font-size: var(--text-2xl);
+  font-weight: 700;
+  color: var(--text);
+  margin: 0 0 32px;
+  letter-spacing: -0.03em;
+}
+.settings-section {
+  margin-bottom: 32px;
+}
+.settings-section h3 {
+  font-size: var(--text-xs);
+  font-weight: 700;
+  color: var(--text3);
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  border-bottom: 1px solid var(--border);
+  padding-bottom: 8px;
+  margin: 0 0 16px;
+}
+.settings-info-grid {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.settings-row {
+  display: flex;
+  gap: 12px;
+  font-size: var(--text-sm);
+  padding: 8px 0;
+}
+.settings-label {
+  font-weight: 600;
+  color: var(--text2);
+  min-width: 100px;
+}
+.theme-toggle {
+  display: flex;
+  gap: 2px;
+  background: var(--surface2);
+  padding: 3px;
+  border-radius: var(--radius);
+}
+.theme-btn {
+  padding: 6px 16px;
+  border: none;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--text2);
+  font-size: var(--text-sm);
+  font-weight: 500;
+  cursor: pointer;
+  transition: all var(--transition);
+}
+.theme-btn:hover {
+  color: var(--text);
+  background: var(--surface-hover);
+}
+.theme-btn.active {
+  background: var(--surface);
+  color: var(--text);
+  box-shadow: var(--shadow-sm);
+}
