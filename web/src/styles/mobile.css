@@ -77,13 +77,18 @@
   .rail-status {
     display: none;
   }
-  /* On mobile the rail is at the top, so flip the dropdown to drop
-     downward and align it to the right edge of the avatar. */
+  /* On mobile the rail is at the top, so the dropdown drops downward.
+     `position: fixed` (not `absolute`) is load-bearing: the rail uses
+     `overflow-x: auto`, which CSS forces `overflow-y` to compute as
+     `auto` too — that clips any absolutely-positioned descendant to
+     the rail's 56px box, making the dropdown silently invisible.
+     Anchoring to the viewport sidesteps the clip entirely. */
   .user-menu-dropdown {
+    position: fixed;
     bottom: auto;
     left: auto;
-    top: calc(100% + 8px);
-    right: 0;
+    top: calc(env(safe-area-inset-top, 0px) + 56px + 4px);
+    right: 8px;
   }
 
   /* Panel → full width overlay */
