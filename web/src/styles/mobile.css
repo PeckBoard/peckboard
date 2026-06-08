@@ -77,6 +77,14 @@
   .rail-status {
     display: none;
   }
+  /* On mobile the rail is at the top, so flip the dropdown to drop
+     downward and align it to the right edge of the avatar. */
+  .user-menu-dropdown {
+    bottom: auto;
+    left: auto;
+    top: calc(100% + 8px);
+    right: 0;
+  }
 
   /* Panel → full width overlay */
   .panel {

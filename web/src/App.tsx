@@ -1,4 +1,4 @@
-import { useEffect, useState, useMemo, useCallback } from 'react'
+import { useEffect, useState, useMemo, useCallback, useRef } from 'react'
 import { useAuthStore, authedFetch } from './store/auth'
 import type { Announcement } from './types/api'
 import { useUiStore } from './store/ui'
@@ -18,6 +18,7 @@ import ConfirmDialog from './components/ConfirmDialog'
 import ReportBrowser from './components/ReportBrowser'
 import GitView from './components/GitView'
 import UserManagement from './components/UserManagement'
+import ChangePasswordModal from './components/ChangePasswordModal'
 import TabBar from './components/TabBar'
 import { startTabsAutoSync, useTabsStore } from './store/tabs'
 import './App.css'
@@ -118,6 +119,27 @@ function App() {
   const [confirmDeleteId, setConfirmDeleteId] = useState<string | null>(null)
   const [confirmDeleteProjectId, setConfirmDeleteProjectId] = useState<string | null>(null)
   const [announcement, setAnnouncement] = useState<Announcement | null>(null)
+  const [userMenuOpen, setUserMenuOpen] = useState(false)
+  const [showChangePassword, setShowChangePassword] = useState(false)
+  const userMenuRef = useRef<HTMLDivElement | null>(null)
+
+  useEffect(() => {
+    if (!userMenuOpen) return
+    const onClick = (e: MouseEvent) => {
+      if (userMenuRef.current && !userMenuRef.current.contains(e.target as Node)) {
+        setUserMenuOpen(false)
+      }
+    }
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') setUserMenuOpen(false)
+    }
+    document.addEventListener('mousedown', onClick)
+    document.addEventListener('keydown', onKey)
+    return () => {
+      document.removeEventListener('mousedown', onClick)
+      document.removeEventListener('keydown', onKey)
+    }
+  }, [userMenuOpen])
 
   // Navigate: update view + push URL
   const navigate = useCallback((newView: View, activeId?: string | null) => {
@@ -533,13 +555,46 @@ function App() {
             className={`rail-status ${connected ? 'online' : ''}`}
             title={connected ? 'Connected' : 'Disconnected'}
           />
-          <button
-            className="rail-btn rail-avatar"
-            onClick={logout}
-            title={`${user?.username} — Sign out`}
-          >
-            {user?.username?.charAt(0).toUpperCase() || '?'}
-          </button>
+          <div className="user-menu" ref={userMenuRef}>
+            <button
+              className="rail-btn rail-avatar"
+              onClick={() => setUserMenuOpen((open) => !open)}
+              title={user?.username}
+              aria-haspopup="menu"
+              aria-expanded={userMenuOpen}
+            >
+              {user?.username?.charAt(0).toUpperCase() || '?'}
+            </button>
+            {userMenuOpen && (
+              <div className="user-menu-dropdown" role="menu">
+                <div className="user-menu-header">
+                  <div className="user-menu-name">{user?.username}</div>
+                  <div className="user-menu-role">{user?.role}</div>
+                </div>
+                <button
+                  type="button"
+                  role="menuitem"
+                  onClick={() => {
+                    setUserMenuOpen(false)
+                    setShowChangePassword(true)
+                  }}
+                >
+                  Change password
+                </button>
+                <button
+                  type="button"
+                  role="menuitem"
+                  className="user-menu-danger"
+                  onClick={() => {
+                    setUserMenuOpen(false)
+                    logout()
+                  }}
+                >
+                  Sign out
+                </button>
+              </div>
+            )}
+          </div>
         </div>
       </nav>
 
@@ -663,6 +718,9 @@ function App() {
 
       {showNewSession && <NewSessionModal onClose={() => setShowNewSession(false)} />}
       {showNewProject && <NewProjectModal onClose={() => setShowNewProject(false)} />}
+      {showChangePassword && (
+        <ChangePasswordModal mode={{ kind: 'self' }} onClose={() => setShowChangePassword(false)} />
+      )}
       {confirmDeleteId && (
         <ConfirmDialog
           title="Delete session"

@@ -7,11 +7,18 @@ function getToken(): string | null {
   return localStorage.getItem(TOKEN_KEY) ?? sessionStorage.getItem(TOKEN_KEY)
 }
 
+/** Which storage currently holds the token, so we can refresh in-place. */
+function getRememberMe(): boolean {
+  return localStorage.getItem(TOKEN_KEY) !== null
+}
+
 function setToken(token: string, rememberMe: boolean): void {
   if (rememberMe) {
     localStorage.setItem(TOKEN_KEY, token)
+    sessionStorage.removeItem(TOKEN_KEY)
   } else {
     sessionStorage.setItem(TOKEN_KEY, token)
+    localStorage.removeItem(TOKEN_KEY)
   }
 }
 
@@ -43,6 +50,7 @@ interface AuthState {
   checkAuth: () => Promise<void>
   login: (username: string, password: string, rememberMe?: boolean) => Promise<void>
   logout: () => Promise<void>
+  changePassword: (currentPassword: string, newPassword: string) => Promise<void>
 }
 
 export const useAuthStore = create<AuthState>((set) => ({
@@ -95,5 +103,26 @@ export const useAuthStore = create<AuthState>((set) => ({
     }
     clearToken()
     set({ authenticated: false, user: null })
+  },
+
+  changePassword: async (currentPassword, newPassword) => {
+    const res = await authedFetch('/api/auth/change-password', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        current_password: currentPassword,
+        new_password: newPassword,
+      }),
+    })
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({ error: 'Failed to change password' }))
+      throw new Error(err.error || 'Failed to change password')
+    }
+    // Server revokes all sessions and mints a fresh token. Persist it
+    // into the same storage tier the caller used originally so a logged-
+    // in tab stays logged in across the change.
+    const data = await res.json()
+    setToken(data.token, getRememberMe())
+    set({ authenticated: true, user: data.user })
   },
 }))

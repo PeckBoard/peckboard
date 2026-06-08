@@ -4,7 +4,7 @@ use axum::{
     http::{HeaderMap, StatusCode, header},
     middleware,
     response::IntoResponse,
-    routing::{delete, get, post},
+    routing::{delete, get, post, put},
 };
 use serde::{Deserialize, Serialize};
 use std::net::SocketAddr;
@@ -80,6 +80,7 @@ pub fn router(state: Arc<AppState>) -> Router<Arc<AppState>> {
         .route("/api/auth/sessions/{id}", delete(revoke_one))
         .route("/api/users", get(list_users).post(create_user))
         .route("/api/users/{id}", get(get_user).delete(delete_user))
+        .route("/api/users/{id}/password", put(admin_set_password))
         .route_layer(middleware::from_fn_with_state(state, require_auth));
 
     public.merge(protected)
@@ -505,6 +506,11 @@ struct CreateUserRequest {
     role: Option<String>,
 }
 
+#[derive(Deserialize)]
+struct AdminSetPasswordRequest {
+    new_password: String,
+}
+
 /// GET /api/users — list all users (admin only)
 async fn list_users(
     State(state): State<Arc<AppState>>,
@@ -652,6 +658,121 @@ async fn create_user(
             "role": user.role,
         })),
     ))
+}
+
+/// PUT /api/users/:id/password — admin override of a user's password
+///
+/// Distinct from `POST /api/auth/change-password` (which is self-service
+/// and requires the current password). This endpoint is admin-only and
+/// does NOT require the target user's current password — that's the
+/// whole point: the admin is overriding a forgotten or compromised one.
+/// Always revokes the target user's auth sessions so any live tokens
+/// belonging to them stop working immediately.
+async fn admin_set_password(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+    request: axum::http::Request<axum::body::Body>,
+) -> impl IntoResponse {
+    let auth_user = request.extensions().get::<AuthUser>().unwrap().clone();
+    if !auth_user.is_admin() {
+        return Err((
+            StatusCode::FORBIDDEN,
+            Json(serde_json::json!({"error": "admin only"})),
+        ));
+    }
+
+    let body: AdminSetPasswordRequest = {
+        let bytes = axum::body::to_bytes(request.into_body(), 1024 * 1024)
+            .await
+            .map_err(|_| {
+                (
+                    StatusCode::BAD_REQUEST,
+                    Json(serde_json::json!({"error": "invalid body"})),
+                )
+            })?;
+        serde_json::from_slice(&bytes).map_err(|_| {
+            (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({"error": "invalid JSON"})),
+            )
+        })?
+    };
+
+    if body.new_password.len() < MIN_PASSWORD_LEN {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({
+                "error": format!("new password must be at least {MIN_PASSWORD_LEN} characters")
+            })),
+        ));
+    }
+
+    // Confirm the target exists so we can return 404 instead of silently
+    // hashing into the void.
+    let target = state
+        .db
+        .get_user(&id)
+        .await
+        .map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({"error": e.to_string()})),
+            )
+        })?
+        .ok_or((
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({"error": "user not found"})),
+        ))?;
+
+    let new_hash = hash_password(&body.new_password).map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({"error": e.to_string()})),
+        )
+    })?;
+
+    let now = chrono::Utc::now().to_rfc3339();
+    state
+        .db
+        .update_user(
+            &target.id,
+            crate::db::models::UpdateUser {
+                password_hash: Some(new_hash),
+                updated_at: Some(now),
+                ..Default::default()
+            },
+        )
+        .await
+        .map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({"error": e.to_string()})),
+            )
+        })?;
+
+    // Invalidate every auth session belonging to the target. If we're
+    // resetting our own password (admin resetting admin), this kicks our
+    // own session too — the UI then prompts for fresh login, which is
+    // the safe behaviour. For self-service, callers should use
+    // `POST /api/auth/change-password` instead so they keep a session.
+    state
+        .db
+        .delete_auth_sessions_by_user(&target.id)
+        .await
+        .map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({"error": e.to_string()})),
+            )
+        })?;
+
+    tracing::info!(
+        admin = %auth_user.user_id,
+        target = %target.id,
+        "Admin reset password",
+    );
+
+    Ok(StatusCode::NO_CONTENT)
 }
 
 /// DELETE /api/users/:id — delete a user (admin only)
