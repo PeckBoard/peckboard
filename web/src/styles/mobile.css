@@ -54,14 +54,16 @@
     border-radius: 2px 2px 0 0;
   }
 
-  /* Tab strip moves to the bottom on mobile, below the content.
-     Uses flex `order` so we don't have to reorder the JSX (the
-     other children of `.content` keep their default order). */
+  /* Tab strip sits directly under the rail on mobile — it's the
+     first child of `.content`, so the default flex order already
+     puts it at the top. We bump tab height for easier tapping;
+     36px chips feel cramped on touch. */
   .tabbar {
-    order: 99;
-    border-bottom: none;
-    border-top: 1px solid var(--border);
-    padding-bottom: env(safe-area-inset-bottom, 0px);
+    flex-shrink: 0;
+  }
+  .tabbar .tab {
+    height: 44px;
+    padding: 0 14px;
   }
   .rail-separator {
     width: 1px;
@@ -97,7 +99,7 @@
     top: 0;
     left: 0;
     right: 0;
-    bottom: 56px;
+    bottom: 0;
     width: 100%;
     z-index: 30;
     border-right: none;
@@ -338,25 +340,32 @@
   color: var(--warning);
 }
 .tab-dot {
-  width: 6px;
-  height: 6px;
+  width: 8px;
+  height: 8px;
   border-radius: 50%;
   flex-shrink: 0;
 }
 .tab-dot-running {
   background: var(--accent);
-  animation: tab-dot-pulse 1.4s ease-in-out infinite;
+  animation: tab-dot-glow 1.4s ease-in-out infinite;
 }
 .tab-dot-unread {
   background: var(--success);
+  box-shadow: 0 0 6px var(--success);
 }
-@keyframes tab-dot-pulse {
+@keyframes tab-dot-glow {
   0%,
   100% {
+    box-shadow:
+      0 0 4px var(--accent),
+      0 0 8px var(--accent);
     opacity: 1;
   }
   50% {
-    opacity: 0.4;
+    box-shadow:
+      0 0 2px var(--accent),
+      0 0 4px var(--accent);
+    opacity: 0.6;
   }
 }
 .tab-menu {

@@ -183,9 +183,11 @@ function OpenedTab({
         onTouchCancel={cancelLongPress}
         onTouchMove={cancelLongPress}
       >
-        <span className={`tab-icon tab-icon-${type}`} aria-hidden="true">
-          {type === 'session' ? '#' : '◧'}
-        </span>
+        {type === 'project' && (
+          <span className={`tab-icon tab-icon-${type}`} aria-hidden="true">
+            ◧
+          </span>
+        )}
         {running ? (
           <span className="tab-dot tab-dot-running" aria-label="running" />
         ) : unread ? (

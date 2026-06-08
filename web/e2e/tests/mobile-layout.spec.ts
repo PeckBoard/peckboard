@@ -245,4 +245,42 @@ test.describe('mobile layout', () => {
     // And the send actually fired: the textarea clears.
     await expect(input).toHaveValue('', { timeout: 5_000 })
   })
+
+  test('tab strip sits directly under the rail (not pinned to the bottom)', async ({
+    request,
+    page,
+    baseURL,
+  }) => {
+    // Earlier layout used `order: 99` to push the tab strip to the bottom
+    // of `.content`, so its top was near the viewport bottom. The new
+    // layout drops it right under the rail — this test pins that.
+    expect(baseURL).toBeTruthy()
+    const { token, auth } = await authenticate(request)
+    const sessionId = await seedSession(request, auth)
+
+    await loadAt(page, token, `/sessions/${sessionId}`)
+
+    const railBox = await page.locator('.rail').boundingBox()
+    const tabbarBox = await page.locator('.tabbar').boundingBox()
+    expect(railBox).not.toBeNull()
+    expect(tabbarBox).not.toBeNull()
+    if (!railBox || !tabbarBox) return
+    const railBottom = railBox.y + railBox.height
+    expect(tabbarBox.y).toBeGreaterThanOrEqual(railBottom - 1)
+    // Should be near the rail (within ~24px), not parked at viewport bottom.
+    expect(tabbarBox.y - railBottom).toBeLessThan(24)
+  })
+
+  test('session tab label does not show a "#" prefix', async ({ request, page, baseURL }) => {
+    expect(baseURL).toBeTruthy()
+    const { token, auth } = await authenticate(request)
+    const sessionId = await seedSession(request, auth)
+
+    await loadAt(page, token, `/sessions/${sessionId}`)
+
+    const tab = page.locator('.tabbar .tab-opened').first()
+    await expect(tab).toBeVisible()
+    const text = (await tab.innerText()).trim()
+    expect(text.startsWith('#')).toBe(false)
+  })
 })
