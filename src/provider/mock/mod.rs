@@ -61,6 +61,7 @@ impl AgentProvider for MockProvider {
             config,
             conversation_id: _,
             completion_tx,
+            plugins,
         } = ctx;
 
         let scenario = config
@@ -92,6 +93,7 @@ impl AgentProvider for MockProvider {
                 &model_label,
                 &db,
                 &broadcaster,
+                &plugins,
                 stdin_rx,
                 cancel_for_task,
             )
@@ -178,6 +180,7 @@ impl AgentProvider for MockProvider {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn run_scenario(
     scenario: &str,
     session_id: &str,
@@ -185,6 +188,7 @@ async fn run_scenario(
     model_label: &str,
     db: &crate::db::Db,
     broadcaster: &crate::ws::broadcaster::Broadcaster,
+    plugins: &crate::plugin::manager::PluginManager,
     mut stdin_rx: mpsc::Receiver<String>,
     cancel: Arc<Notify>,
 ) -> bool {
@@ -206,6 +210,19 @@ async fn run_scenario(
     )
     .await;
     tick().await;
+
+    // Demonstrates the non-Claude provider integration: hand this turn's raw
+    // output to any `todo`-hook plugin, which parses it and drives the todo
+    // lifecycle. A no-op when no such plugin is installed (the usual case for
+    // tests / dev), so it never perturbs the scripted scenarios below.
+    crate::plugin::todo_hook::emit_plugin_todos(
+        plugins,
+        db,
+        broadcaster,
+        session_id,
+        serde_json::json!({ "message": message }),
+    )
+    .await;
 
     match scenario {
         "echo" => {

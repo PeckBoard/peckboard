@@ -59,6 +59,9 @@ impl AgentProvider for ClaudeProvider {
             config,
             conversation_id,
             completion_tx,
+            // Claude parses its own TodoWrite calls into `todo` events
+            // (see process.rs); it has no need for the plugin todo path.
+            plugins: _,
         } = ctx;
 
         // Strip the `claude:` prefix if present so the CLI sees the bare

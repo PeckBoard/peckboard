@@ -13,7 +13,7 @@ use crate::ws::broadcaster::Broadcaster;
 pub struct AppState {
     pub config: Config,
     pub db: Db,
-    pub plugins: PluginManager,
+    pub plugins: Arc<PluginManager>,
     pub jwt_secret: Vec<u8>,
     pub login_limiter: RateLimiter,
     pub broadcaster: Arc<Broadcaster>,

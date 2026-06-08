@@ -7,6 +7,7 @@ use tokio::sync::mpsc;
 
 use crate::db::Db;
 use crate::db::models::NewQueuedMessage;
+use crate::plugin::manager::PluginManager;
 use crate::provider::agent::{ProcessCompletion, SendMessageContext};
 use crate::provider::registry::ProviderRegistry;
 use crate::provider::stream::SpawnConfig;
@@ -56,6 +57,11 @@ pub struct SessionManager {
     completion_tx: mpsc::Sender<ProcessCompletion>,
     completion_rx: Arc<Mutex<Option<mpsc::Receiver<ProcessCompletion>>>>,
     session_locks: Arc<Mutex<HashMap<String, Arc<Mutex<()>>>>>,
+    /// Plugin host handed to each provider via `SendMessageContext` so a
+    /// non-Claude provider can drive todo lifecycle tracking through a plugin.
+    /// Defaults to an empty (no-op) manager; the real one is wired in main via
+    /// `with_plugins`.
+    plugins: Arc<PluginManager>,
 }
 
 impl SessionManager {
@@ -66,7 +72,17 @@ impl SessionManager {
             completion_tx,
             completion_rx: Arc::new(Mutex::new(Some(completion_rx))),
             session_locks: Arc::new(Mutex::new(HashMap::new())),
+            plugins: Arc::new(PluginManager::empty()),
         }
+    }
+
+    /// Attach the application's plugin host so providers dispatched by this
+    /// manager can run their output through `todo`-hook plugins. Without this,
+    /// `SendMessageContext::plugins` is an empty manager and plugin todo
+    /// dispatch is a no-op.
+    pub fn with_plugins(mut self, plugins: Arc<PluginManager>) -> Self {
+        self.plugins = plugins;
+        self
     }
 
     /// Take the completion receiver. Called once at startup to set up the
@@ -184,6 +200,7 @@ impl SessionManager {
             config: final_config,
             conversation_id,
             completion_tx: self.completion_tx.clone(),
+            plugins: self.plugins.clone(),
         };
 
         provider.send_message(ctx).await

@@ -70,7 +70,7 @@ async fn main() -> anyhow::Result<()> {
         tracing::info!("Purged {purged} expired auth session(s)");
     }
 
-    let plugins = PluginManager::new(&config.data_dir);
+    let plugins = Arc::new(PluginManager::new(&config.data_dir));
     plugins.load_all().await?;
 
     let jwt_secret = load_or_create_jwt_secret(&config.data_dir)?;
@@ -85,7 +85,8 @@ async fn main() -> anyhow::Result<()> {
     let provider_registry = Arc::new(ProviderRegistry::new());
     register_claude_provider(&provider_registry).await;
     register_mock_provider(&provider_registry).await;
-    let session_manager = SessionManager::new(provider_registry.clone());
+    let session_manager =
+        SessionManager::new(provider_registry.clone()).with_plugins(plugins.clone());
 
     let mcp_tokens = McpTokenRegistry::new();
     let push_service = PushService::new(&config.data_dir);
