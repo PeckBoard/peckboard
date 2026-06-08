@@ -112,6 +112,63 @@ That means one test per distinct user-visible behaviour, not one per
 code branch. If the change is a pure backend refactor with no
 user-visible surface, say so explicitly.
 
+## Enforce Critical Invariants in the Type System
+
+**When a function has a precondition that must be true for it to be
+correct, make the precondition a parameter the caller can only obtain
+by satisfying it.** Lint rules, code review, naming conventions, and
+documentation all rely on humans noticing — the type system doesn't.
+Use it whenever a "you must X before calling this" rule actually
+matters for correctness.
+
+The canonical example in this codebase is `SessionLock` in
+`src/provider/manager.rs`. Per-session dispatch needs a mutex held
+across the `is_running → spawn` decision, or two concurrent senders
+both spawn agents. Earlier versions of the manager relied on every
+caller remembering to `lock_session()` first — four code paths
+forgot, and the resulting double-spawns took a long debugging session
+to trace. The fix:
+
+- `SessionLock` is a struct that owns the `OwnedMutexGuard<()>` AND
+  carries the `session_id` it locked. It is `pub`, but its only
+  constructors (`SessionManager::lock_session`, `try_lock_session`)
+  acquire the mutex first.
+- The dispatch method is `send_message_locked(&self, &SessionLock,
+…)`. It uses `lock.session_id()` internally, so you can't pass a
+  lock for "s1" and dispatch to "s2" by mistake.
+- The old `pub send_message` is gone. Any future caller that tries
+  to skip the lock fails to compile with `E0599: no method named
+send_message`, not in code review.
+
+**Reach for this pattern when** the invariant is load-bearing for
+correctness (data race, security boundary, transaction scope, "this
+must be true or we corrupt user data"), there's a small, well-defined
+set of dispatch sites, and the proof token's constructor naturally
+co-locates with the work that establishes the invariant. Concrete
+forms:
+
+- **Proof token**: a struct whose only constructors run the
+  precondition check (the `SessionLock` shape).
+- **Typestate**: distinct types for distinct states, with methods on
+  each that move you to the next state (e.g. `Connection` →
+  `AuthenticatedConnection`).
+- **Borrowed witness**: take `&Foo` where the caller already holds a
+  `Foo` that means "I did the check" — same idea as `SessionLock`
+  but lighter-weight.
+
+**Don't reach for this pattern when** the invariant is a soft
+preference (style, performance hint, "usually X"), the constraint
+spans a wildly heterogeneous set of call sites where forcing a
+uniform shape adds more friction than it removes, or a simpler design
+(making the dangerous method private, or just deleting the bypass
+path) would work. Type-level enforcement has a real ergonomic cost
+at call sites; spend that cost on the invariants that genuinely warrant it.
+
+**When adding a new such invariant**, document the proof type next to
+its definition with `// Proof token: bearer has done X. See
+[caller] for an example.` so future readers know it's load-bearing
+and not just bookkeeping.
+
 ## Migrations — READ THIS BEFORE ADDING ONE
 
 **Peckboard runs on real user data. Data loss is not acceptable. A
