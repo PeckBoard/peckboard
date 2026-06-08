@@ -150,9 +150,9 @@
   }
 
   /* Tool blocks full width */
-  /* Kanban rows scroll vertically */
-  .kanban-columns {
-    overflow-y: auto;
+  /* Per-row horizontal scroll is touch-friendly on mobile; the board
+     itself owns vertical scrolling. */
+  .kanban-column {
     -webkit-overflow-scrolling: touch;
   }
   .kanban-column-header {

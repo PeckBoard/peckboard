@@ -4,20 +4,29 @@
 
 .kanban-board {
   flex: 1;
-  overflow: auto;
+  overflow-y: auto;
+  overflow-x: hidden;
   padding: 20px;
+  position: relative;
+}
+/* Top-level header pins above the rows as the user scrolls vertically. */
+.kanban-board .kanban-board-header {
+  position: sticky;
+  top: 0;
+  z-index: 30;
+  background: var(--bg);
+  padding-top: 4px;
+  margin-top: -4px;
 }
 .kanban-columns {
   display: flex;
   flex-direction: column;
   gap: 12px;
-  min-height: 100%;
-  /* Each row sizes to its (potentially wide) card strip; the board
-     scrolls horizontally as a whole so a row's menu dropdowns are not
-     clipped by a per-row overflow box. */
-  width: max-content;
-  min-width: 100%;
+  width: 100%;
 }
+/* Each row is its own horizontal scroll container so wide rows don't
+   force the whole board to scroll sideways. The row header is sticky
+   to the left edge of this scroll box; cards scroll past it. */
 .kanban-column {
   background: var(--surface);
   border: 1px solid var(--border);
@@ -27,6 +36,8 @@
   flex-direction: row;
   gap: 12px;
   align-items: stretch;
+  overflow-x: auto;
+  min-height: 88px;
 }
 .kanban-column-header {
   display: flex;
@@ -35,13 +46,16 @@
   gap: 6px;
   flex-shrink: 0;
   width: 140px;
-  padding: 4px;
-  /* Keep the row label parked at the left edge while the row scrolls
-     under it during horizontal board scroll. */
+  padding: 4px 8px 4px 4px;
+  /* Sticky to the scroll container's left edge so the label stays
+     visible while the row's cards scroll horizontally beneath it. */
   position: sticky;
-  left: 12px;
+  left: 0;
   background: var(--surface);
-  z-index: 1;
+  z-index: 2;
+  border-right: 1px solid var(--border);
+  align-self: stretch;
+  justify-content: center;
 }
 .kanban-column-header h3 {
   margin: 0;
@@ -65,8 +79,19 @@
   flex-wrap: nowrap;
   align-items: center;
   gap: 8px;
-  flex: 1;
-  min-width: 0;
+  min-height: 64px;
+  /* Size to the row's natural card width so the parent `.kanban-column`
+     (overflow-x: auto) reports the right scrollWidth and shows a
+     horizontal scrollbar when the cards don't fit. */
+  flex: 0 0 auto;
+}
+/* Empty row placeholder reads naturally on a horizontal strip. */
+.kanban-cards-empty {
+  font-size: var(--text-xs);
+  color: var(--text3);
+  font-style: italic;
+  padding: 0 4px;
+  white-space: nowrap;
 }
 .kanban-card {
   background: var(--bg);
@@ -283,16 +308,16 @@
   background: var(--surface2);
   color: var(--text);
 }
+/* Fixed-positioned so the dropdown escapes the per-row overflow box.
+   `top`/`right` are set inline from the trigger button's bounding rect. */
 .kanban-card-menu {
-  position: absolute;
-  right: 0;
-  top: 100%;
-  z-index: 10;
+  position: fixed;
+  z-index: 100;
   background: var(--surface);
   border: 1px solid var(--border);
   border-radius: var(--radius-md);
   box-shadow: var(--shadow-md);
-  min-width: 120px;
+  min-width: 140px;
   overflow: hidden;
 }
 .kanban-card-menu button {

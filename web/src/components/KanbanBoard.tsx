@@ -57,6 +57,23 @@ export default function KanbanBoard({ projectId, onOpenTodos }: KanbanBoardProps
   // a cross-row step-move hover (the destination row shows an accept band).
   const [dragOver, setDragOver] = useState<{ step: string; insertIdx: number | null } | null>(null)
   const [cardMenuId, setCardMenuId] = useState<string | null>(null)
+  // Trigger-button rect captured when the "..." menu opens, used to
+  // position the fixed dropdown. Fixed positioning is required because
+  // each kanban row is its own `overflow-x: auto` scroll container —
+  // an absolutely positioned dropdown would be clipped by the row.
+  const [cardMenuRect, setCardMenuRect] = useState<DOMRect | null>(null)
+  const closeCardMenu = () => {
+    setCardMenuId(null)
+    setCardMenuRect(null)
+  }
+  const openCardMenu = (cardId: string, btn: HTMLElement) => {
+    if (cardMenuId === cardId) {
+      closeCardMenu()
+    } else {
+      setCardMenuId(cardId)
+      setCardMenuRect(btn.getBoundingClientRect())
+    }
+  }
   const [editingCard, setEditingCard] = useState<Card | null>(null)
   const [showComms, setShowComms] = useState(false)
   // One transient thought bubble per card, keyed by card id.
@@ -396,14 +413,14 @@ export default function KanbanBoard({ projectId, onOpenTodos }: KanbanBoardProps
       await deleteCard(projectId, cardId)
       setSelectedCard(null)
       setConfirmDeleteId(null)
-      setCardMenuId(null)
+      closeCardMenu()
     } catch {
       /* ignore */
     }
   }
 
   const handleViewSession = (sessionId: string) => {
-    setCardMenuId(null)
+    closeCardMenu()
     setSelectedCard(null)
     // location.assign mutates via a method call (not a property write),
     // which the immutability lint accepts.
@@ -411,19 +428,19 @@ export default function KanbanBoard({ projectId, onOpenTodos }: KanbanBoardProps
   }
 
   const handleStopWorker = async (card: Card) => {
-    setCardMenuId(null)
+    closeCardMenu()
     await authedFetch(`/api/projects/${projectId}/cards/${card.id}/stop`, { method: 'POST' })
     fetchCards(projectId)
   }
 
   const handleRestartWorker = async (card: Card) => {
-    setCardMenuId(null)
+    closeCardMenu()
     await authedFetch(`/api/projects/${projectId}/cards/${card.id}/restart`, { method: 'POST' })
     fetchCards(projectId)
   }
 
   const handleCancelWontDo = async (card: Card) => {
-    setCardMenuId(null)
+    closeCardMenu()
     await authedFetch(`/api/projects/${projectId}/cards/${card.id}/cancel-wont-do`, {
       method: 'POST',
     })
@@ -869,6 +886,9 @@ export default function KanbanBoard({ projectId, onOpenTodos }: KanbanBoardProps
                 <span className="kanban-count">{rowCards.length}</span>
               </div>
               <div className="kanban-cards">
+                {rowCards.length === 0 && (
+                  <span className="kanban-cards-empty">No cards in {step.label}</span>
+                )}
                 {rowCards.map((card, cardIndex) => {
                   const todos = todosByCard[card.id]
                   const todoDone = todos ? todos.filter((t) => t.status === 'done').length : 0
@@ -963,13 +983,19 @@ export default function KanbanBoard({ projectId, onOpenTodos }: KanbanBoardProps
                           className="kanban-card-menu-btn"
                           onClick={(e) => {
                             e.stopPropagation()
-                            setCardMenuId(cardMenuId === card.id ? null : card.id)
+                            openCardMenu(card.id, e.currentTarget as HTMLElement)
                           }}
                         >
                           ...
                         </button>
-                        {cardMenuId === card.id && (
-                          <div className="kanban-card-menu">
+                        {cardMenuId === card.id && cardMenuRect && (
+                          <div
+                            className="kanban-card-menu"
+                            style={{
+                              top: cardMenuRect.bottom + 4,
+                              right: Math.max(8, window.innerWidth - cardMenuRect.right),
+                            }}
+                          >
                             {(card.worker_session_id || card.last_worker_session_id) && (
                               <button
                                 onClick={() =>
@@ -983,7 +1009,7 @@ export default function KanbanBoard({ projectId, onOpenTodos }: KanbanBoardProps
                             )}
                             <button
                               onClick={() => {
-                                setCardMenuId(null)
+                                closeCardMenu()
                                 setEditingCard(card)
                               }}
                             >
@@ -991,7 +1017,7 @@ export default function KanbanBoard({ projectId, onOpenTodos }: KanbanBoardProps
                             </button>
                             <button
                               onClick={() => {
-                                setCardMenuId(null)
+                                closeCardMenu()
                                 setSelectedCard(card)
                               }}
                             >
@@ -1015,7 +1041,7 @@ export default function KanbanBoard({ projectId, onOpenTodos }: KanbanBoardProps
                             <button
                               className="danger"
                               onClick={() => {
-                                setCardMenuId(null)
+                                closeCardMenu()
                                 setConfirmDeleteId(card.id)
                               }}
                             >
