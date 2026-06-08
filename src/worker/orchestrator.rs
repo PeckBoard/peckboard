@@ -107,7 +107,11 @@ pub async fn check_and_spawn_workers(state: &Arc<AppState>) {
         }
 
         // Check for worker sessions with pending inter-worker messages
-        // that finished but weren't re-spawned
+        // that finished but weren't re-spawned. The per-session lock makes
+        // this idempotent: if a parallel tick or completion handler is
+        // already mid-respawn, our check-and-act sees is_running == true
+        // and skips. This is the SINGLE respawn path for inter-worker
+        // messages — handle_worker_done deliberately does not duplicate it.
         if project.worker_communication {
             let worker_sessions = state
                 .db
@@ -115,7 +119,7 @@ pub async fn check_and_spawn_workers(state: &Arc<AppState>) {
                 .await
                 .unwrap_or_default();
             for ws in &worker_sessions {
-                // Skip sessions that have a running process
+                let _guard = state.session_manager.lock_session(&ws.id).await;
                 if state.session_manager.is_running(&ws.id).await {
                     continue;
                 }
@@ -127,84 +131,82 @@ pub async fn check_and_spawn_workers(state: &Arc<AppState>) {
                 let last = &events[events.len() - 1];
                 // If last event is a worker-communication user message, the agent
                 // never got a chance to respond — re-spawn it
-                if last.kind == "user" {
-                    if let Ok(data) = serde_json::from_str::<serde_json::Value>(&last.data) {
-                        let source = data.get("source").and_then(|v| v.as_str()).unwrap_or("");
-                        if matches!(
-                            source,
-                            "worker-communication"
-                                | "worker-finding"
-                                | "worker-message"
-                                | "worker-notification"
-                        ) {
-                            let text = data
-                                .get("text")
-                                .and_then(|v| v.as_str())
-                                .unwrap_or("")
-                                .to_string();
-                            tracing::info!(
-                                session_id = %ws.id,
-                                "Orchestrator: found pending worker message, resuming session"
-                            );
+                if last.kind != "user" {
+                    continue;
+                }
+                let data = match serde_json::from_str::<serde_json::Value>(&last.data) {
+                    Ok(d) => d,
+                    Err(_) => continue,
+                };
+                let source = data.get("source").and_then(|v| v.as_str()).unwrap_or("");
+                if !matches!(
+                    source,
+                    "worker-communication"
+                        | "worker-finding"
+                        | "worker-message"
+                        | "worker-notification"
+                ) {
+                    continue;
+                }
+                let text = data
+                    .get("text")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string();
+                tracing::info!(
+                    session_id = %ws.id,
+                    "Orchestrator: found pending worker message, resuming session"
+                );
 
-                            let session_project_id = ws.project_id.clone();
-                            let mcp_token = state
-                                .mcp_tokens
-                                .issue_token(ws.id.clone(), session_project_id)
-                                .await;
-                            let working_dir = state
-                                .db
-                                .get_folder(&ws.folder_id)
-                                .await
-                                .ok()
-                                .flatten()
-                                .map(|f| f.path)
-                                .unwrap_or_default();
-                            let mcp_config_path = mcp_server::write_mcp_config(
-                                &state.config.data_dir,
-                                &ws.id,
-                                state.config.port,
-                                &mcp_token,
-                            )
-                            .ok()
-                            .map(|p| p.to_string_lossy().to_string());
+                let session_project_id = ws.project_id.clone();
+                let mcp_token = state
+                    .mcp_tokens
+                    .issue_token(ws.id.clone(), session_project_id)
+                    .await;
+                let working_dir = state
+                    .db
+                    .get_folder(&ws.folder_id)
+                    .await
+                    .ok()
+                    .flatten()
+                    .map(|f| f.path)
+                    .unwrap_or_default();
+                let mcp_config_path = mcp_server::write_mcp_config(
+                    &state.config.data_dir,
+                    &ws.id,
+                    state.config.port,
+                    &mcp_token,
+                )
+                .ok()
+                .map(|p| p.to_string_lossy().to_string());
 
-                            let prompt = format!(
-                                "IMPORTANT: You have a message from another worker that requires your response. \
-                                 You MUST acknowledge and respond:\n\n{}",
-                                text
-                            );
-                            let _ = state
-                                .db
-                                .append_event(&ws.id, "user", serde_json::json!({ "text": prompt }))
-                                .await;
+                let prompt = format!(
+                    "IMPORTANT: You have a message from another worker that requires your response. \
+                     You MUST acknowledge and respond:\n\n{}",
+                    text
+                );
+                let _ = state
+                    .db
+                    .append_event(&ws.id, "user", serde_json::json!({ "text": prompt }))
+                    .await;
 
-                            let config = SpawnConfig {
-                                model: "default".into(),
-                                effort: None,
-                                working_dir,
-                                mcp_config_path,
-                                env: Default::default(),
-                                permission_mode: Some("bypass".into()),
-                                timeout_ms: None,
-                                metadata: serde_json::json!({ "worker": true, "inter_worker_followup": true }),
-                            };
+                let config = SpawnConfig {
+                    model: "default".into(),
+                    effort: None,
+                    working_dir,
+                    mcp_config_path,
+                    env: Default::default(),
+                    permission_mode: Some("bypass".into()),
+                    timeout_ms: None,
+                    metadata: serde_json::json!({ "worker": true, "inter_worker_followup": true }),
+                };
 
-                            if let Err(e) = state
-                                .session_manager
-                                .send_message(
-                                    &ws.id,
-                                    &prompt,
-                                    &state.db,
-                                    &state.broadcaster,
-                                    config,
-                                )
-                                .await
-                            {
-                                tracing::error!(session_id = %ws.id, "Failed to resume for pending message: {e}");
-                            }
-                        }
-                    }
+                if let Err(e) = state
+                    .session_manager
+                    .send_message(&ws.id, &prompt, &state.db, &state.broadcaster, config)
+                    .await
+                {
+                    tracing::error!(session_id = %ws.id, "Failed to resume for pending message: {e}");
                 }
             }
         }
@@ -610,205 +612,12 @@ pub async fn handle_worker_done(state: &Arc<AppState>, session_id: &str) {
         )
         .await;
 
-    // Check if there are unprocessed inter-worker messages that arrived
-    // during this worker's turn. Resume even if the card is done — the agent
-    // should still acknowledge messages from peers.
-    let card = state.db.get_card(&card_id).await.ok().flatten();
-    if let Some(ref _card) = card {
-        {
-            let events = state
-                .db
-                .events_tail(session_id, 50)
-                .await
-                .unwrap_or_default();
-
-            // Find worker-communication messages that arrived during this turn
-            // (between the last agent-start and the current agent-end).
-            // These are messages the agent saw in its context but may not have
-            // explicitly responded to.
-            let last_agent_start = events.iter().rposition(|e| e.kind == "agent-start");
-            let last_agent_end = events.iter().rposition(|e| e.kind == "agent-end");
-
-            // Count worker messages that arrived during the last turn
-            let start_idx = last_agent_start.unwrap_or(0);
-            let end_idx = last_agent_end.unwrap_or(events.len());
-            let worker_msgs_during_turn: Vec<&crate::db::models::Event> = events
-                [start_idx..end_idx]
-                .iter()
-                .filter(|e| {
-                    if e.kind != "user" {
-                        return false;
-                    }
-                    if let Ok(data) = serde_json::from_str::<serde_json::Value>(&e.data) {
-                        let source = data.get("source").and_then(|v| v.as_str()).unwrap_or("");
-                        matches!(
-                            source,
-                            "worker-communication"
-                                | "worker-finding"
-                                | "worker-message"
-                                | "worker-notification"
-                        )
-                    } else {
-                        false
-                    }
-                })
-                .collect();
-
-            // Also check for messages after the last agent-end (arrived post-completion)
-            let msgs_after_end: Vec<&crate::db::models::Event> = if end_idx < events.len() {
-                events[end_idx + 1..]
-                    .iter()
-                    .filter(|e| {
-                        if e.kind != "user" {
-                            return false;
-                        }
-                        if let Ok(data) = serde_json::from_str::<serde_json::Value>(&e.data) {
-                            let source = data.get("source").and_then(|v| v.as_str()).unwrap_or("");
-                            matches!(
-                                source,
-                                "worker-communication"
-                                    | "worker-finding"
-                                    | "worker-message"
-                                    | "worker-notification"
-                            )
-                        } else {
-                            false
-                        }
-                    })
-                    .collect()
-            } else {
-                Vec::new()
-            };
-
-            // Check if the agent sent any send_worker_message calls during this turn
-            // (indicating it DID respond to some messages)
-            let sent_responses = events[start_idx..end_idx]
-                .iter()
-                .filter(|e| e.kind == "agent-tool-start" && e.data.contains("send_worker_message"))
-                .count();
-
-            // If there are unresponded messages, re-spawn
-            let total_incoming = worker_msgs_during_turn.len() + msgs_after_end.len();
-            let has_pending_worker_msgs = total_incoming > 0 && sent_responses < total_incoming;
-
-            if has_pending_worker_msgs {
-                tracing::info!(
-                    session_id = %session_id,
-                    card_id = %card_id,
-                    "Pending inter-worker messages detected, resuming to process them"
-                );
-
-                // Collect ALL unresponded messages (during turn + after)
-                let all_unresponded: Vec<&crate::db::models::Event> = worker_msgs_during_turn
-                    .iter()
-                    .chain(msgs_after_end.iter())
-                    .copied()
-                    .collect();
-
-                let pending_msgs: Vec<String> = all_unresponded
-                    .iter()
-                    .filter_map(|e| {
-                        serde_json::from_str::<serde_json::Value>(&e.data)
-                            .ok()
-                            .and_then(|d| {
-                                d.get("text")
-                                    .and_then(|v| v.as_str())
-                                    .map(|s| s.to_string())
-                            })
-                    })
-                    .collect();
-
-                // Send a follow-up message that explicitly asks the agent to respond
-                let follow_up = format!(
-                    "IMPORTANT: You have {} message(s) from other workers that require your \
-                     response. For EACH message below:\n\
-                     1. Read and evaluate the message\n\
-                     2. If it's a finding, acknowledge it and note how it affects your work\n\
-                     3. If it's a question, respond using mcp__peckboard__send_worker_message\n\
-                     4. If it's a file change notification, re-read affected files before editing\n\n\
-                     You MUST acknowledge each message — do not ignore them.\n\n{}",
-                    pending_msgs.len(),
-                    pending_msgs
-                        .iter()
-                        .enumerate()
-                        .map(|(i, m)| { format!("--- Message {} ---\n{}", i + 1, m) })
-                        .collect::<Vec<_>>()
-                        .join("\n\n")
-                );
-
-                // Append as user event
-                let _ = state
-                    .db
-                    .append_event(session_id, "user", serde_json::json!({ "text": follow_up }))
-                    .await;
-
-                // Issue MCP token and resume the session
-                let session_project_id = state
-                    .db
-                    .get_session(session_id)
-                    .await
-                    .ok()
-                    .flatten()
-                    .and_then(|s| s.project_id);
-                let mcp_token = state
-                    .mcp_tokens
-                    .issue_token(session_id.to_string(), session_project_id)
-                    .await;
-                let folder = state
-                    .db
-                    .get_session(session_id)
-                    .await
-                    .ok()
-                    .flatten()
-                    .and_then(|s| Some(s.folder_id));
-                let working_dir = if let Some(ref fid) = folder {
-                    state
-                        .db
-                        .get_folder(fid)
-                        .await
-                        .ok()
-                        .flatten()
-                        .map(|f| f.path)
-                        .unwrap_or_default()
-                } else {
-                    String::new()
-                };
-                let mcp_config_path = mcp_server::write_mcp_config(
-                    &state.config.data_dir,
-                    session_id,
-                    state.config.port,
-                    &mcp_token,
-                )
-                .ok()
-                .map(|p| p.to_string_lossy().to_string());
-
-                let config = SpawnConfig {
-                    model: "default".into(),
-                    effort: None,
-                    working_dir,
-                    mcp_config_path,
-                    env: Default::default(),
-                    permission_mode: Some("bypass".into()),
-                    timeout_ms: None,
-                    metadata: serde_json::json!({ "worker": true, "inter_worker_followup": true }),
-                };
-
-                if let Err(e) = state
-                    .session_manager
-                    .send_message(
-                        session_id,
-                        &follow_up,
-                        &state.db,
-                        &state.broadcaster,
-                        config,
-                    )
-                    .await
-                {
-                    tracing::error!(session_id = %session_id, "Failed to resume for inter-worker messages: {e}");
-                }
-            }
-        }
-    }
+    // Inter-worker message resumption is handled by `check_and_spawn_workers`
+    // (called from the completion listener after we return). Keeping it in
+    // one place ensures the is_running + per-session-lock gate is the
+    // single source of truth for "should this session be respawned?" —
+    // otherwise the 5s orchestrator tick and this handler could both fire
+    // and double-spawn.
 
     let _ = project_id;
 }
@@ -821,4 +630,93 @@ fn default_workflow_steps() -> Vec<String> {
         "review".into(),
         "done".into(),
     ]
+}
+
+/// Drain any persistent queued message for `session_id` and dispatch it as
+/// a fresh agent run. Idempotent and lock-protected:
+///
+/// * If no message is queued, this is a no-op.
+/// * If an agent is currently running on this session, this is a no-op —
+///   the next completion will drain instead.
+/// * If draining fails (e.g. spawn error), the queued message is already
+///   consumed; we log and let the user retry.
+///
+/// Called by the completion listener for every session on every completion
+/// path (success, crash, interrupt) so a `send while busy` reliably
+/// delivers regardless of how the in-flight run ended.
+pub async fn drain_queue_for_session(
+    state: &Arc<AppState>,
+    session_id: &str,
+) -> anyhow::Result<()> {
+    let session = match state.db.get_session(session_id).await? {
+        Some(s) => s,
+        None => return Ok(()),
+    };
+
+    // Peek at the queued message so we can use the model/effort the user
+    // picked when they enqueued, if any. Falls back to the session →
+    // card → project chain. The drain helper itself re-checks the queue
+    // under the per-session lock, so this peek does NOT consume.
+    let queued_peek = state.db.get_queued_message(session_id).await.ok().flatten();
+
+    let mut model: Option<String> = queued_peek
+        .as_ref()
+        .and_then(|q| q.model.clone())
+        .or_else(|| session.model.clone());
+    let mut effort: Option<String> = queued_peek
+        .as_ref()
+        .and_then(|q| q.effort.clone())
+        .or_else(|| session.effort.clone());
+    if model.is_none() || effort.is_none() {
+        if let Some(ref card_id) = session.card_id {
+            if let Ok(Some(card)) = state.db.get_card(card_id).await {
+                if model.is_none() {
+                    model = card.model.clone();
+                }
+                if effort.is_none() {
+                    effort = card.effort.clone();
+                }
+                if model.is_none() || effort.is_none() {
+                    if let Ok(Some(project)) = state.db.get_project(&card.project_id).await {
+                        if model.is_none() {
+                            model = project.model.clone();
+                        }
+                        if effort.is_none() {
+                            effort = project.effort.clone();
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    let mcp_token = state
+        .mcp_tokens
+        .issue_token(session_id.to_string(), session.project_id.clone())
+        .await;
+    let mcp_config_path = mcp_server::write_mcp_config(
+        &state.config.data_dir,
+        session_id,
+        state.config.port,
+        &mcp_token,
+    )
+    .ok()
+    .map(|p| p.to_string_lossy().to_string());
+
+    let config = SpawnConfig {
+        model: model.unwrap_or_else(|| "default".into()),
+        effort,
+        working_dir: String::new(),
+        mcp_config_path,
+        env: Default::default(),
+        permission_mode: Some("bypass".into()),
+        timeout_ms: None,
+        metadata: serde_json::Value::Null,
+    };
+
+    state
+        .session_manager
+        .drain_queued(session_id, &state.db, &state.broadcaster, config)
+        .await?;
+    Ok(())
 }

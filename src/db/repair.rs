@@ -20,6 +20,7 @@ use diesel::sqlite::SqliteConnection;
 /// after `run_pending_migrations`.
 pub fn ensure_schema(conn: &mut SqliteConnection) -> anyhow::Result<()> {
     ensure_projects_worker_communication_columns(conn)?;
+    ensure_queued_messages_model_columns(conn)?;
     Ok(())
 }
 
@@ -56,6 +57,29 @@ struct PragmaColumn {
 fn project_columns(conn: &mut SqliteConnection) -> anyhow::Result<Vec<String>> {
     let rows: Vec<PragmaColumn> = sql_query("PRAGMA table_info(projects)").load(conn)?;
     Ok(rows.into_iter().map(|r| r.name).collect())
+}
+
+/// Backfill for the `model` / `effort` columns added to `queued_messages`
+/// in migration `1780879129_queued_message_model`. Migration is additive
+/// (NULL-able columns), but ALTER ADD COLUMN is not idempotent in SQLite,
+/// so DBs that somehow skipped the migration get healed here.
+fn ensure_queued_messages_model_columns(conn: &mut SqliteConnection) -> anyhow::Result<()> {
+    let rows: Vec<PragmaColumn> = sql_query("PRAGMA table_info(queued_messages)").load(conn)?;
+    let existing: Vec<String> = rows.into_iter().map(|r| r.name).collect();
+    if existing.is_empty() {
+        // Table itself missing — migrations haven't run. Don't try to
+        // ALTER; let the caller surface the schema-missing error.
+        return Ok(());
+    }
+    if !existing.iter().any(|c| c == "model") {
+        tracing::info!("Repairing schema: adding queued_messages.model");
+        sql_query("ALTER TABLE queued_messages ADD COLUMN model TEXT").execute(conn)?;
+    }
+    if !existing.iter().any(|c| c == "effort") {
+        tracing::info!("Repairing schema: adding queued_messages.effort");
+        sql_query("ALTER TABLE queued_messages ADD COLUMN effort TEXT").execute(conn)?;
+    }
+    Ok(())
 }
 
 #[cfg(test)]

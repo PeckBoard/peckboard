@@ -3,8 +3,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
-use tokio::sync::Mutex;
 use tokio::sync::mpsc;
+use tokio::sync::{Mutex, Notify};
 use tokio::task::JoinHandle;
 
 use crate::provider::agent::{AgentProvider, ProcessCompletion, SendMessageContext, emit_event};
@@ -28,6 +28,7 @@ pub struct MockProvider {
 struct MockRun {
     handle: JoinHandle<()>,
     stdin_tx: mpsc::Sender<String>,
+    cancel: Arc<Notify>,
 }
 
 impl MockProvider {
@@ -67,15 +68,17 @@ impl AgentProvider for MockProvider {
             .unwrap_or(&config.model)
             .to_string();
 
-        // Kill any prior run for this session.
+        // Notify any prior run for this session to shut down.
         {
             let mut runs = self.runs.lock().await;
             if let Some(old) = runs.remove(&session_id) {
-                old.handle.abort();
+                old.cancel.notify_one();
             }
         }
 
         let (stdin_tx, stdin_rx) = mpsc::channel::<String>(16);
+        let cancel = Arc::new(Notify::new());
+        let cancel_for_task = cancel.clone();
         let runs = self.runs.clone();
         let sid = session_id.clone();
         let model_label = config.model.clone();
@@ -89,6 +92,7 @@ impl AgentProvider for MockProvider {
                 &db,
                 &broadcaster,
                 stdin_rx,
+                cancel_for_task,
             )
             .await;
 
@@ -108,21 +112,39 @@ impl AgentProvider for MockProvider {
         });
 
         let mut runs_map = self.runs.lock().await;
-        runs_map.insert(session_id, MockRun { handle, stdin_tx });
+        runs_map.insert(
+            session_id,
+            MockRun {
+                handle,
+                stdin_tx,
+                cancel,
+            },
+        );
         Ok(())
     }
 
     async fn cancel(&self, session_id: &str) {
-        let mut runs = self.runs.lock().await;
-        if let Some(run) = runs.remove(session_id) {
+        let removed = {
+            let mut runs = self.runs.lock().await;
+            runs.remove(session_id)
+        };
+        if let Some(run) = removed {
             tracing::info!(session_id = %session_id, "Cancelling mock run");
-            run.handle.abort();
+            // Notify the run to wind down cleanly so it emits an agent-end
+            // (Crashed) event and delivers a ProcessCompletion to the
+            // orchestrator. We deliberately do NOT abort the task; the run
+            // is short and aborting would skip those signals.
+            run.cancel.notify_one();
         }
     }
 
     async fn interrupt(&self, session_id: &str) {
-        // For mocks, an interrupt is just an empty stdin write.
-        self.write_stdin(session_id, "").await;
+        // Same semantics as `cancel`: actually stop the run. The route
+        // handler distinguishes interrupt from cancel by appending a
+        // separate event, but at the provider level there is no soft
+        // interrupt — the run terminates and the orchestrator gets a
+        // completion notification.
+        self.cancel(session_id).await;
     }
 
     async fn write_stdin(&self, session_id: &str, text: &str) -> bool {
@@ -149,6 +171,7 @@ impl AgentProvider for MockProvider {
     async fn shutdown(&self) {
         let mut runs = self.runs.lock().await;
         for (_, run) in runs.drain() {
+            run.cancel.notify_one();
             run.handle.abort();
         }
     }
@@ -162,6 +185,7 @@ async fn run_scenario(
     db: &crate::db::Db,
     broadcaster: &crate::ws::broadcaster::Broadcaster,
     mut stdin_rx: mpsc::Receiver<String>,
+    cancel: Arc<Notify>,
 ) -> bool {
     // Tiny pause so consumers can observe events arriving in order.
     let tick = || tokio::time::sleep(Duration::from_millis(5));
@@ -356,7 +380,29 @@ async fn run_scenario(
                 },
             )
             .await;
-            let answer = stdin_rx.recv().await.unwrap_or_default();
+            let answer = tokio::select! {
+                _ = cancel.notified() => None,
+                ans = stdin_rx.recv() => ans,
+            };
+            // `None` covers both the cancel branch AND the case where the
+            // stdin channel was closed (which happens when `cancel` removes
+            // the MockRun from the map and drops `stdin_tx`). Both mean the
+            // run was cancelled — emit Crashed and report not-completed.
+            let Some(text) = answer else {
+                emit_event(
+                    db,
+                    broadcaster,
+                    session_id,
+                    ProviderEvent::Crashed {
+                        reason: "interrupted".into(),
+                        exit_code: None,
+                        stderr: None,
+                    },
+                )
+                .await;
+                return false;
+            };
+            let answer = text;
             emit_event(
                 db,
                 broadcaster,

@@ -38,6 +38,10 @@ struct CreateAnnouncementRequest {
 #[derive(Deserialize)]
 struct QueueMessageRequest {
     text: String,
+    #[serde(default)]
+    model: Option<String>,
+    #[serde(default)]
+    effort: Option<String>,
 }
 
 // ── Router ─────────────────────────────────────────────────────────
@@ -263,6 +267,8 @@ async fn upsert_queued_message(
             session_id,
             text: body.text,
             queued_at: now,
+            model: body.model,
+            effort: body.effort,
         })
         .await
         .map_err(|e| {

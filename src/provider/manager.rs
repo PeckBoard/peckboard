@@ -1,30 +1,42 @@
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use tokio::sync::Mutex;
+use tokio::sync::OwnedMutexGuard;
 use tokio::sync::mpsc;
 
 use crate::db::Db;
+use crate::db::models::NewQueuedMessage;
 use crate::provider::agent::{ProcessCompletion, SendMessageContext};
 use crate::provider::registry::ProviderRegistry;
 use crate::provider::stream::SpawnConfig;
-use crate::ws::broadcaster::Broadcaster;
+use crate::ws::broadcaster::{Broadcaster, WsEvent};
 
 /// Default provider id used when a model string has no `provider:` prefix.
 const DEFAULT_PROVIDER: &str = "claude";
 
+/// Outcome of `SessionManager::send_or_queue`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SendOutcome {
+    /// The message was dispatched to the provider; an agent run started.
+    Started,
+    /// The session was already running an agent; the message was written to
+    /// the persistent `queued_messages` queue and will be delivered when
+    /// the current run completes.
+    Queued,
+}
+
 /// Provider-agnostic dispatcher that owns the registry and routes session
 /// operations to the right `AgentProvider` based on the model id.
 ///
-/// Routes/orchestrator code calls this exactly like the previous
-/// Claude-specific manager; the only differences are construction
-/// (`SessionManager::new(registry)`) and the fact that model strings can
-/// now be prefixed (`"claude:opus"`, `"mock:echo"`). Bare strings default
-/// to the Claude provider for backward compatibility with stored
-/// sessions/cards.
+/// Holds a per-session lock used by `send_or_queue` and `drain_queued`
+/// so that the "is running? → spawn or enqueue" decision is atomic, and
+/// the watchdog can detect in-flight handler work via `try_lock_session`.
 pub struct SessionManager {
     registry: Arc<ProviderRegistry>,
     completion_tx: mpsc::Sender<ProcessCompletion>,
     completion_rx: Arc<Mutex<Option<mpsc::Receiver<ProcessCompletion>>>>,
+    session_locks: Arc<Mutex<HashMap<String, Arc<Mutex<()>>>>>,
 }
 
 impl SessionManager {
@@ -34,6 +46,7 @@ impl SessionManager {
             registry,
             completion_tx,
             completion_rx: Arc::new(Mutex::new(Some(completion_rx))),
+            session_locks: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
@@ -41,6 +54,33 @@ impl SessionManager {
     /// worker-done listener loop.
     pub async fn take_completion_rx(&self) -> Option<mpsc::Receiver<ProcessCompletion>> {
         self.completion_rx.lock().await.take()
+    }
+
+    /// Acquire the per-session lock. All paths that mutate a session's run
+    /// state (`send_or_queue`, `drain_queued`, the orchestrator spawn loop)
+    /// MUST hold this lock to keep the "is_running → spawn or enqueue"
+    /// decision atomic. The watchdog uses `try_lock_session` to skip
+    /// sessions whose handler is mid-flight.
+    pub async fn lock_session(&self, session_id: &str) -> OwnedMutexGuard<()> {
+        let lock = {
+            let mut map = self.session_locks.lock().await;
+            map.entry(session_id.to_string())
+                .or_insert_with(|| Arc::new(Mutex::new(())))
+                .clone()
+        };
+        lock.lock_owned().await
+    }
+
+    /// Best-effort try-lock used by the watchdog. Returns None if the lock
+    /// is currently held (i.e. a handler is mid-flight on this session).
+    pub async fn try_lock_session(&self, session_id: &str) -> Option<OwnedMutexGuard<()>> {
+        let lock = {
+            let mut map = self.session_locks.lock().await;
+            map.entry(session_id.to_string())
+                .or_insert_with(|| Arc::new(Mutex::new(())))
+                .clone()
+        };
+        lock.try_lock_owned().ok()
     }
 
     /// Dispatch a new agent run for `session_id`.
@@ -112,6 +152,119 @@ impl SessionManager {
         };
 
         provider.send_message(ctx).await
+    }
+
+    /// Atomic check-and-act: if an agent is already running for this
+    /// session, persist the message in `queued_messages` and broadcast a
+    /// "queue" event; otherwise dispatch immediately (as `send_message`).
+    ///
+    /// Callers MUST use this from any external trigger (HTTP route,
+    /// orchestrator respawn) so two concurrent sends can't both spawn
+    /// agents on the same session. The per-session lock is held across
+    /// the is_running check AND the dispatch, so the decision is atomic.
+    pub async fn send_or_queue(
+        &self,
+        session_id: &str,
+        message: &str,
+        db: &Db,
+        broadcaster: &Arc<Broadcaster>,
+        config: SpawnConfig,
+    ) -> anyhow::Result<SendOutcome> {
+        let _guard = self.lock_session(session_id).await;
+
+        if self.is_running(session_id).await {
+            let now = chrono::Utc::now().to_rfc3339();
+            db.upsert_queued_message(NewQueuedMessage {
+                session_id: session_id.to_string(),
+                text: message.to_string(),
+                queued_at: now,
+                model: Some(config.model.clone()),
+                effort: config.effort.clone(),
+            })
+            .await?;
+            broadcaster.broadcast(WsEvent {
+                event_type: "queue".into(),
+                session_id: session_id.to_string(),
+                data: serde_json::json!({ "action": "set", "text": message }),
+            });
+            tracing::info!(
+                session_id = %session_id,
+                "Agent already running; message queued for delivery on completion"
+            );
+            return Ok(SendOutcome::Queued);
+        }
+
+        self.send_message(session_id, message, db, broadcaster, config)
+            .await?;
+        Ok(SendOutcome::Started)
+    }
+
+    /// Drain the persistent queued message (if any) for `session_id` and
+    /// dispatch it as a fresh agent run. Idempotent: if there is no
+    /// queued message or an agent is already running, it returns
+    /// `Ok(false)` without side effects.
+    ///
+    /// Holds the per-session lock so it can't race with `send_or_queue`,
+    /// the orchestrator, or another completion handler.
+    pub async fn drain_queued(
+        &self,
+        session_id: &str,
+        db: &Db,
+        broadcaster: &Arc<Broadcaster>,
+        config: SpawnConfig,
+    ) -> anyhow::Result<bool> {
+        let _guard = self.lock_session(session_id).await;
+
+        if self.is_running(session_id).await {
+            return Ok(false);
+        }
+
+        let queued = match db.get_queued_message(session_id).await? {
+            Some(q) => q,
+            None => return Ok(false),
+        };
+
+        let _ = db.delete_queued_message(session_id).await;
+
+        // Persist the queued text as a user event so the conversation log
+        // reflects the actual delivery order (queue write → drain on
+        // completion → user event → agent run).
+        let user_data = serde_json::json!({ "text": queued.text });
+        match db.append_event(session_id, "user", user_data.clone()).await {
+            Ok(ev) => {
+                broadcaster.broadcast(WsEvent {
+                    event_type: "event".into(),
+                    session_id: session_id.to_string(),
+                    data: serde_json::json!({
+                        "id": ev.id,
+                        "seq": ev.seq,
+                        "ts": ev.ts,
+                        "kind": ev.kind,
+                        "data": user_data,
+                    }),
+                });
+            }
+            Err(e) => {
+                tracing::error!(
+                    session_id = %session_id,
+                    "drain_queued: failed to append user event: {e}"
+                );
+            }
+        }
+
+        broadcaster.broadcast(WsEvent {
+            event_type: "queue".into(),
+            session_id: session_id.to_string(),
+            data: serde_json::json!({ "action": "drained" }),
+        });
+
+        tracing::info!(
+            session_id = %session_id,
+            "Draining queued message and spawning agent run"
+        );
+        self.send_message(session_id, &queued.text, db, broadcaster, config)
+            .await?;
+        Ok(true)
     }
 
     /// Cancel the run for `session_id` across every registered provider.

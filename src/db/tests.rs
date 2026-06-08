@@ -448,6 +448,7 @@ mod tests {
             session_id: "s1".into(),
             text: "hello".into(),
             queued_at: ts.clone(),
+            ..Default::default()
         })
         .await
         .unwrap();
@@ -460,12 +461,16 @@ mod tests {
             session_id: "s1".into(),
             text: "updated".into(),
             queued_at: now(),
+            model: Some("mock:echo".into()),
+            effort: Some("medium".into()),
         })
         .await
         .unwrap();
 
         let msg = db.get_queued_message("s1").await.unwrap().unwrap();
         assert_eq!(msg.text, "updated");
+        assert_eq!(msg.model.as_deref(), Some("mock:echo"));
+        assert_eq!(msg.effort.as_deref(), Some("medium"));
 
         assert!(db.delete_queued_message("s1").await.unwrap());
         assert!(db.get_queued_message("s1").await.unwrap().is_none());

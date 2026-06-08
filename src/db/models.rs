@@ -297,14 +297,18 @@ pub struct QueuedMessage {
     pub session_id: String,
     pub text: String,
     pub queued_at: String,
+    pub model: Option<String>,
+    pub effort: Option<String>,
 }
 
-#[derive(Insertable, Deserialize, Debug)]
+#[derive(Insertable, Deserialize, Debug, Default)]
 #[diesel(table_name = queued_messages)]
 pub struct NewQueuedMessage {
     pub session_id: String,
     pub text: String,
     pub queued_at: String,
+    pub model: Option<String>,
+    pub effort: Option<String>,
 }
 
 // ── Announcements ────────────────────────────────────────────────────

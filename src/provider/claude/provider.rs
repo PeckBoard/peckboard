@@ -2,27 +2,37 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use tokio::sync::Mutex;
+use tokio::sync::{Mutex, Notify};
 
 use crate::provider::agent::{AgentProvider, ProcessCompletion, SendMessageContext};
 use crate::provider::registry::{ProviderInfo, ProviderRegistry};
 
-use super::process::{self, ClaudeProcess};
+use super::process;
+
+/// Per-session tracking entry for a running Claude CLI invocation.
+///
+/// We deliberately do NOT hold the `Child` here — the streaming task owns
+/// it exclusively, which keeps stdin/stdout/wait access lock-free. To stop
+/// the child we notify `cancel`; the stream loop calls `start_kill` and
+/// then emits a Crashed event so the orchestrator sees a normal completion.
+struct ClaudeRun {
+    cancel: Arc<Notify>,
+}
 
 /// `AgentProvider` impl backed by the Claude CLI (`claude -p ...`).
 ///
-/// Owns the per-session process map and stdin channels that used to live
+/// Owns the per-session run map and stdin channels that used to live
 /// in `SessionManager`. The dispatcher delegates here once it has resolved
 /// the model prefix to `"claude"`.
 pub struct ClaudeProvider {
-    processes: Arc<Mutex<HashMap<String, ClaudeProcess>>>,
+    runs: Arc<Mutex<HashMap<String, ClaudeRun>>>,
     stdin_channels: Arc<Mutex<HashMap<String, tokio::sync::mpsc::Sender<String>>>>,
 }
 
 impl ClaudeProvider {
     pub fn new() -> Self {
         ClaudeProvider {
-            processes: Arc::new(Mutex::new(HashMap::new())),
+            runs: Arc::new(Mutex::new(HashMap::new())),
             stdin_channels: Arc::new(Mutex::new(HashMap::new())),
         }
     }
@@ -62,26 +72,26 @@ impl AgentProvider for ClaudeProvider {
             ..config
         };
 
+        // Cancel any prior run before spawning a fresh one. We notify the
+        // old run and let its stream task clean up; the new run will
+        // register itself below.
+        {
+            let mut runs = self.runs.lock().await;
+            if let Some(old) = runs.remove(&session_id) {
+                tracing::warn!(
+                    session_id = %session_id,
+                    "Cancelling previous claude run before spawning new one"
+                );
+                old.cancel.notify_one();
+            }
+        }
+
         let child = process::spawn_claude(
             &session_id,
             &message,
             &cli_config,
             conversation_id.as_deref(),
         )?;
-
-        // If there's already a process for this session, kill it first.
-        {
-            let mut map = self.processes.lock().await;
-            if let Some(old) = map.remove(&session_id) {
-                tracing::warn!(
-                    session_id = %session_id,
-                    "Killing existing claude process before spawning new one"
-                );
-                tokio::spawn(async move {
-                    process::kill_process(old).await;
-                });
-            }
-        }
 
         let (stdin_tx, stdin_rx) = tokio::sync::mpsc::channel::<String>(32);
         let stdin_tx_for_stream = stdin_tx.clone();
@@ -91,7 +101,18 @@ impl AgentProvider for ClaudeProvider {
             channels.insert(session_id.clone(), stdin_tx);
         }
 
-        let processes = self.processes.clone();
+        let cancel = Arc::new(Notify::new());
+        {
+            let mut runs = self.runs.lock().await;
+            runs.insert(
+                session_id.clone(),
+                ClaudeRun {
+                    cancel: cancel.clone(),
+                },
+            );
+        }
+
+        let runs = self.runs.clone();
         let stdin_channels = self.stdin_channels.clone();
         let sid = session_id.clone();
         tokio::spawn(async move {
@@ -102,11 +123,12 @@ impl AgentProvider for ClaudeProvider {
                 stdin_rx,
                 stdin_tx_for_stream,
                 allowed_dir,
+                cancel,
             )
             .await;
 
             {
-                let mut map = processes.lock().await;
+                let mut map = runs.lock().await;
                 map.remove(&sid);
             }
             {
@@ -131,37 +153,30 @@ impl AgentProvider for ClaudeProvider {
     }
 
     async fn cancel(&self, session_id: &str) {
-        let mut map = self.processes.lock().await;
-        if let Some(proc) = map.remove(session_id) {
-            tracing::info!(session_id = %session_id, "Cancelling claude process");
-            tokio::spawn(async move {
-                process::kill_process(proc).await;
-            });
-        } else {
-            tracing::debug!(
-                session_id = %session_id,
-                "No tracked claude process to cancel (may have already exited)"
-            );
+        let removed = {
+            let mut map = self.runs.lock().await;
+            map.remove(session_id)
+        };
+        match removed {
+            Some(run) => {
+                tracing::info!(session_id = %session_id, "Cancelling claude run");
+                run.cancel.notify_one();
+            }
+            None => {
+                tracing::debug!(
+                    session_id = %session_id,
+                    "No tracked claude run to cancel (may have already exited)"
+                );
+            }
         }
     }
 
     async fn interrupt(&self, session_id: &str) {
-        // Prefer the stdin channel (covers the common case where
-        // stream_events owns the child).
-        if self.write_stdin(session_id, "").await {
-            tracing::info!(session_id = %session_id, "Sent interrupt via stdin channel");
-            return;
-        }
-
-        let mut map = self.processes.lock().await;
-        if let Some(proc) = map.get_mut(session_id) {
-            process::interrupt_process(proc).await;
-        } else {
-            tracing::debug!(
-                session_id = %session_id,
-                "No tracked claude process to interrupt"
-            );
-        }
+        // Claude CLI in stream-json mode does not respond to in-band
+        // interrupt bytes — the only reliable way to stop it is to kill
+        // the process. Reuse the cancel path so the stream loop exits and
+        // a completion notification is delivered to the orchestrator.
+        self.cancel(session_id).await;
     }
 
     async fn write_stdin(&self, session_id: &str, text: &str) -> bool {
@@ -193,48 +208,28 @@ impl AgentProvider for ClaudeProvider {
     }
 
     async fn is_running(&self, session_id: &str) -> bool {
-        let mut map = self.processes.lock().await;
-        if let Some(proc) = map.get_mut(session_id) {
-            proc.is_running()
-        } else {
-            false
-        }
+        let map = self.runs.lock().await;
+        map.contains_key(session_id)
     }
 
     async fn cleanup(&self) {
-        let mut map = self.processes.lock().await;
-        let all_ids: Vec<String> = map.keys().cloned().collect();
-        let mut dead = Vec::new();
-
-        for id in &all_ids {
-            if let Some(proc) = map.get_mut(id) {
-                if !proc.is_running() {
-                    dead.push(id.clone());
-                }
-            }
-        }
-
-        for id in &dead {
-            map.remove(id);
-        }
-
-        if !dead.is_empty() {
-            tracing::info!("Cleaned up {} dead claude process(es)", dead.len());
-        }
+        // The stream task removes itself from the map on completion, so
+        // there is nothing to sweep here. Kept as a no-op for API parity.
     }
 
     async fn shutdown(&self) {
-        let mut map = self.processes.lock().await;
-        let entries: Vec<(String, ClaudeProcess)> = map.drain().collect();
-
+        let entries: Vec<(String, ClaudeRun)> = {
+            let mut map = self.runs.lock().await;
+            map.drain().collect()
+        };
         if entries.is_empty() {
             return;
         }
 
-        tracing::info!("Shutting down {} running claude process(es)", entries.len());
-        for (session_id, proc) in entries {
-            tracing::info!(session_id = %session_id, "Killing claude process on shutdown");
-            process::kill_process(proc).await;
+        tracing::info!("Shutting down {} running claude run(s)", entries.len());
+        for (session_id, run) in entries {
+            tracing::info!(session_id = %session_id, "Notifying claude run to shut down");
+            run.cancel.notify_one();
         }
     }
 }

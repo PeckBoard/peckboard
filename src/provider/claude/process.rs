@@ -3,6 +3,7 @@ use std::sync::Arc;
 
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::{Child, Command};
+use tokio::sync::Notify;
 
 use crate::db::Db;
 use crate::provider::agent::emit_event;
@@ -58,7 +59,10 @@ pub fn spawn_claude(
         .current_dir(&config.working_dir)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
+        .stderr(Stdio::piped())
+        // Safety net: if the streaming task is dropped without a clean
+        // shutdown (e.g. JoinHandle::abort), the child still gets SIGKILL.
+        .kill_on_drop(true);
 
     // Apply any extra environment variables from the config
     for (key, value) in &config.env {
@@ -82,14 +86,15 @@ pub fn spawn_claude(
 /// Read stdout line-by-line from the Claude CLI process, parse each JSON line
 /// into a `ProviderEvent`, persist it to the DB, and broadcast via WebSocket.
 ///
-/// This function consumes the process and runs until the child exits.
-/// On exit it emits either a `Completed` or `Crashed` event.
+/// This function consumes the process and runs until the child exits or
+/// `cancel` is notified. On exit it emits either a `Completed`, `Crashed`,
+/// or (when cancelled) a `Crashed { reason: "interrupted" }` event.
 ///
 /// The `stdin_rx` channel allows callers to feed text into the process's
 /// stdin (e.g. to deliver answers to questions).
 ///
 /// Returns `true` if the process completed successfully, `false` if it
-/// crashed or encountered an error.
+/// crashed, was interrupted, or encountered an error.
 pub async fn stream_events(
     mut process: ClaudeProcess,
     db: Db,
@@ -97,6 +102,7 @@ pub async fn stream_events(
     stdin_rx: tokio::sync::mpsc::Receiver<String>,
     _stdin_tx: tokio::sync::mpsc::Sender<String>,
     allowed_dir: String,
+    cancel: Arc<Notify>,
 ) -> bool {
     let session_id = process.session_id.clone();
 
@@ -138,6 +144,7 @@ pub async fn stream_events(
     let mut model_name: Option<String> = None;
     let mut current_tool_id: Option<String> = None;
     let mut emitted_start = false;
+    let mut was_cancelled = false;
 
     // Track file-modifying tool calls for auto cross-worker notification
     let mut pending_file_changes: Vec<String> = Vec::new();
@@ -146,6 +153,15 @@ pub async fn stream_events(
 
     loop {
         let line = tokio::select! {
+            _ = cancel.notified() => {
+                tracing::info!(
+                    session_id = %session_id,
+                    "Cancel signal received; killing claude process"
+                );
+                was_cancelled = true;
+                let _ = process.child.start_kill();
+                break;
+            }
             result = lines.next_line() => {
                 match result {
                     Ok(Some(line)) => line,
@@ -169,13 +185,6 @@ pub async fn stream_events(
                             );
                             write_stdin_line(&mut stdin_pipe, text, &session_id).await;
                         }
-                    } else if ws_event.event_type == "worker-interrupt" {
-                        tracing::info!(
-                            session_id = %session_id,
-                            "Interrupting agent for inter-worker communication"
-                        );
-                        // Send empty line to interrupt the CLI (simulates pressing Enter)
-                        write_stdin_line(&mut stdin_pipe, "", &session_id).await;
                     }
                 }
                 continue;
@@ -484,102 +493,77 @@ pub async fn stream_events(
         None
     };
 
-    let is_completed = match exit_status {
-        Ok(status) if status.success() => {
-            // Process exited cleanly — emit Completed
-            emit_event(
-                &db,
-                &broadcaster,
-                &session_id,
-                ProviderEvent::Completed { conversation_id },
-            )
-            .await;
-            true
-        }
-        Ok(status) => {
-            let code = status.code();
-            tracing::warn!(
-                session_id = %session_id,
-                exit_code = ?code,
-                "Claude process exited with non-zero status"
-            );
-            emit_event(
-                &db,
-                &broadcaster,
-                &session_id,
-                ProviderEvent::Crashed {
-                    reason: format!("process exited with code {}", code.unwrap_or(-1)),
-                    exit_code: code,
-                    stderr: stderr_text,
-                },
-            )
-            .await;
-            false
-        }
-        Err(e) => {
-            tracing::error!(
-                session_id = %session_id,
-                "Failed to wait for claude process: {}",
-                e
-            );
-            emit_event(
-                &db,
-                &broadcaster,
-                &session_id,
-                ProviderEvent::Crashed {
-                    reason: format!("wait error: {}", e),
-                    exit_code: None,
-                    stderr: stderr_text,
-                },
-            )
-            .await;
-            false
+    let is_completed = if was_cancelled {
+        emit_event(
+            &db,
+            &broadcaster,
+            &session_id,
+            ProviderEvent::Crashed {
+                reason: "interrupted".into(),
+                exit_code: exit_status.ok().and_then(|s| s.code()),
+                stderr: stderr_text,
+            },
+        )
+        .await;
+        false
+    } else {
+        match exit_status {
+            Ok(status) if status.success() => {
+                emit_event(
+                    &db,
+                    &broadcaster,
+                    &session_id,
+                    ProviderEvent::Completed { conversation_id },
+                )
+                .await;
+                true
+            }
+            Ok(status) => {
+                let code = status.code();
+                tracing::warn!(
+                    session_id = %session_id,
+                    exit_code = ?code,
+                    "Claude process exited with non-zero status"
+                );
+                emit_event(
+                    &db,
+                    &broadcaster,
+                    &session_id,
+                    ProviderEvent::Crashed {
+                        reason: format!("process exited with code {}", code.unwrap_or(-1)),
+                        exit_code: code,
+                        stderr: stderr_text,
+                    },
+                )
+                .await;
+                false
+            }
+            Err(e) => {
+                tracing::error!(
+                    session_id = %session_id,
+                    "Failed to wait for claude process: {}",
+                    e
+                );
+                emit_event(
+                    &db,
+                    &broadcaster,
+                    &session_id,
+                    ProviderEvent::Crashed {
+                        reason: format!("wait error: {}", e),
+                        exit_code: None,
+                        stderr: stderr_text,
+                    },
+                )
+                .await;
+                false
+            }
         }
     };
 
-    // Auto-deliver queued message if one exists after successful completion
-    if is_completed {
-        if let Ok(Some(queued)) = db.get_queued_message(&session_id).await {
-            let _ = db.delete_queued_message(&session_id).await;
-            tracing::info!(
-                session_id = %session_id,
-                "Found queued message after completion, broadcasting notification"
-            );
-            // Append the queued message as a user event so the frontend sees it
-            if let Ok(user_ev) = db
-                .append_event(
-                    &session_id,
-                    "user",
-                    serde_json::json!({"text": queued.text}),
-                )
-                .await
-            {
-                broadcaster.broadcast(WsEvent {
-                    event_type: "event".into(),
-                    session_id: session_id.clone(),
-                    data: serde_json::json!({
-                        "id": user_ev.id,
-                        "seq": user_ev.seq,
-                        "ts": user_ev.ts,
-                        "kind": user_ev.kind,
-                        "data": serde_json::from_str::<serde_json::Value>(&user_ev.data).unwrap_or_default(),
-                    }),
-                });
-            }
-            // Broadcast a system notification so the frontend knows to re-spawn
-            emit_event(
-                &db,
-                &broadcaster,
-                &session_id,
-                ProviderEvent::ControlRequest {
-                    request_id: uuid::Uuid::new_v4().to_string(),
-                    request_type: "queued-message-ready".into(),
-                    payload: serde_json::json!({"text": queued.text}),
-                },
-            )
-            .await;
-        }
-    }
+    // Queue draining is handled centrally by the completion listener in
+    // main.rs — see SessionManager::drain_queued_message. The provider
+    // intentionally does NOT touch the queue so the drain happens on every
+    // termination path (success, crash, or interrupt), not just clean exits.
 
     is_completed
 }
@@ -1047,95 +1031,6 @@ fn normalize_questions(input: Option<&serde_json::Value>) -> serde_json::Value {
     }
 
     serde_json::Value::Array(result)
-}
-
-/// Kill the Claude CLI process. Sends SIGTERM first, waits up to 5 seconds,
-/// then sends SIGKILL if the process is still alive.
-pub async fn kill_process(mut process: ClaudeProcess) {
-    let session_id = process.session_id.clone();
-
-    // Try graceful termination first (SIGTERM on Unix, TerminateProcess on Windows)
-    if let Some(id) = process.child.id() {
-        tracing::info!(session_id = %session_id, pid = id, "Sending SIGTERM to claude process");
-
-        #[cfg(unix)]
-        {
-            // Send SIGTERM via nix/libc
-            unsafe {
-                libc::kill(id as i32, libc::SIGTERM);
-            }
-        }
-
-        #[cfg(not(unix))]
-        {
-            let _ = process.child.kill().await;
-            return;
-        }
-
-        // Wait up to 5 seconds for graceful exit
-        let wait_result =
-            tokio::time::timeout(std::time::Duration::from_secs(5), process.child.wait()).await;
-
-        match wait_result {
-            Ok(Ok(status)) => {
-                tracing::info!(
-                    session_id = %session_id,
-                    exit_code = ?status.code(),
-                    "Claude process terminated gracefully"
-                );
-                return;
-            }
-            Ok(Err(e)) => {
-                tracing::warn!(
-                    session_id = %session_id,
-                    "Error waiting for claude process: {}",
-                    e
-                );
-            }
-            Err(_) => {
-                tracing::warn!(
-                    session_id = %session_id,
-                    "Claude process did not exit within 5s, sending SIGKILL"
-                );
-            }
-        }
-    }
-
-    // Force kill
-    if let Err(e) = process.child.kill().await {
-        tracing::error!(
-            session_id = %session_id,
-            "Failed to SIGKILL claude process: {}",
-            e
-        );
-    } else {
-        let _ = process.child.wait().await;
-        tracing::info!(session_id = %session_id, "Claude process killed");
-    }
-}
-
-/// Interrupt the Claude CLI process by writing a newline to its stdin.
-/// This simulates pressing Enter, which Claude CLI interprets as an interrupt.
-pub async fn interrupt_process(process: &mut ClaudeProcess) {
-    let session_id = &process.session_id;
-
-    if let Some(stdin) = process.child.stdin.as_mut() {
-        match stdin.write_all(b"\n").await {
-            Ok(()) => {
-                let _ = stdin.flush().await;
-                tracing::info!(session_id = %session_id, "Sent interrupt (newline) to claude process");
-            }
-            Err(e) => {
-                tracing::error!(
-                    session_id = %session_id,
-                    "Failed to write interrupt to claude stdin: {}",
-                    e
-                );
-            }
-        }
-    } else {
-        tracing::warn!(session_id = %session_id, "No stdin handle to send interrupt");
-    }
 }
 
 #[cfg(test)]

@@ -475,11 +475,54 @@ async fn append_event(
         // Resolve references in the answer text (e.g. [session:id] from autocomplete)
         let answer_text = resolve_references(&answer_text, &state).await;
 
-        // Send as a new message to resume the conversation
+        // Resume the conversation under the per-session lock, mirroring
+        // the /message route's atomic check-and-act: if an agent is
+        // already running (e.g. the user's answer raced an orchestrator
+        // respawn or a parallel send), queue instead of spawning a second
+        // run. Spawned so the HTTP response returns immediately.
         let state_clone = state.clone();
         let id_clone = id.clone();
         tokio::spawn(async move {
-            // Append a user event for the answer
+            let _guard = state_clone.session_manager.lock_session(&id_clone).await;
+
+            if state_clone.session_manager.is_running(&id_clone).await {
+                // Persist the answer for the in-flight run's completion
+                // listener to drain. We deliberately do NOT append a user
+                // event here — drain_queued appends one before dispatching,
+                // matching the ordering in the conversation log.
+                let now = chrono::Utc::now().to_rfc3339();
+                if let Err(e) = state_clone
+                    .db
+                    .upsert_queued_message(crate::db::models::NewQueuedMessage {
+                        session_id: id_clone.clone(),
+                        text: answer_text.clone(),
+                        queued_at: now,
+                        model: None,
+                        effort: None,
+                    })
+                    .await
+                {
+                    tracing::error!(
+                        session_id = %id_clone,
+                        "Failed to queue question answer: {e}"
+                    );
+                    return;
+                }
+                state_clone
+                    .broadcaster
+                    .broadcast(crate::ws::broadcaster::WsEvent {
+                        event_type: "queue".into(),
+                        session_id: id_clone.clone(),
+                        data: serde_json::json!({ "action": "set", "text": answer_text }),
+                    });
+                tracing::info!(
+                    session_id = %id_clone,
+                    "Question answer queued; will deliver on next completion"
+                );
+                return;
+            }
+
+            // Not running — append the user event, then dispatch.
             if let Ok(user_ev) = state_clone
                 .db
                 .append_event(&id_clone, "user", serde_json::json!({"text": &answer_text}))
@@ -500,7 +543,6 @@ async fn append_event(
                     });
             }
 
-            // Issue MCP token with project scope (for worker sessions)
             let session_project_id = state_clone
                 .db
                 .get_session(&id_clone)
@@ -679,59 +721,18 @@ async fn send_message(
         }
     };
 
-    // 1. Append a user event with the message text
-    let mut user_data = serde_json::json!({ "text": body.text });
-    if let Some(ref attachment_ids) = body.attachment_ids {
-        user_data["attachmentIds"] = serde_json::json!(attachment_ids);
-    }
+    let attachment_ids = body.attachment_ids.clone();
 
-    let user_event = state
-        .db
-        .append_event(&id, "user", user_data)
-        .await
-        .map_err(|e| {
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(serde_json::json!({ "error": e.to_string() })),
-            )
-        })?;
-
-    // Broadcast user event
-    state.broadcaster.broadcast(crate::ws::broadcaster::WsEvent {
-        event_type: "event".into(),
-        session_id: id.clone(),
-        data: serde_json::json!({
-            "id": user_event.id,
-            "seq": user_event.seq,
-            "ts": user_event.ts,
-            "kind": user_event.kind,
-            "data": serde_json::from_str::<serde_json::Value>(&user_event.data).unwrap_or_default(),
-        }),
-    });
-
-    // Update last_activity
-    let now = chrono::Utc::now().to_rfc3339();
-    let _ = state
-        .db
-        .update_session(
-            &id,
-            UpdateSession {
-                last_activity: Some(now),
-                ..Default::default()
-            },
-        )
-        .await;
-
-    // 1b. Resolve [session:id] and [report:folder/file] references
+    // Resolve [session:id] and [report:folder/file] references early; both
+    // the queued and started paths use the resolved text.
     let resolved_text = resolve_references(&body.text, &state).await;
 
-    // 2. Build spawn config — resolve model/effort with precedence:
-    //    request body > session > card > project > "default"
+    // Build spawn config — resolve model/effort with precedence:
+    //   request body > session > card > project > "default"
     let (resolved_model, resolved_effort) = {
         let mut model: Option<String> = body.model;
         let mut effort: Option<String> = body.effort;
 
-        // Fallback to session-level
         if model.is_none() {
             model = session.model.clone();
         }
@@ -739,7 +740,6 @@ async fn send_message(
             effort = session.effort.clone();
         }
 
-        // Fallback to card-level, and then project-level
         if model.is_none() || effort.is_none() {
             if let Some(ref card_id) = session.card_id {
                 if let Ok(Some(card)) = state.db.get_card(card_id).await {
@@ -750,7 +750,6 @@ async fn send_message(
                         effort = card.effort.clone();
                     }
 
-                    // Fallback to project-level
                     if model.is_none() || effort.is_none() {
                         if let Ok(Some(project)) = state.db.get_project(&card.project_id).await {
                             if model.is_none() {
@@ -768,7 +767,93 @@ async fn send_message(
         (model.unwrap_or_else(|| "default".into()), effort)
     };
 
-    // Issue MCP token and write config so the session has access to MCP tools
+    // Atomic check-and-act under the per-session lock: if an agent is
+    // already running, queue the message; otherwise spawn a fresh run.
+    // Holding the lock across the is_running check + action prevents two
+    // concurrent POSTs from both spawning agents on the same session.
+    let _guard = state.session_manager.lock_session(&id).await;
+
+    if state.session_manager.is_running(&id).await {
+        if attachment_ids.as_ref().is_some_and(|a| !a.is_empty()) {
+            tracing::warn!(
+                session_id = %id,
+                "Attachments dropped on queued message (queue does not persist them)"
+            );
+        }
+
+        let now = chrono::Utc::now().to_rfc3339();
+        let queued = state
+            .db
+            .upsert_queued_message(crate::db::models::NewQueuedMessage {
+                session_id: id.clone(),
+                text: resolved_text.clone(),
+                queued_at: now,
+                model: Some(resolved_model.clone()),
+                effort: resolved_effort.clone(),
+            })
+            .await
+            .map_err(|e| {
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(serde_json::json!({ "error": e.to_string() })),
+                )
+            })?;
+
+        state
+            .broadcaster
+            .broadcast(crate::ws::broadcaster::WsEvent {
+                event_type: "queue".into(),
+                session_id: id.clone(),
+                data: serde_json::json!({ "action": "set", "text": queued.text }),
+            });
+
+        return Ok(Json(serde_json::json!({
+            "status": "queued",
+            "session_id": id,
+        })));
+    }
+
+    // Not running — append the user event, then dispatch a fresh run.
+    let mut user_data = serde_json::json!({ "text": resolved_text });
+    if let Some(ref ids) = attachment_ids {
+        user_data["attachmentIds"] = serde_json::json!(ids);
+    }
+
+    let user_event = state
+        .db
+        .append_event(&id, "user", user_data)
+        .await
+        .map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({ "error": e.to_string() })),
+            )
+        })?;
+
+    state.broadcaster.broadcast(crate::ws::broadcaster::WsEvent {
+        event_type: "event".into(),
+        session_id: id.clone(),
+        data: serde_json::json!({
+            "id": user_event.id,
+            "seq": user_event.seq,
+            "ts": user_event.ts,
+            "kind": user_event.kind,
+            "data": serde_json::from_str::<serde_json::Value>(&user_event.data).unwrap_or_default(),
+        }),
+    });
+
+    let now = chrono::Utc::now().to_rfc3339();
+    let _ = state
+        .db
+        .update_session(
+            &id,
+            UpdateSession {
+                last_activity: Some(now),
+                ..Default::default()
+            },
+        )
+        .await;
+
     let mcp_token = state
         .mcp_tokens
         .issue_token(id.clone(), session.project_id.clone())
@@ -786,17 +871,14 @@ async fn send_message(
     let config = SpawnConfig {
         model: resolved_model,
         effort: resolved_effort,
-        working_dir: String::new(), // Will be resolved by SessionManager from the folder
+        working_dir: String::new(),
         mcp_config_path,
         env: Default::default(),
-        // Use bypass mode — questions are handled through the peckboard MCP
-        // ask_user tool, not the CLI's built-in AskUserQuestion.
         permission_mode: Some("bypass".into()),
         timeout_ms: None,
         metadata: serde_json::Value::Null,
     };
 
-    // 3. Spawn the Claude CLI process in the background
     if let Err(e) = state
         .session_manager
         .send_message(&id, &resolved_text, &state.db, &state.broadcaster, config)
@@ -804,7 +886,6 @@ async fn send_message(
     {
         tracing::error!(session_id = %id, "Failed to spawn claude process: {}", e);
 
-        // Append a crashed event so the UI knows it failed
         let crash_event = state
             .db
             .append_event(
@@ -837,7 +918,6 @@ async fn send_message(
         ));
     }
 
-    // 4. Return 200 immediately — streaming happens in background
     Ok::<_, (StatusCode, Json<serde_json::Value>)>(Json(serde_json::json!({
         "status": "started",
         "session_id": id,

@@ -165,48 +165,80 @@ async fn main() -> anyhow::Result<()> {
     // streaming process finishes and runs the worker-done handler +
     // orchestration outside the tokio::spawn boundary (avoiding Send issues
     // with AppState's PluginManager).
+    //
+    // Every completion (success or crash) also drains any persistent
+    // queued message for the session so a "send while busy" reliably
+    // delivers, even if the in-flight run was interrupted or crashed.
     {
         if let Some(mut rx) = state.session_manager.take_completion_rx().await {
             let orchestrator_state = state.clone();
             tokio::spawn(async move {
                 while let Some(completion) = rx.recv().await {
                     let sid = completion.session_id.clone();
-                    match orchestrator_state.db.get_session(&sid).await {
-                        Ok(Some(session)) if session.is_worker => {
-                            if completion.completed {
-                                tracing::info!(session_id = %sid, "Worker completed, running handle_worker_done");
-                                peckboard::worker::orchestrator::handle_worker_done(
-                                    &orchestrator_state,
-                                    &sid,
-                                )
-                                .await;
-                            } else {
-                                // Worker crashed — clear worker_session_id so
-                                // the orchestrator can re-spawn or the watchdog
-                                // can detect the dead worker.
-                                tracing::warn!(session_id = %sid, "Worker crashed");
-                                if let Some(card_id) = &session.card_id {
-                                    let _ = orchestrator_state
-                                        .db
-                                        .update_card(
-                                            card_id,
-                                            peckboard::db::models::UpdateCard {
-                                                worker_session_id: Some(None),
-                                                last_worker_session_id: Some(Some(sid.clone())),
-                                                ..Default::default()
-                                            },
-                                        )
-                                        .await;
+
+                    // 1. Worker-specific bookkeeping. Hold the per-session
+                    //    lock for the entire handler so the watchdog's
+                    //    try_lock_session check skips this session while
+                    //    plugins, token revoke, and DB updates run — even
+                    //    if the handler takes longer than the watchdog's
+                    //    grace window.
+                    {
+                        let _guard = orchestrator_state.session_manager.lock_session(&sid).await;
+                        match orchestrator_state.db.get_session(&sid).await {
+                            Ok(Some(session)) if session.is_worker => {
+                                if completion.completed {
+                                    tracing::info!(session_id = %sid, "Worker completed, running handle_worker_done");
+                                    peckboard::worker::orchestrator::handle_worker_done(
+                                        &orchestrator_state,
+                                        &sid,
+                                    )
+                                    .await;
+                                } else {
+                                    // Worker crashed/interrupted — clear
+                                    // worker_session_id so the orchestrator can
+                                    // re-spawn or the watchdog can detect the
+                                    // dead worker.
+                                    tracing::warn!(session_id = %sid, "Worker crashed or interrupted");
+                                    if let Some(card_id) = &session.card_id {
+                                        let _ = orchestrator_state
+                                            .db
+                                            .update_card(
+                                                card_id,
+                                                peckboard::db::models::UpdateCard {
+                                                    worker_session_id: Some(None),
+                                                    last_worker_session_id: Some(Some(sid.clone())),
+                                                    ..Default::default()
+                                                },
+                                            )
+                                            .await;
+                                    }
                                 }
                             }
-                            // After handling, fill freed worker slots
-                            peckboard::worker::orchestrator::check_and_spawn_workers(
-                                &orchestrator_state,
-                            )
-                            .await;
+                            _ => {}
                         }
-                        _ => {}
+                    } // release lock before drain_queue_for_session, which
+                    // re-acquires it inside drain_queued (tokio Mutex is
+                    // not reentrant).
+
+                    // 2. Drain any queued message — runs for every session
+                    // (worker or interactive) and every completion outcome.
+                    // drain_queue_for_session takes the per-session lock
+                    // itself; we don't need to hold it here.
+                    if let Err(e) = peckboard::worker::orchestrator::drain_queue_for_session(
+                        &orchestrator_state,
+                        &sid,
+                    )
+                    .await
+                    {
+                        tracing::warn!(
+                            session_id = %sid,
+                            "Queue drain failed: {e}"
+                        );
                     }
+
+                    // 3. Fill any freed worker slots.
+                    peckboard::worker::orchestrator::check_and_spawn_workers(&orchestrator_state)
+                        .await;
                 }
             });
             tracing::info!("Worker completion listener started");

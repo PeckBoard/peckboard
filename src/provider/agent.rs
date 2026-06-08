@@ -55,8 +55,12 @@ pub trait AgentProvider: Send + Sync + 'static {
     /// Cancel any in-flight run for `session_id`. Typically a hard kill.
     async fn cancel(&self, session_id: &str);
 
-    /// Soft-interrupt the run (e.g. write a newline to stdin for Claude
-    /// CLI). Used when the user wants to interrupt without killing.
+    /// Stop the in-flight run for `session_id`. Implementations MUST actually
+    /// terminate the run (kill the process / abort the task) — there is no
+    /// "soft interrupt" path because the Claude CLI in stream-json mode does
+    /// not respond to stdin signals. The difference from `cancel` is purely
+    /// reporting: the route handler appends an `interrupt` event so the UI
+    /// distinguishes a user interrupt from other cancellations.
     async fn interrupt(&self, session_id: &str);
 
     /// Deliver text to the run's input channel (e.g. an answer to a

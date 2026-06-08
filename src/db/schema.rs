@@ -116,6 +116,8 @@ diesel::table! {
         session_id -> Text,
         text -> Text,
         queued_at -> Text,
+        model -> Nullable<Text>,
+        effort -> Nullable<Text>,
     }
 }
 
