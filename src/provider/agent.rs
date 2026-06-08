@@ -4,6 +4,7 @@ use async_trait::async_trait;
 use tokio::sync::mpsc;
 
 use crate::db::Db;
+use crate::plugin::manager::PluginManager;
 use crate::provider::stream::{ProviderEvent, SpawnConfig};
 use crate::ws::broadcaster::{Broadcaster, WsEvent};
 
@@ -30,6 +31,11 @@ pub struct SendMessageContext {
     pub config: SpawnConfig,
     pub conversation_id: Option<String>,
     pub completion_tx: mpsc::Sender<ProcessCompletion>,
+    /// Plugin host for this dispatch. A non-Claude provider runs its raw
+    /// output through `crate::plugin::todo_hook::emit_plugin_todos` to let a
+    /// `todo`-hook plugin drive lifecycle tracking. Empty (a no-op) unless the
+    /// dispatching `SessionManager` was built with `with_plugins`.
+    pub plugins: Arc<PluginManager>,
 }
 
 /// An agent provider runs agent sessions of one kind (Claude CLI, a mock,

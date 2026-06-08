@@ -42,6 +42,18 @@ impl PluginManager {
         }
     }
 
+    /// A plugin manager that hosts no plugins and never loads any. Dispatch is
+    /// always a no-op, so this is the right default for components that take a
+    /// `PluginManager` for uniformity but never host plugins (the watchdog's
+    /// throwaway `SessionManager`, tests). The real manager comes from
+    /// `AppState` via `SessionManager::with_plugins`.
+    pub fn empty() -> Self {
+        PluginManager {
+            plugins: Arc::new(Mutex::new(Vec::new())),
+            plugins_dir: PathBuf::new(),
+        }
+    }
+
     /// Scan the plugins directory and load all .wasm files.
     pub async fn load_all(&self) -> anyhow::Result<()> {
         if !self.plugins_dir.exists() {

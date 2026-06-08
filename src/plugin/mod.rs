@@ -1,6 +1,7 @@
 pub mod hooks;
 pub mod host;
 pub mod manager;
+pub mod todo_hook;
 
 // Plugin system — Extism WASM runtime
 //
