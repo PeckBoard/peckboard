@@ -16,6 +16,10 @@ pub struct AppState {
     pub plugins: Arc<PluginManager>,
     pub jwt_secret: Vec<u8>,
     pub login_limiter: RateLimiter,
+    /// Per-user throttle on `POST /api/auth/change-password`. Keyed by
+    /// user id so a compromised token can't flip the password in a
+    /// tight loop (lockout DoS against the legitimate user).
+    pub password_change_limiter: RateLimiter<String>,
     pub broadcaster: Arc<Broadcaster>,
     pub provider_registry: Arc<ProviderRegistry>,
     pub session_manager: SessionManager,

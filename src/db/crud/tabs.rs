@@ -22,12 +22,18 @@ impl Db {
     /// Insert a tab, or bump its `last_active` if it already exists.
     /// This is what powers MRU ordering: every time the user opens a
     /// session/project, the corresponding tab moves to the front.
+    ///
+    /// Returns `Ok(None)` if the referenced session/project does not
+    /// exist. `user_tabs` is polymorphic so there's no FK to lean on,
+    /// and without this check a stale URL like `/sessions/<deleted-id>`
+    /// (or a cross-device delete race) would write an orphan row that
+    /// then renders as a phantom "Session" chip in the tab strip.
     pub async fn upsert_user_tab(
         &self,
         user_id: &str,
         item_type: &str,
         item_id: &str,
-    ) -> anyhow::Result<UserTab> {
+    ) -> anyhow::Result<Option<UserTab>> {
         let now = chrono::Utc::now().to_rfc3339();
         let tab = UserTab {
             user_id: user_id.to_string(),
@@ -36,14 +42,32 @@ impl Db {
             last_active: now,
         };
         self.with_conn(move |conn| {
-            diesel::insert_into(user_tabs::table)
+            let exists = match tab.item_type.as_str() {
+                "session" => sessions::table
+                    .find(&tab.item_id)
+                    .select(sessions::id)
+                    .first::<String>(conn)
+                    .optional()?
+                    .is_some(),
+                "project" => projects::table
+                    .find(&tab.item_id)
+                    .select(projects::id)
+                    .first::<String>(conn)
+                    .optional()?
+                    .is_some(),
+                _ => false,
+            };
+            if !exists {
+                return Ok::<Option<UserTab>, anyhow::Error>(None);
+            }
+            let row = diesel::insert_into(user_tabs::table)
                 .values(&tab)
                 .on_conflict((user_tabs::user_id, user_tabs::item_type, user_tabs::item_id))
                 .do_update()
                 .set(user_tabs::last_active.eq(&tab.last_active))
                 .returning(UserTab::as_returning())
-                .get_result(conn)
-                .map_err(Into::into)
+                .get_result(conn)?;
+            Ok(Some(row))
         })
         .await
     }

@@ -22,10 +22,9 @@ let cachedAuth: { token: string; auth: Record<string, string> } | null = null
 
 async function authenticate(request: APIRequestContext) {
   if (cachedAuth) return cachedAuth
-  const status = await request.get('/api/auth/status')
-  const { has_users } = (await status.json()) as { has_users: boolean }
-  const endpoint = has_users ? '/api/auth/login' : '/api/auth/register'
-  const res = await request.post(endpoint, {
+  // The server auto-bootstraps the admin from PECKBOARD_BOOTSTRAP_*
+  // env vars at first start (see playwright.config.ts); we just log in.
+  const res = await request.post('/api/auth/login', {
     data: { username: E2E_USER, password: E2E_PASS },
   })
   expect(res.ok()).toBeTruthy()
@@ -34,7 +33,11 @@ async function authenticate(request: APIRequestContext) {
   return cachedAuth
 }
 
-async function seedSession(request: APIRequestContext, auth: Record<string, string>) {
+async function seedSession(
+  request: APIRequestContext,
+  auth: Record<string, string>,
+  opts: { model?: string } = {},
+) {
   const folderPath = mkdtempSync(path.join(tmpdir(), 'peckboard-e2e-mob-'))
   const folderRes = await request.post('/api/folders', {
     headers: auth,
@@ -44,7 +47,7 @@ async function seedSession(request: APIRequestContext, auth: Record<string, stri
   const folder = (await folderRes.json()) as { id: string }
   const sessionRes = await request.post('/api/sessions', {
     headers: auth,
-    data: { name: 'mobile session', folder_id: folder.id },
+    data: { name: 'mobile session', folder_id: folder.id, model: opts.model },
   })
   expect(sessionRes.ok()).toBeTruthy()
   const session = (await sessionRes.json()) as { id: string }
@@ -197,5 +200,87 @@ test.describe('mobile layout', () => {
     // Give the scroll listener a tick to fire.
     await page.waitForFunction(() => window.scrollY === 0, undefined, { timeout: 2_000 })
     expect(await page.evaluate(() => window.scrollY)).toBe(0)
+  })
+
+  test('tapping Send does not blur the textarea (keyboard stays open, single-tap works)', async ({
+    request,
+    page,
+    baseURL,
+  }) => {
+    // Regression test: on mobile, tapping Send used to blur the textarea,
+    // which closed the soft keyboard and shifted the input bar down before
+    // the click landed — so the first tap was wasted and users had to tap
+    // a second time. The fix is `preventDefault` on the button's
+    // pointerdown so focus stays on the textarea through the tap. We can't
+    // open a real soft keyboard in Playwright, but the load-bearing
+    // property — textarea retains focus through the Send tap — is
+    // directly observable here.
+    expect(baseURL).toBeTruthy()
+    const { token, auth } = await authenticate(request)
+    const sessionId = await seedSession(request, auth, { model: 'mock:happy-path' })
+
+    await loadAt(page, token, `/sessions/${sessionId}`)
+    const input = page.locator('.input-textarea')
+    const send = page.locator('.send-btn')
+    await expect(input).toBeVisible({ timeout: 5_000 })
+
+    await input.tap()
+    await input.fill('hello')
+    // Confirm focus + that Send is now enabled before we tap it.
+    await expect
+      .poll(async () => page.evaluate(() => document.activeElement?.tagName), { timeout: 2_000 })
+      .toBe('TEXTAREA')
+    await expect(send).toBeEnabled()
+
+    await send.tap()
+
+    // The key assertion: the textarea must still be the active element
+    // immediately after the tap. If pointerdown had been allowed to shift
+    // focus to the button, this would be 'BUTTON' (briefly) or 'BODY'
+    // (once the button disables itself in handleSend) — both of which
+    // would have closed the soft keyboard on a real device.
+    const active = await page.evaluate(() => document.activeElement?.tagName)
+    expect(active).toBe('TEXTAREA')
+
+    // And the send actually fired: the textarea clears.
+    await expect(input).toHaveValue('', { timeout: 5_000 })
+  })
+
+  test('tab strip sits directly under the rail (not pinned to the bottom)', async ({
+    request,
+    page,
+    baseURL,
+  }) => {
+    // Earlier layout used `order: 99` to push the tab strip to the bottom
+    // of `.content`, so its top was near the viewport bottom. The new
+    // layout drops it right under the rail — this test pins that.
+    expect(baseURL).toBeTruthy()
+    const { token, auth } = await authenticate(request)
+    const sessionId = await seedSession(request, auth)
+
+    await loadAt(page, token, `/sessions/${sessionId}`)
+
+    const railBox = await page.locator('.rail').boundingBox()
+    const tabbarBox = await page.locator('.tabbar').boundingBox()
+    expect(railBox).not.toBeNull()
+    expect(tabbarBox).not.toBeNull()
+    if (!railBox || !tabbarBox) return
+    const railBottom = railBox.y + railBox.height
+    expect(tabbarBox.y).toBeGreaterThanOrEqual(railBottom - 1)
+    // Should be near the rail (within ~24px), not parked at viewport bottom.
+    expect(tabbarBox.y - railBottom).toBeLessThan(24)
+  })
+
+  test('session tab label does not show a "#" prefix', async ({ request, page, baseURL }) => {
+    expect(baseURL).toBeTruthy()
+    const { token, auth } = await authenticate(request)
+    const sessionId = await seedSession(request, auth)
+
+    await loadAt(page, token, `/sessions/${sessionId}`)
+
+    const tab = page.locator('.tabbar .tab-opened').first()
+    await expect(tab).toBeVisible()
+    const text = (await tab.innerText()).trim()
+    expect(text.startsWith('#')).toBe(false)
   })
 })

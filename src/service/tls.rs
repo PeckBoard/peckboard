@@ -61,19 +61,13 @@ pub fn ensure_certs(data_dir: &Path) -> Result<TlsConfig> {
         .self_signed(&key_pair)
         .context("failed to generate self-signed certificate")?;
 
-    // Write cert PEM
+    // Write cert PEM (public — default umask is fine).
     fs::write(&cert_path, cert.pem()).context("failed to write cert.pem")?;
 
-    // Write key PEM
-    fs::write(&key_path, key_pair.serialize_pem()).context("failed to write key.pem")?;
-
-    // Set key permissions to 0o600
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        fs::set_permissions(&key_path, fs::Permissions::from_mode(0o600))
-            .context("failed to set key.pem permissions")?;
-    }
+    // Write key PEM. On Unix we open with mode 0o600 atomically via
+    // OpenOptions so the file is never world-readable, not even for
+    // the few microseconds between `fs::write` and `set_permissions`.
+    write_secret_pem(&key_path, &key_pair.serialize_pem()).context("failed to write key.pem")?;
 
     tracing::info!("Generated self-signed TLS certificate at {:?}", certs_dir);
 
@@ -81,6 +75,33 @@ pub fn ensure_certs(data_dir: &Path) -> Result<TlsConfig> {
         cert_path,
         key_path,
     })
+}
+
+/// Atomic-mode write for a private-key PEM. On Unix the file is
+/// created with mode 0o600 in one syscall via `OpenOptions::mode` so
+/// the secret never lands on disk world-readable. On other platforms
+/// this is just a regular write — Windows ACLs aren't covered here.
+fn write_secret_pem(path: &Path, pem: &str) -> std::io::Result<()> {
+    #[cfg(unix)]
+    {
+        use std::fs::OpenOptions;
+        use std::io::Write;
+        use std::os::unix::fs::OpenOptionsExt;
+
+        let mut f = OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .mode(0o600)
+            .open(path)?;
+        f.write_all(pem.as_bytes())?;
+        f.sync_all()?;
+        Ok(())
+    }
+    #[cfg(not(unix))]
+    {
+        std::fs::write(path, pem)
+    }
 }
 
 fn time_from_chrono(dt: chrono::DateTime<chrono::Utc>) -> time::OffsetDateTime {

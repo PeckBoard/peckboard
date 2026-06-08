@@ -387,7 +387,24 @@ pub(super) async fn resolve_references(text: &str, state: &Arc<AppState>) -> Str
         result = result.replace(&from, &to);
     }
 
-    // Resolve report references
+    // Resolve report references. The folder/file segments come from
+    // user-supplied chat text, so they must pass the same strict
+    // alphanumeric/dash/underscore filter the REST report routes use.
+    // Without this an attacker who can send chat messages can drop
+    // `[report:../../etc/passwd]` to slurp arbitrary files into the
+    // session transcript.
+    fn safe_report_segment(s: &str) -> bool {
+        if s.is_empty() || s.len() > 128 {
+            return false;
+        }
+        let core = s.strip_suffix(".md").unwrap_or(s);
+        if core.is_empty() {
+            return false;
+        }
+        core.bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
+    }
+
     let report_re = regex::Regex::new(r"\[report:([^\]]+)\]").unwrap();
     let mut report_replacements = Vec::new();
     for cap in report_re.captures_iter(&result) {
@@ -397,6 +414,13 @@ pub(super) async fn resolve_references(text: &str, state: &Arc<AppState>) -> Str
         if parts.len() == 2 {
             let folder = parts[0];
             let file = parts[1];
+            if !safe_report_segment(folder) || !safe_report_segment(file) {
+                report_replacements.push((
+                    full_match,
+                    format!("[report {}/{} rejected: invalid path]", folder, file),
+                ));
+                continue;
+            }
             let report_file = state
                 .config
                 .data_dir

@@ -8,10 +8,12 @@ use axum::{
 };
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use std::path::PathBuf;
 use std::sync::{Arc, OnceLock};
 use tokio::sync::Mutex;
 
-use crate::auth::middleware::require_auth;
+use crate::auth::middleware::{require_admin, require_auth};
+use crate::db::Db;
 use crate::state::AppState;
 
 /// Per-path async lock map. Two concurrent git subprocesses on the same
@@ -65,15 +67,85 @@ pub fn router(state: Arc<AppState>) -> Router<Arc<AppState>> {
         .route("/api/git/status", get(git_status))
         .route("/api/git/diff", get(git_diff))
         .route("/api/git/commits", get(git_commits))
+        // Admin-only — these endpoints shell out to git against a
+        // filesystem path. We restrict to admins to keep the IDOR-ish
+        // "any auth user can probe any path" attack out of reach.
+        .route_layer(middleware::from_fn(require_admin))
         .route_layer(middleware::from_fn_with_state(state, require_auth))
 }
 
+/// Resolve a caller-supplied path to a canonical directory that lives
+/// inside one of the folders the operator has actually registered.
+///
+/// Rejects anything that:
+///   - doesn't canonicalize (doesn't exist / no permission)
+///   - isn't a directory
+///   - doesn't sit under (or equal) some registered folder.path
+///   - isn't itself a git working tree (has a `.git` entry)
+///
+/// Without this, the route would happily run `git` against any
+/// directory on the machine — an authenticated admin could enumerate
+/// every git repo on the host. The folder whitelist is the same set
+/// `scan_repos` uses to discover repos, so legitimate UI traffic is
+/// unaffected.
+async fn resolve_repo_path(
+    db: &Db,
+    requested: &str,
+) -> Result<PathBuf, (StatusCode, Json<serde_json::Value>)> {
+    let bad = |msg: &str| {
+        (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"error": msg})),
+        )
+    };
+
+    let canonical =
+        std::fs::canonicalize(requested).map_err(|_| bad("path not found or not accessible"))?;
+    if !canonical.is_dir() {
+        return Err(bad("path is not a directory"));
+    }
+
+    let folders = db.list_folders().await.map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({"error": e.to_string()})),
+        )
+    })?;
+
+    let allowed = folders
+        .iter()
+        .any(|f| match std::fs::canonicalize(&f.path) {
+            Ok(root) => canonical.starts_with(&root),
+            Err(_) => false,
+        });
+    if !allowed {
+        return Err((
+            StatusCode::FORBIDDEN,
+            Json(serde_json::json!({"error": "path is outside any registered folder"})),
+        ));
+    }
+
+    // Requiring a `.git` entry (file or dir — submodules use a file)
+    // means we never run git against a non-repo and never trigger a
+    // walk-up search for a parent repo.
+    if !canonical.join(".git").exists() {
+        return Err(bad("not a git working tree"));
+    }
+
+    Ok(canonical)
+}
+
 /// GET /api/git/status?path=<path> — git status for a folder
-async fn git_status(Query(q): Query<DiffQuery>) -> impl IntoResponse {
-    let _guard = lock_git_path(&q.path).await;
+async fn git_status(
+    State(state): State<Arc<AppState>>,
+    Query(q): Query<DiffQuery>,
+) -> impl IntoResponse {
+    let repo = resolve_repo_path(&state.db, &q.path).await?;
+    let key = repo.to_string_lossy().to_string();
+    let _guard = lock_git_path(&key).await;
     let output = tokio::process::Command::new("git")
         .args(["status", "--porcelain"])
-        .current_dir(&q.path)
+        .current_dir(&repo)
         .output()
         .await;
 
@@ -81,7 +153,7 @@ async fn git_status(Query(q): Query<DiffQuery>) -> impl IntoResponse {
         Ok(out) => {
             let stdout = String::from_utf8_lossy(&out.stdout).to_string();
             let files: Vec<&str> = stdout.lines().collect();
-            Ok(Json(serde_json::json!({
+            Ok::<_, (StatusCode, Json<serde_json::Value>)>(Json(serde_json::json!({
                 "path": q.path,
                 "files": files,
                 "clean": files.is_empty(),
@@ -95,18 +167,23 @@ async fn git_status(Query(q): Query<DiffQuery>) -> impl IntoResponse {
 }
 
 /// GET /api/git/diff?path=<path> — git diff for a folder
-async fn git_diff(Query(q): Query<DiffQuery>) -> impl IntoResponse {
-    let _guard = lock_git_path(&q.path).await;
+async fn git_diff(
+    State(state): State<Arc<AppState>>,
+    Query(q): Query<DiffQuery>,
+) -> impl IntoResponse {
+    let repo = resolve_repo_path(&state.db, &q.path).await?;
+    let key = repo.to_string_lossy().to_string();
+    let _guard = lock_git_path(&key).await;
     let output = tokio::process::Command::new("git")
         .args(["diff"])
-        .current_dir(&q.path)
+        .current_dir(&repo)
         .output()
         .await;
 
     match output {
         Ok(out) => {
             let diff = String::from_utf8_lossy(&out.stdout).to_string();
-            Ok(Json(serde_json::json!({
+            Ok::<_, (StatusCode, Json<serde_json::Value>)>(Json(serde_json::json!({
                 "path": q.path,
                 "diff": diff,
             })))
@@ -119,16 +196,24 @@ async fn git_diff(Query(q): Query<DiffQuery>) -> impl IntoResponse {
 }
 
 /// GET /api/git/commits?path=<path>&limit=<n> — recent commits
-async fn git_commits(Query(q): Query<GitQuery>) -> impl IntoResponse {
-    let _guard = lock_git_path(&q.path).await;
-    let limit_str = q.limit.to_string();
+async fn git_commits(
+    State(state): State<Arc<AppState>>,
+    Query(q): Query<GitQuery>,
+) -> impl IntoResponse {
+    let repo = resolve_repo_path(&state.db, &q.path).await?;
+    let key = repo.to_string_lossy().to_string();
+    let _guard = lock_git_path(&key).await;
+    // Cap limit so an absurd value can't OOM the process or pump a
+    // multi-megabyte response.
+    let safe_limit = q.limit.clamp(1, 500);
+    let limit_str = safe_limit.to_string();
     let output = tokio::process::Command::new("git")
         .args([
             "log",
             &format!("-{limit_str}"),
             "--pretty=format:%H|%an|%ae|%at|%s",
         ])
-        .current_dir(&q.path)
+        .current_dir(&repo)
         .output()
         .await;
 
@@ -153,7 +238,7 @@ async fn git_commits(Query(q): Query<GitQuery>) -> impl IntoResponse {
                 })
                 .collect();
 
-            Ok(Json(serde_json::json!({
+            Ok::<_, (StatusCode, Json<serde_json::Value>)>(Json(serde_json::json!({
                 "path": q.path,
                 "commits": commits,
             })))

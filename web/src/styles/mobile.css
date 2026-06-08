@@ -54,15 +54,10 @@
     border-radius: 2px 2px 0 0;
   }
 
-  /* Tab strip moves to the bottom on mobile, below the content.
-     Uses flex `order` so we don't have to reorder the JSX (the
-     other children of `.content` keep their default order). */
-  .tabbar {
-    order: 99;
-    border-bottom: none;
-    border-top: 1px solid var(--border);
-    padding-bottom: env(safe-area-inset-bottom, 0px);
-  }
+  /* Tab strip sits directly under the rail on mobile — it's the
+     first child of `.content`, so the default flex order already
+     puts it at the top. Mobile-specific tab sizing lives in the
+     `.tab-wrap` rule further down. */
   .rail-separator {
     width: 1px;
     height: 24px;
@@ -77,6 +72,19 @@
   .rail-status {
     display: none;
   }
+  /* On mobile the rail is at the top, so the dropdown drops downward.
+     `position: fixed` (not `absolute`) is load-bearing: the rail uses
+     `overflow-x: auto`, which CSS forces `overflow-y` to compute as
+     `auto` too — that clips any absolutely-positioned descendant to
+     the rail's 56px box, making the dropdown silently invisible.
+     Anchoring to the viewport sidesteps the clip entirely. */
+  .user-menu-dropdown {
+    position: fixed;
+    bottom: auto;
+    left: auto;
+    top: calc(env(safe-area-inset-top, 0px) + 56px + 4px);
+    right: 8px;
+  }
 
   /* Panel → full width overlay */
   .panel {
@@ -84,7 +92,7 @@
     top: 0;
     left: 0;
     right: 0;
-    bottom: 56px;
+    bottom: 0;
     width: 100%;
     z-index: 30;
     border-right: none;
@@ -120,6 +128,27 @@
     padding: 8px 12px;
   }
 
+  /* Todo panel — much tighter on mobile so a long list doesn't eat the
+     chat scroll area. Default desktop cap is 38% of the chat column,
+     which on a phone leaves only a couple of message bubbles visible. */
+  .todo-panel {
+    max-height: 28vh;
+  }
+  .todo-panel-header {
+    padding: 6px 14px;
+  }
+  .todo-panel-body {
+    padding: 2px 14px 8px;
+    gap: 6px;
+  }
+  .todo-group-items {
+    gap: 2px;
+  }
+  .todo-item {
+    font-size: var(--text-xs);
+    line-height: 1.35;
+  }
+
   /* Tool blocks full width */
   /* Kanban columns scroll horizontally */
   .kanban-columns {
@@ -147,16 +176,20 @@
     min-width: auto;
   }
 
-  /* Modals full width on mobile */
+  /* Modals full width on mobile. Cap to the visible viewport via
+     `--app-height` so a long form stays inside the keyboard-shrunk
+     region — `100vh` is the layout viewport, which doesn't shrink
+     when the keyboard opens. */
   .modal {
     max-width: calc(100vw - 32px) !important;
-    max-height: calc(100vh - 100px);
+    max-height: calc(var(--app-height) - 32px);
     overflow-y: auto;
   }
 
   /* Question dialog */
   .question-dialog {
     max-width: calc(100vw - 32px) !important;
+    max-height: calc(var(--app-height) - 32px);
   }
 
   /* Settings/Reports pages */
@@ -216,10 +249,12 @@
    the rest are opened sessions/projects mixed together in MRU order. */
 .tabbar {
   display: flex;
-  align-items: stretch;
+  align-items: center;
   flex-wrap: nowrap;
   overflow-x: auto;
   overflow-y: visible;
+  gap: 6px;
+  padding: 6px 10px;
   border-bottom: 1px solid var(--border);
   background: var(--surface);
   scrollbar-width: thin;
@@ -239,74 +274,87 @@
   flex-shrink: 0;
   display: inline-flex;
   align-items: center;
+  height: 36px;
+  padding: 0 4px 0 12px;
+  border-radius: var(--radius-full);
+  background: var(--surface2);
+  color: var(--text2);
+  transition:
+    background 0.12s ease,
+    color 0.12s ease,
+    box-shadow 0.12s ease;
 }
-.tab-wrap .tab {
-  padding-right: 4px;
+.tab-wrap:hover {
+  background: var(--surface3);
+  color: var(--text);
+}
+.tab-wrap:has(.tab-active) {
+  background: var(--accent);
+  color: var(--text-inverse);
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.08);
 }
 .tab-close {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  width: 18px;
-  height: 18px;
-  margin-right: 6px;
+  width: 20px;
+  height: 20px;
+  margin-left: 4px;
   padding: 0;
   border: 0;
   background: transparent;
-  color: var(--text3);
-  font-size: 11px;
+  color: inherit;
+  font-size: 12px;
   line-height: 1;
-  border-radius: var(--radius-sm);
+  border-radius: var(--radius-full);
   cursor: pointer;
-  opacity: 0;
+  opacity: 0.6;
   transition:
     opacity 0.12s ease,
-    background 0.12s ease,
-    color 0.12s ease;
+    background 0.12s ease;
 }
 .tab-wrap:hover .tab-close,
 .tab-wrap:focus-within .tab-close,
-.tab-active + .tab-close,
 .tab-wrap:has(.tab-active) .tab-close {
   opacity: 1;
 }
 .tab-close:hover {
-  background: var(--surface2, var(--bg-hover, var(--surface)));
-  color: var(--text);
+  background: rgba(0, 0, 0, 0.15);
+}
+.tab-wrap:has(.tab-active) .tab-close:hover {
+  background: rgba(255, 255, 255, 0.2);
 }
 @media (max-width: 768px) {
+  .tabbar {
+    gap: 8px;
+    padding: 8px 10px;
+  }
+  .tab-wrap {
+    height: 40px;
+    padding-right: 14px;
+  }
   .tab-close {
     display: none;
-  }
-  .tab-wrap .tab {
-    padding-right: 12px;
   }
 }
 .tab {
   display: inline-flex;
   align-items: center;
   gap: 6px;
-  padding: 0 12px;
-  height: 36px;
+  padding: 0;
+  height: 100%;
   border: 0;
   background: transparent;
-  color: var(--text2);
+  color: inherit;
   font-size: var(--text-sm);
   font-family: inherit;
   cursor: pointer;
-  border-bottom: 2px solid transparent;
   white-space: nowrap;
   user-select: none;
   -webkit-user-select: none;
 }
-.tab:hover {
-  color: var(--text);
-  background: var(--bg-hover, var(--bg));
-}
 .tab-active {
-  color: var(--text);
-  border-bottom-color: var(--accent);
-  font-weight: 500;
+  font-weight: 600;
 }
 .tab-opened {
   max-width: 200px;
@@ -325,62 +373,34 @@
   color: var(--warning);
 }
 .tab-dot {
-  width: 6px;
-  height: 6px;
+  width: 8px;
+  height: 8px;
   border-radius: 50%;
   flex-shrink: 0;
 }
 .tab-dot-running {
   background: var(--accent);
-  animation: tab-dot-pulse 1.4s ease-in-out infinite;
+  animation: tab-dot-glow 1.4s ease-in-out infinite;
 }
 .tab-dot-unread {
   background: var(--success);
+  box-shadow: 0 0 6px var(--success);
 }
-@keyframes tab-dot-pulse {
+@keyframes tab-dot-glow {
   0%,
   100% {
+    box-shadow:
+      0 0 4px var(--accent),
+      0 0 8px var(--accent);
     opacity: 1;
   }
   50% {
-    opacity: 0.4;
+    box-shadow:
+      0 0 2px var(--accent),
+      0 0 4px var(--accent);
+    opacity: 0.6;
   }
 }
-.tab-menu {
-  position: absolute;
-  top: 100%;
-  left: 8px;
-  z-index: 10;
-  background: var(--surface);
-  border: 1px solid var(--border);
-  border-radius: var(--radius-sm);
-  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.16);
-  min-width: 140px;
-  padding: 4px;
-}
-.tab-menu button {
-  display: block;
-  width: 100%;
-  padding: 8px 12px;
-  background: transparent;
-  border: 0;
-  text-align: left;
-  font-family: inherit;
-  font-size: var(--text-sm);
-  color: var(--text);
-  cursor: pointer;
-  border-radius: var(--radius-xs, 4px);
-}
-.tab-menu button:hover {
-  background: var(--bg);
-}
-.tab-menu .tab-menu-danger {
-  color: var(--danger);
-}
-.tab-menu .tab-menu-danger:hover {
-  background: var(--danger-bg);
-}
-
 /* ── List view (sessions / projects inside main when no item active) ─ */
 .list-view {
   display: flex;

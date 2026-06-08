@@ -88,22 +88,32 @@ async fn get_report(
     State(state): State<Arc<AppState>>,
     Path((folder, file)): Path<(String, String)>,
 ) -> impl IntoResponse {
-    let sanitized_folder = sanitize_name(&folder);
-    let sanitized_file = sanitize_name(&file);
+    let (safe_folder, safe_file) = match (safe_segment(&folder, false), safe_segment(&file, true)) {
+        (Some(f), Some(fi)) => (f, fi),
+        _ => {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({"error": "invalid path"})),
+            ));
+        }
+    };
     let file_path = state
         .config
         .data_dir
         .join("reports")
-        .join(&sanitized_folder)
-        .join(&sanitized_file);
+        .join(&safe_folder)
+        .join(&safe_file);
 
     match std::fs::read_to_string(&file_path) {
         Ok(content) => {
-            let meta = parse_frontmatter(&content, &sanitized_folder, &sanitized_file);
+            let meta = parse_frontmatter(&content, &safe_folder, &safe_file);
             let body = strip_frontmatter(&content);
             Ok(Json(ReportFull { meta, body }))
         }
-        Err(_) => Err(StatusCode::NOT_FOUND),
+        Err(_) => Err((
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({"error": "not found"})),
+        )),
     }
 }
 
@@ -120,14 +130,16 @@ async fn update_report(
         ));
     }
 
-    let sanitized_folder = sanitize_name(&folder);
-    let sanitized_file = sanitize_name(&file);
+    let (safe_folder, safe_file) = match (safe_segment(&folder, false), safe_segment(&file, true)) {
+        (Some(f), Some(fi)) => (f, fi),
+        _ => return Err(bad_path()),
+    };
     let file_path = state
         .config
         .data_dir
         .join("reports")
-        .join(&sanitized_folder)
-        .join(&sanitized_file);
+        .join(&safe_folder)
+        .join(&safe_file);
 
     if !file_path.exists() {
         return Err((
@@ -160,18 +172,20 @@ async fn download_report(
     State(state): State<Arc<AppState>>,
     Path((folder, file)): Path<(String, String)>,
 ) -> impl IntoResponse {
-    let sanitized_folder = sanitize_name(&folder);
-    let sanitized_file = sanitize_name(&file);
+    let (safe_folder, safe_file) = match (safe_segment(&folder, false), safe_segment(&file, true)) {
+        (Some(f), Some(fi)) => (f, fi),
+        _ => return Err(StatusCode::BAD_REQUEST),
+    };
     let file_path = state
         .config
         .data_dir
         .join("reports")
-        .join(&sanitized_folder)
-        .join(&sanitized_file);
+        .join(&safe_folder)
+        .join(&safe_file);
 
     match std::fs::read_to_string(&file_path) {
         Ok(content) => {
-            let disposition = format!("attachment; filename=\"{sanitized_file}\"");
+            let disposition = format!("attachment; filename=\"{safe_file}\"");
             Ok((
                 StatusCode::OK,
                 [
@@ -191,12 +205,42 @@ async fn download_report(
     }
 }
 
-/// Sanitize a filename component — no path separators, dots for traversal.
-fn sanitize_name(name: &str) -> String {
-    name.replace(['/', '\\', '\0'], "")
-        .replace("..", "")
-        .trim_matches('.')
-        .to_string()
+/// Strict filename-component validator. Allows the same charset
+/// `is_safe_id` in attachments uses, plus a single optional trailing
+/// `.md` suffix on the `file` segment, plus `:` in `folder` segments
+/// (some date-like folder names use it). Anything else returns `None`
+/// so the caller can 400 the request outright rather than silently
+/// scrubbing characters and acting on the result.
+///
+/// The earlier `replace`-based scrubber accepted any input and
+/// collapsed problematic substrings to nothing; that left it
+/// vulnerable to inputs like `"."` (trims to `""`) and other edge
+/// cases that the attachments module already addresses via its
+/// stricter `is_safe_id`.
+fn safe_segment(name: &str, allow_md: bool) -> Option<String> {
+    if name.is_empty() || name.len() > 128 {
+        return None;
+    }
+    // Strip a `.md` suffix (only) before validating.
+    let core = if allow_md {
+        name.strip_suffix(".md").unwrap_or(name)
+    } else {
+        name
+    };
+    if core.is_empty() {
+        return None;
+    }
+    let ok = core
+        .bytes()
+        .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_');
+    if ok { Some(name.to_string()) } else { None }
+}
+
+fn bad_path() -> (StatusCode, Json<serde_json::Value>) {
+    (
+        StatusCode::BAD_REQUEST,
+        Json(serde_json::json!({"error": "invalid path"})),
+    )
 }
 
 /// Parse YAML-ish frontmatter from a markdown file.

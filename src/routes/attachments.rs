@@ -9,7 +9,7 @@ use axum::{
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
-use crate::auth::middleware::require_auth;
+use crate::auth::middleware::{require_admin, require_auth};
 use crate::state::AppState;
 
 const MAX_UPLOAD_SIZE: usize = 10 * 1024 * 1024; // 10 MB
@@ -45,6 +45,14 @@ pub fn router(state: Arc<AppState>) -> Router<Arc<AppState>> {
             "/api/sessions/{id}/attachments/{aid}",
             get(download_attachment).delete(delete_attachment),
         )
+        // Layers run outer-to-inner on the request, so `require_admin`
+        // is appended LAST and executes AFTER `require_auth` has put
+        // `AuthUser` into the request extensions. Sessions don't carry
+        // a `user_id` column, so we can't perform per-row ownership
+        // checks without a migration; admin-gating keeps an
+        // admin-created non-admin user from reading attachments by
+        // guessing session UUIDs.
+        .route_layer(middleware::from_fn(require_admin))
         .route_layer(middleware::from_fn_with_state(state, require_auth))
 }
 

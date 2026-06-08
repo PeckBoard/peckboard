@@ -27,15 +27,12 @@ type AuthBundle = {
 }
 
 async function authenticate(request: APIRequestContext): Promise<AuthBundle> {
-  const status = await request.get('/api/auth/status')
-  expect(status.ok()).toBeTruthy()
-  const { has_users } = (await status.json()) as { has_users: boolean }
-
-  const credentials = { username: E2E_USER, password: E2E_PASS }
-  const endpoint = has_users ? '/api/auth/login' : '/api/auth/register'
-
-  const res = await request.post(endpoint, { data: credentials })
-  expect(res.ok(), `auth via ${endpoint} failed: ${await res.text()}`).toBeTruthy()
+  // The server auto-bootstraps the admin from PECKBOARD_BOOTSTRAP_*
+  // env vars at first start (see playwright.config.ts); we just log in.
+  const res = await request.post('/api/auth/login', {
+    data: { username: E2E_USER, password: E2E_PASS },
+  })
+  expect(res.ok(), `login failed: ${await res.text()}`).toBeTruthy()
   const { token } = (await res.json()) as { token: string }
   return { token, authHeader: { Authorization: `Bearer ${token}` } }
 }
@@ -147,4 +144,51 @@ test('chat todo panel renders the snapshot grouped by status and updates live', 
   await expect(page.locator('[data-testid="todo-item"][data-status="in_progress"]')).toContainText(
     'Adding tests',
   )
+})
+
+test('clearing the session removes the todo panel from the chat view', async ({
+  request,
+  page,
+  baseURL,
+}) => {
+  // Regression: the chat-side `loadedTodos` snapshot was set on session
+  // mount and never reset on clear, so the panel kept showing the stale
+  // pre-clear list even though the server had no events left.
+  expect(baseURL, 'baseURL configured').toBeTruthy()
+
+  const { token, authHeader } = await authenticate(request)
+  const { sessionId } = await seedAuthedSession(request, authHeader)
+
+  await loadAppAt(page, token, `/sessions/${sessionId}`)
+
+  // Seed a todo snapshot so the panel renders.
+  const sendRes = await request.post(`/api/sessions/${sessionId}/message`, {
+    headers: authHeader,
+    data: { text: 'track some work', model: 'mock:todo' },
+  })
+  expect(sendRes.ok(), `send failed: ${await sendRes.text()}`).toBeTruthy()
+
+  const panel = page.getByTestId('todo-panel')
+  await expect(panel).toBeVisible({ timeout: 10_000 })
+  await expect(page.getByTestId('todo-item')).toHaveCount(3)
+
+  // Clear the session through the public API — the same endpoint both the
+  // chat toolbar menu and the tab context menu post to.
+  const clearRes = await request.post(`/api/sessions/${sessionId}/clear`, { headers: authHeader })
+  expect(clearRes.ok(), `clear failed: ${await clearRes.text()}`).toBeTruthy()
+
+  // Trigger a refetch the same way the UI's clear handlers do (the
+  // backend doesn't broadcast a "session cleared" event, so the open
+  // ChatView only learns by re-listing events).
+  const refetchRes = await request.get(`/api/sessions/${sessionId}/events`, {
+    headers: authHeader,
+  })
+  expect(refetchRes.ok()).toBeTruthy()
+  expect((await refetchRes.json()) as unknown[]).toEqual([])
+
+  // Reload to re-enter the chat with a fresh fetch — this exercises the
+  // user-visible promise: after clear, no todo panel.
+  await page.reload()
+  await expect(page.locator('.chat-empty')).toBeVisible({ timeout: 10_000 })
+  await expect(page.getByTestId('todo-panel')).toHaveCount(0)
 })

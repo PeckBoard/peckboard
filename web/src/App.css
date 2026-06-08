@@ -22,6 +22,7 @@
 @import './styles/attachments.css';
 @import './styles/question-options.css';
 @import './styles/confirm-dialog.css';
+@import './styles/context-menu.css';
 @import './styles/kanban-header.css';
 @import './styles/announcement.css';
 @import './styles/worker-comms.css';

@@ -12,6 +12,37 @@ use super::hooks::{HookResult, PluginManifest, Verdict};
 const MEMORY_LIMIT_PAGES: u32 = 2048; // 128 MB (64 KB per page)
 const CALL_TIMEOUT: Duration = Duration::from_secs(2);
 
+/// The complete set of hook names Peckboard actually dispatches. A
+/// plugin manifest may only register handlers for hooks in this list;
+/// anything else is rejected at load time.
+///
+/// Without this gate a malicious plugin could claim it handles
+/// `mcp.token.issue.before` (a hook that can short-circuit token
+/// minting via `Verdict::Cancel`) and silently break worker
+/// dispatch — or, worse, modify payloads on hooks the user never
+/// expected to be plugin-controllable. Pinning the set in code means
+/// only hooks we've thought through ever fire plugin code.
+///
+/// When you add a new dispatched hook in the codebase, add its name
+/// here too. The corresponding test below will catch the omission if
+/// you forget.
+pub const ALLOWED_HOOKS: &[&str] = &[
+    "card.create.before",
+    "card.update.before",
+    "card.priorities.list",
+    "mcp.config.delete.after",
+    "mcp.config.write.after",
+    "mcp.config.write.before",
+    "mcp.token.issue.after",
+    "mcp.token.issue.before",
+    "mcp.token.revoke.after",
+    "mcp.tool.call.after",
+    "mcp.tool.call.before",
+    "mcp.tool.call.failed",
+    "session.reference.resolve",
+    "todo",
+];
+
 /// A loaded plugin instance.
 ///
 /// `plugin` is wrapped in its own `Mutex` so concurrent dispatches of
@@ -110,6 +141,21 @@ impl PluginManager {
         // Call manifest export to get hook declarations.
         let manifest_json = plugin.call::<&str, String>("manifest", "")?;
         let plugin_manifest: PluginManifest = serde_json::from_str(&manifest_json)?;
+
+        // Reject plugins that try to hook anything outside the
+        // allowlist. Otherwise an attacker who can drop a `.wasm` file
+        // into the plugins dir could intercept arbitrary internal
+        // dispatches.
+        if let Some(bad) = plugin_manifest
+            .hooks
+            .iter()
+            .find(|h| !ALLOWED_HOOKS.contains(&h.as_str()))
+        {
+            return Err(anyhow::anyhow!(
+                "plugin '{name}' declares unknown hook '{bad}'; \
+                 see ALLOWED_HOOKS in src/plugin/manager.rs",
+            ));
+        }
 
         // Call init export.
         let init_result = plugin.call::<&str, String>("init", "{}");

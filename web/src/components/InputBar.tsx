@@ -50,6 +50,12 @@ export default function InputBar({ sessionId }: InputBarProps) {
     ta.style.height = 'auto'
     const lineHeight = 20
     const maxHeight = lineHeight * 10
+    const needsScroll = ta.scrollHeight > maxHeight
+    // Hide the scrollbar while we have room to grow — the textarea is
+    // auto-sized and the scrollbar only appears at the cap. Otherwise
+    // browsers reserve the gutter and the user sees a permanent vertical
+    // scrollbar on a 1-line input.
+    ta.style.overflowY = needsScroll ? 'auto' : 'hidden'
     ta.style.height = `${Math.min(ta.scrollHeight, maxHeight)}px`
   }, [])
 
@@ -121,20 +127,24 @@ export default function InputBar({ sessionId }: InputBarProps) {
   const handleSend = useCallback(async () => {
     const trimmed = text.trim()
     if ((!trimmed && attachments.length === 0) || sending) return
+    const attachmentIds = attachments.map((a) => a.id)
+    // Clear the composer up-front: lets the user start typing the next
+    // message immediately (matches Slack/Discord/iMessage), and avoids
+    // clobbering anything they type during the in-flight request.
     setSending(true)
+    setText('')
+    setDraft(sessionId, '')
+    setAttachments([])
     try {
       const body: Record<string, unknown> = { text: trimmed }
-      if (attachments.length > 0) {
-        body.attachmentIds = attachments.map((a) => a.id)
+      if (attachmentIds.length > 0) {
+        body.attachmentIds = attachmentIds
       }
       await authedFetch(`/api/sessions/${sessionId}/message`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(body),
       })
-      setText('')
-      setDraft(sessionId, '')
-      setAttachments([])
     } finally {
       setSending(false)
     }
@@ -212,11 +222,39 @@ export default function InputBar({ sessionId }: InputBarProps) {
           value={text}
           onChange={handleChange}
           onKeyDown={handleKeyDown}
-          disabled={sending}
+          // Intentionally not disabled while sending: on mobile, disabling
+          // a focused textarea blurs it, which closes the soft keyboard
+          // and shifts the layout. handleSend already guards re-entry.
         />
         <div className="input-buttons">
-          <button className="send-btn" onClick={handleSend} disabled={!canSend} type="button">
-            Send
+          <button
+            className="send-btn"
+            onClick={handleSend}
+            // Prevent the textarea from blurring on tap: on mobile the
+            // resulting soft-keyboard close shifts the input bar down and
+            // the click lands on empty space, so the first tap is wasted.
+            onPointerDown={(e) => {
+              if (canSend) e.preventDefault()
+            }}
+            disabled={!canSend}
+            type="button"
+            aria-label="Send message"
+            title="Send"
+          >
+            <svg
+              width="18"
+              height="18"
+              viewBox="0 0 24 24"
+              fill="none"
+              stroke="currentColor"
+              strokeWidth="2"
+              strokeLinecap="round"
+              strokeLinejoin="round"
+              aria-hidden="true"
+            >
+              <path d="M22 2 11 13" />
+              <path d="m22 2-7 20-4-9-9-4 20-7z" />
+            </svg>
           </button>
         </div>
       </div>

@@ -104,8 +104,72 @@
 }
 
 .rail-avatar:hover {
-  background: var(--danger-bg);
+  background: var(--surface-hover);
+  color: var(--text);
+}
+
+/* ─── User Menu (avatar dropdown) ─── */
+.user-menu {
+  position: relative;
+}
+
+.user-menu-dropdown {
+  position: absolute;
+  bottom: calc(100% + 8px);
+  left: calc(100% + 8px);
+  z-index: 40;
+  min-width: 200px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.18);
+  padding: 4px;
+  display: flex;
+  flex-direction: column;
+}
+
+.user-menu-header {
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--border);
+  margin-bottom: 4px;
+}
+
+.user-menu-name {
+  font-size: var(--text-sm);
+  font-weight: 600;
+  color: var(--text);
+}
+
+.user-menu-role {
+  font-size: var(--text-xs);
+  color: var(--text3);
+  text-transform: capitalize;
+}
+
+.user-menu-dropdown button {
+  display: block;
+  width: 100%;
+  padding: 8px 12px;
+  background: transparent;
+  border: 0;
+  text-align: left;
+  font-family: inherit;
+  font-size: var(--text-sm);
+  color: var(--text);
+  cursor: pointer;
+  border-radius: var(--radius-sm);
+}
+
+.user-menu-dropdown button:hover {
+  background: var(--surface-hover);
+}
+
+.user-menu-dropdown .user-menu-danger {
   color: var(--danger);
+}
+
+.user-menu-dropdown .user-menu-danger:hover {
+  background: var(--danger-bg);
 }
 
 .rail-status {

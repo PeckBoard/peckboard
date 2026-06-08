@@ -30,6 +30,14 @@ pub struct CliArgs {
     /// Username for --reset-password.
     #[arg(long, requires = "reset_password")]
     pub user: Option<String>,
+
+    /// Advertise the server on the LAN via mDNS. Off by default —
+    /// publishing `_peckboard._tcp.local.` lets any host on the same
+    /// network see the service exists, fingerprint the brand, and
+    /// probe for credentials. Turn it on when you actively need
+    /// discovery (e.g. an iPad on the same Wi-Fi).
+    #[arg(long, env = "PECKBOARD_MDNS")]
+    pub mdns: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -38,6 +46,7 @@ pub struct Config {
     pub https_port: u16,
     pub host: String,
     pub data_dir: PathBuf,
+    pub mdns: bool,
 }
 
 impl Config {
@@ -57,6 +66,7 @@ impl Config {
             https_port: args.https_port,
             host: args.host,
             data_dir,
+            mdns: args.mdns,
         }
     }
 }

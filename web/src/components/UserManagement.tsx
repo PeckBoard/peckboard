@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react'
 import { useAuthStore } from '../store/auth'
 import { useUsersStore } from '../store/users'
+import ChangePasswordModal from './ChangePasswordModal'
 
 export default function UserManagement() {
   const currentUser = useAuthStore((s) => s.user)
@@ -24,6 +25,12 @@ export default function UserManagement() {
 
   // Delete confirm
   const [deleteTarget, setDeleteTarget] = useState<string | null>(null)
+
+  // Password reset target (admin-mode modal). Carries username so the
+  // modal can render "Reset password for <name>" without re-looking up.
+  const [passwordTarget, setPasswordTarget] = useState<{ id: string; username: string } | null>(
+    null,
+  )
 
   useEffect(() => {
     fetchUsers()
@@ -228,13 +235,23 @@ export default function UserManagement() {
                         </button>
                       </div>
                     ) : (
-                      <button
-                        className="folder-delete"
-                        onClick={() => setDeleteTarget(u.id)}
-                        title="Delete user"
-                      >
-                        &times;
-                      </button>
+                      <div style={{ display: 'flex', gap: 4, alignItems: 'center' }}>
+                        <button
+                          className="btn-secondary"
+                          style={{ fontSize: 'var(--text-xs)', padding: '4px 10px' }}
+                          onClick={() => setPasswordTarget({ id: u.id, username: u.username })}
+                          title="Reset this user's password"
+                        >
+                          Reset password
+                        </button>
+                        <button
+                          className="folder-delete"
+                          onClick={() => setDeleteTarget(u.id)}
+                          title="Delete user"
+                        >
+                          &times;
+                        </button>
+                      </div>
                     )}
                   </>
                 )}
@@ -243,6 +260,17 @@ export default function UserManagement() {
           </div>
         )}
       </section>
+
+      {passwordTarget && (
+        <ChangePasswordModal
+          mode={{
+            kind: 'admin',
+            targetUserId: passwordTarget.id,
+            targetUsername: passwordTarget.username,
+          }}
+          onClose={() => setPasswordTarget(null)}
+        />
+      )}
     </div>
   )
 }

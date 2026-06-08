@@ -114,21 +114,8 @@
   color: var(--text);
 }
 
-.todo-item-marker {
-  flex: 0 0 auto;
-  font-size: 12px;
-  line-height: 1.4;
-}
-
-.todo-item-pending .todo-item-marker {
-  color: var(--text3);
-}
-
 .todo-item-in_progress {
   font-weight: 600;
-}
-
-.todo-item-in_progress .todo-item-marker {
   color: var(--accent);
 }
 
@@ -138,10 +125,6 @@
 
 .todo-item-done .todo-item-text {
   text-decoration: line-through;
-}
-
-.todo-item-done .todo-item-marker {
-  color: var(--success);
 }
 
 /* Project-page todo roll-up: the shared TodoPanel sits inside this wrapper,

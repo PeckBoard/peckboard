@@ -10,13 +10,16 @@ pub async fn security_headers(request: Request, next: Next) -> Response {
     let mut response = next.run(request).await;
     let headers = response.headers_mut();
 
+    // No `style-src-attr 'unsafe-inline'`: inline `style=""` attributes
+    // are a CSS-based exfiltration vector when combined with any other
+    // XSS toehold, and the React app uses class/CSS-module styling
+    // rather than dynamic inline `style` for almost everything.
     headers.insert(
         "Content-Security-Policy",
         HeaderValue::from_static(
             "default-src 'self'; \
              script-src 'self'; \
              style-src 'self'; \
-             style-src-attr 'unsafe-inline'; \
              img-src 'self' data: blob:; \
              connect-src 'self'; \
              frame-ancestors 'none'; \
@@ -72,12 +75,11 @@ pub async fn origin_check(request: Request, next: Next) -> Response {
         }
     }
 
-    // Also allow if path is /mcp (checked separately for loopback + token auth)
-    let path = request.uri().path();
-    if path == "/mcp" {
-        return next.run(request).await;
-    }
-
+    // Note: there is no `/mcp` carve-out here. MCP clients run as
+    // subprocesses on the loopback interface and don't send an Origin
+    // header at all (they hit the absent-Origin branch above), so they
+    // pass without needing an exception. A browser hitting `/mcp` from
+    // a foreign origin is exactly the case we want to block.
     (
         StatusCode::FORBIDDEN,
         axum::Json(serde_json::json!({"error": "cross-origin request blocked"})),

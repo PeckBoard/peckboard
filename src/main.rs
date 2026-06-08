@@ -1,4 +1,5 @@
 use clap::Parser;
+use peckboard::auth::bootstrap::{BootstrapOutcome, ensure_admin_user};
 use peckboard::auth::rate_limit::RateLimiter;
 use peckboard::auth::reset::reset_user_password;
 use peckboard::auth::token::load_or_create_jwt_secret;
@@ -57,6 +58,14 @@ async fn main() -> anyhow::Result<()> {
     let db = Db::open(&config.data_dir)?;
     tracing::info!("Database opened at {}", config.data_dir.display());
 
+    // First-run bootstrap: create the sole admin user if the DB is empty.
+    // Peckboard does not expose self-service registration — operators
+    // get one auto-generated admin and can mint additional users from
+    // there. The outcome is held until the very end of startup so the
+    // credentials land below the noisy tracing logs and are the last
+    // thing the operator sees.
+    let bootstrap_outcome = ensure_admin_user(&db).await?;
+
     // Startup state repair: fix dangling agent-starts from previous crash
     repair_dangling_sessions(&db).await?;
 
@@ -80,6 +89,10 @@ async fn main() -> anyhow::Result<()> {
     // still uses the (currently hardcoded) IP, so this is a per-host
     // ceiling, not a per-account one.
     let login_limiter = RateLimiter::new(60);
+    // 5 password-change attempts per minute per user. Stops a stolen
+    // token from ratcheting the password to lock out the legitimate
+    // user; 5 is plenty of headroom for honest mis-clicks.
+    let password_change_limiter = RateLimiter::<String>::new(5);
 
     let broadcaster = Broadcaster::new();
     let provider_registry = Arc::new(ProviderRegistry::new());
@@ -97,6 +110,7 @@ async fn main() -> anyhow::Result<()> {
         plugins,
         jwt_secret,
         login_limiter,
+        password_change_limiter,
         broadcaster,
         provider_registry,
         session_manager,
@@ -132,17 +146,26 @@ async fn main() -> anyhow::Result<()> {
     tracing::info!("Peckboard listening on http://{addr}");
     let listener = TcpListener::bind(&addr).await?;
 
-    // Start mDNS advertisement
-    let mdns_name = mdns::generate_mdns_name();
-    let mdns_handle = match mdns::start_mdns(&mdns_name, state.config.port) {
-        Ok(handle) => {
-            tracing::info!("mDNS name: {mdns_name}");
-            Some(handle)
+    // mDNS advertisement is opt-in. Default-off avoids broadcasting
+    // service presence on the LAN, which is an unnecessary discovery
+    // / fingerprinting surface for a single-tenant LAN server. Enable
+    // explicitly with `--mdns` (or `PECKBOARD_MDNS=1`) when discovery
+    // is actually desired.
+    let mdns_handle = if state.config.mdns {
+        let mdns_name = mdns::generate_mdns_name();
+        match mdns::start_mdns(&mdns_name, state.config.port) {
+            Ok(handle) => {
+                tracing::info!("mDNS name: {mdns_name}");
+                Some(handle)
+            }
+            Err(e) => {
+                tracing::warn!("Failed to start mDNS: {e}");
+                None
+            }
         }
-        Err(e) => {
-            tracing::warn!("Failed to start mDNS: {e}");
-            None
-        }
+    } else {
+        tracing::info!("mDNS disabled (enable with --mdns)");
+        None
     };
 
     // Start wake-from-sleep detector
@@ -275,6 +298,13 @@ async fn main() -> anyhow::Result<()> {
         }
     };
 
+    // Print the first-run admin credentials *last* so they sit below
+    // the startup tracing noise and are the operator's final view
+    // before the server goes quiet waiting on connections.
+    if let Some(outcome) = bootstrap_outcome.as_ref() {
+        print_bootstrap_banner(outcome);
+    }
+
     // Graceful shutdown on SIGINT/SIGTERM
     let shutdown_state = state.clone();
     axum::serve(
@@ -359,6 +389,29 @@ async fn serve_https(
             }
         });
     }
+}
+
+/// Print the first-run admin credentials in a hard-to-miss banner.
+/// Goes to stdout so it shows up in normal terminal capture and so the
+/// final `username:password` line stays pipe-friendly
+/// (`peckboard | tail -1`).
+fn print_bootstrap_banner(outcome: &BootstrapOutcome) {
+    const BAR: &str = "════════════════════════════════════════════════════════════════════";
+    println!();
+    println!("{BAR}");
+    println!("  PECKBOARD FIRST-RUN ADMIN ACCOUNT");
+    println!("{BAR}");
+    println!();
+    println!("    username:  {}", outcome.username);
+    println!("    password:  {}", outcome.new_password);
+    println!();
+    println!("  Save this — it will not be shown again.");
+    println!("  Use `peckboard --reset-password` to mint a new one if it's lost.");
+    println!();
+    println!("{BAR}");
+    // Machine-readable form (same as --reset-password) for tooling that
+    // parses `peckboard | tail -1`.
+    println!("{}:{}", outcome.username, outcome.new_password);
 }
 
 async fn shutdown_signal() {

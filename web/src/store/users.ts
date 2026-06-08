@@ -21,6 +21,7 @@ interface UsersState {
     email?: string
   }) => Promise<void>
   deleteUser: (id: string) => Promise<void>
+  setUserPassword: (id: string, newPassword: string) => Promise<void>
   clearError: () => void
 }
 
@@ -73,6 +74,18 @@ export const useUsersStore = create<UsersState>((set, get) => ({
       throw new Error(err.error || 'Failed to delete user')
     }
     await get().fetchUsers()
+  },
+
+  setUserPassword: async (id: string, newPassword: string) => {
+    const res = await authedFetch(`/api/users/${id}/password`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ new_password: newPassword }),
+    })
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({ error: 'Failed to set password' }))
+      throw new Error(err.error || 'Failed to set password')
+    }
   },
 
   clearError: () => set({ error: '' }),

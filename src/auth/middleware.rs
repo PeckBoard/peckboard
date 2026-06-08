@@ -96,3 +96,27 @@ impl AuthUser {
         self.role == "admin"
     }
 }
+
+/// Admin-only middleware. MUST be layered AFTER `require_auth` so the
+/// `AuthUser` extension is already present. Sessions, cards, and other
+/// per-tenant data are not partitioned by user id in the DB (single
+/// admin is the design), so the route layer enforces "admin only" to
+/// keep an admin-created non-admin user from reading or modifying
+/// admin-owned state by guessing UUIDs.
+pub async fn require_admin(request: Request<axum::body::Body>, next: Next) -> Response {
+    let is_admin = request
+        .extensions()
+        .get::<AuthUser>()
+        .map(|u| u.is_admin())
+        .unwrap_or(false);
+
+    if !is_admin {
+        return (
+            StatusCode::FORBIDDEN,
+            axum::Json(serde_json::json!({ "error": "admin only" })),
+        )
+            .into_response();
+    }
+
+    next.run(request).await
+}

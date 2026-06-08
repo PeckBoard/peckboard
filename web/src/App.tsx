@@ -1,4 +1,4 @@
-import { useEffect, useState, useMemo, useCallback } from 'react'
+import { useEffect, useState, useMemo, useCallback, useRef } from 'react'
 import { useAuthStore, authedFetch } from './store/auth'
 import type { Announcement } from './types/api'
 import { useUiStore } from './store/ui'
@@ -7,7 +7,6 @@ import { useSessionsStore } from './store/sessions'
 import { useProjectsStore } from './store/projects'
 import { useFoldersStore } from './store/folders'
 import LoginModal from './components/LoginModal'
-import RegisterModal from './components/RegisterModal'
 import ChatView from './components/ChatView'
 import SessionTodosView from './components/SessionTodosView'
 import ProjectList from './components/ProjectList'
@@ -21,8 +20,9 @@ import ConfirmDialog from './components/ConfirmDialog'
 import ReportBrowser from './components/ReportBrowser'
 import GitView from './components/GitView'
 import UserManagement from './components/UserManagement'
+import ChangePasswordModal from './components/ChangePasswordModal'
 import TabBar from './components/TabBar'
-import { startTabsAutoSync, useTabsStore } from './store/tabs'
+import { startTabsAutoSync, useTabsStore, type TabType } from './store/tabs'
 import './App.css'
 
 type View = 'sessions' | 'projects' | 'folders' | 'settings' | 'reports' | 'git' | 'users'
@@ -93,7 +93,6 @@ function formatRelativeTime(dateStr: string): string {
 function App() {
   const initialized = useAuthStore((s) => s.initialized)
   const authenticated = useAuthStore((s) => s.authenticated)
-  const needsRegistration = useAuthStore((s) => s.needsRegistration)
   const user = useAuthStore((s) => s.user)
   const checkAuth = useAuthStore((s) => s.checkAuth)
   const logout = useAuthStore((s) => s.logout)
@@ -101,14 +100,22 @@ function App() {
   const connect = useWsStore((s) => s.connect)
   const disconnect = useWsStore((s) => s.disconnect)
   const sessions = useSessionsStore((s) => s.sessions)
+  const sessionsLoaded = useSessionsStore((s) => s.sessionsLoaded)
   const activeSessionId = useSessionsStore((s) => s.activeSessionId)
   const fetchSessions = useSessionsStore((s) => s.fetchSessions)
   const setActiveSession = useSessionsStore((s) => s.setActiveSession)
   const deleteSession = useSessionsStore((s) => s.deleteSession)
+  const renameSession = useSessionsStore((s) => s.renameSession)
+  const clearSession = useSessionsStore((s) => s.clearSession)
+  const fetchEvents = useSessionsStore((s) => s.fetchEvents)
   const processing = useSessionsStore((s) => s.processing)
   const unreadSessions = useSessionsStore((s) => s.unreadSessions)
+  const projects = useProjectsStore((s) => s.projects)
+  const projectsLoaded = useProjectsStore((s) => s.projectsLoaded)
   const activeProjectId = useProjectsStore((s) => s.activeProjectId)
   const deleteProject = useProjectsStore((s) => s.deleteProject)
+  const updateProject = useProjectsStore((s) => s.updateProject)
+  const fetchProjects = useProjectsStore((s) => s.fetchProjects)
   const folders = useFoldersStore((s) => s.folders)
   const fetchFolders = useFoldersStore((s) => s.fetchFolders)
 
@@ -129,7 +136,29 @@ function App() {
   const [contextSession, setContextSession] = useState<string | null>(null)
   const [confirmDeleteId, setConfirmDeleteId] = useState<string | null>(null)
   const [confirmDeleteProjectId, setConfirmDeleteProjectId] = useState<string | null>(null)
+  const [confirmClearSessionId, setConfirmClearSessionId] = useState<string | null>(null)
   const [announcement, setAnnouncement] = useState<Announcement | null>(null)
+  const [userMenuOpen, setUserMenuOpen] = useState(false)
+  const [showChangePassword, setShowChangePassword] = useState(false)
+  const userMenuRef = useRef<HTMLDivElement | null>(null)
+
+  useEffect(() => {
+    if (!userMenuOpen) return
+    const onClick = (e: MouseEvent) => {
+      if (userMenuRef.current && !userMenuRef.current.contains(e.target as Node)) {
+        setUserMenuOpen(false)
+      }
+    }
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') setUserMenuOpen(false)
+    }
+    document.addEventListener('mousedown', onClick)
+    document.addEventListener('keydown', onKey)
+    return () => {
+      document.removeEventListener('mousedown', onClick)
+      document.removeEventListener('keydown', onKey)
+    }
+  }, [userMenuOpen])
 
   // Navigate: update view + push URL
   const navigate = useCallback(
@@ -288,6 +317,12 @@ function App() {
     if (authenticated) {
       connect()
       fetchSessions()
+      // Projects list is needed at startup (not just when ProjectList
+      // mounts) so the tab strip can validate project tabs against it
+      // — otherwise it can't tell an orphan project tab from a
+      // not-yet-loaded one and either leaks phantom chips or wrongly
+      // closes a real tab.
+      fetchProjects()
       fetchFolders()
       useTabsStore.getState().fetchTabs()
       const stopTabsSync = startTabsAutoSync()
@@ -305,22 +340,36 @@ function App() {
         stopTabsSync()
       }
     }
-  }, [authenticated, connect, disconnect, fetchSessions, fetchFolders])
+  }, [authenticated, connect, disconnect, fetchSessions, fetchProjects, fetchFolders])
 
   // Open / promote a tab whenever the user activates a session or
   // project — this is what makes "MRU + cross-device sync" Just Work,
   // because every navigation goes through these state changes (whether
   // it came from a tab click, the rail, a URL load, or back/forward).
+  //
+  // Gate on the store being loaded and the item actually existing.
+  // Without that guard, a stale URL like `/sessions/<deleted-id>` (a
+  // bookmark, browser history, or another device that just deleted
+  // the session) would write a phantom `user_tabs` row that the strip
+  // then renders as a chip labelled "Session". If the id is unknown
+  // after loading, clear the active id so the URL drops back to the
+  // list view.
   useEffect(() => {
-    if (authenticated && activeSessionId) {
+    if (!authenticated || !activeSessionId || !sessionsLoaded) return
+    if (sessions.some((s) => s.id === activeSessionId)) {
       useTabsStore.getState().openTab('session', activeSessionId)
+    } else {
+      setActiveSession(null)
     }
-  }, [authenticated, activeSessionId])
+  }, [authenticated, activeSessionId, sessionsLoaded, sessions, setActiveSession])
   useEffect(() => {
-    if (authenticated && activeProjectId) {
+    if (!authenticated || !activeProjectId || !projectsLoaded) return
+    if (projects.some((p) => p.id === activeProjectId)) {
       useTabsStore.getState().openTab('project', activeProjectId)
+    } else {
+      setActiveProject(null)
     }
-  }, [authenticated, activeProjectId])
+  }, [authenticated, activeProjectId, projectsLoaded, projects, setActiveProject])
 
   if (!initialized) {
     return (
@@ -331,7 +380,6 @@ function App() {
     )
   }
 
-  if (needsRegistration) return <RegisterModal />
   if (!authenticated) return <LoginModal />
 
   const dismissAnnouncement = async () => {
@@ -368,6 +416,46 @@ function App() {
       /* ignore */
     }
     setConfirmDeleteProjectId(null)
+  }
+
+  const confirmClearSession = async () => {
+    if (!confirmClearSessionId) return
+    const id = confirmClearSessionId
+    setConfirmClearSessionId(null)
+    try {
+      await clearSession(id)
+      // Refetch so the open ChatView (if any) reflects the empty event
+      // list immediately — clearSession only wipes our local cache for
+      // the cleared session, but the view subscribes by id and won't
+      // notice an in-place mutation.
+      await fetchEvents(id)
+    } catch {
+      /* ignore */
+    }
+  }
+
+  const handleRenameItem = async (type: TabType, id: string) => {
+    if (type === 'session') {
+      const current = sessions.find((s) => s.id === id)?.name ?? ''
+      const next = window.prompt('Rename session:', current)
+      if (next && next !== current) {
+        try {
+          await renameSession(id, next)
+        } catch {
+          /* ignore */
+        }
+      }
+    } else {
+      const current = projects.find((p) => p.id === id)?.name ?? ''
+      const next = window.prompt('Rename project:', current)
+      if (next && next !== current) {
+        try {
+          await updateProject(id, { name: next })
+        } catch {
+          /* ignore */
+        }
+      }
+    }
   }
 
   return (
@@ -531,13 +619,46 @@ function App() {
             className={`rail-status ${connected ? 'online' : ''}`}
             title={connected ? 'Connected' : 'Disconnected'}
           />
-          <button
-            className="rail-btn rail-avatar"
-            onClick={logout}
-            title={`${user?.username} — Sign out`}
-          >
-            {user?.username?.charAt(0).toUpperCase() || '?'}
-          </button>
+          <div className="user-menu" ref={userMenuRef}>
+            <button
+              className="rail-btn rail-avatar"
+              onClick={() => setUserMenuOpen((open) => !open)}
+              title={user?.username}
+              aria-haspopup="menu"
+              aria-expanded={userMenuOpen}
+            >
+              {user?.username?.charAt(0).toUpperCase() || '?'}
+            </button>
+            {userMenuOpen && (
+              <div className="user-menu-dropdown" role="menu">
+                <div className="user-menu-header">
+                  <div className="user-menu-name">{user?.username}</div>
+                  <div className="user-menu-role">{user?.role}</div>
+                </div>
+                <button
+                  type="button"
+                  role="menuitem"
+                  onClick={() => {
+                    setUserMenuOpen(false)
+                    setShowChangePassword(true)
+                  }}
+                >
+                  Change password
+                </button>
+                <button
+                  type="button"
+                  role="menuitem"
+                  className="user-menu-danger"
+                  onClick={() => {
+                    setUserMenuOpen(false)
+                    logout()
+                  }}
+                >
+                  Sign out
+                </button>
+              </div>
+            )}
+          </div>
         </div>
       </nav>
 
@@ -555,6 +676,10 @@ function App() {
               setActiveProject(id)
               navigate('projects', id)
             }
+          }}
+          onRenameItem={handleRenameItem}
+          onClearItem={(type, id) => {
+            if (type === 'session') setConfirmClearSessionId(id)
           }}
           onDeleteItem={(type, id) => {
             if (type === 'session') setConfirmDeleteId(id)
@@ -681,6 +806,9 @@ function App() {
 
       {showNewSession && <NewSessionModal onClose={() => setShowNewSession(false)} />}
       {showNewProject && <NewProjectModal onClose={() => setShowNewProject(false)} />}
+      {showChangePassword && (
+        <ChangePasswordModal mode={{ kind: 'self' }} onClose={() => setShowChangePassword(false)} />
+      )}
       {confirmDeleteId && (
         <ConfirmDialog
           title="Delete session"
@@ -701,6 +829,17 @@ function App() {
           danger
           onConfirm={confirmDeleteProject}
           onCancel={() => setConfirmDeleteProjectId(null)}
+        />
+      )}
+      {confirmClearSessionId && (
+        <ConfirmDialog
+          title="Clear session"
+          message="Clear all messages in this session? This cannot be undone."
+          confirmLabel="Clear"
+          cancelLabel="Cancel"
+          danger
+          onConfirm={confirmClearSession}
+          onCancel={() => setConfirmClearSessionId(null)}
         />
       )}
     </div>

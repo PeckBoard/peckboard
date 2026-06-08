@@ -25,6 +25,11 @@ function saveDrafts(drafts: Record<string, string>) {
 
 interface SessionsState {
   sessions: Session[]
+  /** True once `fetchSessions` has completed successfully at least
+   *  once. Consumers that want to reason about "is this session id
+   *  real?" must wait for this — otherwise the empty initial state
+   *  looks identical to "every session was deleted". */
+  sessionsLoaded: boolean
   activeSessionId: string | null
   inputDrafts: Record<string, string>
   processing: Set<string>
@@ -54,6 +59,7 @@ interface SessionsState {
 
 export const useSessionsStore = create<SessionsState>((set, get) => ({
   sessions: [],
+  sessionsLoaded: false,
   activeSessionId: null,
   inputDrafts: loadDrafts(),
   processing: new Set<string>(),
@@ -65,7 +71,7 @@ export const useSessionsStore = create<SessionsState>((set, get) => ({
     const res = await authedFetch('/api/sessions')
     if (res.ok) {
       const sessions: Session[] = await res.json()
-      set({ sessions })
+      set({ sessions, sessionsLoaded: true })
     }
   },
 

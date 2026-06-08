@@ -68,13 +68,13 @@ async fn handle_connection(socket: WebSocket, state: Arc<AppState>) {
             return None;
         };
         validate_token(&state.jwt_secret, &token)
-            .map(|claims| (claims.sub, claims.jti))
+            .map(|claims| (claims.sub, claims.jti, claims.role))
             .ok()
     })
     .await;
 
-    let (user_id, session_id) = match auth_result {
-        Ok(Some(pair)) => pair,
+    let (user_id, session_id, role) = match auth_result {
+        Ok(Some(triple)) => triple,
         _ => {
             let _ = sender
                 .send(Message::Close(Some(axum::extract::ws::CloseFrame {
@@ -85,6 +85,7 @@ async fn handle_connection(socket: WebSocket, state: Arc<AppState>) {
             return;
         }
     };
+    let is_admin = role == "admin";
 
     // Send auth ok
     let _ = sender
@@ -163,12 +164,35 @@ async fn handle_connection(socket: WebSocket, state: Arc<AppState>) {
                             }
                             match frame {
                                 ClientFrame::Subscribe { session_id } => {
+                                    // Sessions are not per-user partitioned; gate
+                                    // subscription on admin role so a non-admin
+                                    // user can't tap into another's stream by
+                                    // guessing session UUIDs.
+                                    if !is_admin {
+                                        tracing::info!(
+                                            "WS client {client_id} non-admin subscribe denied"
+                                        );
+                                        continue;
+                                    }
                                     state.broadcaster.subscribe(client_id, &session_id).await;
                                 }
                                 ClientFrame::Unsubscribe { session_id } => {
                                     state.broadcaster.unsubscribe(client_id, &session_id).await;
                                 }
                                 ClientFrame::Resume { session_id, last_seq } => {
+                                    if !is_admin {
+                                        tracing::info!(
+                                            "WS client {client_id} non-admin resume denied"
+                                        );
+                                        // Send ResumeComplete so the client unblocks
+                                        // instead of hanging on a forbidden replay.
+                                        let _ = sender.send(Message::Text(
+                                            serde_json::to_string(&ServerFrame::ResumeComplete {
+                                                session_id,
+                                            }).unwrap().into()
+                                        )).await;
+                                        continue;
+                                    }
                                     // Replay events since last_seq
                                     if let Ok(events) = state.db.events_since(&session_id, last_seq).await {
                                         for event in events.iter().take(500) {
