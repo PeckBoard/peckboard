@@ -4,30 +4,33 @@
 
 .kanban-board {
   flex: 1;
-  overflow-x: auto;
+  overflow: auto;
   padding: 20px;
 }
 .kanban-columns {
   display: flex;
+  flex-direction: column;
   gap: 12px;
   min-height: 100%;
 }
 .kanban-column {
-  flex: 1;
-  min-width: 240px;
   background: var(--surface);
   border: 1px solid var(--border);
   border-radius: var(--radius-lg);
   padding: 12px;
   display: flex;
-  flex-direction: column;
+  flex-direction: row;
+  gap: 12px;
+  align-items: stretch;
 }
 .kanban-column-header {
   display: flex;
-  align-items: center;
-  justify-content: space-between;
-  margin-bottom: 12px;
-  padding: 0 4px;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 6px;
+  flex-shrink: 0;
+  width: 140px;
+  padding: 4px;
 }
 .kanban-column-header h3 {
   margin: 0;
@@ -47,9 +50,12 @@
 }
 .kanban-cards {
   display: flex;
-  flex-direction: column;
+  flex-direction: row;
+  flex-wrap: wrap;
+  align-content: flex-start;
   gap: 8px;
   flex: 1;
+  min-width: 0;
 }
 .kanban-card {
   background: var(--bg);
@@ -57,7 +63,8 @@
   border-radius: var(--radius-md);
   padding: 0;
   text-align: left;
-  width: 100%;
+  width: 240px;
+  flex-shrink: 0;
   font-family: inherit;
   transition:
     all 0.3s ease,

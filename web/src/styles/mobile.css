@@ -150,13 +150,13 @@
   }
 
   /* Tool blocks full width */
-  /* Kanban columns scroll horizontally */
+  /* Kanban rows scroll vertically */
   .kanban-columns {
-    overflow-x: auto;
+    overflow-y: auto;
     -webkit-overflow-scrolling: touch;
   }
-  .kanban-column {
-    min-width: 200px;
+  .kanban-column-header {
+    width: 100px;
   }
 
   /* Kanban header stack */
@@ -238,8 +238,8 @@
   .modal {
     padding: 20px !important;
   }
-  .kanban-column {
-    min-width: 160px;
+  .kanban-column-header {
+    width: 80px;
   }
 }
 
