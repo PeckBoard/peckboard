@@ -20,7 +20,7 @@ import GitView from './components/GitView'
 import UserManagement from './components/UserManagement'
 import ChangePasswordModal from './components/ChangePasswordModal'
 import TabBar from './components/TabBar'
-import { startTabsAutoSync, useTabsStore } from './store/tabs'
+import { startTabsAutoSync, useTabsStore, type TabType } from './store/tabs'
 import './App.css'
 
 type View = 'sessions' | 'projects' | 'folders' | 'settings' | 'reports' | 'git' | 'users'
@@ -92,12 +92,16 @@ function App() {
   const fetchSessions = useSessionsStore((s) => s.fetchSessions)
   const setActiveSession = useSessionsStore((s) => s.setActiveSession)
   const deleteSession = useSessionsStore((s) => s.deleteSession)
+  const renameSession = useSessionsStore((s) => s.renameSession)
+  const clearSession = useSessionsStore((s) => s.clearSession)
+  const fetchEvents = useSessionsStore((s) => s.fetchEvents)
   const processing = useSessionsStore((s) => s.processing)
   const unreadSessions = useSessionsStore((s) => s.unreadSessions)
   const projects = useProjectsStore((s) => s.projects)
   const projectsLoaded = useProjectsStore((s) => s.projectsLoaded)
   const activeProjectId = useProjectsStore((s) => s.activeProjectId)
   const deleteProject = useProjectsStore((s) => s.deleteProject)
+  const updateProject = useProjectsStore((s) => s.updateProject)
   const fetchProjects = useProjectsStore((s) => s.fetchProjects)
   const folders = useFoldersStore((s) => s.folders)
   const fetchFolders = useFoldersStore((s) => s.fetchFolders)
@@ -118,6 +122,7 @@ function App() {
   const [contextSession, setContextSession] = useState<string | null>(null)
   const [confirmDeleteId, setConfirmDeleteId] = useState<string | null>(null)
   const [confirmDeleteProjectId, setConfirmDeleteProjectId] = useState<string | null>(null)
+  const [confirmClearSessionId, setConfirmClearSessionId] = useState<string | null>(null)
   const [announcement, setAnnouncement] = useState<Announcement | null>(null)
   const [userMenuOpen, setUserMenuOpen] = useState(false)
   const [showChangePassword, setShowChangePassword] = useState(false)
@@ -394,6 +399,46 @@ function App() {
     setConfirmDeleteProjectId(null)
   }
 
+  const confirmClearSession = async () => {
+    if (!confirmClearSessionId) return
+    const id = confirmClearSessionId
+    setConfirmClearSessionId(null)
+    try {
+      await clearSession(id)
+      // Refetch so the open ChatView (if any) reflects the empty event
+      // list immediately — clearSession only wipes our local cache for
+      // the cleared session, but the view subscribes by id and won't
+      // notice an in-place mutation.
+      await fetchEvents(id)
+    } catch {
+      /* ignore */
+    }
+  }
+
+  const handleRenameItem = async (type: TabType, id: string) => {
+    if (type === 'session') {
+      const current = sessions.find((s) => s.id === id)?.name ?? ''
+      const next = window.prompt('Rename session:', current)
+      if (next && next !== current) {
+        try {
+          await renameSession(id, next)
+        } catch {
+          /* ignore */
+        }
+      }
+    } else {
+      const current = projects.find((p) => p.id === id)?.name ?? ''
+      const next = window.prompt('Rename project:', current)
+      if (next && next !== current) {
+        try {
+          await updateProject(id, { name: next })
+        } catch {
+          /* ignore */
+        }
+      }
+    }
+  }
+
   return (
     <div className="shell">
       {/* Navigation Rail. Sessions / Projects live here so the top tab
@@ -613,6 +658,10 @@ function App() {
               navigate('projects', id)
             }
           }}
+          onRenameItem={handleRenameItem}
+          onClearItem={(type, id) => {
+            if (type === 'session') setConfirmClearSessionId(id)
+          }}
           onDeleteItem={(type, id) => {
             if (type === 'session') setConfirmDeleteId(id)
             else setConfirmDeleteProjectId(id)
@@ -741,6 +790,17 @@ function App() {
           danger
           onConfirm={confirmDeleteProject}
           onCancel={() => setConfirmDeleteProjectId(null)}
+        />
+      )}
+      {confirmClearSessionId && (
+        <ConfirmDialog
+          title="Clear session"
+          message="Clear all messages in this session? This cannot be undone."
+          confirmLabel="Clear"
+          cancelLabel="Cancel"
+          danger
+          onConfirm={confirmClearSession}
+          onCancel={() => setConfirmClearSessionId(null)}
         />
       )}
     </div>

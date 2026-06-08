@@ -1,0 +1,40 @@
+/* Reusable context menu — rendered into a portal at body level and
+   positioned with viewport coords by useContextMenu. Used today by the
+   tab strip; intended to be reused for any right-click / long-press
+   menu in the app. */
+.context-menu {
+  position: fixed;
+  z-index: 100;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  box-shadow: var(--shadow-overlay);
+  min-width: 160px;
+  padding: 4px;
+}
+.context-menu-item {
+  display: block;
+  width: 100%;
+  padding: 8px 12px;
+  background: transparent;
+  border: 0;
+  text-align: left;
+  font-family: inherit;
+  font-size: var(--text-sm);
+  color: var(--text);
+  cursor: pointer;
+  border-radius: var(--radius-xs, 4px);
+}
+.context-menu-item:hover:not(:disabled) {
+  background: var(--bg);
+}
+.context-menu-item:disabled {
+  color: var(--text3);
+  cursor: not-allowed;
+}
+.context-menu-danger {
+  color: var(--danger);
+}
+.context-menu-danger:hover:not(:disabled) {
+  background: var(--danger-bg);
+}

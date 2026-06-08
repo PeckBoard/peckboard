@@ -14,6 +14,10 @@ import path from 'node:path'
  *   3. Reloading the page restores the tabs from the server.
  *   4. Right-click on a tab opens a context menu, "Close tab" removes
  *      it from the strip (server-side too — survives reload).
+ *   5. Right-click → Rename updates the tab label and persists.
+ *   6. Right-click → Clear messages confirms and POSTs the clear endpoint.
+ *   7. Project tabs hide the session-only "Clear messages" item and
+ *      label the destructive action "Delete project".
  */
 
 const E2E_USER = 'e2e-user'
@@ -157,7 +161,7 @@ test.describe('tabs', () => {
     await expect(tab).toBeVisible()
 
     await tab.click({ button: 'right' })
-    const closeBtn = page.locator('.tab-menu button', { hasText: 'Close tab' })
+    const closeBtn = page.locator('.context-menu button', { hasText: 'Close tab' })
     await expect(closeBtn).toBeVisible()
     await closeBtn.click()
 
@@ -234,7 +238,7 @@ test.describe('tabs', () => {
     await expect(tab).toBeVisible()
 
     await tab.click({ button: 'right' })
-    const deleteBtn = page.locator('.tab-menu button', { hasText: 'Delete session' })
+    const deleteBtn = page.locator('.context-menu button', { hasText: 'Delete session' })
     await expect(deleteBtn).toBeVisible()
     await deleteBtn.click()
 
@@ -299,6 +303,123 @@ test.describe('tabs', () => {
     const tabsRes = await request.get('/api/me/tabs', { headers: auth })
     expect(tabsRes.ok()).toBeTruthy()
     expect((await tabsRes.json()) as unknown[]).toEqual([])
+  })
+
+  test('right-click → Rename updates the tab label and persists', async ({
+    request,
+    page,
+    baseURL,
+  }) => {
+    expect(baseURL).toBeTruthy()
+    const { token, auth } = await authenticate(request)
+    await clearTabs(request, auth)
+    const { sessionId } = await seedFolderAndSession(request, auth, 'old-name')
+
+    await loadAt(page, token, `/sessions/${sessionId}`)
+    const tab = page.locator('.tab-opened', { hasText: 'old-name' })
+    await expect(tab).toBeVisible()
+
+    // Answer the window.prompt() with the new name before triggering it.
+    page.once('dialog', (dialog) => {
+      void dialog.accept('new-name')
+    })
+
+    await tab.click({ button: 'right' })
+    const renameBtn = page.locator('.context-menu button', { hasText: 'Rename' })
+    await expect(renameBtn).toBeVisible()
+    await renameBtn.click()
+
+    // Tab label flips to the new name; server agrees.
+    await expect(page.locator('.tab-opened', { hasText: 'new-name' })).toBeVisible({
+      timeout: 5_000,
+    })
+    await expect(page.locator('.tab-opened', { hasText: 'old-name' })).toHaveCount(0)
+
+    const sessionRes = await request.get(`/api/sessions/${sessionId}`, { headers: auth })
+    expect(sessionRes.ok()).toBeTruthy()
+    const sessionBody = (await sessionRes.json()) as { name: string }
+    expect(sessionBody.name).toBe('new-name')
+  })
+
+  test('right-click → Clear messages confirms then POSTs the clear endpoint', async ({
+    request,
+    page,
+    baseURL,
+  }) => {
+    expect(baseURL).toBeTruthy()
+    const { token, auth } = await authenticate(request)
+    await clearTabs(request, auth)
+    const { sessionId } = await seedFolderAndSession(request, auth, 'clearable')
+
+    await loadAt(page, token, `/sessions/${sessionId}`)
+    const tab = page.locator('.tab-opened', { hasText: 'clearable' })
+    await expect(tab).toBeVisible()
+
+    await tab.click({ button: 'right' })
+    const clearBtn = page.locator('.context-menu button', { hasText: 'Clear messages' })
+    await expect(clearBtn).toBeVisible()
+    await clearBtn.click()
+
+    // ConfirmDialog appears with a Clear danger button (not Delete).
+    const confirmBtn = page.locator('.confirm-dialog-danger', { hasText: /^Clear$/ })
+    await expect(confirmBtn).toBeVisible()
+
+    // Watch for the POST to the clear endpoint so we verify wiring even
+    // if the session has no events to assert against.
+    const clearResponse = page.waitForResponse(
+      (res) =>
+        res.url().endsWith(`/api/sessions/${sessionId}/clear`) && res.request().method() === 'POST',
+    )
+    await confirmBtn.click()
+    const cleared = await clearResponse
+    expect(cleared.ok()).toBeTruthy()
+
+    // Dialog dismisses and server-side events list is empty.
+    await expect(page.locator('.confirm-dialog-title')).toHaveCount(0)
+    const eventsRes = await request.get(`/api/sessions/${sessionId}/events`, { headers: auth })
+    expect(eventsRes.ok()).toBeTruthy()
+    expect((await eventsRes.json()) as unknown[]).toEqual([])
+  })
+
+  test('project tab context menu omits Clear messages and labels Delete as project', async ({
+    request,
+    page,
+    baseURL,
+  }) => {
+    // Clear messages is session-specific. The same menu rendered on a
+    // project tab should hide that item entirely and offer Delete
+    // project (not Delete session).
+    expect(baseURL).toBeTruthy()
+    const { token, auth } = await authenticate(request)
+    await clearTabs(request, auth)
+
+    // Seed a folder + project (no cards needed — we only exercise the menu).
+    const folderPath = mkdtempSync(path.join(tmpdir(), 'peckboard-e2e-tabs-proj-'))
+    const folderRes = await request.post('/api/folders', {
+      headers: auth,
+      data: { name: 'e2e-tabs-proj', path: folderPath },
+    })
+    expect(folderRes.ok()).toBeTruthy()
+    const folder = (await folderRes.json()) as { id: string }
+    const projectRes = await request.post('/api/projects', {
+      headers: auth,
+      data: { name: 'menu-proj', folder_id: folder.id, worker_count: 1, model: 'mock:happy-path' },
+    })
+    expect(projectRes.ok()).toBeTruthy()
+    const project = (await projectRes.json()) as { id: string }
+
+    await loadAt(page, token, `/projects/${project.id}`)
+    const tab = page.locator('.tab-opened', { hasText: 'menu-proj' })
+    await expect(tab).toBeVisible()
+
+    await tab.click({ button: 'right' })
+    await expect(page.locator('.context-menu')).toBeVisible()
+
+    await expect(page.locator('.context-menu button', { hasText: 'Close tab' })).toBeVisible()
+    await expect(page.locator('.context-menu button', { hasText: 'Rename' })).toBeVisible()
+    await expect(page.locator('.context-menu button', { hasText: 'Delete project' })).toBeVisible()
+    await expect(page.locator('.context-menu button', { hasText: 'Clear messages' })).toHaveCount(0)
+    await expect(page.locator('.context-menu button', { hasText: 'Delete session' })).toHaveCount(0)
   })
 
   test('backend rejects upserting a tab for a non-existent item', async ({ request }) => {

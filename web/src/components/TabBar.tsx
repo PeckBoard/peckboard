@@ -1,13 +1,17 @@
-import { useEffect, useMemo, useRef, useState } from 'react'
+import { useEffect, useMemo } from 'react'
 import { useSessionsStore } from '../store/sessions'
 import { useProjectsStore } from '../store/projects'
 import { useTabsStore, type TabType } from '../store/tabs'
+import { useContextMenu, type ContextMenuItem } from '../hooks/useContextMenu'
 
 interface TabBarProps {
   view: 'sessions' | 'projects' | 'folders' | 'settings' | 'reports' | 'git' | 'users'
   activeSessionId: string | null
   activeProjectId: string | null
   onOpenItem: (type: TabType, id: string) => void
+  onRenameItem: (type: TabType, id: string) => void
+  /** Clear all messages in a session. Only invoked for `type === 'session'`. */
+  onClearItem: (type: TabType, id: string) => void
   onDeleteItem: (type: TabType, id: string) => void
 }
 
@@ -21,15 +25,18 @@ interface TabBarProps {
  *
  * Close UX:
  *   Desktop: an X button on each tab (visible on hover/active);
- *     also right-click → context menu with Close.
- *   Mobile:  long-press → context menu with Close. The X is hidden
- *     under the 768px breakpoint to keep tab chips compact.
+ *     also right-click → context menu with Close, Rename, Clear (sessions
+ *     only), and Delete.
+ *   Mobile:  long-press → the same context menu. The X is hidden under
+ *     the 768px breakpoint to keep tab chips compact.
  */
 export default function TabBar({
   view,
   activeSessionId,
   activeProjectId,
   onOpenItem,
+  onRenameItem,
+  onClearItem,
   onDeleteItem,
 }: TabBarProps) {
   const tabs = useTabsStore((s) => s.tabs)
@@ -102,6 +109,8 @@ export default function TabBar({
             unread={isUnread}
             onClick={() => onOpenItem(t.itemType, t.itemId)}
             onClose={() => closeTab(t.itemType, t.itemId)}
+            onRename={() => onRenameItem(t.itemType, t.itemId)}
+            onClear={() => onClearItem(t.itemType, t.itemId)}
             onDelete={() => onDeleteItem(t.itemType, t.itemId)}
           />
         )
@@ -119,6 +128,8 @@ function OpenedTab({
   unread,
   onClick,
   onClose,
+  onRename,
+  onClear,
   onDelete,
 }: {
   type: TabType
@@ -129,33 +140,22 @@ function OpenedTab({
   unread: boolean
   onClick: () => void
   onClose: () => void
+  onRename: () => void
+  onClear: () => void
   onDelete: () => void
 }) {
-  const [menuOpen, setMenuOpen] = useState(false)
-  const longPressTimer = useRef<number | undefined>(undefined)
-  const longPressFired = useRef(false)
-
-  // Close menu when clicking elsewhere.
-  useEffect(() => {
-    if (!menuOpen) return
-    const onDocClick = () => setMenuOpen(false)
-    document.addEventListener('click', onDocClick)
-    return () => document.removeEventListener('click', onDocClick)
-  }, [menuOpen])
-
-  const startLongPress = () => {
-    longPressFired.current = false
-    longPressTimer.current = window.setTimeout(() => {
-      longPressFired.current = true
-      setMenuOpen(true)
-    }, 450)
-  }
-  const cancelLongPress = () => {
-    if (longPressTimer.current !== undefined) {
-      window.clearTimeout(longPressTimer.current)
-      longPressTimer.current = undefined
-    }
-  }
+  const { triggerProps, menu, consumeLongPressClick } = useContextMenu((): ContextMenuItem[] => [
+    { label: 'Close tab', onSelect: onClose },
+    { label: 'Rename', onSelect: onRename },
+    // Clear messages is session-specific — there's no equivalent for
+    // projects, so hide rather than disable to avoid menu noise.
+    { label: 'Clear messages', onSelect: onClear, hidden: type !== 'session' },
+    {
+      label: type === 'session' ? 'Delete session' : 'Delete project',
+      onSelect: onDelete,
+      danger: true,
+    },
+  ])
 
   return (
     <div className="tab-wrap" data-tab-id={`${type}:${id}`}>
@@ -164,24 +164,10 @@ function OpenedTab({
         aria-selected={active}
         className={`tab tab-opened ${active ? 'tab-active' : ''}`}
         onClick={(e) => {
-          // If a long-press just fired, suppress the click that follows.
-          if (longPressFired.current) {
-            e.preventDefault()
-            e.stopPropagation()
-            longPressFired.current = false
-            return
-          }
+          if (consumeLongPressClick(e)) return
           onClick()
         }}
-        onContextMenu={(e) => {
-          // Right-click on desktop opens the same menu as long-press on touch.
-          e.preventDefault()
-          setMenuOpen(true)
-        }}
-        onTouchStart={startLongPress}
-        onTouchEnd={cancelLongPress}
-        onTouchCancel={cancelLongPress}
-        onTouchMove={cancelLongPress}
+        {...triggerProps}
       >
         {type === 'project' && (
           <span className={`tab-icon tab-icon-${type}`} aria-hidden="true">
@@ -206,31 +192,7 @@ function OpenedTab({
       >
         &#10005;
       </button>
-      {menuOpen && (
-        <div className="tab-menu" role="menu">
-          <button
-            role="menuitem"
-            onClick={(e) => {
-              e.stopPropagation()
-              setMenuOpen(false)
-              onClose()
-            }}
-          >
-            Close tab
-          </button>
-          <button
-            role="menuitem"
-            className="tab-menu-danger"
-            onClick={(e) => {
-              e.stopPropagation()
-              setMenuOpen(false)
-              onDelete()
-            }}
-          >
-            {type === 'session' ? 'Delete session' : 'Delete project'}
-          </button>
-        </div>
-      )}
+      {menu}
     </div>
   )
 }

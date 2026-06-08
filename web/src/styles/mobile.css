@@ -368,41 +368,6 @@
     opacity: 0.6;
   }
 }
-.tab-menu {
-  position: absolute;
-  top: 100%;
-  left: 8px;
-  z-index: 10;
-  background: var(--surface);
-  border: 1px solid var(--border);
-  border-radius: var(--radius-sm);
-  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.16);
-  min-width: 140px;
-  padding: 4px;
-}
-.tab-menu button {
-  display: block;
-  width: 100%;
-  padding: 8px 12px;
-  background: transparent;
-  border: 0;
-  text-align: left;
-  font-family: inherit;
-  font-size: var(--text-sm);
-  color: var(--text);
-  cursor: pointer;
-  border-radius: var(--radius-xs, 4px);
-}
-.tab-menu button:hover {
-  background: var(--bg);
-}
-.tab-menu .tab-menu-danger {
-  color: var(--danger);
-}
-.tab-menu .tab-menu-danger:hover {
-  background: var(--danger-bg);
-}
-
 /* ── List view (sessions / projects inside main when no item active) ─ */
 .list-view {
   display: flex;
