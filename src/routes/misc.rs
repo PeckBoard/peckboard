@@ -6,8 +6,29 @@ use std::time::Duration;
 use crate::auth::middleware::require_auth;
 use crate::state::AppState;
 
-/// Global handle for the caffeinate process on macOS.
-static CAFFEINATE: Mutex<Option<std::process::Child>> = Mutex::new(None);
+/// State machine for the macOS `caffeinate` keep-awake feature.
+///
+/// The old design — `Mutex<Option<Child>>` plus a tokio::spawn'd
+/// watchdog that polled every 5s — could leak watchdog tasks under
+/// rapid enable/disable toggles: each enable spawned a new watchdog
+/// without proving the old one had exited, so over N toggle cycles
+/// you could end up with N sleeping watchdog tasks all racing to
+/// detect process death and respawn. The state-enum + generation
+/// counter makes the invariant explicit: at most one watchdog can
+/// match the current generation, so any older watchdog wakes, sees
+/// the generation has advanced, and exits.
+struct CaffeinateState {
+    child: Option<std::process::Child>,
+    /// Monotonically increased every time the keep-awake feature is
+    /// enabled. The watchdog captures the generation at spawn time
+    /// and exits immediately if it ever observes a different value.
+    generation: u64,
+}
+
+static CAFFEINATE: Mutex<CaffeinateState> = Mutex::new(CaffeinateState {
+    child: None,
+    generation: 0,
+});
 
 pub fn router(state: Arc<AppState>) -> Router<Arc<AppState>> {
     Router::new()
@@ -120,7 +141,7 @@ async fn get_keep_awake() -> impl IntoResponse {
     let supported = cfg!(target_os = "macos");
     let active = CAFFEINATE
         .lock()
-        .map(|guard| guard.is_some())
+        .map(|guard| guard.child.is_some())
         .unwrap_or(false);
 
     Json(serde_json::json!({
@@ -148,9 +169,12 @@ async fn put_keep_awake(Json(req): Json<KeepAwakeRequest>) -> impl IntoResponse 
     }
 
     if req.enabled {
-        // Spawn caffeinate if not already running
+        // Spawn caffeinate if not already running, and start a watchdog
+        // tagged with a fresh generation. Disable bumps the generation
+        // so any leftover watchdog (e.g. sleeping mid-poll during a
+        // rapid toggle) exits immediately when it wakes.
         let mut guard = CAFFEINATE.lock().unwrap();
-        if guard.is_none() {
+        if guard.child.is_none() {
             let pid = std::process::id().to_string();
             match std::process::Command::new("caffeinate")
                 .args(["-i", "-w", &pid])
@@ -161,41 +185,44 @@ async fn put_keep_awake(Json(req): Json<KeepAwakeRequest>) -> impl IntoResponse 
                         caffeinate_pid = child.id(),
                         "Started caffeinate for keep-awake"
                     );
-                    *guard = Some(child);
-                    // Start watchdog to respawn caffeinate if it dies
-                    tokio::spawn(async {
+                    guard.child = Some(child);
+                    guard.generation = guard.generation.wrapping_add(1);
+                    let my_generation = guard.generation;
+                    drop(guard);
+
+                    tokio::spawn(async move {
                         loop {
                             tokio::time::sleep(Duration::from_secs(5)).await;
                             let mut guard = CAFFEINATE.lock().unwrap();
-                            if let Some(ref mut child) = *guard {
-                                match child.try_wait() {
-                                    Ok(Some(_)) => {
-                                        // Caffeinate died, respawn
-                                        tracing::warn!("caffeinate process died, respawning");
-                                        match std::process::Command::new("caffeinate")
-                                            .args(["-i", "-w", &std::process::id().to_string()])
-                                            .spawn()
-                                        {
-                                            Ok(new_child) => {
-                                                *child = new_child;
-                                            }
-                                            Err(e) => {
-                                                tracing::error!(
-                                                    "Failed to respawn caffeinate: {e}"
-                                                );
-                                                *guard = None;
-                                                break;
-                                            }
+                            // A different generation means this
+                            // watchdog is stale; another enable cycle
+                            // has its own watchdog now.
+                            if guard.generation != my_generation {
+                                break;
+                            }
+                            let Some(ref mut child) = guard.child else {
+                                break;
+                            };
+                            match child.try_wait() {
+                                Ok(Some(_)) => {
+                                    tracing::warn!("caffeinate process died, respawning");
+                                    match std::process::Command::new("caffeinate")
+                                        .args(["-i", "-w", &std::process::id().to_string()])
+                                        .spawn()
+                                    {
+                                        Ok(new_child) => *child = new_child,
+                                        Err(e) => {
+                                            tracing::error!("Failed to respawn caffeinate: {e}");
+                                            guard.child = None;
+                                            break;
                                         }
                                     }
-                                    Ok(None) => {} // Still running
-                                    Err(_) => {
-                                        *guard = None;
-                                        break;
-                                    }
                                 }
-                            } else {
-                                break; // No process, stop watchdog
+                                Ok(None) => {} // still running
+                                Err(_) => {
+                                    guard.child = None;
+                                    break;
+                                }
                             }
                         }
                     });
@@ -212,9 +239,10 @@ async fn put_keep_awake(Json(req): Json<KeepAwakeRequest>) -> impl IntoResponse 
             }
         }
     } else {
-        // Kill caffeinate if running
+        // Kill caffeinate if running and bump the generation so any
+        // sleeping watchdog will exit on next wake.
         let mut guard = CAFFEINATE.lock().unwrap();
-        if let Some(mut child) = guard.take() {
+        if let Some(mut child) = guard.child.take() {
             tracing::info!(
                 caffeinate_pid = child.id(),
                 "Stopping caffeinate for keep-awake"
@@ -222,11 +250,12 @@ async fn put_keep_awake(Json(req): Json<KeepAwakeRequest>) -> impl IntoResponse 
             let _ = child.kill();
             let _ = child.wait();
         }
+        guard.generation = guard.generation.wrapping_add(1);
     }
 
     let active = CAFFEINATE
         .lock()
-        .map(|guard| guard.is_some())
+        .map(|guard| guard.child.is_some())
         .unwrap_or(false);
 
     Json(serde_json::json!({

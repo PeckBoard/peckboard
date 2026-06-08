@@ -13,10 +13,18 @@ const MEMORY_LIMIT_PAGES: u32 = 2048; // 128 MB (64 KB per page)
 const CALL_TIMEOUT: Duration = Duration::from_secs(2);
 
 /// A loaded plugin instance.
+///
+/// `plugin` is wrapped in its own `Mutex` so concurrent dispatches of
+/// different hooks (or the same hook against different plugins) don't
+/// serialise on a single PluginManager-wide lock. The Plugin type
+/// isn't `Sync` and `call` takes `&mut self`, so we need a per-plugin
+/// mutex either way; placing it here means the outer `plugins` lock
+/// is only held while we *find* the plugins to dispatch to, not
+/// across the (up to 2-second) extism call.
 struct LoadedPlugin {
     name: String,
     manifest: PluginManifest,
-    plugin: Plugin,
+    plugin: Arc<Mutex<Plugin>>,
 }
 
 /// Manages all loaded plugins and dispatches hook calls.
@@ -101,7 +109,7 @@ impl PluginManager {
         Ok(LoadedPlugin {
             name,
             manifest: plugin_manifest,
-            plugin,
+            plugin: Arc::new(Mutex::new(plugin)),
         })
     }
 
@@ -109,23 +117,35 @@ impl PluginManager {
     ///
     /// Plugins are called in load order. If any plugin cancels, dispatch stops.
     /// If a plugin modifies the payload, the modified version is passed to the next.
+    ///
+    /// Acquires the outer `plugins` lock only long enough to find which
+    /// plugins handle this hook and clone their per-plugin Arc<Mutex<Plugin>>,
+    /// then releases it. Per-plugin work happens under each plugin's own
+    /// mutex, so two dispatches for different hooks (or the same hook
+    /// against disjoint plugin sets) don't serialise on a single
+    /// PluginManager-wide lock — important because each `plugin.call`
+    /// can take up to `CALL_TIMEOUT` (2s).
     pub async fn dispatch(&self, hook: &str, payload: serde_json::Value) -> HookResult {
-        let mut plugins = self.plugins.lock().await;
+        let targets: Vec<(String, Arc<Mutex<Plugin>>)> = {
+            let plugins = self.plugins.lock().await;
+            plugins
+                .iter()
+                .filter(|p| p.manifest.hooks.contains(&hook.to_string()))
+                .map(|p| (p.name.clone(), p.plugin.clone()))
+                .collect()
+        };
+
         let mut current_payload = payload;
-
-        for loaded in plugins.iter_mut() {
-            if !loaded.manifest.hooks.contains(&hook.to_string()) {
-                continue;
-            }
-
+        for (name, plugin) in targets {
             let call_input = serde_json::json!({
                 "hook": hook,
                 "payload": current_payload,
             });
 
-            let result = loaded
-                .plugin
-                .call::<String, String>("handle".to_string(), call_input.to_string());
+            let result = {
+                let mut guard = plugin.lock().await;
+                guard.call::<String, String>("handle".to_string(), call_input.to_string())
+            };
 
             match result {
                 Ok(output) => match serde_json::from_str::<Verdict>(&output) {
@@ -135,12 +155,9 @@ impl PluginManager {
                         }
                     }
                     Ok(Verdict::Cancel { reason }) => {
-                        info!(
-                            "Plugin '{}' cancelled hook '{}': {reason}",
-                            loaded.name, hook
-                        );
+                        info!("Plugin '{name}' cancelled hook '{hook}': {reason}");
                         return HookResult::Cancelled {
-                            plugin: loaded.name.clone(),
+                            plugin: name,
                             reason,
                         };
                     }
@@ -148,15 +165,12 @@ impl PluginManager {
                         // No opinion, continue to next plugin
                     }
                     Err(e) => {
-                        warn!(
-                            "Plugin '{}' returned invalid verdict for hook '{}': {e}",
-                            loaded.name, hook
-                        );
+                        warn!("Plugin '{name}' returned invalid verdict for hook '{hook}': {e}");
                         // Treat parse errors as skip
                     }
                 },
                 Err(e) => {
-                    warn!("Plugin '{}' failed on hook '{}': {e}", loaded.name, hook);
+                    warn!("Plugin '{name}' failed on hook '{hook}': {e}");
                     // Plugin failure doesn't block the operation
                 }
             }
@@ -176,8 +190,9 @@ impl PluginManager {
     /// Shut down all loaded plugins.
     pub async fn shutdown(&self) {
         let mut plugins = self.plugins.lock().await;
-        for loaded in plugins.iter_mut() {
-            if let Err(e) = loaded.plugin.call::<&str, String>("shutdown", "") {
+        for loaded in plugins.iter() {
+            let mut guard = loaded.plugin.lock().await;
+            if let Err(e) = guard.call::<&str, String>("shutdown", "") {
                 warn!("Plugin '{}' shutdown failed: {e}", loaded.name);
             }
         }
