@@ -33,7 +33,11 @@ async function authenticate(request: APIRequestContext) {
   return cachedAuth
 }
 
-async function seedSession(request: APIRequestContext, auth: Record<string, string>) {
+async function seedSession(
+  request: APIRequestContext,
+  auth: Record<string, string>,
+  opts: { model?: string } = {},
+) {
   const folderPath = mkdtempSync(path.join(tmpdir(), 'peckboard-e2e-mob-'))
   const folderRes = await request.post('/api/folders', {
     headers: auth,
@@ -43,7 +47,7 @@ async function seedSession(request: APIRequestContext, auth: Record<string, stri
   const folder = (await folderRes.json()) as { id: string }
   const sessionRes = await request.post('/api/sessions', {
     headers: auth,
-    data: { name: 'mobile session', folder_id: folder.id },
+    data: { name: 'mobile session', folder_id: folder.id, model: opts.model },
   })
   expect(sessionRes.ok()).toBeTruthy()
   const session = (await sessionRes.json()) as { id: string }
@@ -196,5 +200,49 @@ test.describe('mobile layout', () => {
     // Give the scroll listener a tick to fire.
     await page.waitForFunction(() => window.scrollY === 0, undefined, { timeout: 2_000 })
     expect(await page.evaluate(() => window.scrollY)).toBe(0)
+  })
+
+  test('tapping Send does not blur the textarea (keyboard stays open, single-tap works)', async ({
+    request,
+    page,
+    baseURL,
+  }) => {
+    // Regression test: on mobile, tapping Send used to blur the textarea,
+    // which closed the soft keyboard and shifted the input bar down before
+    // the click landed — so the first tap was wasted and users had to tap
+    // a second time. The fix is `preventDefault` on the button's
+    // pointerdown so focus stays on the textarea through the tap. We can't
+    // open a real soft keyboard in Playwright, but the load-bearing
+    // property — textarea retains focus through the Send tap — is
+    // directly observable here.
+    expect(baseURL).toBeTruthy()
+    const { token, auth } = await authenticate(request)
+    const sessionId = await seedSession(request, auth, { model: 'mock:happy-path' })
+
+    await loadAt(page, token, `/sessions/${sessionId}`)
+    const input = page.locator('.input-textarea')
+    const send = page.locator('.send-btn')
+    await expect(input).toBeVisible({ timeout: 5_000 })
+
+    await input.tap()
+    await input.fill('hello')
+    // Confirm focus + that Send is now enabled before we tap it.
+    await expect
+      .poll(async () => page.evaluate(() => document.activeElement?.tagName), { timeout: 2_000 })
+      .toBe('TEXTAREA')
+    await expect(send).toBeEnabled()
+
+    await send.tap()
+
+    // The key assertion: the textarea must still be the active element
+    // immediately after the tap. If pointerdown had been allowed to shift
+    // focus to the button, this would be 'BUTTON' (briefly) or 'BODY'
+    // (once the button disables itself in handleSend) — both of which
+    // would have closed the soft keyboard on a real device.
+    const active = await page.evaluate(() => document.activeElement?.tagName)
+    expect(active).toBe('TEXTAREA')
+
+    // And the send actually fired: the textarea clears.
+    await expect(input).toHaveValue('', { timeout: 5_000 })
   })
 })
