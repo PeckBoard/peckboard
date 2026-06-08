@@ -117,6 +117,14 @@ export const useTabsStore = create<TabsState>((set, get) => ({
               }
             : { tabs: [tab, ...s.tabs] }
         })
+      } else {
+        // Server refused (404 = referenced item is gone, 4xx more
+        // generally). Roll the optimistic add back so the strip
+        // doesn't leak a phantom chip for an item the server won't
+        // store.
+        set((s) => ({
+          tabs: s.tabs.filter((t) => !(t.itemType === itemType && t.itemId === itemId)),
+        }))
       }
     } catch {
       // Leave the optimistic update in place; next focus refetch will

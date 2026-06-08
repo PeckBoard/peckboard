@@ -260,4 +260,64 @@ test.describe('tabs', () => {
     const sessionRes = await request.get(`/api/sessions/${sessionId}`, { headers: auth })
     expect(sessionRes.status()).toBe(404)
   })
+
+  test('navigating to a deleted session id does not create a phantom tab', async ({
+    request,
+    page,
+    baseURL,
+  }) => {
+    // Regression test: a stale URL like a bookmark or browser history
+    // entry for `/sessions/<deleted-id>` used to trigger an auto-openTab
+    // for that id, writing a phantom `user_tabs` row that rendered as
+    // an orphan chip labelled "Session". Visiting an unknown id should
+    // just drop back to the list view without leaving a tab behind.
+    expect(baseURL).toBeTruthy()
+    const { token, auth } = await authenticate(request)
+    await clearTabs(request, auth)
+
+    // Use a syntactically valid but non-existent session id. Going
+    // through page.goto won't render `.tabbar` (no tabs to show), so
+    // assert on the URL + tab list directly.
+    await page.addInitScript((t) => {
+      localStorage.setItem('peckboard_token', t)
+    }, token)
+    await page.goto('/sessions/00000000-0000-0000-0000-000000000000')
+
+    // The shell renders; the rail is the cheapest stable thing to wait
+    // on without depending on which view is showing.
+    await expect(page.locator('.rail')).toBeVisible({ timeout: 10_000 })
+
+    // No tab strip should render — there shouldn't be any tabs at all.
+    await expect(page.locator('.tab-opened')).toHaveCount(0)
+    await expect(page.locator('.tab-opened', { hasText: /^Session$/ })).toHaveCount(0)
+
+    // URL should have been cleared back to the session list (`/`).
+    await expect.poll(() => new URL(page.url()).pathname).toBe('/')
+
+    // And server-side, no phantom tab should have been created.
+    await page.waitForTimeout(200)
+    const tabsRes = await request.get('/api/me/tabs', { headers: auth })
+    expect(tabsRes.ok()).toBeTruthy()
+    expect((await tabsRes.json()) as unknown[]).toEqual([])
+  })
+
+  test('backend rejects upserting a tab for a non-existent item', async ({ request }) => {
+    // Defense-in-depth check on the backend guard. The frontend should
+    // never POST one of these, but if it does (or if any external
+    // client tries), the server must refuse rather than silently store
+    // an orphan row.
+    const { auth } = await authenticate(request)
+
+    const sessionRes = await request.post('/api/me/tabs', {
+      headers: auth,
+      data: { item_type: 'session', item_id: 'does-not-exist' },
+    })
+    expect(sessionRes.status()).toBe(404)
+
+    const projectRes = await request.post('/api/me/tabs', {
+      headers: auth,
+      data: { item_type: 'project', item_id: 'does-not-exist' },
+    })
+    expect(projectRes.status()).toBe(404)
+  })
 })

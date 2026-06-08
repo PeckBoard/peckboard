@@ -30,6 +30,11 @@ export interface PendingQuestion {
 
 interface ProjectsState {
   projects: Project[]
+  /** True once `fetchProjects` has completed successfully at least
+   *  once. See the matching flag in `useSessionsStore` for why this
+   *  matters — without it, the empty initial state is indistinguishable
+   *  from "no projects exist". */
+  projectsLoaded: boolean
   activeProjectId: string | null
   cards: Card[]
   cardReportsByCard: Record<string, CardReport[]>
@@ -50,6 +55,7 @@ interface ProjectsState {
 
 export const useProjectsStore = create<ProjectsState>((set) => ({
   projects: [],
+  projectsLoaded: false,
   activeProjectId: null,
   cards: [],
   cardReportsByCard: {},
@@ -59,7 +65,7 @@ export const useProjectsStore = create<ProjectsState>((set) => ({
     const res = await authedFetch('/api/projects')
     if (res.ok) {
       const projects: Project[] = await res.json()
-      set({ projects })
+      set({ projects, projectsLoaded: true })
     }
   },
 

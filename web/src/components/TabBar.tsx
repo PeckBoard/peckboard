@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import { useSessionsStore } from '../store/sessions'
 import { useProjectsStore } from '../store/projects'
 import { useTabsStore, type TabType } from '../store/tabs'
@@ -35,21 +35,56 @@ export default function TabBar({
   const tabs = useTabsStore((s) => s.tabs)
   const closeTab = useTabsStore((s) => s.closeTab)
   const sessions = useSessionsStore((s) => s.sessions)
+  const sessionsLoaded = useSessionsStore((s) => s.sessionsLoaded)
   const projects = useProjectsStore((s) => s.projects)
+  const projectsLoaded = useProjectsStore((s) => s.projectsLoaded)
   const unreadSessions = useSessionsStore((s) => s.unreadSessions)
   const processing = useSessionsStore((s) => s.processing)
 
-  const sessionMap = new Map(sessions.map((s) => [s.id, s]))
-  const projectMap = new Map(projects.map((p) => [p.id, p]))
+  const sessionMap = useMemo(() => new Map(sessions.map((s) => [s.id, s])), [sessions])
+  const projectMap = useMemo(() => new Map(projects.map((p) => [p.id, p])), [projects])
 
-  if (tabs.length === 0) return null
+  // Drop any tab whose underlying session/project no longer exists.
+  // Without this the strip renders a placeholder chip labelled
+  // "Session" / "Project" — that's the phantom-tab bug. We only
+  // filter once the corresponding store has loaded, otherwise the
+  // brief window before the first fetch arrives looks identical to
+  // "everything was deleted" and we'd nuke every real tab.
+  const visibleTabs = useMemo(
+    () =>
+      tabs.filter((t) => {
+        if (t.itemType === 'session') {
+          return !sessionsLoaded || sessionMap.has(t.itemId)
+        }
+        return !projectsLoaded || projectMap.has(t.itemId)
+      }),
+    [tabs, sessionsLoaded, projectsLoaded, sessionMap, projectMap],
+  )
+
+  // Once both stores have loaded, fire-and-forget close any tabs
+  // pointing at vanished items so the cleanup syncs across devices
+  // (closeTab DELETEs the row on the server). Run in an effect rather
+  // than during render to avoid setState-during-render warnings.
+  useEffect(() => {
+    if (!sessionsLoaded || !projectsLoaded) return
+    for (const t of tabs) {
+      const exists = t.itemType === 'session' ? sessionMap.has(t.itemId) : projectMap.has(t.itemId)
+      if (!exists) closeTab(t.itemType, t.itemId)
+    }
+  }, [tabs, sessionsLoaded, projectsLoaded, sessionMap, projectMap, closeTab])
+
+  if (visibleTabs.length === 0) return null
 
   return (
     <div className="tabbar" role="tablist" aria-label="Open tabs">
-      {tabs.map((t) => {
+      {visibleTabs.map((t) => {
         const isActive =
           (t.itemType === 'session' && view === 'sessions' && activeSessionId === t.itemId) ||
           (t.itemType === 'project' && view === 'projects' && activeProjectId === t.itemId)
+        // After the filter above, the lookup may still miss only
+        // during the pre-load window — fall back to a generic label
+        // there. Once stores are loaded, every visible tab is known
+        // to map to a real item.
         const label =
           t.itemType === 'session'
             ? (sessionMap.get(t.itemId)?.name ?? 'Session')

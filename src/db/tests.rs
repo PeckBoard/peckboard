@@ -628,7 +628,10 @@ mod tests {
         })
         .await
         .unwrap();
-        db.upsert_user_tab("u", "session", "s").await.unwrap();
+        db.upsert_user_tab("u", "session", "s")
+            .await
+            .unwrap()
+            .unwrap();
         assert_eq!(db.list_user_tabs("u").await.unwrap().len(), 1);
 
         assert!(db.delete_session("s").await.unwrap());
@@ -680,11 +683,55 @@ mod tests {
         })
         .await
         .unwrap();
-        db.upsert_user_tab("u", "project", "p").await.unwrap();
+        db.upsert_user_tab("u", "project", "p")
+            .await
+            .unwrap()
+            .unwrap();
         assert_eq!(db.list_user_tabs("u").await.unwrap().len(), 1);
 
         assert!(db.delete_project("p").await.unwrap());
         assert!(db.list_user_tabs("u").await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_upsert_user_tab_rejects_unknown_item() {
+        // Tabs are polymorphic so we can't lean on FKs — upsert must
+        // refuse unknown item_ids itself, otherwise stale URLs and
+        // cross-device delete races silently write orphan rows that
+        // render as phantom "Session" chips.
+        let db = test_db();
+        let ts = now();
+
+        db.create_user(NewUser {
+            id: "u".into(),
+            username: "u".into(),
+            email: None,
+            password_hash: "h".into(),
+            role: "user".into(),
+            created_at: ts.clone(),
+            updated_at: ts.clone(),
+        })
+        .await
+        .unwrap();
+
+        assert!(
+            db.upsert_user_tab("u", "session", "missing")
+                .await
+                .unwrap()
+                .is_none(),
+            "upserting a tab for a non-existent session must return None"
+        );
+        assert!(
+            db.upsert_user_tab("u", "project", "missing")
+                .await
+                .unwrap()
+                .is_none(),
+            "upserting a tab for a non-existent project must return None"
+        );
+        assert!(
+            db.list_user_tabs("u").await.unwrap().is_empty(),
+            "no row should have been written for either rejected upsert"
+        );
     }
 
     // ── Delete non-existent returns false ─────────────────────────

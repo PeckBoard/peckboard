@@ -113,11 +113,18 @@ async fn upsert_tab(State(state): State<Arc<AppState>>, req: Request<Body>) -> i
         .upsert_user_tab(&user_id, &req_body.item_type, &req_body.item_id)
         .await
     {
-        Ok(tab) => Ok(Json(TabView {
+        Ok(Some(tab)) => Ok(Json(TabView {
             item_type: tab.item_type,
             item_id: tab.item_id,
             last_active: tab.last_active,
         })),
+        // Item doesn't exist — refuse to create the tab. Stops phantom
+        // chips from being written for stale URLs or cross-device delete
+        // races. The frontend treats 404 here as "drop the local tab".
+        Ok(None) => Err((
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({ "error": "referenced item does not exist" })),
+        )),
         Err(e) => Err((
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(serde_json::json!({ "error": e.to_string() })),

@@ -86,14 +86,18 @@ function App() {
   const connect = useWsStore((s) => s.connect)
   const disconnect = useWsStore((s) => s.disconnect)
   const sessions = useSessionsStore((s) => s.sessions)
+  const sessionsLoaded = useSessionsStore((s) => s.sessionsLoaded)
   const activeSessionId = useSessionsStore((s) => s.activeSessionId)
   const fetchSessions = useSessionsStore((s) => s.fetchSessions)
   const setActiveSession = useSessionsStore((s) => s.setActiveSession)
   const deleteSession = useSessionsStore((s) => s.deleteSession)
   const processing = useSessionsStore((s) => s.processing)
   const unreadSessions = useSessionsStore((s) => s.unreadSessions)
+  const projects = useProjectsStore((s) => s.projects)
+  const projectsLoaded = useProjectsStore((s) => s.projectsLoaded)
   const activeProjectId = useProjectsStore((s) => s.activeProjectId)
   const deleteProject = useProjectsStore((s) => s.deleteProject)
+  const fetchProjects = useProjectsStore((s) => s.fetchProjects)
   const folders = useFoldersStore((s) => s.folders)
   const fetchFolders = useFoldersStore((s) => s.fetchFolders)
 
@@ -267,6 +271,12 @@ function App() {
     if (authenticated) {
       connect()
       fetchSessions()
+      // Projects list is needed at startup (not just when ProjectList
+      // mounts) so the tab strip can validate project tabs against it
+      // — otherwise it can't tell an orphan project tab from a
+      // not-yet-loaded one and either leaks phantom chips or wrongly
+      // closes a real tab.
+      fetchProjects()
       fetchFolders()
       useTabsStore.getState().fetchTabs()
       const stopTabsSync = startTabsAutoSync()
@@ -284,22 +294,36 @@ function App() {
         stopTabsSync()
       }
     }
-  }, [authenticated, connect, disconnect, fetchSessions, fetchFolders])
+  }, [authenticated, connect, disconnect, fetchSessions, fetchProjects, fetchFolders])
 
   // Open / promote a tab whenever the user activates a session or
   // project — this is what makes "MRU + cross-device sync" Just Work,
   // because every navigation goes through these state changes (whether
   // it came from a tab click, the rail, a URL load, or back/forward).
+  //
+  // Gate on the store being loaded and the item actually existing.
+  // Without that guard, a stale URL like `/sessions/<deleted-id>` (a
+  // bookmark, browser history, or another device that just deleted
+  // the session) would write a phantom `user_tabs` row that the strip
+  // then renders as a chip labelled "Session". If the id is unknown
+  // after loading, clear the active id so the URL drops back to the
+  // list view.
   useEffect(() => {
-    if (authenticated && activeSessionId) {
+    if (!authenticated || !activeSessionId || !sessionsLoaded) return
+    if (sessions.some((s) => s.id === activeSessionId)) {
       useTabsStore.getState().openTab('session', activeSessionId)
+    } else {
+      setActiveSession(null)
     }
-  }, [authenticated, activeSessionId])
+  }, [authenticated, activeSessionId, sessionsLoaded, sessions, setActiveSession])
   useEffect(() => {
-    if (authenticated && activeProjectId) {
+    if (!authenticated || !activeProjectId || !projectsLoaded) return
+    if (projects.some((p) => p.id === activeProjectId)) {
       useTabsStore.getState().openTab('project', activeProjectId)
+    } else {
+      setActiveProject(null)
     }
-  }, [authenticated, activeProjectId])
+  }, [authenticated, activeProjectId, projectsLoaded, projects, setActiveProject])
 
   if (!initialized) {
     return (
