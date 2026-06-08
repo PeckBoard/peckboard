@@ -132,10 +132,24 @@ async fn register(
         })
         .await
         .map_err(|e| {
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(serde_json::json!({"error": e.to_string()})),
-            )
+            // Two concurrent register requests on a fresh DB can both
+            // pass the count_users()==0 check above and race to
+            // create_user. The UNIQUE constraint on users.username
+            // (and the implicit PK uniqueness) catches the second one;
+            // surface that as 409 Conflict instead of a generic 500.
+            let msg = e.to_string();
+            let is_unique_conflict = msg.to_lowercase().contains("unique");
+            let status = if is_unique_conflict {
+                StatusCode::CONFLICT
+            } else {
+                StatusCode::INTERNAL_SERVER_ERROR
+            };
+            let user_msg = if is_unique_conflict {
+                "registration already completed by another request — please log in".to_string()
+            } else {
+                msg
+            };
+            (status, Json(serde_json::json!({"error": user_msg})))
         })?;
 
     // Create auth session and token

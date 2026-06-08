@@ -135,6 +135,32 @@ async fn handle_connection(socket: WebSocket, state: Arc<AppState>) {
                 match msg {
                     Some(Ok(Message::Text(text))) => {
                         if let Ok(frame) = serde_json::from_str::<ClientFrame>(&text) {
+                            // Re-validate the auth session before honouring
+                            // any action frame. The periodic 10s tick above
+                            // catches revoked sessions for the broadcast
+                            // path, but a Subscribe / Unsubscribe / Resume
+                            // arriving within that window would otherwise
+                            // run against a session that's already been
+                            // revoked. Re-checking here closes the window.
+                            let still_valid = state
+                                .db
+                                .get_auth_session(&session_id)
+                                .await
+                                .ok()
+                                .flatten()
+                                .is_some();
+                            if !still_valid {
+                                tracing::info!(
+                                    "WS client {client_id} action on revoked auth session, closing"
+                                );
+                                let _ = sender
+                                    .send(Message::Close(Some(axum::extract::ws::CloseFrame {
+                                        code: 4001,
+                                        reason: "session revoked".into(),
+                                    })))
+                                    .await;
+                                break;
+                            }
                             match frame {
                                 ClientFrame::Subscribe { session_id } => {
                                     state.broadcaster.subscribe(client_id, &session_id).await;

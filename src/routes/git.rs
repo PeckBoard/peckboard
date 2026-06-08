@@ -7,10 +7,33 @@ use axum::{
     routing::get,
 };
 use serde::{Deserialize, Serialize};
-use std::sync::Arc;
+use std::collections::HashMap;
+use std::sync::{Arc, OnceLock};
+use tokio::sync::Mutex;
 
 use crate::auth::middleware::require_auth;
 use crate::state::AppState;
+
+/// Per-path async lock map. Two concurrent git subprocesses on the same
+/// working tree race on `.git/index.lock`, one will fail with
+/// "another git process seems to be running" and report a fake "git
+/// status failed" error to the user. Holding a per-path mutex across
+/// the subprocess invocation serialises requests for the same repo
+/// without blocking requests for different repos.
+fn git_path_locks() -> &'static Mutex<HashMap<String, Arc<Mutex<()>>>> {
+    static LOCKS: OnceLock<Mutex<HashMap<String, Arc<Mutex<()>>>>> = OnceLock::new();
+    LOCKS.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+async fn lock_git_path(path: &str) -> tokio::sync::OwnedMutexGuard<()> {
+    let lock = {
+        let mut map = git_path_locks().lock().await;
+        map.entry(path.to_string())
+            .or_insert_with(|| Arc::new(Mutex::new(())))
+            .clone()
+    };
+    lock.lock_owned().await
+}
 
 #[derive(Deserialize)]
 struct GitQuery {
@@ -47,6 +70,7 @@ pub fn router(state: Arc<AppState>) -> Router<Arc<AppState>> {
 
 /// GET /api/git/status?path=<path> — git status for a folder
 async fn git_status(Query(q): Query<DiffQuery>) -> impl IntoResponse {
+    let _guard = lock_git_path(&q.path).await;
     let output = tokio::process::Command::new("git")
         .args(["status", "--porcelain"])
         .current_dir(&q.path)
@@ -72,6 +96,7 @@ async fn git_status(Query(q): Query<DiffQuery>) -> impl IntoResponse {
 
 /// GET /api/git/diff?path=<path> — git diff for a folder
 async fn git_diff(Query(q): Query<DiffQuery>) -> impl IntoResponse {
+    let _guard = lock_git_path(&q.path).await;
     let output = tokio::process::Command::new("git")
         .args(["diff"])
         .current_dir(&q.path)
@@ -95,6 +120,7 @@ async fn git_diff(Query(q): Query<DiffQuery>) -> impl IntoResponse {
 
 /// GET /api/git/commits?path=<path>&limit=<n> — recent commits
 async fn git_commits(Query(q): Query<GitQuery>) -> impl IntoResponse {
+    let _guard = lock_git_path(&q.path).await;
     let limit_str = q.limit.to_string();
     let output = tokio::process::Command::new("git")
         .args([
