@@ -795,135 +795,148 @@ export default function KanbanBoard({ projectId, onOpenTodos }: KanbanBoardProps
               <span className="kanban-count">{cardsByStep(step.key).length}</span>
             </div>
             <div className="kanban-cards">
-              {cardsByStep(step.key).map((card) => (
-                <div
-                  key={`${card.id}-${card.step}`}
-                  className={`kanban-card ${card.blocked ? 'blocked' : ''}${draggingCardId === card.id ? ' dragging' : ''}`}
-                  draggable={true}
-                  onDragStart={(e) => handleDragStart(e, card)}
-                  onDragEnd={handleDragEnd}
-                >
-                  {bubbles[card.id] && (
-                    <div
-                      key={bubbles[card.id].key}
-                      className="card-thought-bubble"
-                      title={bubbles[card.id].text}
-                    >
-                      {bubbles[card.id].text}
-                    </div>
-                  )}
-                  <div className="kanban-card-top" onClick={() => setSelectedCard(card)}>
-                    <div className="kanban-card-header">
-                      <span className="kanban-card-title">{card.title}</span>
-                      {(() => {
-                        const todos = todosByCard[card.id]
-                        if (!todos || todos.length === 0) return null
-                        const done = todos.filter((t) => t.status === 'done').length
-                        return (
-                          <span
-                            className="card-todo-badge"
-                            data-testid="card-todo-badge"
-                            title={`${done} of ${todos.length} tasks done`}
-                          >
-                            {done}/{todos.length}
-                          </span>
-                        )
-                      })()}
-                      {priorityBadge(card.priority, priorities)}
-                    </div>
-                    {card.blocked && (
-                      <div className="blocked-indicator">
-                        Blocked{card.block_reason ? `: ${card.block_reason}` : ''}
+              {cardsByStep(step.key).map((card) => {
+                const todos = todosByCard[card.id]
+                const todoDone = todos ? todos.filter((t) => t.status === 'done').length : 0
+                const pendingDeps =
+                  !card.worker_session_id && card.step !== 'done' && card.step !== 'wont_do'
+                    ? unmetDeps(card)
+                    : []
+                const descPreview = (card.description ?? '').replace(/\s+/g, ' ').trim()
+                return (
+                  <div
+                    key={`${card.id}-${card.step}`}
+                    className={`kanban-card ${card.blocked ? 'blocked' : ''}${draggingCardId === card.id ? ' dragging' : ''}`}
+                    draggable={true}
+                    onDragStart={(e) => handleDragStart(e, card)}
+                    onDragEnd={handleDragEnd}
+                  >
+                    {bubbles[card.id] && (
+                      <div
+                        key={bubbles[card.id].key}
+                        className="card-thought-bubble"
+                        title={bubbles[card.id].text}
+                      >
+                        {bubbles[card.id].text}
                       </div>
                     )}
-                    {!card.worker_session_id &&
-                      card.step !== 'done' &&
-                      card.step !== 'wont_do' &&
-                      (() => {
-                        const pending = unmetDeps(card)
-                        if (pending.length === 0) return null
-                        return (
-                          <div
-                            className="waiting-indicator"
-                            title={`Waiting on: ${pending.map((c) => c.title).join(', ')}`}
-                          >
-                            Waiting on {pending.length}{' '}
-                            {pending.length === 1 ? 'dependency' : 'dependencies'}
-                          </div>
-                        )
-                      })()}
-                    {card.worker_session_id && (
-                      <div className="kanban-card-worker">Worker active</div>
-                    )}
-                  </div>
-                  <div className="kanban-card-actions">
-                    <button
-                      className="kanban-card-menu-btn"
-                      onClick={(e) => {
-                        e.stopPropagation()
-                        setCardMenuId(cardMenuId === card.id ? null : card.id)
-                      }}
+                    <div
+                      className="kanban-card-left"
+                      onClick={() => setSelectedCard(card)}
+                      title={card.title}
                     >
-                      ...
-                    </button>
-                    {cardMenuId === card.id && (
-                      <div className="kanban-card-menu">
-                        {(card.worker_session_id || card.last_worker_session_id) && (
-                          <button
-                            onClick={() =>
-                              handleViewSession(
-                                (card.worker_session_id || card.last_worker_session_id)!,
-                              )
-                            }
-                          >
-                            View Session
-                          </button>
-                        )}
-                        <button
-                          onClick={() => {
-                            setCardMenuId(null)
-                            setEditingCard(card)
-                          }}
+                      <span className="kanban-card-title">{card.title}</span>
+                      {descPreview && (
+                        <span className="kanban-card-desc" title={descPreview}>
+                          {descPreview}
+                        </span>
+                      )}
+                    </div>
+                    <div className="kanban-card-middle" onClick={() => setSelectedCard(card)}>
+                      {priorityBadge(card.priority, priorities)}
+                      {todos && todos.length > 0 && (
+                        <span
+                          className="card-todo-badge"
+                          data-testid="card-todo-badge"
+                          title={`${todoDone} of ${todos.length} tasks done`}
                         >
-                          Edit
-                        </button>
-                        <button
-                          onClick={() => {
-                            setCardMenuId(null)
-                            setSelectedCard(card)
-                          }}
+                          {todoDone}/{todos.length}
+                        </span>
+                      )}
+                      {card.worker_session_id && (
+                        <span className="kanban-card-worker" title="Worker active">
+                          <span className="kanban-card-worker-dot" />
+                          Worker
+                        </span>
+                      )}
+                      {card.blocked && (
+                        <span
+                          className="blocked-indicator"
+                          title={card.block_reason ? `Blocked: ${card.block_reason}` : 'Blocked'}
                         >
-                          Details
-                        </button>
-                        {card.worker_session_id && (
-                          <button onClick={() => handleStopWorker(card)}>Stop Worker</button>
-                        )}
-                        {!card.worker_session_id &&
-                          card.step !== 'done' &&
-                          card.step !== 'wont_do' && (
-                            <button onClick={() => handleRestartWorker(card)}>
-                              Restart Worker
+                          Blocked
+                          {card.block_reason ? `: ${card.block_reason}` : ''}
+                        </span>
+                      )}
+                      {pendingDeps.length > 0 && (
+                        <span
+                          className="waiting-indicator"
+                          title={`Waiting on: ${pendingDeps.map((c) => c.title).join(', ')}`}
+                        >
+                          Waiting on {pendingDeps.length}{' '}
+                          {pendingDeps.length === 1 ? 'dep' : 'deps'}
+                        </span>
+                      )}
+                    </div>
+                    <div className="kanban-card-actions">
+                      <button
+                        className="kanban-card-menu-btn"
+                        onClick={(e) => {
+                          e.stopPropagation()
+                          setCardMenuId(cardMenuId === card.id ? null : card.id)
+                        }}
+                      >
+                        ...
+                      </button>
+                      {cardMenuId === card.id && (
+                        <div className="kanban-card-menu">
+                          {(card.worker_session_id || card.last_worker_session_id) && (
+                            <button
+                              onClick={() =>
+                                handleViewSession(
+                                  (card.worker_session_id || card.last_worker_session_id)!,
+                                )
+                              }
+                            >
+                              View Session
                             </button>
                           )}
-                        {card.step !== 'done' && card.step !== 'wont_do' && (
-                          <button className="danger" onClick={() => handleCancelWontDo(card)}>
-                            Cancel as Won't Do
+                          <button
+                            onClick={() => {
+                              setCardMenuId(null)
+                              setEditingCard(card)
+                            }}
+                          >
+                            Edit
                           </button>
-                        )}
-                        <button
-                          className="danger"
-                          onClick={() => {
-                            setCardMenuId(null)
-                            setConfirmDeleteId(card.id)
-                          }}
-                        >
-                          Delete
-                        </button>
-                      </div>
-                    )}
+                          <button
+                            onClick={() => {
+                              setCardMenuId(null)
+                              setSelectedCard(card)
+                            }}
+                          >
+                            Details
+                          </button>
+                          {card.worker_session_id && (
+                            <button onClick={() => handleStopWorker(card)}>Stop Worker</button>
+                          )}
+                          {!card.worker_session_id &&
+                            card.step !== 'done' &&
+                            card.step !== 'wont_do' && (
+                              <button onClick={() => handleRestartWorker(card)}>
+                                Restart Worker
+                              </button>
+                            )}
+                          {card.step !== 'done' && card.step !== 'wont_do' && (
+                            <button className="danger" onClick={() => handleCancelWontDo(card)}>
+                              Cancel as Won't Do
+                            </button>
+                          )}
+                          <button
+                            className="danger"
+                            onClick={() => {
+                              setCardMenuId(null)
+                              setConfirmDeleteId(card.id)
+                            }}
+                          >
+                            Delete
+                          </button>
+                        </div>
+                      )}
+                    </div>
                   </div>
-                </div>
-              ))}
+                )
+              })}
             </div>
           </div>
         ))}
