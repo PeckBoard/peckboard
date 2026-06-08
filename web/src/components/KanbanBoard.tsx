@@ -17,6 +17,7 @@ import {
   THOUGHT_BUBBLE_MS,
   type PriorityInfo,
   type ThoughtBubble,
+  priorityAtInsertIdx,
   priorityBadge,
   summarizeEvent,
 } from './kanban/utils'
@@ -51,7 +52,10 @@ export default function KanbanBoard({ projectId, onOpenTodos }: KanbanBoardProps
   const [addSubmitting, setAddSubmitting] = useState(false)
   const [confirmDeleteId, setConfirmDeleteId] = useState<string | null>(null)
   const [draggingCardId, setDraggingCardId] = useState<string | null>(null)
-  const [dragOverStep, setDragOverStep] = useState<string | null>(null)
+  // Active drop target. `insertIdx` is set only for an in-row reorder hover
+  // (mouse is over a sibling card in the same row); a null `insertIdx` means
+  // a cross-row step-move hover (the destination row shows an accept band).
+  const [dragOver, setDragOver] = useState<{ step: string; insertIdx: number | null } | null>(null)
   const [cardMenuId, setCardMenuId] = useState<string | null>(null)
   const [editingCard, setEditingCard] = useState<Card | null>(null)
   const [showComms, setShowComms] = useState(false)
@@ -426,6 +430,15 @@ export default function KanbanBoard({ projectId, onOpenTodos }: KanbanBoardProps
     fetchCards(projectId)
   }
 
+  // Step the currently-dragged card originates from, or null when no drag
+  // is active. Read during dragover (when dataTransfer is locked for
+  // security) to tell an in-row reorder from a cross-row step move.
+  const draggingFromStep = (() => {
+    if (!draggingCardId) return null
+    const c = cards.find((x) => x.id === draggingCardId)
+    return c ? normalizeStep(c.step) : null
+  })()
+
   const handleDragStart = (e: React.DragEvent, card: Card) => {
     e.dataTransfer.setData('cardId', card.id)
     e.dataTransfer.setData('fromStep', card.step)
@@ -435,36 +448,92 @@ export default function KanbanBoard({ projectId, onOpenTodos }: KanbanBoardProps
 
   const handleDragEnd = () => {
     setDraggingCardId(null)
-    setDragOverStep(null)
+    setDragOver(null)
   }
 
-  const handleDragOver = (e: React.DragEvent, stepKey: string) => {
+  // Dragover on the row container (gaps + empty trailing space). Cross-row
+  // hover → row accept band. Same-row hover with no card under the cursor →
+  // drop at the end of the row.
+  const handleColumnDragOver = (e: React.DragEvent, stepKey: string, cardCount: number) => {
     e.preventDefault()
     e.dataTransfer.dropEffect = 'move'
-    setDragOverStep(stepKey)
+    if (draggingFromStep === stepKey) {
+      // Same-row, between-cards: default to "insert at end" so a horizontal
+      // drag past the last card still shows a meaningful indicator.
+      setDragOver({ step: stepKey, insertIdx: cardCount })
+    } else {
+      setDragOver({ step: stepKey, insertIdx: null })
+    }
+  }
+
+  // Dragover on a specific card. Left half → insert before this card; right
+  // half → insert after. Cross-row hover still falls through to the row
+  // accept band (no insert indicator) so the gesture matches the layout.
+  const handleCardDragOver = (
+    e: React.DragEvent,
+    stepKey: string,
+    cardIndex: number,
+    cardEl: HTMLElement,
+  ) => {
+    e.preventDefault()
+    e.stopPropagation()
+    e.dataTransfer.dropEffect = 'move'
+    if (draggingFromStep !== stepKey) {
+      setDragOver({ step: stepKey, insertIdx: null })
+      return
+    }
+    const rect = cardEl.getBoundingClientRect()
+    const midX = rect.left + rect.width / 2
+    const insertIdx = e.clientX < midX ? cardIndex : cardIndex + 1
+    setDragOver({ step: stepKey, insertIdx })
   }
 
   const handleDragLeave = (e: React.DragEvent, stepKey: string) => {
     const related = e.relatedTarget as Node | null
     const current = e.currentTarget as Node
     if (!related || !current.contains(related)) {
-      if (dragOverStep === stepKey) setDragOverStep(null)
+      setDragOver((d) => (d?.step === stepKey ? null : d))
     }
   }
 
   const handleDrop = async (e: React.DragEvent, targetStep: string) => {
     e.preventDefault()
-    setDragOverStep(null)
+    const insertIdx = dragOver?.insertIdx ?? null
+    setDragOver(null)
     const cardId = e.dataTransfer.getData('cardId')
     const fromStep = e.dataTransfer.getData('fromStep')
-    if (!cardId || fromStep === targetStep) return
+    if (!cardId) return
+
+    // Cross-row drop → step change. Existing persistence.
+    if (normalizeStep(fromStep) !== targetStep) {
+      useProjectsStore.setState((s) => ({
+        cards: s.cards.map((c) => (c.id === cardId ? { ...c, step: targetStep } : c)),
+      }))
+      try {
+        await updateCard(projectId, cardId, { step: targetStep })
+      } catch {
+        fetchCards(projectId)
+      }
+      return
+    }
+
+    // Same-row drop → reorder via priority bucket. No `priority` field on
+    // the dragged card means no-op (rare; only if the row sort changed
+    // mid-drag). Without an explicit insert position we can't infer intent,
+    // so leave it alone.
+    if (insertIdx === null) return
+
+    const rowCards = cardsByStep(targetStep)
+    const draggedCard = rowCards.find((c) => c.id === cardId)
+    if (!draggedCard) return
+    const targetPriority = priorityAtInsertIdx(rowCards, cardId, insertIdx, draggedCard.priority)
+    if (targetPriority === draggedCard.priority) return
 
     useProjectsStore.setState((s) => ({
-      cards: s.cards.map((c) => (c.id === cardId ? { ...c, step: targetStep } : c)),
+      cards: s.cards.map((c) => (c.id === cardId ? { ...c, priority: targetPriority } : c)),
     }))
-
     try {
-      await updateCard(projectId, cardId, { step: targetStep })
+      await updateCard(projectId, cardId, { priority: targetPriority })
     } catch {
       fetchCards(projectId)
     }
@@ -782,164 +851,186 @@ export default function KanbanBoard({ projectId, onOpenTodos }: KanbanBoardProps
       )}
 
       <div className="kanban-columns">
-        {visibleSteps.map((step) => (
-          <div
-            key={step.key}
-            className={`kanban-column${dragOverStep === step.key ? ' drag-over' : ''}`}
-            onDragOver={(e) => handleDragOver(e, step.key)}
-            onDragLeave={(e) => handleDragLeave(e, step.key)}
-            onDrop={(e) => handleDrop(e, step.key)}
-          >
-            <div className="kanban-column-header">
-              <h3>{step.label}</h3>
-              <span className="kanban-count">{cardsByStep(step.key).length}</span>
-            </div>
-            <div className="kanban-cards">
-              {cardsByStep(step.key).map((card) => {
-                const todos = todosByCard[card.id]
-                const todoDone = todos ? todos.filter((t) => t.status === 'done').length : 0
-                const pendingDeps =
-                  !card.worker_session_id && card.step !== 'done' && card.step !== 'wont_do'
-                    ? unmetDeps(card)
-                    : []
-                const descPreview = (card.description ?? '').replace(/\s+/g, ' ').trim()
-                return (
-                  <div
-                    key={`${card.id}-${card.step}`}
-                    className={`kanban-card ${card.blocked ? 'blocked' : ''}${draggingCardId === card.id ? ' dragging' : ''}`}
-                    draggable={true}
-                    onDragStart={(e) => handleDragStart(e, card)}
-                    onDragEnd={handleDragEnd}
-                  >
-                    {bubbles[card.id] && (
-                      <div
-                        key={bubbles[card.id].key}
-                        className="card-thought-bubble"
-                        title={bubbles[card.id].text}
-                      >
-                        {bubbles[card.id].text}
-                      </div>
-                    )}
+        {visibleSteps.map((step) => {
+          const rowCards = cardsByStep(step.key)
+          const dragOverRow = dragOver?.step === step.key
+          const showInsertIndicator = dragOverRow && dragOver?.insertIdx != null
+          const showAcceptBand = dragOverRow && dragOver?.insertIdx == null
+          return (
+            <div
+              key={step.key}
+              className={`kanban-column${showAcceptBand ? ' drag-over' : ''}`}
+              onDragOver={(e) => handleColumnDragOver(e, step.key, rowCards.length)}
+              onDragLeave={(e) => handleDragLeave(e, step.key)}
+              onDrop={(e) => handleDrop(e, step.key)}
+            >
+              <div className="kanban-column-header">
+                <h3>{step.label}</h3>
+                <span className="kanban-count">{rowCards.length}</span>
+              </div>
+              <div className="kanban-cards">
+                {rowCards.map((card, cardIndex) => {
+                  const todos = todosByCard[card.id]
+                  const todoDone = todos ? todos.filter((t) => t.status === 'done').length : 0
+                  const pendingDeps =
+                    !card.worker_session_id && card.step !== 'done' && card.step !== 'wont_do'
+                      ? unmetDeps(card)
+                      : []
+                  const descPreview = (card.description ?? '').replace(/\s+/g, ' ').trim()
+                  const dropBefore =
+                    showInsertIndicator &&
+                    dragOver?.insertIdx === cardIndex &&
+                    draggingCardId !== card.id
+                  // Last card carries the trailing indicator when the drop
+                  // would land at the end of the row.
+                  const dropAfter =
+                    showInsertIndicator &&
+                    cardIndex === rowCards.length - 1 &&
+                    dragOver?.insertIdx === rowCards.length &&
+                    draggingCardId !== card.id
+                  return (
                     <div
-                      className="kanban-card-left"
-                      onClick={() => setSelectedCard(card)}
-                      title={card.title}
+                      key={`${card.id}-${card.step}`}
+                      className={`kanban-card ${card.blocked ? 'blocked' : ''}${draggingCardId === card.id ? ' dragging' : ''}`}
+                      data-drop-before={dropBefore ? 'true' : undefined}
+                      data-drop-after={dropAfter ? 'true' : undefined}
+                      draggable={true}
+                      onDragStart={(e) => handleDragStart(e, card)}
+                      onDragEnd={handleDragEnd}
+                      onDragOver={(e) =>
+                        handleCardDragOver(e, step.key, cardIndex, e.currentTarget as HTMLElement)
+                      }
                     >
-                      <span className="kanban-card-title">{card.title}</span>
-                      {descPreview && (
-                        <span className="kanban-card-desc" title={descPreview}>
-                          {descPreview}
-                        </span>
-                      )}
-                    </div>
-                    <div className="kanban-card-middle" onClick={() => setSelectedCard(card)}>
-                      {priorityBadge(card.priority, priorities)}
-                      {todos && todos.length > 0 && (
-                        <span
-                          className="card-todo-badge"
-                          data-testid="card-todo-badge"
-                          title={`${todoDone} of ${todos.length} tasks done`}
+                      {bubbles[card.id] && (
+                        <div
+                          key={bubbles[card.id].key}
+                          className="card-thought-bubble"
+                          title={bubbles[card.id].text}
                         >
-                          {todoDone}/{todos.length}
-                        </span>
-                      )}
-                      {card.worker_session_id && (
-                        <span className="kanban-card-worker" title="Worker active">
-                          <span className="kanban-card-worker-dot" />
-                          Worker
-                        </span>
-                      )}
-                      {card.blocked && (
-                        <span
-                          className="blocked-indicator"
-                          title={card.block_reason ? `Blocked: ${card.block_reason}` : 'Blocked'}
-                        >
-                          Blocked
-                          {card.block_reason ? `: ${card.block_reason}` : ''}
-                        </span>
-                      )}
-                      {pendingDeps.length > 0 && (
-                        <span
-                          className="waiting-indicator"
-                          title={`Waiting on: ${pendingDeps.map((c) => c.title).join(', ')}`}
-                        >
-                          Waiting on {pendingDeps.length}{' '}
-                          {pendingDeps.length === 1 ? 'dep' : 'deps'}
-                        </span>
-                      )}
-                    </div>
-                    <div className="kanban-card-actions">
-                      <button
-                        className="kanban-card-menu-btn"
-                        onClick={(e) => {
-                          e.stopPropagation()
-                          setCardMenuId(cardMenuId === card.id ? null : card.id)
-                        }}
-                      >
-                        ...
-                      </button>
-                      {cardMenuId === card.id && (
-                        <div className="kanban-card-menu">
-                          {(card.worker_session_id || card.last_worker_session_id) && (
-                            <button
-                              onClick={() =>
-                                handleViewSession(
-                                  (card.worker_session_id || card.last_worker_session_id)!,
-                                )
-                              }
-                            >
-                              View Session
-                            </button>
-                          )}
-                          <button
-                            onClick={() => {
-                              setCardMenuId(null)
-                              setEditingCard(card)
-                            }}
-                          >
-                            Edit
-                          </button>
-                          <button
-                            onClick={() => {
-                              setCardMenuId(null)
-                              setSelectedCard(card)
-                            }}
-                          >
-                            Details
-                          </button>
-                          {card.worker_session_id && (
-                            <button onClick={() => handleStopWorker(card)}>Stop Worker</button>
-                          )}
-                          {!card.worker_session_id &&
-                            card.step !== 'done' &&
-                            card.step !== 'wont_do' && (
-                              <button onClick={() => handleRestartWorker(card)}>
-                                Restart Worker
-                              </button>
-                            )}
-                          {card.step !== 'done' && card.step !== 'wont_do' && (
-                            <button className="danger" onClick={() => handleCancelWontDo(card)}>
-                              Cancel as Won't Do
-                            </button>
-                          )}
-                          <button
-                            className="danger"
-                            onClick={() => {
-                              setCardMenuId(null)
-                              setConfirmDeleteId(card.id)
-                            }}
-                          >
-                            Delete
-                          </button>
+                          {bubbles[card.id].text}
                         </div>
                       )}
+                      <div
+                        className="kanban-card-left"
+                        onClick={() => setSelectedCard(card)}
+                        title={card.title}
+                      >
+                        <span className="kanban-card-title">{card.title}</span>
+                        {descPreview && (
+                          <span className="kanban-card-desc" title={descPreview}>
+                            {descPreview}
+                          </span>
+                        )}
+                      </div>
+                      <div className="kanban-card-middle" onClick={() => setSelectedCard(card)}>
+                        {priorityBadge(card.priority, priorities)}
+                        {todos && todos.length > 0 && (
+                          <span
+                            className="card-todo-badge"
+                            data-testid="card-todo-badge"
+                            title={`${todoDone} of ${todos.length} tasks done`}
+                          >
+                            {todoDone}/{todos.length}
+                          </span>
+                        )}
+                        {card.worker_session_id && (
+                          <span className="kanban-card-worker" title="Worker active">
+                            <span className="kanban-card-worker-dot" />
+                            Worker
+                          </span>
+                        )}
+                        {card.blocked && (
+                          <span
+                            className="blocked-indicator"
+                            title={card.block_reason ? `Blocked: ${card.block_reason}` : 'Blocked'}
+                          >
+                            Blocked
+                            {card.block_reason ? `: ${card.block_reason}` : ''}
+                          </span>
+                        )}
+                        {pendingDeps.length > 0 && (
+                          <span
+                            className="waiting-indicator"
+                            title={`Waiting on: ${pendingDeps.map((c) => c.title).join(', ')}`}
+                          >
+                            Waiting on {pendingDeps.length}{' '}
+                            {pendingDeps.length === 1 ? 'dep' : 'deps'}
+                          </span>
+                        )}
+                      </div>
+                      <div className="kanban-card-actions">
+                        <button
+                          className="kanban-card-menu-btn"
+                          onClick={(e) => {
+                            e.stopPropagation()
+                            setCardMenuId(cardMenuId === card.id ? null : card.id)
+                          }}
+                        >
+                          ...
+                        </button>
+                        {cardMenuId === card.id && (
+                          <div className="kanban-card-menu">
+                            {(card.worker_session_id || card.last_worker_session_id) && (
+                              <button
+                                onClick={() =>
+                                  handleViewSession(
+                                    (card.worker_session_id || card.last_worker_session_id)!,
+                                  )
+                                }
+                              >
+                                View Session
+                              </button>
+                            )}
+                            <button
+                              onClick={() => {
+                                setCardMenuId(null)
+                                setEditingCard(card)
+                              }}
+                            >
+                              Edit
+                            </button>
+                            <button
+                              onClick={() => {
+                                setCardMenuId(null)
+                                setSelectedCard(card)
+                              }}
+                            >
+                              Details
+                            </button>
+                            {card.worker_session_id && (
+                              <button onClick={() => handleStopWorker(card)}>Stop Worker</button>
+                            )}
+                            {!card.worker_session_id &&
+                              card.step !== 'done' &&
+                              card.step !== 'wont_do' && (
+                                <button onClick={() => handleRestartWorker(card)}>
+                                  Restart Worker
+                                </button>
+                              )}
+                            {card.step !== 'done' && card.step !== 'wont_do' && (
+                              <button className="danger" onClick={() => handleCancelWontDo(card)}>
+                                Cancel as Won't Do
+                              </button>
+                            )}
+                            <button
+                              className="danger"
+                              onClick={() => {
+                                setCardMenuId(null)
+                                setConfirmDeleteId(card.id)
+                              }}
+                            >
+                              Delete
+                            </button>
+                          </div>
+                        )}
+                      </div>
                     </div>
-                  </div>
-                )
-              })}
+                  )
+                })}
+              </div>
             </div>
-          </div>
-        ))}
+          )
+        })}
       </div>
 
       {confirmDeleteId && (

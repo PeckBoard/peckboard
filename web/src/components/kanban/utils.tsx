@@ -1,5 +1,5 @@
 import type { CardReport, PendingQuestion } from '../../store/projects'
-import type { Event } from '../../types/api'
+import type { Card, Event } from '../../types/api'
 
 // How long a thought bubble lingers after its event before fading out,
 // unless a newer event replaces it first.
@@ -100,6 +100,33 @@ export interface PriorityInfo {
   label: string
   value: number
   description: string
+}
+
+/**
+ * Pick the priority a card should adopt when dropped at `insertIdx` inside
+ * `rowCards` (cards in the destination step, in the order they appear in
+ * the board). Mirrors the backend's ASC-by-priority sort: the card adopts
+ * the priority of its new leading neighbor (or trailing, at the start of
+ * the row), so it lands in that priority bucket. Same-priority neighbours
+ * mean the drop is a same-bucket move and returns the dragged card's
+ * current priority — the caller treats that as a no-op write.
+ */
+export function priorityAtInsertIdx(
+  rowCards: Card[],
+  draggedId: string,
+  insertIdx: number,
+  fallback: number,
+): number {
+  const others = rowCards.filter((c) => c.id !== draggedId)
+  // Insert index was computed against the visible row (which still
+  // contains the dragged card). Translate it into an index in `others` by
+  // subtracting 1 if the dragged card sat before the insertion point.
+  const draggedIdx = rowCards.findIndex((c) => c.id === draggedId)
+  const adjusted = draggedIdx >= 0 && draggedIdx < insertIdx ? insertIdx - 1 : insertIdx
+  if (others.length === 0) return fallback
+  if (adjusted <= 0) return others[0].priority
+  if (adjusted >= others.length) return others[others.length - 1].priority
+  return others[adjusted - 1].priority
 }
 
 export function priorityBadge(priority: number, priorities: PriorityInfo[]) {

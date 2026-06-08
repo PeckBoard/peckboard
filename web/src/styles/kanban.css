@@ -115,10 +115,34 @@
 .kanban-card.blocked {
   border-left: 3px solid var(--danger);
 }
+/* Cross-row step-move target: the destination row gets a horizontal accept
+   band so the gesture matches the rotated layout. */
 .kanban-column.drag-over {
   background: var(--accent-subtle);
   box-shadow: inset 0 0 0 2px var(--accent-muted);
   border-color: var(--accent);
+}
+/* In-row reorder indicator: a 2px vertical bar drawn in the gap between
+   the dragged-over card and its neighbour, showing where the card will
+   land. `data-drop-before` paints on the leading edge; `data-drop-after`
+   only fires on the last card when the drop lands at the row's tail. */
+.kanban-card[data-drop-before='true']::before,
+.kanban-card[data-drop-after='true']::after {
+  content: '';
+  position: absolute;
+  top: 4px;
+  bottom: 4px;
+  width: 3px;
+  background: var(--accent);
+  border-radius: 2px;
+  box-shadow: 0 0 6px var(--accent-muted);
+  pointer-events: none;
+}
+.kanban-card[data-drop-before='true']::before {
+  left: -6px;
+}
+.kanban-card[data-drop-after='true']::after {
+  right: -6px;
 }
 .card-thought-bubble {
   position: absolute;
