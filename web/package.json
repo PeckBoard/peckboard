@@ -10,7 +10,7 @@
     "format": "prettier --write .",
     "format:check": "prettier --check .",
     "preview": "vite preview",
-    "e2e": "playwright test",
+    "e2e": "playwright test --config=e2e/playwright.config.ts",
     "e2e:install": "playwright install --with-deps chromium",
     "prepare": "cd .. && husky web/.husky"
   },
