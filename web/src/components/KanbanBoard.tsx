@@ -7,6 +7,8 @@ import { useMentions, filterMentions } from '../hooks/useMentions'
 import type { Card, Event } from '../types/api'
 import EditCardModal from './EditCardModal'
 import WorkerComms from './WorkerComms'
+import ProjectTodoSummary from './ProjectTodoSummary'
+import { useProjectTodos } from '../hooks/useProjectTodos'
 
 // How long a thought bubble lingers after its event before fading out,
 // unless a newer event replaces it first.
@@ -137,6 +139,8 @@ export default function KanbanBoard({ projectId }: KanbanBoardProps) {
   const deleteCard = useProjectsStore((s) => s.deleteCard)
 
   const project = projects.find((p) => p.id === projectId)
+  // cardId -> latest todo snapshot for that card's worker session.
+  const todosByCard = useProjectTodos(cards)
   const [selectedCard, setSelectedCard] = useState<Card | null>(null)
   const [showAddForm, setShowAddForm] = useState(false)
   const [addTitle, setAddTitle] = useState('')
@@ -270,12 +274,19 @@ export default function KanbanBoard({ projectId }: KanbanBoardProps) {
     sessionToCardRef.current = map
   }, [cards])
 
-  // Subscribe to every active worker session so its events stream in even
-  // when no one has the session's chat open. The key is the sorted set of
-  // session ids, so this only re-runs when a worker is added or removed.
-  const workerSessionKey = cards
-    .map((c) => c.worker_session_id)
-    .filter((id): id is string => Boolean(id))
+  // Subscribe to every worker session so its events stream in even when no one
+  // has the session's chat open. Include `last_worker_session_id` so the todo
+  // aggregate keeps receiving live `todo` events after a worker finishes a
+  // chunk (the orchestrator clears `worker_session_id` between dispatches). The
+  // key is the sorted, deduped set of session ids, so this only re-runs when a
+  // worker is added or removed.
+  const workerSessionKey = [
+    ...new Set(
+      cards
+        .flatMap((c) => [c.worker_session_id, c.last_worker_session_id])
+        .filter((id): id is string => Boolean(id)),
+    ),
+  ]
     .sort()
     .join(',')
   useEffect(() => {
@@ -601,6 +612,9 @@ export default function KanbanBoard({ projectId }: KanbanBoardProps) {
         </button>
       </div>
 
+      {/* Project-level todo roll-up across every card's worker session. */}
+      <ProjectTodoSummary todosByCard={todosByCard} />
+
       {/* Pending worker questions — trigger button */}
       {pendingQuestions.length > 0 && !questionDialogOpen && (
         <button className="worker-questions-trigger" onClick={() => setQuestionDialogOpen(true)}>
@@ -893,6 +907,20 @@ export default function KanbanBoard({ projectId }: KanbanBoardProps) {
                   <div className="kanban-card-top" onClick={() => setSelectedCard(card)}>
                     <div className="kanban-card-header">
                       <span className="kanban-card-title">{card.title}</span>
+                      {(() => {
+                        const todos = todosByCard[card.id]
+                        if (!todos || todos.length === 0) return null
+                        const done = todos.filter((t) => t.status === 'done').length
+                        return (
+                          <span
+                            className="card-todo-badge"
+                            data-testid="card-todo-badge"
+                            title={`${done} of ${todos.length} tasks done`}
+                          >
+                            {done}/{todos.length}
+                          </span>
+                        )
+                      })()}
                       {priorityBadge(card.priority, priorities)}
                     </div>
                     {card.blocked && (

@@ -1,6 +1,8 @@
 // Frontend representation of the backend `todo` event's work items.
 // Kept in sync with `src/todo.rs` (wire form uses snake_case status tokens).
 
+import type { Event } from './api'
+
 export type TodoStatus = 'pending' | 'in_progress' | 'done'
 
 export interface TodoItem {
@@ -39,4 +41,20 @@ export function parseTodoItems(raw: unknown): TodoItem[] {
     items.push({ content, status, activeForm })
   }
   return items
+}
+
+/**
+ * The `todo` event kind is a full replace-all snapshot, so only the latest one
+ * matters. Walk a session's events back to front and return the newest todo
+ * snapshot, or `null` if the session has never reported any (so callers can
+ * fall back to the load-time `/todos` fetch). Shared by the chat-session panel
+ * and the project-page aggregate view.
+ */
+export function latestTodoSnapshot(events: Event[]): TodoItem[] | null {
+  for (let i = events.length - 1; i >= 0; i--) {
+    if (events[i].kind === 'todo') {
+      return parseTodoItems(events[i].data.todos)
+    }
+  }
+  return null
 }

@@ -10,7 +10,7 @@ import InputBar from './InputBar'
 import ToolUseBlock from './ToolUseBlock'
 import ConfirmDialog from './ConfirmDialog'
 import TodoPanel from './TodoPanel'
-import { parseTodoItems, type TodoItem } from '../types/todo'
+import { parseTodoItems, latestTodoSnapshot, type TodoItem } from '../types/todo'
 import 'highlight.js/styles/github-dark.css'
 
 interface ChatViewProps {
@@ -338,19 +338,6 @@ function buildDisplayItems(events: Event[]): DisplayItem[] {
 
   flushAssistant()
   return items
-}
-
-/** The `todo` event kind is a full replace-all snapshot, so only the latest
- * one matters. Walk back to front and return its items, or null if the session
- * has never reported any todos (so the caller can fall back to the load-time
- * fetch). */
-function latestTodoSnapshot(events: Event[]): TodoItem[] | null {
-  for (let i = events.length - 1; i >= 0; i--) {
-    if (events[i].kind === 'todo') {
-      return parseTodoItems(events[i].data.todos)
-    }
-  }
-  return null
 }
 
 function formatTime(ts: number): string {
