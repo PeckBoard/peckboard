@@ -1,0 +1,150 @@
+import { test, expect, type APIRequestContext, type Page } from '@playwright/test'
+import { mkdtempSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import path from 'node:path'
+
+/**
+ * UI e2e test for the chat-session todo/task panel.
+ *
+ * Drives the real React app: logs in via the API, injects the token into
+ * localStorage so the app boots authenticated, opens a session, and sends a
+ * message backed by the `mock:todo` scenario. That scenario emits a TodoWrite
+ * tool call normalized into a `todo` event whose snapshot is
+ *   done: "Write the parser", in_progress: "Wire up the route", pending: "Add tests".
+ *
+ * Asserts the panel groups items by Pending / In Progress / Done with the right
+ * markers (done struck through, in_progress emphasized + shown via activeForm),
+ * then POSTs a second `todo` event over the same WS broadcast path the real
+ * provider uses and asserts the panel re-buckets live (latest snapshot wins).
+ */
+
+const E2E_USER = 'e2e-user'
+const E2E_PASS = 'e2e-password-1234'
+
+type AuthBundle = {
+  token: string
+  authHeader: { Authorization: string }
+}
+
+async function authenticate(request: APIRequestContext): Promise<AuthBundle> {
+  const status = await request.get('/api/auth/status')
+  expect(status.ok()).toBeTruthy()
+  const { has_users } = (await status.json()) as { has_users: boolean }
+
+  const credentials = { username: E2E_USER, password: E2E_PASS }
+  const endpoint = has_users ? '/api/auth/login' : '/api/auth/register'
+
+  const res = await request.post(endpoint, { data: credentials })
+  expect(res.ok(), `auth via ${endpoint} failed: ${await res.text()}`).toBeTruthy()
+  const { token } = (await res.json()) as { token: string }
+  return { token, authHeader: { Authorization: `Bearer ${token}` } }
+}
+
+async function seedAuthedSession(
+  request: APIRequestContext,
+  authHeader: Record<string, string>,
+): Promise<{ sessionId: string }> {
+  const folderPath = mkdtempSync(path.join(tmpdir(), 'peckboard-e2e-todo-'))
+  const folderRes = await request.post('/api/folders', {
+    headers: authHeader,
+    data: { name: 'e2e-todo', path: folderPath },
+  })
+  expect(folderRes.ok(), `create folder failed: ${await folderRes.text()}`).toBeTruthy()
+  const folder = (await folderRes.json()) as { id: string }
+
+  const sessionRes = await request.post('/api/sessions', {
+    headers: authHeader,
+    data: { name: 'todo smoke', folder_id: folder.id },
+  })
+  expect(sessionRes.ok(), `create session failed: ${await sessionRes.text()}`).toBeTruthy()
+  const session = (await sessionRes.json()) as { id: string }
+  return { sessionId: session.id }
+}
+
+async function loadAppAt(page: Page, token: string, route: string) {
+  await page.addInitScript((injectedToken) => {
+    localStorage.setItem('peckboard_token', injectedToken)
+  }, token)
+  await page.goto(route)
+}
+
+test('chat todo panel renders the snapshot grouped by status and updates live', async ({
+  request,
+  page,
+  baseURL,
+}) => {
+  expect(baseURL, 'baseURL configured').toBeTruthy()
+
+  const { token, authHeader } = await authenticate(request)
+  const { sessionId } = await seedAuthedSession(request, authHeader)
+
+  await loadAppAt(page, token, `/sessions/${sessionId}`)
+
+  // App booted authenticated and the chat surface rendered.
+  await expect(page.locator('.chat-empty').or(page.locator('.chat-bubble').first())).toBeVisible({
+    timeout: 10_000,
+  })
+
+  // No panel before any todo snapshot exists (empty state stays out of the way).
+  await expect(page.getByTestId('todo-panel')).toHaveCount(0)
+
+  // Trigger the scripted todo snapshot through the real route.
+  const sendRes = await request.post(`/api/sessions/${sessionId}/message`, {
+    headers: authHeader,
+    data: { text: 'track some work', model: 'mock:todo' },
+  })
+  expect(sendRes.ok(), `send failed: ${await sendRes.text()}`).toBeTruthy()
+
+  // Panel appears with a 1-of-3-done progress summary.
+  const panel = page.getByTestId('todo-panel')
+  await expect(panel).toBeVisible({ timeout: 10_000 })
+  await expect(page.getByTestId('todo-panel-count')).toHaveText('1/3 done')
+
+  const items = page.getByTestId('todo-item')
+  await expect(items).toHaveCount(3)
+
+  // Done item: original content, struck through.
+  const done = page.locator('[data-testid="todo-item"][data-status="done"]')
+  await expect(done).toHaveCount(1)
+  await expect(done).toContainText('Write the parser')
+  await expect(done.locator('.todo-item-text')).toHaveCSS('text-decoration-line', 'line-through')
+
+  // In-progress item: shown via its activeForm ("Wiring up the route").
+  const inProgress = page.locator('[data-testid="todo-item"][data-status="in_progress"]')
+  await expect(inProgress).toHaveCount(1)
+  await expect(inProgress).toContainText('Wiring up the route')
+
+  // Pending item.
+  const pending = page.locator('[data-testid="todo-item"][data-status="pending"]')
+  await expect(pending).toHaveCount(1)
+  await expect(pending).toContainText('Add tests')
+
+  // Live update: emit a fresh snapshot over the same WS broadcast path the real
+  // provider uses (latest `todo` event wins). Move "Add tests" to in_progress
+  // and "Wire up the route" to done.
+  const updateRes = await request.post(`/api/sessions/${sessionId}/events`, {
+    headers: authHeader,
+    data: {
+      kind: 'todo',
+      // A real `todo` event carries the backend's normalized status tokens
+      // (pending / in_progress / done), so mirror that wire shape here.
+      data: {
+        todos: [
+          { content: 'Write the parser', status: 'done', activeForm: 'Writing the parser' },
+          { content: 'Wire up the route', status: 'done', activeForm: 'Wiring up the route' },
+          { content: 'Add tests', status: 'in_progress', activeForm: 'Adding tests' },
+        ],
+      },
+    },
+  })
+  expect(updateRes.ok(), `update event failed: ${await updateRes.text()}`).toBeTruthy()
+
+  // Panel re-buckets live: 2 done, the pending group is gone, in-progress now
+  // shows "Adding tests".
+  await expect(page.getByTestId('todo-panel-count')).toHaveText('2/3 done')
+  await expect(page.locator('[data-testid="todo-item"][data-status="done"]')).toHaveCount(2)
+  await expect(page.locator('[data-testid="todo-item"][data-status="pending"]')).toHaveCount(0)
+  await expect(page.locator('[data-testid="todo-item"][data-status="in_progress"]')).toContainText(
+    'Adding tests',
+  )
+})

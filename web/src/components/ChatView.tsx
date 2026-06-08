@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import rehypeHighlight from 'rehype-highlight'
@@ -9,6 +9,8 @@ import { useSessionsStore } from '../store/sessions'
 import InputBar from './InputBar'
 import ToolUseBlock from './ToolUseBlock'
 import ConfirmDialog from './ConfirmDialog'
+import TodoPanel from './TodoPanel'
+import { parseTodoItems, type TodoItem } from '../types/todo'
 import 'highlight.js/styles/github-dark.css'
 
 interface ChatViewProps {
@@ -338,6 +340,19 @@ function buildDisplayItems(events: Event[]): DisplayItem[] {
   return items
 }
 
+/** The `todo` event kind is a full replace-all snapshot, so only the latest
+ * one matters. Walk back to front and return its items, or null if the session
+ * has never reported any todos (so the caller can fall back to the load-time
+ * fetch). */
+function latestTodoSnapshot(events: Event[]): TodoItem[] | null {
+  for (let i = events.length - 1; i >= 0; i--) {
+    if (events[i].kind === 'todo') {
+      return parseTodoItems(events[i].data.todos)
+    }
+  }
+  return null
+}
+
 function formatTime(ts: number): string {
   if (!ts) return ''
   return new Date(ts).toLocaleTimeString([], {
@@ -532,6 +547,7 @@ export default function ChatView({ sessionId }: ChatViewProps) {
   } | null>(null)
   const [modelDropdownOpen, setModelDropdownOpen] = useState(false)
   const [availableModels, setAvailableModels] = useState<ModelInfo[]>([])
+  const [loadedTodos, setLoadedTodos] = useState<TodoItem[]>([])
   const scrollRef = useRef<HTMLDivElement>(null)
   const menuRef = useRef<HTMLDivElement>(null)
   const modelRef = useRef<HTMLDivElement>(null)
@@ -553,6 +569,23 @@ export default function ChatView({ sessionId }: ChatViewProps) {
       .then((res) => (res.ok ? res.json() : null))
       .then((data: Session | null) => {
         if (!cancelled && data) setSessionDetail(data)
+      })
+      .catch(() => {})
+    return () => {
+      cancelled = true
+    }
+  }, [sessionId])
+
+  // Fetch the current todo snapshot on load so a freshly opened session shows
+  // existing todos before any live `todo` event arrives over the WS.
+  useEffect(() => {
+    let cancelled = false
+    authedFetch(`/api/sessions/${sessionId}/todos`)
+      .then((res) => (res.ok ? res.json() : null))
+      .then((data) => {
+        // Always set (the endpoint returns `{ todos: [] }` for a fresh
+        // session), so switching sessions clears any prior snapshot.
+        if (!cancelled) setLoadedTodos(parseTodoItems(data?.todos))
       })
       .catch(() => {})
     return () => {
@@ -640,6 +673,11 @@ export default function ChatView({ sessionId }: ChatViewProps) {
   }, [events])
 
   const displayItems = buildDisplayItems(events)
+
+  // Live `todo` events are authoritative once any arrive; before then, fall
+  // back to the snapshot fetched at load time.
+  const eventTodos = useMemo(() => latestTodoSnapshot(events), [events])
+  const todos = eventTodos ?? loadedTodos
 
   // Determine if agent is working (includes waiting for CLI to start after user sends)
   const agentWorking = (() => {
@@ -778,6 +816,8 @@ export default function ChatView({ sessionId }: ChatViewProps) {
           )}
         </div>
       </div>
+
+      <TodoPanel todos={todos} />
 
       <div className="chat-messages" ref={scrollRef} onScroll={handleScroll}>
         {displayItems.length === 0 && (
