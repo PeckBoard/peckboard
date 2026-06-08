@@ -4,14 +4,14 @@ import { tmpdir } from 'node:os'
 import path from 'node:path'
 
 /**
- * Sticky row headers + per-row horizontal scroll on the kanban board.
+ * Card wrapping inside a kanban row.
  *
  * Two user-visible behaviours, one assertion each:
  *
- *   1. **Sticky header** — when a row has more cards than fit, scrolling
- *      that row horizontally leaves the step label pinned at the row's
- *      left edge. The label's viewport x stays put while cards slide
- *      past it.
+ *   1. **Wrap, don't overflow** — when a row has more cards than fit
+ *      across the viewport, the cards wrap onto additional lines inside
+ *      the row. The board itself never scrolls horizontally; cards
+ *      visually stack on more than one line.
  *   2. **Empty state** — a row with no cards shows a "No cards in …"
  *      placeholder so the row doesn't collapse to a thin strip.
  *
@@ -46,17 +46,17 @@ async function setupProject(
   suffix: string,
   cardCount: number,
 ): Promise<{ projectId: string }> {
-  const folderPath = mkdtempSync(path.join(tmpdir(), `peckboard-e2e-sticky-${suffix}-`))
+  const folderPath = mkdtempSync(path.join(tmpdir(), `peckboard-e2e-wrap-${suffix}-`))
   const folderRes = await request.post('/api/folders', {
     headers: auth,
-    data: { name: `e2e-sticky-${suffix}-${Date.now()}`, path: folderPath },
+    data: { name: `e2e-wrap-${suffix}-${Date.now()}`, path: folderPath },
   })
   expect(folderRes.ok(), `create folder failed: ${await folderRes.text()}`).toBeTruthy()
   const folder = (await folderRes.json()) as { id: string }
 
   const projectRes = await request.post('/api/projects', {
     headers: auth,
-    data: { name: `sticky project ${suffix}`, folder_id: folder.id, worker_count: 0 },
+    data: { name: `wrap project ${suffix}`, folder_id: folder.id, worker_count: 0 },
   })
   expect(projectRes.ok(), `create project failed: ${await projectRes.text()}`).toBeTruthy()
   const project = (await projectRes.json()) as { id: string }
@@ -71,28 +71,26 @@ async function setupProject(
   return { projectId: project.id }
 }
 
-test('row header stays pinned at the left while cards scroll horizontally', async ({
+test('cards wrap onto multiple lines without horizontal page scroll', async ({
   request,
   page,
   baseURL,
 }) => {
   expect(baseURL, 'baseURL configured').toBeTruthy()
-  // Narrow viewport guarantees the row overflows and scrolls horizontally
-  // (each card is 320px; 8 cards = 2560px of content).
+  // Narrow viewport guarantees the row needs to wrap (cards are 320px;
+  // 8 cards = 2560px of card content, far wider than the viewport).
   await page.setViewportSize({ width: 800, height: 700 })
 
   const { token, auth } = await authenticate(request)
-  const { projectId } = await setupProject(request, auth, 'pinned', 8)
+  const { projectId } = await setupProject(request, auth, 'wrap', 8)
 
   await loadAt(page, token, `/projects/${projectId}`)
 
   const backlogRow = page.locator('.kanban-column', { hasText: 'Backlog' })
-  const header = backlogRow.locator('.kanban-column-header')
-  await expect(header).toBeVisible({ timeout: 10_000 })
+  await expect(backlogRow.locator('.kanban-column-header')).toBeVisible({ timeout: 10_000 })
 
-  // Wait until every card has finished its mount-grow animation; otherwise
-  // the cards section briefly reports a sub-natural width and the row
-  // can't yet scroll.
+  // Wait for every card's mount-grow animation to settle so width/y
+  // measurements reflect the final laid-out positions.
   await backlogRow
     .locator('.kanban-card')
     .first()
@@ -101,23 +99,29 @@ test('row header stays pinned at the left while cards scroll horizontally', asyn
       await Promise.all(anims.map((a) => a.finished.catch(() => undefined)))
     })
 
-  // Capture the header's viewport-left before scrolling, then push the row
-  // horizontally and confirm the label stayed pinned.
-  const beforeBox = await header.boundingBox()
-  expect(beforeBox, 'header bbox before scroll').toBeTruthy()
+  // The document never grows wider than the viewport — no horizontal
+  // scrollbar on the page.
+  const hScroll = await page.evaluate(() => ({
+    scrollWidth: document.documentElement.scrollWidth,
+    clientWidth: document.documentElement.clientWidth,
+  }))
+  expect(hScroll.scrollWidth, 'document fits inside viewport width').toBeLessThanOrEqual(
+    hScroll.clientWidth + 1,
+  )
 
-  const scrolled = await backlogRow.evaluate((el) => {
-    el.scrollLeft = 400
-    return el.scrollLeft
-  })
-  expect(scrolled, 'row actually scrolled horizontally').toBeGreaterThan(100)
-
-  const afterBox = await header.boundingBox()
-  expect(afterBox, 'header bbox after scroll').toBeTruthy()
-  expect(
-    Math.abs(afterBox!.x - beforeBox!.x),
-    'sticky header x unchanged after row scroll',
-  ).toBeLessThan(2)
+  // Cards visibly wrap: collect each card's top-y and confirm at least
+  // two distinct rows of cards appear inside the backlog row.
+  const cards = backlogRow.locator('.kanban-card')
+  const count = await cards.count()
+  expect(count, 'all 8 cards rendered').toBe(8)
+  const tops: number[] = []
+  for (let i = 0; i < count; i++) {
+    const box = await cards.nth(i).boundingBox()
+    expect(box, `card ${i} measurable`).toBeTruthy()
+    tops.push(Math.round(box!.y))
+  }
+  const distinctRows = new Set(tops).size
+  expect(distinctRows, 'cards wrap onto at least two visual lines').toBeGreaterThanOrEqual(2)
 })
 
 test('empty rows render a placeholder so they do not collapse', async ({

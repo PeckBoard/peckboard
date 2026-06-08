@@ -58,9 +58,8 @@ export default function KanbanBoard({ projectId, onOpenTodos }: KanbanBoardProps
   const [dragOver, setDragOver] = useState<{ step: string; insertIdx: number | null } | null>(null)
   const [cardMenuId, setCardMenuId] = useState<string | null>(null)
   // Trigger-button rect captured when the "..." menu opens, used to
-  // position the fixed dropdown. Fixed positioning is required because
-  // each kanban row is its own `overflow-x: auto` scroll container —
-  // an absolutely positioned dropdown would be clipped by the row.
+  // position the fixed dropdown so it can escape any clipping ancestor
+  // (modal, scroll container) and align under the trigger.
   const [cardMenuRect, setCardMenuRect] = useState<DOMRect | null>(null)
   const closeCardMenu = () => {
     setCardMenuId(null)

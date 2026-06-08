@@ -24,9 +24,11 @@
   gap: 12px;
   width: 100%;
 }
-/* Each row is its own horizontal scroll container so wide rows don't
-   force the whole board to scroll sideways. The row header is sticky
-   to the left edge of this scroll box; cards scroll past it. */
+/* Each row is a fixed-width header on the left and a wrapping card
+   strip on the right. The strip wraps onto additional lines as needed
+   so a step with many cards stays within the viewport instead of
+   spilling off-screen. The row grows tall to accommodate the wrap;
+   the board scrolls vertically. */
 .kanban-column {
   background: var(--surface);
   border: 1px solid var(--border);
@@ -36,7 +38,6 @@
   flex-direction: row;
   gap: 12px;
   align-items: stretch;
-  overflow-x: auto;
   min-height: 88px;
 }
 .kanban-column-header {
@@ -47,12 +48,7 @@
   flex-shrink: 0;
   width: 140px;
   padding: 4px 8px 4px 4px;
-  /* Sticky to the scroll container's left edge so the label stays
-     visible while the row's cards scroll horizontally beneath it. */
-  position: sticky;
-  left: 0;
   background: var(--surface);
-  z-index: 2;
   border-right: 1px solid var(--border);
   align-self: stretch;
   justify-content: center;
@@ -76,14 +72,17 @@
 .kanban-cards {
   display: flex;
   flex-direction: row;
-  flex-wrap: nowrap;
+  flex-wrap: wrap;
+  align-content: flex-start;
   align-items: center;
   gap: 8px;
   min-height: 64px;
-  /* Size to the row's natural card width so the parent `.kanban-column`
-     (overflow-x: auto) reports the right scrollWidth and shows a
-     horizontal scrollbar when the cards don't fit. */
-  flex: 0 0 auto;
+  /* Take the row's remaining width so cards wrap inside it instead of
+     forcing a horizontal scrollbar on the board. The last wrapped line
+     keeps its leftover space on the right (cards have a fixed width
+     and don't stretch). */
+  flex: 1 1 auto;
+  min-width: 0;
 }
 /* Empty row placeholder reads naturally on a horizontal strip. */
 .kanban-cards-empty {
