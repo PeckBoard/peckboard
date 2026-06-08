@@ -9,12 +9,6 @@ const GROUP_ORDER: { status: TodoStatus; label: string }[] = [
   { status: 'done', label: 'Done' },
 ]
 
-const MARKER: Record<TodoStatus, string> = {
-  pending: '○', // ○
-  in_progress: '◐', // ◐
-  done: '✓', // ✓
-}
-
 interface TodoPanelProps {
   todos: TodoItem[]
 }
@@ -65,9 +59,6 @@ export default function TodoPanel({ todos }: TodoPanelProps) {
                       data-testid="todo-item"
                       data-status={status}
                     >
-                      <span className="todo-item-marker" aria-hidden="true">
-                        {MARKER[status]}
-                      </span>
                       <span className="todo-item-text">
                         {status === 'in_progress' && item.activeForm
                           ? item.activeForm

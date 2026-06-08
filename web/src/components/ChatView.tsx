@@ -22,6 +22,11 @@ import {
 } from './chat/events'
 import 'highlight.js/styles/github-dark.css'
 
+// Stable empty array so the memoized `todos` keeps referential equality
+// when there are no todos (avoids re-renders of TodoPanel and a
+// fresh-array warning from React fast refresh).
+const EMPTY_TODOS: TodoItem[] = []
+
 interface ChatViewProps {
   sessionId: string
 }
@@ -339,9 +344,16 @@ export default function ChatView({ sessionId }: ChatViewProps) {
   const displayItems = buildDisplayItems(events)
 
   // Live `todo` events are authoritative once any arrive; before then, fall
-  // back to the snapshot fetched at load time.
-  const eventTodos = useMemo(() => latestTodoSnapshot(events), [events])
-  const todos = eventTodos ?? loadedTodos
+  // back to the snapshot fetched at load time. After a clear (events loaded
+  // but empty) the snapshot must also go away — without the explicit empty
+  // check the panel would keep rendering `loadedTodos` from the pre-clear
+  // mount and never disappear.
+  const todos = useMemo(() => {
+    const snap = latestTodoSnapshot(events)
+    if (snap) return snap
+    if (!loading && events.length === 0) return EMPTY_TODOS
+    return loadedTodos
+  }, [events, loadedTodos, loading])
 
   // Determine if agent is working (includes waiting for CLI to start after user sends)
   const agentWorking = (() => {

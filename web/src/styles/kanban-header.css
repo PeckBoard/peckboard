@@ -68,7 +68,9 @@
   overflow: hidden;
   display: flex;
   flex-direction: column;
-  max-height: 80vh;
+  /* `--app-height` tracks `visualViewport.height` (App.tsx), so the
+     dialog shrinks above the soft keyboard instead of being clipped. */
+  max-height: min(80vh, calc(var(--app-height) - 32px));
 }
 
 .question-dialog-header {

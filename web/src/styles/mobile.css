@@ -56,15 +56,8 @@
 
   /* Tab strip sits directly under the rail on mobile — it's the
      first child of `.content`, so the default flex order already
-     puts it at the top. We bump tab height for easier tapping;
-     36px chips feel cramped on touch. */
-  .tabbar {
-    flex-shrink: 0;
-  }
-  .tabbar .tab {
-    height: 44px;
-    padding: 0 14px;
-  }
+     puts it at the top. Mobile-specific tab sizing lives in the
+     `.tab-wrap` rule further down. */
   .rail-separator {
     width: 1px;
     height: 24px;
@@ -135,6 +128,27 @@
     padding: 8px 12px;
   }
 
+  /* Todo panel — much tighter on mobile so a long list doesn't eat the
+     chat scroll area. Default desktop cap is 38% of the chat column,
+     which on a phone leaves only a couple of message bubbles visible. */
+  .todo-panel {
+    max-height: 28vh;
+  }
+  .todo-panel-header {
+    padding: 6px 14px;
+  }
+  .todo-panel-body {
+    padding: 2px 14px 8px;
+    gap: 6px;
+  }
+  .todo-group-items {
+    gap: 2px;
+  }
+  .todo-item {
+    font-size: var(--text-xs);
+    line-height: 1.35;
+  }
+
   /* Tool blocks full width */
   /* Kanban columns scroll horizontally */
   .kanban-columns {
@@ -162,16 +176,20 @@
     min-width: auto;
   }
 
-  /* Modals full width on mobile */
+  /* Modals full width on mobile. Cap to the visible viewport via
+     `--app-height` so a long form stays inside the keyboard-shrunk
+     region — `100vh` is the layout viewport, which doesn't shrink
+     when the keyboard opens. */
   .modal {
     max-width: calc(100vw - 32px) !important;
-    max-height: calc(100vh - 100px);
+    max-height: calc(var(--app-height) - 32px);
     overflow-y: auto;
   }
 
   /* Question dialog */
   .question-dialog {
     max-width: calc(100vw - 32px) !important;
+    max-height: calc(var(--app-height) - 32px);
   }
 
   /* Settings/Reports pages */
@@ -231,10 +249,12 @@
    the rest are opened sessions/projects mixed together in MRU order. */
 .tabbar {
   display: flex;
-  align-items: stretch;
+  align-items: center;
   flex-wrap: nowrap;
   overflow-x: auto;
   overflow-y: visible;
+  gap: 6px;
+  padding: 6px 10px;
   border-bottom: 1px solid var(--border);
   background: var(--surface);
   scrollbar-width: thin;
@@ -254,74 +274,87 @@
   flex-shrink: 0;
   display: inline-flex;
   align-items: center;
+  height: 36px;
+  padding: 0 4px 0 12px;
+  border-radius: var(--radius-full);
+  background: var(--surface2);
+  color: var(--text2);
+  transition:
+    background 0.12s ease,
+    color 0.12s ease,
+    box-shadow 0.12s ease;
 }
-.tab-wrap .tab {
-  padding-right: 4px;
+.tab-wrap:hover {
+  background: var(--surface3);
+  color: var(--text);
+}
+.tab-wrap:has(.tab-active) {
+  background: var(--accent);
+  color: var(--text-inverse);
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.08);
 }
 .tab-close {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  width: 18px;
-  height: 18px;
-  margin-right: 6px;
+  width: 20px;
+  height: 20px;
+  margin-left: 4px;
   padding: 0;
   border: 0;
   background: transparent;
-  color: var(--text3);
-  font-size: 11px;
+  color: inherit;
+  font-size: 12px;
   line-height: 1;
-  border-radius: var(--radius-sm);
+  border-radius: var(--radius-full);
   cursor: pointer;
-  opacity: 0;
+  opacity: 0.6;
   transition:
     opacity 0.12s ease,
-    background 0.12s ease,
-    color 0.12s ease;
+    background 0.12s ease;
 }
 .tab-wrap:hover .tab-close,
 .tab-wrap:focus-within .tab-close,
-.tab-active + .tab-close,
 .tab-wrap:has(.tab-active) .tab-close {
   opacity: 1;
 }
 .tab-close:hover {
-  background: var(--surface2, var(--bg-hover, var(--surface)));
-  color: var(--text);
+  background: rgba(0, 0, 0, 0.15);
+}
+.tab-wrap:has(.tab-active) .tab-close:hover {
+  background: rgba(255, 255, 255, 0.2);
 }
 @media (max-width: 768px) {
+  .tabbar {
+    gap: 8px;
+    padding: 8px 10px;
+  }
+  .tab-wrap {
+    height: 40px;
+    padding-right: 14px;
+  }
   .tab-close {
     display: none;
-  }
-  .tab-wrap .tab {
-    padding-right: 12px;
   }
 }
 .tab {
   display: inline-flex;
   align-items: center;
   gap: 6px;
-  padding: 0 12px;
-  height: 36px;
+  padding: 0;
+  height: 100%;
   border: 0;
   background: transparent;
-  color: var(--text2);
+  color: inherit;
   font-size: var(--text-sm);
   font-family: inherit;
   cursor: pointer;
-  border-bottom: 2px solid transparent;
   white-space: nowrap;
   user-select: none;
   -webkit-user-select: none;
 }
-.tab:hover {
-  color: var(--text);
-  background: var(--bg-hover, var(--bg));
-}
 .tab-active {
-  color: var(--text);
-  border-bottom-color: var(--accent);
-  font-weight: 500;
+  font-weight: 600;
 }
 .tab-opened {
   max-width: 200px;

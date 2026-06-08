@@ -38,7 +38,14 @@
 /* ─── Modal ─── */
 .modal-backdrop {
   position: fixed;
-  inset: 0;
+  top: 0;
+  left: 0;
+  right: 0;
+  /* Use `--app-height` (kept in sync with `visualViewport` in App.tsx)
+     so the centered modal moves up when the on-screen keyboard opens
+     instead of being clipped behind it. `inset: 0` would anchor to the
+     full layout viewport, which doesn't shrink with the keyboard. */
+  height: var(--app-height);
   display: flex;
   align-items: center;
   justify-content: center;
@@ -46,6 +53,11 @@
   backdrop-filter: blur(4px);
   z-index: 100;
   animation: fadeIn 0.15s ease;
+  /* When the modal is taller than the visible region (long form +
+     keyboard open), let the backdrop itself scroll rather than the
+     modal getting cut off. */
+  overflow-y: auto;
+  padding: 16px;
 }
 
 @keyframes fadeIn {
