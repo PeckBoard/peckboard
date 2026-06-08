@@ -1,12 +1,20 @@
 import { useEffect, useRef } from 'react'
 import { useWsStore } from '../store/ws'
-import { useWorkerCommsStore } from '../store/workerComms'
+import { useWorkerCommsStore, type WorkerInfo, type CommMessage } from '../store/workerComms'
 import type { Event } from '../types/api'
 
 interface WorkerCommsProps {
   projectId: string
   onClose: () => void
 }
+
+// Stable empty references. Returning `?? []` inline from a zustand selector
+// allocates a new array each render, which zustand compares by Object.is and
+// treats as a state change — triggering an infinite re-render loop. Sharing
+// frozen constants keeps the selector output stable while a project hasn't
+// loaded yet.
+const EMPTY_WORKERS: ReadonlyArray<WorkerInfo> = Object.freeze([])
+const EMPTY_MESSAGES: ReadonlyArray<CommMessage> = Object.freeze([])
 
 function formatTime(ts: number): string {
   if (!ts) return ''
@@ -44,9 +52,11 @@ function msgTypeLabel(type: string): string {
 }
 
 export default function WorkerComms({ projectId, onClose }: WorkerCommsProps) {
-  const workers = useWorkerCommsStore((s) => s.workersByProject[projectId] ?? [])
-  const messages = useWorkerCommsStore((s) => s.messagesByProject[projectId] ?? [])
-  const loading = useWorkerCommsStore((s) => s.loadingByProject[projectId] ?? true)
+  const workers =
+    useWorkerCommsStore((s) => s.workersByProject[projectId]) ?? (EMPTY_WORKERS as WorkerInfo[])
+  const messages =
+    useWorkerCommsStore((s) => s.messagesByProject[projectId]) ?? (EMPTY_MESSAGES as CommMessage[])
+  const loading = useWorkerCommsStore((s) => s.loadingByProject[projectId]) ?? true
   const fetchComms = useWorkerCommsStore((s) => s.fetchComms)
   const scrollRef = useRef<HTMLDivElement>(null)
   const addEventListener = useWsStore((s) => s.addEventListener)
