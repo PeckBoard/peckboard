@@ -534,6 +534,15 @@ export default function ChatView({ sessionId }: ChatViewProps) {
                   </div>
                 </div>
               )
+            case 'interrupt':
+              return (
+                <div key={item.key} className="chat-row chat-row-system">
+                  <div className="chat-agent-start">
+                    <span className="chat-agent-start-label">Agent interrupted</span>
+                    <span className="chat-agent-start-time">{formatTime(item.ts)}</span>
+                  </div>
+                </div>
+              )
             case 'tool':
               return (
                 <div key={item.key} className="chat-row chat-row-tool">

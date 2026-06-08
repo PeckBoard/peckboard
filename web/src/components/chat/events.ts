@@ -43,6 +43,7 @@ export type DisplayItem =
     }
   | { type: 'step'; label: string; key: string }
   | { type: 'agent-start'; model: string; effort: string; ts: number; key: string }
+  | { type: 'interrupt'; ts: number; key: string }
   | { type: 'question'; questionId: string; questions: QuestionItem[]; key: string }
   | {
       type: 'question-resolved'
@@ -169,6 +170,14 @@ export function buildDisplayItems(events: Event[]): DisplayItem[] {
   const openTools = new Map<string, number>() // tool_use_id -> index in items
   const seenToolIds = new Set<string>() // dedupe tool starts from streaming + snapshot
 
+  // When the user hits the Interrupt button we get two events back-to-back:
+  // an `interrupt` (from the HTTP route) and an `agent-end` with status
+  // crashed / reason "interrupted" (from the provider's stream loop winding
+  // down). The dedicated interrupt notice already tells the user what
+  // happened, so suppress the paired crash banner — without this the UI
+  // looks like the agent broke instead of acknowledging the user's action.
+  let pendingInterrupt = false
+
   for (const ev of events) {
     switch (ev.kind) {
       case 'user': {
@@ -226,6 +235,7 @@ export function buildDisplayItems(events: Event[]): DisplayItem[] {
       }
       case 'agent-start': {
         flushAssistant()
+        pendingInterrupt = false
         const model = (ev.data.model as string) ?? 'default'
         // Strip provider prefix for display
         const displayModel = model.replace(/^claude:/, '')
@@ -236,8 +246,13 @@ export function buildDisplayItems(events: Event[]): DisplayItem[] {
       case 'agent-end': {
         flushAssistant()
         closeOpenTools(items, openTools, 'agent ended before tool completed')
+        const reason = (ev.data.reason as string) ?? 'unknown error'
+        const wasInterrupted = pendingInterrupt && reason === 'interrupted'
+        pendingInterrupt = false
+        if (wasInterrupted) {
+          break
+        }
         if ((ev.data.status as string) === 'crashed') {
-          const reason = (ev.data.reason as string) ?? 'unknown error'
           const stderr = ev.data.stderr as string | undefined
           const crashText = stderr
             ? `Agent crashed: ${reason}\n\n${stderr}`
@@ -256,7 +271,8 @@ export function buildDisplayItems(events: Event[]): DisplayItem[] {
       case 'interrupt': {
         flushAssistant()
         closeOpenTools(items, openTools, 'interrupted')
-        items.push({ type: 'system', text: 'Interrupted', key: ev.id, ts: ev.ts })
+        items.push({ type: 'interrupt', ts: ev.ts, key: ev.id })
+        pendingInterrupt = true
         break
       }
       case 'system': {
