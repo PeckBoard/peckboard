@@ -13,7 +13,10 @@ mod push;
 mod queued;
 mod sessions;
 mod tabs;
+mod todos;
 mod users;
+
+pub use todos::ProjectCardTodos;
 
 /// Outcome of `Db::delete_folder_if_empty`. Avoids the older check-then-
 /// act pattern (`list_sessions_by_folder().await` + `delete_folder().await`)

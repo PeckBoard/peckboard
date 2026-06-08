@@ -142,6 +142,50 @@
   max-height: 40vh;
 }
 
+/* Dedicated session-todos view: same chat-container shell, but the body is
+   a centered scroll surface that hosts the shared TodoPanel as a card,
+   matching the project-todo-summary roll-up styling. */
+.session-todos-body {
+  flex: 1;
+  overflow-y: auto;
+  padding: 20px 24px;
+}
+
+.session-todos-wrapper {
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface);
+  overflow: hidden;
+}
+
+.session-todos-wrapper .todo-panel {
+  border-bottom: none;
+  max-height: none;
+}
+
+.session-todos-empty {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  padding: 60px 24px;
+  color: var(--text3);
+  text-align: center;
+}
+
+.session-todos-empty p {
+  margin: 0;
+  font-size: var(--text-base);
+  font-weight: 600;
+  color: var(--text2);
+}
+
+.session-todos-empty span {
+  font-size: var(--text-sm);
+  max-width: 360px;
+}
+
 /* Per-card "done/total" progress chip on a kanban card. */
 .card-todo-badge {
   flex: 0 0 auto;

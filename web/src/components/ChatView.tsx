@@ -29,6 +29,7 @@ const EMPTY_TODOS: TodoItem[] = []
 
 interface ChatViewProps {
   sessionId: string
+  onOpenTodos?: () => void
 }
 
 function ResolvedQuestionCard({
@@ -202,7 +203,7 @@ interface ModelInfo {
   display_name: string
 }
 
-export default function ChatView({ sessionId }: ChatViewProps) {
+export default function ChatView({ sessionId, onOpenTodos }: ChatViewProps) {
   const events = useSessionsStore((s) => s.eventsBySession[sessionId] ?? EMPTY_EVENTS)
   const loading = useSessionsStore((s) => s.loadingEventsBySession[sessionId] ?? true)
   const fetchEvents = useSessionsStore((s) => s.fetchEvents)
@@ -469,6 +470,36 @@ export default function ChatView({ sessionId }: ChatViewProps) {
           <span className={getStatusDotClass(agentStatus)} />
           {getStatusLabel(agentStatus)}
         </span>
+        {onOpenTodos && (
+          <button
+            className="chat-toolbar-tasks"
+            onClick={onOpenTodos}
+            type="button"
+            title="Tasks"
+            data-testid="chat-toolbar-tasks"
+          >
+            <svg
+              width="14"
+              height="14"
+              viewBox="0 0 24 24"
+              fill="none"
+              stroke="currentColor"
+              strokeWidth="2"
+              strokeLinecap="round"
+              strokeLinejoin="round"
+              aria-hidden="true"
+            >
+              <polyline points="9 11 12 14 22 4" />
+              <path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11" />
+            </svg>
+            <span>Tasks</span>
+            {todos.length > 0 && (
+              <span className="chat-toolbar-tasks-count">
+                {todos.filter((t) => t.status === 'done').length}/{todos.length}
+              </span>
+            )}
+          </button>
+        )}
         <div className="chat-toolbar-menu-wrapper" ref={menuRef}>
           <button
             className="chat-toolbar-menu"

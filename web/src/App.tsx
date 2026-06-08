@@ -8,8 +8,10 @@ import { useProjectsStore } from './store/projects'
 import { useFoldersStore } from './store/folders'
 import LoginModal from './components/LoginModal'
 import ChatView from './components/ChatView'
+import SessionTodosView from './components/SessionTodosView'
 import ProjectList from './components/ProjectList'
 import KanbanBoard from './components/KanbanBoard'
+import ProjectTodosView from './components/ProjectTodosView'
 import SettingsPage from './components/SettingsPage'
 import NewSessionModal from './components/NewSessionModal'
 import NewProjectModal from './components/NewProjectModal'
@@ -25,35 +27,46 @@ import './App.css'
 
 type View = 'sessions' | 'projects' | 'folders' | 'settings' | 'reports' | 'git' | 'users'
 
-/** Parse the current URL pathname into a view and optional active ID. */
-function parseRoute(): { view: View; activeId: string | null } {
+/** Sub-view for an active session or project — 'chat' (the default
+ *  ChatView / KanbanBoard) or 'todos' (the dedicated *TodosView reachable at
+ *  /{sessions,projects}/{id}/todos). */
+type SessionSub = 'chat' | 'todos'
+
+/** Parse the current URL pathname into a view, optional active ID, and an
+ *  optional sub-view (only meaningful when `view` is 'sessions' or
+ *  'projects'). */
+function parseRoute(): { view: View; activeId: string | null; sub: SessionSub } {
   const path = window.location.pathname
   const segments = path.split('/').filter(Boolean)
   const first = segments[0] || 'sessions'
   const id = segments[1] || null
+  const third = segments[2] || null
 
   switch (first) {
     case 'sessions':
-      return { view: 'sessions', activeId: id }
+      return { view: 'sessions', activeId: id, sub: third === 'todos' ? 'todos' : 'chat' }
     case 'projects':
-      return { view: 'projects', activeId: id }
+      return { view: 'projects', activeId: id, sub: third === 'todos' ? 'todos' : 'chat' }
     case 'folders':
-      return { view: 'folders', activeId: null }
+      return { view: 'folders', activeId: null, sub: 'chat' }
     case 'settings':
-      return { view: 'settings', activeId: null }
+      return { view: 'settings', activeId: null, sub: 'chat' }
     case 'reports':
-      return { view: 'reports', activeId: null }
+      return { view: 'reports', activeId: null, sub: 'chat' }
     case 'git':
-      return { view: 'git', activeId: null }
+      return { view: 'git', activeId: null, sub: 'chat' }
     case 'users':
-      return { view: 'users', activeId: null }
+      return { view: 'users', activeId: null, sub: 'chat' }
     default:
-      return { view: 'sessions', activeId: null }
+      return { view: 'sessions', activeId: null, sub: 'chat' }
   }
 }
 
-/** Build a URL path for a given view and optional ID. */
-function buildPath(view: View, activeId?: string | null): string {
+/** Build a URL path for a given view, optional ID, and optional sub-view. */
+function buildPath(view: View, activeId?: string | null, sub?: SessionSub): string {
+  if ((view === 'sessions' || view === 'projects') && activeId && sub === 'todos') {
+    return `/${view}/${activeId}/todos`
+  }
   if (activeId) return `/${view}/${activeId}`
   if (view === 'sessions') return '/'
   return `/${view}`
@@ -117,6 +130,7 @@ function App() {
   // Parse initial route
   const initialRoute = useMemo(() => parseRoute(), [])
   const [view, setViewRaw] = useState<View>(initialRoute.view)
+  const [sessionSub, setSessionSub] = useState<SessionSub>(initialRoute.sub)
   const [showNewSession, setShowNewSession] = useState(false)
   const [showNewProject, setShowNewProject] = useState(false)
   const [contextSession, setContextSession] = useState<string | null>(null)
@@ -147,13 +161,17 @@ function App() {
   }, [userMenuOpen])
 
   // Navigate: update view + push URL
-  const navigate = useCallback((newView: View, activeId?: string | null) => {
-    setViewRaw(newView)
-    const path = buildPath(newView, activeId)
-    if (window.location.pathname !== path) {
-      history.pushState(null, '', path)
-    }
-  }, [])
+  const navigate = useCallback(
+    (newView: View, activeId?: string | null, sub: SessionSub = 'chat') => {
+      setViewRaw(newView)
+      setSessionSub(sub)
+      const path = buildPath(newView, activeId, sub)
+      if (window.location.pathname !== path) {
+        history.pushState(null, '', path)
+      }
+    },
+    [],
+  )
 
   // Sync active IDs from initial URL once authenticated
   useEffect(() => {
@@ -171,6 +189,7 @@ function App() {
     const onPopState = () => {
       const route = parseRoute()
       setViewRaw(route.view)
+      setSessionSub(route.sub)
       if (route.view === 'sessions') {
         setActiveSession(route.activeId)
       } else if (route.view === 'projects') {
@@ -184,22 +203,22 @@ function App() {
   // When activeSessionId changes, update URL.
   useEffect(() => {
     if (view === 'sessions') {
-      const path = activeSessionId ? `/sessions/${activeSessionId}` : '/'
+      const path = buildPath('sessions', activeSessionId, activeSessionId ? sessionSub : 'chat')
       if (window.location.pathname !== path) {
         history.pushState(null, '', path)
       }
     }
-  }, [view, activeSessionId])
+  }, [view, activeSessionId, sessionSub])
 
   // When activeProjectId changes, update URL.
   useEffect(() => {
     if (view === 'projects') {
-      const path = activeProjectId ? `/projects/${activeProjectId}` : '/projects'
+      const path = buildPath('projects', activeProjectId, activeProjectId ? sessionSub : 'chat')
       if (window.location.pathname !== path) {
         history.pushState(null, '', path)
       }
     }
-  }, [view, activeProjectId])
+  }, [view, activeProjectId, sessionSub])
 
   useEffect(() => {
     const saved = localStorage.getItem('peckboard_theme')
@@ -680,7 +699,17 @@ function App() {
         )}
         {view === 'sessions' &&
           (activeSessionId ? (
-            <ChatView sessionId={activeSessionId} />
+            sessionSub === 'todos' ? (
+              <SessionTodosView
+                sessionId={activeSessionId}
+                onBack={() => navigate('sessions', activeSessionId, 'chat')}
+              />
+            ) : (
+              <ChatView
+                sessionId={activeSessionId}
+                onOpenTodos={() => navigate('sessions', activeSessionId, 'todos')}
+              />
+            )
           ) : (
             <div className="list-view">
               <div className="list-view-header">
@@ -752,7 +781,17 @@ function App() {
           ))}
         {view === 'projects' &&
           (activeProjectId ? (
-            <KanbanBoard projectId={activeProjectId} />
+            sessionSub === 'todos' ? (
+              <ProjectTodosView
+                projectId={activeProjectId}
+                onClose={() => navigate('projects', activeProjectId, 'chat')}
+              />
+            ) : (
+              <KanbanBoard
+                projectId={activeProjectId}
+                onOpenTodos={() => navigate('projects', activeProjectId, 'todos')}
+              />
+            )
           ) : (
             <div className="list-view">
               <ProjectList onNewProject={() => setShowNewProject(true)} />

@@ -188,4 +188,18 @@ async fn mock_todo_emits_normalized_todo_event() {
         snapshot.todos[2].status,
         peckboard::todo::TodoStatus::Pending
     );
+
+    // The emit_event seam must also mirror the snapshot into the
+    // dedicated `todos` table — that's the source of truth for the
+    // load-time read path.
+    let stored = db.list_session_todos("s1").await.unwrap();
+    assert_eq!(stored.len(), 3);
+    assert_eq!(stored[0].status, peckboard::todo::TodoStatus::Done);
+    assert_eq!(stored[1].status, peckboard::todo::TodoStatus::InProgress);
+    assert_eq!(stored[1].content, "Wire up the route");
+    assert_eq!(
+        stored[1].active_form.as_deref(),
+        Some("Wiring up the route")
+    );
+    assert_eq!(stored[2].status, peckboard::todo::TodoStatus::Pending);
 }
