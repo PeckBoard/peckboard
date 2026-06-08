@@ -377,6 +377,11 @@ impl McpToolRegistry {
                         "effort": {
                             "type": "string",
                             "description": "Optional effort level (low, medium, high, xhigh, max)"
+                        },
+                        "depends_on": {
+                            "type": "array",
+                            "items": { "type": "string" },
+                            "description": "Optional ids of cards this card depends on. A worker only starts this card once every dependency is 'done'. Dependencies must be existing cards in the same project."
                         }
                     },
                     "required": ["title", "description"],
@@ -1197,11 +1202,25 @@ impl McpToolRegistry {
             .and_then(|v| v.as_str())
             .map(|s| s.to_string());
 
+        // Optional dependency ids: only keep those that are real cards in
+        // the same project (a new card can't form a cycle since nothing
+        // points back to it yet).
+        let depends_on: Vec<String> = args
+            .get("depends_on")
+            .and_then(|v| v.as_array())
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                    .collect()
+            })
+            .unwrap_or_default();
+
         let now = chrono::Utc::now().to_rfc3339();
+        let card_id = uuid::Uuid::new_v4().to_string();
         let card = ctx
             .db
             .create_card(NewCard {
-                id: uuid::Uuid::new_v4().to_string(),
+                id: card_id.clone(),
                 project_id: project_id.to_string(),
                 title: title.to_string(),
                 description: description.to_string(),
@@ -1215,11 +1234,32 @@ impl McpToolRegistry {
             })
             .await?;
 
+        if !depends_on.is_empty() {
+            let project_cards = ctx.db.list_cards_by_project(project_id).await?;
+            let valid: std::collections::HashSet<&str> =
+                project_cards.iter().map(|c| c.id.as_str()).collect();
+            let deps: Vec<String> = depends_on
+                .into_iter()
+                .filter(|d| d != &card_id && valid.contains(d.as_str()))
+                .collect();
+            ctx.db.set_card_dependencies(&card_id, deps).await?;
+        }
+
+        let deps = ctx
+            .db
+            .list_card_dependencies(&card_id)
+            .await
+            .unwrap_or_default();
+        let mut card_value = serde_json::to_value(&card).unwrap_or_else(|_| serde_json::json!({}));
+        if let Some(obj) = card_value.as_object_mut() {
+            obj.insert("depends_on".into(), serde_json::json!(deps));
+        }
+
         // Broadcast for live kanban
         ctx.broadcaster.broadcast(crate::ws::broadcaster::WsEvent {
             event_type: "card-update".into(),
             session_id: project_id.to_string(),
-            data: serde_json::json!({ "card": card }),
+            data: serde_json::json!({ "card": card_value }),
         });
 
         Ok(serde_json::json!({
@@ -1229,6 +1269,7 @@ impl McpToolRegistry {
                 "title": card.title,
                 "step": card.step,
                 "priority": card.priority,
+                "depends_on": deps,
             }
         }))
     }
@@ -1247,9 +1288,33 @@ impl McpToolRegistry {
 
         let cards = ctx.db.list_cards_by_project(&project_id).await?;
 
+        // Dependency edges + per-card step, so each card can report what it
+        // depends on and whether those dependencies are all `done`.
+        let edges = ctx
+            .db
+            .list_dependencies_by_project(&project_id)
+            .await
+            .unwrap_or_default();
+        let mut deps_by_card: std::collections::HashMap<&str, Vec<&str>> =
+            std::collections::HashMap::new();
+        for (card_id, dep_id) in &edges {
+            deps_by_card
+                .entry(card_id.as_str())
+                .or_default()
+                .push(dep_id.as_str());
+        }
+        let step_by_id: std::collections::HashMap<&str, &str> = cards
+            .iter()
+            .map(|c| (c.id.as_str(), c.step.as_str()))
+            .collect();
+
         let items: Vec<Value> = cards
             .iter()
             .map(|c| {
+                let deps = deps_by_card.get(c.id.as_str()).cloned().unwrap_or_default();
+                let dependencies_met = deps
+                    .iter()
+                    .all(|dep| step_by_id.get(dep).copied() == Some("done"));
                 serde_json::json!({
                     "id": c.id,
                     "title": c.title,
@@ -1263,6 +1328,8 @@ impl McpToolRegistry {
                     "effort": c.effort,
                     "worker_session_id": c.worker_session_id,
                     "has_worker": c.worker_session_id.is_some(),
+                    "depends_on": deps,
+                    "dependencies_met": dependencies_met,
                 })
             })
             .collect();

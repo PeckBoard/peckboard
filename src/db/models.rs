@@ -182,6 +182,24 @@ pub struct UpdateCard {
     pub updated_at: Option<String>,
 }
 
+// ── Card dependencies ────────────────────────────────────────────────
+
+#[derive(Queryable, Selectable, Serialize, Debug, Clone)]
+#[diesel(table_name = card_dependencies)]
+pub struct CardDependency {
+    pub card_id: String,
+    pub depends_on_card_id: String,
+    pub created_at: String,
+}
+
+#[derive(Insertable, Debug)]
+#[diesel(table_name = card_dependencies)]
+pub struct NewCardDependency {
+    pub card_id: String,
+    pub depends_on_card_id: String,
+    pub created_at: String,
+}
+
 // ── Events ───────────────────────────────────────────────────────────
 
 #[derive(Queryable, Selectable, Serialize, Debug, Clone)]

@@ -75,7 +75,36 @@ pub async fn check_and_spawn_workers(state: &Arc<AppState>) {
             continue;
         }
 
-        // Find unassigned, unblocked cards not in terminal states
+        // Dependency gate: a card can only be picked up once every card it
+        // depends on has reached `done`. `wont_do` does NOT satisfy a
+        // dependency — a dropped prerequisite keeps the dependent waiting
+        // until the user edits the dependency list.
+        let dep_edges = state
+            .db
+            .list_dependencies_by_project(&project.id)
+            .await
+            .unwrap_or_default();
+        let mut deps_by_card: std::collections::HashMap<&str, Vec<&str>> =
+            std::collections::HashMap::new();
+        for (card_id, dep_id) in &dep_edges {
+            deps_by_card
+                .entry(card_id.as_str())
+                .or_default()
+                .push(dep_id.as_str());
+        }
+        let step_by_id: std::collections::HashMap<&str, &str> = cards
+            .iter()
+            .map(|c| (c.id.as_str(), c.step.as_str()))
+            .collect();
+        let deps_satisfied = |card_id: &str| -> bool {
+            deps_by_card.get(card_id).is_none_or(|deps| {
+                deps.iter()
+                    .all(|dep| step_by_id.get(dep).copied() == Some("done"))
+            })
+        };
+
+        // Find unassigned, unblocked cards not in terminal states whose
+        // dependencies are all satisfied.
         let available: Vec<&Card> = cards
             .iter()
             .filter(|c| {
@@ -83,6 +112,7 @@ pub async fn check_and_spawn_workers(state: &Arc<AppState>) {
                     && !c.blocked
                     && c.step != "done"
                     && c.step != "wont_do"
+                    && deps_satisfied(&c.id)
             })
             .collect();
 

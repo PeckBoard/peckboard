@@ -10,7 +10,7 @@ use serde::Deserialize;
 use std::sync::Arc;
 
 use crate::auth::middleware::require_auth;
-use crate::db::models::{NewCard, NewProject, UpdateCard, UpdateProject};
+use crate::db::models::{Card, NewCard, NewProject, UpdateCard, UpdateProject};
 use crate::state::AppState;
 
 // ── Request / query types ───────────────────────────────────────────
@@ -70,6 +70,9 @@ struct CreateCardRequest {
     workflow: Option<String>,
     model: Option<String>,
     effort: Option<String>,
+    /// Ids of cards this card depends on (must be `done` before a worker
+    /// will pick this card up).
+    depends_on: Option<Vec<String>>,
 }
 
 #[derive(Deserialize, serde::Serialize)]
@@ -86,6 +89,124 @@ struct UpdateCardRequest {
     handoff_context: Option<Option<String>>,
     blocked: Option<bool>,
     block_reason: Option<Option<String>>,
+    /// When present, replaces the card's full dependency set.
+    depends_on: Option<Vec<String>>,
+}
+
+// ── Card dependency helpers ─────────────────────────────────────────
+
+type RouteError = (StatusCode, Json<serde_json::Value>);
+
+fn bad_request(msg: impl Into<String>) -> RouteError {
+    (
+        StatusCode::BAD_REQUEST,
+        Json(serde_json::json!({ "error": msg.into() })),
+    )
+}
+
+fn internal_error(e: impl std::fmt::Display) -> RouteError {
+    (
+        StatusCode::INTERNAL_SERVER_ERROR,
+        Json(serde_json::json!({ "error": e.to_string() })),
+    )
+}
+
+/// Would setting `card_id`'s dependencies to `new_deps` introduce a
+/// cycle, given the project's existing edges (each card mapped to the
+/// cards it depends on)? Walk outward from `new_deps`; if we can reach
+/// `card_id` again, the new edges would close a loop.
+fn would_create_cycle(
+    edges: &std::collections::HashMap<String, Vec<String>>,
+    card_id: &str,
+    new_deps: &[String],
+) -> bool {
+    let mut stack: Vec<&str> = new_deps.iter().map(|s| s.as_str()).collect();
+    let mut seen: std::collections::HashSet<&str> = std::collections::HashSet::new();
+    while let Some(node) = stack.pop() {
+        if node == card_id {
+            return true;
+        }
+        if !seen.insert(node) {
+            continue;
+        }
+        if let Some(next) = edges.get(node) {
+            stack.extend(next.iter().map(|s| s.as_str()));
+        }
+    }
+    false
+}
+
+/// Validate a proposed dependency set for `card_id` and persist it.
+/// Rejects dependencies that aren't cards in the same project and any set
+/// that would form a cycle. An empty set clears the card's dependencies.
+async fn apply_dependencies(
+    state: &AppState,
+    project_id: &str,
+    card_id: &str,
+    depends_on: Vec<String>,
+) -> Result<(), RouteError> {
+    // Drop self-references and duplicates.
+    let mut deps: Vec<String> = Vec::new();
+    for d in depends_on {
+        if d != card_id && !deps.contains(&d) {
+            deps.push(d);
+        }
+    }
+
+    if !deps.is_empty() {
+        let project_cards = state
+            .db
+            .list_cards_by_project(project_id)
+            .await
+            .map_err(internal_error)?;
+        let valid_ids: std::collections::HashSet<&str> =
+            project_cards.iter().map(|c| c.id.as_str()).collect();
+        for d in &deps {
+            if !valid_ids.contains(d.as_str()) {
+                return Err(bad_request(format!(
+                    "dependency {d} is not a card in this project"
+                )));
+            }
+        }
+
+        let existing = state
+            .db
+            .list_dependencies_by_project(project_id)
+            .await
+            .map_err(internal_error)?;
+        let mut edges: std::collections::HashMap<String, Vec<String>> =
+            std::collections::HashMap::new();
+        for (c, dep) in existing {
+            edges.entry(c).or_default().push(dep);
+        }
+        if would_create_cycle(&edges, card_id, &deps) {
+            return Err(bad_request(
+                "dependency cycle detected — a card cannot transitively depend on itself",
+            ));
+        }
+    }
+
+    state
+        .db
+        .set_card_dependencies(card_id, deps)
+        .await
+        .map_err(internal_error)?;
+    Ok(())
+}
+
+/// Serialize a card with its `depends_on` ids attached, so the frontend
+/// can render dependency state without a second round-trip.
+async fn card_json_with_deps(state: &AppState, card: &Card) -> serde_json::Value {
+    let deps = state
+        .db
+        .list_card_dependencies(&card.id)
+        .await
+        .unwrap_or_default();
+    let mut value = serde_json::to_value(card).unwrap_or_else(|_| serde_json::json!({}));
+    if let Some(obj) = value.as_object_mut() {
+        obj.insert("depends_on".into(), serde_json::json!(deps));
+    }
+    value
 }
 
 // ── Router ──────────────────────────────────────────────────────────
@@ -444,7 +565,7 @@ async fn create_card(
         .db
         .create_card(NewCard {
             id,
-            project_id,
+            project_id: project_id.clone(),
             title: body.title,
             description: body.description,
             step: body.step,
@@ -463,19 +584,27 @@ async fn create_card(
             )
         })?;
 
+    // Persist dependencies if requested. On validation failure roll the
+    // card back so we don't leave a half-created card behind.
+    if let Some(depends_on) = body.depends_on {
+        if let Err(err) = apply_dependencies(&state, &project_id, &card.id, depends_on).await {
+            let _ = state.db.delete_card(&card.id).await;
+            return Err(err);
+        }
+    }
+
+    let card_value = card_json_with_deps(&state, &card).await;
+
     // Broadcast card creation for live kanban
     state
         .broadcaster
         .broadcast(crate::ws::broadcaster::WsEvent {
             event_type: "card-update".into(),
             session_id: card.project_id.clone(),
-            data: serde_json::json!({ "card": card }),
+            data: serde_json::json!({ "card": card_value }),
         });
 
-    Ok::<_, (StatusCode, Json<serde_json::Value>)>((
-        StatusCode::CREATED,
-        Json(serde_json::json!(card)),
-    ))
+    Ok::<_, (StatusCode, Json<serde_json::Value>)>((StatusCode::CREATED, Json(card_value)))
 }
 
 /// GET /api/projects/:id/cards
@@ -495,7 +624,34 @@ async fn list_cards(
             )
         })?;
 
-    Ok::<_, (StatusCode, Json<serde_json::Value>)>(Json(serde_json::json!(cards)))
+    // Attach each card's dependency ids from a single project-wide query.
+    let edges = state
+        .db
+        .list_dependencies_by_project(&project_id)
+        .await
+        .unwrap_or_default();
+    let mut deps_by_card: std::collections::HashMap<&str, Vec<&str>> =
+        std::collections::HashMap::new();
+    for (card_id, dep_id) in &edges {
+        deps_by_card
+            .entry(card_id.as_str())
+            .or_default()
+            .push(dep_id.as_str());
+    }
+
+    let items: Vec<serde_json::Value> = cards
+        .iter()
+        .map(|c| {
+            let deps = deps_by_card.get(c.id.as_str()).cloned().unwrap_or_default();
+            let mut value = serde_json::to_value(c).unwrap_or_else(|_| serde_json::json!({}));
+            if let Some(obj) = value.as_object_mut() {
+                obj.insert("depends_on".into(), serde_json::json!(deps));
+            }
+            value
+        })
+        .collect();
+
+    Ok::<_, (StatusCode, Json<serde_json::Value>)>(Json(serde_json::json!(items)))
 }
 
 /// PUT /api/projects/:id/cards/:card_id
@@ -567,7 +723,8 @@ async fn update_card(
             && body.model.is_none()
             && body.effort.is_none()
             && body.blocked.is_none()
-            && body.block_reason.is_none();
+            && body.block_reason.is_none()
+            && body.depends_on.is_none();
         if !only_step {
             return Err((
                 StatusCode::FORBIDDEN,
@@ -589,6 +746,12 @@ async fn update_card(
                 ),
             ));
         }
+    }
+
+    // Replace dependencies first so a validation failure (unknown dep or
+    // cycle) aborts before we mutate any card fields.
+    if let Some(depends_on) = body.depends_on {
+        apply_dependencies(&state, &existing.project_id, &card_id, depends_on).await?;
     }
 
     let update = UpdateCard {
@@ -616,15 +779,16 @@ async fn update_card(
 
     match card {
         Some(c) => {
+            let card_value = card_json_with_deps(&state, &c).await;
             // Broadcast card update for live kanban
             state
                 .broadcaster
                 .broadcast(crate::ws::broadcaster::WsEvent {
                     event_type: "card-update".into(),
                     session_id: c.project_id.clone(),
-                    data: serde_json::json!({ "card": c }),
+                    data: serde_json::json!({ "card": card_value }),
                 });
-            Ok(Json(serde_json::json!(c)))
+            Ok(Json(card_value))
         }
         None => Err((
             StatusCode::NOT_FOUND,
@@ -969,4 +1133,45 @@ async fn list_pending_questions(
     Ok::<_, (StatusCode, Json<serde_json::Value>)>(Json(
         serde_json::json!({ "questions": pending_questions }),
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::would_create_cycle;
+    use std::collections::HashMap;
+
+    fn edges(pairs: &[(&str, &str)]) -> HashMap<String, Vec<String>> {
+        let mut m: HashMap<String, Vec<String>> = HashMap::new();
+        for (c, d) in pairs {
+            m.entry(c.to_string()).or_default().push(d.to_string());
+        }
+        m
+    }
+
+    #[test]
+    fn direct_self_dependency_is_a_cycle() {
+        let e = edges(&[]);
+        assert!(would_create_cycle(&e, "a", &["a".to_string()]));
+    }
+
+    #[test]
+    fn back_edge_closes_a_cycle() {
+        // Existing: b depends on a. Making a depend on b closes a->b->a.
+        let e = edges(&[("b", "a")]);
+        assert!(would_create_cycle(&e, "a", &["b".to_string()]));
+    }
+
+    #[test]
+    fn transitive_back_edge_is_a_cycle() {
+        // c->b->a already; adding a->c closes the loop.
+        let e = edges(&[("c", "b"), ("b", "a")]);
+        assert!(would_create_cycle(&e, "a", &["c".to_string()]));
+    }
+
+    #[test]
+    fn independent_dependencies_are_fine() {
+        // a and b both depend on shared leaf z — no cycle.
+        let e = edges(&[("a", "z"), ("b", "z")]);
+        assert!(!would_create_cycle(&e, "a", &["b".to_string()]));
+    }
 }

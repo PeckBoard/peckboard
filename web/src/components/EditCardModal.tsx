@@ -29,6 +29,7 @@ const EFFORT_OPTIONS = [
 
 export default function EditCardModal({ projectId, card, onClose }: Props) {
   const updateCard = useProjectsStore((s) => s.updateCard)
+  const cards = useProjectsStore((s) => s.cards)
 
   const isTerminal = card.step === 'done' || card.step === 'wont_do'
   const isBacklog = card.step === 'backlog'
@@ -41,8 +42,12 @@ export default function EditCardModal({ projectId, card, onClose }: Props) {
   const [effort, setEffort] = useState(card.effort ?? '')
   const [blocked, setBlocked] = useState(card.blocked)
   const [blockReason, setBlockReason] = useState(card.block_reason ?? '')
+  const [dependsOn, setDependsOn] = useState<string[]>(card.depends_on ?? [])
   const [error, setError] = useState('')
   const [loading, setLoading] = useState(false)
+
+  // Any other card in the project is a candidate prerequisite.
+  const dependencyCandidates = cards.filter((c) => c.id !== card.id)
 
   const [workflows, setWorkflows] = useState<WorkflowInfo[]>([])
   const [models, setModels] = useState<ModelInfo[]>([])
@@ -91,6 +96,7 @@ export default function EditCardModal({ projectId, card, onClose }: Props) {
         block_reason: blocked ? blockReason.trim() || null : null,
         model: model || null,
         effort: effort || null,
+        depends_on: dependsOn,
       }
       // Description and workflow are backlog-only fields
       if (isBacklog) {
@@ -249,6 +255,33 @@ export default function EditCardModal({ projectId, card, onClose }: Props) {
               />
             )}
           </div>
+          {dependencyCandidates.length > 0 && (
+            <div className="form-field">
+              <label className="form-label">Depends On</label>
+              <p className="form-hint" style={{ marginTop: 0, marginBottom: 6 }}>
+                A worker only starts this card once every selected card is done.
+              </p>
+              <div className="kanban-deps-options">
+                {dependencyCandidates.map((c) => (
+                  <label key={c.id} className="kanban-dep-option">
+                    <input
+                      type="checkbox"
+                      checked={dependsOn.includes(c.id)}
+                      onChange={(e) =>
+                        setDependsOn((prev) =>
+                          e.target.checked ? [...prev, c.id] : prev.filter((id) => id !== c.id),
+                        )
+                      }
+                    />
+                    <span>
+                      {c.title}
+                      {c.step === 'done' ? ' (done)' : ''}
+                    </span>
+                  </label>
+                ))}
+              </div>
+            </div>
+          )}
           {error && <p className="form-error">{error}</p>}
           <div className="form-actions">
             <button type="button" className="btn-secondary" onClick={onClose}>

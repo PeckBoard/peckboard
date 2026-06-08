@@ -226,6 +226,87 @@ mod tests {
         assert!(db.delete_card("c1").await.unwrap());
     }
 
+    // ── Card dependencies ────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn test_card_dependencies() {
+        let db = test_db();
+        let ts = now();
+
+        db.create_folder(NewFolder {
+            id: "f1".into(),
+            name: "Folder".into(),
+            path: "/tmp/f".into(),
+            created_at: ts.clone(),
+        })
+        .await
+        .unwrap();
+        db.create_project(NewProject {
+            id: "p1".into(),
+            name: "Project".into(),
+            context: "".into(),
+            folder_id: "f1".into(),
+            worker_count: 1,
+            status: "active".into(),
+            default_workflow: None,
+            model: None,
+            effort: None,
+            parallel_instructions: false,
+            auto_notify_changes: true,
+            worker_communication: false,
+            created_at: ts.clone(),
+            last_accessed_at: ts.clone(),
+        })
+        .await
+        .unwrap();
+
+        let mk = |id: &str| NewCard {
+            id: id.into(),
+            project_id: "p1".into(),
+            title: id.into(),
+            description: "".into(),
+            step: "backlog".into(),
+            priority: 1,
+            workflow: None,
+            model: None,
+            effort: None,
+            created_at: ts.clone(),
+            updated_at: ts.clone(),
+        };
+        db.create_card(mk("a")).await.unwrap();
+        db.create_card(mk("b")).await.unwrap();
+        db.create_card(mk("c")).await.unwrap();
+
+        // c depends on a and b; self-edge is dropped.
+        db.set_card_dependencies("c", vec!["a".into(), "b".into(), "c".into()])
+            .await
+            .unwrap();
+        let mut deps = db.list_card_dependencies("c").await.unwrap();
+        deps.sort();
+        assert_eq!(deps, vec!["a".to_string(), "b".to_string()]);
+
+        // Replacing the set removes the old edges.
+        db.set_card_dependencies("c", vec!["a".into()])
+            .await
+            .unwrap();
+        assert_eq!(db.list_card_dependencies("c").await.unwrap(), vec!["a"]);
+
+        // Project-wide edge listing.
+        let edges = db.list_dependencies_by_project("p1").await.unwrap();
+        assert_eq!(edges, vec![("c".to_string(), "a".to_string())]);
+
+        // Deleting a prerequisite cascades its edges away (FK ON DELETE
+        // CASCADE), so the dependent is no longer stranded.
+        assert!(db.delete_card("a").await.unwrap());
+        assert!(db.list_card_dependencies("c").await.unwrap().is_empty());
+        assert!(
+            db.list_dependencies_by_project("p1")
+                .await
+                .unwrap()
+                .is_empty()
+        );
+    }
+
     // ── Events ───────────────────────────────────────────────────────
 
     #[tokio::test]

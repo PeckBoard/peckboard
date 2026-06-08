@@ -1489,6 +1489,18 @@
   margin-top: 8px;
   font-weight: 500;
 }
+.waiting-indicator {
+  font-size: var(--text-xs);
+  color: var(--warning);
+  margin-top: 8px;
+  font-weight: 500;
+}
+.dep-done {
+  color: var(--success);
+}
+.dep-pending {
+  color: var(--warning);
+}
 
 .card-detail-grid {
   margin: 16px 0;
@@ -3025,6 +3037,34 @@ select.form-input {
 .kanban-add-row select {
   flex: 1;
   min-width: 120px;
+}
+
+.kanban-add-deps {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin-top: 8px;
+}
+.kanban-add-deps-label {
+  font-size: var(--text-xs);
+  color: var(--text2);
+}
+.kanban-deps-options {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  max-height: 160px;
+  overflow-y: auto;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 6px 8px;
+}
+.kanban-dep-option {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: var(--text-sm);
+  cursor: pointer;
 }
 
 /* ─── Card Detail Actions ─── */

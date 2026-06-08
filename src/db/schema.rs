@@ -67,6 +67,14 @@ diesel::table! {
 }
 
 diesel::table! {
+    card_dependencies (card_id, depends_on_card_id) {
+        card_id -> Text,
+        depends_on_card_id -> Text,
+        created_at -> Text,
+    }
+}
+
+diesel::table! {
     events (id) {
         id -> Text,
         session_id -> Text,
@@ -156,6 +164,7 @@ diesel::allow_tables_to_appear_in_same_query!(
     sessions,
     projects,
     cards,
+    card_dependencies,
     events,
     users,
     auth_sessions,

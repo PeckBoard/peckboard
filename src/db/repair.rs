@@ -21,6 +21,24 @@ use diesel::sqlite::SqliteConnection;
 pub fn ensure_schema(conn: &mut SqliteConnection) -> anyhow::Result<()> {
     ensure_projects_worker_communication_columns(conn)?;
     ensure_queued_messages_model_columns(conn)?;
+    ensure_card_dependencies_table(conn)?;
+    Ok(())
+}
+
+/// Heal DBs that predate (or somehow skipped) the
+/// `1780883838_card_dependencies` migration. `CREATE TABLE IF NOT
+/// EXISTS` is inherently idempotent, so this is safe on a fully-migrated
+/// DB and only does work on one that lacks the table.
+fn ensure_card_dependencies_table(conn: &mut SqliteConnection) -> anyhow::Result<()> {
+    sql_query(
+        "CREATE TABLE IF NOT EXISTS card_dependencies (
+            card_id             TEXT NOT NULL REFERENCES cards(id) ON DELETE CASCADE,
+            depends_on_card_id  TEXT NOT NULL REFERENCES cards(id) ON DELETE CASCADE,
+            created_at          TEXT NOT NULL,
+            PRIMARY KEY (card_id, depends_on_card_id)
+        )",
+    )
+    .execute(conn)?;
     Ok(())
 }
 

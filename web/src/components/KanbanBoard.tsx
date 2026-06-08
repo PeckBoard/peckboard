@@ -145,6 +145,7 @@ export default function KanbanBoard({ projectId }: KanbanBoardProps) {
   const [addWorkflow, setAddWorkflow] = useState('')
   const [addModel, setAddModel] = useState('')
   const [addEffort, setAddEffort] = useState('')
+  const [addDependsOn, setAddDependsOn] = useState<string[]>([])
   const [addSubmitting, setAddSubmitting] = useState(false)
   const [confirmDeleteId, setConfirmDeleteId] = useState<string | null>(null)
   const [draggingCardId, setDraggingCardId] = useState<string | null>(null)
@@ -437,6 +438,17 @@ export default function KanbanBoard({ projectId }: KanbanBoardProps) {
   }
   const cardsByStep = (step: string) => cards.filter((c) => normalizeStep(c.step) === step)
 
+  // Dependency ids resolve to titles/steps via this lookup so cards can
+  // show which prerequisites are still outstanding.
+  const cardById = new Map(cards.map((c) => [c.id, c]))
+  // A dependency is satisfied only when the prerequisite card is `done`
+  // (matches the backend gate). Deleted prerequisites resolve to undefined
+  // and no longer block.
+  const unmetDeps = (card: Card): Card[] =>
+    (card.depends_on ?? [])
+      .map((id) => cardById.get(id))
+      .filter((c): c is Card => c != null && normalizeStep(c.step) !== 'done')
+
   const handleAddCard = async () => {
     if (!addTitle.trim() || addSubmitting) return
     setAddSubmitting(true)
@@ -449,6 +461,7 @@ export default function KanbanBoard({ projectId }: KanbanBoardProps) {
         workflow: addWorkflow || undefined,
         model: addModel || undefined,
         effort: addEffort || undefined,
+        depends_on: addDependsOn.length > 0 ? addDependsOn : undefined,
       } as Partial<Card>)
       setAddTitle('')
       setAddDescription('')
@@ -456,6 +469,7 @@ export default function KanbanBoard({ projectId }: KanbanBoardProps) {
       setAddWorkflow('')
       setAddModel('')
       setAddEffort('')
+      setAddDependsOn([])
       setShowAddForm(false)
     } catch {
       /* ignore */
@@ -812,6 +826,29 @@ export default function KanbanBoard({ projectId }: KanbanBoardProps) {
               ))}
             </select>
           </div>
+          {cards.length > 0 && (
+            <div className="kanban-add-deps">
+              <span className="kanban-add-deps-label">
+                Depends on (starts after these are done):
+              </span>
+              <div className="kanban-deps-options">
+                {cards.map((c) => (
+                  <label key={c.id} className="kanban-dep-option">
+                    <input
+                      type="checkbox"
+                      checked={addDependsOn.includes(c.id)}
+                      onChange={(e) =>
+                        setAddDependsOn((prev) =>
+                          e.target.checked ? [...prev, c.id] : prev.filter((id) => id !== c.id),
+                        )
+                      }
+                    />
+                    <span>{c.title}</span>
+                  </label>
+                ))}
+              </div>
+            </div>
+          )}
           <button
             className="btn-primary"
             onClick={handleAddCard}
@@ -863,6 +900,22 @@ export default function KanbanBoard({ projectId }: KanbanBoardProps) {
                         Blocked{card.block_reason ? `: ${card.block_reason}` : ''}
                       </div>
                     )}
+                    {!card.worker_session_id &&
+                      card.step !== 'done' &&
+                      card.step !== 'wont_do' &&
+                      (() => {
+                        const pending = unmetDeps(card)
+                        if (pending.length === 0) return null
+                        return (
+                          <div
+                            className="waiting-indicator"
+                            title={`Waiting on: ${pending.map((c) => c.title).join(', ')}`}
+                          >
+                            Waiting on {pending.length}{' '}
+                            {pending.length === 1 ? 'dependency' : 'dependencies'}
+                          </div>
+                        )
+                      })()}
                     {card.worker_session_id && (
                       <div className="kanban-card-worker">Worker active</div>
                     )}
@@ -1000,6 +1053,25 @@ export default function KanbanBoard({ projectId }: KanbanBoardProps) {
                 <div className="card-detail-row">
                   <span className="card-detail-label">Block Reason</span>
                   <span>{selectedCard.block_reason}</span>
+                </div>
+              )}
+              {(selectedCard.depends_on?.length ?? 0) > 0 && (
+                <div className="card-detail-row">
+                  <span className="card-detail-label">Depends On</span>
+                  <span>
+                    {selectedCard.depends_on!.map((id) => {
+                      const dep = cardById.get(id)
+                      if (!dep) return null
+                      const done = normalizeStep(dep.step) === 'done'
+                      return (
+                        <span key={id} className={done ? 'dep-done' : 'dep-pending'}>
+                          {dep.title}
+                          {done ? ' ✓' : ' (pending)'}
+                          {'  '}
+                        </span>
+                      )
+                    })}
+                  </span>
                 </div>
               )}
               {selectedCard.description && (
