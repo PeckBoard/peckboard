@@ -78,7 +78,7 @@ async fn mock_echo_flows_through_dispatcher() {
     };
 
     manager
-        .send_message("s1", "hello mock", &db, &broadcaster, config)
+        .send_or_queue("s1", "hello mock", &db, &broadcaster, config)
         .await
         .expect("dispatch succeeds");
 

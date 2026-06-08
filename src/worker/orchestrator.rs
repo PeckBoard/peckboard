@@ -119,7 +119,7 @@ pub async fn check_and_spawn_workers(state: &Arc<AppState>) {
                 .await
                 .unwrap_or_default();
             for ws in &worker_sessions {
-                let _guard = state.session_manager.lock_session(&ws.id).await;
+                let lock = state.session_manager.lock_session(&ws.id).await;
                 if state.session_manager.is_running(&ws.id).await {
                     continue;
                 }
@@ -203,7 +203,7 @@ pub async fn check_and_spawn_workers(state: &Arc<AppState>) {
 
                 if let Err(e) = state
                     .session_manager
-                    .send_message(&ws.id, &prompt, &state.db, &state.broadcaster, config)
+                    .send_message_locked(&lock, &prompt, &state.db, &state.broadcaster, config)
                     .await
                 {
                     tracing::error!(session_id = %ws.id, "Failed to resume for pending message: {e}");
@@ -220,7 +220,9 @@ pub async fn check_and_spawn_workers(state: &Arc<AppState>) {
 /// 3. Issue an MCP bearer token scoped to the session/project.
 /// 4. Write the per-session MCP config file.
 /// 5. Build the worker prompt from `pipeline::build_worker_prompt`.
-/// 6. Call `session_manager.send_message()` with the prompt.
+/// 6. Acquire the per-session lock and call `send_message_locked` with
+///    the prompt. The lock is uncontested for a fresh uuid but routes us
+///    through the single, proof-token-protected dispatch entry point.
 /// 7. Update `card.worker_session_id` to point at the new session.
 async fn spawn_worker_for_card(
     state: &Arc<AppState>,
@@ -363,10 +365,14 @@ async fn spawn_worker_for_card(
         }),
     };
 
+    // The lock is uncontested for a brand-new uuid; we acquire it anyway
+    // so `send_message_locked` is the single dispatch entry point.
+    let lock = state.session_manager.lock_session(&session_id).await;
     state
         .session_manager
-        .send_message(&session_id, &prompt, &state.db, &state.broadcaster, config)
+        .send_message_locked(&lock, &prompt, &state.db, &state.broadcaster, config)
         .await?;
+    drop(lock);
 
     // 7. Update card: assign worker and move to in_progress if in backlog
     let new_step = if card.step == "backlog" || card.step == "todo" {

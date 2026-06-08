@@ -98,7 +98,7 @@ async fn interrupt_aborts_blocking_run_and_delivers_completion() {
 
     // mock:ask blocks indefinitely waiting on stdin.
     manager
-        .send_message("s1", "go", &db, &broadcaster, cfg("mock:ask"))
+        .send_or_queue("s1", "go", &db, &broadcaster, cfg("mock:ask"))
         .await
         .unwrap();
 
@@ -185,7 +185,7 @@ async fn drain_queued_delivers_after_clean_completion() {
 
     // Start (and let complete) a short echo run.
     manager
-        .send_message("s3", "first", &db, &broadcaster, cfg("mock:echo"))
+        .send_or_queue("s3", "first", &db, &broadcaster, cfg("mock:echo"))
         .await
         .unwrap();
     let first = wait_for_completion(&mut rx, "s3").await;
@@ -232,7 +232,7 @@ async fn drain_queued_delivers_after_interrupted_run() {
 
     // Start a blocking run and queue a message while it's busy.
     manager
-        .send_message("s4", "first", &db, &broadcaster, cfg("mock:ask"))
+        .send_or_queue("s4", "first", &db, &broadcaster, cfg("mock:ask"))
         .await
         .unwrap();
     tokio::time::sleep(Duration::from_millis(50)).await;
@@ -291,7 +291,7 @@ async fn drain_queued_is_noop_while_already_running() {
 
     // Start a long-running ask scenario.
     manager
-        .send_message("s6", "go", &db, &broadcaster, cfg("mock:ask"))
+        .send_or_queue("s6", "go", &db, &broadcaster, cfg("mock:ask"))
         .await
         .unwrap();
     tokio::time::sleep(Duration::from_millis(50)).await;

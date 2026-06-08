@@ -483,7 +483,7 @@ async fn append_event(
         let state_clone = state.clone();
         let id_clone = id.clone();
         tokio::spawn(async move {
-            let _guard = state_clone.session_manager.lock_session(&id_clone).await;
+            let lock = state_clone.session_manager.lock_session(&id_clone).await;
 
             if state_clone.session_manager.is_running(&id_clone).await {
                 // Persist the answer for the in-flight run's completion
@@ -576,8 +576,8 @@ async fn append_event(
 
             if let Err(e) = state_clone
                 .session_manager
-                .send_message(
-                    &id_clone,
+                .send_message_locked(
+                    &lock,
                     &answer_text,
                     &state_clone.db,
                     &state_clone.broadcaster,
@@ -771,7 +771,7 @@ async fn send_message(
     // already running, queue the message; otherwise spawn a fresh run.
     // Holding the lock across the is_running check + action prevents two
     // concurrent POSTs from both spawning agents on the same session.
-    let _guard = state.session_manager.lock_session(&id).await;
+    let lock = state.session_manager.lock_session(&id).await;
 
     if state.session_manager.is_running(&id).await {
         if attachment_ids.as_ref().is_some_and(|a| !a.is_empty()) {
@@ -881,7 +881,7 @@ async fn send_message(
 
     if let Err(e) = state
         .session_manager
-        .send_message(&id, &resolved_text, &state.db, &state.broadcaster, config)
+        .send_message_locked(&lock, &resolved_text, &state.db, &state.broadcaster, config)
         .await
     {
         tracing::error!(session_id = %id, "Failed to spawn claude process: {}", e);

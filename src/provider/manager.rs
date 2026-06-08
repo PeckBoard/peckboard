@@ -26,6 +26,25 @@ pub enum SendOutcome {
     Queued,
 }
 
+/// Proof token: the bearer holds the per-session lock for `session_id`.
+///
+/// The only way to construct one is via `SessionManager::lock_session` or
+/// `try_lock_session`, so a `&SessionLock` parameter on
+/// `send_message_locked` is a compile-time guarantee that the caller has
+/// serialised against every other `is_running → dispatch` decision for
+/// this session. Pre-merge, four code paths were dispatching without the
+/// lock and double-spawning agents; this type makes that bug a type error.
+pub struct SessionLock {
+    _guard: OwnedMutexGuard<()>,
+    session_id: String,
+}
+
+impl SessionLock {
+    pub fn session_id(&self) -> &str {
+        &self.session_id
+    }
+}
+
 /// Provider-agnostic dispatcher that owns the registry and routes session
 /// operations to the right `AgentProvider` based on the model id.
 ///
@@ -61,41 +80,57 @@ impl SessionManager {
     /// MUST hold this lock to keep the "is_running → spawn or enqueue"
     /// decision atomic. The watchdog uses `try_lock_session` to skip
     /// sessions whose handler is mid-flight.
-    pub async fn lock_session(&self, session_id: &str) -> OwnedMutexGuard<()> {
+    ///
+    /// The returned `SessionLock` is the proof token required to call
+    /// `send_message_locked`.
+    pub async fn lock_session(&self, session_id: &str) -> SessionLock {
         let lock = {
             let mut map = self.session_locks.lock().await;
             map.entry(session_id.to_string())
                 .or_insert_with(|| Arc::new(Mutex::new(())))
                 .clone()
         };
-        lock.lock_owned().await
+        SessionLock {
+            _guard: lock.lock_owned().await,
+            session_id: session_id.to_string(),
+        }
     }
 
     /// Best-effort try-lock used by the watchdog. Returns None if the lock
     /// is currently held (i.e. a handler is mid-flight on this session).
-    pub async fn try_lock_session(&self, session_id: &str) -> Option<OwnedMutexGuard<()>> {
+    pub async fn try_lock_session(&self, session_id: &str) -> Option<SessionLock> {
         let lock = {
             let mut map = self.session_locks.lock().await;
             map.entry(session_id.to_string())
                 .or_insert_with(|| Arc::new(Mutex::new(())))
                 .clone()
         };
-        lock.try_lock_owned().ok()
+        lock.try_lock_owned().ok().map(|g| SessionLock {
+            _guard: g,
+            session_id: session_id.to_string(),
+        })
     }
 
-    /// Dispatch a new agent run for `session_id`.
+    /// Dispatch a new agent run for `lock.session_id()`.
     ///
-    /// Resolves working dir + resume conversation id from the DB, picks the
-    /// provider based on the model prefix, and forwards to its
-    /// `AgentProvider::send_message`.
-    pub async fn send_message(
+    /// The `&SessionLock` parameter is the compile-time proof that the
+    /// per-session lock is held — every dispatch site must obtain one via
+    /// `lock_session` (or `try_lock_session`) first, which serialises this
+    /// call against every other `is_running → dispatch` decision for the
+    /// same session. External callers should prefer the higher-level
+    /// `send_or_queue` / `drain_queued`, which acquire the lock for you;
+    /// reach for this directly only when you've already locked because
+    /// you needed a custom check (e.g. the route handler that appends a
+    /// user event before dispatching).
+    pub async fn send_message_locked(
         &self,
-        session_id: &str,
+        lock: &SessionLock,
         message: &str,
         db: &Db,
         broadcaster: &Arc<Broadcaster>,
         config: SpawnConfig,
     ) -> anyhow::Result<()> {
+        let session_id = lock.session_id();
         let session = db
             .get_session(session_id)
             .await?
@@ -170,7 +205,7 @@ impl SessionManager {
         broadcaster: &Arc<Broadcaster>,
         config: SpawnConfig,
     ) -> anyhow::Result<SendOutcome> {
-        let _guard = self.lock_session(session_id).await;
+        let lock = self.lock_session(session_id).await;
 
         if self.is_running(session_id).await {
             let now = chrono::Utc::now().to_rfc3339();
@@ -194,7 +229,7 @@ impl SessionManager {
             return Ok(SendOutcome::Queued);
         }
 
-        self.send_message(session_id, message, db, broadcaster, config)
+        self.send_message_locked(&lock, message, db, broadcaster, config)
             .await?;
         Ok(SendOutcome::Started)
     }
@@ -213,7 +248,7 @@ impl SessionManager {
         broadcaster: &Arc<Broadcaster>,
         config: SpawnConfig,
     ) -> anyhow::Result<bool> {
-        let _guard = self.lock_session(session_id).await;
+        let lock = self.lock_session(session_id).await;
 
         if self.is_running(session_id).await {
             return Ok(false);
@@ -262,7 +297,7 @@ impl SessionManager {
             session_id = %session_id,
             "Draining queued message and spawning agent run"
         );
-        self.send_message(session_id, &queued.text, db, broadcaster, config)
+        self.send_message_locked(&lock, &queued.text, db, broadcaster, config)
             .await?;
         Ok(true)
     }
