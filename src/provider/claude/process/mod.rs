@@ -1,17 +1,47 @@
-//! Claude CLI subprocess lifecycle: spawn, stream stdout events, deliver
-//! stdin lines from peers, and produce a final `Completed`/`Crashed`
-//! event on exit. The pure parsing logic lives in [`parser`] and the
-//! best-effort path sandbox in [`sandbox`].
+//! Long-lived Claude CLI subprocess: spawn once per session, stream
+//! stdout events, accept new user messages on stdin mid-turn, and
+//! synthesize per-turn `Completed`/`Crashed` events from the CLI's
+//! `result` frames (and process exit, when it actually dies).
+//!
+//! # Architecture: long-lived process, multiple turns
+//!
+//! The CLI is spawned with `--input-format=stream-json
+//! --output-format=stream-json`. In that mode it reads JSON envelopes
+//! from stdin one line at a time and emits a stream of events on
+//! stdout. Each `{"type":"user","message":{role,content}}` line is a
+//! fresh user turn; the CLI consumes it whenever it's ready (i.e.
+//! after the in-flight `result` event for any prior turn) and
+//! responds with the usual `system.init` → `assistant`* → `result`
+//! sequence.
+//!
+//! The peckboard process loop is therefore **per-session**, not
+//! per-turn. We map the CLI's `result` event to a peckboard
+//! `Completed` (carrying the `conversation_id`) and reset the
+//! `turn_active` flag, but the child keeps running. The next
+//! `send_message` writes another user envelope and a new turn
+//! begins. A message that arrives mid-turn is forwarded straight to
+//! stdin; the CLI buffers it and consumes it after the current
+//! `result`. That's the mid-stream injection contract — there is no
+//! peckboard-layer queue, the CLI is the queue.
+//!
+//! Process death is the only thing that produces a `Crashed`. If the
+//! CLI dies between turns the next `send_message` respawns with
+//! `--resume <conv_id>` so the conversation continues seamlessly.
+//!
+//! The pure parsing logic lives in [`parser`] and the best-effort
+//! path sandbox in [`sandbox`].
 
 mod parser;
 mod sandbox;
 
 use std::process::Stdio;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::{Child, Command};
 use tokio::sync::Notify;
+use tokio::sync::mpsc;
 
 use crate::db::Db;
 use crate::provider::agent::emit_event;
@@ -23,6 +53,20 @@ use crate::provider::stream::SpawnConfig;
 use parser::{normalize_questions, parse_stream_json};
 use sandbox::check_path_violation;
 
+/// One message bound for the CLI's stdin.
+pub enum StdinMsg {
+    /// Start a new user turn. The string is the prompt body; the
+    /// loop wraps it in the stream-json envelope before writing.
+    /// Setting the turn-active flag is delegated to the loop so the
+    /// "is mid-turn" bit only flips once the bytes have actually
+    /// reached the child.
+    UserTurn(String),
+    /// Write an already-formed JSON line verbatim (control_response
+    /// frame, worker-comms delivery, etc.). Doesn't touch the
+    /// turn-active flag.
+    RawLine(String),
+}
+
 /// Handle to a running Claude CLI child process.
 pub struct ClaudeProcess {
     child: Child,
@@ -30,28 +74,24 @@ pub struct ClaudeProcess {
 }
 
 impl ClaudeProcess {
-    /// Access the session ID associated with this process.
     pub fn session_id(&self) -> &str {
         &self.session_id
     }
-
-    /// Check whether the child process is still running.
-    pub fn is_running(&mut self) -> bool {
-        matches!(self.child.try_wait(), Ok(None))
-    }
 }
 
-/// Spawn a Claude CLI child process.
+/// Spawn a Claude CLI child process for `session_id`.
 ///
-/// Builds CLI arguments via `build_cli_args`, sets the working directory,
-/// and configures stdin/stdout/stderr pipes.
+/// Builds CLI arguments via `build_cli_args`, sets the working
+/// directory, and configures stdin/stdout/stderr pipes. The first
+/// user message is delivered separately, via `stdin_rx`, so the same
+/// spawn path works for "first turn" and "resume after idle reaper
+/// killed the prior child."
 pub fn spawn_claude(
     session_id: &str,
-    message: &str,
     config: &SpawnConfig,
     conversation_id: Option<&str>,
 ) -> anyhow::Result<ClaudeProcess> {
-    let args = build_cli_args(message, config, conversation_id);
+    let args = build_cli_args(config, conversation_id);
 
     // args[0] is "claude", the rest are actual arguments
     let program = &args[0];
@@ -93,26 +133,56 @@ pub fn spawn_claude(
     })
 }
 
-/// Read stdout line-by-line from the Claude CLI process, parse each JSON line
-/// into a `ProviderEvent`, persist it to the DB, and broadcast via WebSocket.
+/// State shared with the streaming loop for mid-turn coordination.
 ///
-/// This function consumes the process and runs until the child exits or
-/// `cancel` is notified. On exit it emits either a `Completed`, `Crashed`,
-/// or (when cancelled) a `Crashed { reason: "interrupted" }` event.
+/// These flags read from outside the loop (e.g. `is_running` on the
+/// provider, the idle reaper) so they live in `Arc` instead of as
+/// loop-local mutables.
+pub struct LoopState {
+    /// True while a turn is in flight (between writing a `user`
+    /// frame and seeing the matching `result`). Drives
+    /// `AgentProvider::is_running`.
+    pub turn_active: Arc<AtomicBool>,
+    /// Epoch milliseconds of the most recent event from the CLI.
+    /// The idle reaper uses this to decide when a quiet, alive
+    /// process has been around long enough to recycle.
+    pub last_activity: Arc<AtomicU64>,
+}
+
+fn now_ms() -> u64 {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
+}
+
+/// Read stdout line-by-line from the Claude CLI process, parse each
+/// JSON line into a `ProviderEvent`, persist it to the DB, and
+/// broadcast via WebSocket.
 ///
-/// The `stdin_rx` channel allows callers to feed text into the process's
-/// stdin (e.g. to deliver answers to questions).
+/// This loop runs for the **lifetime of the child process**, not per
+/// turn. A CLI `result` event is mapped to a peckboard `Completed`
+/// event (and clears `turn_active`) but the child keeps running and
+/// waits for the next user envelope on stdin.
 ///
-/// Returns `true` if the process completed successfully, `false` if it
-/// crashed, was interrupted, or encountered an error.
+/// `stdin_rx` is the channel callers use to deliver new turns (or
+/// raw JSON lines like control_response frames). The loop exits when
+/// `cancel` is notified, when stdin closes, or when the child exits
+/// on its own. If the child exits while `turn_active` is set we
+/// synthesize a `Crashed { reason: "interrupted" | "exit-mid-turn"
+/// }` event so the UI doesn't show a hung spinner.
+///
+/// Returns `true` if the process ended after a clean `Completed`
+/// (no mid-turn death), `false` otherwise.
 pub async fn stream_events(
     mut process: ClaudeProcess,
     db: Db,
     broadcaster: Arc<Broadcaster>,
-    stdin_rx: tokio::sync::mpsc::Receiver<String>,
-    _stdin_tx: tokio::sync::mpsc::Sender<String>,
+    mut stdin_rx: mpsc::Receiver<StdinMsg>,
     allowed_dir: String,
     cancel: Arc<Notify>,
+    state: LoopState,
 ) -> bool {
     let session_id = process.session_id.clone();
 
@@ -131,30 +201,39 @@ pub async fn stream_events(
                 },
             )
             .await;
+            state.turn_active.store(false, Ordering::Release);
             return false;
         }
     };
 
-    // Take the stdin handle — we'll write to it directly from the stream loop
-    // for control_responses (low latency) and via the channel for external
-    // callers (e.g. question-resolved route handler).
     let mut stdin_pipe = process.child.stdin.take();
-
     let stderr = process.child.stderr.take();
 
     let reader = BufReader::new(stdout);
     let mut lines = reader.lines();
-    let mut stdin_rx = stdin_rx;
 
     // Subscribe to broadcasts for immediate inter-worker message delivery
     let mut broadcast_rx = broadcaster.subscribe_all();
 
-    // Track state for mapping stream-json events
+    // Per-conversation state. These cursors persist across turns —
+    // a `result` event resets the per-turn flags below but keeps the
+    // conversation_id and model_name we've discovered.
     let mut conversation_id: Option<String> = None;
     let mut model_name: Option<String> = None;
+
+    // Per-turn state. The parser uses `emitted_start` to suppress
+    // duplicate `Started` events within one turn; we reset it on each
+    // `result` so the next turn's `system.init` emits a fresh
+    // agent-start event. `current_tool_id` is per-turn for the same
+    // reason — a long-running process must not carry over a tool id
+    // from a previous turn's content_block_start that never saw its
+    // matching content_block_stop because the parser sees them all
+    // in order anyway.
     let mut current_tool_id: Option<String> = None;
     let mut emitted_start = false;
+
     let mut was_cancelled = false;
+    let mut saw_clean_completion = false;
 
     // Track file-modifying tool calls for auto cross-worker notification
     let mut pending_file_changes: Vec<String> = Vec::new();
@@ -162,7 +241,7 @@ pub async fn stream_events(
         std::collections::HashMap::new();
 
     loop {
-        let line = tokio::select! {
+        let event_source = tokio::select! {
             _ = cancel.notified() => {
                 tracing::info!(
                     session_id = %session_id,
@@ -174,26 +253,59 @@ pub async fn stream_events(
             }
             result = lines.next_line() => {
                 match result {
-                    Ok(Some(line)) => line,
-                    _ => break, // stdout closed
+                    Ok(Some(line)) => EventSource::Stdout(line),
+                    Ok(None) => break, // stdout closed
+                    Err(e) => {
+                        tracing::warn!(session_id = %session_id, "stdout read error: {e}");
+                        break;
+                    }
                 }
             }
-            Some(text) = stdin_rx.recv() => {
-                // External caller (e.g. question-resolved) wants to write to stdin
-                write_stdin_line(&mut stdin_pipe, &text, &session_id).await;
-                continue;
+            msg = stdin_rx.recv() => {
+                match msg {
+                    Some(StdinMsg::UserTurn(text)) => {
+                        let frame = super::build_user_message_frame(&text);
+                        if write_stdin_line(&mut stdin_pipe, &frame, &session_id).await {
+                            state.turn_active.store(true, Ordering::Release);
+                            state.last_activity.store(now_ms(), Ordering::Release);
+                        }
+                        continue;
+                    }
+                    Some(StdinMsg::RawLine(line)) => {
+                        write_stdin_line(&mut stdin_pipe, &line, &session_id).await;
+                        continue;
+                    }
+                    None => {
+                        // All sender handles dropped — the provider has
+                        // released the run. We can't accept more turns,
+                        // but the child may still be mid-turn; let
+                        // stdout drain to its `result` then exit.
+                        // Falling through to the next select round is
+                        // fine because `recv()` will keep returning
+                        // None and the other branches still drive
+                        // progress.
+                        continue;
+                    }
+                }
             }
             event = broadcast_rx.recv() => {
                 if let Ok(ws_event) = event {
-                    if ws_event.session_id != session_id {
-                        // Not for us
-                    } else if ws_event.event_type == "worker-stdin-deliver" {
+                    if ws_event.session_id == session_id
+                        && ws_event.event_type == "worker-stdin-deliver"
+                    {
                         if let Some(text) = ws_event.data.get("text").and_then(|v| v.as_str()) {
                             tracing::info!(
                                 session_id = %session_id,
                                 "Delivering inter-worker message to running agent"
                             );
-                            write_stdin_line(&mut stdin_pipe, text, &session_id).await;
+                            // Inter-worker deliveries are user messages,
+                            // not raw control frames, so they need the
+                            // stream-json envelope.
+                            let frame = super::build_user_message_frame(text);
+                            if write_stdin_line(&mut stdin_pipe, &frame, &session_id).await {
+                                state.turn_active.store(true, Ordering::Release);
+                                state.last_activity.store(now_ms(), Ordering::Release);
+                            }
                         }
                     }
                 }
@@ -201,285 +313,255 @@ pub async fn stream_events(
             }
         };
 
-        {
-            let line = line.trim().to_string();
-            if line.is_empty() {
+        let EventSource::Stdout(line) = event_source;
+        let line = line.trim().to_string();
+        if line.is_empty() {
+            continue;
+        }
+
+        state.last_activity.store(now_ms(), Ordering::Release);
+
+        let json: serde_json::Value = match serde_json::from_str(&line) {
+            Ok(v) => v,
+            Err(e) => {
+                tracing::warn!(
+                    session_id = %session_id,
+                    "Non-JSON line from claude: {} (error: {})",
+                    &line[..line.len().min(200)],
+                    e
+                );
                 continue;
             }
+        };
 
-            let json: serde_json::Value = match serde_json::from_str(&line) {
-                Ok(v) => v,
-                Err(e) => {
+        // Handle control_request events directly (need stdin access for auto-allow)
+        if json.get("type").and_then(|v| v.as_str()) == Some("control_request") {
+            let request = json.get("request");
+            let request_id = json
+                .get("request_id")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            let subtype = request
+                .and_then(|r| r.get("subtype"))
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            let tool_name = request
+                .and_then(|r| r.get("tool_name"))
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+
+            if subtype == "can_use_tool" && tool_name == "AskUserQuestion" {
+                let input = request.and_then(|r| r.get("input"));
+                let tool_use_id = request
+                    .and_then(|r| r.get("tool_use_id"))
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
+                let questions = normalize_questions(input);
+
+                let event_data = serde_json::json!({
+                    "requestId": request_id,
+                    "toolUseId": tool_use_id,
+                    "questions": questions,
+                });
+
+                if let Ok(db_event) = db
+                    .append_event(&session_id, "question", event_data.clone())
+                    .await
+                {
+                    let now = chrono::Utc::now().to_rfc3339();
+                    let _ = db
+                        .update_session(
+                            &session_id,
+                            crate::db::models::UpdateSession {
+                                last_activity: Some(now),
+                                ..Default::default()
+                            },
+                        )
+                        .await;
+                    broadcaster.broadcast(WsEvent {
+                        event_type: "event".into(),
+                        session_id: session_id.clone(),
+                        data: serde_json::json!({
+                            "id": db_event.id,
+                            "seq": db_event.seq,
+                            "ts": db_event.ts,
+                            "kind": "question",
+                            "data": event_data,
+                        }),
+                    });
+                }
+            } else if subtype == "can_use_tool" {
+                let input = request
+                    .and_then(|r| r.get("input"))
+                    .cloned()
+                    .unwrap_or(serde_json::json!({}));
+
+                let denied = check_path_violation(tool_name, &input, &allowed_dir);
+
+                let frame = if let Some(reason) = denied {
                     tracing::warn!(
                         session_id = %session_id,
-                        "Non-JSON line from claude: {} (error: {})",
-                        &line[..line.len().min(200)],
-                        e
+                        tool = tool_name,
+                        "Denied tool use: {}",
+                        reason
                     );
-                    continue;
-                }
-            };
+                    serde_json::json!({
+                        "type": "control_response",
+                        "response": {
+                            "subtype": "success",
+                            "request_id": request_id,
+                            "response": {
+                                "behavior": "deny",
+                                "message": reason,
+                            }
+                        }
+                    })
+                } else {
+                    serde_json::json!({
+                        "type": "control_response",
+                        "response": {
+                            "subtype": "success",
+                            "request_id": request_id,
+                            "response": {
+                                "behavior": "allow",
+                                "updatedInput": input,
+                            }
+                        }
+                    })
+                };
+                write_stdin_line(&mut stdin_pipe, &frame.to_string(), &session_id).await;
+            }
+            continue;
+        }
 
-            // Handle control_request events directly (need stdin access for auto-allow)
-            if json.get("type").and_then(|v| v.as_str()) == Some("control_request") {
-                let request = json.get("request");
-                let request_id = json
-                    .get("request_id")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("");
-                let subtype = request
-                    .and_then(|r| r.get("subtype"))
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("");
-                let tool_name = request
-                    .and_then(|r| r.get("tool_name"))
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("");
+        // `result` is the per-turn completion marker in stream-json
+        // mode. We surface it as a peckboard `Completed` event AND
+        // reset per-turn state so the next user message produces a
+        // fresh agent-start. The child keeps running.
+        let is_result_event = json.get("type").and_then(|v| v.as_str()) == Some("result");
 
-                if subtype == "can_use_tool" && tool_name == "AskUserQuestion" {
-                    // Parse and normalize questions from the input
-                    let input = request.and_then(|r| r.get("input"));
-                    let tool_use_id = request
-                        .and_then(|r| r.get("tool_use_id"))
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("");
-                    let questions = normalize_questions(input);
+        let events = parse_stream_json(
+            &json,
+            &mut conversation_id,
+            &mut model_name,
+            &mut current_tool_id,
+            &mut emitted_start,
+        );
 
-                    let event_data = serde_json::json!({
-                        "requestId": request_id,
-                        "toolUseId": tool_use_id,
-                        "questions": questions,
-                    });
+        let mut todo_events: Vec<ProviderEvent> = Vec::new();
 
-                    // Emit as a "question" event
-                    if let Ok(db_event) = db
-                        .append_event(&session_id, "question", event_data.clone())
-                        .await
-                    {
-                        let now = chrono::Utc::now().to_rfc3339();
-                        let _ = db
-                            .update_session(
-                                &session_id,
-                                crate::db::models::UpdateSession {
-                                    last_activity: Some(now),
-                                    ..Default::default()
-                                },
-                            )
-                            .await;
-                        broadcaster.broadcast(WsEvent {
-                            event_type: "event".into(),
-                            session_id: session_id.clone(),
-                            data: serde_json::json!({
-                                "id": db_event.id,
-                                "seq": db_event.seq,
-                                "ts": db_event.ts,
-                                "kind": "question",
-                                "data": event_data,
-                            }),
+        for event in &events {
+            match event {
+                ProviderEvent::ToolStart {
+                    tool_use_id,
+                    name,
+                    input,
+                } => {
+                    if let Some(snapshot) = crate::todo::snapshot_from_tool_call(name, input) {
+                        todo_events.push(ProviderEvent::Todo {
+                            todos: snapshot.todos,
                         });
                     }
-                } else if subtype == "can_use_tool" {
-                    let input = request
-                        .and_then(|r| r.get("input"))
-                        .cloned()
-                        .unwrap_or(serde_json::json!({}));
-
-                    // Check if the tool is trying to access paths outside the allowed directory
-                    let denied = check_path_violation(tool_name, &input, &allowed_dir);
-
-                    let frame = if let Some(reason) = denied {
-                        tracing::warn!(
-                            session_id = %session_id,
-                            tool = tool_name,
-                            "Denied tool use: {}",
-                            reason
-                        );
-                        serde_json::json!({
-                            "type": "control_response",
-                            "response": {
-                                "subtype": "success",
-                                "request_id": request_id,
-                                "response": {
-                                    "behavior": "deny",
-                                    "message": reason,
-                                }
-                            }
-                        })
-                    } else {
-                        serde_json::json!({
-                            "type": "control_response",
-                            "response": {
-                                "subtype": "success",
-                                "request_id": request_id,
-                                "response": {
-                                    "behavior": "allow",
-                                    "updatedInput": input,
-                                }
-                            }
-                        })
+                    let file_path = match name.as_str() {
+                        "Write" | "Edit" => input
+                            .get("file_path")
+                            .and_then(|v| v.as_str())
+                            .map(|s| s.to_string()),
+                        _ => None,
                     };
-                    write_stdin_line(&mut stdin_pipe, &frame.to_string(), &session_id).await;
+                    pending_tool_names.insert(tool_use_id.clone(), (name.clone(), file_path));
                 }
-                continue;
-            }
-
-            // Extract events based on the stream-json type field
-            let events = parse_stream_json(
-                &json,
-                &mut conversation_id,
-                &mut model_name,
-                &mut current_tool_id,
-                &mut emitted_start,
-            );
-
-            // Normalized todo snapshots derived from TodoWrite tool calls in
-            // this batch. Emitted as their own `todo` events after the raw
-            // provider events below, so the tool call stays visible AND a
-            // provider-agnostic snapshot lands in the log for the UI.
-            let mut todo_events: Vec<ProviderEvent> = Vec::new();
-
-            for event in &events {
-                // Track file-modifying tools for cross-worker notification
-                match event {
-                    ProviderEvent::ToolStart {
-                        tool_use_id,
-                        name,
-                        input,
-                    } => {
-                        if let Some(snapshot) = crate::todo::snapshot_from_tool_call(name, input) {
-                            todo_events.push(ProviderEvent::Todo {
-                                todos: snapshot.todos,
-                            });
-                        }
-                        let file_path = match name.as_str() {
-                            "Write" | "Edit" => input
-                                .get("file_path")
-                                .and_then(|v| v.as_str())
-                                .map(|s| s.to_string()),
-                            _ => None,
-                        };
-                        pending_tool_names.insert(tool_use_id.clone(), (name.clone(), file_path));
-                    }
-                    ProviderEvent::ToolEnd {
-                        tool_use_id, error, ..
-                    } => {
-                        // Always drop the pending entry on any end (success or
-                        // error) so the post-exit synthetic-end sweep only
-                        // covers truly orphaned tools.
-                        if let Some((name, file_path)) = pending_tool_names.remove(tool_use_id) {
-                            if error.is_none() {
-                                if let Some(path) = file_path {
-                                    if name == "Write" || name == "Edit" {
-                                        pending_file_changes.push(path);
-                                    }
+                ProviderEvent::ToolEnd {
+                    tool_use_id, error, ..
+                } => {
+                    if let Some((name, file_path)) = pending_tool_names.remove(tool_use_id) {
+                        if error.is_none() {
+                            if let Some(path) = file_path {
+                                if name == "Write" || name == "Edit" {
+                                    pending_file_changes.push(path);
                                 }
                             }
                         }
                     }
-                    // When the agent produces text or ends, flush accumulated file changes
-                    ProviderEvent::Text { .. } | ProviderEvent::Completed { .. } => {
-                        if !pending_file_changes.is_empty() {
-                            let changes = std::mem::take(&mut pending_file_changes);
-                            if let Ok(Some(session)) = db.get_session(&session_id).await {
-                                if session.is_worker {
-                                    if let Some(ref project_id) = session.project_id {
-                                        // Check if auto_notify_changes is enabled for this project
-                                        let auto_notify = db
-                                            .get_project(project_id)
-                                            .await
-                                            .ok()
-                                            .flatten()
-                                            .map(|p| p.auto_notify_changes)
-                                            .unwrap_or(true);
-
-                                        if auto_notify {
-                                            let card_title =
-                                                if let Some(ref card_id) = session.card_id {
-                                                    db.get_card(card_id)
-                                                        .await
-                                                        .ok()
-                                                        .flatten()
-                                                        .map(|c| c.title)
-                                                } else {
-                                                    None
-                                                };
-
-                                            if let Ok(workers) =
-                                                db.list_worker_sessions_by_project(project_id).await
-                                            {
-                                                let msg = format!(
-                                                    "[Auto] Worker on \"{}\" modified: {}",
-                                                    card_title.as_deref().unwrap_or("unknown"),
-                                                    changes.join(", ")
-                                                );
-                                                for ws in &workers {
-                                                    if ws.id == session_id {
-                                                        continue;
-                                                    }
-                                                    if let Some(ref cid) = ws.card_id {
-                                                        if let Ok(Some(c)) = db.get_card(cid).await
-                                                        {
-                                                            if c.step == "done"
-                                                                || c.step == "wont_do"
-                                                            {
-                                                                continue;
-                                                            }
-                                                        }
-                                                    }
-                                                    // Persist as user event
-                                                    let _ = db
-                                                        .append_event(
-                                                            &ws.id,
-                                                            "user",
-                                                            serde_json::json!({
-                                                                "text": msg,
-                                                                "source": "worker-auto-notify",
-                                                            }),
-                                                        )
-                                                        .await;
-                                                    // Broadcast for immediate stdin delivery
-                                                    broadcaster.broadcast(WsEvent {
-                                                        event_type: "worker-stdin-deliver".into(),
-                                                        session_id: ws.id.clone(),
-                                                        data: serde_json::json!({ "text": msg }),
-                                                    });
-                                                }
-                                                tracing::info!(
-                                                    session_id = %session_id,
-                                                    files = ?changes,
-                                                    "Auto-notified workers of file changes"
-                                                );
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
-                    _ => {}
                 }
+                ProviderEvent::Text { .. } => {
+                    if !pending_file_changes.is_empty() {
+                        flush_pending_file_changes(
+                            &db,
+                            &broadcaster,
+                            &session_id,
+                            std::mem::take(&mut pending_file_changes),
+                        )
+                        .await;
+                    }
+                }
+                _ => {}
             }
+        }
 
-            for event in events {
-                emit_event(&db, &broadcaster, &session_id, event).await;
-            }
+        for event in events {
+            emit_event(&db, &broadcaster, &session_id, event).await;
+        }
 
-            for event in todo_events {
-                emit_event(&db, &broadcaster, &session_id, event).await;
+        for event in todo_events {
+            emit_event(&db, &broadcaster, &session_id, event).await;
+        }
+
+        // After persisting the result-derived events, emit our own
+        // Completed (so the UI gets a normal agent-end) and reset
+        // per-turn state. The CLI's `result` carries the
+        // conversation_id; the parser already captured it into
+        // `conversation_id` for us.
+        if is_result_event {
+            if !pending_file_changes.is_empty() {
+                flush_pending_file_changes(
+                    &db,
+                    &broadcaster,
+                    &session_id,
+                    std::mem::take(&mut pending_file_changes),
+                )
+                .await;
             }
-        } // end inner block
-    } // end loop
+            emit_event(
+                &db,
+                &broadcaster,
+                &session_id,
+                ProviderEvent::Completed {
+                    conversation_id: conversation_id.clone(),
+                },
+            )
+            .await;
+            state.turn_active.store(false, Ordering::Release);
+            emitted_start = false;
+            // Closing any tools still flagged open at result time
+            // — keeps spinner state self-consistent across turn
+            // boundaries.
+            if !pending_tool_names.is_empty() {
+                let orphans: Vec<String> = pending_tool_names.keys().cloned().collect();
+                for tool_use_id in orphans {
+                    emit_event(
+                        &db,
+                        &broadcaster,
+                        &session_id,
+                        ProviderEvent::ToolEnd {
+                            tool_use_id,
+                            output: None,
+                            error: Some("tool did not return a result before turn ended".into()),
+                        },
+                    )
+                    .await;
+                }
+                pending_tool_names.clear();
+            }
+            saw_clean_completion = true;
+        }
+    }
 
     // Drop stdin pipe to signal EOF to the child process
     drop(stdin_pipe);
 
-    // Wait for the process to exit and capture the exit code
     let exit_status = process.child.wait().await;
 
-    // Close any tools we saw start but never saw end. If the CLI exits
-    // (cleanly or otherwise) with outstanding tool_use blocks, the user
-    // would otherwise see a spinner that never resolves. Emit synthetic
-    // ToolEnd events so the event log is self-consistent.
     if !pending_tool_names.is_empty() {
         tracing::warn!(
             session_id = %session_id,
@@ -502,7 +584,6 @@ pub async fn stream_events(
         }
     }
 
-    // Read any remaining stderr
     let stderr_text = if let Some(stderr) = stderr {
         let stderr_reader = BufReader::new(stderr);
         let mut buf = String::new();
@@ -518,6 +599,18 @@ pub async fn stream_events(
         None
     };
 
+    // Decide whether to emit a Crashed on process exit:
+    //
+    //   - cancelled mid-turn → emit Crashed{interrupted}
+    //   - turn active at exit (no result event reached us) → Crashed
+    //   - turn idle, clean stdout EOF after at least one completion
+    //     (e.g. the idle reaper or graceful shutdown closed stdin)
+    //     → silent exit, no Crashed event
+    //   - turn idle, never saw a completion at all (child died
+    //     before any user turn) → Crashed{spawn-failed}
+    let turn_was_active = state.turn_active.load(Ordering::Acquire);
+    state.turn_active.store(false, Ordering::Release);
+
     let is_completed = if was_cancelled {
         emit_event(
             &db,
@@ -531,87 +624,153 @@ pub async fn stream_events(
         )
         .await;
         false
+    } else if turn_was_active {
+        let exit_code = exit_status.ok().and_then(|s| s.code());
+        emit_event(
+            &db,
+            &broadcaster,
+            &session_id,
+            ProviderEvent::Crashed {
+                reason: format!("process exited mid-turn (code {})", exit_code.unwrap_or(-1)),
+                exit_code,
+                stderr: stderr_text,
+            },
+        )
+        .await;
+        false
+    } else if !saw_clean_completion {
+        let exit_code = exit_status.ok().and_then(|s| s.code());
+        emit_event(
+            &db,
+            &broadcaster,
+            &session_id,
+            ProviderEvent::Crashed {
+                reason: format!(
+                    "process exited before producing any output (code {})",
+                    exit_code.unwrap_or(-1)
+                ),
+                exit_code,
+                stderr: stderr_text,
+            },
+        )
+        .await;
+        false
     } else {
-        match exit_status {
-            Ok(status) if status.success() => {
-                emit_event(
-                    &db,
-                    &broadcaster,
-                    &session_id,
-                    ProviderEvent::Completed { conversation_id },
-                )
-                .await;
-                true
-            }
-            Ok(status) => {
-                let code = status.code();
-                tracing::warn!(
-                    session_id = %session_id,
-                    exit_code = ?code,
-                    "Claude process exited with non-zero status"
-                );
-                emit_event(
-                    &db,
-                    &broadcaster,
-                    &session_id,
-                    ProviderEvent::Crashed {
-                        reason: format!("process exited with code {}", code.unwrap_or(-1)),
-                        exit_code: code,
-                        stderr: stderr_text,
-                    },
-                )
-                .await;
-                false
-            }
-            Err(e) => {
-                tracing::error!(
-                    session_id = %session_id,
-                    "Failed to wait for claude process: {}",
-                    e
-                );
-                emit_event(
-                    &db,
-                    &broadcaster,
-                    &session_id,
-                    ProviderEvent::Crashed {
-                        reason: format!("wait error: {}", e),
-                        exit_code: None,
-                        stderr: stderr_text,
-                    },
-                )
-                .await;
-                false
-            }
-        }
+        // Turn idle + saw at least one prior completion → graceful
+        // recycle (idle reaper killed it, or the provider was
+        // shutting down). Don't emit anything; the UI already saw
+        // the last turn's Completed event.
+        true
     };
-
-    // Queue draining is handled centrally by the completion listener in
-    // main.rs — see SessionManager::drain_queued_message. The provider
-    // intentionally does NOT touch the queue so the drain happens on every
-    // termination path (success, crash, or interrupt), not just clean exits.
 
     is_completed
 }
 
-/// Write a line to the child process's stdin pipe.
+enum EventSource {
+    Stdout(String),
+}
+
+/// Auto-notify worker peers about files this worker just modified.
+/// Mirrors the previous inline logic but extracted as a free
+/// function so the post-result flush and the per-text flush call
+/// the same code.
+async fn flush_pending_file_changes(
+    db: &Db,
+    broadcaster: &Arc<Broadcaster>,
+    session_id: &str,
+    changes: Vec<String>,
+) {
+    let Ok(Some(session)) = db.get_session(session_id).await else {
+        return;
+    };
+    if !session.is_worker {
+        return;
+    }
+    let Some(project_id) = session.project_id.as_ref() else {
+        return;
+    };
+    let auto_notify = db
+        .get_project(project_id)
+        .await
+        .ok()
+        .flatten()
+        .map(|p| p.auto_notify_changes)
+        .unwrap_or(true);
+    if !auto_notify {
+        return;
+    }
+
+    let card_title = if let Some(ref card_id) = session.card_id {
+        db.get_card(card_id).await.ok().flatten().map(|c| c.title)
+    } else {
+        None
+    };
+
+    let Ok(workers) = db.list_worker_sessions_by_project(project_id).await else {
+        return;
+    };
+
+    let msg = format!(
+        "[Auto] Worker on \"{}\" modified: {}",
+        card_title.as_deref().unwrap_or("unknown"),
+        changes.join(", ")
+    );
+    for ws in &workers {
+        if ws.id == session_id {
+            continue;
+        }
+        if let Some(ref cid) = ws.card_id {
+            if let Ok(Some(c)) = db.get_card(cid).await {
+                if c.step == "done" || c.step == "wont_do" {
+                    continue;
+                }
+            }
+        }
+        let _ = db
+            .append_event(
+                &ws.id,
+                "user",
+                serde_json::json!({
+                    "text": msg,
+                    "source": "worker-auto-notify",
+                }),
+            )
+            .await;
+        broadcaster.broadcast(WsEvent {
+            event_type: "worker-stdin-deliver".into(),
+            session_id: ws.id.clone(),
+            data: serde_json::json!({ "text": msg }),
+        });
+    }
+    tracing::info!(
+        session_id = %session_id,
+        files = ?changes,
+        "Auto-notified workers of file changes"
+    );
+}
+
+/// Write a line to the child process's stdin pipe. Returns true on
+/// success.
 async fn write_stdin_line(
     stdin: &mut Option<tokio::process::ChildStdin>,
     text: &str,
     session_id: &str,
-) {
-    if let Some(pipe) = stdin.as_mut() {
-        if let Err(e) = pipe.write_all(text.as_bytes()).await {
-            tracing::warn!(session_id = %session_id, "Failed to write to stdin: {e}");
-            return;
-        }
-        if let Err(e) = pipe.write_all(b"\n").await {
-            tracing::warn!(session_id = %session_id, "Failed to write newline to stdin: {e}");
-            return;
-        }
-        if let Err(e) = pipe.flush().await {
-            tracing::warn!(session_id = %session_id, "Failed to flush stdin: {e}");
-        }
-    } else {
+) -> bool {
+    let Some(pipe) = stdin.as_mut() else {
         tracing::warn!(session_id = %session_id, "No stdin pipe available");
+        return false;
+    };
+    if let Err(e) = pipe.write_all(text.as_bytes()).await {
+        tracing::warn!(session_id = %session_id, "Failed to write to stdin: {e}");
+        return false;
     }
+    if let Err(e) = pipe.write_all(b"\n").await {
+        tracing::warn!(session_id = %session_id, "Failed to write newline to stdin: {e}");
+        return false;
+    }
+    if let Err(e) = pipe.flush().await {
+        tracing::warn!(session_id = %session_id, "Failed to flush stdin: {e}");
+        return false;
+    }
+    true
 }

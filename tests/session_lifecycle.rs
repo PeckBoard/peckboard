@@ -385,3 +385,185 @@ async fn lock_session_serializes_handlers() {
     let try2 = manager.try_lock_session("sx").await;
     assert!(try2.is_some(), "try_lock should succeed after release");
 }
+
+// ── 6. Mid-stream injection (mid-turn dispatch without DB queue) ───────
+
+mod midstream {
+    //! Verifies the SessionManager's dispatch fork for a provider
+    //! that advertises `supports_mid_stream_injection = true`:
+    //!
+    //!   - A second `send_or_queue` while a turn is in flight delivers
+    //!     through `send_message` (not the DB queue).
+    //!   - The provider's `send_message` sees BOTH messages — the first
+    //!     one starting the run, the second one mid-turn.
+    //!   - The `queued_messages` table stays empty (no DB queue write).
+    //!
+    //! Uses a minimal in-test provider so the test doesn't depend on
+    //! the real `claude` CLI or any of its in-process plumbing.
+
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::time::Duration;
+
+    use async_trait::async_trait;
+    use peckboard::db::Db;
+    use peckboard::db::models::{NewFolder, NewSession};
+    use peckboard::provider::agent::{AgentProvider, SendMessageContext};
+    use peckboard::provider::manager::{SendOutcome, SessionManager};
+    use peckboard::provider::registry::{ProviderInfo, ProviderRegistry};
+    use peckboard::provider::stream::{ModelInfo, SpawnConfig};
+    use peckboard::ws::broadcaster::Broadcaster;
+    use tokio::sync::Mutex;
+
+    /// A test provider that records every `send_message` call and
+    /// reports the turn-active flag the SessionManager uses for its
+    /// dispatch decision.
+    struct RecordingProvider {
+        sent: Arc<Mutex<Vec<String>>>,
+        turn_active: Arc<AtomicBool>,
+    }
+
+    #[async_trait]
+    impl AgentProvider for RecordingProvider {
+        fn id(&self) -> &str {
+            "recording"
+        }
+
+        async fn send_message(&self, ctx: SendMessageContext) -> anyhow::Result<()> {
+            self.sent.lock().await.push(ctx.message);
+            // First send latches turn_active; subsequent sends just
+            // record and return so the SessionManager sees the
+            // "running" state and dispatches anyway (no queue).
+            self.turn_active.store(true, Ordering::Release);
+            Ok(())
+        }
+
+        async fn cancel(&self, _session_id: &str) {
+            self.turn_active.store(false, Ordering::Release);
+        }
+
+        async fn interrupt(&self, session_id: &str) {
+            self.cancel(session_id).await;
+        }
+
+        async fn write_stdin(&self, _session_id: &str, _text: &str) -> bool {
+            false
+        }
+
+        async fn is_running(&self, _session_id: &str) -> bool {
+            self.turn_active.load(Ordering::Acquire)
+        }
+
+        fn supports_mid_stream_injection(&self) -> bool {
+            true
+        }
+
+        async fn cleanup(&self) {}
+        async fn shutdown(&self) {}
+    }
+
+    fn cfg() -> SpawnConfig {
+        SpawnConfig {
+            model: "recording:any".into(),
+            effort: None,
+            working_dir: String::new(),
+            mcp_config_path: None,
+            env: Default::default(),
+            permission_mode: None,
+            timeout_ms: None,
+            metadata: serde_json::Value::Null,
+        }
+    }
+
+    async fn build_env() -> (
+        SessionManager,
+        Db,
+        Arc<Broadcaster>,
+        Arc<Mutex<Vec<String>>>,
+    ) {
+        let registry = Arc::new(ProviderRegistry::new());
+        let sent = Arc::new(Mutex::new(Vec::new()));
+        let provider = Arc::new(RecordingProvider {
+            sent: sent.clone(),
+            turn_active: Arc::new(AtomicBool::new(false)),
+        });
+        registry
+            .register(
+                provider,
+                ProviderInfo {
+                    id: "recording".into(),
+                    display_name: "Recording".into(),
+                    models: vec![ModelInfo {
+                        id: "any".into(),
+                        display_name: "Any".into(),
+                        capabilities: vec![],
+                    }],
+                },
+            )
+            .await;
+        let manager = SessionManager::new(registry);
+        let db = Db::in_memory().unwrap();
+        let broadcaster = Broadcaster::new();
+        let ts = chrono::Utc::now().to_rfc3339();
+        db.create_folder(NewFolder {
+            id: "f1".into(),
+            name: "F".into(),
+            path: "/tmp".into(),
+            created_at: ts.clone(),
+        })
+        .await
+        .unwrap();
+        db.create_session(NewSession {
+            id: "mid".into(),
+            name: "mid".into(),
+            folder_id: "f1".into(),
+            model: None,
+            effort: None,
+            is_worker: false,
+            project_id: None,
+            card_id: None,
+            conversation_id: None,
+            created_at: ts.clone(),
+            last_activity: ts,
+        })
+        .await
+        .unwrap();
+        (manager, db, broadcaster, sent)
+    }
+
+    #[tokio::test]
+    async fn mid_stream_provider_sees_both_messages_no_db_queue() {
+        let (manager, db, broadcaster, sent) = build_env().await;
+
+        // First send: turn is not active → Started outcome.
+        let first = manager
+            .send_or_queue("mid", "first", &db, &broadcaster, cfg())
+            .await
+            .unwrap();
+        assert_eq!(first, SendOutcome::Started);
+
+        // Brief settle so the provider's turn_active flag flips.
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        assert!(manager.is_running("mid").await);
+
+        // Second send while running: the mid-stream-capable provider
+        // gets it via send_message, NOT the durable queue. Outcome is
+        // Queued (which now means "delivered mid-turn").
+        let second = manager
+            .send_or_queue("mid", "second", &db, &broadcaster, cfg())
+            .await
+            .unwrap();
+        assert_eq!(second, SendOutcome::Queued);
+
+        let calls = sent.lock().await.clone();
+        assert_eq!(
+            calls,
+            vec!["first".to_string(), "second".to_string()],
+            "both messages must reach the provider mid-stream"
+        );
+
+        // No row was written to the persistent queue — the provider's
+        // own machinery (here: just a Vec) is the queue.
+        assert!(db.get_queued_message("mid").await.unwrap().is_none());
+    }
+}

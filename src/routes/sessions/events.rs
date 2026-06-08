@@ -260,54 +260,18 @@ pub(super) async fn append_event(
         // Resolve references in the answer text (e.g. [session:id] from autocomplete)
         let answer_text = resolve_references(&answer_text, &state).await;
 
-        // Resume the conversation under the per-session lock, mirroring
-        // the /message route's atomic check-and-act: if an agent is
-        // already running (e.g. the user's answer raced an orchestrator
-        // respawn or a parallel send), queue instead of spawning a second
-        // run. Spawned so the HTTP response returns immediately.
+        // Resume the conversation. With the long-lived stream-json
+        // process we just append the user event and write the answer
+        // to stdin via `send_or_queue` — if the agent is still mid-
+        // turn (because another worker reply was streaming back), the
+        // CLI buffers the user envelope and consumes it after the
+        // current `result`. Spawned so the HTTP response returns
+        // immediately.
         let state_clone = state.clone();
         let id_clone = id.clone();
         tokio::spawn(async move {
-            let lock = state_clone.session_manager.lock_session(&id_clone).await;
-
-            if state_clone.session_manager.is_running(&id_clone).await {
-                // Persist the answer for the in-flight run's completion
-                // listener to drain. We deliberately do NOT append a user
-                // event here — drain_queued appends one before dispatching,
-                // matching the ordering in the conversation log.
-                let now = chrono::Utc::now().to_rfc3339();
-                if let Err(e) = state_clone
-                    .db
-                    .upsert_queued_message(crate::db::models::NewQueuedMessage {
-                        session_id: id_clone.clone(),
-                        text: answer_text.clone(),
-                        queued_at: now,
-                        model: None,
-                        effort: None,
-                    })
-                    .await
-                {
-                    tracing::error!(
-                        session_id = %id_clone,
-                        "Failed to queue question answer: {e}"
-                    );
-                    return;
-                }
-                state_clone
-                    .broadcaster
-                    .broadcast(crate::ws::broadcaster::WsEvent {
-                        event_type: "queue".into(),
-                        session_id: id_clone.clone(),
-                        data: serde_json::json!({ "action": "set", "text": answer_text }),
-                    });
-                tracing::info!(
-                    session_id = %id_clone,
-                    "Question answer queued; will deliver on next completion"
-                );
-                return;
-            }
-
-            // Not running — append the user event, then dispatch.
+            // Append the user event up front so the conversation log
+            // reflects the typed order regardless of mid-turn vs. idle.
             if let Ok(user_ev) = state_clone
                 .db
                 .append_event(&id_clone, "user", serde_json::json!({"text": &answer_text}))
@@ -361,8 +325,8 @@ pub(super) async fn append_event(
 
             if let Err(e) = state_clone
                 .session_manager
-                .send_message_locked(
-                    &lock,
+                .send_or_queue(
+                    &id_clone,
                     &answer_text,
                     &state_clone.db,
                     &state_clone.broadcaster,

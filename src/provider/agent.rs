@@ -76,6 +76,30 @@ pub trait AgentProvider: Send + Sync + 'static {
     /// Whether a run is currently in flight for this session.
     async fn is_running(&self, session_id: &str) -> bool;
 
+    /// Whether `send_message` is safe to call again while a turn is
+    /// already in flight.
+    ///
+    /// `true` ⇒ a second `send_message` mid-turn is consumed by the
+    /// same long-lived run (e.g. the Claude CLI in stream-json mode
+    /// buffers user envelopes on stdin and consumes them after the
+    /// current `result`). The SessionManager dispatches such messages
+    /// straight through, without a DB-level queue.
+    ///
+    /// `false` ⇒ the provider would spawn a parallel run, so the
+    /// SessionManager falls back to persisting the message in the
+    /// `queued_messages` table and draining it on completion. This
+    /// is the mock provider's contract, and the contract callers
+    /// expect for any future provider that can only handle one turn
+    /// at a time.
+    ///
+    /// Default: `false` — the safe assumption is "treat this like a
+    /// per-turn batch process unless the provider explicitly opts
+    /// in." Override to `true` only when concurrent dispatch is the
+    /// intended fast path.
+    fn supports_mid_stream_injection(&self) -> bool {
+        false
+    }
+
     /// Drop any stale per-session state (e.g. exited processes).
     async fn cleanup(&self);
 

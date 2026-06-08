@@ -206,14 +206,31 @@ impl SessionManager {
         provider.send_message(ctx).await
     }
 
-    /// Atomic check-and-act: if an agent is already running for this
-    /// session, persist the message in `queued_messages` and broadcast a
-    /// "queue" event; otherwise dispatch immediately (as `send_message`).
+    /// Atomic check-and-act for the message dispatch path.
+    ///
+    /// Behaviour forks on the underlying provider's
+    /// `supports_mid_stream_injection` capability:
+    ///
+    /// - **Mid-stream-capable (Claude in stream-json mode).** Always
+    ///   dispatches through `send_message_locked`. The provider
+    ///   either spawns a fresh child (first turn / after idle reap)
+    ///   or writes the new user envelope to the existing child's
+    ///   stdin. There is no DB-level queue — the CLI itself is the
+    ///   queue. `SendOutcome::Queued` is reported when a turn was
+    ///   already in flight at dispatch time so the UI can render
+    ///   the "will pick up after this turn" badge.
+    ///
+    /// - **Per-turn provider (mock + any future provider that can
+    ///   only handle one turn at a time).** Falls back to the
+    ///   original behaviour: if `is_running`, persist the message in
+    ///   `queued_messages` and broadcast a queue event; the
+    ///   completion listener calls `drain_queued` to deliver it
+    ///   when the current run ends. Otherwise dispatch directly.
     ///
     /// Callers MUST use this from any external trigger (HTTP route,
-    /// orchestrator respawn) so two concurrent sends can't both spawn
-    /// agents on the same session. The per-session lock is held across
-    /// the is_running check AND the dispatch, so the decision is atomic.
+    /// orchestrator respawn). The per-session lock is held across
+    /// the is_running check AND the dispatch so two concurrent
+    /// sends never both decide to spawn.
     pub async fn send_or_queue(
         &self,
         session_id: &str,
@@ -223,8 +240,15 @@ impl SessionManager {
         config: SpawnConfig,
     ) -> anyhow::Result<SendOutcome> {
         let lock = self.lock_session(session_id).await;
+        let was_running = self.is_running(session_id).await;
+        let supports_mid_stream = self
+            .provider_for_model_supports_mid_stream(&config.model)
+            .await;
 
-        if self.is_running(session_id).await {
+        if was_running && !supports_mid_stream {
+            // Per-turn provider — fall back to the durable queue so
+            // the completion listener can deliver this message when
+            // the current run finishes.
             let now = chrono::Utc::now().to_rfc3339();
             db.upsert_queued_message(NewQueuedMessage {
                 session_id: session_id.to_string(),
@@ -241,14 +265,36 @@ impl SessionManager {
             });
             tracing::info!(
                 session_id = %session_id,
-                "Agent already running; message queued for delivery on completion"
+                "Per-turn provider already running; message persisted in queue"
             );
             return Ok(SendOutcome::Queued);
         }
 
         self.send_message_locked(&lock, message, db, broadcaster, config)
             .await?;
-        Ok(SendOutcome::Started)
+
+        if was_running {
+            broadcaster.broadcast(WsEvent {
+                event_type: "queue".into(),
+                session_id: session_id.to_string(),
+                data: serde_json::json!({ "action": "set", "text": message }),
+            });
+            tracing::info!(
+                session_id = %session_id,
+                "Mid-turn message delivered to provider stdin"
+            );
+            Ok(SendOutcome::Queued)
+        } else {
+            Ok(SendOutcome::Started)
+        }
+    }
+
+    async fn provider_for_model_supports_mid_stream(&self, model: &str) -> bool {
+        let (provider_id, _) = ProviderRegistry::parse_model_id(model, DEFAULT_PROVIDER);
+        match self.registry.get_provider(&provider_id).await {
+            Some(p) => p.supports_mid_stream_injection(),
+            None => false,
+        }
     }
 
     /// Drain the persistent queued message (if any) for `session_id` and

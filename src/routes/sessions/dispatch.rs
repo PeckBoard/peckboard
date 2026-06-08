@@ -90,53 +90,12 @@ pub(super) async fn send_message(
         (model.unwrap_or_else(|| "default".into()), effort)
     };
 
-    // Atomic check-and-act under the per-session lock: if an agent is
-    // already running, queue the message; otherwise spawn a fresh run.
-    // Holding the lock across the is_running check + action prevents two
-    // concurrent POSTs from both spawning agents on the same session.
-    let lock = state.session_manager.lock_session(&id).await;
-
-    if state.session_manager.is_running(&id).await {
-        if attachment_ids.as_ref().is_some_and(|a| !a.is_empty()) {
-            tracing::warn!(
-                session_id = %id,
-                "Attachments dropped on queued message (queue does not persist them)"
-            );
-        }
-
-        let now = chrono::Utc::now().to_rfc3339();
-        let queued = state
-            .db
-            .upsert_queued_message(crate::db::models::NewQueuedMessage {
-                session_id: id.clone(),
-                text: resolved_text.clone(),
-                queued_at: now,
-                model: Some(resolved_model.clone()),
-                effort: resolved_effort.clone(),
-            })
-            .await
-            .map_err(|e| {
-                (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(serde_json::json!({ "error": e.to_string() })),
-                )
-            })?;
-
-        state
-            .broadcaster
-            .broadcast(crate::ws::broadcaster::WsEvent {
-                event_type: "queue".into(),
-                session_id: id.clone(),
-                data: serde_json::json!({ "action": "set", "text": queued.text }),
-            });
-
-        return Ok(Json(serde_json::json!({
-            "status": "queued",
-            "session_id": id,
-        })));
-    }
-
-    // Not running — append the user event, then dispatch a fresh run.
+    // Always append the user event up front so the chat transcript
+    // reflects the order the user typed in, regardless of whether the
+    // agent is mid-turn or idle. In stream-json mode the Claude CLI
+    // accepts new user envelopes on stdin at any time and consumes
+    // them after the current `result` — there is no peckboard-layer
+    // queue to gate this on.
     let mut user_data = serde_json::json!({ "text": resolved_text });
     if let Some(ref ids) = attachment_ids {
         user_data["attachmentIds"] = serde_json::json!(ids);
@@ -202,47 +161,59 @@ pub(super) async fn send_message(
         metadata: serde_json::Value::Null,
     };
 
-    if let Err(e) = state
+    // `send_or_queue` acquires the per-session lock internally,
+    // dispatches through the long-lived child (spawning lazily on
+    // the first turn) and returns `Queued` iff the agent was
+    // already mid-turn when the bytes hit stdin.
+    let outcome = state
         .session_manager
-        .send_message_locked(&lock, &resolved_text, &state.db, &state.broadcaster, config)
-        .await
-    {
-        tracing::error!(session_id = %id, "Failed to spawn claude process: {}", e);
+        .send_or_queue(&id, &resolved_text, &state.db, &state.broadcaster, config)
+        .await;
 
-        let crash_event = state
-            .db
-            .append_event(
-                &id,
-                "agent-end",
-                serde_json::json!({
-                    "status": "crashed",
-                    "reason": format!("spawn error: {}", e),
-                }),
-            )
-            .await;
-
-        if let Ok(ev) = crash_event {
-            state.broadcaster.broadcast(crate::ws::broadcaster::WsEvent {
-                event_type: "event".into(),
-                session_id: id.clone(),
-                data: serde_json::json!({
-                    "id": ev.id,
-                    "seq": ev.seq,
-                    "ts": ev.ts,
-                    "kind": ev.kind,
-                    "data": serde_json::from_str::<serde_json::Value>(&ev.data).unwrap_or_default(),
-                }),
-            });
+    let outcome = match outcome {
+        Ok(o) => o,
+        Err(e) => {
+            tracing::error!(session_id = %id, "Failed to dispatch message: {}", e);
+            let crash_event = state
+                .db
+                .append_event(
+                    &id,
+                    "agent-end",
+                    serde_json::json!({
+                        "status": "crashed",
+                        "reason": format!("dispatch error: {}", e),
+                    }),
+                )
+                .await;
+            if let Ok(ev) = crash_event {
+                state.broadcaster.broadcast(crate::ws::broadcaster::WsEvent {
+                    event_type: "event".into(),
+                    session_id: id.clone(),
+                    data: serde_json::json!({
+                        "id": ev.id,
+                        "seq": ev.seq,
+                        "ts": ev.ts,
+                        "kind": ev.kind,
+                        "data": serde_json::from_str::<serde_json::Value>(&ev.data).unwrap_or_default(),
+                    }),
+                });
+            }
+            return Err((
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({
+                    "error": format!("Failed to dispatch message: {}", e)
+                })),
+            ));
         }
+    };
 
-        return Err((
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(serde_json::json!({ "error": format!("Failed to spawn agent: {}", e) })),
-        ));
-    }
+    let status_str = match outcome {
+        crate::provider::manager::SendOutcome::Started => "started",
+        crate::provider::manager::SendOutcome::Queued => "queued",
+    };
 
     Ok::<_, (StatusCode, Json<serde_json::Value>)>(Json(serde_json::json!({
-        "status": "started",
+        "status": status_str,
         "session_id": id,
     })))
 }

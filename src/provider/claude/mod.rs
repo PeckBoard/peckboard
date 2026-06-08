@@ -194,45 +194,64 @@ pub(crate) fn discover_models() -> Vec<ModelInfo> {
     models
 }
 
-/// Build the CLI arguments for spawning a Claude process.
-pub fn build_cli_args(
-    message: &str,
-    config: &SpawnConfig,
-    conversation_id: Option<&str>,
-) -> Vec<String> {
+/// Build the CLI arguments for spawning a long-lived Claude process.
+///
+/// # Stream-json mode
+///
+/// The CLI is spawned in `--input-format stream-json --output-format
+/// stream-json` mode. User messages are NOT in argv — they're written
+/// to stdin as JSON envelopes (`{"type":"user", "message":{...}}`) one
+/// per line. This lets a single child handle many turns and accept
+/// new user messages mid-turn (the CLI queues them internally and
+/// consumes them after the current `result`). See the long-form
+/// architectural note on `process::ClaudeProcess`.
+///
+/// # Argument-injection hardening
+///
+/// Several values flowing into this function are user-controlled
+/// (`config.model` and `config.effort` come straight from the HTTP
+/// request body of an authenticated user; `conversation_id` is
+/// extracted from the CLI's own output). The Claude CLI uses
+/// commander.js, which parses `--flag value` by consuming the next
+/// argv entry — and if that entry starts with `-`, commander treats it
+/// as a separate option instead. An attacker who could pick the value
+/// of one of these fields could therefore inject arbitrary flags into
+/// the spawned `claude` process (`--mcp-config`, `--allowedTools`, …),
+/// which would be a real escalation given the CLI runs with
+/// `--dangerously-skip-permissions`.
+///
+/// Defence: every value-taking flag uses the `--name=VALUE` form,
+/// which commander.js parses unambiguously regardless of what VALUE
+/// starts with. The prompt no longer enters argv at all (it goes over
+/// stdin), so there is no positional argument to worry about. Both
+/// properties are exercised by the regression tests below.
+pub fn build_cli_args(config: &SpawnConfig, conversation_id: Option<&str>) -> Vec<String> {
     let mut args = vec![
         "claude".to_string(),
-        "-p".to_string(),
-        message.to_string(),
-        "--output-format".to_string(),
-        "stream-json".to_string(),
+        "--input-format=stream-json".to_string(),
+        "--output-format=stream-json".to_string(),
         "--verbose".to_string(),
-        "--append-system-prompt".to_string(),
-        PECKBOARD_SYSTEM_PROMPT.to_string(),
+        format!("--append-system-prompt={PECKBOARD_SYSTEM_PROMPT}"),
         // Block the built-in AskUserQuestion tool — it doesn't work in headless
         // mode. The agent must use mcp__peckboard__ask_user instead.
-        "--disallowedTools".to_string(),
-        "AskUserQuestion".to_string(),
+        "--disallowedTools=AskUserQuestion".to_string(),
     ];
 
     if config.model != "default" {
-        args.push("--model".to_string());
         // Strip provider prefix if present (e.g. "claude:claude-opus-4-8" → "claude-opus-4-8")
         let model = config
             .model
             .strip_prefix("claude:")
             .unwrap_or(&config.model);
-        args.push(model.to_string());
+        args.push(format!("--model={model}"));
     }
 
     if let Some(effort) = &config.effort {
-        args.push("--effort".to_string());
-        args.push(effort.clone());
+        args.push(format!("--effort={effort}"));
     }
 
     if let Some(conv_id) = conversation_id {
-        args.push("--resume".to_string());
-        args.push(conv_id.to_string());
+        args.push(format!("--resume={conv_id}"));
     }
 
     // Only use MCP servers we explicitly provide — skip built-in Anthropic
@@ -240,8 +259,7 @@ pub fn build_cli_args(
     args.push("--strict-mcp-config".to_string());
 
     if let Some(mcp_path) = &config.mcp_config_path {
-        args.push("--mcp-config".to_string());
-        args.push(mcp_path.clone());
+        args.push(format!("--mcp-config={mcp_path}"));
 
         // Tell Claude which MCP tools are allowed
         let mcp_tools = [
@@ -283,8 +301,7 @@ pub fn build_cli_args(
             .iter()
             .map(|t| format!("mcp__peckboard__{t}"))
             .collect();
-        args.push("--allowedTools".to_string());
-        args.push(allowed.join(","));
+        args.push(format!("--allowedTools={}", allowed.join(",")));
     }
 
     // Permission handling: Peckboard runs Claude headless, so we need
@@ -298,8 +315,7 @@ pub fn build_cli_args(
         Some("prompt") => {
             // Interactive mode: use stdio for permission prompts
             // (answers delivered via stdin channel)
-            args.push("--permission-prompt-tool".to_string());
-            args.push("stdio".to_string());
+            args.push("--permission-prompt-tool=stdio".to_string());
         }
         Some(_) => {
             // Unknown mode: default to skip
@@ -308,6 +324,17 @@ pub fn build_cli_args(
     }
 
     args
+}
+
+/// Build the JSON envelope for a user message sent over stdin in
+/// stream-json mode. The CLI consumes one envelope per line and treats
+/// each as a fresh user turn.
+pub fn build_user_message_frame(text: &str) -> String {
+    serde_json::json!({
+        "type": "user",
+        "message": { "role": "user", "content": text },
+    })
+    .to_string()
 }
 
 #[cfg(test)]
@@ -323,10 +350,9 @@ mod tests {
         assert!(models.iter().any(|m| m.id == "claude-haiku-4-5"));
     }
 
-    #[test]
-    fn test_build_cli_args_basic() {
-        let config = SpawnConfig {
-            model: "claude-opus-4-8".into(),
+    fn default_spawn(model: &str) -> SpawnConfig {
+        SpawnConfig {
+            model: model.into(),
             effort: None,
             working_dir: "/tmp".into(),
             mcp_config_path: None,
@@ -334,16 +360,34 @@ mod tests {
             permission_mode: None,
             timeout_ms: None,
             metadata: serde_json::Value::Null,
-        };
+        }
+    }
 
-        let args = build_cli_args("hello", &config, None);
+    /// Returns true iff `args` contains an entry equal to `value`. Used
+    /// by the injection tests to assert that an attacker-supplied value
+    /// is NEVER passed as a standalone argv entry (which is how
+    /// commander.js would parse it as a separate flag).
+    fn has_bare(args: &[String], value: &str) -> bool {
+        args.iter().any(|a| a == value)
+    }
+
+    #[test]
+    fn test_build_cli_args_basic() {
+        let config = default_spawn("claude-opus-4-8");
+
+        let args = build_cli_args(&config, None);
         assert!(args.contains(&"claude".to_string()));
-        assert!(args.contains(&"-p".to_string()));
-        assert!(args.contains(&"hello".to_string()));
-        assert!(args.contains(&"--model".to_string()));
-        assert!(args.contains(&"claude-opus-4-8".to_string()));
+        // Stream-json mode in both directions — the prompt is no longer
+        // in argv; it goes over stdin as `{type:'user', ...}` envelopes.
+        assert!(args.contains(&"--input-format=stream-json".to_string()));
+        assert!(args.contains(&"--output-format=stream-json".to_string()));
+        assert!(args.contains(&"--model=claude-opus-4-8".to_string()));
         assert!(args.contains(&"--dangerously-skip-permissions".to_string()));
-        assert!(!args.contains(&"--resume".to_string()));
+        assert!(!args.iter().any(|a| a.starts_with("--resume")));
+        // No positional prompt — no `--` separator either.
+        assert!(!args.contains(&"--".to_string()));
+        // And no `-p` (one-shot print mode) since we run interactively.
+        assert!(!args.contains(&"-p".to_string()));
     }
 
     #[test]
@@ -359,29 +403,144 @@ mod tests {
             metadata: serde_json::Value::Null,
         };
 
-        let args = build_cli_args("hi", &config, Some("conv-123"));
-        assert!(args.contains(&"--resume".to_string()));
-        assert!(args.contains(&"conv-123".to_string()));
-        assert!(args.contains(&"--effort".to_string()));
-        assert!(args.contains(&"high".to_string()));
-        assert!(args.contains(&"--mcp-config".to_string()));
-        assert!(args.contains(&"--permission-prompt-tool".to_string()));
+        let args = build_cli_args(&config, Some("conv-123"));
+        assert!(args.contains(&"--resume=conv-123".to_string()));
+        assert!(args.contains(&"--effort=high".to_string()));
+        assert!(args.contains(&"--mcp-config=/tmp/mcp.json".to_string()));
+        assert!(args.contains(&"--permission-prompt-tool=stdio".to_string()));
     }
 
     #[test]
     fn test_build_cli_args_default_model() {
-        let config = SpawnConfig {
-            model: "default".into(),
-            effort: None,
-            working_dir: "/tmp".into(),
-            mcp_config_path: None,
-            env: Default::default(),
-            permission_mode: None,
-            timeout_ms: None,
-            metadata: serde_json::Value::Null,
-        };
+        let config = default_spawn("default");
 
-        let args = build_cli_args("test", &config, None);
-        assert!(!args.contains(&"--model".to_string()));
+        let args = build_cli_args(&config, None);
+        assert!(!args.iter().any(|a| a.starts_with("--model")));
+    }
+
+    #[test]
+    fn test_user_message_frame_round_trips() {
+        // The frame is what we write to the CLI's stdin to start (or
+        // queue) a new turn. The CLI parses each line as a JSON object
+        // with shape `{type:"user", message:{role,content}}`.
+        let frame = build_user_message_frame("hello world");
+        let parsed: serde_json::Value = serde_json::from_str(&frame).unwrap();
+        assert_eq!(parsed["type"], "user");
+        assert_eq!(parsed["message"]["role"], "user");
+        assert_eq!(parsed["message"]["content"], "hello world");
+    }
+
+    #[test]
+    fn test_user_message_frame_handles_control_chars() {
+        // Newlines and quotes in the prompt must be JSON-escaped — they
+        // can't break the one-line-per-envelope framing the CLI uses on
+        // stdin. (No matter the prompt content, `serde_json::to_string`
+        // will produce a single JSON line with embedded escapes.)
+        let frame = build_user_message_frame("line one\nline two with \"quotes\"");
+        assert!(!frame.contains('\n'));
+        let parsed: serde_json::Value = serde_json::from_str(&frame).unwrap();
+        assert_eq!(
+            parsed["message"]["content"],
+            "line one\nline two with \"quotes\""
+        );
+    }
+
+    // ── Argument-injection regression tests ────────────────────────
+    //
+    // Each of these covers a field whose value is either directly
+    // user-controlled (model, effort) or derived from data the CLI
+    // itself produced (conversation_id, mcp_config_path). The tests
+    // assert that even if the attacker hands us a value that LOOKS like
+    // a CLI flag, the flag never appears as its own argv entry — it is
+    // always fused to its parent via `=`, so commander.js parses it as
+    // the option's value, not as a separate option.
+
+    #[test]
+    fn test_model_with_leading_dash_is_not_injected() {
+        // Attacker scenario: POST /api/sessions/:id/message
+        //   { "text": "...", "model": "--allowedTools=Bash" }
+        // If we had passed `--model --allowedTools=Bash`, commander
+        // would have consumed `--allowedTools=Bash` as its own option
+        // and bypassed the tool allow-list.
+        let config = default_spawn("--allowedTools=Bash");
+
+        let args = build_cli_args(&config, None);
+
+        assert!(args.contains(&"--model=--allowedTools=Bash".to_string()));
+        assert!(
+            !has_bare(&args, "--allowedTools=Bash"),
+            "attacker value must NEVER appear as a standalone argv entry"
+        );
+        // And no bare `--model` either — that would be the smoking gun
+        // that the attacker value was about to be split off.
+        assert!(!has_bare(&args, "--model"));
+    }
+
+    #[test]
+    fn test_effort_with_leading_dash_is_not_injected() {
+        let mut config = default_spawn("claude-opus-4-8");
+        config.effort = Some("--mcp-config=/tmp/evil.json".into());
+
+        let args = build_cli_args(&config, None);
+
+        assert!(args.contains(&"--effort=--mcp-config=/tmp/evil.json".to_string()));
+        assert!(!has_bare(&args, "--mcp-config=/tmp/evil.json"));
+        assert!(!has_bare(&args, "--effort"));
+    }
+
+    #[test]
+    fn test_conversation_id_with_leading_dash_is_not_injected() {
+        // conversation_id comes from the CLI's own `system init` event,
+        // so an attacker would need to influence that stream — but
+        // defence-in-depth: even a malformed value can't smuggle a
+        // flag.
+        let config = default_spawn("default");
+
+        let args = build_cli_args(&config, Some("--allowedTools=Bash"));
+
+        assert!(args.contains(&"--resume=--allowedTools=Bash".to_string()));
+        assert!(!has_bare(&args, "--allowedTools=Bash"));
+        assert!(!has_bare(&args, "--resume"));
+    }
+
+    #[test]
+    fn test_mcp_config_path_with_leading_dash_is_not_injected() {
+        // The mcp config path is server-controlled today (built from
+        // the data dir), but a future caller could conceivably make it
+        // reflect a project-scoped value. Harden now so that change
+        // can't introduce a hole.
+        let mut config = default_spawn("default");
+        config.mcp_config_path = Some("--allowedTools=Bash".into());
+
+        let args = build_cli_args(&config, None);
+
+        assert!(args.contains(&"--mcp-config=--allowedTools=Bash".to_string()));
+        // The allowedTools the build emits is the legitimate list of
+        // mcp__peckboard__* tools — so make the "bare allowedTools"
+        // assertion specific to the attacker value.
+        assert!(!has_bare(&args, "--allowedTools=Bash"));
+        assert!(!has_bare(&args, "--mcp-config"));
+    }
+
+    #[test]
+    fn test_no_user_value_becomes_a_standalone_flag() {
+        // Sanity sweep: combine every user-influenced field with a
+        // flag-shaped value, then assert that NO argv entry in the
+        // result equals one of those attacker values verbatim. This
+        // catches a future regression where someone reintroduces the
+        // two-arg form for any one of them.
+        let mut config = default_spawn("--evil-model");
+        config.effort = Some("--evil-effort".into());
+        config.mcp_config_path = Some("--evil-mcp".into());
+
+        let evil_values = ["--evil-model", "--evil-effort", "--evil-mcp", "--evil-conv"];
+        let args = build_cli_args(&config, Some("--evil-conv"));
+
+        for evil in evil_values {
+            assert!(
+                !has_bare(&args, evil),
+                "attacker value {evil:?} appeared as a standalone argv entry: {args:?}"
+            );
+        }
     }
 }
