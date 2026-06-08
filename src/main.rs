@@ -1,5 +1,5 @@
 use clap::Parser;
-use peckboard::auth::bootstrap::ensure_admin_user;
+use peckboard::auth::bootstrap::{BootstrapOutcome, ensure_admin_user};
 use peckboard::auth::rate_limit::RateLimiter;
 use peckboard::auth::reset::reset_user_password;
 use peckboard::auth::token::load_or_create_jwt_secret;
@@ -61,22 +61,10 @@ async fn main() -> anyhow::Result<()> {
     // First-run bootstrap: create the sole admin user if the DB is empty.
     // Peckboard does not expose self-service registration — operators
     // get one auto-generated admin and can mint additional users from
-    // there. Credentials are printed once, here, and never again.
-    if let Some(outcome) = ensure_admin_user(&db).await? {
-        eprintln!(
-            "──────────────────────────────────────────────────────────\n\
-             Peckboard first-run admin account\n\
-               username: {}\n\
-               password: {}\n\
-             Save this — it will not be shown again. Use `peckboard \
-             --reset-password` to mint a new one if it's lost.\n\
-             ──────────────────────────────────────────────────────────",
-            outcome.username, outcome.new_password,
-        );
-        // Same machine-readable form as --reset-password so existing
-        // tooling that parses `peckboard | tail -1` keeps working.
-        println!("{}:{}", outcome.username, outcome.new_password);
-    }
+    // there. The outcome is held until the very end of startup so the
+    // credentials land below the noisy tracing logs and are the last
+    // thing the operator sees.
+    let bootstrap_outcome = ensure_admin_user(&db).await?;
 
     // Startup state repair: fix dangling agent-starts from previous crash
     repair_dangling_sessions(&db).await?;
@@ -310,6 +298,13 @@ async fn main() -> anyhow::Result<()> {
         }
     };
 
+    // Print the first-run admin credentials *last* so they sit below
+    // the startup tracing noise and are the operator's final view
+    // before the server goes quiet waiting on connections.
+    if let Some(outcome) = bootstrap_outcome.as_ref() {
+        print_bootstrap_banner(outcome);
+    }
+
     // Graceful shutdown on SIGINT/SIGTERM
     let shutdown_state = state.clone();
     axum::serve(
@@ -394,6 +389,29 @@ async fn serve_https(
             }
         });
     }
+}
+
+/// Print the first-run admin credentials in a hard-to-miss banner.
+/// Goes to stdout so it shows up in normal terminal capture and so the
+/// final `username:password` line stays pipe-friendly
+/// (`peckboard | tail -1`).
+fn print_bootstrap_banner(outcome: &BootstrapOutcome) {
+    const BAR: &str = "════════════════════════════════════════════════════════════════════";
+    println!();
+    println!("{BAR}");
+    println!("  PECKBOARD FIRST-RUN ADMIN ACCOUNT");
+    println!("{BAR}");
+    println!();
+    println!("    username:  {}", outcome.username);
+    println!("    password:  {}", outcome.new_password);
+    println!();
+    println!("  Save this — it will not be shown again.");
+    println!("  Use `peckboard --reset-password` to mint a new one if it's lost.");
+    println!();
+    println!("{BAR}");
+    // Machine-readable form (same as --reset-password) for tooling that
+    // parses `peckboard | tail -1`.
+    println!("{}:{}", outcome.username, outcome.new_password);
 }
 
 async fn shutdown_signal() {
