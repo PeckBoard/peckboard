@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { useProjectsStore, type CardReport, type PendingQuestion } from '../store/projects'
 import { useResourcesStore } from '../store/resources'
 import { useWsStore } from '../store/ws'
@@ -7,6 +7,79 @@ import { useMentions, filterMentions } from '../hooks/useMentions'
 import type { Card, Event } from '../types/api'
 import EditCardModal from './EditCardModal'
 import WorkerComms from './WorkerComms'
+
+// How long a thought bubble lingers after its event before fading out,
+// unless a newer event replaces it first.
+const THOUGHT_BUBBLE_MS = 5000
+
+/** Collapse whitespace and clamp a string to `n` chars for the tiny bubble. */
+function truncate(s: string, n = 60): string {
+  const t = s.replace(/\s+/g, ' ').trim()
+  return t.length > n ? `${t.slice(0, n - 1)}…` : t
+}
+
+/** Pull a short, human-meaningful hint out of a tool's input payload. */
+function toolHint(input?: Record<string, unknown>): string {
+  if (!input) return ''
+  const filePath = (input.file_path as string) ?? (input.path as string)
+  if (filePath) return filePath.split('/').pop() || filePath
+  const command = input.command as string
+  if (command) return truncate(command, 36)
+  const pattern = input.pattern as string
+  if (pattern) return truncate(pattern, 36)
+  const description = input.description as string
+  if (description) return truncate(description, 36)
+  return ''
+}
+
+/**
+ * Reduce a raw session event to a one-line summary for a card's thought
+ * bubble. Returns an empty string for events that carry no useful signal —
+ * those are ignored and leave the current bubble untouched.
+ */
+function summarizeEvent(event: Event): string {
+  const d = event.data ?? {}
+  switch (event.kind) {
+    case 'user': {
+      const text = (d.text as string) ?? ''
+      return text.trim() ? truncate(text) : 'New message'
+    }
+    case 'agent-start':
+      return 'Started working'
+    case 'agent-text': {
+      const text = (d.text as string) ?? ''
+      return text.trim() ? truncate(text) : ''
+    }
+    case 'agent-tool-start': {
+      const name = (d.name as string) ?? (d.tool_name as string) ?? 'tool'
+      const hint = toolHint(d.input as Record<string, unknown> | undefined)
+      return hint ? `${name}: ${hint}` : `Running ${name}`
+    }
+    case 'agent-tool-end': {
+      const name = (d.name as string) ?? (d.tool_name as string) ?? 'tool'
+      return d.error ? `${name} failed` : `${name} done`
+    }
+    case 'agent-end':
+      return (d.status as string) === 'crashed' ? 'Crashed' : 'Done'
+    case 'step-change':
+      return `Step: ${truncate((d.step as string) ?? (d.label as string) ?? 'next', 40)}`
+    case 'question':
+      return 'Needs your input'
+    case 'interrupt':
+      return 'Interrupted'
+    case 'system': {
+      const text = (d.text as string) ?? (d.message as string) ?? ''
+      return text.trim() ? truncate(text) : ''
+    }
+    default:
+      return ''
+  }
+}
+
+interface ThoughtBubble {
+  text: string
+  key: number
+}
 
 // Stable references for empty selector results so subscribers don't
 // re-render on every store update with an empty array/list.
@@ -79,6 +152,11 @@ export default function KanbanBoard({ projectId }: KanbanBoardProps) {
   const [cardMenuId, setCardMenuId] = useState<string | null>(null)
   const [editingCard, setEditingCard] = useState<Card | null>(null)
   const [showComms, setShowComms] = useState(false)
+  // One transient thought bubble per card, keyed by card id.
+  const [bubbles, setBubbles] = useState<Record<string, ThoughtBubble>>({})
+  const bubbleTimers = useRef<Record<string, ReturnType<typeof setTimeout>>>({})
+  // Latest session→card map, read inside the (stable) event listener.
+  const sessionToCardRef = useRef<Record<string, string>>({})
   const cardReports = useProjectsStore((s) =>
     selectedCard ? (s.cardReportsByCard[selectedCard.id] ?? EMPTY_REPORTS) : EMPTY_REPORTS,
   )
@@ -115,6 +193,8 @@ export default function KanbanBoard({ projectId }: KanbanBoardProps) {
 
   const addEventListener = useWsStore((s) => s.addEventListener)
   const removeEventListener = useWsStore((s) => s.removeEventListener)
+  const subscribe = useWsStore((s) => s.subscribe)
+  const unsubscribe = useWsStore((s) => s.unsubscribe)
 
   // Fetch pending questions on mount and when events arrive
   useEffect(() => {
@@ -179,6 +259,59 @@ export default function KanbanBoard({ projectId }: KanbanBoardProps) {
     window.addEventListener('peckboard:card-delete', handler)
     return () => window.removeEventListener('peckboard:card-delete', handler)
   }, [projectId])
+
+  // Keep a live session→card lookup for the thought-bubble listener.
+  useEffect(() => {
+    const map: Record<string, string> = {}
+    for (const c of cards) {
+      if (c.worker_session_id) map[c.worker_session_id] = c.id
+    }
+    sessionToCardRef.current = map
+  }, [cards])
+
+  // Subscribe to every active worker session so its events stream in even
+  // when no one has the session's chat open. The key is the sorted set of
+  // session ids, so this only re-runs when a worker is added or removed.
+  const workerSessionKey = cards
+    .map((c) => c.worker_session_id)
+    .filter((id): id is string => Boolean(id))
+    .sort()
+    .join(',')
+  useEffect(() => {
+    const ids = workerSessionKey ? workerSessionKey.split(',') : []
+    ids.forEach((id) => subscribe(id))
+    return () => ids.forEach((id) => unsubscribe(id))
+  }, [workerSessionKey, subscribe, unsubscribe])
+
+  // Show a transient thought bubble on a card whenever its worker emits an
+  // event. Only one bubble per card; a newer event replaces the current one
+  // and resets the 5s dismissal timer.
+  useEffect(() => {
+    const timers = bubbleTimers.current
+    const listener = (event: Event) => {
+      const cardId = sessionToCardRef.current[event.session_id]
+      if (!cardId) return
+      const text = summarizeEvent(event)
+      if (!text) return
+      setBubbles((prev) => ({ ...prev, [cardId]: { text, key: event.seq } }))
+      if (timers[cardId]) clearTimeout(timers[cardId])
+      timers[cardId] = setTimeout(() => {
+        delete timers[cardId]
+        setBubbles((prev) => {
+          if (!(cardId in prev)) return prev
+          const next = { ...prev }
+          delete next[cardId]
+          return next
+        })
+      }, THOUGHT_BUBBLE_MS)
+    }
+    addEventListener(listener)
+    return () => {
+      removeEventListener(listener)
+      Object.values(timers).forEach(clearTimeout)
+      bubbleTimers.current = {}
+    }
+  }, [addEventListener, removeEventListener])
 
   const handleAnswerQuestion = async (pq: PendingQuestion) => {
     const answers = questionAnswers[pq.eventId] ?? {}
@@ -711,6 +844,15 @@ export default function KanbanBoard({ projectId }: KanbanBoardProps) {
                   onDragStart={(e) => handleDragStart(e, card)}
                   onDragEnd={handleDragEnd}
                 >
+                  {bubbles[card.id] && (
+                    <div
+                      key={bubbles[card.id].key}
+                      className="card-thought-bubble"
+                      title={bubbles[card.id].text}
+                    >
+                      {bubbles[card.id].text}
+                    </div>
+                  )}
                   <div className="kanban-card-top" onClick={() => setSelectedCard(card)}>
                     <div className="kanban-card-header">
                       <span className="kanban-card-title">{card.title}</span>
