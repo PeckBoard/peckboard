@@ -358,8 +358,28 @@ function App() {
     if (!authenticated || !activeSessionId || !sessionsLoaded) return
     if (sessions.some((s) => s.id === activeSessionId)) {
       useTabsStore.getState().openTab('session', activeSessionId)
-    } else {
-      setActiveSession(null)
+      return
+    }
+    // Not in the plain-sessions list. Worker sessions are excluded from
+    // GET /api/sessions on purpose (they'd clutter the user's session
+    // list), but a card's "View Session" link points straight at the
+    // worker's id — so we must verify the session exists rather than
+    // assume "not in list = deleted" and drop activeSessionId.
+    let cancelled = false
+    authedFetch(`/api/sessions/${activeSessionId}`)
+      .then((res) => {
+        if (cancelled) return
+        if (res.ok) {
+          useTabsStore.getState().openTab('session', activeSessionId)
+        } else {
+          setActiveSession(null)
+        }
+      })
+      .catch(() => {
+        if (!cancelled) setActiveSession(null)
+      })
+    return () => {
+      cancelled = true
     }
   }, [authenticated, activeSessionId, sessionsLoaded, sessions, setActiveSession])
   useEffect(() => {
