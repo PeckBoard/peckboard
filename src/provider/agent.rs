@@ -111,6 +111,23 @@ pub async fn emit_event(
                 )
                 .await;
 
+            // Mirror `todo` snapshots into the dedicated `todos` table —
+            // the source of truth for the load-time read path. The event
+            // still wins for live WS updates, but a reload reads from
+            // the table.
+            if let ProviderEvent::Todo { ref todos } = event {
+                let snapshot = crate::todo::TodoSnapshot {
+                    todos: todos.clone(),
+                };
+                if let Err(e) = db.replace_session_todos(session_id, snapshot).await {
+                    tracing::error!(
+                        session_id = session_id,
+                        "Failed to persist todo snapshot: {}",
+                        e
+                    );
+                }
+            }
+
             if let ProviderEvent::Completed {
                 conversation_id: Some(ref cid),
             } = event

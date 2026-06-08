@@ -687,6 +687,270 @@ mod tests {
         assert!(db.list_user_tabs("u").await.unwrap().is_empty());
     }
 
+    // ── Todos table: replace-all + load order ──────────────────────
+
+    #[tokio::test]
+    async fn test_todos_replace_all_and_ordered_read() {
+        use crate::todo::{TodoItem, TodoSnapshot, TodoStatus};
+
+        let db = test_db();
+        let ts = now();
+
+        db.create_folder(NewFolder {
+            id: "f1".into(),
+            name: "F".into(),
+            path: "/tmp/f".into(),
+            created_at: ts.clone(),
+        })
+        .await
+        .unwrap();
+        db.create_session(NewSession {
+            id: "s1".into(),
+            name: "S".into(),
+            folder_id: "f1".into(),
+            model: None,
+            effort: None,
+            is_worker: false,
+            project_id: None,
+            card_id: None,
+            conversation_id: None,
+            created_at: ts.clone(),
+            last_activity: ts,
+        })
+        .await
+        .unwrap();
+
+        // Empty load -> empty vec.
+        assert!(db.list_session_todos("s1").await.unwrap().is_empty());
+
+        // First snapshot populates the table.
+        let first = TodoSnapshot {
+            todos: vec![
+                TodoItem {
+                    content: "a".into(),
+                    status: TodoStatus::InProgress,
+                    active_form: Some("Doing a".into()),
+                },
+                TodoItem {
+                    content: "b".into(),
+                    status: TodoStatus::Pending,
+                    active_form: None,
+                },
+            ],
+        };
+        db.replace_session_todos("s1", first).await.unwrap();
+
+        let loaded = db.list_session_todos("s1").await.unwrap();
+        assert_eq!(loaded.len(), 2);
+        assert_eq!(loaded[0].content, "a");
+        assert_eq!(loaded[0].status, TodoStatus::InProgress);
+        assert_eq!(loaded[0].active_form.as_deref(), Some("Doing a"));
+        assert_eq!(loaded[1].content, "b");
+        assert_eq!(loaded[1].status, TodoStatus::Pending);
+
+        // Second snapshot REPLACES, doesn't append. The new list is
+        // shorter AND reordered AND drops "a" entirely — none of "a"
+        // may survive, and the new ordering must hold.
+        let second = TodoSnapshot {
+            todos: vec![
+                TodoItem {
+                    content: "c".into(),
+                    status: TodoStatus::Done,
+                    active_form: None,
+                },
+                TodoItem {
+                    content: "b".into(),
+                    status: TodoStatus::InProgress,
+                    active_form: Some("Doing b".into()),
+                },
+            ],
+        };
+        db.replace_session_todos("s1", second).await.unwrap();
+
+        let loaded = db.list_session_todos("s1").await.unwrap();
+        assert_eq!(loaded.len(), 2);
+        assert_eq!(loaded[0].content, "c");
+        assert_eq!(loaded[0].status, TodoStatus::Done);
+        assert_eq!(loaded[1].content, "b");
+        assert_eq!(loaded[1].status, TodoStatus::InProgress);
+        assert!(loaded.iter().all(|t| t.content != "a"));
+
+        // Empty snapshot clears the list.
+        db.replace_session_todos("s1", TodoSnapshot::default())
+            .await
+            .unwrap();
+        assert!(db.list_session_todos("s1").await.unwrap().is_empty());
+    }
+
+    // ── Project todos aggregation ─────────────────────────────────
+
+    #[tokio::test]
+    async fn test_list_project_todos_aggregates_across_cards_and_fallback_session() {
+        use crate::todo::{TodoItem, TodoSnapshot, TodoStatus};
+
+        let db = test_db();
+        let ts = now();
+
+        db.create_folder(NewFolder {
+            id: "f1".into(),
+            name: "F".into(),
+            path: "/tmp/f-pt".into(),
+            created_at: ts.clone(),
+        })
+        .await
+        .unwrap();
+
+        db.create_project(NewProject {
+            id: "p1".into(),
+            name: "P".into(),
+            context: "".into(),
+            folder_id: "f1".into(),
+            worker_count: 1,
+            status: "active".into(),
+            default_workflow: None,
+            model: None,
+            effort: None,
+            parallel_instructions: false,
+            auto_notify_changes: true,
+            worker_communication: false,
+            created_at: ts.clone(),
+            last_accessed_at: ts.clone(),
+        })
+        .await
+        .unwrap();
+
+        // Two cards each with their own worker session. Card "a" uses the
+        // active `worker_session_id`; card "b" exercises the
+        // `last_worker_session_id` fallback (the orchestrator clears the
+        // active one between dispatches but we still want its last snapshot
+        // to roll up). A third card "c" has no session at all and must be
+        // omitted, and a fourth card "d" has a session that never reported
+        // any todos and must also be omitted.
+        for cid in ["a", "b", "c", "d"] {
+            db.create_card(NewCard {
+                id: cid.into(),
+                project_id: "p1".into(),
+                title: format!("Card {cid}"),
+                description: "".into(),
+                step: "backlog".into(),
+                // Same priority for stable order; the call orders by
+                // priority asc and ties fall through to insertion order.
+                priority: 1,
+                workflow: None,
+                model: None,
+                effort: None,
+                created_at: ts.clone(),
+                updated_at: ts.clone(),
+            })
+            .await
+            .unwrap();
+        }
+
+        for sid in ["s-a", "s-b", "s-d"] {
+            db.create_session(NewSession {
+                id: sid.into(),
+                name: sid.into(),
+                folder_id: "f1".into(),
+                model: None,
+                effort: None,
+                is_worker: true,
+                project_id: Some("p1".into()),
+                card_id: None,
+                conversation_id: None,
+                created_at: ts.clone(),
+                last_activity: ts.clone(),
+            })
+            .await
+            .unwrap();
+        }
+
+        db.update_card(
+            "a",
+            UpdateCard {
+                worker_session_id: Some(Some("s-a".into())),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        db.update_card(
+            "b",
+            UpdateCard {
+                // Active is cleared; only the last_* fallback is set.
+                last_worker_session_id: Some(Some("s-b".into())),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        db.update_card(
+            "d",
+            UpdateCard {
+                worker_session_id: Some(Some("s-d".into())),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+
+        db.replace_session_todos(
+            "s-a",
+            TodoSnapshot {
+                todos: vec![TodoItem {
+                    content: "todo from a".into(),
+                    status: TodoStatus::InProgress,
+                    active_form: Some("Doing a".into()),
+                }],
+            },
+        )
+        .await
+        .unwrap();
+        db.replace_session_todos(
+            "s-b",
+            TodoSnapshot {
+                todos: vec![
+                    TodoItem {
+                        content: "todo from b 1".into(),
+                        status: TodoStatus::Pending,
+                        active_form: None,
+                    },
+                    TodoItem {
+                        content: "todo from b 2".into(),
+                        status: TodoStatus::Done,
+                        active_form: None,
+                    },
+                ],
+            },
+        )
+        .await
+        .unwrap();
+        // s-d intentionally has no todos.
+
+        let groups = db.list_project_todos("p1").await.unwrap();
+        let by_card: std::collections::HashMap<String, Vec<String>> = groups
+            .iter()
+            .map(|g| {
+                (
+                    g.card_id.clone(),
+                    g.todos.iter().map(|t| t.content.clone()).collect(),
+                )
+            })
+            .collect();
+
+        assert_eq!(by_card.len(), 2);
+        assert_eq!(by_card.get("a").unwrap(), &vec!["todo from a".to_string()]);
+        assert_eq!(
+            by_card.get("b").unwrap(),
+            &vec!["todo from b 1".to_string(), "todo from b 2".to_string()]
+        );
+        assert!(!by_card.contains_key("c"));
+        assert!(!by_card.contains_key("d"));
+
+        // Card titles are denormalized for the frontend group labels.
+        let a = groups.iter().find(|g| g.card_id == "a").unwrap();
+        assert_eq!(a.card_title, "Card a");
+    }
+
     // ── Delete non-existent returns false ─────────────────────────
 
     #[tokio::test]

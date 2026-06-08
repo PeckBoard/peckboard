@@ -225,6 +225,7 @@ pub fn router(state: Arc<AppState>) -> Router<Arc<AppState>> {
             "/api/projects/{id}/pending-questions",
             get(list_pending_questions),
         )
+        .route("/api/projects/{id}/todos", get(list_project_todos))
         .route_layer(middleware::from_fn_with_state(state, require_auth))
 }
 
@@ -549,6 +550,24 @@ async fn list_pending_questions(
     Ok::<_, (StatusCode, Json<serde_json::Value>)>(Json(
         serde_json::json!({ "questions": pending_questions }),
     ))
+}
+
+/// GET /api/projects/:id/todos -- aggregate todos across every card in the
+/// project, grouped by card. See `Db::list_project_todos` for the per-card
+/// session-id fallback logic, which mirrors the frontend `useProjectTodos`
+/// hook so the dedicated view and the in-board summary stay in sync.
+async fn list_project_todos(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> impl IntoResponse {
+    tracing::info!(project_id = %id, "Listing project todos");
+    let cards = state.db.list_project_todos(&id).await.map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({ "error": e.to_string() })),
+        )
+    })?;
+    Ok::<_, (StatusCode, Json<serde_json::Value>)>(Json(serde_json::json!({ "cards": cards })))
 }
 
 #[cfg(test)]

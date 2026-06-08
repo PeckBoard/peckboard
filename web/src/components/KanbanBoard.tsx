@@ -23,9 +23,11 @@ import {
 
 interface KanbanBoardProps {
   projectId: string
+  /** Navigate to the dedicated project-todos view. */
+  onOpenTodos?: () => void
 }
 
-export default function KanbanBoard({ projectId }: KanbanBoardProps) {
+export default function KanbanBoard({ projectId, onOpenTodos }: KanbanBoardProps) {
   const projects = useProjectsStore((s) => s.projects)
   const updateProject = useProjectsStore((s) => s.updateProject)
   const cards = useProjectsStore((s) => s.cards)
@@ -503,6 +505,16 @@ export default function KanbanBoard({ projectId }: KanbanBoardProps) {
         >
           Comms
         </button>
+        {onOpenTodos && (
+          <button
+            className="btn-secondary"
+            onClick={onOpenTodos}
+            title="View aggregated todos across all cards"
+            data-testid="project-todos-button"
+          >
+            Todos
+          </button>
+        )}
         <button className="btn-primary" onClick={() => setShowAddForm(!showAddForm)}>
           {showAddForm ? 'Cancel' : 'Add Card'}
         </button>

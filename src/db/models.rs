@@ -353,6 +353,30 @@ pub struct NewAnnouncement {
     pub created_at: String,
 }
 
+// ── Todos ────────────────────────────────────────────────────────────
+
+#[derive(Queryable, Selectable, Serialize, Debug, Clone)]
+#[diesel(table_name = todos)]
+pub struct TodoRow {
+    pub session_id: String,
+    pub position: i32,
+    pub content: String,
+    pub status: String,
+    pub active_form: Option<String>,
+    pub updated_at: String,
+}
+
+#[derive(Insertable, Debug)]
+#[diesel(table_name = todos)]
+pub struct NewTodoRow {
+    pub session_id: String,
+    pub position: i32,
+    pub content: String,
+    pub status: String,
+    pub active_form: Option<String>,
+    pub updated_at: String,
+}
+
 // ── User tabs ────────────────────────────────────────────────────────
 
 #[derive(Queryable, Selectable, Insertable, Serialize, Deserialize, Debug, Clone)]

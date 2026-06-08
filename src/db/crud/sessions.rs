@@ -159,6 +159,7 @@ impl Db {
                     .filter(user_tabs::item_id.eq(&id)),
             )
             .execute(conn)?;
+            diesel::delete(todos::table.filter(todos::session_id.eq(&id))).execute(conn)?;
             let count = diesel::delete(sessions::table.find(&id)).execute(conn)?;
             Ok(count > 0)
         })

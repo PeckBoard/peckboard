@@ -22,6 +22,7 @@ pub fn ensure_schema(conn: &mut SqliteConnection) -> anyhow::Result<()> {
     ensure_projects_worker_communication_columns(conn)?;
     ensure_queued_messages_model_columns(conn)?;
     ensure_card_dependencies_table(conn)?;
+    ensure_todos_table(conn)?;
     Ok(())
 }
 
@@ -40,6 +41,145 @@ fn ensure_card_dependencies_table(conn: &mut SqliteConnection) -> anyhow::Result
     )
     .execute(conn)?;
     Ok(())
+}
+
+/// Heal DBs that predate the `1780900501_todos` migration AND backfill
+/// the new `todos` table from each session's most recent `todo` event,
+/// so an older DB doesn't lose its current snapshot when the read path
+/// switches over from `latest_event_of_kind`.
+///
+/// Idempotent in both directions:
+///   * `CREATE TABLE IF NOT EXISTS` is a no-op on healthy DBs.
+///   * Backfill replaces each session's rows with whatever the latest
+///     `todo` event says — so re-running just re-asserts the same state.
+///     Sessions that received fresh writes after startup will already
+///     hold the post-startup snapshot; those won't have a stale
+///     pre-startup `todo` event later than the live writes, so re-runs
+///     don't clobber newer data.
+fn ensure_todos_table(conn: &mut SqliteConnection) -> anyhow::Result<()> {
+    sql_query(
+        "CREATE TABLE IF NOT EXISTS todos (
+            session_id   TEXT    NOT NULL,
+            position     INTEGER NOT NULL,
+            content      TEXT    NOT NULL,
+            status       TEXT    NOT NULL,
+            active_form  TEXT,
+            updated_at   TEXT    NOT NULL,
+            PRIMARY KEY (session_id, position)
+        )",
+    )
+    .execute(conn)?;
+    sql_query("CREATE INDEX IF NOT EXISTS idx_todos_session ON todos (session_id)")
+        .execute(conn)?;
+    backfill_todos_from_events(conn)?;
+    Ok(())
+}
+
+#[derive(QueryableByName, Debug)]
+struct SessionTodoEvent {
+    #[diesel(sql_type = diesel::sql_types::Text)]
+    session_id: String,
+    #[diesel(sql_type = diesel::sql_types::Text)]
+    data: String,
+}
+
+/// Backfill: for every session whose latest `todo` event isn't already
+/// reflected in `todos`, replace that session's rows. We skip sessions
+/// that already have rows whose `updated_at` is newer than the event's
+/// timestamp — those got a fresh write at runtime and we mustn't
+/// clobber them on a later restart.
+fn backfill_todos_from_events(conn: &mut SqliteConnection) -> anyhow::Result<()> {
+    // Skip if the `events` table doesn't exist yet (e.g. test fixtures
+    // that build a minimal schema). Real DBs always have it; this is a
+    // belt-and-braces guard for the repair-tests-only case.
+    let has_events: Vec<PragmaColumn> = sql_query("PRAGMA table_info(events)").load(conn)?;
+    if has_events.is_empty() {
+        return Ok(());
+    }
+
+    // Latest `todo` event per session.
+    let rows: Vec<SessionTodoEvent> = sql_query(
+        "SELECT e.session_id AS session_id, e.data AS data
+         FROM events e
+         JOIN (
+             SELECT session_id, MAX(seq) AS max_seq
+             FROM events
+             WHERE kind = 'todo'
+             GROUP BY session_id
+         ) latest
+           ON latest.session_id = e.session_id
+          AND latest.max_seq = e.seq
+         WHERE e.kind = 'todo'",
+    )
+    .load(conn)?;
+
+    if rows.is_empty() {
+        return Ok(());
+    }
+
+    let now = chrono::Utc::now().to_rfc3339();
+    for row in rows {
+        // Skip if this session already has todos rows — runtime writes win.
+        let existing: i64 = sql_query("SELECT COUNT(*) AS n FROM todos WHERE session_id = ?1")
+            .bind::<diesel::sql_types::Text, _>(&row.session_id)
+            .get_result::<CountRow>(conn)
+            .map(|r| r.n)
+            .unwrap_or(0);
+        if existing > 0 {
+            continue;
+        }
+
+        let Ok(data) = serde_json::from_str::<serde_json::Value>(&row.data) else {
+            continue;
+        };
+        let Some(arr) = data.get("todos").and_then(|v| v.as_array()) else {
+            continue;
+        };
+
+        tracing::info!(
+            session_id = %row.session_id,
+            count = arr.len(),
+            "Backfilling todos table from latest event"
+        );
+
+        for (position, item) in arr.iter().enumerate() {
+            let content = item
+                .get("content")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+            let status = item
+                .get("status")
+                .and_then(|v| v.as_str())
+                .unwrap_or("pending")
+                .to_string();
+            let active_form = item
+                .get("activeForm")
+                .and_then(|v| v.as_str())
+                .map(str::to_string);
+
+            sql_query(
+                "INSERT OR REPLACE INTO todos
+                   (session_id, position, content, status, active_form, updated_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            )
+            .bind::<diesel::sql_types::Text, _>(&row.session_id)
+            .bind::<diesel::sql_types::Integer, _>(position as i32)
+            .bind::<diesel::sql_types::Text, _>(&content)
+            .bind::<diesel::sql_types::Text, _>(&status)
+            .bind::<diesel::sql_types::Nullable<diesel::sql_types::Text>, _>(&active_form)
+            .bind::<diesel::sql_types::Text, _>(&now)
+            .execute(conn)?;
+        }
+    }
+
+    Ok(())
+}
+
+#[derive(QueryableByName, Debug)]
+struct CountRow {
+    #[diesel(sql_type = diesel::sql_types::BigInt)]
+    n: i64,
 }
 
 /// Original bug: `00000000000002_user_tabs` (since renamed to
@@ -127,6 +267,99 @@ mod tests {
             after,
         );
         assert!(after.iter().any(|c| c == "worker_communication"));
+    }
+
+    /// Pre-existing DB has no `todos` table and a session whose latest
+    /// `todo` event holds the live snapshot. ensure_schema must create
+    /// the table AND backfill rows from that event.
+    #[test]
+    fn ensure_schema_backfills_todos_from_latest_event() {
+        let mut conn = SqliteConnection::establish(":memory:").unwrap();
+
+        // Other ensure_schema steps prod `projects` and `queued_messages`;
+        // stub the bare minimum so we can isolate the todos check.
+        sql_query(
+            "CREATE TABLE projects (
+                id TEXT PRIMARY KEY NOT NULL,
+                auto_notify_changes BOOLEAN NOT NULL DEFAULT 1,
+                worker_communication BOOLEAN NOT NULL DEFAULT 1
+            )",
+        )
+        .execute(&mut conn)
+        .unwrap();
+        sql_query(
+            "CREATE TABLE queued_messages (
+                session_id TEXT PRIMARY KEY NOT NULL,
+                text TEXT NOT NULL,
+                queued_at TEXT NOT NULL,
+                model TEXT,
+                effort TEXT
+            )",
+        )
+        .execute(&mut conn)
+        .unwrap();
+
+        // Minimal `events` shape — enough for the backfill query.
+        sql_query(
+            "CREATE TABLE events (
+                id TEXT PRIMARY KEY NOT NULL,
+                session_id TEXT NOT NULL,
+                seq INTEGER NOT NULL,
+                ts BIGINT NOT NULL,
+                kind TEXT NOT NULL,
+                data TEXT NOT NULL
+            )",
+        )
+        .execute(&mut conn)
+        .unwrap();
+
+        // Two `todo` events for one session — backfill must pick the
+        // latest by seq, not seq=1's stale snapshot.
+        sql_query(
+            "INSERT INTO events (id, session_id, seq, ts, kind, data) VALUES
+             ('e1', 's1', 1, 100, 'todo',
+                '{\"todos\":[{\"content\":\"stale\",\"status\":\"pending\"}]}'),
+             ('e2', 's1', 2, 200, 'todo',
+                '{\"todos\":[{\"content\":\"latest a\",\"status\":\"in_progress\",\"activeForm\":\"Doing a\"},{\"content\":\"latest b\",\"status\":\"done\"}]}')",
+        )
+        .execute(&mut conn)
+        .unwrap();
+
+        ensure_schema(&mut conn).unwrap();
+
+        #[derive(QueryableByName, Debug)]
+        struct R {
+            #[diesel(sql_type = diesel::sql_types::Text)]
+            content: String,
+            #[diesel(sql_type = diesel::sql_types::Text)]
+            status: String,
+            #[diesel(sql_type = diesel::sql_types::Nullable<diesel::sql_types::Text>)]
+            active_form: Option<String>,
+        }
+
+        let rows: Vec<R> = sql_query(
+            "SELECT content, status, active_form
+             FROM todos WHERE session_id='s1' ORDER BY position",
+        )
+        .load(&mut conn)
+        .unwrap();
+
+        assert_eq!(rows.len(), 2, "stale event must not be picked");
+        assert_eq!(rows[0].content, "latest a");
+        assert_eq!(rows[0].status, "in_progress");
+        assert_eq!(rows[0].active_form.as_deref(), Some("Doing a"));
+        assert_eq!(rows[1].content, "latest b");
+        assert_eq!(rows[1].status, "done");
+
+        // Second call must be a no-op — existing rows win, no clobber.
+        ensure_schema(&mut conn).unwrap();
+        let rows2: Vec<R> = sql_query(
+            "SELECT content, status, active_form
+             FROM todos WHERE session_id='s1' ORDER BY position",
+        )
+        .load(&mut conn)
+        .unwrap();
+        assert_eq!(rows2.len(), 2);
     }
 
     /// Running on a healthy schema must be a no-op (no double-add).

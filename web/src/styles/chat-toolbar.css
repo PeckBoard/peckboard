@@ -74,6 +74,53 @@
   flex-shrink: 0;
 }
 
+.chat-toolbar-tasks {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: transparent;
+  color: var(--text2);
+  font-size: var(--text-xs);
+  font-weight: 600;
+  cursor: pointer;
+  flex-shrink: 0;
+  transition: all var(--transition);
+}
+
+.chat-toolbar-tasks:hover {
+  background: var(--surface-hover);
+  color: var(--text);
+}
+
+.chat-toolbar-tasks-count {
+  font-variant-numeric: tabular-nums;
+  color: var(--text3);
+  font-weight: 500;
+}
+
+.chat-toolbar-back {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  border: none;
+  border-radius: var(--radius);
+  background: transparent;
+  color: var(--text2);
+  cursor: pointer;
+  flex-shrink: 0;
+  transition: all var(--transition);
+}
+
+.chat-toolbar-back:hover {
+  background: var(--surface-hover);
+  color: var(--text);
+}
+
 .chat-toolbar-menu-wrapper {
   position: relative;
   flex-shrink: 0;
