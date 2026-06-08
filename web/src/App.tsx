@@ -705,6 +705,7 @@ function App() {
             if (type === 'session') setConfirmDeleteId(id)
             else setConfirmDeleteProjectId(id)
           }}
+          onNewSession={() => setShowNewSession(true)}
         />
         {announcement && (
           <div className="announcement-banner">

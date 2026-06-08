@@ -372,6 +372,40 @@
 .tab-icon-project {
   color: var(--warning);
 }
+/* Trailing `+` button — entry point for creating a new session. Lives at
+   the far right of the strip via `margin-left: auto`; sticks at the end
+   of the row when there are too many tabs to fit. */
+.tab-new {
+  margin-left: auto;
+  flex-shrink: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 32px;
+  height: 32px;
+  padding: 0;
+  border: 0;
+  border-radius: var(--radius-full);
+  background: var(--surface2);
+  color: var(--text2);
+  font-size: 18px;
+  line-height: 1;
+  cursor: pointer;
+  transition:
+    background 0.12s ease,
+    color 0.12s ease;
+}
+.tab-new:hover {
+  background: var(--accent);
+  color: var(--text-inverse);
+}
+@media (max-width: 768px) {
+  .tab-new {
+    width: 36px;
+    height: 36px;
+    font-size: 20px;
+  }
+}
 .tab-dot {
   width: 8px;
   height: 8px;
@@ -433,34 +467,51 @@
 .list-view-body {
   flex: 1;
   overflow-y: auto;
-  padding: 8px;
+  padding: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
 }
+/* Each row renders as its own card so the list reads as discrete items
+   rather than a wall of prose. The row owns the visual chrome (border,
+   background, hover lift); the inner `.list-view-item` button stays
+   transparent and just provides the clickable region. */
 .list-view-row {
   position: relative;
   display: flex;
-  align-items: center;
-  padding: 2px 4px;
+  align-items: stretch;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  transition:
+    background 0.12s ease,
+    border-color 0.12s ease,
+    box-shadow 0.12s ease;
+}
+.list-view-row:hover {
+  background: var(--surface-hover);
+  border-color: var(--border-strong, var(--border));
+}
+.list-view-row.active {
+  background: var(--accent-subtle);
+  border-color: var(--accent);
 }
 .list-view-item {
   flex: 1;
   display: flex;
   align-items: center;
   gap: 8px;
-  padding: 10px 12px;
+  padding: 12px 14px;
   background: transparent;
   border: 0;
-  border-radius: var(--radius-sm);
+  border-radius: var(--radius-md);
   text-align: left;
   font-family: inherit;
   font-size: var(--text-sm);
   color: var(--text);
   cursor: pointer;
 }
-.list-view-item:hover {
-  background: var(--bg);
-}
 .list-view-row.active .list-view-item {
-  background: var(--accent-subtle);
   color: var(--accent);
 }
 .list-view-name {

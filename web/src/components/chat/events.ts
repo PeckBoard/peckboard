@@ -43,6 +43,7 @@ export type DisplayItem =
     }
   | { type: 'step'; label: string; key: string }
   | { type: 'agent-start'; model: string; effort: string; ts: number; key: string }
+  | { type: 'agent-crashed'; reason: string; ts: number; key: string }
   | { type: 'interrupt'; ts: number; key: string }
   | { type: 'question'; questionId: string; questions: QuestionItem[]; key: string }
   | {
@@ -253,11 +254,12 @@ export function buildDisplayItems(events: Event[]): DisplayItem[] {
           break
         }
         if ((ev.data.status as string) === 'crashed') {
-          const stderr = ev.data.stderr as string | undefined
-          const crashText = stderr
-            ? `Agent crashed: ${reason}\n\n${stderr}`
-            : `Agent crashed: ${reason}`
-          items.push({ type: 'system', text: crashText, key: ev.id, ts: ev.ts })
+          items.push({
+            type: 'agent-crashed',
+            reason,
+            key: ev.id,
+            ts: ev.ts,
+          })
         } else {
           items.push({
             type: 'status',

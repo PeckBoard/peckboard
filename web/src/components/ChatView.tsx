@@ -586,6 +586,22 @@ export default function ChatView({ sessionId, onOpenTodos }: ChatViewProps) {
                   </div>
                 </div>
               )
+            case 'agent-crashed':
+              // Plain row, no bubble/icon — mirrors `agent-start` and
+              // `interrupt` so all agent lifecycle notices read the
+              // same. The reason ("process exited with code 1",
+              // "interrupted", etc.) sits in the detail chip; stderr
+              // is intentionally not surfaced here, it's still in the
+              // event payload for debugging via the API.
+              return (
+                <div key={item.key} className="chat-row chat-row-system">
+                  <div className="chat-agent-start">
+                    <span className="chat-agent-start-label">Agent crashed</span>
+                    <span className="chat-agent-start-detail">{item.reason}</span>
+                    <span className="chat-agent-start-time">{formatTime(item.ts)}</span>
+                  </div>
+                </div>
+              )
             case 'tool':
               return (
                 <div key={item.key} className="chat-row chat-row-tool">

@@ -196,6 +196,15 @@ test.describe('tabs', () => {
     const { sessionId: idB } = await seedFolderAndSession(request, auth, 'second-open')
 
     await loadAt(page, token, `/sessions/${idA}`)
+    // Wait for A's tab to actually land in the strip before navigating
+    // to B — without this, B can be opened first and the MRU prepend
+    // order ends up [A, B] instead of [B, A]. (Previously the loadAt
+    // helper indirectly waited because `.tabbar` only rendered once
+    // there was at least one tab. Now the strip is always visible for
+    // the trailing `+` button, so we wait explicitly.)
+    await expect(page.locator('.tab-opened', { hasText: 'first-open' })).toBeVisible({
+      timeout: 5_000,
+    })
     await page.evaluate((id) => {
       history.pushState(null, '', `/sessions/${id}`)
       window.dispatchEvent(new PopStateEvent('popstate'))

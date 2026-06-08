@@ -78,12 +78,32 @@
   list-style: none;
   flex: 1;
   overflow-y: auto;
-  padding: 0 8px 8px;
+  padding: 4px 12px 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin: 0;
 }
+/* Each project renders as a card so the list reads as discrete items
+   instead of one long paragraph. The `li` owns the visual chrome and
+   the inner button stays transparent. */
 .project-list li {
   display: flex;
-  align-items: center;
+  align-items: stretch;
   position: relative;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  transition:
+    background 0.12s ease,
+    border-color 0.12s ease;
+}
+.project-list li:hover {
+  background: var(--surface-hover);
+}
+.project-list li.active {
+  background: var(--accent-subtle);
+  border-color: var(--accent);
 }
 .project-list-item {
   display: flex;
@@ -91,21 +111,16 @@
   gap: 8px;
   flex: 1;
   text-align: left;
-  padding: 9px 12px;
+  padding: 11px 14px;
   border: none;
-  border-radius: var(--radius);
+  border-radius: var(--radius-md);
   background: transparent;
   font-size: var(--text-sm);
   color: var(--text);
   cursor: pointer;
-  transition: background var(--transition);
   min-width: 0;
 }
-.project-list-item:hover {
-  background: var(--surface-hover);
-}
 .project-list li.active .project-list-item {
-  background: var(--accent-subtle);
   color: var(--accent);
   font-weight: 500;
 }
@@ -146,7 +161,10 @@
 .project-list li.empty {
   font-size: var(--text-sm);
   color: var(--text3);
-  padding: 8px 12px;
+  padding: 12px 14px;
+  background: transparent;
+  border: 0;
+  text-align: center;
 }
 .project-list-actions {
   position: relative;

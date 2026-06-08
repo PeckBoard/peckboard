@@ -13,6 +13,8 @@ interface TabBarProps {
   /** Clear all messages in a session. Only invoked for `type === 'session'`. */
   onClearItem: (type: TabType, id: string) => void
   onDeleteItem: (type: TabType, id: string) => void
+  /** Open the New Session modal. Renders as a trailing `+` button. */
+  onNewSession: () => void
 }
 
 /**
@@ -38,6 +40,7 @@ export default function TabBar({
   onRenameItem,
   onClearItem,
   onDeleteItem,
+  onNewSession,
 }: TabBarProps) {
   const tabs = useTabsStore((s) => s.tabs)
   const closeTab = useTabsStore((s) => s.closeTab)
@@ -80,8 +83,9 @@ export default function TabBar({
     }
   }, [tabs, sessionsLoaded, projectsLoaded, sessionMap, projectMap, closeTab])
 
-  if (visibleTabs.length === 0) return null
-
+  // Always render the strip — even with zero tabs — so the trailing `+`
+  // button stays reachable as the user's entry point to creating a new
+  // session.
   return (
     <div className="tabbar" role="tablist" aria-label="Open tabs">
       {visibleTabs.map((t) => {
@@ -115,6 +119,15 @@ export default function TabBar({
           />
         )
       })}
+      <button
+        type="button"
+        className="tab-new"
+        title="New session"
+        aria-label="New session"
+        onClick={onNewSession}
+      >
+        +
+      </button>
     </div>
   )
 }
