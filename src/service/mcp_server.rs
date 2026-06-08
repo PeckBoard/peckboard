@@ -7,7 +7,7 @@ use serde_json::Value;
 use tokio::sync::Mutex;
 
 use crate::db::Db;
-use crate::db::models::{NewCard, NewFolder, NewProject, UpdateCard, UpdateProject};
+use crate::db::models::{Card, NewCard, NewFolder, NewProject, UpdateCard, UpdateProject};
 
 // ── MCP config file generation ────────────────────────────────────
 
@@ -470,6 +470,30 @@ impl McpToolRegistry {
                 }),
             },
             McpToolDef {
+                name: "list_card_dependencies".into(),
+                description: "List the direct dependencies of a card — the cards it must wait on before a worker will pick it up. Each entry reports whether that prerequisite is 'done'.".into(),
+                input_schema: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "card_id": { "type": "string", "description": "ID of the card whose dependencies to list" }
+                    },
+                    "required": ["card_id"],
+                    "additionalProperties": false
+                }),
+            },
+            McpToolDef {
+                name: "get_card_dependency_tree".into(),
+                description: "Resolve the full transitive dependency tree of a card — its dependencies, their dependencies, and so on. Returns a nested tree plus whether every transitive prerequisite has reached 'done'.".into(),
+                input_schema: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "card_id": { "type": "string", "description": "ID of the card to resolve the dependency tree for" }
+                    },
+                    "required": ["card_id"],
+                    "additionalProperties": false
+                }),
+            },
+            McpToolDef {
                 name: "list_projects".into(),
                 description: "List all projects.".into(),
                 input_schema: serde_json::json!({
@@ -927,6 +951,8 @@ impl McpToolRegistry {
             "ask_user" => self.handle_ask_user(args, ctx).await,
             "create_card" => self.handle_create_card(args, ctx).await,
             "list_cards" => self.handle_list_cards(args, ctx).await,
+            "list_card_dependencies" => self.handle_list_card_dependencies(args, ctx).await,
+            "get_card_dependency_tree" => self.handle_get_card_dependency_tree(args, ctx).await,
             "list_projects" => self.handle_list_projects(ctx).await,
             "list_workflows" => self.handle_list_workflows(ctx).await,
             "write_report" => self.handle_write_report(args, ctx).await,
@@ -1386,6 +1412,111 @@ impl McpToolRegistry {
             .collect();
 
         Ok(serde_json::json!({ "cards": items, "count": items.len(), "project_id": project_id }))
+    }
+
+    async fn handle_list_card_dependencies(
+        &self,
+        args: Value,
+        ctx: &ToolCallContext,
+    ) -> anyhow::Result<Value> {
+        let card_id = args
+            .get("card_id")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| anyhow::anyhow!("list_card_dependencies requires 'card_id'"))?;
+
+        tracing::info!(session_id = %ctx.session_id, card_id = %card_id, "MCP tool: list_card_dependencies");
+
+        let card = ctx
+            .db
+            .get_card(card_id)
+            .await?
+            .ok_or_else(|| anyhow::anyhow!("card not found: {card_id}"))?;
+
+        // Resolve dependency ids against the card's own project so we can
+        // report each prerequisite's title and step.
+        let project_cards = ctx.db.list_cards_by_project(&card.project_id).await?;
+        let info_by_id: std::collections::HashMap<&str, &Card> =
+            project_cards.iter().map(|c| (c.id.as_str(), c)).collect();
+
+        let dep_ids = ctx.db.list_card_dependencies(card_id).await?;
+        let dependencies: Vec<Value> = dep_ids
+            .iter()
+            .map(|id| match info_by_id.get(id.as_str()) {
+                Some(c) => serde_json::json!({
+                    "id": c.id,
+                    "title": c.title,
+                    "step": c.step,
+                    "met": c.step == "done",
+                }),
+                None => serde_json::json!({ "id": id, "met": false }),
+            })
+            .collect();
+
+        let all_met = dep_ids
+            .iter()
+            .all(|id| info_by_id.get(id.as_str()).map(|c| c.step.as_str()) == Some("done"));
+
+        Ok(serde_json::json!({
+            "card_id": card_id,
+            "dependencies": dependencies,
+            "count": dependencies.len(),
+            "all_met": all_met,
+        }))
+    }
+
+    async fn handle_get_card_dependency_tree(
+        &self,
+        args: Value,
+        ctx: &ToolCallContext,
+    ) -> anyhow::Result<Value> {
+        let card_id = args
+            .get("card_id")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| anyhow::anyhow!("get_card_dependency_tree requires 'card_id'"))?;
+
+        tracing::info!(session_id = %ctx.session_id, card_id = %card_id, "MCP tool: get_card_dependency_tree");
+
+        let card = ctx
+            .db
+            .get_card(card_id)
+            .await?
+            .ok_or_else(|| anyhow::anyhow!("card not found: {card_id}"))?;
+
+        let cards = ctx.db.list_cards_by_project(&card.project_id).await?;
+        let edges = ctx
+            .db
+            .list_dependencies_by_project(&card.project_id)
+            .await
+            .unwrap_or_default();
+
+        let mut deps_by_card: std::collections::HashMap<&str, Vec<&str>> =
+            std::collections::HashMap::new();
+        for (cid, dep_id) in &edges {
+            deps_by_card
+                .entry(cid.as_str())
+                .or_default()
+                .push(dep_id.as_str());
+        }
+        let info_by_id: std::collections::HashMap<&str, &Card> =
+            cards.iter().map(|c| (c.id.as_str(), c)).collect();
+
+        let mut path = std::collections::HashSet::new();
+        let tree = build_dependency_tree(card_id, &deps_by_card, &info_by_id, &mut path);
+
+        // Every transitive prerequisite (excluding the card itself) must be
+        // `done` for the card to be dispatchable.
+        let mut transitive = std::collections::HashSet::new();
+        collect_transitive_deps(card_id, &deps_by_card, &mut transitive);
+        let all_dependencies_met = transitive
+            .iter()
+            .all(|id| info_by_id.get(id.as_str()).map(|c| c.step.as_str()) == Some("done"));
+
+        Ok(serde_json::json!({
+            "card_id": card_id,
+            "tree": tree,
+            "dependency_count": transitive.len(),
+            "all_dependencies_met": all_dependencies_met,
+        }))
     }
 
     async fn handle_list_projects(&self, ctx: &ToolCallContext) -> anyhow::Result<Value> {
@@ -2941,6 +3072,65 @@ impl McpToolRegistry {
     }
 }
 
+/// Build a nested dependency tree rooted at `card_id`. `path` tracks the
+/// nodes on the current branch so a cycle (which the `would_create_cycle`
+/// guard normally prevents, but we stay defensive) is reported as a leaf
+/// with `"cycle": true` instead of recursing forever.
+fn build_dependency_tree(
+    card_id: &str,
+    deps_by_card: &std::collections::HashMap<&str, Vec<&str>>,
+    info_by_id: &std::collections::HashMap<&str, &Card>,
+    path: &mut std::collections::HashSet<String>,
+) -> Value {
+    let (title, step) = match info_by_id.get(card_id) {
+        Some(c) => (c.title.as_str(), c.step.as_str()),
+        None => ("<unknown>", "<unknown>"),
+    };
+
+    if !path.insert(card_id.to_string()) {
+        return serde_json::json!({
+            "id": card_id,
+            "title": title,
+            "step": step,
+            "cycle": true,
+        });
+    }
+
+    let depends_on: Vec<Value> = deps_by_card
+        .get(card_id)
+        .map(|deps| {
+            deps.iter()
+                .map(|d| build_dependency_tree(d, deps_by_card, info_by_id, path))
+                .collect()
+        })
+        .unwrap_or_default();
+
+    path.remove(card_id);
+
+    serde_json::json!({
+        "id": card_id,
+        "title": title,
+        "step": step,
+        "depends_on": depends_on,
+    })
+}
+
+/// Collect every transitive dependency id of `card_id` (excluding itself)
+/// into `seen`. The `seen` set doubles as cycle protection.
+fn collect_transitive_deps(
+    card_id: &str,
+    deps_by_card: &std::collections::HashMap<&str, Vec<&str>>,
+    seen: &mut std::collections::HashSet<String>,
+) {
+    if let Some(deps) = deps_by_card.get(card_id) {
+        for dep in deps {
+            if seen.insert(dep.to_string()) {
+                collect_transitive_deps(dep, deps_by_card, seen);
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2960,6 +3150,8 @@ mod tests {
         assert!(names.contains(&"ask_user"));
         assert!(names.contains(&"create_card"));
         assert!(names.contains(&"list_cards"));
+        assert!(names.contains(&"list_card_dependencies"));
+        assert!(names.contains(&"get_card_dependency_tree"));
         assert!(names.contains(&"list_projects"));
         assert!(names.contains(&"list_workflows"));
         assert!(names.contains(&"write_report"));
@@ -2975,7 +3167,7 @@ mod tests {
         assert!(names.contains(&"move_card_to_wont_do"));
         assert!(names.contains(&"create_folder"));
         assert!(names.contains(&"list_folders"));
-        assert_eq!(names.len(), 31);
+        assert_eq!(names.len(), 33);
     }
 
     #[test]
@@ -3056,6 +3248,158 @@ mod tests {
         let ctx = ctx_for_scope(None);
         let err = ctx.scope_project(None).unwrap_err();
         assert!(err.to_string().contains("project_id required"));
+    }
+
+    #[tokio::test]
+    async fn test_card_dependency_tools() {
+        use crate::db::models::{NewFolder, NewProject};
+
+        let registry = McpToolRegistry::new();
+        let db = Arc::new(crate::db::Db::in_memory().unwrap());
+        let ts = chrono::Utc::now().to_rfc3339();
+
+        db.create_folder(NewFolder {
+            id: "f1".into(),
+            name: "Folder".into(),
+            path: "/tmp/f".into(),
+            created_at: ts.clone(),
+        })
+        .await
+        .unwrap();
+        db.create_project(NewProject {
+            id: "p1".into(),
+            name: "Project".into(),
+            context: "".into(),
+            folder_id: "f1".into(),
+            worker_count: 1,
+            status: "active".into(),
+            default_workflow: None,
+            model: None,
+            effort: None,
+            parallel_instructions: false,
+            auto_notify_changes: true,
+            worker_communication: false,
+            created_at: ts.clone(),
+            last_accessed_at: ts.clone(),
+        })
+        .await
+        .unwrap();
+
+        let ctx = ToolCallContext {
+            session_id: "s1".into(),
+            project_id: Some("p1".into()),
+            card_id: None,
+            db: db.clone(),
+            broadcaster: crate::ws::broadcaster::Broadcaster::new(),
+            provider_registry: None,
+        };
+
+        // Two prerequisites via create_card (no deps yet).
+        let a = registry
+            .handle_tool_call(
+                "create_card",
+                serde_json::json!({ "title": "A", "description": "root prereq" }),
+                &ctx,
+            )
+            .await
+            .unwrap();
+        let a_id = a["card"]["id"].as_str().unwrap().to_string();
+
+        let b = registry
+            .handle_tool_call(
+                "create_card",
+                serde_json::json!({ "title": "B", "description": "mid", "depends_on": [a_id] }),
+                &ctx,
+            )
+            .await
+            .unwrap();
+        let b_id = b["card"]["id"].as_str().unwrap().to_string();
+        // create_card persists and echoes the dependency.
+        assert_eq!(b["card"]["depends_on"], serde_json::json!([a_id]));
+
+        // C depends on B (so transitively on A). Bogus + self ids are dropped.
+        let c = registry
+            .handle_tool_call(
+                "create_card",
+                serde_json::json!({
+                    "title": "C",
+                    "description": "leaf",
+                    "depends_on": [b_id, "does-not-exist"],
+                }),
+                &ctx,
+            )
+            .await
+            .unwrap();
+        let c_id = c["card"]["id"].as_str().unwrap().to_string();
+        assert_eq!(c["card"]["depends_on"], serde_json::json!([b_id]));
+
+        // list_card_dependencies: direct deps only, none met yet.
+        let direct = registry
+            .handle_tool_call(
+                "list_card_dependencies",
+                serde_json::json!({ "card_id": c_id }),
+                &ctx,
+            )
+            .await
+            .unwrap();
+        assert_eq!(direct["count"], 1);
+        assert_eq!(direct["dependencies"][0]["id"], serde_json::json!(b_id));
+        assert_eq!(direct["all_met"], serde_json::json!(false));
+
+        // get_card_dependency_tree: C -> B -> A, two transitive deps, unmet.
+        let tree = registry
+            .handle_tool_call(
+                "get_card_dependency_tree",
+                serde_json::json!({ "card_id": c_id }),
+                &ctx,
+            )
+            .await
+            .unwrap();
+        assert_eq!(tree["dependency_count"], 2);
+        assert_eq!(tree["all_dependencies_met"], serde_json::json!(false));
+        assert_eq!(tree["tree"]["id"], serde_json::json!(c_id));
+        assert_eq!(tree["tree"]["depends_on"][0]["id"], serde_json::json!(b_id));
+        assert_eq!(
+            tree["tree"]["depends_on"][0]["depends_on"][0]["id"],
+            serde_json::json!(a_id)
+        );
+
+        // Mark both prerequisites done; the tree now reports satisfied.
+        registry
+            .handle_tool_call(
+                "move_card_to_done",
+                serde_json::json!({ "card_id": a_id }),
+                &ctx,
+            )
+            .await
+            .unwrap();
+        registry
+            .handle_tool_call(
+                "move_card_to_done",
+                serde_json::json!({ "card_id": b_id }),
+                &ctx,
+            )
+            .await
+            .unwrap();
+        let tree2 = registry
+            .handle_tool_call(
+                "get_card_dependency_tree",
+                serde_json::json!({ "card_id": c_id }),
+                &ctx,
+            )
+            .await
+            .unwrap();
+        assert_eq!(tree2["all_dependencies_met"], serde_json::json!(true));
+
+        // Unknown card id is an error, not a panic.
+        let err = registry
+            .handle_tool_call(
+                "list_card_dependencies",
+                serde_json::json!({ "card_id": "nope" }),
+                &ctx,
+            )
+            .await;
+        assert!(err.is_err());
     }
 
     #[tokio::test]
