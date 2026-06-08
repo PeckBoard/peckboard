@@ -395,56 +395,31 @@ async fn delete_project(
     Path(id): Path<String>,
 ) -> impl IntoResponse {
     tracing::info!(project_id = %id, "Deleting project");
-    // Cascade: collect worker session IDs from cards, then clean up
-    let cards = state.db.list_cards_by_project(&id).await.map_err(|e| {
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(serde_json::json!({ "error": e.to_string() })),
-        )
+
+    // Atomic cascade: cards, their worker sessions, those sessions'
+    // events and queued messages, and the project itself all delete in
+    // one closure under the DB connection mutex. Replaces the old
+    // pattern that did each step in a separate await with `let _ = …`
+    // swallowing errors, which could leave orphans and silently report
+    // success when the cascade was only half-applied.
+    let report = state.db.delete_project_cascade(&id).await.map_err(|e| {
+        let msg = e.to_string();
+        let status = if msg.contains("not found") {
+            StatusCode::NOT_FOUND
+        } else {
+            StatusCode::INTERNAL_SERVER_ERROR
+        };
+        (status, Json(serde_json::json!({ "error": msg })))
     })?;
+    tracing::info!(
+        project_id = %id,
+        cards = report.cards_deleted,
+        sessions = report.sessions_deleted,
+        events = report.events_deleted,
+        "Project cascade-deleted"
+    );
 
-    // Collect all worker session IDs (current and last)
-    let mut session_ids: Vec<String> = Vec::new();
-    for card in &cards {
-        if let Some(ref sid) = card.worker_session_id {
-            session_ids.push(sid.clone());
-        }
-        if let Some(ref sid) = card.last_worker_session_id {
-            session_ids.push(sid.clone());
-        }
-    }
-    session_ids.sort();
-    session_ids.dedup();
-
-    // Delete events then sessions for each worker session
-    for sid in &session_ids {
-        let _ = state.db.delete_events_by_session(sid).await;
-        let _ = state.db.delete_session(sid).await;
-    }
-
-    // Delete all cards
-    state.db.delete_cards_by_project(&id).await.map_err(|e| {
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(serde_json::json!({ "error": e.to_string() })),
-        )
-    })?;
-
-    let deleted = state.db.delete_project(&id).await.map_err(|e| {
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(serde_json::json!({ "error": e.to_string() })),
-        )
-    })?;
-
-    if !deleted {
-        return Err((
-            StatusCode::NOT_FOUND,
-            Json(serde_json::json!({ "error": "project not found" })),
-        ));
-    }
-
-    Ok(StatusCode::NO_CONTENT)
+    Ok::<_, (StatusCode, Json<serde_json::Value>)>(StatusCode::NO_CONTENT)
 }
 
 /// POST /api/projects/:id/pause
@@ -453,6 +428,9 @@ async fn pause_project(
     Path(id): Path<String>,
 ) -> impl IntoResponse {
     tracing::info!(project_id = %id, "Pausing project");
+    // Flip status first so the orchestrator's 5s tick won't immediately
+    // re-spawn workers in the window between cancel and the user
+    // noticing.
     let update = UpdateProject {
         status: Some("paused".to_string()),
         last_accessed_at: Some(chrono::Utc::now().to_rfc3339()),
@@ -466,13 +444,34 @@ async fn pause_project(
         )
     })?;
 
-    match project {
-        Some(p) => Ok(Json(serde_json::json!(p))),
-        None => Err((
-            StatusCode::NOT_FOUND,
-            Json(serde_json::json!({ "error": "project not found" })),
-        )),
+    let project = match project {
+        Some(p) => p,
+        None => {
+            return Err((
+                StatusCode::NOT_FOUND,
+                Json(serde_json::json!({ "error": "project not found" })),
+            ));
+        }
+    };
+
+    // Cancel any worker sessions that are currently in flight on this
+    // project. Without this, a worker mid-turn would keep running,
+    // advance its card on completion, and leave the project in an
+    // inconsistent state (paused on the kanban; cards still moving).
+    if let Ok(workers) = state.db.list_worker_sessions_by_project(&id).await {
+        let mut cancelled = 0u32;
+        for ws in &workers {
+            if state.session_manager.is_running(&ws.id).await {
+                state.session_manager.cancel(&ws.id).await;
+                cancelled += 1;
+            }
+        }
+        if cancelled > 0 {
+            tracing::info!(project_id = %id, cancelled, "Cancelled in-flight workers on pause");
+        }
     }
+
+    Ok::<_, (StatusCode, Json<serde_json::Value>)>(Json(serde_json::json!(project)))
 }
 
 /// POST /api/projects/:id/resume
@@ -658,7 +657,7 @@ async fn list_cards(
 async fn update_card(
     State(state): State<Arc<AppState>>,
     Path((_project_id, card_id)): Path<(String, String)>,
-    Json(body): Json<UpdateCardRequest>,
+    Json(mut body): Json<UpdateCardRequest>,
 ) -> impl IntoResponse {
     tracing::info!(card_id = %card_id, "Updating card");
 
@@ -693,108 +692,119 @@ async fn update_card(
         ));
     }
 
-    // Fetch existing card for edit policy checks
-    let existing = state.db.get_card(&card_id).await.map_err(|e| {
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(serde_json::json!({ "error": e.to_string() })),
-        )
-    })?;
+    // Pull `depends_on` out before the atomic update closure so the
+    // body fields it captures don't include the dep set. Replacing
+    // dependencies is a separate table write that needs to validate
+    // (unknown dep / cycle) against the project's full card graph; we
+    // do it after the atomic card update succeeds so a failed card
+    // write doesn't leave dependencies in an inconsistent state.
+    let depends_on = body.depends_on.take();
 
-    let existing = match existing {
-        Some(c) => c,
-        None => {
+    // Atomic validate + update under the DB connection mutex. Holding
+    // the mutex across the read-validate-write closure prevents two
+    // concurrent transitions from both seeing the same pre-state and
+    // both applying their write (e.g. two `complete_step` calls racing
+    // and producing inconsistent step values).
+    let depends_on_present = depends_on.is_some();
+    let card = state
+        .db
+        .update_card_atomic(&card_id, move |existing| {
+            let is_terminal = existing.step == "done" || existing.step == "wont_do";
+
+            // Terminal cards: only step changes allowed (to reopen / move).
+            // depends_on edits are also blocked in terminal states.
+            if is_terminal {
+                let only_step = body.step.is_some()
+                    && body.title.is_none()
+                    && body.description.is_none()
+                    && body.priority.is_none()
+                    && body.workflow.is_none()
+                    && body.model.is_none()
+                    && body.effort.is_none()
+                    && body.blocked.is_none()
+                    && body.block_reason.is_none()
+                    && !depends_on_present;
+                if !only_step {
+                    anyhow::bail!(
+                        "card-update-policy: card is in terminal state — only step changes allowed"
+                    );
+                }
+            }
+
+            // description/workflow are locked once a card leaves backlog.
+            // model, effort, title, priority, blocked, block_reason stay
+            // editable in any non-terminal state.
+            if existing.step != "backlog"
+                && !is_terminal
+                && (body.workflow.is_some() || body.description.is_some())
+            {
+                anyhow::bail!(
+                    "card-update-policy: description and workflow are locked after leaving backlog"
+                );
+            }
+
+            Ok(UpdateCard {
+                title: body.title,
+                description: body.description,
+                step: body.step,
+                priority: body.priority,
+                workflow: body.workflow,
+                model: body.model,
+                effort: body.effort,
+                worker_session_id: body.worker_session_id,
+                last_worker_session_id: body.last_worker_session_id,
+                handoff_context: body.handoff_context,
+                blocked: body.blocked,
+                block_reason: body.block_reason,
+                updated_at: Some(chrono::Utc::now().to_rfc3339()),
+            })
+        })
+        .await;
+
+    let card = match card {
+        Ok(c) => c,
+        Err(e) => {
+            let msg = e.to_string();
+            // Validation rejections from the closure are user-correctable
+            // (terminal-state or backlog-locked policy); everything else
+            // is a server-side error.
+            let status = if msg.starts_with("card-update-policy:") {
+                StatusCode::FORBIDDEN
+            } else {
+                StatusCode::INTERNAL_SERVER_ERROR
+            };
             return Err((
-                StatusCode::NOT_FOUND,
-                Json(serde_json::json!({ "error": "card not found" })),
+                status,
+                Json(serde_json::json!({
+                    "error": msg.trim_start_matches("card-update-policy: ").to_string()
+                })),
             ));
         }
     };
 
-    let is_terminal = existing.step == "done" || existing.step == "wont_do";
-
-    // Terminal cards: only allow step changes (to reopen/move) and nothing else
-    if is_terminal {
-        let only_step = body.step.is_some()
-            && body.title.is_none()
-            && body.description.is_none()
-            && body.priority.is_none()
-            && body.workflow.is_none()
-            && body.model.is_none()
-            && body.effort.is_none()
-            && body.blocked.is_none()
-            && body.block_reason.is_none()
-            && body.depends_on.is_none();
-        if !only_step {
-            return Err((
-                StatusCode::FORBIDDEN,
-                Json(
-                    serde_json::json!({ "error": "card is in terminal state — only step changes allowed" }),
-                ),
-            ));
-        }
-    }
-
-    // Reject updates to backlog-only fields (description, workflow) after leaving backlog.
-    // Model, effort, title, priority, blocked, block_reason remain editable in any non-terminal state.
-    if existing.step != "backlog" && !is_terminal {
-        if body.workflow.is_some() || body.description.is_some() {
-            return Err((
-                StatusCode::FORBIDDEN,
-                Json(
-                    serde_json::json!({ "error": "description and workflow are locked after leaving backlog" }),
-                ),
-            ));
-        }
-    }
-
-    // Replace dependencies first so a validation failure (unknown dep or
-    // cycle) aborts before we mutate any card fields.
-    if let Some(depends_on) = body.depends_on {
-        apply_dependencies(&state, &existing.project_id, &card_id, depends_on).await?;
-    }
-
-    let update = UpdateCard {
-        title: body.title,
-        description: body.description,
-        step: body.step,
-        priority: body.priority,
-        workflow: body.workflow,
-        model: body.model,
-        effort: body.effort,
-        worker_session_id: body.worker_session_id,
-        last_worker_session_id: body.last_worker_session_id,
-        handoff_context: body.handoff_context,
-        blocked: body.blocked,
-        block_reason: body.block_reason,
-        updated_at: Some(chrono::Utc::now().to_rfc3339()),
-    };
-
-    let card = state.db.update_card(&card_id, update).await.map_err(|e| {
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(serde_json::json!({ "error": e.to_string() })),
-        )
-    })?;
-
-    match card {
-        Some(c) => {
-            let card_value = card_json_with_deps(&state, &c).await;
-            // Broadcast card update for live kanban
-            state
-                .broadcaster
-                .broadcast(crate::ws::broadcaster::WsEvent {
-                    event_type: "card-update".into(),
-                    session_id: c.project_id.clone(),
-                    data: serde_json::json!({ "card": card_value }),
-                });
-            Ok(Json(card_value))
-        }
-        None => Err((
+    let Some(c) = card else {
+        return Err((
             StatusCode::NOT_FOUND,
             Json(serde_json::json!({ "error": "card not found" })),
-        )),
+        ));
+    };
+
+    // Apply dependency replacements after the card row update has
+    // succeeded. `apply_dependencies` validates unknown ids / cycles
+    // and returns a 4xx via the response type if rejected.
+    if let Some(deps) = depends_on {
+        apply_dependencies(&state, &c.project_id, &card_id, deps).await?;
     }
+
+    let card_value = card_json_with_deps(&state, &c).await;
+    state
+        .broadcaster
+        .broadcast(crate::ws::broadcaster::WsEvent {
+            event_type: "card-update".into(),
+            session_id: c.project_id.clone(),
+            data: serde_json::json!({ "card": card_value }),
+        });
+    Ok(Json(card_value))
 }
 
 /// DELETE /api/projects/:id/cards/:card_id
@@ -803,66 +813,46 @@ async fn delete_card(
     Path((_project_id, card_id)): Path<(String, String)>,
 ) -> impl IntoResponse {
     tracing::info!(card_id = %card_id, "Deleting card");
-    let card_before = state.db.get_card(&card_id).await.ok().flatten();
+    // Grab the project_id before we delete so we can still broadcast a
+    // card-delete event with it.
+    let project_id = state
+        .db
+        .get_card(&card_id)
+        .await
+        .ok()
+        .flatten()
+        .map(|c| c.project_id);
 
-    // Cascade: clear FK refs, delete worker sessions and events
-    if let Some(ref card) = card_before {
-        let mut sids = Vec::new();
-        if let Some(ref s) = card.worker_session_id {
-            sids.push(s.clone());
-        }
-        if let Some(ref s) = card.last_worker_session_id {
-            sids.push(s.clone());
-        }
-        sids.sort();
-        sids.dedup();
-
-        // Clear card FK references first
-        let _ = state
-            .db
-            .update_card(
-                &card_id,
-                crate::db::models::UpdateCard {
-                    worker_session_id: Some(None),
-                    last_worker_session_id: Some(None),
-                    ..Default::default()
-                },
-            )
-            .await;
-
-        for sid in &sids {
-            let _ = state.db.delete_queued_message(sid).await;
-            let _ = state.db.delete_events_by_session(sid).await;
-            let _ = state.db.delete_session(sid).await;
-        }
-    }
-
-    let deleted = state.db.delete_card(&card_id).await.map_err(|e| {
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(serde_json::json!({ "error": e.to_string() })),
-        )
+    // Atomic cascade. Replaces a sequence of separate awaits with
+    // `let _ = …` that silently swallowed errors and could leave
+    // orphaned events/sessions when a step failed.
+    let report = state.db.delete_card_cascade(&card_id).await.map_err(|e| {
+        let msg = e.to_string();
+        let status = if msg.contains("not found") {
+            StatusCode::NOT_FOUND
+        } else {
+            StatusCode::INTERNAL_SERVER_ERROR
+        };
+        (status, Json(serde_json::json!({ "error": msg })))
     })?;
+    tracing::info!(
+        card_id = %card_id,
+        sessions = report.sessions_deleted,
+        events = report.events_deleted,
+        "Card cascade-deleted"
+    );
 
-    if !deleted {
-        return Err((
-            StatusCode::NOT_FOUND,
-            Json(serde_json::json!({ "error": "card not found" })),
-        ));
-    }
-
-    // Broadcast card deletion for live kanban
-    if let Some(card) = card_before {
+    if let Some(pid) = project_id {
         state
             .broadcaster
             .broadcast(crate::ws::broadcaster::WsEvent {
                 event_type: "card-delete".into(),
-                session_id: card.project_id.clone(),
-                data: serde_json::json!({ "cardId": card_id, "projectId": card.project_id }),
+                session_id: pid.clone(),
+                data: serde_json::json!({ "cardId": card_id, "projectId": pid }),
             });
     }
 
-    Ok(StatusCode::NO_CONTENT)
+    Ok::<_, (StatusCode, Json<serde_json::Value>)>(StatusCode::NO_CONTENT)
 }
 
 /// POST /api/projects/:id/cards/:card_id/stop -- stop the card's active worker

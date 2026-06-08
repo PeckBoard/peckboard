@@ -111,39 +111,30 @@ async fn delete_folder(
     Path(id): Path<String>,
 ) -> impl IntoResponse {
     tracing::info!(folder_id = %id, "Deleting folder");
-    // Check if sessions exist for this folder
-    let sessions = state.db.list_sessions_by_folder(&id).await.map_err(|e| {
+
+    // Atomic check-and-delete: prevents a concurrent session creation
+    // from slipping in between an empty-check and the delete.
+    let outcome = state.db.delete_folder_if_empty(&id).await.map_err(|e| {
         (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(serde_json::json!({ "error": e.to_string() })),
         )
     })?;
 
-    if !sessions.is_empty() {
-        return Err((
+    match outcome {
+        crate::db::crud::FolderEmptyDelete::Deleted => Ok(StatusCode::NO_CONTENT),
+        crate::db::crud::FolderEmptyDelete::HasSessions(n) => Err((
             StatusCode::CONFLICT,
             Json(serde_json::json!({
                 "error": "folder has active sessions",
-                "session_count": sessions.len()
+                "session_count": n,
             })),
-        ));
-    }
-
-    let deleted = state.db.delete_folder(&id).await.map_err(|e| {
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(serde_json::json!({ "error": e.to_string() })),
-        )
-    })?;
-
-    if !deleted {
-        return Err((
+        )),
+        crate::db::crud::FolderEmptyDelete::NotFound => Err((
             StatusCode::NOT_FOUND,
             Json(serde_json::json!({ "error": "folder not found" })),
-        ));
+        )),
     }
-
-    Ok(StatusCode::NO_CONTENT)
 }
 
 /// POST /api/folders/:id/delete-sessions — delete all sessions in folder, then delete folder
@@ -151,30 +142,25 @@ async fn delete_with_sessions(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
 ) -> impl IntoResponse {
-    let sessions = state.db.list_sessions_by_folder(&id).await.map_err(|e| {
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(serde_json::json!({ "error": e.to_string() })),
-        )
-    })?;
+    tracing::info!(folder_id = %id, "Cascade-deleting folder and sessions");
 
-    // Delete events and sessions
-    for session in &sessions {
-        let _ = state.db.delete_events_by_session(&session.id).await;
-        let _ = state.db.delete_queued_message(&session.id).await;
-        let _ = state.db.delete_session(&session.id).await;
-    }
-
-    // Delete folder
-    state.db.delete_folder(&id).await.map_err(|e| {
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(serde_json::json!({ "error": e.to_string() })),
-        )
+    // Atomic cascade: sessions, their events, queued messages, and the
+    // folder all drop in a single transactional closure. Replaces the
+    // older "list → loop with let _ = …" pattern that silently dropped
+    // failures and could leave orphaned rows behind.
+    let report = state.db.delete_folder_cascade(&id).await.map_err(|e| {
+        let msg = e.to_string();
+        let status = if msg.contains("not found") {
+            StatusCode::NOT_FOUND
+        } else {
+            StatusCode::INTERNAL_SERVER_ERROR
+        };
+        (status, Json(serde_json::json!({ "error": msg })))
     })?;
 
     Ok::<_, (StatusCode, Json<serde_json::Value>)>(Json(serde_json::json!({
-        "deleted_sessions": sessions.len()
+        "deleted_sessions": report.sessions_deleted,
+        "deleted_events": report.events_deleted,
     })))
 }
 

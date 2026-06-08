@@ -210,6 +210,76 @@ pub struct ToolCallContext {
     pub provider_registry: Option<Arc<crate::provider::registry::ProviderRegistry>>,
 }
 
+/// Proof token: a project id verified against the current MCP token's
+/// scope. The only way to obtain one is via `ToolCallContext::scope_project`,
+/// `scope_card`, or `scope_session` — each compares the target project
+/// against `ctx.project_id` and returns `Forbidden` on mismatch.
+///
+/// Every MCP handler that touches a project- or card-scoped resource
+/// MUST start by calling one of those helpers, then use the returned
+/// `ScopedProjectId` for downstream DB calls. The bug class fixed by this
+/// type: prior to the proof-token rollout, only three handlers
+/// (update/pause/resume_project) were scope-checked at the route layer.
+/// `handle_create_card` and ~10 other handlers happily accepted
+/// `args.project_id` raw, so a worker scoped to project A could create
+/// cards, complete steps, share findings, etc. inside project B by
+/// passing a different `project_id` in the arguments.
+#[derive(Debug, Clone)]
+pub struct ScopedProjectId(String);
+
+impl ScopedProjectId {
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+
+    pub fn into_string(self) -> String {
+        self.0
+    }
+}
+
+impl ToolCallContext {
+    /// Verify the given target project_id is allowed by the current MCP
+    /// token's scope. Resolution:
+    /// * token scoped, target provided → must match;
+    /// * token scoped, target absent → returns the token's project;
+    /// * token unscoped, target provided → accepted as-is;
+    /// * token unscoped, target absent → error ("project_id required").
+    pub fn scope_project(&self, target: Option<&str>) -> anyhow::Result<ScopedProjectId> {
+        match (target, self.project_id.as_deref()) {
+            (Some(t), Some(scoped)) if t != scoped => {
+                anyhow::bail!("token scoped to project {scoped}, cannot target {t}")
+            }
+            (Some(t), _) => Ok(ScopedProjectId(t.to_string())),
+            (None, Some(scoped)) => Ok(ScopedProjectId(scoped.to_string())),
+            (None, None) => anyhow::bail!("project_id required"),
+        }
+    }
+
+    /// Resolve the card's project_id, then scope-check it.
+    pub async fn scope_card(&self, card_id: &str) -> anyhow::Result<ScopedProjectId> {
+        let card = self
+            .db
+            .get_card(card_id)
+            .await?
+            .ok_or_else(|| anyhow::anyhow!("card not found: {card_id}"))?;
+        self.scope_project(Some(&card.project_id))
+    }
+
+    /// Resolve the session's project_id, then scope-check it. Used by
+    /// tools like `send_worker_message` that target a peer worker session.
+    pub async fn scope_session(&self, session_id: &str) -> anyhow::Result<ScopedProjectId> {
+        let session = self
+            .db
+            .get_session(session_id)
+            .await?
+            .ok_or_else(|| anyhow::anyhow!("session not found: {session_id}"))?;
+        let project_id = session
+            .project_id
+            .ok_or_else(|| anyhow::anyhow!("session is not part of any project: {session_id}"))?;
+        self.scope_project(Some(&project_id))
+    }
+}
+
 /// A single MCP tool definition.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct McpToolDef {
@@ -1159,21 +1229,8 @@ impl McpToolRegistry {
         args: Value,
         ctx: &ToolCallContext,
     ) -> anyhow::Result<Value> {
-        // Accept project_id from args (for chat sessions) or context (for workers)
-        let project_id = args
-            .get("project_id")
-            .and_then(|v| v.as_str())
-            .map(|s| s.to_string())
-            .or_else(|| ctx.project_id.clone())
-            .or_else(|| {
-                // Fallback: resolve from session
-                // (can't await here, handled below)
-                None
-            })
-            .ok_or_else(|| {
-                anyhow::anyhow!("create_card requires 'project_id' parameter or project context")
-            })?;
-        let project_id = project_id.as_str();
+        let scope = ctx.scope_project(args.get("project_id").and_then(|v| v.as_str()))?;
+        let project_id = scope.as_str();
 
         tracing::info!(session_id = %ctx.session_id, project_id = %project_id, "MCP tool: create_card");
 
@@ -1277,16 +1334,10 @@ impl McpToolRegistry {
     async fn handle_list_cards(&self, args: Value, ctx: &ToolCallContext) -> anyhow::Result<Value> {
         tracing::info!(session_id = %ctx.session_id, "MCP tool: list_cards");
 
-        let project_id = args
-            .get("project_id")
-            .and_then(|v| v.as_str())
-            .map(|s| s.to_string())
-            .or_else(|| ctx.project_id.clone())
-            .ok_or_else(|| {
-                anyhow::anyhow!("list_cards requires 'project_id' parameter or project context")
-            })?;
+        let scope = ctx.scope_project(args.get("project_id").and_then(|v| v.as_str()))?;
+        let project_id = scope.as_str();
 
-        let cards = ctx.db.list_cards_by_project(&project_id).await?;
+        let cards = ctx.db.list_cards_by_project(project_id).await?;
 
         // Dependency edges + per-card step, so each card can report what it
         // depends on and whether those dependencies are all `done`.
@@ -1597,6 +1648,7 @@ impl McpToolRegistry {
             .get("card_id")
             .and_then(|v| v.as_str())
             .ok_or_else(|| anyhow::anyhow!("update_card requires 'card_id'"))?;
+        let _scope = ctx.scope_card(card_id).await?;
 
         tracing::info!(session_id = %ctx.session_id, card_id = %card_id, "MCP tool: update_card");
 
@@ -1654,10 +1706,8 @@ impl McpToolRegistry {
         args: Value,
         ctx: &ToolCallContext,
     ) -> anyhow::Result<Value> {
-        let project_id = args
-            .get("project_id")
-            .and_then(|v| v.as_str())
-            .ok_or_else(|| anyhow::anyhow!("update_project requires 'project_id'"))?;
+        let scope = ctx.scope_project(args.get("project_id").and_then(|v| v.as_str()))?;
+        let project_id = scope.as_str();
 
         tracing::info!(session_id = %ctx.session_id, project_id = %project_id, "MCP tool: update_project");
 
@@ -1880,10 +1930,8 @@ impl McpToolRegistry {
         args: Value,
         ctx: &ToolCallContext,
     ) -> anyhow::Result<Value> {
-        let project_id = args
-            .get("project_id")
-            .and_then(|v| v.as_str())
-            .ok_or_else(|| anyhow::anyhow!("pause_project requires 'project_id'"))?;
+        let scope = ctx.scope_project(args.get("project_id").and_then(|v| v.as_str()))?;
+        let project_id = scope.as_str();
 
         tracing::info!(session_id = %ctx.session_id, project_id = %project_id, "MCP tool: pause_project");
 
@@ -1898,6 +1946,24 @@ impl McpToolRegistry {
             .update_project(project_id, update)
             .await?
             .ok_or_else(|| anyhow::anyhow!("project not found: {project_id}"))?;
+
+        // Cancel any in-flight workers so pause means stop, not "stop
+        // spawning new ones but let the current turn finish and advance
+        // the card." Mirrors the HTTP /pause route.
+        if let Some(registry) = ctx.provider_registry.as_ref() {
+            if let Ok(workers) = ctx.db.list_worker_sessions_by_project(project_id).await {
+                for ws in &workers {
+                    for info in registry.list_providers().await {
+                        if let Some(p) = registry.get_provider(&info.id).await {
+                            if p.is_running(&ws.id).await {
+                                p.cancel(&ws.id).await;
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
+        }
 
         Ok(serde_json::json!({
             "status": "ok",
@@ -1914,10 +1980,8 @@ impl McpToolRegistry {
         args: Value,
         ctx: &ToolCallContext,
     ) -> anyhow::Result<Value> {
-        let project_id = args
-            .get("project_id")
-            .and_then(|v| v.as_str())
-            .ok_or_else(|| anyhow::anyhow!("resume_project requires 'project_id'"))?;
+        let scope = ctx.scope_project(args.get("project_id").and_then(|v| v.as_str()))?;
+        let project_id = scope.as_str();
 
         tracing::info!(session_id = %ctx.session_id, project_id = %project_id, "MCP tool: resume_project");
 
@@ -1948,66 +2012,30 @@ impl McpToolRegistry {
         args: Value,
         ctx: &ToolCallContext,
     ) -> anyhow::Result<Value> {
-        let project_id = args
-            .get("project_id")
-            .and_then(|v| v.as_str())
-            .ok_or_else(|| anyhow::anyhow!("delete_project requires 'project_id'"))?;
+        let scope = ctx.scope_project(args.get("project_id").and_then(|v| v.as_str()))?;
+        let project_id = scope.as_str();
 
         tracing::info!(session_id = %ctx.session_id, project_id = %project_id, "MCP tool: delete_project");
 
-        // Verify project exists
-        let project = ctx
+        // Project name for the response message (looked up before cascade
+        // so we still have it).
+        let project_name = ctx
             .db
             .get_project(project_id)
             .await?
-            .ok_or_else(|| anyhow::anyhow!("project not found: {project_id}"))?;
+            .map(|p| p.name)
+            .unwrap_or_else(|| project_id.to_string());
 
-        // Collect worker session IDs from cards
-        let cards = ctx.db.list_cards_by_project(project_id).await?;
-        let mut session_ids: Vec<String> = Vec::new();
-        for card in &cards {
-            if let Some(ref sid) = card.worker_session_id {
-                session_ids.push(sid.clone());
-            }
-            if let Some(ref sid) = card.last_worker_session_id {
-                session_ids.push(sid.clone());
-            }
-        }
-        session_ids.sort();
-        session_ids.dedup();
-
-        // Clear card FK refs first so we can delete sessions without FK errors
-        for card in &cards {
-            let _ = ctx
-                .db
-                .update_card(
-                    &card.id,
-                    crate::db::models::UpdateCard {
-                        worker_session_id: Some(None),
-                        last_worker_session_id: Some(None),
-                        ..Default::default()
-                    },
-                )
-                .await;
-        }
-
-        // Now safe to delete sessions and their data
-        for sid in &session_ids {
-            let _ = ctx.db.delete_queued_message(sid).await;
-            let _ = ctx.db.delete_events_by_session(sid).await;
-            let _ = ctx.db.delete_session(sid).await;
-        }
-
-        // Delete all cards then the project
-        ctx.db.delete_cards_by_project(project_id).await?;
-        let deleted = ctx.db.delete_project(project_id).await?;
-        if !deleted {
-            anyhow::bail!("project not found: {project_id}");
-        }
+        // Atomic cascade — single closure on the DB mutex so concurrent
+        // mutations can't slip in between gather and delete.
+        let report = ctx.db.delete_project_cascade(project_id).await?;
 
         Ok(serde_json::json!({
             "status": "ok",
-            "message": format!("Project '{}' deleted ({} cards, {} sessions cascaded)", project.name, cards.len(), session_ids.len()),
+            "message": format!(
+                "Project '{}' deleted ({} cards, {} sessions cascaded)",
+                project_name, report.cards_deleted, report.sessions_deleted,
+            ),
         }))
     }
 
@@ -2020,52 +2048,21 @@ impl McpToolRegistry {
             .get("card_id")
             .and_then(|v| v.as_str())
             .ok_or_else(|| anyhow::anyhow!("delete_card requires 'card_id'"))?;
+        let _scope = ctx.scope_card(card_id).await?;
 
         tracing::info!(session_id = %ctx.session_id, card_id = %card_id, "MCP tool: delete_card");
 
-        // Get card before deletion for cascade cleanup
-        let card = ctx
+        // Look up the project_id before cascade so we can broadcast a
+        // card-delete event with it after the row is gone.
+        let project_id = ctx
             .db
             .get_card(card_id)
             .await?
+            .map(|c| c.project_id)
             .ok_or_else(|| anyhow::anyhow!("card not found: {card_id}"))?;
-        let project_id = card.project_id.clone();
 
-        // Cascade: clear card refs, delete queued messages, events, sessions
-        let mut session_ids = Vec::new();
-        if let Some(ref sid) = card.worker_session_id {
-            session_ids.push(sid.clone());
-        }
-        if let Some(ref sid) = card.last_worker_session_id {
-            session_ids.push(sid.clone());
-        }
-        session_ids.sort();
-        session_ids.dedup();
-
-        // Clear card's FK references to sessions first
-        let _ = ctx
-            .db
-            .update_card(
-                card_id,
-                crate::db::models::UpdateCard {
-                    worker_session_id: Some(None),
-                    last_worker_session_id: Some(None),
-                    ..Default::default()
-                },
-            )
-            .await;
-
-        // Now safe to delete sessions and their data
-        for sid in &session_ids {
-            let _ = ctx.db.delete_queued_message(sid).await;
-            let _ = ctx.db.delete_events_by_session(sid).await;
-            let _ = ctx.db.delete_session(sid).await;
-        }
-
-        let deleted = ctx.db.delete_card(card_id).await?;
-        if !deleted {
-            anyhow::bail!("card not found: {card_id}");
-        }
+        // Atomic cascade.
+        let _ = ctx.db.delete_card_cascade(card_id).await?;
 
         ctx.broadcaster.broadcast(crate::ws::broadcaster::WsEvent {
             event_type: "card-delete".into(),
@@ -2088,6 +2085,7 @@ impl McpToolRegistry {
             .get("card_id")
             .and_then(|v| v.as_str())
             .ok_or_else(|| anyhow::anyhow!("move_card_to_done requires 'card_id'"))?;
+        let _scope = ctx.scope_card(card_id).await?;
 
         tracing::info!(session_id = %ctx.session_id, card_id = %card_id, "MCP tool: move_card_to_done");
 
@@ -2128,6 +2126,7 @@ impl McpToolRegistry {
             .get("card_id")
             .and_then(|v| v.as_str())
             .ok_or_else(|| anyhow::anyhow!("move_card_to_wont_do requires 'card_id'"))?;
+        let _scope = ctx.scope_card(card_id).await?;
 
         tracing::info!(session_id = %ctx.session_id, card_id = %card_id, "MCP tool: move_card_to_wont_do");
 
@@ -2459,6 +2458,10 @@ impl McpToolRegistry {
             anyhow::bail!("event {finding_id} is not a finding");
         }
 
+        // Token-scope check: the finding lives on some session; that
+        // session's project must match the caller's token scope.
+        let _scope = ctx.scope_session(&event.session_id).await?;
+
         let data: Value = serde_json::from_str(&event.data)?;
         Ok(serde_json::json!({
             "status": "ok",
@@ -2486,6 +2489,11 @@ impl McpToolRegistry {
             .ok_or_else(|| anyhow::anyhow!("send_worker_message requires 'message'"))?;
 
         tracing::info!(session_id = %ctx.session_id, target = %target_session_id, "MCP tool: send_worker_message");
+
+        // Token-scope check: target session must live in the same project
+        // as the caller's MCP token. This blocks a worker on project A
+        // from messaging a worker on project B by guessing session ids.
+        let _scope = ctx.scope_session(target_session_id).await?;
 
         let project_id = self.resolve_project_id(ctx).await;
 
@@ -2998,6 +3006,56 @@ mod tests {
             .await;
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("unknown tool"));
+    }
+
+    fn ctx_for_scope(project_id: Option<&str>) -> ToolCallContext {
+        ToolCallContext {
+            session_id: "s1".into(),
+            project_id: project_id.map(|s| s.to_string()),
+            card_id: None,
+            db: Arc::new(crate::db::Db::in_memory().unwrap()),
+            broadcaster: crate::ws::broadcaster::Broadcaster::new(),
+            provider_registry: None,
+        }
+    }
+
+    #[test]
+    fn scope_project_unscoped_token_passes_target_through() {
+        let ctx = ctx_for_scope(None);
+        let s = ctx.scope_project(Some("p-1")).unwrap();
+        assert_eq!(s.as_str(), "p-1");
+    }
+
+    #[test]
+    fn scope_project_scoped_token_accepts_matching_target() {
+        let ctx = ctx_for_scope(Some("p-1"));
+        let s = ctx.scope_project(Some("p-1")).unwrap();
+        assert_eq!(s.as_str(), "p-1");
+    }
+
+    #[test]
+    fn scope_project_scoped_token_rejects_mismatched_target() {
+        let ctx = ctx_for_scope(Some("p-1"));
+        let err = ctx.scope_project(Some("p-2")).unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("p-1") && msg.contains("p-2"),
+            "expected scope-mismatch error to mention both project ids, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn scope_project_scoped_token_no_target_returns_token_scope() {
+        let ctx = ctx_for_scope(Some("p-1"));
+        let s = ctx.scope_project(None).unwrap();
+        assert_eq!(s.as_str(), "p-1");
+    }
+
+    #[test]
+    fn scope_project_unscoped_token_no_target_errors() {
+        let ctx = ctx_for_scope(None);
+        let err = ctx.scope_project(None).unwrap_err();
+        assert!(err.to_string().contains("project_id required"));
     }
 
     #[tokio::test]

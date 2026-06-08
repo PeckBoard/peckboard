@@ -172,24 +172,15 @@ async fn mcp_handler(
                 .cloned()
                 .unwrap_or(serde_json::json!({}));
 
-            // Token scoping enforcement: if the token is scoped to a project,
-            // check that the tool call targets that same project.
-            if let Some(ref scoped_pid) = token_project_id {
-                if let Some(target_pid) = extract_target_project_id(tool_name, &arguments) {
-                    if target_pid != *scoped_pid {
-                        return (
-                            StatusCode::FORBIDDEN,
-                            rpc_json(JsonRpcResponse::error(
-                                body.id,
-                                -32000,
-                                format!(
-                                    "token scoped to project {scoped_pid}, cannot target {target_pid}"
-                                ),
-                            )),
-                        );
-                    }
-                }
-            }
+            // Token-scope enforcement now lives inside each handler via
+            // `ToolCallContext::scope_project` / `scope_card` /
+            // `scope_session`, which produce a `ScopedProjectId` proof
+            // token before any project- or card-scoped DB access. The
+            // route layer is intentionally a no-op for scoping — the
+            // earlier `extract_target_project_id` only covered three
+            // tools and silently let `create_card`, `complete_step`,
+            // `send_worker_message`, etc. bypass scope by passing a
+            // different project/card/session id in the arguments.
 
             // Look up the session to get card_id context
             let card_id = state
@@ -308,25 +299,6 @@ fn extract_bearer(headers: &HeaderMap) -> Option<String> {
     Some(token.to_string())
 }
 
-/// For token scoping: extract the project ID that a tool call targets.
-/// Returns None if the tool doesn't target a specific project (e.g. list_projects),
-/// meaning session-scoped tokens already restrict via ctx.project_id.
-fn extract_target_project_id(tool_name: &str, args: &Value) -> Option<String> {
-    match tool_name {
-        // Tools that reference a project_id directly
-        "update_project" | "pause_project" | "resume_project" => args
-            .get("project_id")
-            .and_then(|v| v.as_str())
-            .map(|s| s.to_string()),
-        // Tools that reference a card; we'd need to look up the card's project
-        // to fully enforce, but the card_id-based tools are already scoped
-        // through ctx.project_id in the handler. For create_project the folder
-        // is the scope, not a project. Return None for these to let the
-        // handler-level checks apply.
-        _ => None,
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -349,27 +321,6 @@ mod tests {
         let mut headers = HeaderMap::new();
         headers.insert(header::AUTHORIZATION, "Basic abc".parse().unwrap());
         assert_eq!(extract_bearer(&headers), None);
-    }
-
-    #[test]
-    fn test_extract_target_project_id() {
-        let args = serde_json::json!({ "project_id": "p-123" });
-        assert_eq!(
-            extract_target_project_id("update_project", &args),
-            Some("p-123".to_string())
-        );
-        assert_eq!(
-            extract_target_project_id("pause_project", &args),
-            Some("p-123".to_string())
-        );
-        assert_eq!(
-            extract_target_project_id("resume_project", &args),
-            Some("p-123".to_string())
-        );
-
-        // Tools that don't directly reference project_id
-        assert_eq!(extract_target_project_id("list_cards", &args), None);
-        assert_eq!(extract_target_project_id("create_card", &args), None);
     }
 
     #[test]
