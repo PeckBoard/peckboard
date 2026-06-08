@@ -322,6 +322,12 @@ pub async fn stream_events(
                 &mut emitted_start,
             );
 
+            // Normalized todo snapshots derived from TodoWrite tool calls in
+            // this batch. Emitted as their own `todo` events after the raw
+            // provider events below, so the tool call stays visible AND a
+            // provider-agnostic snapshot lands in the log for the UI.
+            let mut todo_events: Vec<ProviderEvent> = Vec::new();
+
             for event in &events {
                 // Track file-modifying tools for cross-worker notification
                 match event {
@@ -330,6 +336,11 @@ pub async fn stream_events(
                         name,
                         input,
                     } => {
+                        if let Some(snapshot) = crate::todo::snapshot_from_tool_call(name, input) {
+                            todo_events.push(ProviderEvent::Todo {
+                                todos: snapshot.todos,
+                            });
+                        }
                         let file_path = match name.as_str() {
                             "Write" | "Edit" => input
                                 .get("file_path")
@@ -440,6 +451,10 @@ pub async fn stream_events(
             }
 
             for event in events {
+                emit_event(&db, &broadcaster, &session_id, event).await;
+            }
+
+            for event in todo_events {
                 emit_event(&db, &broadcaster, &session_id, event).await;
             }
         } // end inner block

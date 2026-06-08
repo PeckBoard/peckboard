@@ -9,5 +9,6 @@ pub mod routes;
 pub mod security;
 pub mod service;
 pub mod state;
+pub mod todo;
 pub mod worker;
 pub mod ws;

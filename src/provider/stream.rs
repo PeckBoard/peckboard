@@ -1,5 +1,7 @@
 use serde::{Deserialize, Serialize};
 
+use crate::todo::TodoItem;
+
 /// Unified event stream from any AI provider.
 /// Providers translate their native output format into these events.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -26,6 +28,10 @@ pub enum ProviderEvent {
         output: Option<String>,
         error: Option<String>,
     },
+    /// The agent reported its current todo list (a full replace-all snapshot
+    /// of its trackable work items). Provider-agnostic — any provider that can
+    /// surface work items emits this; the latest one wins.
+    Todo { todos: Vec<TodoItem> },
     /// Agent finished normally.
     Completed { conversation_id: Option<String> },
     /// Agent failed / crashed.
@@ -50,6 +56,7 @@ impl ProviderEvent {
             ProviderEvent::Text { .. } => "agent-text",
             ProviderEvent::ToolStart { .. } => "agent-tool-start",
             ProviderEvent::ToolEnd { .. } => "agent-tool-end",
+            ProviderEvent::Todo { .. } => "todo",
             ProviderEvent::Completed { .. } => "agent-end",
             ProviderEvent::Crashed { .. } => "agent-end",
             ProviderEvent::ControlRequest { .. } => "question",
@@ -87,6 +94,7 @@ impl ProviderEvent {
                 "output": output,
                 "error": error,
             }),
+            ProviderEvent::Todo { todos } => serde_json::json!({ "todos": todos }),
             ProviderEvent::Completed { conversation_id } => serde_json::json!({
                 "status": "complete",
                 "conversationId": conversation_id,

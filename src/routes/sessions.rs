@@ -60,6 +60,7 @@ pub fn router(state: Arc<AppState>) -> Router<Arc<AppState>> {
             "/api/sessions/{id}/events",
             get(list_events).post(append_event),
         )
+        .route("/api/sessions/{id}/todos", get(get_session_todos))
         .route("/api/sessions/{id}/read", post(mark_read))
         .route("/api/sessions/{id}/clear", post(clear_session))
         .route("/api/sessions/{id}/message", post(send_message))
@@ -599,6 +600,36 @@ async fn append_event(
             "kind": event.kind,
         })),
     ))
+}
+
+/// GET /api/sessions/:id/todos -- current todo snapshot for the session.
+///
+/// Todos are derived from the event log (the latest `todo` event wins), not a
+/// dedicated table. Returns `{ "todos": [...] }`, an empty list when the
+/// session has never reported any. This is the load-time read path; live
+/// updates still arrive over the WebSocket as `todo` events.
+async fn get_session_todos(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> impl IntoResponse {
+    tracing::info!(session_id = %id, "Getting session todos");
+    let latest = state
+        .db
+        .latest_event_of_kind(&id, "todo")
+        .await
+        .map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({ "error": e.to_string() })),
+            )
+        })?;
+
+    let todos = latest
+        .and_then(|e| serde_json::from_str::<serde_json::Value>(&e.data).ok())
+        .and_then(|d| d.get("todos").cloned())
+        .unwrap_or_else(|| serde_json::json!([]));
+
+    Ok::<_, (StatusCode, Json<serde_json::Value>)>(Json(serde_json::json!({ "todos": todos })))
 }
 
 /// POST /api/sessions/:id/read -- mark session as read

@@ -101,6 +101,30 @@ impl Db {
         .await
     }
 
+    /// Get the most recent event of a given kind for a session, or None.
+    ///
+    /// Useful for "latest snapshot" event kinds like `todo`, where each event
+    /// fully replaces the previous one and only the newest matters.
+    pub async fn latest_event_of_kind(
+        &self,
+        session_id: &str,
+        kind: &str,
+    ) -> anyhow::Result<Option<Event>> {
+        let session_id = session_id.to_string();
+        let kind = kind.to_string();
+        self.with_conn(move |conn| {
+            events::table
+                .filter(events::session_id.eq(&session_id))
+                .filter(events::kind.eq(&kind))
+                .select(Event::as_select())
+                .order(events::seq.desc())
+                .first(conn)
+                .optional()
+                .map_err(Into::into)
+        })
+        .await
+    }
+
     /// Get the latest seq number for a session, or None if no events exist.
     pub async fn latest_seq(&self, session_id: &str) -> anyhow::Result<Option<i32>> {
         let session_id = session_id.to_string();

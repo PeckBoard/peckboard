@@ -122,3 +122,70 @@ async fn mock_echo_flows_through_dispatcher() {
         session.conversation_id,
     );
 }
+
+#[tokio::test]
+async fn mock_todo_emits_normalized_todo_event() {
+    let (manager, db, broadcaster) = build_dispatcher().await;
+    let mut completion_rx = manager
+        .take_completion_rx()
+        .await
+        .expect("completion rx available");
+
+    let config = SpawnConfig {
+        model: "mock:todo".into(),
+        effort: None,
+        working_dir: String::new(),
+        mcp_config_path: None,
+        env: Default::default(),
+        permission_mode: None,
+        timeout_ms: None,
+        metadata: serde_json::Value::Null,
+    };
+
+    manager
+        .send_or_queue("s1", "track some work", &db, &broadcaster, config)
+        .await
+        .expect("dispatch succeeds");
+
+    let completion = tokio::time::timeout(Duration::from_secs(2), completion_rx.recv())
+        .await
+        .expect("completion arrived before timeout")
+        .expect("channel still open");
+    assert!(completion.completed, "mock:todo should report success");
+
+    // A `todo` event must be persisted, with the TodoWrite tool's
+    // pending/in_progress/completed statuses normalized onto the canonical
+    // pending/in_progress/done lifecycle.
+    let todo_event = db
+        .latest_event_of_kind("s1", "todo")
+        .await
+        .unwrap()
+        .expect("a todo event was persisted");
+    let data: serde_json::Value = serde_json::from_str(&todo_event.data).unwrap();
+    let todos = data["todos"].as_array().expect("todos array present");
+    assert_eq!(todos.len(), 3, "unexpected todos: {todos:?}");
+
+    let statuses: Vec<&str> = todos
+        .iter()
+        .map(|t| t["status"].as_str().unwrap())
+        .collect();
+    assert_eq!(statuses, vec!["done", "in_progress", "pending"]);
+
+    // activeForm carries through under the normalized field name.
+    assert_eq!(todos[1]["content"], "Wire up the route");
+    assert_eq!(todos[1]["activeForm"], "Wiring up the route");
+
+    // The snapshot is readable as a typed TodoSnapshot — proves the wire shape
+    // round-trips through the canonical type other consumers will deserialize.
+    let snapshot: peckboard::todo::TodoSnapshot =
+        serde_json::from_value(data.clone()).expect("data deserializes as TodoSnapshot");
+    assert_eq!(snapshot.todos[0].status, peckboard::todo::TodoStatus::Done);
+    assert_eq!(
+        snapshot.todos[1].status,
+        peckboard::todo::TodoStatus::InProgress
+    );
+    assert_eq!(
+        snapshot.todos[2].status,
+        peckboard::todo::TodoStatus::Pending
+    );
+}

@@ -21,6 +21,7 @@ use crate::provider::stream::{ModelInfo, ProviderEvent};
 /// * `tool-use` — Started → ToolStart/ToolEnd (with input/output) → Completed
 /// * `crash` — Started → Text → Crashed
 /// * `ask` — Started → ControlRequest, waits for stdin → Text(reply) → Completed
+/// * `todo` — Started → ToolStart/ToolEnd(TodoWrite) → Todo(snapshot) → Completed
 pub struct MockProvider {
     runs: Arc<Mutex<HashMap<String, MockRun>>>,
 }
@@ -412,6 +413,54 @@ async fn run_scenario(
                 },
             )
             .await;
+        }
+        "todo" => {
+            // Emit a TodoWrite tool call exactly as Claude would, then run it
+            // through the same `snapshot_from_tool_call` seam the real provider
+            // uses so the normalized `todo` event is byte-for-byte consistent.
+            let raw_input = serde_json::json!({
+                "todos": [
+                    { "content": "Write the parser", "status": "completed", "activeForm": "Writing the parser" },
+                    { "content": "Wire up the route", "status": "in_progress", "activeForm": "Wiring up the route" },
+                    { "content": "Add tests", "status": "pending", "activeForm": "Adding tests" },
+                ]
+            });
+            let tool_id = format!("tool-{}", uuid::Uuid::new_v4());
+            emit_event(
+                db,
+                broadcaster,
+                session_id,
+                ProviderEvent::ToolStart {
+                    tool_use_id: tool_id.clone(),
+                    name: "TodoWrite".into(),
+                    input: raw_input.clone(),
+                },
+            )
+            .await;
+            tick().await;
+            emit_event(
+                db,
+                broadcaster,
+                session_id,
+                ProviderEvent::ToolEnd {
+                    tool_use_id: tool_id,
+                    output: Some("Todos updated".into()),
+                    error: None,
+                },
+            )
+            .await;
+            tick().await;
+            if let Some(snapshot) = crate::todo::snapshot_from_tool_call("TodoWrite", &raw_input) {
+                emit_event(
+                    db,
+                    broadcaster,
+                    session_id,
+                    ProviderEvent::Todo {
+                        todos: snapshot.todos,
+                    },
+                )
+                .await;
+            }
         }
         other => {
             emit_event(
