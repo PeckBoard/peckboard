@@ -246,6 +246,7 @@ mod tests {
             conversation_id: None,
             created_at: ts,
             last_activity: old_ts(),
+            ..Default::default()
         })
         .await
         .unwrap();
@@ -280,6 +281,7 @@ mod tests {
             conversation_id: None,
             created_at: ts.clone(),
             last_activity: ts.clone(),
+            ..Default::default()
         })
         .await
         .unwrap();
@@ -352,6 +354,7 @@ mod tests {
             conversation_id: None,
             created_at: ts.clone(),
             last_activity: old.clone(),
+            ..Default::default()
         })
         .await
         .unwrap();
@@ -368,6 +371,7 @@ mod tests {
             conversation_id: None,
             created_at: ts.clone(),
             last_activity: old,
+            ..Default::default()
         })
         .await
         .unwrap();

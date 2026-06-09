@@ -202,9 +202,15 @@ test.describe('tabs', () => {
     // helper indirectly waited because `.tabbar` only rendered once
     // there was at least one tab. Now the strip is always visible for
     // the trailing `+` button, so we wait explicitly.)
-    await expect(page.locator('.tab-opened', { hasText: 'first-open' })).toBeVisible({
-      timeout: 5_000,
-    })
+    // Wait until A is the *sole, active* tab — not merely present. The tab
+    // strip reconciles against the server-persisted order after each
+    // navigation, so opening B before A has fully committed can leave the
+    // strip settling as [A, B] instead of [B, A]. Gating on count===1 +
+    // active closes that window.
+    const firstTab = page.locator('.tab-opened', { hasText: 'first-open' })
+    await expect(firstTab).toBeVisible({ timeout: 5_000 })
+    await expect(page.locator('.tab-opened')).toHaveCount(1)
+    await expect(firstTab).toHaveClass(/tab-active/)
     await page.evaluate((id) => {
       history.pushState(null, '', `/sessions/${id}`)
       window.dispatchEvent(new PopStateEvent('popstate'))

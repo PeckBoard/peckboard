@@ -3,7 +3,9 @@
 //! regardless of which submodule defines them, and the dispatcher in the
 //! parent `mod.rs` routes tool names to the right method.
 
+mod ask_expert;
 mod cards;
+mod experts;
 mod folders;
 mod misc;
 mod projects;

@@ -39,9 +39,15 @@ pub struct Session {
     pub conversation_id: Option<String>,
     pub created_at: String,
     pub last_activity: String,
+    pub is_expert: bool,
+    pub expert_kind: Option<String>,
+    pub knowledge_summary: Option<String>,
+    pub knowledge_area: Option<String>,
+    pub scope_path: Option<String>,
+    pub is_permanent: bool,
 }
 
-#[derive(Insertable, Deserialize, Debug)]
+#[derive(Insertable, Deserialize, Debug, Default)]
 #[diesel(table_name = sessions)]
 pub struct NewSession {
     pub id: String,
@@ -55,6 +61,12 @@ pub struct NewSession {
     pub conversation_id: Option<String>,
     pub created_at: String,
     pub last_activity: String,
+    pub is_expert: bool,
+    pub expert_kind: Option<String>,
+    pub knowledge_summary: Option<String>,
+    pub knowledge_area: Option<String>,
+    pub scope_path: Option<String>,
+    pub is_permanent: bool,
 }
 
 #[derive(AsChangeset, Deserialize, Debug, Default)]
@@ -67,6 +79,12 @@ pub struct UpdateSession {
     pub card_id: Option<Option<String>>,
     pub conversation_id: Option<Option<String>>,
     pub last_activity: Option<String>,
+    pub is_expert: Option<bool>,
+    pub expert_kind: Option<Option<String>>,
+    pub knowledge_summary: Option<Option<String>>,
+    pub knowledge_area: Option<Option<String>>,
+    pub scope_path: Option<Option<String>>,
+    pub is_permanent: Option<bool>,
 }
 
 // ── Projects ─────────────────────────────────────────────────────────

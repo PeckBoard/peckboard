@@ -58,6 +58,7 @@ async fn make_session(db: &Db, id: &str) {
         conversation_id: None,
         created_at: ts.clone(),
         last_activity: ts,
+        ..Default::default()
     })
     .await
     .unwrap();
@@ -525,6 +526,7 @@ mod midstream {
             conversation_id: None,
             created_at: ts.clone(),
             last_activity: ts,
+            ..Default::default()
         })
         .await
         .unwrap();

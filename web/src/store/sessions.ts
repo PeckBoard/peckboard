@@ -1,5 +1,5 @@
 import { create } from 'zustand'
-import type { Event, Session } from '../types/api'
+import type { Event, Expert, Session } from '../types/api'
 import { authedFetch } from './auth'
 import { useTabsStore } from './tabs'
 
@@ -36,7 +36,13 @@ interface SessionsState {
   unreadSessions: Set<string>
   eventsBySession: Record<string, Event[]>
   loadingEventsBySession: Record<string, boolean>
+  /** Expert sessions (is_expert = true) from GET /api/experts. Kept
+   *  separate from `sessions` because experts are deliberately hidden
+   *  from the ordinary chat list and only surface in the Experts view. */
+  experts: Expert[]
+  expertsLoaded: boolean
   fetchSessions: () => Promise<void>
+  fetchExperts: () => Promise<void>
   fetchEvents: (sessionId: string) => Promise<void>
   appendEvent: (event: Event) => void
   createSession: (
@@ -66,12 +72,22 @@ export const useSessionsStore = create<SessionsState>((set, get) => ({
   unreadSessions: new Set<string>(),
   eventsBySession: {},
   loadingEventsBySession: {},
+  experts: [],
+  expertsLoaded: false,
 
   fetchSessions: async () => {
     const res = await authedFetch('/api/sessions')
     if (res.ok) {
       const sessions: Session[] = await res.json()
       set({ sessions, sessionsLoaded: true })
+    }
+  },
+
+  fetchExperts: async () => {
+    const res = await authedFetch('/api/experts')
+    if (res.ok) {
+      const experts: Expert[] = await res.json()
+      set({ experts, expertsLoaded: true })
     }
   },
 

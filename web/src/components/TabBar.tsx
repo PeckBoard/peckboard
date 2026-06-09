@@ -5,7 +5,7 @@ import { useTabsStore, type TabType } from '../store/tabs'
 import { useContextMenu, type ContextMenuItem } from '../hooks/useContextMenu'
 
 interface TabBarProps {
-  view: 'sessions' | 'projects' | 'folders' | 'settings' | 'reports' | 'git' | 'users'
+  view: 'sessions' | 'projects' | 'experts' | 'folders' | 'settings' | 'reports' | 'git' | 'users'
   activeSessionId: string | null
   activeProjectId: string | null
   onOpenItem: (type: TabType, id: string) => void

@@ -284,6 +284,7 @@ async fn spawn_worker_for_card(
             conversation_id: None,
             created_at: now.clone(),
             last_activity: now.clone(),
+            ..Default::default()
         })
         .await?;
 
@@ -376,8 +377,28 @@ async fn spawn_worker_for_card(
         .await;
 
     // 5. Build worker prompt
-    let prompt =
-        pipeline::build_worker_prompt(project, card, &card.step, card.handoff_context.as_deref());
+    let workflow_steps = crate::workflow::steps_for(
+        card.workflow
+            .as_deref()
+            .or(project.default_workflow.as_deref()),
+    );
+    // In-scope experts (project + global) so the worker can consult them.
+    // A lookup failure here must not block the spawn — degrade to none.
+    let experts = match state.db.list_expert_sessions_by_scope(&project.id).await {
+        Ok(experts) => experts,
+        Err(err) => {
+            tracing::warn!(error = %err, "failed to load in-scope experts for worker prompt");
+            Vec::new()
+        }
+    };
+    let prompt = pipeline::build_worker_prompt(
+        project,
+        card,
+        &card.step,
+        &workflow_steps,
+        card.handoff_context.as_deref(),
+        &experts,
+    );
 
     // 6. Build spawn config and send message
     let config = SpawnConfig {
@@ -404,9 +425,12 @@ async fn spawn_worker_for_card(
         .await?;
     drop(lock);
 
-    // 7. Update card: assign worker and move to in_progress if in backlog
+    // 7. Update card: assign worker and, if it's still in the intake step,
+    // advance it to the workflow's second step (the first one a worker
+    // actually performs). Hardcoding `in_progress` here was wrong for any
+    // non-default workflow (e.g. research's second step is `research`).
     let new_step = if card.step == "backlog" || card.step == "todo" {
-        Some("in_progress".to_string())
+        workflow_steps.get(1).cloned()
     } else {
         None
     };
@@ -499,8 +523,24 @@ pub async fn handle_worker_done(state: &Arc<AppState>, session_id: &str) {
     // 3. Act on intent
     match intent {
         Some(WorkerIntent::CompleteStep { handoff_context }) => {
-            // Determine workflow steps
-            let workflow_steps = default_workflow_steps();
+            // `complete_step` is a true partial handoff: advance EXACTLY ONE
+            // step. We deliberately do NOT auto-jump to `done` when a worker
+            // signals "step complete" — doing so would silently skip a genuine
+            // intermediate stage (e.g. `review`). A worker that has finished
+            // the whole card is instead steered to call `finish_card` (which
+            // lands on `done` from any step) via the prompt + tool-description
+            // disambiguation in build_worker_prompt / schemas.rs.
+            //
+            // Resolve the card's own workflow (falling back to the project
+            // default, then the built-in default) so `complete_step` walks the
+            // configured steps — not a hardcoded list that would skip e.g.
+            // research's `research`/`summarize` stages.
+            let project = state.db.get_project(&project_id).await.ok().flatten();
+            let workflow_steps = crate::workflow::steps_for(
+                card.workflow
+                    .as_deref()
+                    .or(project.as_ref().and_then(|p| p.default_workflow.as_deref())),
+            );
 
             if let Some(next_step) = pipeline::find_next_step(&card.step, &workflow_steps) {
                 // Advance step
@@ -656,16 +696,6 @@ pub async fn handle_worker_done(state: &Arc<AppState>, session_id: &str) {
     // and double-spawn.
 
     let _ = project_id;
-}
-
-/// Return the default workflow step order.
-fn default_workflow_steps() -> Vec<String> {
-    vec![
-        "backlog".into(),
-        "in_progress".into(),
-        "review".into(),
-        "done".into(),
-    ]
 }
 
 /// Drain any persistent queued message for `session_id` and dispatch it as

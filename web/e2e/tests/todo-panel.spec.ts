@@ -161,6 +161,14 @@ test('clearing the session removes the todo panel from the chat view', async ({
 
   await loadAppAt(page, token, `/sessions/${sessionId}`)
 
+  // Wait for the chat surface to boot (and its WS subscription to attach)
+  // before sending — otherwise the message can fire and the mock's `todo`
+  // event broadcast before this client subscribes, so the live snapshot is
+  // missed and the panel never appears. Mirrors the first test's boot gate.
+  await expect(page.locator('.chat-empty').or(page.locator('.chat-bubble').first())).toBeVisible({
+    timeout: 10_000,
+  })
+
   // Seed a todo snapshot so the panel renders.
   const sendRes = await request.post(`/api/sessions/${sessionId}/message`, {
     headers: authHeader,

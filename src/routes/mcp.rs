@@ -198,6 +198,9 @@ async fn mcp_handler(
                 db: Arc::new(state.db.clone()),
                 broadcaster: state.broadcaster.clone(),
                 provider_registry: Some(state.provider_registry.clone()),
+                expert_dispatcher: Some(Arc::new(
+                    crate::service::mcp_server::AppExpertDispatcher::new(state.clone()),
+                )),
             };
 
             // ── Hook: mcp.tool.call.before ──

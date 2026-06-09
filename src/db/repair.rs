@@ -24,6 +24,39 @@ pub fn ensure_schema(conn: &mut SqliteConnection) -> anyhow::Result<()> {
     ensure_card_dependencies_table(conn)?;
     ensure_todos_table(conn)?;
     ensure_cards_completed_at_column(conn)?;
+    ensure_sessions_expert_columns(conn)?;
+    Ok(())
+}
+
+/// Heal DBs that predate `1780985065_expert_sessions`. That migration is
+/// a series of bare `ALTER TABLE … ADD COLUMN` statements (SQLite has no
+/// IF NOT EXISTS for ADD COLUMN), so on a DB that already has the columns
+/// it would fail — this detect-then-skip path is the only safe way to add
+/// them to an older data dir. All columns are additive with DEFAULTs or
+/// NULL-able, so existing rows need no backfill.
+fn ensure_sessions_expert_columns(conn: &mut SqliteConnection) -> anyhow::Result<()> {
+    let rows: Vec<PragmaColumn> = sql_query("PRAGMA table_info(sessions)").load(conn)?;
+    let existing: Vec<String> = rows.into_iter().map(|r| r.name).collect();
+    if existing.is_empty() {
+        // Table itself missing — migrations haven't run. Don't ALTER;
+        // let the caller surface the schema-missing error.
+        return Ok(());
+    }
+    // (column name, full type+default clause) for each additive column.
+    let columns = [
+        ("is_expert", "BOOLEAN NOT NULL DEFAULT 0"),
+        ("expert_kind", "TEXT"),
+        ("knowledge_summary", "TEXT"),
+        ("knowledge_area", "TEXT"),
+        ("scope_path", "TEXT"),
+        ("is_permanent", "BOOLEAN NOT NULL DEFAULT 0"),
+    ];
+    for (name, clause) in columns {
+        if !existing.iter().any(|c| c == name) {
+            tracing::info!("Repairing schema: adding sessions.{name}");
+            sql_query(format!("ALTER TABLE sessions ADD COLUMN {name} {clause}")).execute(conn)?;
+        }
+    }
     Ok(())
 }
 
@@ -414,5 +447,83 @@ mod tests {
 
         ensure_schema(&mut conn).unwrap();
         ensure_schema(&mut conn).unwrap(); // second call must not error
+    }
+
+    /// A DB that predates `1780985065_expert_sessions` has a `sessions`
+    /// table without the expert columns. ensure_schema must add every
+    /// column AND preserve existing rows (no data loss). Idempotent on a
+    /// second run.
+    #[test]
+    fn ensure_schema_adds_missing_session_expert_columns() {
+        let mut conn = SqliteConnection::establish(":memory:").unwrap();
+
+        // Other ensure_schema steps prod these tables; stub the minimum.
+        sql_query(
+            "CREATE TABLE projects (
+                id TEXT PRIMARY KEY NOT NULL,
+                auto_notify_changes BOOLEAN NOT NULL DEFAULT 1,
+                worker_communication BOOLEAN NOT NULL DEFAULT 1
+            )",
+        )
+        .execute(&mut conn)
+        .unwrap();
+
+        // Pre-migration sessions shape with a single existing row.
+        sql_query(
+            "CREATE TABLE sessions (
+                id TEXT PRIMARY KEY NOT NULL,
+                name TEXT NOT NULL,
+                is_worker BOOLEAN NOT NULL DEFAULT 0
+            )",
+        )
+        .execute(&mut conn)
+        .unwrap();
+        sql_query("INSERT INTO sessions (id, name, is_worker) VALUES ('s1', 'Chat', 0)")
+            .execute(&mut conn)
+            .unwrap();
+
+        ensure_schema(&mut conn).unwrap();
+
+        let cols: Vec<String> = {
+            let rows: Vec<PragmaColumn> = sql_query("PRAGMA table_info(sessions)")
+                .load(&mut conn)
+                .unwrap();
+            rows.into_iter().map(|r| r.name).collect()
+        };
+        for expected in [
+            "is_expert",
+            "expert_kind",
+            "knowledge_summary",
+            "knowledge_area",
+            "scope_path",
+            "is_permanent",
+        ] {
+            assert!(
+                cols.iter().any(|c| c == expected),
+                "missing {expected}; got {cols:?}",
+            );
+        }
+
+        // Existing row survived and defaults applied.
+        #[derive(QueryableByName)]
+        struct Row {
+            #[diesel(sql_type = diesel::sql_types::Text)]
+            name: String,
+            #[diesel(sql_type = diesel::sql_types::Bool)]
+            is_expert: bool,
+            #[diesel(sql_type = diesel::sql_types::Bool)]
+            is_permanent: bool,
+        }
+        let rows: Vec<Row> =
+            sql_query("SELECT name, is_expert, is_permanent FROM sessions WHERE id = 's1'")
+                .load(&mut conn)
+                .unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].name, "Chat");
+        assert!(!rows[0].is_expert);
+        assert!(!rows[0].is_permanent);
+
+        // Second run must be a no-op (no double-add error).
+        ensure_schema(&mut conn).unwrap();
     }
 }

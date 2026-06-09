@@ -19,7 +19,21 @@ export interface Session {
   conversation_id: string | null
   created_at: string
   last_activity: string
+  is_expert: boolean
+  expert_kind: string | null
+  knowledge_summary: string | null
+  knowledge_area: string | null
+  scope_path: string | null
+  is_permanent: boolean
 }
+
+/** An expert session as returned by `GET /api/experts`. The endpoint
+ *  serializes the full `Session` row, so an Expert is structurally a
+ *  Session that is always `is_expert: true`. The fields below are the
+ *  ones the Expert Sessions view reads; `expert_kind` is 'knowledge' or
+ *  'question'. A null `project_id` means the expert is global (available
+ *  to chat sessions across the whole install). */
+export type Expert = Session
 
 export interface Project {
   id: string

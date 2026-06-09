@@ -9,7 +9,7 @@ pub(super) fn tool_definitions() -> Vec<McpToolDef> {
     vec![
         McpToolDef {
             name: "complete_step".into(),
-            description: "Mark the current workflow step as complete and advance to the next step.".into(),
+            description: "Finish the CURRENT workflow step and hand off to the next worker for the NEXT step. Advances the card by EXACTLY ONE step — it does NOT finish the card. Use this ONLY when there is genuine remaining work for a later step. If you have completed ALL of the card's work, call `finish_card` instead — calling `complete_step` then would leave the card stalled in an early step and block every card that depends on it.".into(),
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
@@ -23,7 +23,7 @@ pub(super) fn tool_definitions() -> Vec<McpToolDef> {
         },
         McpToolDef {
             name: "finish_card".into(),
-            description: "Mark the card as finished (done). No further steps will run.".into(),
+            description: "Mark the ENTIRE card as done. Moves the card straight to the terminal `done` step from whatever step it is currently on, which unblocks any cards that depend on it. Use this whenever all of the card's work is complete — even if the card is still on an early step like `backlog` or `in_progress`. Do NOT use `complete_step` to finish a card.".into(),
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
@@ -592,6 +592,68 @@ pub(super) fn tool_definitions() -> Vec<McpToolDef> {
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {},
+                "additionalProperties": false
+            }),
+        },
+        McpToolDef {
+            name: "spin_up_experts".into(),
+            description: "Partition a project's codebase across several long-lived KNOWLEDGE-EXPERT sessions and have each eagerly read and summarize its slice. The split is size-balanced with small per-expert windows, grouping adjacent (related) top-level directories together. Capture is throttled to 3 experts reading at once to limit token burn. Returns the created experts (session id, area, scope_path). Experts are hidden from the chat list and consulted later via ask_expert.".into(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "project_id": {
+                        "type": "string",
+                        "description": "Project to spin experts up for (optional if the session already has project context)"
+                    },
+                    "max_experts": {
+                        "type": "integer",
+                        "description": "Upper bound on how many experts to create (default 4). Fewer may be created for small codebases."
+                    }
+                },
+                "additionalProperties": false
+            }),
+        },
+        McpToolDef {
+            name: "list_experts".into(),
+            description: "List the long-lived EXPERT sessions you may consult: experts scoped to your project plus globally-scoped experts. Each entry returns session_id, name, expert_kind ('knowledge'|'question'), knowledge_area, a compact knowledge_summary, scope_path (boundaries), project_id (null = global), is_permanent, and last_activity. Use this to pick a target session_id for ask_expert.".into(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "project_id": {
+                        "type": "string",
+                        "description": "Project whose experts to list (optional if the session already has project context). Global experts are always included."
+                    }
+                },
+                "additionalProperties": false
+            }),
+        },
+        McpToolDef {
+            name: "ask_expert".into(),
+            description: "Ask a long-lived EXPERT session a question, ASYNCHRONOUSLY. You do NOT block waiting — the answer arrives as an event you read on a later turn. Target the expert either by explicit `expert_id` (from list_experts) or by an `area`/topic string the tool resolves to the best in-scope expert; you may only reach experts in your own project or globally-scoped experts. The question is delivered to the expert and a context-coupled answer (which expert, area, your question, the expert's captured knowledge) is returned to you. A live expert may also reply with a more specific answer on a later turn. EXPERTS answering a consultation use this same tool in reply mode by setting `answer` + `reply_to_session_id`.".into(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "question": {
+                        "type": "string",
+                        "description": "The question to ask the expert (required when asking)."
+                    },
+                    "expert_id": {
+                        "type": "string",
+                        "description": "Explicit target expert session id (from list_experts). Takes precedence over `area`."
+                    },
+                    "area": {
+                        "type": "string",
+                        "description": "Topic/area hint used to resolve the best in-scope expert when `expert_id` is omitted."
+                    },
+                    "answer": {
+                        "type": "string",
+                        "description": "EXPERT REPLY MODE: the answer text to deliver back to the asking session. Requires `reply_to_session_id`."
+                    },
+                    "reply_to_session_id": {
+                        "type": "string",
+                        "description": "EXPERT REPLY MODE: the session id to deliver the answer to (the original asker). Requires `answer`."
+                    }
+                },
                 "additionalProperties": false
             }),
         },

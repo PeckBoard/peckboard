@@ -169,6 +169,7 @@ mod tests {
             conversation_id: None,
             created_at: ts.clone(),
             last_activity: ts,
+            ..Default::default()
         })
         .await
         .unwrap();

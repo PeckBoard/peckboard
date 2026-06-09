@@ -18,6 +18,7 @@ import NewProjectModal from './components/NewProjectModal'
 import FoldersPage from './components/ManageFoldersModal'
 import ConfirmDialog from './components/ConfirmDialog'
 import ReportBrowser from './components/ReportBrowser'
+import ExpertsView from './components/ExpertsView'
 import GitView from './components/GitView'
 import UserManagement from './components/UserManagement'
 import ChangePasswordModal from './components/ChangePasswordModal'
@@ -25,7 +26,15 @@ import TabBar from './components/TabBar'
 import { startTabsAutoSync, useTabsStore, type TabType } from './store/tabs'
 import './App.css'
 
-type View = 'sessions' | 'projects' | 'folders' | 'settings' | 'reports' | 'git' | 'users'
+type View =
+  | 'sessions'
+  | 'projects'
+  | 'experts'
+  | 'folders'
+  | 'settings'
+  | 'reports'
+  | 'git'
+  | 'users'
 
 /** Sub-view for an active session or project — 'chat' (the default
  *  ChatView / KanbanBoard) or 'todos' (the dedicated *TodosView reachable at
@@ -47,6 +56,8 @@ function parseRoute(): { view: View; activeId: string | null; sub: SessionSub } 
       return { view: 'sessions', activeId: id, sub: third === 'todos' ? 'todos' : 'chat' }
     case 'projects':
       return { view: 'projects', activeId: id, sub: third === 'todos' ? 'todos' : 'chat' }
+    case 'experts':
+      return { view: 'experts', activeId: null, sub: 'chat' }
     case 'folders':
       return { view: 'folders', activeId: null, sub: 'chat' }
     case 'settings':
@@ -124,6 +135,11 @@ function App() {
     for (const f of folders) m.set(f.id, f.name)
     return m
   }, [folders])
+
+  // Defense-in-depth: experts must never appear in the chat session
+  // list. The API (GET /api/sessions) already excludes them, but filter
+  // again client-side so a backend regression can't leak them here.
+  const chatSessions = useMemo(() => sessions.filter((s) => !s.is_expert), [sessions])
 
   const setActiveProject = useProjectsStore((s) => s.setActiveProject)
 
@@ -541,6 +557,26 @@ function App() {
               <rect x="14" y="3" width="7" height="11" rx="1" />
             </svg>
           </button>
+          <button
+            className={`rail-btn ${view === 'experts' ? 'active' : ''}`}
+            onClick={() => navigate('experts')}
+            title="Experts"
+          >
+            <svg
+              width="18"
+              height="18"
+              viewBox="0 0 24 24"
+              fill="none"
+              stroke="currentColor"
+              strokeWidth="2"
+              strokeLinecap="round"
+              strokeLinejoin="round"
+            >
+              <path d="M12 2a5 5 0 0 0-5 5c0 1.8 1 3.2 2 4.2.8.8 1 1.3 1 2.3v.5h4v-.5c0-1 .2-1.5 1-2.3 1-1 2-2.4 2-4.2a5 5 0 0 0-5-5z" />
+              <line x1="10" y1="19" x2="14" y2="19" />
+              <line x1="11" y1="22" x2="13" y2="22" />
+            </svg>
+          </button>
           <div className="rail-separator" aria-hidden="true" />
           <button
             className={`rail-btn ${view === 'folders' ? 'active' : ''}`}
@@ -756,7 +792,7 @@ function App() {
                 </button>
               </div>
               <div className="list-view-body">
-                {sessions.map((s) => (
+                {chatSessions.map((s) => (
                   <div
                     key={s.id}
                     className={`list-view-row ${s.id === activeSessionId ? 'active' : ''}`}
@@ -798,7 +834,7 @@ function App() {
                     )}
                   </div>
                 ))}
-                {sessions.length === 0 && (
+                {chatSessions.length === 0 && (
                   <div className="list-view-empty">
                     <p>No sessions yet</p>
                     <button
@@ -830,6 +866,7 @@ function App() {
               <ProjectList onNewProject={() => setShowNewProject(true)} />
             </div>
           ))}
+        {view === 'experts' && <ExpertsView />}
         {view === 'folders' && <FoldersPage />}
         {view === 'settings' && <SettingsPage />}
         {view === 'reports' && <ReportBrowser />}

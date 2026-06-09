@@ -180,15 +180,7 @@ impl McpToolRegistry {
     ) -> anyhow::Result<Value> {
         tracing::info!(session_id = %ctx.session_id, "MCP tool: list_workflows");
 
-        // Workflows are defined conventionally; return the default set.
-        Ok(serde_json::json!({
-            "workflows": [
-                {
-                    "name": "default",
-                    "steps": ["todo", "in-progress", "review", "done"]
-                }
-            ]
-        }))
+        Ok(serde_json::json!({ "workflows": crate::workflow::WORKFLOWS }))
     }
 
     pub(crate) async fn handle_fetch_url(

@@ -23,6 +23,12 @@ diesel::table! {
         conversation_id -> Nullable<Text>,
         created_at -> Text,
         last_activity -> Text,
+        is_expert -> Bool,
+        expert_kind -> Nullable<Text>,
+        knowledge_summary -> Nullable<Text>,
+        knowledge_area -> Nullable<Text>,
+        scope_path -> Nullable<Text>,
+        is_permanent -> Bool,
     }
 }
 

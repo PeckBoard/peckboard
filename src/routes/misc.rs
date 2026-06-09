@@ -80,30 +80,7 @@ async fn list_models(State(state): State<Arc<AppState>>) -> impl IntoResponse {
 
 /// GET /api/workflows — list built-in workflow definitions
 async fn list_workflows() -> impl IntoResponse {
-    Json(serde_json::json!({
-        "workflows": [
-            {
-                "id": "default",
-                "name": "Default",
-                "steps": ["backlog", "in_progress", "review", "done"],
-            },
-            {
-                "id": "simple",
-                "name": "Simple",
-                "steps": ["backlog", "in_progress", "done"],
-            },
-            {
-                "id": "research",
-                "name": "Research",
-                "steps": ["backlog", "research", "summarize", "done"],
-            },
-            {
-                "id": "full",
-                "name": "Full Pipeline",
-                "steps": ["backlog", "design", "implement", "test", "review", "done"],
-            },
-        ]
-    }))
+    Json(serde_json::json!({ "workflows": crate::workflow::WORKFLOWS }))
 }
 
 /// GET /api/priorities — list card priority levels

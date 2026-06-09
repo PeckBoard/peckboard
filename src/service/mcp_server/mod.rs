@@ -9,10 +9,12 @@ mod config;
 mod context;
 mod handlers;
 mod schemas;
+mod spawn;
 
 pub use auth::McpTokenRegistry;
 pub use config::{delete_mcp_config, write_mcp_config};
-pub use context::{McpToolDef, ScopedProjectId, ToolCallContext};
+pub use context::{ExpertDispatcher, McpToolDef, ScopedProjectId, ToolCallContext};
+pub use spawn::AppExpertDispatcher;
 
 use serde_json::Value;
 
@@ -88,6 +90,9 @@ impl McpToolRegistry {
             "share_finding" => self.handle_share_finding(args, ctx).await,
             "get_finding_details" => self.handle_get_finding_details(args, ctx).await,
             "send_worker_message" => self.handle_send_worker_message(args, ctx).await,
+            "spin_up_experts" => self.handle_spin_up_experts(args, ctx).await,
+            "list_experts" => self.handle_list_experts(args, ctx).await,
+            "ask_expert" => self.handle_ask_expert(args, ctx).await,
             _ => anyhow::bail!("unknown tool: {tool_name}"),
         }
     }
@@ -274,7 +279,10 @@ mod tests {
         assert!(names.contains(&"move_card_to_wont_do"));
         assert!(names.contains(&"create_folder"));
         assert!(names.contains(&"list_folders"));
-        assert_eq!(names.len(), 33);
+        assert!(names.contains(&"spin_up_experts"));
+        assert!(names.contains(&"list_experts"));
+        assert!(names.contains(&"ask_expert"));
+        assert_eq!(names.len(), 36);
     }
 
     #[test]
@@ -298,6 +306,7 @@ mod tests {
             db,
             broadcaster: crate::ws::broadcaster::Broadcaster::new(),
             provider_registry: None,
+            expert_dispatcher: None,
         };
 
         let result = registry
@@ -349,6 +358,7 @@ mod tests {
             db: db.clone(),
             broadcaster: crate::ws::broadcaster::Broadcaster::new(),
             provider_registry: None,
+            expert_dispatcher: None,
         };
 
         // Two prerequisites via create_card (no deps yet).
@@ -470,6 +480,7 @@ mod tests {
             db,
             broadcaster: crate::ws::broadcaster::Broadcaster::new(),
             provider_registry: None,
+            expert_dispatcher: None,
         };
 
         let result = registry
@@ -477,5 +488,135 @@ mod tests {
             .await
             .unwrap();
         assert!(result["workflows"].is_array());
+    }
+
+    #[tokio::test]
+    async fn test_list_experts_scoped_to_caller() {
+        use crate::db::models::{NewFolder, NewProject, NewSession};
+
+        let registry = McpToolRegistry::new();
+        let db = Arc::new(crate::db::Db::in_memory().unwrap());
+        let ts = chrono::Utc::now().to_rfc3339();
+
+        db.create_folder(NewFolder {
+            id: "f1".into(),
+            name: "Folder".into(),
+            path: "/tmp/f".into(),
+            created_at: ts.clone(),
+        })
+        .await
+        .unwrap();
+        for pid in ["p1", "p2"] {
+            db.create_project(NewProject {
+                id: pid.into(),
+                name: pid.into(),
+                context: "".into(),
+                folder_id: "f1".into(),
+                worker_count: 1,
+                status: "active".into(),
+                default_workflow: None,
+                model: None,
+                effort: None,
+                parallel_instructions: false,
+                auto_notify_changes: true,
+                worker_communication: false,
+                created_at: ts.clone(),
+                last_accessed_at: ts.clone(),
+            })
+            .await
+            .unwrap();
+        }
+
+        let make_expert =
+            |id: &str, name: &str, project_id: Option<&str>, kind: &str, permanent: bool| {
+                NewSession {
+                    id: id.into(),
+                    name: name.into(),
+                    folder_id: "f1".into(),
+                    model: None,
+                    effort: None,
+                    is_worker: false,
+                    project_id: project_id.map(Into::into),
+                    card_id: None,
+                    conversation_id: None,
+                    created_at: ts.clone(),
+                    last_activity: ts.clone(),
+                    is_expert: true,
+                    expert_kind: Some(kind.into()),
+                    knowledge_summary: Some(format!("{name} summary")),
+                    knowledge_area: Some(format!("{name} area")),
+                    scope_path: Some("src".into()),
+                    is_permanent: permanent,
+                }
+            };
+
+        db.create_session(make_expert(
+            "e-proj",
+            "Project Expert",
+            Some("p1"),
+            "knowledge",
+            false,
+        ))
+        .await
+        .unwrap();
+        db.create_session(make_expert(
+            "e-global",
+            "Global Expert",
+            None,
+            "question",
+            true,
+        ))
+        .await
+        .unwrap();
+        db.create_session(make_expert(
+            "e-other",
+            "Other Project Expert",
+            Some("p2"),
+            "knowledge",
+            false,
+        ))
+        .await
+        .unwrap();
+
+        let ctx = ToolCallContext {
+            session_id: "s1".into(),
+            project_id: Some("p1".into()),
+            card_id: None,
+            db: db.clone(),
+            broadcaster: crate::ws::broadcaster::Broadcaster::new(),
+            provider_registry: None,
+            expert_dispatcher: None,
+        };
+
+        let result = registry
+            .handle_tool_call("list_experts", serde_json::json!({}), &ctx)
+            .await
+            .unwrap();
+
+        assert_eq!(result["status"], "ok");
+        assert_eq!(result["count"], 2);
+        let ids: Vec<&str> = result["experts"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|e| e["session_id"].as_str().unwrap())
+            .collect();
+        assert!(ids.contains(&"e-proj"), "in-project expert missing");
+        assert!(ids.contains(&"e-global"), "global expert missing");
+        assert!(
+            !ids.contains(&"e-other"),
+            "out-of-scope expert must NOT be listed"
+        );
+
+        // Compact payload carries the fields callers need for ask_expert.
+        let proj = result["experts"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|e| e["session_id"] == "e-proj")
+            .unwrap();
+        assert_eq!(proj["expert_kind"], "knowledge");
+        assert_eq!(proj["knowledge_area"], "Project Expert area");
+        assert_eq!(proj["project_id"], "p1");
     }
 }

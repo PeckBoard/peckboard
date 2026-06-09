@@ -266,6 +266,15 @@ async fn create_project(
             )
         })?;
 
+    // Idempotently give the new project its own question-expert. Non-fatal:
+    // a failure here must not block project creation, and unscoped callers
+    // still fall back to the global question-expert.
+    if let Err(e) =
+        crate::service::question_expert::ensure_project_question_expert(&state.db, &project).await
+    {
+        tracing::warn!(project_id = %project.id, "Failed to ensure project question-expert: {e}");
+    }
+
     Ok::<_, (StatusCode, Json<serde_json::Value>)>((
         StatusCode::CREATED,
         Json(serde_json::json!(project)),

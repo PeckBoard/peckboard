@@ -51,6 +51,7 @@ async fn build_dispatcher() -> (SessionManager, Db, Arc<Broadcaster>) {
         conversation_id: None,
         created_at: ts.clone(),
         last_activity: ts,
+        ..Default::default()
     })
     .await
     .unwrap();

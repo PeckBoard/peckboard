@@ -1,4 +1,7 @@
 import { defineConfig } from '@playwright/test'
+import { mkdtempSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import path from 'node:path'
 
 /**
  * Playwright config for peckboard end-to-end tests.
@@ -26,6 +29,17 @@ const E2E_PASS = 'e2e-password-1234'
 process.env.PECKBOARD_E2E_USER = E2E_USER
 process.env.PECKBOARD_E2E_PASS = E2E_PASS
 
+// The server's data dir is created here (instead of inline in the
+// webServer shell command) so its path is known to the spec processes
+// via `process.env.PECKBOARD_E2E_DATA_DIR`. A few specs need to read
+// server-written files under it — e.g. the per-session MCP token at
+// `worker-mcp/<session_id>.json`, which is the only way to drive MCP
+// tools (like `spin_up_experts`) over the loopback `/mcp` endpoint.
+// One dir per run, same isolation as the previous inline `mktemp -d`.
+const DATA_DIR =
+  process.env.PECKBOARD_E2E_DATA_DIR ?? mkdtempSync(path.join(tmpdir(), 'peckboard-e2e-'))
+process.env.PECKBOARD_E2E_DATA_DIR = DATA_DIR
+
 export default defineConfig({
   testDir: './tests',
   fullyParallel: false,
@@ -43,7 +57,7 @@ export default defineConfig({
     // Fresh data dir each run so prior state can't bleed in.
     // The binary embeds the frontend, so we only run the binary here —
     // both builds happen in global-setup before webServer launches.
-    command: `PECKBOARD_DATA_DIR=$(mktemp -d /tmp/peckboard-e2e-XXXXXX) PECKBOARD_BOOTSTRAP_USERNAME=${E2E_USER} PECKBOARD_BOOTSTRAP_PASSWORD=${E2E_PASS} ../../target/release/peckboard --port ${PORT} --https-port ${HTTPS_PORT} --host 127.0.0.1`,
+    command: `PECKBOARD_DATA_DIR=${DATA_DIR} PECKBOARD_BOOTSTRAP_USERNAME=${E2E_USER} PECKBOARD_BOOTSTRAP_PASSWORD=${E2E_PASS} ../../target/release/peckboard --port ${PORT} --https-port ${HTTPS_PORT} --host 127.0.0.1`,
     url: `http://127.0.0.1:${PORT}/api/health`,
     reuseExistingServer: !process.env.CI,
     timeout: 60_000,

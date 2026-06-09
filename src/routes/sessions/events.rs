@@ -260,6 +260,34 @@ pub(super) async fn append_event(
         // Resolve references in the answer text (e.g. [session:id] from autocomplete)
         let answer_text = resolve_references(&answer_text, &state).await;
 
+        // Feed the resolved Q&A back to the in-scope question-expert, coupled
+        // with the original question context, so it can answer the same thing
+        // next time without troubling the user. Skip dismissals (nothing was
+        // learned) and never loop a question-expert's own traffic back to it.
+        if !rejected {
+            let fb_state = state.clone();
+            let fb_id = id.clone();
+            let fb_qa = answer_text.clone();
+            tokio::spawn(async move {
+                let session = fb_state.db.get_session(&fb_id).await.ok().flatten();
+                if session.as_ref().map(|s| s.is_expert).unwrap_or(false) {
+                    return;
+                }
+                let project_id = session.and_then(|s| s.project_id);
+                if let Err(e) = crate::service::question_expert::record_user_answer(
+                    &fb_state.db,
+                    &fb_state.broadcaster,
+                    &fb_state.config.data_dir,
+                    project_id.as_deref(),
+                    &fb_qa,
+                )
+                .await
+                {
+                    tracing::warn!(session_id = %fb_id, "failed to record user answer to question-expert: {e}");
+                }
+            });
+        }
+
         // Resume the conversation. With the long-lived stream-json
         // process we just append the user event and write the answer
         // to stdin via `send_or_queue` — if the agent is still mid-

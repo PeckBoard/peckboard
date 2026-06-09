@@ -1,11 +1,17 @@
 //! Build-time checks for the migrations directory.
 //!
-//! Two jobs:
+//! Three jobs:
 //!   1. `cargo:rerun-if-changed=migrations` — otherwise cargo has no
 //!      reason to re-invoke the `embed_migrations!()` proc macro when a
 //!      SQL file changes, and you can silently ship a binary with stale
 //!      migrations.
-//!   2. Reject duplicate version prefixes. Diesel keys migration runs
+//!   2. `cargo:rerun-if-changed=web/dist` — same hazard for the embedded
+//!      frontend. `src/frontend.rs` embeds `web/dist/` via rust-embed at
+//!      compile time, but a frontend-only change touches no `.rs` file,
+//!      so without this cargo skips recompilation and the binary keeps
+//!      serving stale assets (e2e then runs the rebuilt frontend's tests
+//!      against the OLD UI and fails confusingly).
+//!   3. Reject duplicate version prefixes. Diesel keys migration runs
 //!      by version (the numeric prefix before the first underscore),
 //!      so two directories with the same number — e.g.
 //!      `00000000000002_user_tabs` and `00000000000002_worker_comm` —
@@ -18,6 +24,7 @@ use std::path::Path;
 
 fn main() {
     println!("cargo:rerun-if-changed=migrations");
+    println!("cargo:rerun-if-changed=web/dist");
 
     let dir = Path::new("migrations");
     if !dir.is_dir() {

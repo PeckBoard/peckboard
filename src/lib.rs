@@ -11,4 +11,5 @@ pub mod service;
 pub mod state;
 pub mod todo;
 pub mod worker;
+pub mod workflow;
 pub mod ws;

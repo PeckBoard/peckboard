@@ -71,6 +71,7 @@ mod tests {
                 conversation_id: None,
                 created_at: ts.clone(),
                 last_activity: ts.clone(),
+                ..Default::default()
             })
             .await
             .unwrap();
@@ -94,6 +95,163 @@ mod tests {
         assert_eq!(by_folder.len(), 1);
 
         assert!(db.delete_session("s1").await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn test_expert_sessions() {
+        let db = test_db();
+        let ts = now();
+
+        db.create_folder(NewFolder {
+            id: "f1".into(),
+            name: "Folder".into(),
+            path: "/tmp/f".into(),
+            created_at: ts.clone(),
+        })
+        .await
+        .unwrap();
+
+        db.create_project(NewProject {
+            id: "p1".into(),
+            name: "Project".into(),
+            context: "".into(),
+            folder_id: "f1".into(),
+            worker_count: 1,
+            status: "active".into(),
+            default_workflow: None,
+            model: None,
+            effort: None,
+            parallel_instructions: false,
+            auto_notify_changes: true,
+            worker_communication: false,
+            created_at: ts.clone(),
+            last_accessed_at: ts.clone(),
+        })
+        .await
+        .unwrap();
+
+        // A plain session — must never show up in expert lists.
+        db.create_session(NewSession {
+            id: "plain".into(),
+            name: "Chat".into(),
+            folder_id: "f1".into(),
+            created_at: ts.clone(),
+            last_activity: ts.clone(),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+
+        // A project-scoped knowledge expert.
+        let expert = db
+            .create_session(NewSession {
+                id: "exp-p1".into(),
+                name: "Auth expert".into(),
+                folder_id: "f1".into(),
+                project_id: Some("p1".into()),
+                is_expert: true,
+                expert_kind: Some("knowledge".into()),
+                knowledge_summary: Some("Knows the auth layer".into()),
+                knowledge_area: Some("authentication".into()),
+                scope_path: Some("src/auth".into()),
+                created_at: ts.clone(),
+                last_activity: ts.clone(),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+
+        // All new fields round-trip.
+        assert!(expert.is_expert);
+        assert_eq!(expert.expert_kind.as_deref(), Some("knowledge"));
+        assert_eq!(
+            expert.knowledge_summary.as_deref(),
+            Some("Knows the auth layer")
+        );
+        assert_eq!(expert.knowledge_area.as_deref(), Some("authentication"));
+        assert_eq!(expert.scope_path.as_deref(), Some("src/auth"));
+        assert!(!expert.is_permanent);
+
+        // A global (project_id NULL) permanent question-expert.
+        db.create_session(NewSession {
+            id: "exp-global".into(),
+            name: "Question expert".into(),
+            folder_id: "f1".into(),
+            project_id: None,
+            is_expert: true,
+            expert_kind: Some("question".into()),
+            is_permanent: true,
+            created_at: ts.clone(),
+            last_activity: ts.clone(),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+
+        // Plain list excludes both experts.
+        let plain = db.list_plain_sessions().await.unwrap();
+        assert_eq!(plain.len(), 1);
+        assert_eq!(plain[0].id, "plain");
+        let plain_by_folder = db.list_plain_sessions_by_folder("f1").await.unwrap();
+        assert_eq!(plain_by_folder.len(), 1);
+        assert_eq!(plain_by_folder[0].id, "plain");
+
+        // Expert lists.
+        let all_experts = db.list_expert_sessions().await.unwrap();
+        assert_eq!(all_experts.len(), 2);
+
+        let by_project = db.list_expert_sessions_by_project("p1").await.unwrap();
+        assert_eq!(by_project.len(), 1);
+        assert_eq!(by_project[0].id, "exp-p1");
+
+        // Scope = this project's experts PLUS global experts.
+        let by_scope = db.list_expert_sessions_by_scope("p1").await.unwrap();
+        let mut scope_ids: Vec<&str> = by_scope.iter().map(|s| s.id.as_str()).collect();
+        scope_ids.sort();
+        assert_eq!(scope_ids, vec!["exp-global", "exp-p1"]);
+
+        // get_expert_session: returns experts, rejects plain sessions.
+        assert!(db.get_expert_session("exp-p1").await.unwrap().is_some());
+        assert!(db.get_expert_session("plain").await.unwrap().is_none());
+        assert!(db.get_expert_session("missing").await.unwrap().is_none());
+
+        // Upsert is idempotent under a stable id: a second call must not
+        // clobber the accumulated row.
+        let first = db
+            .upsert_permanent_question_expert(NewSession {
+                id: "q-stable".into(),
+                name: "Stable Q expert".into(),
+                folder_id: "f1".into(),
+                is_expert: true,
+                expert_kind: Some("question".into()),
+                is_permanent: true,
+                knowledge_summary: Some("v1".into()),
+                created_at: ts.clone(),
+                last_activity: ts.clone(),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        assert_eq!(first.knowledge_summary.as_deref(), Some("v1"));
+
+        let second = db
+            .upsert_permanent_question_expert(NewSession {
+                id: "q-stable".into(),
+                name: "Rehydrated".into(),
+                folder_id: "f1".into(),
+                is_expert: true,
+                expert_kind: Some("question".into()),
+                is_permanent: true,
+                knowledge_summary: Some("v2-should-not-win".into()),
+                created_at: ts.clone(),
+                last_activity: ts.clone(),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        // Existing row preserved, not overwritten.
+        assert_eq!(second.name, "Stable Q expert");
+        assert_eq!(second.knowledge_summary.as_deref(), Some("v1"));
     }
 
     // ── Projects ─────────────────────────────────────────────────────
@@ -335,6 +493,7 @@ mod tests {
             conversation_id: None,
             created_at: ts.clone(),
             last_activity: ts.clone(),
+            ..Default::default()
         })
         .await
         .unwrap();
@@ -521,6 +680,7 @@ mod tests {
             conversation_id: None,
             created_at: ts.clone(),
             last_activity: ts.clone(),
+            ..Default::default()
         })
         .await
         .unwrap();
@@ -625,6 +785,7 @@ mod tests {
             conversation_id: None,
             created_at: ts.clone(),
             last_activity: ts.clone(),
+            ..Default::default()
         })
         .await
         .unwrap();
@@ -716,6 +877,7 @@ mod tests {
             conversation_id: None,
             created_at: ts.clone(),
             last_activity: ts,
+            ..Default::default()
         })
         .await
         .unwrap();
@@ -859,6 +1021,7 @@ mod tests {
                 conversation_id: None,
                 created_at: ts.clone(),
                 last_activity: ts.clone(),
+                ..Default::default()
             })
             .await
             .unwrap();

@@ -202,7 +202,11 @@ test('step header pins under the toolbar while scrolling its section, then yield
 
   await loadAt(page, token, `/projects/${project.id}`)
 
-  const toolbar = page.locator('.kanban-board-header')
+  // The step header pins flush beneath the tabbar — the board's own
+  // `.kanban-board-header` is deliberately NOT sticky and scrolls away
+  // (see kanban.css), so the tabbar is the fixed reference the pinned
+  // header docks under.
+  const toolbar = page.locator('.tabbar')
   // Match rows by their header heading exactly so the locator can't
   // catch a priority-badge "Backlog" inside a card.
   const rowByLabel = (label: string) =>

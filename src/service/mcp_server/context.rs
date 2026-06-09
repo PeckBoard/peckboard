@@ -1,12 +1,30 @@
 //! Per-tool-call context plumbed into every MCP handler, plus the scope-
 //! verification proof token and the inter-worker rate limiter.
 
+use std::future::Future;
+use std::pin::Pin;
 use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::db::Db;
+
+/// Best-effort seam for dispatching a live capture run on an expert
+/// session. The MCP tool layer has no access to the `SessionManager` /
+/// token registry / data dir, so `spin_up_experts` can't spawn agents on
+/// its own. The production impl (wired in the `mcp` route from
+/// `AppState`, see `super::spawn::AppExpertDispatcher`) issues an MCP
+/// token, writes the per-session config, and dispatches a capture run via
+/// `SessionManager::send_message_locked`. Kept as a narrow trait so the
+/// tool context depends only on this capability, not the whole `AppState`.
+pub trait ExpertDispatcher: Send + Sync {
+    fn dispatch_capture<'a>(
+        &'a self,
+        expert_session_id: &'a str,
+        prompt: &'a str,
+    ) -> Pin<Box<dyn Future<Output = anyhow::Result<()>> + Send + 'a>>;
+}
 
 /// Context scoped from the MCP token — identifies what session/project/card
 /// the tool call is operating within.
@@ -18,6 +36,11 @@ pub struct ToolCallContext {
     pub db: Arc<Db>,
     pub broadcaster: Arc<crate::ws::broadcaster::Broadcaster>,
     pub provider_registry: Option<Arc<crate::provider::registry::ProviderRegistry>>,
+    /// Present only on real tool calls from the `mcp` route; `None` in unit
+    /// tests and contexts without a running app. When `None`, expert tools
+    /// still create + persist experts and their captured knowledge but skip
+    /// the live agent dispatch.
+    pub expert_dispatcher: Option<Arc<dyn ExpertDispatcher>>,
 }
 
 /// Proof token: a project id verified against the current MCP token's
@@ -148,6 +171,7 @@ mod tests {
             db: Arc::new(crate::db::Db::in_memory().unwrap()),
             broadcaster: crate::ws::broadcaster::Broadcaster::new(),
             provider_registry: None,
+            expert_dispatcher: None,
         }
     }
 

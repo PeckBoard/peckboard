@@ -99,10 +99,14 @@ impl Db {
         .await
     }
 
+    /// Plain (non-worker, non-expert) sessions — the ordinary chat list.
+    /// Experts are deliberately excluded: they must never surface in the
+    /// normal chat session list.
     pub async fn list_plain_sessions(&self) -> anyhow::Result<Vec<Session>> {
         self.with_conn(move |conn| {
             sessions::table
                 .filter(sessions::is_worker.eq(false))
+                .filter(sessions::is_expert.eq(false))
                 .select(Session::as_select())
                 .order(sessions::last_activity.desc())
                 .load(conn)
@@ -120,9 +124,103 @@ impl Db {
             sessions::table
                 .filter(sessions::folder_id.eq(&folder_id))
                 .filter(sessions::is_worker.eq(false))
+                .filter(sessions::is_expert.eq(false))
                 .select(Session::as_select())
                 .order(sessions::last_activity.desc())
                 .load(conn)
+                .map_err(Into::into)
+        })
+        .await
+    }
+
+    /// All expert sessions, newest activity first.
+    pub async fn list_expert_sessions(&self) -> anyhow::Result<Vec<Session>> {
+        self.with_conn(move |conn| {
+            sessions::table
+                .filter(sessions::is_expert.eq(true))
+                .select(Session::as_select())
+                .order(sessions::last_activity.desc())
+                .load(conn)
+                .map_err(Into::into)
+        })
+        .await
+    }
+
+    /// Expert sessions owned by a specific project.
+    pub async fn list_expert_sessions_by_project(
+        &self,
+        project_id: &str,
+    ) -> anyhow::Result<Vec<Session>> {
+        let project_id = project_id.to_string();
+        self.with_conn(move |conn| {
+            sessions::table
+                .filter(sessions::is_expert.eq(true))
+                .filter(sessions::project_id.eq(&project_id))
+                .select(Session::as_select())
+                .order(sessions::last_activity.desc())
+                .load(conn)
+                .map_err(Into::into)
+        })
+        .await
+    }
+
+    /// Experts a session in `project_id` may consult: ones scoped to that
+    /// project plus globally-scoped experts (`project_id IS NULL`).
+    pub async fn list_expert_sessions_by_scope(
+        &self,
+        project_id: &str,
+    ) -> anyhow::Result<Vec<Session>> {
+        let project_id = project_id.to_string();
+        self.with_conn(move |conn| {
+            sessions::table
+                .filter(sessions::is_expert.eq(true))
+                .filter(
+                    sessions::project_id
+                        .eq(&project_id)
+                        .or(sessions::project_id.is_null()),
+                )
+                .select(Session::as_select())
+                .order(sessions::last_activity.desc())
+                .load(conn)
+                .map_err(Into::into)
+        })
+        .await
+    }
+
+    /// Fetch an expert session by its (stable) id. Returns `None` if the
+    /// id doesn't exist or the session isn't an expert.
+    pub async fn get_expert_session(&self, id: &str) -> anyhow::Result<Option<Session>> {
+        let id = id.to_string();
+        self.with_conn(move |conn| {
+            sessions::table
+                .find(&id)
+                .filter(sessions::is_expert.eq(true))
+                .select(Session::as_select())
+                .first(conn)
+                .optional()
+                .map_err(Into::into)
+        })
+        .await
+    }
+
+    /// Insert the permanent (stable-id) question-expert if it doesn't yet
+    /// exist; otherwise return the existing row untouched. This is how a
+    /// question-expert rehydrates under its stable id across restarts
+    /// without clobbering the accumulated session. The caller is expected
+    /// to set `is_expert`, `is_permanent`, and `expert_kind` on `new`.
+    pub async fn upsert_permanent_question_expert(
+        &self,
+        new: NewSession,
+    ) -> anyhow::Result<Session> {
+        self.with_conn(move |conn| {
+            let id = new.id.clone();
+            diesel::insert_or_ignore_into(sessions::table)
+                .values(&new)
+                .execute(conn)?;
+            sessions::table
+                .find(&id)
+                .select(Session::as_select())
+                .first(conn)
                 .map_err(Into::into)
         })
         .await
