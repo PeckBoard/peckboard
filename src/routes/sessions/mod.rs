@@ -33,7 +33,30 @@ struct CreateSessionRequest {
 #[derive(Deserialize)]
 struct ListSessionsQuery {
     folder_id: Option<String>,
+    /// Cursor: `last_activity` of the last row from the previous page.
+    /// Paired with `cursor_id` to break ties on rows that share a
+    /// `last_activity`. Both must be supplied together to be honoured;
+    /// passing just one is treated as "no cursor".
+    cursor_la: Option<String>,
+    cursor_id: Option<String>,
+    /// Page size. Defaults to [`DEFAULT_SESSION_PAGE_SIZE`], capped at
+    /// [`MAX_SESSION_PAGE_SIZE`] so a malicious client can't ask for the
+    /// entire table by passing `?limit=99999999` and re-introduce the
+    /// pre-pagination O(N) behaviour we just removed.
+    limit: Option<i64>,
 }
+
+/// Default page size for `GET /api/sessions`. Tuned for the sidebar UI:
+/// ~100 rows is more than fits on a tall monitor's session list, so the
+/// initial fetch covers the visible viewport without a follow-up page
+/// fetch for most users.
+const DEFAULT_SESSION_PAGE_SIZE: i64 = 100;
+
+/// Hard ceiling on `?limit=`. Stops a buggy or malicious client from
+/// asking for the whole table in one go. 500 leaves headroom for power
+/// users with denser histories while still bounding the worst-case row
+/// scan and JSON serialization cost.
+const MAX_SESSION_PAGE_SIZE: i64 = 500;
 
 #[derive(Deserialize)]
 struct ListExpertsQuery {
@@ -121,15 +144,53 @@ async fn create_session(
 }
 
 /// GET /api/sessions
+///
+/// Keyset-paginated. Default page size [`DEFAULT_SESSION_PAGE_SIZE`];
+/// the caller can pass `?limit=` up to [`MAX_SESSION_PAGE_SIZE`].
+///
+/// Response shape:
+/// ```json
+/// {
+///   "items": [Session, ...],
+///   "next_cursor": { "last_activity": "...", "id": "..." } | null
+/// }
+/// ```
+///
+/// `next_cursor` is `null` when the current page returned fewer rows
+/// than the requested limit (i.e. end of list); pass the returned
+/// `next_cursor` fields back as `?cursor_la=...&cursor_id=...` to get
+/// the next page.
 async fn list_sessions(
     State(state): State<Arc<AppState>>,
     Query(params): Query<ListSessionsQuery>,
 ) -> impl IntoResponse {
-    tracing::info!(folder_id = ?params.folder_id, "Listing sessions");
+    tracing::info!(
+        folder_id = ?params.folder_id,
+        cursor = ?(params.cursor_la.as_deref(), params.cursor_id.as_deref()),
+        limit = ?params.limit,
+        "Listing sessions",
+    );
+
+    let limit = params
+        .limit
+        .unwrap_or(DEFAULT_SESSION_PAGE_SIZE)
+        .clamp(1, MAX_SESSION_PAGE_SIZE);
+    // The cursor is meaningless unless BOTH halves are present (they
+    // share the keyset comparison). Pass only one and we treat it as
+    // "no cursor" rather than half-applying it and producing a
+    // surprising page.
+    let cursor = match (params.cursor_la, params.cursor_id) {
+        (Some(la), Some(id)) => Some((la, id)),
+        _ => None,
+    };
+
     let sessions = if let Some(folder_id) = params.folder_id {
-        state.db.list_plain_sessions_by_folder(&folder_id).await
+        state
+            .db
+            .list_plain_sessions_by_folder_page(&folder_id, cursor, limit)
+            .await
     } else {
-        state.db.list_plain_sessions().await
+        state.db.list_plain_sessions_page(cursor, limit).await
     };
 
     let sessions = sessions.map_err(|e| {
@@ -139,7 +200,26 @@ async fn list_sessions(
         )
     })?;
 
-    Ok::<_, (StatusCode, Json<serde_json::Value>)>(Json(serde_json::json!(sessions)))
+    // If we got fewer than `limit` rows, the caller has reached the end
+    // — emit `next_cursor: null` so the frontend can stop paginating.
+    let next_cursor = if (sessions.len() as i64) < limit {
+        serde_json::Value::Null
+    } else {
+        sessions
+            .last()
+            .map(|s| {
+                serde_json::json!({
+                    "last_activity": s.last_activity,
+                    "id": s.id,
+                })
+            })
+            .unwrap_or(serde_json::Value::Null)
+    };
+
+    Ok::<_, (StatusCode, Json<serde_json::Value>)>(Json(serde_json::json!({
+        "items": sessions,
+        "next_cursor": next_cursor,
+    })))
 }
 
 /// GET /api/experts

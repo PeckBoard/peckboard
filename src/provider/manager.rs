@@ -127,6 +127,60 @@ impl SessionManager {
         })
     }
 
+    /// Drop lock entries that nobody else holds a reference to.
+    ///
+    /// `lock_session` / `try_lock_session` clone the `Arc<Mutex<()>>`
+    /// into the returned `SessionLock`'s guard, so a strong count > 1
+    /// means a guard is live (or about to be live — see the race
+    /// note below). A strong count of exactly 1 means only the map
+    /// holds the `Arc` and the entry is provably unused; we can drop
+    /// it and the next `lock_session` will re-create it transparently.
+    ///
+    /// The race: a caller about to call `lock_session` is racing
+    /// against this sweep. Both paths take `self.session_locks.lock()`
+    /// first, so we serialise on the outer map mutex. If the sweep
+    /// wins, the caller just inserts a fresh entry on its next access
+    /// — that's a no-op visible to callers since the `Arc<Mutex<()>>`
+    /// for a session id has no persistent state.
+    ///
+    /// Returns the number of entries removed (for tests + tracing).
+    /// Cost is O(N) over the map; intended for a low-frequency
+    /// background sweep, not the hot path.
+    pub async fn evict_idle_locks(&self) -> usize {
+        let mut map = self.session_locks.lock().await;
+        let before = map.len();
+        map.retain(|_, lock| Arc::strong_count(lock) > 1);
+        before - map.len()
+    }
+
+    /// Spawn a background task that periodically evicts idle lock-map
+    /// entries. Returns the join handle so the caller (`main`) can hold
+    /// it without leaking. Clones only the inner `Arc<Mutex<HashMap>>`
+    /// — keeping the manager itself ownable-by-value lets `AppState`
+    /// stay non-Arc, which matters because the hot paths (route
+    /// handlers, orchestrator) already access it through `&AppState`.
+    ///
+    /// The sweep cadence is generous because the per-entry overhead is
+    /// tiny (a HashMap bucket + an `Arc`) and we don't want this
+    /// competing for the outer map mutex with hot-path dispatchers.
+    pub fn spawn_lock_sweeper(&self) -> tokio::task::JoinHandle<()> {
+        let locks = self.session_locks.clone();
+        tokio::spawn(async move {
+            const SWEEP_INTERVAL: std::time::Duration = std::time::Duration::from_secs(300);
+            loop {
+                tokio::time::sleep(SWEEP_INTERVAL).await;
+                let mut map = locks.lock().await;
+                let before = map.len();
+                map.retain(|_, lock| Arc::strong_count(lock) > 1);
+                let evicted = before - map.len();
+                drop(map);
+                if evicted > 0 {
+                    tracing::debug!("Session lock sweep: evicted {evicted} idle entries");
+                }
+            }
+        })
+    }
+
     /// Dispatch a new agent run for `lock.session_id()`.
     ///
     /// The `&SessionLock` parameter is the compile-time proof that the
@@ -458,5 +512,71 @@ impl SessionManager {
         }
 
         None
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::provider::registry::ProviderRegistry;
+
+    fn manager() -> SessionManager {
+        SessionManager::new(Arc::new(ProviderRegistry::new()))
+    }
+
+    #[tokio::test]
+    async fn evict_idle_locks_removes_unheld_entries() {
+        let m = manager();
+        // Materialise three lock entries by acquiring + immediately
+        // dropping each — after the drop the entry's Arc is held
+        // only by the inner map, which is the precondition for
+        // eviction.
+        for id in ["s1", "s2", "s3"] {
+            drop(m.lock_session(id).await);
+        }
+        assert_eq!(m.session_locks.lock().await.len(), 3);
+
+        let evicted = m.evict_idle_locks().await;
+        assert_eq!(evicted, 3);
+        assert_eq!(m.session_locks.lock().await.len(), 0);
+    }
+
+    #[tokio::test]
+    async fn evict_idle_locks_preserves_held_entries() {
+        let m = manager();
+        let held = m.lock_session("hot").await;
+        drop(m.lock_session("cold").await);
+        assert_eq!(m.session_locks.lock().await.len(), 2);
+
+        // The hot lock is still live (we own its guard), so its
+        // Arc has strong_count > 1; the cold one's only reference
+        // is the map. Sweep must drop the cold one and leave the
+        // hot one untouched.
+        let evicted = m.evict_idle_locks().await;
+        assert_eq!(evicted, 1);
+        let remaining = m.session_locks.lock().await;
+        assert_eq!(remaining.len(), 1);
+        assert!(remaining.contains_key("hot"));
+        drop(held);
+    }
+
+    #[tokio::test]
+    async fn evict_idle_locks_is_no_op_on_empty_map() {
+        let m = manager();
+        assert_eq!(m.evict_idle_locks().await, 0);
+    }
+
+    #[tokio::test]
+    async fn lock_session_after_eviction_works() {
+        // Regression check: a sweep that just dropped an entry must
+        // not break a subsequent lock_session for the same id —
+        // it should transparently re-create the entry.
+        let m = manager();
+        drop(m.lock_session("s1").await);
+        m.evict_idle_locks().await;
+
+        // Re-acquire — must succeed and yield a fresh, working lock.
+        let lock = m.lock_session("s1").await;
+        assert_eq!(lock.session_id(), "s1");
     }
 }

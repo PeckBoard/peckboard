@@ -1396,4 +1396,283 @@ mod tests {
             .unwrap();
         assert_eq!(same.completed_at, newer.completed_at);
     }
+
+    // ── Pagination ────────────────────────────────────────────────────
+
+    async fn seed_paginated_sessions(db: &Db, folder: &str, count: usize) -> Vec<Session> {
+        let ts_base = chrono::Utc::now();
+        db.create_folder(NewFolder {
+            id: folder.into(),
+            name: folder.into(),
+            path: format!("/tmp/{folder}"),
+            created_at: ts_base.to_rfc3339(),
+        })
+        .await
+        .unwrap();
+        let mut sessions = Vec::with_capacity(count);
+        // Insert in reverse age order — session 0 ends up with the OLDEST
+        // last_activity, session N-1 with the NEWEST — so the expected
+        // page order is just the reversed insertion order, which makes
+        // each assertion below easy to reason about.
+        for i in 0..count {
+            let ts = (ts_base - chrono::Duration::seconds((count - i) as i64)).to_rfc3339();
+            let s = db
+                .create_session(NewSession {
+                    id: format!("s{i:03}"),
+                    name: format!("Session {i}"),
+                    folder_id: folder.into(),
+                    model: None,
+                    effort: None,
+                    is_worker: false,
+                    project_id: None,
+                    card_id: None,
+                    conversation_id: None,
+                    created_at: ts.clone(),
+                    last_activity: ts,
+                    ..Default::default()
+                })
+                .await
+                .unwrap();
+            sessions.push(s);
+        }
+        sessions
+    }
+
+    #[tokio::test]
+    async fn list_plain_sessions_page_returns_newest_first_and_respects_limit() {
+        let db = test_db();
+        seed_paginated_sessions(&db, "f1", 5).await;
+
+        let page = db.list_plain_sessions_page(None, 3).await.unwrap();
+        assert_eq!(page.len(), 3, "limit must cap row count");
+        // Newest first: we inserted s000 oldest, s004 newest, so the
+        // first page is s004, s003, s002.
+        let ids: Vec<&str> = page.iter().map(|s| s.id.as_str()).collect();
+        assert_eq!(ids, vec!["s004", "s003", "s002"]);
+    }
+
+    #[tokio::test]
+    async fn list_plain_sessions_page_walks_full_history_with_cursor() {
+        let db = test_db();
+        seed_paginated_sessions(&db, "f1", 7).await;
+
+        // Page 1
+        let p1 = db.list_plain_sessions_page(None, 3).await.unwrap();
+        let last = p1.last().unwrap();
+        let cursor = (last.last_activity.clone(), last.id.clone());
+
+        // Page 2 — must start with the row immediately older than the
+        // page-1 tail and continue in strict order.
+        let p2 = db.list_plain_sessions_page(Some(cursor), 3).await.unwrap();
+        let p2_ids: Vec<&str> = p2.iter().map(|s| s.id.as_str()).collect();
+        assert_eq!(p2_ids, vec!["s003", "s002", "s001"]);
+
+        // Page 3 — fewer than `limit` rows confirms end-of-list.
+        let last2 = p2.last().unwrap();
+        let cursor2 = (last2.last_activity.clone(), last2.id.clone());
+        let p3 = db.list_plain_sessions_page(Some(cursor2), 3).await.unwrap();
+        assert_eq!(
+            p3.iter().map(|s| s.id.as_str()).collect::<Vec<_>>(),
+            vec!["s000"],
+        );
+    }
+
+    #[tokio::test]
+    async fn list_plain_sessions_page_breaks_ties_by_id() {
+        // Two sessions with the same last_activity. The keyset cursor
+        // must still walk past them deterministically — otherwise the
+        // second page could either repeat or skip the duplicate.
+        let db = test_db();
+        let ts = chrono::Utc::now().to_rfc3339();
+        db.create_folder(NewFolder {
+            id: "f1".into(),
+            name: "f".into(),
+            path: "/tmp/f1".into(),
+            created_at: ts.clone(),
+        })
+        .await
+        .unwrap();
+        for id in ["a", "b", "c"] {
+            db.create_session(NewSession {
+                id: id.into(),
+                name: id.into(),
+                folder_id: "f1".into(),
+                model: None,
+                effort: None,
+                is_worker: false,
+                project_id: None,
+                card_id: None,
+                conversation_id: None,
+                created_at: ts.clone(),
+                last_activity: ts.clone(),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        }
+
+        let p1 = db.list_plain_sessions_page(None, 2).await.unwrap();
+        assert_eq!(p1.len(), 2);
+        let cursor = (p1[1].last_activity.clone(), p1[1].id.clone());
+        let p2 = db.list_plain_sessions_page(Some(cursor), 2).await.unwrap();
+        assert_eq!(p2.len(), 1);
+
+        // Together the pages must cover every row exactly once.
+        let mut all: Vec<&str> = p1.iter().chain(p2.iter()).map(|s| s.id.as_str()).collect();
+        all.sort();
+        assert_eq!(all, vec!["a", "b", "c"]);
+    }
+
+    #[tokio::test]
+    async fn list_plain_sessions_page_skips_workers_and_experts() {
+        let db = test_db();
+        let ts = chrono::Utc::now().to_rfc3339();
+        db.create_folder(NewFolder {
+            id: "f1".into(),
+            name: "f".into(),
+            path: "/tmp/f1".into(),
+            created_at: ts.clone(),
+        })
+        .await
+        .unwrap();
+        // A plain session that should appear, plus one worker + one
+        // expert that should not — defence-in-depth against a future
+        // edit that drops the filter.
+        for (id, is_worker, is_expert) in [
+            ("plain", false, false),
+            ("worker", true, false),
+            ("expert", false, true),
+        ] {
+            db.create_session(NewSession {
+                id: id.into(),
+                name: id.into(),
+                folder_id: "f1".into(),
+                model: None,
+                effort: None,
+                is_worker,
+                project_id: None,
+                card_id: None,
+                conversation_id: None,
+                created_at: ts.clone(),
+                last_activity: ts.clone(),
+                is_expert,
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        }
+        let page = db.list_plain_sessions_page(None, 10).await.unwrap();
+        let ids: Vec<&str> = page.iter().map(|s| s.id.as_str()).collect();
+        assert_eq!(ids, vec!["plain"]);
+    }
+
+    #[tokio::test]
+    async fn list_plain_sessions_by_folder_page_scopes_correctly() {
+        let db = test_db();
+        let ts = chrono::Utc::now().to_rfc3339();
+        for folder in ["fa", "fb"] {
+            db.create_folder(NewFolder {
+                id: folder.into(),
+                name: folder.into(),
+                path: format!("/tmp/{folder}"),
+                created_at: ts.clone(),
+            })
+            .await
+            .unwrap();
+            for i in 0..3 {
+                db.create_session(NewSession {
+                    id: format!("{folder}-{i}"),
+                    name: format!("{folder} {i}"),
+                    folder_id: folder.into(),
+                    model: None,
+                    effort: None,
+                    is_worker: false,
+                    project_id: None,
+                    card_id: None,
+                    conversation_id: None,
+                    created_at: ts.clone(),
+                    last_activity: ts.clone(),
+                    ..Default::default()
+                })
+                .await
+                .unwrap();
+            }
+        }
+        let page = db
+            .list_plain_sessions_by_folder_page("fa", None, 10)
+            .await
+            .unwrap();
+        let ids: Vec<String> = page.iter().map(|s| s.id.clone()).collect();
+        assert_eq!(ids.len(), 3);
+        for id in ids {
+            assert!(id.starts_with("fa-"), "folder filter leaked: {id}");
+        }
+    }
+
+    #[tokio::test]
+    async fn list_events_by_session_before_returns_oldest_first_window() {
+        let db = test_db();
+        let ts = chrono::Utc::now().to_rfc3339();
+        db.create_folder(NewFolder {
+            id: "f1".into(),
+            name: "f".into(),
+            path: "/tmp/f1".into(),
+            created_at: ts.clone(),
+        })
+        .await
+        .unwrap();
+        db.create_session(NewSession {
+            id: "s1".into(),
+            name: "s1".into(),
+            folder_id: "f1".into(),
+            model: None,
+            effort: None,
+            is_worker: false,
+            project_id: None,
+            card_id: None,
+            conversation_id: None,
+            created_at: ts.clone(),
+            last_activity: ts.clone(),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+        // Seed 10 events with sequential seqs (append_event picks
+        // them automatically).
+        for i in 0..10 {
+            db.append_event(
+                "s1",
+                "user",
+                serde_json::json!({ "text": format!("msg{i}") }),
+            )
+            .await
+            .unwrap();
+        }
+
+        // Default fetch (before_seq=None) returns the LATEST 4 in
+        // ascending order — the chat view's first page.
+        let latest = db
+            .list_events_by_session_before("s1", None, 4)
+            .await
+            .unwrap();
+        let latest_seqs: Vec<i32> = latest.iter().map(|e| e.seq).collect();
+        assert_eq!(latest_seqs, vec![7, 8, 9, 10]);
+
+        // Walk older: ask for events strictly before seq 7.
+        let older = db
+            .list_events_by_session_before("s1", Some(7), 4)
+            .await
+            .unwrap();
+        let older_seqs: Vec<i32> = older.iter().map(|e| e.seq).collect();
+        assert_eq!(older_seqs, vec![3, 4, 5, 6]);
+
+        // Short page when fewer than `limit` events remain — the
+        // chat view uses this to hide the "Load older" button.
+        let oldest = db
+            .list_events_by_session_before("s1", Some(3), 10)
+            .await
+            .unwrap();
+        let oldest_seqs: Vec<i32> = oldest.iter().map(|e| e.seq).collect();
+        assert_eq!(oldest_seqs, vec![1, 2]);
+    }
 }

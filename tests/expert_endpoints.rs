@@ -210,6 +210,11 @@ async fn seed(state: &AppState) {
         .unwrap();
 }
 
+/// Used by the experts endpoint, which deliberately did NOT get
+/// pagination — expert counts stay small (one per scope, maybe a few
+/// dozen total even on a heavily-used instance), so the simple array
+/// response is intentional. If we ever paginate experts too, this
+/// helper becomes the wrapped-shape one below.
 async fn get_json(state: Arc<AppState>, token: &str, uri: &str) -> Vec<Value> {
     let req = Request::builder()
         .uri(uri)
@@ -228,13 +233,37 @@ async fn get_json(state: Arc<AppState>, token: &str, uri: &str) -> Vec<Value> {
     serde_json::from_slice(&bytes).unwrap()
 }
 
+/// `/api/sessions` returns `{items, next_cursor}`; helper unwraps `items`
+/// so tests that only care about the row list can stay terse.
+async fn get_paged_items(state: Arc<AppState>, token: &str, uri: &str) -> Vec<Value> {
+    let req = Request::builder()
+        .uri(uri)
+        .header(header::AUTHORIZATION, format!("Bearer {token}"))
+        .body(Body::empty())
+        .unwrap();
+    let resp = router(state.clone())
+        .with_state(state)
+        .oneshot(req)
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK, "GET {uri} should be 200");
+    let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let v: Value = serde_json::from_slice(&bytes).unwrap();
+    v["items"]
+        .as_array()
+        .unwrap_or_else(|| panic!("GET {uri} response missing items array: {v}"))
+        .clone()
+}
+
 #[tokio::test]
 async fn experts_endpoint_lists_experts_and_chat_list_hides_them() {
     let (state, token) = build_state().await;
     seed(&state).await;
 
     // GET /api/sessions must contain ONLY the plain chat session.
-    let sessions = get_json(state.clone(), &token, "/api/sessions").await;
+    let sessions = get_paged_items(state.clone(), &token, "/api/sessions").await;
     let session_ids: Vec<&str> = sessions.iter().map(|s| s["id"].as_str().unwrap()).collect();
     assert_eq!(
         session_ids,

@@ -26,6 +26,41 @@ pub fn ensure_schema(conn: &mut SqliteConnection) -> anyhow::Result<()> {
     ensure_cards_completed_at_column(conn)?;
     ensure_sessions_expert_columns(conn)?;
     ensure_repeating_tasks_schema(conn)?;
+    ensure_sessions_pagination_indexes(conn)?;
+    Ok(())
+}
+
+/// Composite indexes for keyset-paginated session lists. Mirrors
+/// `migrations/1781033682_session_pagination_indexes` so a DB that
+/// somehow skipped that migration still gets the planner support the
+/// route assumes. `CREATE INDEX IF NOT EXISTS` is idempotent, so this
+/// is safe to call on a healthy schema.
+fn ensure_sessions_pagination_indexes(conn: &mut SqliteConnection) -> anyhow::Result<()> {
+    let cols: Vec<PragmaColumn> = sql_query("PRAGMA table_info(sessions)").load(conn)?;
+    if cols.is_empty() {
+        return Ok(());
+    }
+    // Both indexes reference `last_activity` and (one of them) `folder_id`.
+    // The repair-tests stub a minimal sessions table without those columns,
+    // and a real DB that pre-dates `00000000000001_initial` should never
+    // get here — but bail out cleanly rather than fail with a confusing
+    // "no such column" error if either prerequisite is missing.
+    let names: Vec<String> = cols.into_iter().map(|c| c.name).collect();
+    let has = |n: &str| names.iter().any(|c| c == n);
+    if !has("last_activity") || !has("id") {
+        return Ok(());
+    }
+    sql_query(
+        "CREATE INDEX IF NOT EXISTS idx_sessions_last_activity ON sessions (last_activity, id)",
+    )
+    .execute(conn)?;
+    if has("folder_id") {
+        sql_query(
+            "CREATE INDEX IF NOT EXISTS idx_sessions_folder_last_activity \
+             ON sessions (folder_id, last_activity, id)",
+        )
+        .execute(conn)?;
+    }
     Ok(())
 }
 

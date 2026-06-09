@@ -65,7 +65,14 @@ export const useWorkerCommsStore = create<WorkerCommsState>((set) => ({
       const comms: CommMessage[] = []
       for (const w of Object.values(workerMap)) {
         try {
-          const evRes = await authedFetch(`/api/sessions/${w.session_id}/events`)
+          // `?after_seq=0` opts into the unbounded WS-catchup mode of
+          // the events route. The default fetch was capped at the
+          // chat view's page size after pagination landed, which
+          // silently dropped older worker-to-worker comms from this
+          // aggregator. We need every event ≥ seq 1 because we filter
+          // for `source: worker-*` user events scattered throughout
+          // the timeline.
+          const evRes = await authedFetch(`/api/sessions/${w.session_id}/events?after_seq=0`)
           if (!evRes.ok) continue
           const events: Event[] = await evRes.json()
           for (const e of events) {

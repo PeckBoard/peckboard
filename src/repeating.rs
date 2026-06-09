@@ -131,6 +131,41 @@ impl RepeatingTaskManager {
         })
     }
 
+    /// Drop task-lock entries that nobody else references. See the
+    /// matching note on [`crate::provider::manager::SessionManager::evict_idle_locks`]
+    /// for the safety argument: `Arc::strong_count == 1` means only
+    /// the map holds the entry, so dropping it is invisible to live
+    /// callers (the next `lock_task` re-creates it transparently).
+    /// Returns the number of entries removed.
+    pub async fn evict_idle_locks(&self) -> usize {
+        let mut map = self.task_locks.lock().await;
+        let before = map.len();
+        map.retain(|_, lock| Arc::strong_count(lock) > 1);
+        before - map.len()
+    }
+
+    /// Spawn a background task that periodically evicts idle task-lock
+    /// entries. Returns the join handle for the caller to hold. See the
+    /// matching note on [`crate::provider::manager::SessionManager::spawn_lock_sweeper`]
+    /// for why this clones the inner map rather than taking `Arc<Self>`.
+    pub fn spawn_lock_sweeper(&self) -> tokio::task::JoinHandle<()> {
+        let locks = self.task_locks.clone();
+        tokio::spawn(async move {
+            const SWEEP_INTERVAL: std::time::Duration = std::time::Duration::from_secs(300);
+            loop {
+                tokio::time::sleep(SWEEP_INTERVAL).await;
+                let mut map = locks.lock().await;
+                let before = map.len();
+                map.retain(|_, lock| Arc::strong_count(lock) > 1);
+                let evicted = before - map.len();
+                drop(map);
+                if evicted > 0 {
+                    tracing::debug!("Repeating-task lock sweep: evicted {evicted} idle entries");
+                }
+            }
+        })
+    }
+
     /// Force a run *right now* (e.g. operator clicked "Run now"). Acquires
     /// the per-task lock, checks no run is in flight, and dispatches.
     ///
@@ -679,6 +714,32 @@ mod tests {
         );
         assert!(body.contains("Previous run finished around 2026-06-08T09:00:00Z"));
         assert!(!body.contains("This is the first run."));
+    }
+
+    #[tokio::test]
+    async fn evict_idle_locks_removes_unheld_task_entries() {
+        let m = RepeatingTaskManager::new();
+        drop(m.lock_task("t1").await);
+        drop(m.lock_task("t2").await);
+        assert_eq!(m.task_locks.lock().await.len(), 2);
+
+        let evicted = m.evict_idle_locks().await;
+        assert_eq!(evicted, 2);
+        assert_eq!(m.task_locks.lock().await.len(), 0);
+    }
+
+    #[tokio::test]
+    async fn evict_idle_locks_keeps_active_task_entries() {
+        let m = RepeatingTaskManager::new();
+        let live = m.lock_task("active").await;
+        drop(m.lock_task("idle").await);
+
+        let evicted = m.evict_idle_locks().await;
+        assert_eq!(evicted, 1);
+        let remaining = m.task_locks.lock().await;
+        assert!(remaining.contains_key("active"));
+        assert!(!remaining.contains_key("idle"));
+        drop(live);
     }
 
     #[test]

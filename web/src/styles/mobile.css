@@ -675,6 +675,12 @@
   font-size: var(--text-sm);
   cursor: pointer;
 }
+.list-view-loading-more {
+  padding: 12px 16px;
+  text-align: center;
+  color: var(--text3);
+  font-size: var(--text-xs);
+}
 
 /* ── Experts view ──────────────────────────────────────────────────── */
 .experts-empty-hint {

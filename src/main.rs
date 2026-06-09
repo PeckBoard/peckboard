@@ -253,6 +253,18 @@ async fn main() -> anyhow::Result<()> {
         tracing::info!("Repeating-task scheduler started (30s interval)");
     }
 
+    // Idle lock-map sweepers for SessionManager + RepeatingTaskManager.
+    // Both managers insert a per-session/per-task `Arc<Mutex<()>>` on
+    // first access and previously never removed it; for a user who
+    // never closes tabs that map grows monotonically over months. The
+    // sweep is `O(N)` over the map at a 5-minute cadence — invisible
+    // until the count climbs into the thousands, and even then it
+    // serialises against hot paths only briefly because the outer
+    // mutex hold is bounded by the retain pass.
+    state.session_manager.spawn_lock_sweeper();
+    state.repeating_task_manager.spawn_lock_sweeper();
+    tracing::info!("Lock-map sweepers started (5min interval)");
+
     let app = api_router(state.clone())
         .layer(axum::extract::DefaultBodyLimit::max(20 * 1024 * 1024))
         .layer(middleware::from_fn(security_headers))

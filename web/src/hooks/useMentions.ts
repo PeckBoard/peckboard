@@ -20,7 +20,17 @@ export function useMentions(excludeSessionId?: string): MentionItem[] {
       authedFetch('/api/reports')
         .then((r) => (r.ok ? r.json() : null))
         .catch(() => null),
-      authedFetch('/api/sessions')
+      // The session list is paginated, but autocomplete needs the
+      // most-recently-active sessions — and exactly those — so a
+      // first-page fetch matches the autocomplete intent. A user with
+      // 10k stale sessions doesn't want every one in the @-menu.
+      //
+      // 500 is the server's `MAX_SESSION_PAGE_SIZE`; passing more would
+      // be clamped silently. A user with more than 500 active sessions
+      // would still find recent ones via @-search prefix matching but
+      // miss the long tail — accept that tradeoff over walking the
+      // cursor on every keystroke.
+      authedFetch('/api/sessions?limit=500')
         .then((r) => (r.ok ? r.json() : null))
         .catch(() => null),
       authedFetch('/api/projects')
@@ -40,10 +50,14 @@ export function useMentions(excludeSessionId?: string): MentionItem[] {
         })
       }
 
-      // Sessions
+      // Sessions: the endpoint returns `{items, next_cursor}` after
+      // pagination landed; the older Array.isArray branch is the
+      // compatibility path for the experts endpoint format-mirroring
+      // and the legacy server response shape we still see in stale
+      // browser tabs mid-deploy.
       const sessions = Array.isArray(sessionsData)
         ? sessionsData
-        : (sessionsData?.sessions ?? sessionsData ?? [])
+        : (sessionsData?.items ?? sessionsData?.sessions ?? [])
       for (const s of sessions) {
         if (s.id === excludeSessionId) continue
         result.push({

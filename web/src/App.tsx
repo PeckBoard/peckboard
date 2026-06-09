@@ -119,6 +119,9 @@ function App() {
   const disconnect = useWsStore((s) => s.disconnect)
   const sessions = useSessionsStore((s) => s.sessions)
   const sessionsLoaded = useSessionsStore((s) => s.sessionsLoaded)
+  const sessionsNextCursor = useSessionsStore((s) => s.sessionsNextCursor)
+  const sessionsLoadingMore = useSessionsStore((s) => s.sessionsLoadingMore)
+  const fetchMoreSessions = useSessionsStore((s) => s.fetchMoreSessions)
   const activeSessionId = useSessionsStore((s) => s.activeSessionId)
   const fetchSessions = useSessionsStore((s) => s.fetchSessions)
   const setActiveSession = useSessionsStore((s) => s.setActiveSession)
@@ -825,7 +828,22 @@ function App() {
                   + New session
                 </button>
               </div>
-              <div className="list-view-body">
+              <div
+                className="list-view-body"
+                // Scroll-load: when the user gets within 200px of the
+                // bottom of the list AND there's a next-page cursor
+                // AND we're not already fetching, pull the next page.
+                // The store debounces with `sessionsLoadingMore`, so
+                // the burst of scroll events fired during a flick is
+                // collapsed into a single fetch.
+                onScroll={(e) => {
+                  if (!sessionsNextCursor || sessionsLoadingMore) return
+                  const el = e.currentTarget
+                  if (el.scrollHeight - el.scrollTop - el.clientHeight < 200) {
+                    void fetchMoreSessions()
+                  }
+                }}
+              >
                 {chatSessions.map((s) => (
                   <div
                     key={s.id}
@@ -877,6 +895,11 @@ function App() {
                     >
                       Create your first session
                     </button>
+                  </div>
+                )}
+                {sessionsLoadingMore && (
+                  <div className="list-view-loading-more" data-testid="sessions-loading-more">
+                    Loading more sessions…
                   </div>
                 )}
               </div>

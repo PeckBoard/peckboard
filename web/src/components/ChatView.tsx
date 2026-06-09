@@ -208,6 +208,13 @@ export default function ChatView({ sessionId, onOpenTodos }: ChatViewProps) {
   const events = useSessionsStore((s) => s.eventsBySession[sessionId] ?? EMPTY_EVENTS)
   const loading = useSessionsStore((s) => s.loadingEventsBySession[sessionId] ?? true)
   const fetchEvents = useSessionsStore((s) => s.fetchEvents)
+  const fetchOlderEvents = useSessionsStore((s) => s.fetchOlderEvents)
+  const loadingOlderEvents = useSessionsStore(
+    (s) => s.loadingOlderEventsBySession[sessionId] ?? false,
+  )
+  const hasMoreOlderEvents = useSessionsStore(
+    (s) => s.hasMoreOlderEventsBySession[sessionId] ?? false,
+  )
   const appendEvent = useSessionsStore((s) => s.appendEvent)
   const pendingUserMessages = useSessionsStore(
     (s) => s.pendingUserMessages[sessionId] ?? EMPTY_PENDING_MESSAGES,
@@ -227,6 +234,12 @@ export default function ChatView({ sessionId, onOpenTodos }: ChatViewProps) {
   const menuRef = useRef<HTMLDivElement>(null)
   const modelRef = useRef<HTMLDivElement>(null)
   const userScrolledUp = useRef(false)
+  /** Saved scroll-height immediately before a "Load older" fetch so
+   *  we can restore the user's viewport position after the new rows
+   *  splice in at the top. Without this the entire conversation
+   *  shifts down by the height of the loaded page and the user loses
+   *  their reading position. `null` whenever no restore is pending. */
+  const pendingOlderScrollRestore = useRef<number | null>(null)
 
   const subscribe = useWsStore((s) => s.subscribe)
   const unsubscribe = useWsStore((s) => s.unsubscribe)
@@ -366,13 +379,43 @@ export default function ChatView({ sessionId, onOpenTodos }: ChatViewProps) {
   }, [])
 
   useEffect(() => {
-    if (!userScrolledUp.current) {
-      const el = scrollRef.current
-      if (el) {
-        el.scrollTop = el.scrollHeight
+    const el = scrollRef.current
+    if (!el) return
+    // If a "Load older" fetch is in flight, restore the user's
+    // scroll-from-bottom so the older rows splice in above without
+    // shifting their viewport. Stomp the saved value so we don't
+    // re-apply on the next render.
+    //
+    // BUT only if the user is still scrolled up. If they scrolled
+    // all the way to the bottom while the fetch was in flight (the
+    // agent just emitted something, or they hit End), respect that
+    // — fall through to the auto-scroll branch and snap to the new
+    // bottom. Restoring an older saved position over an active
+    // scroll-to-bottom would yank them away from text they just
+    // chose to read.
+    if (pendingOlderScrollRestore.current !== null) {
+      const savedHeight = pendingOlderScrollRestore.current
+      pendingOlderScrollRestore.current = null
+      if (userScrolledUp.current) {
+        el.scrollTop = el.scrollHeight - savedHeight
+        return
       }
+      // Falls through to auto-scroll-to-bottom.
+    }
+    if (!userScrolledUp.current) {
+      el.scrollTop = el.scrollHeight
     }
   }, [events])
+
+  const handleLoadOlder = useCallback(() => {
+    const el = scrollRef.current
+    if (el) {
+      // Capture the current "distance from top of content" so the
+      // useEffect above can restore it after the new rows render.
+      pendingOlderScrollRestore.current = el.scrollHeight - el.scrollTop
+    }
+    void fetchOlderEvents(sessionId)
+  }, [fetchOlderEvents, sessionId])
 
   const displayItems = buildDisplayItems(events)
 
@@ -559,6 +602,24 @@ export default function ChatView({ sessionId, onOpenTodos }: ChatViewProps) {
       <TodoPanel todos={todos} />
 
       <div className="chat-messages" ref={scrollRef} onScroll={handleScroll}>
+        {/* "Load older" button: shown at the top once the initial
+            fetch returned a full page (more history likely exists)
+            and hidden once a short page proves the user has reached
+            the start of the conversation. The store debounces with
+            `loadingOlderEvents` so a rapid double-click loads at most
+            one extra page. */}
+        {hasMoreOlderEvents && displayItems.length > 0 && (
+          <div className="chat-load-older">
+            <button
+              className="chat-load-older-btn"
+              data-testid="chat-load-older"
+              onClick={handleLoadOlder}
+              disabled={loadingOlderEvents}
+            >
+              {loadingOlderEvents ? 'Loading…' : 'Load older messages'}
+            </button>
+          </div>
+        )}
         {displayItems.length === 0 && (
           <div className="chat-empty">No messages yet. Send one below.</div>
         )}

@@ -28,6 +28,32 @@
   font-size: var(--text-sm);
 }
 
+.chat-load-older {
+  display: flex;
+  justify-content: center;
+  padding: var(--space-3) 0 var(--space-2);
+}
+
+.chat-load-older-btn {
+  background: var(--surface2);
+  color: var(--text2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: var(--space-2) var(--space-4);
+  font-size: var(--text-sm);
+  cursor: pointer;
+  transition: background 0.12s ease;
+}
+
+.chat-load-older-btn:hover:not(:disabled) {
+  background: var(--surface3);
+}
+
+.chat-load-older-btn:disabled {
+  opacity: 0.6;
+  cursor: default;
+}
+
 /* Todo / task panel — pinned below the toolbar, above the message log. */
 .todo-panel {
   flex: 0 0 auto;

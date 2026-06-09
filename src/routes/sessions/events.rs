@@ -12,9 +12,37 @@ use super::resolve_references;
 
 #[derive(Deserialize)]
 pub(super) struct EventsQuery {
+    /// WS-catch-up mode: return every event with `seq > after_seq`,
+    /// oldest-first. Used by the live-update path after a reconnect to
+    /// pull anything missed while the socket was down. Returns all
+    /// matching rows (no `limit` applied) so the client can be sure it
+    /// hasn't lost an event in the gap.
     after_seq: Option<i32>,
+    /// Pagination mode: return the latest `limit` events with
+    /// `seq < before_seq`, oldest-first. Used by the chat view's
+    /// "Load older messages" path. Implies `limit` (capped at
+    /// [`MAX_EVENTS_PAGE_SIZE`]).
+    before_seq: Option<i32>,
+    /// Page size. Applied to `before_seq` and the default "latest N"
+    /// mode; ignored for `after_seq` so WS catch-up can't lose events.
+    /// Defaults to [`DEFAULT_EVENTS_PAGE_SIZE`], capped at
+    /// [`MAX_EVENTS_PAGE_SIZE`].
     limit: Option<i64>,
 }
+
+/// Default page size for the chat view's initial fetch. Tuned so the
+/// 90% case (recent conversation) loads in one shot without paying the
+/// cost of an unbounded event scan, while still showing enough scrollback
+/// that the user rarely needs to "Load older".
+pub const DEFAULT_EVENTS_PAGE_SIZE: i64 = 200;
+
+/// Hard ceiling on `?limit=` for events. Stops a client from asking for
+/// every event in a session (the bug we're fixing) by passing
+/// `?limit=99999999`. 1000 is large enough that "Load older" twice
+/// covers ~2k events of scrollback before any extra round-trip; past
+/// that point the user is digging through history and a few clicks is
+/// acceptable.
+pub const MAX_EVENTS_PAGE_SIZE: i64 = 1000;
 
 #[derive(Deserialize)]
 pub(super) struct AppendEventRequest {
@@ -22,30 +50,55 @@ pub(super) struct AppendEventRequest {
     data: serde_json::Value,
 }
 
-/// GET /api/sessions/:id/events -- list events with optional afterSeq + limit
+/// GET /api/sessions/:id/events
+///
+/// Three modes, picked by query param:
+/// - **`?after_seq=N`** — WS catch-up. Returns every event with `seq > N`,
+///   oldest-first. Returns all matching rows (no limit) so a reconnect
+///   never silently drops events.
+/// - **`?before_seq=N&limit=K`** — "Load older" page. Returns up to K
+///   events with `seq < N`, oldest-first.
+/// - **No params (or just `?limit=`)** — Default load. Returns the
+///   latest K events (default [`DEFAULT_EVENTS_PAGE_SIZE`]),
+///   oldest-first.
+///
+/// All modes return a flat JSON array. The chat view tracks the lowest
+/// `seq` it has and passes it as `before_seq` to page upward.
 pub(super) async fn list_events(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
     Query(params): Query<EventsQuery>,
 ) -> impl IntoResponse {
-    tracing::info!(session_id = %id, after_seq = ?params.after_seq, "Listing events");
+    tracing::info!(
+        session_id = %id,
+        after_seq = ?params.after_seq,
+        before_seq = ?params.before_seq,
+        limit = ?params.limit,
+        "Listing events",
+    );
+
     let events = if let Some(after_seq) = params.after_seq {
+        // WS catch-up: return all events strictly after `after_seq`.
+        // Intentionally NOT limited — losing events in the catch-up
+        // path produces silent UI desync.
         state.db.events_since(&id, after_seq).await
     } else {
-        state.db.list_events_by_session(&id, None).await
+        let limit = params
+            .limit
+            .unwrap_or(DEFAULT_EVENTS_PAGE_SIZE)
+            .clamp(1, MAX_EVENTS_PAGE_SIZE);
+        state
+            .db
+            .list_events_by_session_before(&id, params.before_seq, limit)
+            .await
     };
 
-    let mut events = events.map_err(|e| {
+    let events = events.map_err(|e| {
         (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(serde_json::json!({ "error": e.to_string() })),
         )
     })?;
-
-    // Apply limit if specified
-    if let Some(limit) = params.limit {
-        events.truncate(limit as usize);
-    }
 
     // Parse data field from string to JSON for each event
     let events_json: Vec<serde_json::Value> = events

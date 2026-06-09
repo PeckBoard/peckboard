@@ -62,6 +62,13 @@ export interface PendingUserMessage {
   ts: number
 }
 
+/** Cursor returned by `GET /api/sessions`. Pass back as-is to fetch
+ *  the next page. `null` means we've reached the end of the list. */
+export interface SessionsCursor {
+  last_activity: string
+  id: string
+}
+
 interface SessionsState {
   sessions: Session[]
   /** True once `fetchSessions` has completed successfully at least
@@ -69,12 +76,29 @@ interface SessionsState {
    *  real?" must wait for this — otherwise the empty initial state
    *  looks identical to "every session was deleted". */
   sessionsLoaded: boolean
+  /** Cursor for the next page of plain chat sessions, or `null` if
+   *  we've loaded everything. Scroll-to-bottom in the session list
+   *  calls `fetchMoreSessions` while this is non-null. */
+  sessionsNextCursor: SessionsCursor | null
+  /** True while a `fetchMoreSessions` request is in flight. Used to
+   *  debounce repeated scroll triggers — the sidebar can fire a
+   *  half-dozen scroll events while waiting on the previous fetch. */
+  sessionsLoadingMore: boolean
   activeSessionId: string | null
   inputDrafts: Record<string, string>
   processing: Set<string>
   unreadSessions: Set<string>
   eventsBySession: Record<string, Event[]>
   loadingEventsBySession: Record<string, boolean>
+  /** True while a "Load older" request is in flight for `sessionId`.
+   *  ChatView disables the button while this is set so repeated
+   *  clicks can't pile up duplicate requests for the same page. */
+  loadingOlderEventsBySession: Record<string, boolean>
+  /** False once we know there are no more older events for a session
+   *  (a page came back shorter than the requested size). Defaults to
+   *  true on first load so the "Load older" button shows; flipped to
+   *  false the first time a partial page arrives. */
+  hasMoreOlderEventsBySession: Record<string, boolean>
   /** Expert sessions (is_expert = true) from GET /api/experts. Kept
    *  separate from `sessions` because experts are deliberately hidden
    *  from the ordinary chat list and only surface in the Experts view. */
@@ -82,8 +106,10 @@ interface SessionsState {
   expertsLoaded: boolean
   pendingUserMessages: Record<string, PendingUserMessage[]>
   fetchSessions: () => Promise<void>
+  fetchMoreSessions: () => Promise<void>
   fetchExperts: () => Promise<void>
   fetchEvents: (sessionId: string) => Promise<void>
+  fetchOlderEvents: (sessionId: string) => Promise<void>
   appendEvent: (event: Event) => void
   /** Optimistically register a user-typed message for `sessionId`.
    *  ChatView renders it as a user bubble immediately. The matching
@@ -118,24 +144,77 @@ interface SessionsState {
   markSessionRead: (sessionId: string) => void
 }
 
+/** Default page size requested from the backend. Matches the server's
+ *  `DEFAULT_SESSION_PAGE_SIZE` — kept in sync explicitly because the
+ *  numbers are tuned together (visible viewport + scroll-load trigger
+ *  distance both assume ~100 rows per page). */
+const SESSIONS_PAGE_SIZE = 100
+
+/** Default chat events fetched on session open. Matches the server's
+ *  `DEFAULT_EVENTS_PAGE_SIZE`. The "Load older messages" button pulls
+ *  another page-full per click. */
+const EVENTS_PAGE_SIZE = 200
+
 export const useSessionsStore = create<SessionsState>((set, get) => ({
   sessions: [],
   sessionsLoaded: false,
+  sessionsNextCursor: null,
+  sessionsLoadingMore: false,
   activeSessionId: null,
   inputDrafts: loadDrafts(),
   processing: new Set<string>(),
   unreadSessions: new Set<string>(),
   eventsBySession: {},
   loadingEventsBySession: {},
+  loadingOlderEventsBySession: {},
+  hasMoreOlderEventsBySession: {},
   experts: [],
   expertsLoaded: false,
   pendingUserMessages: {},
 
   fetchSessions: async () => {
-    const res = await authedFetch('/api/sessions')
+    const res = await authedFetch(`/api/sessions?limit=${SESSIONS_PAGE_SIZE}`)
     if (res.ok) {
-      const sessions: Session[] = await res.json()
-      set({ sessions, sessionsLoaded: true })
+      const body: { items: Session[]; next_cursor: SessionsCursor | null } = await res.json()
+      set({
+        sessions: body.items,
+        sessionsNextCursor: body.next_cursor,
+        sessionsLoaded: true,
+      })
+    }
+  },
+
+  fetchMoreSessions: async () => {
+    const { sessionsNextCursor, sessionsLoadingMore } = get()
+    if (!sessionsNextCursor || sessionsLoadingMore) return
+    set({ sessionsLoadingMore: true })
+    try {
+      const params = new URLSearchParams({
+        limit: String(SESSIONS_PAGE_SIZE),
+        cursor_la: sessionsNextCursor.last_activity,
+        cursor_id: sessionsNextCursor.id,
+      })
+      const res = await authedFetch(`/api/sessions?${params.toString()}`)
+      if (!res.ok) {
+        set({ sessionsLoadingMore: false })
+        return
+      }
+      const body: { items: Session[]; next_cursor: SessionsCursor | null } = await res.json()
+      // De-dupe against rows we already have. The keyset filter
+      // shouldn't produce duplicates, but a row whose last_activity
+      // bumped after the previous page can land twice across a
+      // boundary — drop those rather than render a duplicate chip.
+      set((s) => {
+        const existing = new Set(s.sessions.map((x) => x.id))
+        const fresh = body.items.filter((x) => !existing.has(x.id))
+        return {
+          sessions: [...s.sessions, ...fresh],
+          sessionsNextCursor: body.next_cursor,
+          sessionsLoadingMore: false,
+        }
+      })
+    } catch {
+      set({ sessionsLoadingMore: false })
     }
   },
 
@@ -151,17 +230,76 @@ export const useSessionsStore = create<SessionsState>((set, get) => ({
     set((s) => ({
       loadingEventsBySession: { ...s.loadingEventsBySession, [sessionId]: true },
       eventsBySession: { ...s.eventsBySession, [sessionId]: [] },
+      // Reset older-page bookkeeping for a fresh session open. We
+      // assume "more history exists" until a short page proves
+      // otherwise; the "Load older" button hides immediately when
+      // hasMore flips false.
+      hasMoreOlderEventsBySession: {
+        ...s.hasMoreOlderEventsBySession,
+        [sessionId]: true,
+      },
     }))
     try {
-      const res = await authedFetch(`/api/sessions/${sessionId}/events`)
+      const res = await authedFetch(`/api/sessions/${sessionId}/events?limit=${EVENTS_PAGE_SIZE}`)
       const events: Event[] = res.ok ? await res.json() : []
       set((s) => ({
         eventsBySession: { ...s.eventsBySession, [sessionId]: events },
         loadingEventsBySession: { ...s.loadingEventsBySession, [sessionId]: false },
+        // If the first page came back short, there are no older
+        // events to load — hide the button up-front.
+        hasMoreOlderEventsBySession: {
+          ...s.hasMoreOlderEventsBySession,
+          [sessionId]: events.length >= EVENTS_PAGE_SIZE,
+        },
       }))
     } catch {
       set((s) => ({
         loadingEventsBySession: { ...s.loadingEventsBySession, [sessionId]: false },
+      }))
+    }
+  },
+
+  fetchOlderEvents: async (sessionId: string) => {
+    const state = get()
+    if (state.loadingOlderEventsBySession[sessionId]) return
+    if (state.hasMoreOlderEventsBySession[sessionId] === false) return
+    const existing = state.eventsBySession[sessionId] ?? []
+    if (existing.length === 0) return
+    // Lowest seq we currently have is the upper bound for the next page.
+    const oldestSeq = existing.reduce((min, e) => (e.seq < min ? e.seq : min), existing[0].seq)
+    set((s) => ({
+      loadingOlderEventsBySession: { ...s.loadingOlderEventsBySession, [sessionId]: true },
+    }))
+    try {
+      const url = `/api/sessions/${sessionId}/events?before_seq=${oldestSeq}&limit=${EVENTS_PAGE_SIZE}`
+      const res = await authedFetch(url)
+      const older: Event[] = res.ok ? await res.json() : []
+      set((s) => {
+        const current = s.eventsBySession[sessionId] ?? []
+        const seen = new Set(current.map((e) => e.id))
+        const fresh = older.filter((e) => !seen.has(e.id))
+        return {
+          eventsBySession: {
+            ...s.eventsBySession,
+            // Server returned ascending; splice in front so the
+            // existing list stays globally ascending too.
+            [sessionId]: [...fresh, ...current],
+          },
+          loadingOlderEventsBySession: {
+            ...s.loadingOlderEventsBySession,
+            [sessionId]: false,
+          },
+          // A short page (less than what we asked for) is the
+          // unambiguous "end of history" signal.
+          hasMoreOlderEventsBySession: {
+            ...s.hasMoreOlderEventsBySession,
+            [sessionId]: older.length >= EVENTS_PAGE_SIZE,
+          },
+        }
+      })
+    } catch {
+      set((s) => ({
+        loadingOlderEventsBySession: { ...s.loadingOlderEventsBySession, [sessionId]: false },
       }))
     }
   },

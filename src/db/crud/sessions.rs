@@ -133,6 +133,82 @@ impl Db {
         .await
     }
 
+    /// Keyset-paginated page of "plain" (non-worker, non-expert) sessions,
+    /// newest activity first. `before` is the cursor returned from the
+    /// previous page's tail: pass `Some((last_activity, id))` to get the
+    /// next page, `None` for the first page.
+    ///
+    /// Tuple-keyset (`(la, id) < (cursor_la, cursor_id)` in descending
+    /// order) is stable across concurrent inserts: a session whose
+    /// `last_activity` bumps mid-scroll just shifts up to a position
+    /// the caller already loaded — it never reappears further down,
+    /// and never gets skipped. `id` is the secondary key so rows that
+    /// share a `last_activity` (rare but possible — e.g. a bulk
+    /// import) are still totally ordered.
+    pub async fn list_plain_sessions_page(
+        &self,
+        before: Option<(String, String)>,
+        limit: i64,
+    ) -> anyhow::Result<Vec<Session>> {
+        self.with_conn(move |conn| {
+            let mut query = sessions::table
+                .filter(sessions::is_worker.eq(false))
+                .filter(sessions::is_expert.eq(false))
+                .into_boxed();
+            if let Some((cursor_la, cursor_id)) = before {
+                let la_for_eq = cursor_la.clone();
+                query = query.filter(
+                    sessions::last_activity
+                        .lt(cursor_la)
+                        .or(sessions::last_activity
+                            .eq(la_for_eq)
+                            .and(sessions::id.lt(cursor_id))),
+                );
+            }
+            query
+                .order((sessions::last_activity.desc(), sessions::id.desc()))
+                .limit(limit)
+                .select(Session::as_select())
+                .load(conn)
+                .map_err(Into::into)
+        })
+        .await
+    }
+
+    /// Folder-scoped variant of [`list_plain_sessions_page`].
+    pub async fn list_plain_sessions_by_folder_page(
+        &self,
+        folder_id: &str,
+        before: Option<(String, String)>,
+        limit: i64,
+    ) -> anyhow::Result<Vec<Session>> {
+        let folder_id = folder_id.to_string();
+        self.with_conn(move |conn| {
+            let mut query = sessions::table
+                .filter(sessions::folder_id.eq(&folder_id))
+                .filter(sessions::is_worker.eq(false))
+                .filter(sessions::is_expert.eq(false))
+                .into_boxed();
+            if let Some((cursor_la, cursor_id)) = before {
+                let la_for_eq = cursor_la.clone();
+                query = query.filter(
+                    sessions::last_activity
+                        .lt(cursor_la)
+                        .or(sessions::last_activity
+                            .eq(la_for_eq)
+                            .and(sessions::id.lt(cursor_id))),
+                );
+            }
+            query
+                .order((sessions::last_activity.desc(), sessions::id.desc()))
+                .limit(limit)
+                .select(Session::as_select())
+                .load(conn)
+                .map_err(Into::into)
+        })
+        .await
+    }
+
     /// All expert sessions, newest activity first.
     pub async fn list_expert_sessions(&self) -> anyhow::Result<Vec<Session>> {
         self.with_conn(move |conn| {
