@@ -1,25 +1,9 @@
 /* ═══════════════════════════════════════════════════
-   Project List (inside panel)
+   Shared list/badge primitives
    ═══════════════════════════════════════════════════ */
 
-.project-list-container {
-  display: flex;
-  flex-direction: column;
-  height: 100%;
-}
-.project-list-header {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  padding: 16px 16px 12px;
-  flex-shrink: 0;
-}
-.project-list-header h2 {
-  margin: 0;
-  font-size: var(--text-sm);
-  font-weight: 700;
-  color: var(--text);
-}
+/* `.create-btn` is used by the user-management page. Keep it general,
+   not scoped to a particular list. */
 .create-btn {
   font-size: var(--text-xs);
   padding: 4px 10px;
@@ -74,62 +58,9 @@
   opacity: 0.4;
   cursor: not-allowed;
 }
-.project-list {
-  list-style: none;
-  flex: 1;
-  overflow-y: auto;
-  padding: 4px 12px 12px;
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-  margin: 0;
-}
-/* Each project renders as a card so the list reads as discrete items
-   instead of one long paragraph. The `li` owns the visual chrome and
-   the inner button stays transparent. */
-.project-list li {
-  display: flex;
-  align-items: stretch;
-  position: relative;
-  background: var(--surface);
-  border: 1px solid var(--border);
-  border-radius: var(--radius-md);
-  transition:
-    background 0.12s ease,
-    border-color 0.12s ease;
-}
-.project-list li:hover {
-  background: var(--surface-hover);
-}
-.project-list li.active {
-  background: var(--accent-subtle);
-  border-color: var(--accent);
-}
-.project-list-item {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  flex: 1;
-  text-align: left;
-  padding: 11px 14px;
-  border: none;
-  border-radius: var(--radius-md);
-  background: transparent;
-  font-size: var(--text-sm);
-  color: var(--text);
-  cursor: pointer;
-  min-width: 0;
-}
-.project-list li.active .project-list-item {
-  color: var(--accent);
-  font-weight: 500;
-}
-.project-name {
-  flex: 1;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
+
+/* Status pills shared across the projects list, kanban header, and
+   repeating tasks list. */
 .status-badge {
   font-size: 10px;
   padding: 1px 6px;
@@ -148,75 +79,4 @@
 .status-archived {
   background: var(--surface3);
   color: var(--text3);
-}
-.card-count {
-  font-size: var(--text-xs);
-  color: var(--text3);
-  white-space: nowrap;
-}
-.project-list li.active .status-badge,
-.project-list li.active .card-count {
-  opacity: 0.8;
-}
-.project-list li.empty {
-  font-size: var(--text-sm);
-  color: var(--text3);
-  padding: 12px 14px;
-  background: transparent;
-  border: 0;
-  text-align: center;
-}
-.project-list-actions {
-  position: relative;
-  flex-shrink: 0;
-}
-.project-menu-btn {
-  background: none;
-  border: none;
-  color: var(--text3);
-  cursor: pointer;
-  padding: 4px;
-  border-radius: var(--radius);
-  opacity: 0;
-  transition: opacity var(--transition);
-}
-.project-list li:hover .project-menu-btn,
-.project-menu-btn:focus {
-  opacity: 1;
-}
-.project-menu-btn:hover {
-  background: var(--surface2);
-  color: var(--text);
-}
-.project-menu-dropdown {
-  position: absolute;
-  right: 0;
-  top: 100%;
-  z-index: 10;
-  background: var(--surface);
-  border: 1px solid var(--border);
-  border-radius: var(--radius-md);
-  box-shadow: var(--shadow-md);
-  min-width: 100px;
-  overflow: hidden;
-}
-.project-menu-dropdown button {
-  display: block;
-  width: 100%;
-  text-align: left;
-  padding: 8px 12px;
-  border: none;
-  background: transparent;
-  font-size: var(--text-sm);
-  color: var(--text);
-  cursor: pointer;
-}
-.project-menu-dropdown button:hover {
-  background: var(--surface-hover);
-}
-.project-menu-dropdown button.danger {
-  color: var(--danger);
-}
-.project-menu-dropdown button.danger:hover {
-  background: var(--danger-bg);
 }

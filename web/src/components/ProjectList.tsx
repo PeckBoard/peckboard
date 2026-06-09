@@ -45,42 +45,56 @@ export default function ProjectList({ onNewProject }: ProjectListProps) {
   }
 
   return (
-    <div className="project-list-container">
-      <div className="project-list-header">
-        <h2>Projects</h2>
+    <>
+      <div className="list-view-header">
+        <h2 className="list-view-title">Projects</h2>
         {onNewProject && (
-          <button className="create-btn" onClick={onNewProject}>
-            + New
+          <button className="list-view-action" onClick={onNewProject}>
+            + New project
           </button>
         )}
       </div>
-
-      <ul className="project-list">
-        {projects.map((project) => {
-          const cardCount = project.id === activeProjectId ? cards.length : null
-          return (
-            <li key={project.id} className={project.id === activeProjectId ? 'active' : ''}>
-              <button className="project-list-item" onClick={() => setActiveProject(project.id)}>
-                <span className="project-name">{project.name}</span>
-                <span className={`status-badge status-${project.status}`}>{project.status}</span>
-                {cardCount !== null && <span className="card-count">{cardCount} cards</span>}
+      <div className="list-view-body">
+        {projects.length === 0 ? (
+          <div className="list-view-empty">
+            <p>No projects yet</p>
+            {onNewProject && (
+              <button className="list-view-empty-action" onClick={onNewProject}>
+                Create your first project
               </button>
-              <div className="project-list-actions">
+            )}
+          </div>
+        ) : (
+          projects.map((project) => {
+            const cardCount = project.id === activeProjectId ? cards.length : null
+            return (
+              <div
+                key={project.id}
+                className={`list-view-row ${project.id === activeProjectId ? 'active' : ''}`}
+              >
+                <button className="list-view-item" onClick={() => setActiveProject(project.id)}>
+                  {project.status !== 'active' && (
+                    <span className={`status-badge status-${project.status}`}>
+                      {project.status}
+                    </span>
+                  )}
+                  <span className="list-view-name">{project.name}</span>
+                  <span className="list-view-meta">
+                    {cardCount !== null && <span className="list-view-tag">{cardCount} cards</span>}
+                  </span>
+                </button>
                 <button
-                  className="project-menu-btn"
+                  className="list-view-menu"
                   onClick={(e) => {
                     e.stopPropagation()
                     setMenuOpen(menuOpen === project.id ? null : project.id)
                   }}
+                  aria-label="Project menu"
                 >
-                  <svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor">
-                    <circle cx="8" cy="3" r="1.5" />
-                    <circle cx="8" cy="8" r="1.5" />
-                    <circle cx="8" cy="13" r="1.5" />
-                  </svg>
+                  ···
                 </button>
                 {menuOpen === project.id && (
-                  <div className="project-menu-dropdown">
+                  <div className="list-view-dropdown">
                     <button
                       onClick={() => {
                         setMenuOpen(null)
@@ -93,7 +107,6 @@ export default function ProjectList({ onNewProject }: ProjectListProps) {
                       {project.status === 'paused' ? 'Resume' : 'Pause'}
                     </button>
                     <button
-                      className="danger"
                       onClick={() => {
                         setMenuOpen(null)
                         setConfirmDelete(project.id)
@@ -104,11 +117,10 @@ export default function ProjectList({ onNewProject }: ProjectListProps) {
                   </div>
                 )}
               </div>
-            </li>
-          )
-        })}
-        {projects.length === 0 && <li className="empty">No projects yet</li>}
-      </ul>
+            )
+          })
+        )}
+      </div>
 
       {editingProject &&
         (() => {
@@ -129,6 +141,6 @@ export default function ProjectList({ onNewProject }: ProjectListProps) {
           onCancel={() => setConfirmDelete(null)}
         />
       )}
-    </div>
+    </>
   )
 }

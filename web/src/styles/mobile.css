@@ -555,6 +555,14 @@
   flex-direction: column;
   gap: 8px;
 }
+/* `.list-view-rows` is a non-scrolling stack of list rows — use it
+   when you want the same row styling inside a wider parent (e.g. the
+   sessions list embedded in a repeating-task detail view). */
+.list-view-rows {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
 /* Each row renders as its own card so the list reads as discrete items
    rather than a wall of prose. The row owns the visual chrome (border,
    background, hover lift); the inner `.list-view-item` button stays
@@ -680,6 +688,25 @@
   text-align: center;
   color: var(--text3);
   font-size: var(--text-xs);
+}
+/* On narrow viewports each row's meta (folder/schedule tags + time) was
+   crowding the name into ellipsis. Let the row wrap and reserve a
+   `min-width` for the name so the title stays legible; the meta tags
+   wrap onto a second line if they don't fit beside the name. Keeping
+   wrap on the row (rather than forcing column) lets small inline
+   indicators — unread/processing dots, pause badges — stay next to
+   the name instead of jumping above it. */
+@media (max-width: 768px) {
+  .list-view-item {
+    flex-wrap: wrap;
+    row-gap: 4px;
+  }
+  .list-view-name {
+    min-width: 140px;
+  }
+  .list-view-meta {
+    flex-wrap: wrap;
+  }
 }
 
 /* ── Experts view ──────────────────────────────────────────────────── */

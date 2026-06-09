@@ -208,9 +208,9 @@ export default function RepeatingTasksView({ activeTaskId, onNavigate, onOpenSes
             {taskSessions.length === 0 ? (
               <p className="form-help">No sessions yet. Click &quot;Run now&quot; to start one.</p>
             ) : (
-              <ul className="repeating-task-sessions">
+              <div className="list-view-rows">
                 {taskSessions.map((s) => (
-                  <li key={s.id}>
+                  <div key={s.id} className="list-view-row">
                     <button
                       className="list-view-item"
                       onClick={() => onOpenSession(s.id)}
@@ -221,9 +221,9 @@ export default function RepeatingTasksView({ activeTaskId, onNavigate, onOpenSes
                         <span className="list-view-time">{formatRelative(s.last_activity)}</span>
                       </span>
                     </button>
-                  </li>
+                  </div>
                 ))}
-              </ul>
+              </div>
             )}
           </div>
         </div>
