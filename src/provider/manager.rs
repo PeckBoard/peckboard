@@ -190,6 +190,7 @@ impl SessionManager {
             permission_mode: config.permission_mode,
             timeout_ms: config.timeout_ms,
             metadata: config.metadata,
+            system_prompt_suffix: config.system_prompt_suffix,
         };
 
         let ctx = SendMessageContext {

@@ -171,6 +171,7 @@ pub(super) async fn send_message(
         permission_mode: Some("bypass".into()),
         timeout_ms: None,
         metadata: serde_json::Value::Null,
+        system_prompt_suffix: None,
     };
 
     // `send_or_queue` acquires the per-session lock internally,

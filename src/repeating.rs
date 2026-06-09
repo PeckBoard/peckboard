@@ -313,6 +313,12 @@ impl RepeatingTaskManager {
             permission_mode: Some("bypass".into()),
             timeout_ms: None,
             metadata: serde_json::Value::Null,
+            system_prompt_suffix: Some(build_recurring_system_prompt(
+                &task.name,
+                &task.id,
+                task.last_run_at.as_deref(),
+                &now,
+            )),
         };
 
         // Dispatch via the regular send-or-queue path. The TaskLock is
@@ -520,6 +526,54 @@ fn format_run_label(t: &DateTime<Utc>) -> String {
     t.format("%Y-%m-%d %H:%M UTC").to_string()
 }
 
+/// Per-spawn system prompt baked into every repeating-task run. Tells
+/// the agent it's running as part of a recurring task (so it can frame
+/// its work accordingly) and points at a notes-file convention for
+/// carrying context across runs without history persistence.
+///
+/// Compact-not-append is the load-bearing instruction: each run starts
+/// fresh, so a naively-appending notes file would grow without bound and
+/// become useless to read at the top of every run. Phrasing it as
+/// "rewrite, don't append" — and giving the agent the explicit
+/// permission to drop stale details — is what keeps the file small
+/// enough to be cheap context on every tick.
+pub fn build_recurring_system_prompt(
+    task_name: &str,
+    task_id: &str,
+    last_run_at: Option<&str>,
+    now_rfc3339: &str,
+) -> String {
+    let last_run = match last_run_at {
+        Some(t) => format!("Previous run finished around {t}."),
+        None => "This is the first run.".to_string(),
+    };
+    let notes_path = format!(".peckboard/repeating-tasks/{task_id}.md");
+    format!(
+        "# Repeating Task Context\n\
+\n\
+You are running as part of a recurring task: \"{task_name}\".\n\
+- This run started at {now_rfc3339}.\n\
+- {last_run}\n\
+- Each run spawns a fresh session — no chat history is carried over from previous runs.\n\
+- This could be the first run or the 100th; assume nothing about prior context being in your conversation.\n\
+\n\
+## Carrying Context Across Runs\n\
+\n\
+To remember things between runs, maintain a compact notes file at this path inside the working directory:\n\
+\n\
+    {notes_path}\n\
+\n\
+Treat it as long-term memory, NOT an event log:\n\
+- Read it at the start of your run if it exists.\n\
+- At the end of your run, REWRITE it (don't just append) so it stays short and skimmable.\n\
+- Keep only what's load-bearing for future runs: standing decisions, the current state of the recurring work, deadlines, things you should not redo next time, open questions still waiting on the user.\n\
+- Drop stale details, one-off observations, and the play-by-play of this run.\n\
+- Only switch to append-style logging if the user has explicitly asked you to keep a running log.\n\
+- Aim for a file that's quick to read on every run, not one that grows unbounded.\n\
+"
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -595,6 +649,36 @@ mod tests {
         let now = Utc.with_ymd_and_hms(2026, 6, 9, 10, 0, 0).unwrap();
         let next: DateTime<Utc> = next_run_at_after(&task, now).unwrap().parse().unwrap();
         assert_eq!(next, Utc.with_ymd_and_hms(2026, 6, 10, 9, 0, 0).unwrap());
+    }
+
+    #[test]
+    fn recurring_system_prompt_includes_task_name_and_notes_path() {
+        let body = build_recurring_system_prompt(
+            "Inventory sweep",
+            "task-uuid-123",
+            None,
+            "2026-06-09T10:00:00Z",
+        );
+        assert!(body.contains("Inventory sweep"));
+        assert!(body.contains(".peckboard/repeating-tasks/task-uuid-123.md"));
+        assert!(body.contains("This is the first run."));
+        assert!(body.contains("2026-06-09T10:00:00Z"));
+        // The compact-not-append rule is load-bearing — make sure
+        // future edits can't quietly drop it without flipping this test.
+        assert!(body.contains("REWRITE it"));
+        assert!(body.contains("don't just append"));
+    }
+
+    #[test]
+    fn recurring_system_prompt_mentions_previous_run() {
+        let body = build_recurring_system_prompt(
+            "Daily digest",
+            "task-uuid-456",
+            Some("2026-06-08T09:00:00Z"),
+            "2026-06-09T09:00:00Z",
+        );
+        assert!(body.contains("Previous run finished around 2026-06-08T09:00:00Z"));
+        assert!(!body.contains("This is the first run."));
     }
 
     #[test]

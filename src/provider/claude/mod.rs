@@ -237,12 +237,24 @@ pub(crate) fn discover_models() -> Vec<ModelInfo> {
 /// stdin), so there is no positional argument to worry about. Both
 /// properties are exercised by the regression tests below.
 pub fn build_cli_args(config: &SpawnConfig, conversation_id: Option<&str>) -> Vec<String> {
+    // Concatenate the standing Peckboard system prompt with any
+    // per-spawn suffix (used by e.g. repeating tasks) into a single
+    // --append-system-prompt flag value. Claude's CLI takes only one
+    // --append-system-prompt, so combining them here keeps the wiring
+    // tidy and avoids relying on flag-multiplicity behaviour.
+    let combined_system_prompt = match config.system_prompt_suffix.as_deref() {
+        Some(suffix) if !suffix.is_empty() => {
+            format!("{PECKBOARD_SYSTEM_PROMPT}\n{suffix}")
+        }
+        _ => PECKBOARD_SYSTEM_PROMPT.to_string(),
+    };
+
     let mut args = vec![
         "claude".to_string(),
         "--input-format=stream-json".to_string(),
         "--output-format=stream-json".to_string(),
         "--verbose".to_string(),
-        format!("--append-system-prompt={PECKBOARD_SYSTEM_PROMPT}"),
+        format!("--append-system-prompt={combined_system_prompt}"),
         // Block the built-in AskUserQuestion tool — it doesn't work in headless
         // mode. The agent must use mcp__peckboard__ask_user instead.
         "--disallowedTools=AskUserQuestion".to_string(),
@@ -371,6 +383,7 @@ mod tests {
             permission_mode: None,
             timeout_ms: None,
             metadata: serde_json::Value::Null,
+            system_prompt_suffix: None,
         }
     }
 
@@ -380,6 +393,38 @@ mod tests {
     /// commander.js would parse it as a separate flag).
     fn has_bare(args: &[String], value: &str) -> bool {
         args.iter().any(|a| a == value)
+    }
+
+    #[test]
+    fn test_build_cli_args_includes_system_prompt_suffix() {
+        let mut config = default_spawn("claude-opus-4-8");
+        config.system_prompt_suffix = Some("# Repeating Task Context\n\nrun #42".to_string());
+
+        let args = build_cli_args(&config, None);
+        // The base prompt and the suffix are concatenated into the same
+        // --append-system-prompt flag value (Claude's CLI takes only one).
+        let append = args
+            .iter()
+            .find(|a| a.starts_with("--append-system-prompt="))
+            .expect("append-system-prompt flag present");
+        assert!(append.contains("Asking the user questions"));
+        assert!(append.contains("Repeating Task Context"));
+        assert!(append.contains("run #42"));
+    }
+
+    #[test]
+    fn test_build_cli_args_omits_empty_suffix() {
+        let mut config = default_spawn("claude-opus-4-8");
+        config.system_prompt_suffix = Some(String::new());
+
+        let with_empty = build_cli_args(&config, None);
+        let none = default_spawn("claude-opus-4-8");
+        let with_none = build_cli_args(&none, None);
+
+        // Empty-string and None must produce byte-identical CLI args —
+        // no "None" marker, no spurious trailing blank line from the
+        // concatenation path.
+        assert_eq!(with_empty, with_none);
     }
 
     #[test]
@@ -412,6 +457,7 @@ mod tests {
             permission_mode: Some("prompt".into()),
             timeout_ms: None,
             metadata: serde_json::Value::Null,
+            system_prompt_suffix: None,
         };
 
         let args = build_cli_args(&config, Some("conv-123"));

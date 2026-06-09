@@ -349,6 +349,7 @@ pub(super) async fn append_event(
                 permission_mode: Some("bypass".into()),
                 timeout_ms: None,
                 metadata: serde_json::Value::Null,
+                system_prompt_suffix: None,
             };
 
             if let Err(e) = state_clone

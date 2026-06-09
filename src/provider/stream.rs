@@ -135,6 +135,13 @@ pub struct SpawnConfig {
     pub timeout_ms: Option<u64>,
     #[serde(default)]
     pub metadata: serde_json::Value,
+    /// Provider-agnostic instruction text appended to the agent's system
+    /// prompt for this one spawn (Claude wires it into another
+    /// `--append-system-prompt`; mock + recording providers ignore it).
+    /// Used by repeating tasks to inform the agent it's a recurring run
+    /// and to point at the per-task notes file convention.
+    #[serde(default)]
+    pub system_prompt_suffix: Option<String>,
 }
 
 /// Model info from a provider.

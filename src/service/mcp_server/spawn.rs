@@ -63,6 +63,7 @@ impl ExpertDispatcher for AppExpertDispatcher {
                 permission_mode: Some("bypass".into()),
                 timeout_ms: None,
                 metadata: serde_json::json!({ "expert": true, "capture": true }),
+                system_prompt_suffix: None,
             };
 
             let lock = state.session_manager.lock_session(expert_session_id).await;

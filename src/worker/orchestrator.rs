@@ -229,6 +229,7 @@ pub async fn check_and_spawn_workers(state: &Arc<AppState>) {
                     permission_mode: Some("bypass".into()),
                     timeout_ms: None,
                     metadata: serde_json::json!({ "worker": true, "inter_worker_followup": true }),
+                    system_prompt_suffix: None,
                 };
 
                 if let Err(e) = state
@@ -414,6 +415,7 @@ async fn spawn_worker_for_card(
             "project_id": project.id,
             "card_id": card.id,
         }),
+        system_prompt_suffix: None,
     };
 
     // The lock is uncontested for a brand-new uuid; we acquire it anyway
@@ -778,6 +780,7 @@ pub async fn drain_queue_for_session(
         permission_mode: Some("bypass".into()),
         timeout_ms: None,
         metadata: serde_json::Value::Null,
+        system_prompt_suffix: None,
     };
 
     state
