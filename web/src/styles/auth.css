@@ -89,6 +89,10 @@
   font-weight: 600;
 }
 
+.modal-brand-icon {
+  margin-bottom: 8px;
+}
+
 .modal-brand {
   font-size: var(--text-2xl);
   font-weight: 700;

@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="docs/assets/icon.png" alt="Peckboard" width="128" height="128" />
+</p>
+
 # Peckboard
 
 A remote control panel for [Claude Code](https://claude.com/claude-code). Peckboard spawns and manages Claude CLI child processes, exposes them through a mobile-friendly web UI, and orchestrates multi-agent workflows on a kanban board.

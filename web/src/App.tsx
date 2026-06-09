@@ -434,7 +434,7 @@ function App() {
   if (!initialized) {
     return (
       <div className="loading-screen">
-        <div className="loading-spinner" />
+        <img src="/favicon.svg" alt="Peckboard" width="64" height="64" />
         <span className="loading-text">Peckboard</span>
       </div>
     )
@@ -525,7 +525,9 @@ function App() {
           critical on mobile, where the rail becomes a bottom toolbar. */}
       <nav className="rail">
         <div className="rail-top">
-          <div className="rail-brand">P</div>
+          <div className="rail-brand">
+            <img src="/favicon.svg" alt="Peckboard" width="24" height="24" />
+          </div>
           <button
             className={`rail-btn ${view === 'sessions' && !activeSessionId ? 'active' : ''}`}
             onClick={() => {

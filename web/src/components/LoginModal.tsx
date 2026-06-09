@@ -25,6 +25,7 @@ export default function LoginModal() {
   return (
     <div className="modal-backdrop">
       <div className="modal">
+        <img src="/favicon.svg" alt="" width="64" height="64" className="modal-brand-icon" />
         <h1 className="modal-brand">
           Peck<span>board</span>
         </h1>
