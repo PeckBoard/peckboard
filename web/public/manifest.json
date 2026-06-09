@@ -4,8 +4,8 @@
   "description": "Remote control panel for Claude Code",
   "start_url": "/",
   "display": "standalone",
-  "background_color": "#FFC916",
-  "theme_color": "#FFC916",
+  "background_color": "#EC2000",
+  "theme_color": "#EC2000",
   "icons": [
     {
       "src": "/icon-192.png",
