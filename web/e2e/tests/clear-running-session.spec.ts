@@ -4,11 +4,12 @@ import { tmpdir } from 'node:os'
 import path from 'node:path'
 
 /**
- * UI e2e test: when the user clicks the Interrupt button, the chat must
- * show a subtle "Agent interrupted" line — not the boxed "Agent crashed"
- * banner. The provider stream emits a `Crashed { reason: "interrupted" }`
- * event as it winds down; pairing that with the route-emitted `interrupt`
- * event used to surface as an error in the UI.
+ * UI e2e test: clearing a session while the agent is still running must
+ * leave the chat genuinely empty. The provider stream emits a synthetic
+ * `Crashed { reason: "interrupted" }` as it winds down on cancel; if the
+ * route deletes events before waiting for that emission, the Crashed
+ * lands AFTER the wipe and resurrects an "Agent crashed (interrupted)"
+ * line on the cleared session.
  */
 
 const E2E_USER = 'e2e-user'
@@ -27,17 +28,17 @@ async function seedSession(
   request: APIRequestContext,
   authHeader: Record<string, string>,
 ): Promise<{ sessionId: string }> {
-  const folderPath = mkdtempSync(path.join(tmpdir(), 'peckboard-e2e-irq-'))
+  const folderPath = mkdtempSync(path.join(tmpdir(), 'peckboard-e2e-clear-'))
   const folderRes = await request.post('/api/folders', {
     headers: authHeader,
-    data: { name: 'e2e-interrupt', path: folderPath },
+    data: { name: 'e2e-clear', path: folderPath },
   })
   expect(folderRes.ok(), `create folder failed: ${await folderRes.text()}`).toBeTruthy()
   const folder = (await folderRes.json()) as { id: string }
 
   const sessionRes = await request.post('/api/sessions', {
     headers: authHeader,
-    data: { name: 'interrupt UI', folder_id: folder.id },
+    data: { name: 'clear UI', folder_id: folder.id },
   })
   expect(sessionRes.ok(), `create session failed: ${await sessionRes.text()}`).toBeTruthy()
   const session = (await sessionRes.json()) as { id: string }
@@ -51,7 +52,7 @@ async function loadAppAt(page: Page, token: string, route: string) {
   await page.goto(route)
 }
 
-test('clicking Interrupt shows a subtle notice, not a crash banner', async ({
+test('clearing a running session leaves no crash banner behind', async ({
   request,
   page,
   baseURL,
@@ -67,32 +68,43 @@ test('clicking Interrupt shows a subtle notice, not a crash banner', async ({
     timeout: 10_000,
   })
 
-  // mock:ask blocks waiting for stdin — keeps the agent running long
-  // enough for the user to hit Interrupt.
+  // mock:ask blocks waiting for stdin so the agent is still running
+  // when we hit /clear — that's the path that emits the synthetic
+  // Crashed event from the cancel branch.
   const sendRes = await request.post(`/api/sessions/${sessionId}/message`, {
     headers: authHeader,
     data: { text: 'ask me', model: 'mock:ask' },
   })
   expect(sendRes.ok(), `send failed: ${await sendRes.text()}`).toBeTruthy()
 
-  // Wait until the agent-start notice is rendered (proxy for "agent is running").
   await expect(
     page.locator('.chat-agent-start-label').filter({ hasText: 'Agent started' }),
   ).toBeVisible({ timeout: 10_000 })
 
-  // Click the Interrupt button (inline next to the Thinking... indicator).
-  await page.locator('.chat-thinking-interrupt').click()
+  // Clear via the API (same path the toolbar uses, minus the confirm modal).
+  const clearRes = await request.post(`/api/sessions/${sessionId}/clear`, {
+    headers: authHeader,
+  })
+  expect(clearRes.ok(), `clear failed: ${await clearRes.text()}`).toBeTruthy()
 
-  // The "Agent interrupted" subtle notice must appear.
+  // After the wipe the chat should be empty — no crash banner from a
+  // late-arriving Crashed event, no interrupted notice from the pre-cancel
+  // interrupt row, nothing at all.
+  await expect(page.locator('.chat-empty')).toBeVisible({ timeout: 10_000 })
+  await expect(page.getByText(/Agent crashed/i)).toHaveCount(0)
+  await expect(
+    page.locator('.chat-agent-start-label').filter({ hasText: 'Agent started' }),
+  ).toHaveCount(0)
   await expect(
     page.locator('.chat-agent-start-label').filter({ hasText: 'Agent interrupted' }),
-  ).toBeVisible({ timeout: 10_000 })
+  ).toHaveCount(0)
 
-  // The crash banner (boxed system notice) must NOT appear.
-  await expect(page.getByText(/Agent crashed/i)).toHaveCount(0)
-
-  // And the interrupted notice should NOT be wrapped in the boxed
-  // chat-system-notice container — it should sit in the subtle
-  // chat-agent-start layout instead.
-  await expect(page.locator('.chat-system-notice', { hasText: /interrupt/i })).toHaveCount(0)
+  // And the underlying events list must be empty too, so a reload
+  // doesn't show the crash either.
+  const eventsRes = await request.get(`/api/sessions/${sessionId}/events`, {
+    headers: authHeader,
+  })
+  expect(eventsRes.ok()).toBeTruthy()
+  const events = (await eventsRes.json()) as unknown[]
+  expect(events).toEqual([])
 })

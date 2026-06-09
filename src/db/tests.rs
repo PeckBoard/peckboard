@@ -743,6 +743,90 @@ mod tests {
         assert_eq!(db.list_announcements().await.unwrap().len(), 0);
     }
 
+    // ── worker-session tabs are first-class ────────────────────────
+
+    #[tokio::test]
+    async fn test_user_tabs_includes_worker_sessions() {
+        // Worker sessions (`is_worker=true`) are excluded from
+        // `list_plain_sessions` (powers GET /api/sessions), but the
+        // tab strip still needs to reach them — the user gets to a
+        // worker session by clicking "Details" on a kanban card. The
+        // tabs API/store must therefore treat worker sessions as
+        // legitimate tab targets. Regression test for the bug where
+        // the frontend's "drop tabs not in the sessions list"
+        // cleanup loop closed worker-session tabs the moment the
+        // plain-sessions list loaded.
+        let db = test_db();
+        let ts = now();
+
+        db.create_folder(NewFolder {
+            id: "f".into(),
+            name: "F".into(),
+            path: "/tmp/f".into(),
+            created_at: ts.clone(),
+        })
+        .await
+        .unwrap();
+        db.create_user(NewUser {
+            id: "u".into(),
+            username: "u".into(),
+            email: None,
+            password_hash: "h".into(),
+            role: "user".into(),
+            created_at: ts.clone(),
+            updated_at: ts.clone(),
+        })
+        .await
+        .unwrap();
+        db.create_session(NewSession {
+            id: "worker-s".into(),
+            name: "Worker for card A".into(),
+            folder_id: "f".into(),
+            model: None,
+            effort: None,
+            is_worker: true,
+            project_id: None,
+            card_id: None,
+            conversation_id: None,
+            created_at: ts.clone(),
+            last_activity: ts.clone(),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+
+        // The upsert must accept a worker session (it's a real row
+        // in `sessions`; the `is_worker` filter is purely on the
+        // listing endpoint).
+        let tab = db
+            .upsert_user_tab("u", "session", "worker-s")
+            .await
+            .unwrap();
+        assert!(tab.is_some(), "worker-session tab should be accepted");
+
+        // And the underlying session must still be retrievable by id —
+        // that's how `GET /api/me/tabs` resolves the denormalized name.
+        let session = db.get_session("worker-s").await.unwrap();
+        assert_eq!(
+            session.map(|s| s.name).as_deref(),
+            Some("Worker for card A"),
+            "worker session should be reachable by id so /api/me/tabs can render its label"
+        );
+
+        // Sanity-check: `list_plain_sessions` excludes the worker (this
+        // is the listing the SessionList view uses), but the tab list
+        // is independent and still surfaces it.
+        assert!(
+            db.list_plain_sessions().await.unwrap().is_empty(),
+            "worker session must NOT appear in the plain sessions list"
+        );
+        assert_eq!(
+            db.list_user_tabs("u").await.unwrap().len(),
+            1,
+            "worker-session tab must survive even though plain-sessions list is empty"
+        );
+    }
+
     // ── delete_session cascades to user_tabs ──────────────────────
 
     #[tokio::test]

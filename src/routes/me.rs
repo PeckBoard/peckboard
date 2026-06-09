@@ -26,6 +26,14 @@ pub struct TabView {
     pub item_type: String,
     pub item_id: String,
     pub last_active: String,
+    /// Name of the referenced session/project, denormalized so the tab
+    /// strip doesn't have to cross-reference a separate list. This also
+    /// lets us include worker sessions (`is_worker=true`) — those are
+    /// not surfaced by `GET /api/sessions`, so before we shipped this
+    /// the tab strip rendered them as a phantom "Session" chip and the
+    /// auto-cleanup loop closed them as soon as the sessions list
+    /// loaded.
+    pub name: String,
 }
 
 #[derive(Deserialize)]
@@ -58,23 +66,59 @@ fn validate_item_type(s: &str) -> Result<(), (StatusCode, Json<serde_json::Value
 }
 
 /// GET /api/me/tabs — list this user's tabs, MRU first.
+///
+/// Each tab is enriched with the underlying session/project name so the
+/// strip can render a label without cross-referencing a separate list.
+/// Tabs whose referenced item no longer exists are filtered out — this
+/// is the cross-device cleanup path for sessions/projects deleted on
+/// another device.
+///
+/// Implementation note: the per-tab name lookup is N+1 against
+/// `sessions` / `projects`. Acceptable for the expected tab count
+/// (humans rarely keep more than a couple dozen open) and avoids a
+/// hand-rolled polymorphic JOIN. If users start running into 100+
+/// tabs we can swap this for a single batched lookup keyed by id.
 async fn list_tabs(State(state): State<Arc<AppState>>, req: Request<Body>) -> impl IntoResponse {
     let user = auth_user(&req);
-    match state.db.list_user_tabs(&user.user_id).await {
-        Ok(tabs) => Ok(Json(
-            tabs.into_iter()
-                .map(|t| TabView {
-                    item_type: t.item_type,
-                    item_id: t.item_id,
-                    last_active: t.last_active,
-                })
-                .collect::<Vec<_>>(),
-        )),
-        Err(e) => Err((
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(serde_json::json!({ "error": e.to_string() })),
-        )),
+    let tabs = match state.db.list_user_tabs(&user.user_id).await {
+        Ok(t) => t,
+        Err(e) => {
+            return Err((
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({ "error": e.to_string() })),
+            ));
+        }
+    };
+
+    let mut out: Vec<TabView> = Vec::with_capacity(tabs.len());
+    for t in tabs {
+        let name = match t.item_type.as_str() {
+            "session" => state
+                .db
+                .get_session(&t.item_id)
+                .await
+                .ok()
+                .flatten()
+                .map(|s| s.name),
+            "project" => state
+                .db
+                .get_project(&t.item_id)
+                .await
+                .ok()
+                .flatten()
+                .map(|p| p.name),
+            _ => None,
+        };
+        if let Some(name) = name {
+            out.push(TabView {
+                item_type: t.item_type,
+                item_id: t.item_id,
+                last_active: t.last_active,
+                name,
+            });
+        }
     }
+    Ok(Json(out))
 }
 
 /// POST /api/me/tabs — open or activate a tab.
@@ -113,11 +157,38 @@ async fn upsert_tab(State(state): State<Arc<AppState>>, req: Request<Body>) -> i
         .upsert_user_tab(&user_id, &req_body.item_type, &req_body.item_id)
         .await
     {
-        Ok(Some(tab)) => Ok(Json(TabView {
-            item_type: tab.item_type,
-            item_id: tab.item_id,
-            last_active: tab.last_active,
-        })),
+        Ok(Some(tab)) => {
+            // Look up the underlying name so the response shape matches
+            // GET /api/me/tabs (same denormalized `name` field). The
+            // upsert path has already verified the item exists, so a
+            // missing name here would be a TOCTOU race — fall back to
+            // empty rather than 500ing.
+            let name = match tab.item_type.as_str() {
+                "session" => state
+                    .db
+                    .get_session(&tab.item_id)
+                    .await
+                    .ok()
+                    .flatten()
+                    .map(|s| s.name)
+                    .unwrap_or_default(),
+                "project" => state
+                    .db
+                    .get_project(&tab.item_id)
+                    .await
+                    .ok()
+                    .flatten()
+                    .map(|p| p.name)
+                    .unwrap_or_default(),
+                _ => String::new(),
+            };
+            Ok(Json(TabView {
+                item_type: tab.item_type,
+                item_id: tab.item_id,
+                last_active: tab.last_active,
+                name,
+            }))
+        }
         // Item doesn't exist — refuse to create the tab. Stops phantom
         // chips from being written for stale URLs or cross-device delete
         // races. The frontend treats 404 here as "drop the local tab".

@@ -5,7 +5,7 @@ import rehypeHighlight from 'rehype-highlight'
 import type { Event, Session } from '../types/api'
 import { authedFetch } from '../store/auth'
 import { useWsStore } from '../store/ws'
-import { useSessionsStore } from '../store/sessions'
+import { useSessionsStore, type PendingUserMessage } from '../store/sessions'
 import InputBar from './InputBar'
 import ToolUseBlock from './ToolUseBlock'
 import ConfirmDialog from './ConfirmDialog'
@@ -26,6 +26,7 @@ import 'highlight.js/styles/github-dark.css'
 // when there are no todos (avoids re-renders of TodoPanel and a
 // fresh-array warning from React fast refresh).
 const EMPTY_TODOS: TodoItem[] = []
+const EMPTY_PENDING_MESSAGES: PendingUserMessage[] = []
 
 interface ChatViewProps {
   sessionId: string
@@ -208,6 +209,10 @@ export default function ChatView({ sessionId, onOpenTodos }: ChatViewProps) {
   const loading = useSessionsStore((s) => s.loadingEventsBySession[sessionId] ?? true)
   const fetchEvents = useSessionsStore((s) => s.fetchEvents)
   const appendEvent = useSessionsStore((s) => s.appendEvent)
+  const pendingUserMessages = useSessionsStore(
+    (s) => s.pendingUserMessages[sessionId] ?? EMPTY_PENDING_MESSAGES,
+  )
+  const prunePendingUserMessages = useSessionsStore((s) => s.prunePendingUserMessages)
   const [sessionDetail, setSessionDetail] = useState<Session | null>(null)
   const [menuOpen, setMenuOpen] = useState(false)
   const [confirmAction, setConfirmAction] = useState<{
@@ -337,6 +342,19 @@ export default function ChatView({ sessionId, onOpenTodos }: ChatViewProps) {
       unsubscribe(sessionId)
     }
   }, [sessionId, subscribe, unsubscribe, addEventListener, removeEventListener, appendEvent])
+
+  // Sweep orphaned optimistic bubbles every 10s. Normally the matching
+  // WS `user` event arrives within a few hundred ms and clears the
+  // pending entry; if the POST succeeded but the broadcast was lost
+  // (server crash mid-flight, etc.) the bubble would otherwise stick
+  // around with no way to clear it. 60s is generous — anything older
+  // than that is almost certainly orphaned.
+  useEffect(() => {
+    const tick = window.setInterval(() => {
+      prunePendingUserMessages(60_000)
+    }, 10_000)
+    return () => window.clearInterval(tick)
+  }, [prunePendingUserMessages])
 
   // Scroll handling
   const handleScroll = useCallback(() => {
@@ -688,7 +706,23 @@ export default function ChatView({ sessionId, onOpenTodos }: ChatViewProps) {
               )
           }
         })}
-        {/* Thinking indicator — shown when waiting for agent response */}
+        {/* Optimistic user bubbles — rendered immediately on Send so the
+            chat doesn't appear to swallow the message during the WS
+            round-trip (especially noticeable for queued turns). The
+            matching real `user` event clears the pending entry on
+            arrival; see `clearMatchingPending` in store/sessions.ts. */}
+        {pendingUserMessages.map((p) => (
+          <div key={p.tempId} className="chat-row chat-row-user">
+            <div className="chat-bubble chat-bubble-user chat-bubble-pending">
+              {p.text}
+              <div className="chat-time chat-time-user">Sending...</div>
+            </div>
+          </div>
+        ))}
+        {/* Thinking indicator + inline Interrupt — shown at the end of the
+            message log when the agent is working. Combining them keeps the
+            "stop the agent" affordance attached to the activity it's
+            stopping, instead of a floating toolbar pinned above the input. */}
         {showThinking && (
           <div className="chat-row chat-row-system">
             <div className="chat-thinking">
@@ -698,19 +732,19 @@ export default function ChatView({ sessionId, onOpenTodos }: ChatViewProps) {
                 <span />
               </div>
               <span>Thinking...</span>
+              <button
+                className="chat-thinking-interrupt"
+                onClick={() => interruptSession(sessionId)}
+                type="button"
+                aria-label="Interrupt agent"
+                title="Interrupt the agent"
+              >
+                Interrupt
+              </button>
             </div>
           </div>
         )}
       </div>
-
-      {/* Interrupt button — centered above input bar when agent is working */}
-      {agentWorking && (
-        <div className="chat-interrupt-bar">
-          <button className="chat-interrupt-btn" onClick={() => interruptSession(sessionId)}>
-            Interrupt
-          </button>
-        </div>
-      )}
 
       {/* `key` forces a fresh InputBar per session — drafts and any
           pending attachments belong to the session that started them

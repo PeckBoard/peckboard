@@ -1,4 +1,4 @@
-import { useEffect, useMemo } from 'react'
+import { useMemo } from 'react'
 import { useSessionsStore } from '../store/sessions'
 import { useProjectsStore } from '../store/projects'
 import { useTabsStore, type TabType } from '../store/tabs'
@@ -45,61 +45,48 @@ export default function TabBar({
   const tabs = useTabsStore((s) => s.tabs)
   const closeTab = useTabsStore((s) => s.closeTab)
   const sessions = useSessionsStore((s) => s.sessions)
-  const sessionsLoaded = useSessionsStore((s) => s.sessionsLoaded)
   const projects = useProjectsStore((s) => s.projects)
-  const projectsLoaded = useProjectsStore((s) => s.projectsLoaded)
   const unreadSessions = useSessionsStore((s) => s.unreadSessions)
   const processing = useSessionsStore((s) => s.processing)
 
+  // Map by id for the live-state lookups (running/unread on session
+  // tabs, project icon, etc.). Names themselves come from `t.name`
+  // which the server denormalizes into the tab payload — that's what
+  // lets us label worker-session tabs even though they're not in the
+  // regular sessions list.
   const sessionMap = useMemo(() => new Map(sessions.map((s) => [s.id, s])), [sessions])
   const projectMap = useMemo(() => new Map(projects.map((p) => [p.id, p])), [projects])
 
-  // Drop any tab whose underlying session/project no longer exists.
-  // Without this the strip renders a placeholder chip labelled
-  // "Session" / "Project" — that's the phantom-tab bug. We only
-  // filter once the corresponding store has loaded, otherwise the
-  // brief window before the first fetch arrives looks identical to
-  // "everything was deleted" and we'd nuke every real tab.
-  const visibleTabs = useMemo(
-    () =>
-      tabs.filter((t) => {
-        if (t.itemType === 'session') {
-          return !sessionsLoaded || sessionMap.has(t.itemId)
-        }
-        return !projectsLoaded || projectMap.has(t.itemId)
-      }),
-    [tabs, sessionsLoaded, projectsLoaded, sessionMap, projectMap],
-  )
-
-  // Once both stores have loaded, fire-and-forget close any tabs
-  // pointing at vanished items so the cleanup syncs across devices
-  // (closeTab DELETEs the row on the server). Run in an effect rather
-  // than during render to avoid setState-during-render warnings.
-  useEffect(() => {
-    if (!sessionsLoaded || !projectsLoaded) return
-    for (const t of tabs) {
-      const exists = t.itemType === 'session' ? sessionMap.has(t.itemId) : projectMap.has(t.itemId)
-      if (!exists) closeTab(t.itemType, t.itemId)
-    }
-  }, [tabs, sessionsLoaded, projectsLoaded, sessionMap, projectMap, closeTab])
+  // No frontend cleanup loop: the server-side `list_tabs` handler in
+  // src/routes/me.rs filters out tabs whose underlying item is gone,
+  // and explicit deletes call `removeTabsForItem` directly. Closing on
+  // "not in the sessions list" was overzealous — worker sessions
+  // (`is_worker=true`) are intentionally not in `GET /api/sessions`, so
+  // their tabs were disappearing the moment the page loaded.
 
   // Always render the strip — even with zero tabs — so the trailing `+`
   // button stays reachable as the user's entry point to creating a new
   // session.
   return (
     <div className="tabbar" role="tablist" aria-label="Open tabs">
-      {visibleTabs.map((t) => {
+      {tabs.map((t) => {
         const isActive =
           (t.itemType === 'session' && view === 'sessions' && activeSessionId === t.itemId) ||
           (t.itemType === 'project' && view === 'projects' && activeProjectId === t.itemId)
-        // After the filter above, the lookup may still miss only
-        // during the pre-load window — fall back to a generic label
-        // there. Once stores are loaded, every visible tab is known
-        // to map to a real item.
-        const label =
-          t.itemType === 'session'
-            ? (sessionMap.get(t.itemId)?.name ?? 'Session')
-            : (projectMap.get(t.itemId)?.name ?? 'Project')
+        // Prefer the live name from the sessions/projects stores so
+        // an in-page rename reflects on the tab immediately. Fall back
+        // to the denormalized `t.name` (the server's tab response
+        // carries it) — that's what lets a worker session tab render
+        // a real label even though `is_worker=true` excludes the
+        // session from the plain sessions list.
+        // `||` (not `??`) is intentional: openTab's optimistic insert
+        // stores `name: ''` for the brief window between local insert
+        // and the upsert response landing, and the empty string must
+        // fall through to the placeholder rather than render as a
+        // label-less chip.
+        const live =
+          t.itemType === 'session' ? sessionMap.get(t.itemId)?.name : projectMap.get(t.itemId)?.name
+        const label = live || t.name || (t.itemType === 'session' ? 'Session' : 'Project')
         const isRunning = t.itemType === 'session' && processing.has(t.itemId)
         const isUnread = t.itemType === 'session' && !isActive && unreadSessions.has(t.itemId)
         return (

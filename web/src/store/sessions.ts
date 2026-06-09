@@ -23,6 +23,45 @@ function saveDrafts(drafts: Record<string, string>) {
   }
 }
 
+/**
+ * When a real `user` event arrives, remove the FIFO-first matching
+ * optimistic bubble for that session (matched by exact text). Returns a
+ * partial state update — caller spreads it into the next set() patch.
+ *
+ * Exact-text match is intentional: two identical messages sent in rapid
+ * succession each get their own pending entry, and we resolve them in
+ * order. Mismatched text leaves the bubble in place; it'll age out via
+ * the staleness sweep in ChatView.
+ */
+function clearMatchingPending(
+  state: { pendingUserMessages: Record<string, PendingUserMessage[]> },
+  event: Event,
+): Partial<{ pendingUserMessages: Record<string, PendingUserMessage[]> }> {
+  if (event.kind !== 'user') return {}
+  const list = state.pendingUserMessages[event.session_id]
+  if (!list || list.length === 0) return {}
+  const text = (event.data.text as string) ?? ''
+  const idx = list.findIndex((p) => p.text === text)
+  if (idx === -1) return {}
+  const next = [...list.slice(0, idx), ...list.slice(idx + 1)]
+  return {
+    pendingUserMessages: { ...state.pendingUserMessages, [event.session_id]: next },
+  }
+}
+
+/**
+ * Optimistic user message: rendered in the chat as soon as the user hits
+ * Send, before the WS event for the persisted `user` row arrives. Without
+ * this the composer clears but the bubble doesn't appear until the round-
+ * trip completes — for queued turns that gap can be hundreds of ms and
+ * makes the message look lost.
+ */
+export interface PendingUserMessage {
+  tempId: string
+  text: string
+  ts: number
+}
+
 interface SessionsState {
   sessions: Session[]
   /** True once `fetchSessions` has completed successfully at least
@@ -41,10 +80,26 @@ interface SessionsState {
    *  from the ordinary chat list and only surface in the Experts view. */
   experts: Expert[]
   expertsLoaded: boolean
+  pendingUserMessages: Record<string, PendingUserMessage[]>
   fetchSessions: () => Promise<void>
   fetchExperts: () => Promise<void>
   fetchEvents: (sessionId: string) => Promise<void>
   appendEvent: (event: Event) => void
+  /** Optimistically register a user-typed message for `sessionId`.
+   *  ChatView renders it as a user bubble immediately. The matching
+   *  `user` event arriving over the WS auto-clears it. Returns the
+   *  `tempId` so the caller can roll back manually if the POST
+   *  errors and no `user` event will ever arrive. */
+  addPendingUserMessage: (sessionId: string, text: string) => string
+  /** Remove a single pending user-message entry by id — used by the
+   *  send path when the POST fails so the optimistic bubble doesn't
+   *  hang around with no hope of being confirmed. */
+  removePendingUserMessage: (sessionId: string, tempId: string) => void
+  /** Drop pending entries that are clearly orphaned — the POST
+   *  succeeded but the WS `user` event never arrived (server crashed
+   *  mid-broadcast, etc.) and the entry has been sitting there for
+   *  longer than `maxAgeMs`. ChatView calls this on a ~10s tick. */
+  prunePendingUserMessages: (maxAgeMs: number) => void
   createSession: (
     name: string,
     folderId: string,
@@ -74,6 +129,7 @@ export const useSessionsStore = create<SessionsState>((set, get) => ({
   loadingEventsBySession: {},
   experts: [],
   expertsLoaded: false,
+  pendingUserMessages: {},
 
   fetchSessions: async () => {
     const res = await authedFetch('/api/sessions')
@@ -113,13 +169,61 @@ export const useSessionsStore = create<SessionsState>((set, get) => ({
   appendEvent: (event: Event) => {
     set((s) => {
       const existing = s.eventsBySession[event.session_id] ?? []
-      if (existing.some((e) => e.id === event.id)) return s
-      return {
+      if (existing.some((e) => e.id === event.id)) {
+        // Already in the log — still clear any matching optimistic
+        // bubble (the duplicate path is rare but happens on resume).
+        return clearMatchingPending(s, event)
+      }
+      const nextEvents = {
         eventsBySession: {
           ...s.eventsBySession,
           [event.session_id]: [...existing, event],
         },
       }
+      return { ...nextEvents, ...clearMatchingPending(s, event) }
+    })
+  },
+
+  addPendingUserMessage: (sessionId: string, text: string) => {
+    if (!text) return ''
+    const entry: PendingUserMessage = {
+      tempId: `pending-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+      text,
+      ts: Date.now(),
+    }
+    set((s) => ({
+      pendingUserMessages: {
+        ...s.pendingUserMessages,
+        [sessionId]: [...(s.pendingUserMessages[sessionId] ?? []), entry],
+      },
+    }))
+    return entry.tempId
+  },
+
+  removePendingUserMessage: (sessionId: string, tempId: string) => {
+    set((s) => {
+      const list = s.pendingUserMessages[sessionId]
+      if (!list) return s
+      const next = list.filter((p) => p.tempId !== tempId)
+      if (next.length === list.length) return s
+      return {
+        pendingUserMessages: { ...s.pendingUserMessages, [sessionId]: next },
+      }
+    })
+  },
+
+  prunePendingUserMessages: (maxAgeMs: number) => {
+    const cutoff = Date.now() - maxAgeMs
+    set((s) => {
+      let changed = false
+      const next: Record<string, PendingUserMessage[]> = {}
+      for (const [sid, list] of Object.entries(s.pendingUserMessages)) {
+        const kept = list.filter((p) => p.ts >= cutoff)
+        if (kept.length !== list.length) changed = true
+        if (kept.length > 0) next[sid] = kept
+      }
+      if (!changed) return s
+      return { pendingUserMessages: next }
     })
   },
 
@@ -149,11 +253,14 @@ export const useSessionsStore = create<SessionsState>((set, get) => ({
     }
     set((s) => {
       const { [id]: _drop, ...remainingEvents } = s.eventsBySession
+      const { [id]: _dropPending, ...remainingPending } = s.pendingUserMessages
       void _drop
+      void _dropPending
       return {
         sessions: s.sessions.filter((sess) => sess.id !== id),
         activeSessionId: s.activeSessionId === id ? null : s.activeSessionId,
         eventsBySession: remainingEvents,
+        pendingUserMessages: remainingPending,
       }
     })
     // Drop the tab for the now-deleted session so it doesn't render as
@@ -191,9 +298,14 @@ export const useSessionsStore = create<SessionsState>((set, get) => ({
       const err = await res.json().catch(() => ({ error: 'Failed to clear session' }))
       throw new Error(err.error || 'Failed to clear session')
     }
-    set((s) => ({
-      eventsBySession: { ...s.eventsBySession, [id]: [] },
-    }))
+    set((s) => {
+      const { [id]: _drop, ...remainingPending } = s.pendingUserMessages
+      void _drop
+      return {
+        eventsBySession: { ...s.eventsBySession, [id]: [] },
+        pendingUserMessages: remainingPending,
+      }
+    })
   },
 
   cancelSession: async (id: string) => {
@@ -226,6 +338,13 @@ export const useSessionsStore = create<SessionsState>((set, get) => ({
   handleEvent: (event: Event) => {
     const { processing, unreadSessions, activeSessionId } = get()
     const sid = event.session_id
+
+    // Optimistic bubble clearing is intentionally NOT done here.
+    // handleEvent runs from the WS layer before `appendEvent`, which
+    // would briefly remove the pending entry before the real event
+    // lands in `eventsBySession` — that gap causes a one-frame flicker
+    // where the user bubble disappears. `appendEvent` itself does the
+    // pending clear atomically with the event-list update.
 
     if (event.kind === 'agent-start') {
       if (!processing.has(sid)) {
