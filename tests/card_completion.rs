@@ -54,6 +54,7 @@ async fn build_state() -> Arc<AppState> {
         broadcaster: Broadcaster::new(),
         provider_registry: registry,
         session_manager,
+        repeating_task_manager: peckboard::repeating::RepeatingTaskManager::new(),
         mcp_tokens: McpTokenRegistry::new(),
         push_service: PushService::new(&data_dir),
     })

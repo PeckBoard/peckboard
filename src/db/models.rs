@@ -45,6 +45,7 @@ pub struct Session {
     pub knowledge_area: Option<String>,
     pub scope_path: Option<String>,
     pub is_permanent: bool,
+    pub repeating_task_id: Option<String>,
 }
 
 #[derive(Insertable, Deserialize, Debug, Default)]
@@ -67,6 +68,7 @@ pub struct NewSession {
     pub knowledge_area: Option<String>,
     pub scope_path: Option<String>,
     pub is_permanent: bool,
+    pub repeating_task_id: Option<String>,
 }
 
 #[derive(AsChangeset, Deserialize, Debug, Default)]
@@ -85,6 +87,63 @@ pub struct UpdateSession {
     pub knowledge_area: Option<Option<String>>,
     pub scope_path: Option<Option<String>>,
     pub is_permanent: Option<bool>,
+}
+
+// ── Repeating Tasks ──────────────────────────────────────────────────
+
+#[derive(Queryable, Selectable, Serialize, Debug, Clone)]
+#[diesel(table_name = repeating_tasks)]
+pub struct RepeatingTask {
+    pub id: String,
+    pub name: String,
+    pub description: String,
+    pub folder_id: String,
+    pub prompt: String,
+    pub schedule_kind: String,
+    pub schedule_value: String,
+    pub model: Option<String>,
+    pub effort: Option<String>,
+    pub enabled: bool,
+    pub next_run_at: Option<String>,
+    pub last_run_at: Option<String>,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+#[derive(Insertable, Debug)]
+#[diesel(table_name = repeating_tasks)]
+pub struct NewRepeatingTask {
+    pub id: String,
+    pub name: String,
+    pub description: String,
+    pub folder_id: String,
+    pub prompt: String,
+    pub schedule_kind: String,
+    pub schedule_value: String,
+    pub model: Option<String>,
+    pub effort: Option<String>,
+    pub enabled: bool,
+    pub next_run_at: Option<String>,
+    pub last_run_at: Option<String>,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+#[derive(AsChangeset, Debug, Default)]
+#[diesel(table_name = repeating_tasks)]
+pub struct UpdateRepeatingTask {
+    pub name: Option<String>,
+    pub description: Option<String>,
+    pub folder_id: Option<String>,
+    pub prompt: Option<String>,
+    pub schedule_kind: Option<String>,
+    pub schedule_value: Option<String>,
+    pub model: Option<Option<String>>,
+    pub effort: Option<Option<String>>,
+    pub enabled: Option<bool>,
+    pub next_run_at: Option<Option<String>>,
+    pub last_run_at: Option<Option<String>>,
+    pub updated_at: Option<String>,
 }
 
 // ── Projects ─────────────────────────────────────────────────────────

@@ -70,6 +70,24 @@ impl ScopedProjectId {
     }
 }
 
+/// Proof token: a folder id obtained by resolving the **current session's**
+/// folder, with the additional guarantee that the session is *not* part
+/// of a project. Repeating-task MCP tools take a `&ScopedFolderId` so
+/// they can never be used from a worker session to reach across into a
+/// folder the worker isn't supposed to touch.
+///
+/// The only way to construct one is [`ToolCallContext::scope_folder`],
+/// which returns Err if `ctx.project_id` is set or if the underlying
+/// session is itself bound to a project.
+#[derive(Debug, Clone)]
+pub struct ScopedFolderId(String);
+
+impl ScopedFolderId {
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
 impl ToolCallContext {
     /// Verify the given target project_id is allowed by the current MCP
     /// token's scope. Resolution:
@@ -110,6 +128,29 @@ impl ToolCallContext {
             .project_id
             .ok_or_else(|| anyhow::anyhow!("session is not part of any project: {session_id}"))?;
         self.scope_project(Some(&project_id))
+    }
+
+    /// Resolve the current session's folder for the repeating-task MCP
+    /// tools. Refuses sessions that are part of a project — those tools
+    /// are intentionally only available to plain (non-worker) sessions
+    /// so a worker can't reach across folders via the task table.
+    pub async fn scope_folder(&self) -> anyhow::Result<ScopedFolderId> {
+        // Defence in depth: token scope already excludes folder-CRUD for
+        // a worker token (project_id would be Some), but check both
+        // the token AND the persisted session row so a stale MCP config
+        // hand-edited to drop the project_id scope still gets rejected.
+        if self.project_id.is_some() {
+            anyhow::bail!("repeating-task tools are not available in worker sessions");
+        }
+        let session = self
+            .db
+            .get_session(&self.session_id)
+            .await?
+            .ok_or_else(|| anyhow::anyhow!("session not found: {}", self.session_id))?;
+        if session.project_id.is_some() {
+            anyhow::bail!("repeating-task tools are not available in worker sessions");
+        }
+        Ok(ScopedFolderId(session.folder_id))
     }
 }
 
@@ -212,5 +253,142 @@ mod tests {
         let ctx = ctx_for_scope(None);
         let err = ctx.scope_project(None).unwrap_err();
         assert!(err.to_string().contains("project_id required"));
+    }
+
+    // ── ScopedFolderId: repeating-task scope guard ───────────────────────
+
+    async fn seed_session(
+        db: &crate::db::Db,
+        session_id: &str,
+        folder_id: &str,
+        project_id: Option<&str>,
+    ) {
+        use crate::db::models::{NewFolder, NewSession};
+        let ts = chrono::Utc::now().to_rfc3339();
+        db.create_folder(NewFolder {
+            id: folder_id.into(),
+            name: folder_id.into(),
+            path: format!("/tmp/{folder_id}"),
+            created_at: ts.clone(),
+        })
+        .await
+        .unwrap();
+        db.create_session(NewSession {
+            id: session_id.into(),
+            name: session_id.into(),
+            folder_id: folder_id.into(),
+            model: None,
+            effort: None,
+            is_worker: false,
+            project_id: project_id.map(String::from),
+            card_id: None,
+            conversation_id: None,
+            created_at: ts.clone(),
+            last_activity: ts,
+            repeating_task_id: None,
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    }
+
+    fn ctx_for_session(
+        db: Arc<crate::db::Db>,
+        session_id: &str,
+        project_id: Option<&str>,
+    ) -> ToolCallContext {
+        ToolCallContext {
+            session_id: session_id.to_string(),
+            project_id: project_id.map(String::from),
+            card_id: None,
+            db,
+            expert_dispatcher: None,
+            broadcaster: crate::ws::broadcaster::Broadcaster::new(),
+            provider_registry: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn scope_folder_returns_session_folder_for_plain_session() {
+        let db = Arc::new(crate::db::Db::in_memory().unwrap());
+        seed_session(&db, "s1", "f1", None).await;
+        let ctx = ctx_for_session(db, "s1", None);
+        let scope = ctx.scope_folder().await.unwrap();
+        assert_eq!(scope.as_str(), "f1");
+    }
+
+    #[tokio::test]
+    async fn scope_folder_rejects_token_with_project_scope() {
+        // Token scope explicitly tagged with a project_id — even if the
+        // session row itself is a plain session, the token says "you are
+        // operating inside project P", which means repeating-task tools
+        // must be unavailable.
+        let db = Arc::new(crate::db::Db::in_memory().unwrap());
+        seed_session(&db, "s1", "f1", None).await;
+        let ctx = ctx_for_session(db, "s1", Some("p1"));
+        let err = ctx.scope_folder().await.unwrap_err();
+        assert!(err.to_string().contains("worker sessions"), "got: {err}",);
+    }
+
+    #[tokio::test]
+    async fn scope_folder_rejects_session_bound_to_project() {
+        // Token scope is unscoped, but the persisted session has a
+        // project_id (worker session). Still rejected — defence in depth.
+        let db = Arc::new(crate::db::Db::in_memory().unwrap());
+        use crate::db::models::{NewFolder, NewProject, NewSession};
+        let ts = chrono::Utc::now().to_rfc3339();
+        db.create_folder(NewFolder {
+            id: "f1".into(),
+            name: "f1".into(),
+            path: "/tmp/f1".into(),
+            created_at: ts.clone(),
+        })
+        .await
+        .unwrap();
+        db.create_project(NewProject {
+            id: "p1".into(),
+            name: "P".into(),
+            context: "".into(),
+            folder_id: "f1".into(),
+            worker_count: 1,
+            status: "active".into(),
+            default_workflow: None,
+            model: None,
+            effort: None,
+            parallel_instructions: false,
+            auto_notify_changes: true,
+            worker_communication: false,
+            created_at: ts.clone(),
+            last_accessed_at: ts.clone(),
+        })
+        .await
+        .unwrap();
+        db.create_session(NewSession {
+            id: "s1".into(),
+            name: "worker".into(),
+            folder_id: "f1".into(),
+            model: None,
+            effort: None,
+            is_worker: true,
+            project_id: Some("p1".into()),
+            card_id: None,
+            conversation_id: None,
+            created_at: ts.clone(),
+            last_activity: ts,
+            repeating_task_id: None,
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+        let ctx = ctx_for_session(db, "s1", None);
+        let err = ctx.scope_folder().await.unwrap_err();
+        assert!(err.to_string().contains("worker sessions"), "got: {err}");
+    }
+
+    #[tokio::test]
+    async fn scope_folder_rejects_unknown_session() {
+        let db = Arc::new(crate::db::Db::in_memory().unwrap());
+        let ctx = ctx_for_session(db, "nope", None);
+        assert!(ctx.scope_folder().await.is_err());
     }
 }

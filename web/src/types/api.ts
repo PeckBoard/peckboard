@@ -25,6 +25,27 @@ export interface Session {
   knowledge_area: string | null
   scope_path: string | null
   is_permanent: boolean
+  repeating_task_id: string | null
+}
+
+export type RepeatingScheduleKind = 'interval' | 'daily' | 'weekly'
+
+export interface RepeatingTask {
+  id: string
+  name: string
+  description: string
+  folder_id: string
+  prompt: string
+  schedule_kind: RepeatingScheduleKind
+  /** JSON-encoded schedule value; see backend Schedule::parse. */
+  schedule_value: string
+  model: string | null
+  effort: string | null
+  enabled: boolean
+  next_run_at: string | null
+  last_run_at: string | null
+  created_at: string
+  updated_at: string
 }
 
 /** An expert session as returned by `GET /api/experts`. The endpoint

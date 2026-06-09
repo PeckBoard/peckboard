@@ -13,7 +13,7 @@ mod spawn;
 
 pub use auth::McpTokenRegistry;
 pub use config::{delete_mcp_config, write_mcp_config};
-pub use context::{ExpertDispatcher, McpToolDef, ScopedProjectId, ToolCallContext};
+pub use context::{ExpertDispatcher, McpToolDef, ScopedFolderId, ScopedProjectId, ToolCallContext};
 pub use spawn::AppExpertDispatcher;
 
 use serde_json::Value;
@@ -93,6 +93,10 @@ impl McpToolRegistry {
             "spin_up_experts" => self.handle_spin_up_experts(args, ctx).await,
             "list_experts" => self.handle_list_experts(args, ctx).await,
             "ask_expert" => self.handle_ask_expert(args, ctx).await,
+            "list_repeating_tasks" => self.handle_list_repeating_tasks(ctx).await,
+            "create_repeating_task" => self.handle_create_repeating_task(args, ctx).await,
+            "update_repeating_task" => self.handle_update_repeating_task(args, ctx).await,
+            "delete_repeating_task" => self.handle_delete_repeating_task(args, ctx).await,
             _ => anyhow::bail!("unknown tool: {tool_name}"),
         }
     }
@@ -282,7 +286,11 @@ mod tests {
         assert!(names.contains(&"spin_up_experts"));
         assert!(names.contains(&"list_experts"));
         assert!(names.contains(&"ask_expert"));
-        assert_eq!(names.len(), 36);
+        assert!(names.contains(&"list_repeating_tasks"));
+        assert!(names.contains(&"create_repeating_task"));
+        assert!(names.contains(&"update_repeating_task"));
+        assert!(names.contains(&"delete_repeating_task"));
+        assert_eq!(names.len(), 40);
     }
 
     #[test]
@@ -547,6 +555,7 @@ mod tests {
                     knowledge_area: Some(format!("{name} area")),
                     scope_path: Some("src".into()),
                     is_permanent: permanent,
+                    repeating_task_id: None,
                 }
             };
 

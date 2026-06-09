@@ -657,5 +657,65 @@ pub(super) fn tool_definitions() -> Vec<McpToolDef> {
                 "additionalProperties": false
             }),
         },
+        McpToolDef {
+            name: "list_repeating_tasks".into(),
+            description: "List repeating tasks in this session's folder. Only available in non-project sessions. Each task has a schedule and a prompt that fires a fresh session on each tick.".into(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {},
+                "additionalProperties": false
+            }),
+        },
+        McpToolDef {
+            name: "create_repeating_task".into(),
+            description: "Create a repeating task in this session's folder. Only available in non-project sessions. Schedule is one of: interval ({\"minutes\": N}), daily ({\"hour\": H, \"minute\": M}), weekly ({\"weekday\": 0-6 (Mon=0), \"hour\": H, \"minute\": M}).".into(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "name": { "type": "string", "description": "Display name" },
+                    "description": { "type": "string", "description": "Informational description (optional)" },
+                    "prompt": { "type": "string", "description": "Prompt sent to the new session on each run" },
+                    "schedule_kind": { "type": "string", "enum": ["interval", "daily", "weekly"] },
+                    "schedule_value": { "type": "object", "description": "Schedule parameters per kind" },
+                    "model": { "type": "string", "description": "Override model id (optional)" },
+                    "effort": { "type": "string", "description": "Override effort level (optional)" },
+                    "enabled": { "type": "boolean", "description": "Whether the schedule fires (default true)" }
+                },
+                "required": ["name", "prompt", "schedule_kind", "schedule_value"],
+                "additionalProperties": false
+            }),
+        },
+        McpToolDef {
+            name: "update_repeating_task".into(),
+            description: "Edit a repeating task in this session's folder. Only available in non-project sessions. Pass only the fields you want to change.".into(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "task_id": { "type": "string" },
+                    "name": { "type": "string" },
+                    "description": { "type": "string" },
+                    "prompt": { "type": "string" },
+                    "schedule_kind": { "type": "string", "enum": ["interval", "daily", "weekly"] },
+                    "schedule_value": { "type": "object" },
+                    "model": { "type": ["string", "null"] },
+                    "effort": { "type": ["string", "null"] },
+                    "enabled": { "type": "boolean" }
+                },
+                "required": ["task_id"],
+                "additionalProperties": false
+            }),
+        },
+        McpToolDef {
+            name: "delete_repeating_task".into(),
+            description: "Delete a repeating task in this session's folder. Only available in non-project sessions. Previously spawned sessions are preserved (but detached).".into(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "task_id": { "type": "string" }
+                },
+                "required": ["task_id"],
+                "additionalProperties": false
+            }),
+        },
     ]
 }

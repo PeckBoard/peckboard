@@ -25,6 +25,13 @@ impl Db {
     /// Delete a folder only if it has no sessions. Atomic: the empty-
     /// check and the delete run while the connection mutex is held, so
     /// a concurrent session creation cannot slip in.
+    ///
+    /// Repeating tasks aren't user *data* the same way sessions are
+    /// (they are metadata that can be recreated), so they don't block
+    /// the empty-delete — they're cleaned up in the same transaction.
+    /// Without this the FK on `repeating_tasks.folder_id → folders.id`
+    /// makes "delete empty folder" fail when a task is configured even
+    /// though no sessions were ever spawned.
     pub async fn delete_folder_if_empty(&self, id: &str) -> anyhow::Result<FolderEmptyDelete> {
         let id = id.to_string();
         self.with_conn(move |conn| {
@@ -44,6 +51,10 @@ impl Db {
             if session_count > 0 {
                 return Ok(FolderEmptyDelete::HasSessions(session_count as usize));
             }
+            // Drop any repeating tasks targeting this folder so the FK
+            // doesn't block the folder delete below.
+            diesel::delete(repeating_tasks::table.filter(repeating_tasks::folder_id.eq(&id)))
+                .execute(conn)?;
             diesel::delete(folders::table.find(&id)).execute(conn)?;
             Ok(FolderEmptyDelete::Deleted)
         })
@@ -71,6 +82,13 @@ impl Db {
             let sessions_deleted =
                 diesel::delete(sessions::table.filter(sessions::folder_id.eq(&id)))
                     .execute(conn)?;
+            // Drop the folder's repeating tasks too — their FK on
+            // folder_id would otherwise block the folder delete below.
+            // Sessions are already gone by the time we get here, so
+            // sessions.repeating_task_id FKs onto these tasks no longer
+            // exist.
+            diesel::delete(repeating_tasks::table.filter(repeating_tasks::folder_id.eq(&id)))
+                .execute(conn)?;
             let folder_deleted = diesel::delete(folders::table.find(&id)).execute(conn)?;
             if folder_deleted == 0 {
                 anyhow::bail!("folder not found: {id}");

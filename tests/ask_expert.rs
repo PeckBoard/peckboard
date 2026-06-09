@@ -75,6 +75,7 @@ async fn seed_session(
         knowledge_area: knowledge_area.map(|s| s.to_string()),
         scope_path: scope_path.map(|s| s.to_string()),
         is_permanent: false,
+        repeating_task_id: None,
     })
     .await
     .unwrap();

@@ -25,6 +25,7 @@ pub fn ensure_schema(conn: &mut SqliteConnection) -> anyhow::Result<()> {
     ensure_todos_table(conn)?;
     ensure_cards_completed_at_column(conn)?;
     ensure_sessions_expert_columns(conn)?;
+    ensure_repeating_tasks_schema(conn)?;
     Ok(())
 }
 
@@ -57,6 +58,70 @@ fn ensure_sessions_expert_columns(conn: &mut SqliteConnection) -> anyhow::Result
             sql_query(format!("ALTER TABLE sessions ADD COLUMN {name} {clause}")).execute(conn)?;
         }
     }
+    Ok(())
+}
+
+/// Heal DBs that predate `1781025117_repeating_tasks`. The migration
+/// creates the table with `IF NOT EXISTS` (safe to re-run) and adds a
+/// non-idempotent `ALTER TABLE sessions ADD COLUMN repeating_task_id`,
+/// which we detect-and-add here for any DB that ran the table-creation
+/// half but not the column-add half.
+///
+/// Bails out cleanly if the prerequisite tables (`folders`, `sessions`)
+/// don't exist yet. Real DBs always have them, but test fixtures that
+/// build a minimal schema can hit this path before any migrations have
+/// created sessions/folders, and a hard failure here would mask the
+/// fixture's intent.
+fn ensure_repeating_tasks_schema(conn: &mut SqliteConnection) -> anyhow::Result<()> {
+    let folders_cols: Vec<PragmaColumn> = sql_query("PRAGMA table_info(folders)").load(conn)?;
+    let sessions_cols: Vec<PragmaColumn> = sql_query("PRAGMA table_info(sessions)").load(conn)?;
+    if folders_cols.is_empty() || sessions_cols.is_empty() {
+        return Ok(());
+    }
+
+    sql_query(
+        "CREATE TABLE IF NOT EXISTS repeating_tasks (
+            id              TEXT    PRIMARY KEY NOT NULL,
+            name            TEXT    NOT NULL,
+            description     TEXT    NOT NULL DEFAULT '',
+            folder_id       TEXT    NOT NULL REFERENCES folders(id),
+            prompt          TEXT    NOT NULL,
+            schedule_kind   TEXT    NOT NULL,
+            schedule_value  TEXT    NOT NULL,
+            model           TEXT,
+            effort          TEXT,
+            enabled         BOOLEAN NOT NULL DEFAULT 1,
+            next_run_at     TEXT,
+            last_run_at     TEXT,
+            created_at      TEXT    NOT NULL,
+            updated_at      TEXT    NOT NULL
+        )",
+    )
+    .execute(conn)?;
+    sql_query(
+        "CREATE INDEX IF NOT EXISTS idx_repeating_tasks_folder ON repeating_tasks (folder_id)",
+    )
+    .execute(conn)?;
+    sql_query(
+        "CREATE INDEX IF NOT EXISTS idx_repeating_tasks_next_run \
+         ON repeating_tasks (next_run_at) WHERE enabled = 1",
+    )
+    .execute(conn)?;
+
+    // ALTER TABLE sessions ADD COLUMN -- the only non-idempotent part of
+    // the migration. Skip if the column is already present.
+    let existing: Vec<String> = sessions_cols.into_iter().map(|r| r.name).collect();
+    if !existing.iter().any(|c| c == "repeating_task_id") {
+        tracing::info!("Repairing schema: adding sessions.repeating_task_id");
+        sql_query(
+            "ALTER TABLE sessions ADD COLUMN repeating_task_id TEXT REFERENCES repeating_tasks(id)",
+        )
+        .execute(conn)?;
+    }
+    sql_query(
+        "CREATE INDEX IF NOT EXISTS idx_sessions_repeating_task ON sessions (repeating_task_id)",
+    )
+    .execute(conn)?;
     Ok(())
 }
 

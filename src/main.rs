@@ -10,6 +10,7 @@ use peckboard::provider::claude::register_claude_provider;
 use peckboard::provider::manager::SessionManager;
 use peckboard::provider::mock::register_mock_provider;
 use peckboard::provider::registry::ProviderRegistry;
+use peckboard::repeating::RepeatingTaskManager;
 use peckboard::routes::api_router;
 use peckboard::security::{origin_check, repair_dangling_sessions, security_headers};
 use peckboard::service::mcp_server::McpTokenRegistry;
@@ -180,6 +181,7 @@ async fn main() -> anyhow::Result<()> {
     register_mock_provider(&provider_registry).await;
     let session_manager =
         SessionManager::new(provider_registry.clone()).with_plugins(plugins.clone());
+    let repeating_task_manager = RepeatingTaskManager::new();
 
     let mcp_tokens = McpTokenRegistry::new();
     let push_service = PushService::new(&config.data_dir);
@@ -194,6 +196,7 @@ async fn main() -> anyhow::Result<()> {
         broadcaster,
         provider_registry,
         session_manager,
+        repeating_task_manager,
         mcp_tokens,
         push_service,
     });
@@ -214,6 +217,40 @@ async fn main() -> anyhow::Result<()> {
             }
         });
         tracing::info!("Worker orchestrator loop started (5s interval)");
+    }
+
+    // Repeating tasks scheduler: tick every 30 seconds. Cheap because
+    // the due-task query is indexed on next_run_at. We don't tick more
+    // often than the smallest practical schedule interval (1 minute),
+    // so 30s gives us at most ~30s of slack between "due" and "fired".
+    {
+        let sched_state = state.clone();
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(std::time::Duration::from_secs(30));
+            // If a tick takes longer than the interval (e.g. a slow
+            // dispatch with many due tasks), skip the missed ticks
+            // rather than bursting catch-up runs — the next tick
+            // re-queries due tasks anyway, so a burst would just
+            // re-process the same set on top of each other.
+            interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+            // Skip the immediate first tick — every tick after start sleeps
+            // first so we don't dispatch the moment the server boots
+            // (which would race the rest of startup).
+            interval.tick().await;
+            loop {
+                interval.tick().await;
+                let ctx = peckboard::repeating::RunContext {
+                    db: &sched_state.db,
+                    broadcaster: &sched_state.broadcaster,
+                    session_manager: &sched_state.session_manager,
+                    mcp_tokens: &sched_state.mcp_tokens,
+                    data_dir: &sched_state.config.data_dir,
+                    http_port: sched_state.config.port,
+                };
+                sched_state.repeating_task_manager.run_due_tasks(ctx).await;
+            }
+        });
+        tracing::info!("Repeating-task scheduler started (30s interval)");
     }
 
     let app = api_router(state.clone())

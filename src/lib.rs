@@ -5,6 +5,7 @@ pub mod error;
 pub mod frontend;
 pub mod plugin;
 pub mod provider;
+pub mod repeating;
 pub mod routes;
 pub mod security;
 pub mod service;

@@ -9,5 +9,6 @@ mod experts;
 mod folders;
 mod misc;
 mod projects;
+mod repeating_tasks;
 mod reports;
 mod workers;

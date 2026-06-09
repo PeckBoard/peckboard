@@ -26,4 +26,5 @@
 @import './styles/kanban-header.css';
 @import './styles/announcement.css';
 @import './styles/worker-comms.css';
+@import './styles/repeating-tasks.css';
 @import './styles/mobile.css';

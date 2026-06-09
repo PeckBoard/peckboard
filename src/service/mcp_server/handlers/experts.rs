@@ -141,6 +141,7 @@ impl McpToolRegistry {
                     knowledge_area: Some(part.area.clone()),
                     scope_path: Some(scope_path.clone()),
                     is_permanent: false,
+                    repeating_task_id: None,
                 })
                 .await?;
             created.push((idx, session_id, part, scope_path));

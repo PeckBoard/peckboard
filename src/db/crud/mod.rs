@@ -11,6 +11,7 @@ mod folders;
 mod projects;
 mod push;
 mod queued;
+mod repeating_tasks;
 mod sessions;
 mod tabs;
 mod todos;

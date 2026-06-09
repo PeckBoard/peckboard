@@ -140,6 +140,16 @@ export const useWsStore = create<WsState>((set, get) => ({
         return
       }
 
+      if (msg.type === 'repeating-task-changed') {
+        window.dispatchEvent(new CustomEvent('peckboard:repeating-task-changed', { detail: msg }))
+        return
+      }
+
+      if (msg.type === 'repeating-task-run') {
+        window.dispatchEvent(new CustomEvent('peckboard:repeating-task-run', { detail: msg }))
+        return
+      }
+
       if (msg.type === 'session-cleared') {
         // Server wiped this session's events + todos. Two event caches
         // need to drop the snapshot in lockstep — `useWsStore`'s

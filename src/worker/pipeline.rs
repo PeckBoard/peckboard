@@ -368,6 +368,7 @@ mod tests {
             knowledge_area: Some("HTTP routes".into()),
             scope_path: Some("src/routes".into()),
             is_permanent: false,
+            repeating_task_id: None,
         }
     }
 

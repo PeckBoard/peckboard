@@ -29,6 +29,26 @@ diesel::table! {
         knowledge_area -> Nullable<Text>,
         scope_path -> Nullable<Text>,
         is_permanent -> Bool,
+        repeating_task_id -> Nullable<Text>,
+    }
+}
+
+diesel::table! {
+    repeating_tasks (id) {
+        id -> Text,
+        name -> Text,
+        description -> Text,
+        folder_id -> Text,
+        prompt -> Text,
+        schedule_kind -> Text,
+        schedule_value -> Text,
+        model -> Nullable<Text>,
+        effort -> Nullable<Text>,
+        enabled -> Bool,
+        next_run_at -> Nullable<Text>,
+        last_run_at -> Nullable<Text>,
+        created_at -> Text,
+        updated_at -> Text,
     }
 }
 
@@ -169,12 +189,14 @@ diesel::table! {
 
 diesel::joinable!(sessions -> folders (folder_id));
 diesel::joinable!(sessions -> projects (project_id));
+diesel::joinable!(sessions -> repeating_tasks (repeating_task_id));
 diesel::joinable!(projects -> folders (folder_id));
 diesel::joinable!(cards -> projects (project_id));
 diesel::joinable!(events -> sessions (session_id));
 diesel::joinable!(auth_sessions -> users (user_id));
 diesel::joinable!(queued_messages -> sessions (session_id));
 diesel::joinable!(todos -> sessions (session_id));
+diesel::joinable!(repeating_tasks -> folders (folder_id));
 
 diesel::joinable!(user_tabs -> users (user_id));
 
@@ -192,4 +214,5 @@ diesel::allow_tables_to_appear_in_same_query!(
     announcements,
     user_tabs,
     todos,
+    repeating_tasks,
 );
