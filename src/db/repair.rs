@@ -23,6 +23,42 @@ pub fn ensure_schema(conn: &mut SqliteConnection) -> anyhow::Result<()> {
     ensure_queued_messages_model_columns(conn)?;
     ensure_card_dependencies_table(conn)?;
     ensure_todos_table(conn)?;
+    ensure_cards_completed_at_column(conn)?;
+    Ok(())
+}
+
+/// Heal DBs that predate `1780966657_cards_completed_at` AND backfill
+/// `completed_at` for cards already in `done`. The migration is a bare
+/// `ALTER TABLE … ADD COLUMN` (SQLite has no IF NOT EXISTS for that),
+/// so this is the only safe path on a DB that already has the column.
+///
+/// Backfill uses `updated_at` as the best available proxy for "when did
+/// this card finish" on legacy rows — the DB doesn't preserve transition
+/// timestamps. Re-running is safe: we only touch rows where
+/// `completed_at IS NULL AND step = 'done'`, so post-migration writes
+/// (which carry an accurate timestamp) are never clobbered.
+fn ensure_cards_completed_at_column(conn: &mut SqliteConnection) -> anyhow::Result<()> {
+    let rows: Vec<PragmaColumn> = sql_query("PRAGMA table_info(cards)").load(conn)?;
+    let existing: Vec<String> = rows.into_iter().map(|r| r.name).collect();
+    if existing.is_empty() {
+        return Ok(());
+    }
+    let needs_add = !existing.iter().any(|c| c == "completed_at");
+    if needs_add {
+        tracing::info!("Repairing schema: adding cards.completed_at");
+        sql_query("ALTER TABLE cards ADD COLUMN completed_at TEXT").execute(conn)?;
+    }
+    // Backfill once: if we just added the column there are no
+    // post-migration writes to protect; on healthy DBs the column is
+    // already accurate so we don't touch existing rows.
+    if needs_add {
+        sql_query(
+            "UPDATE cards
+             SET completed_at = updated_at
+             WHERE completed_at IS NULL AND step = 'done'",
+        )
+        .execute(conn)?;
+    }
     Ok(())
 }
 

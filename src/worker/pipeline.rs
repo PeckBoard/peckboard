@@ -285,6 +285,7 @@ mod tests {
             block_reason: None,
             created_at: "2025-01-01T00:00:00Z".into(),
             updated_at: "2025-01-01T00:00:00Z".into(),
+            completed_at: None,
         }
     }
 

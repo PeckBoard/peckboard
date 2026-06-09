@@ -4,6 +4,23 @@ use crate::db::Db;
 use crate::db::models::*;
 use crate::db::schema::*;
 
+/// Mutate `update.completed_at` so it reflects the step transition
+/// implied by `update.step` relative to `prev_step`. Called from both
+/// `update_card` and `update_card_atomic` so every step transition —
+/// whether it goes through the policy-checking route handler, the MCP
+/// tool, or the worker orchestrator — stamps a consistent timestamp
+/// without each call site remembering to do it.
+fn stamp_completed_at(prev_step: &str, update: &mut UpdateCard) {
+    let Some(new_step) = update.step.as_deref() else {
+        return;
+    };
+    if new_step == "done" && prev_step != "done" {
+        update.completed_at = Some(Some(chrono::Utc::now().to_rfc3339()));
+    } else if prev_step == "done" && new_step != "done" {
+        update.completed_at = Some(None);
+    }
+}
+
 impl Db {
     pub async fn create_card(&self, new: NewCard) -> anyhow::Result<Card> {
         self.with_conn(move |conn| {
@@ -45,6 +62,23 @@ impl Db {
     pub async fn update_card(&self, id: &str, update: UpdateCard) -> anyhow::Result<Option<Card>> {
         let id = id.to_string();
         self.with_conn(move |conn| {
+            let mut update = update;
+            // Stamp completed_at on transitions into/out of the `done`
+            // step so the Kanban "Done" column can sort by most-recently
+            // finished. We read the existing row inside the same
+            // connection scope, so the read/write pair is atomic under
+            // the DB connection mutex — concurrent step changes can't
+            // interleave between the lookup and the write.
+            if update.step.is_some() && update.completed_at.is_none() {
+                let existing: Option<String> = cards::table
+                    .find(&id)
+                    .select(cards::step)
+                    .first::<String>(conn)
+                    .optional()?;
+                if let Some(prev_step) = existing {
+                    stamp_completed_at(&prev_step, &mut update);
+                }
+            }
             diesel::update(cards::table.find(&id))
                 .set(&update)
                 .returning(Card::as_returning())
@@ -82,7 +116,10 @@ impl Db {
             let Some(existing) = existing else {
                 return Ok(None);
             };
-            let update = validate(&existing)?;
+            let mut update = validate(&existing)?;
+            if update.step.is_some() && update.completed_at.is_none() {
+                stamp_completed_at(&existing.step, &mut update);
+            }
             diesel::update(cards::table.find(&id))
                 .set(&update)
                 .returning(Card::as_returning())

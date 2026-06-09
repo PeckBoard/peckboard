@@ -29,6 +29,25 @@ interface KanbanBoardProps {
 }
 
 export default function KanbanBoard({ projectId, onOpenTodos }: KanbanBoardProps) {
+  // Step headers are `position: sticky; top: var(--kanban-toolbar-h)`. The
+  // toolbar above them is also sticky-top with a higher z-index, so the
+  // step header must offset by the toolbar's measured height to sit flush
+  // beneath it instead of riding behind it.
+  const boardRef = useRef<HTMLDivElement>(null)
+  const boardHeaderRef = useRef<HTMLDivElement>(null)
+  useEffect(() => {
+    const headerEl = boardHeaderRef.current
+    const boardEl = boardRef.current
+    if (!headerEl || !boardEl) return
+    const apply = () => {
+      boardEl.style.setProperty('--kanban-toolbar-h', `${headerEl.offsetHeight}px`)
+    }
+    apply()
+    const ro = new ResizeObserver(apply)
+    ro.observe(headerEl)
+    return () => ro.disconnect()
+  }, [])
+
   const projects = useProjectsStore((s) => s.projects)
   const updateProject = useProjectsStore((s) => s.updateProject)
   const cards = useProjectsStore((s) => s.cards)
@@ -365,7 +384,26 @@ export default function KanbanBoard({ projectId, onOpenTodos }: KanbanBoardProps
         return step
     }
   }
-  const cardsByStep = (step: string) => cards.filter((c) => normalizeStep(c.step) === step)
+  const cardsByStep = (step: string) => {
+    const rows = cards.filter((c) => normalizeStep(c.step) === step)
+    // Done column shows most-recently-finished first so a freshly
+    // completed card jumps to the top instead of being buried behind
+    // older completions in priority order. Backend list is sorted by
+    // priority ASC; we re-order Done client-side because it's the only
+    // step with a non-priority rule and we want the live WS update
+    // (which just patches the cards array) to re-order in place.
+    if (step === 'done') {
+      return [...rows].sort((a, b) => {
+        const aTs = a.completed_at ?? ''
+        const bTs = b.completed_at ?? ''
+        if (aTs === bTs) return 0
+        if (!aTs) return 1
+        if (!bTs) return -1
+        return bTs.localeCompare(aTs)
+      })
+    }
+    return rows
+  }
 
   // Dependency ids resolve to titles/steps via this lookup so cards can
   // show which prerequisites are still outstanding.
@@ -563,8 +601,8 @@ export default function KanbanBoard({ projectId, onOpenTodos }: KanbanBoardProps
   }
 
   return (
-    <div className="kanban-board">
-      <div className="kanban-board-header">
+    <div className="kanban-board" ref={boardRef}>
+      <div className="kanban-board-header" ref={boardHeaderRef}>
         {project && (
           <div className="kanban-project-info">
             <h2 className="kanban-project-name">{project.name}</h2>
@@ -880,10 +918,12 @@ export default function KanbanBoard({ projectId, onOpenTodos }: KanbanBoardProps
               onDragLeave={(e) => handleDragLeave(e, step.key)}
               onDrop={(e) => handleDrop(e, step.key)}
             >
-              <div className="kanban-column-header">
+              <header className="kanban-column-header">
                 <h3>{step.label}</h3>
-                <span className="kanban-count">{rowCards.length}</span>
-              </div>
+                <span className="kanban-count" aria-label={`${rowCards.length} cards`}>
+                  {rowCards.length}
+                </span>
+              </header>
               <div className="kanban-cards">
                 {rowCards.length === 0 && (
                   <span className="kanban-cards-empty">No cards in {step.label}</span>

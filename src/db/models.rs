@@ -146,6 +146,7 @@ pub struct Card {
     pub block_reason: Option<String>,
     pub created_at: String,
     pub updated_at: String,
+    pub completed_at: Option<String>,
 }
 
 #[derive(Insertable, Deserialize, Debug)]
@@ -180,6 +181,7 @@ pub struct UpdateCard {
     pub blocked: Option<bool>,
     pub block_reason: Option<Option<String>>,
     pub updated_at: Option<String>,
+    pub completed_at: Option<Option<String>>,
 }
 
 // ── Card dependencies ────────────────────────────────────────────────

@@ -292,6 +292,9 @@ pub(super) async fn update_card(
                 blocked: body.blocked,
                 block_reason: body.block_reason,
                 updated_at: Some(chrono::Utc::now().to_rfc3339()),
+                // Leave to update_card_atomic's stamper — it knows the
+                // prev_step from the read it already did.
+                completed_at: None,
             })
         })
         .await;

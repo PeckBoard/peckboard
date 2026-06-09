@@ -63,6 +63,7 @@ diesel::table! {
         block_reason -> Nullable<Text>,
         created_at -> Text,
         updated_at -> Text,
+        completed_at -> Nullable<Text>,
     }
 }
 

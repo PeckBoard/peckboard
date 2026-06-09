@@ -1008,4 +1008,145 @@ mod tests {
         assert!(!db.delete_queued_message("nonexistent").await.unwrap());
         assert!(!db.delete_announcement("nonexistent").await.unwrap());
     }
+
+    // ── completed_at stamping on step transitions ────────────────────
+
+    /// Moving a card into the `done` step must stamp `completed_at`;
+    /// moving back out must clear it. Two cards finished at distinct
+    /// times must therefore be distinguishable for the Done-column
+    /// "newest first" sort.
+    #[tokio::test]
+    async fn test_completed_at_stamped_on_done_transition() {
+        let db = test_db();
+        let ts = now();
+        db.create_folder(NewFolder {
+            id: "f1".into(),
+            name: "F".into(),
+            path: "/tmp/f".into(),
+            created_at: ts.clone(),
+        })
+        .await
+        .unwrap();
+        db.create_project(NewProject {
+            id: "p1".into(),
+            name: "P".into(),
+            context: "".into(),
+            folder_id: "f1".into(),
+            worker_count: 1,
+            status: "active".into(),
+            default_workflow: None,
+            model: None,
+            effort: None,
+            parallel_instructions: false,
+            auto_notify_changes: true,
+            worker_communication: false,
+            created_at: ts.clone(),
+            last_accessed_at: ts.clone(),
+        })
+        .await
+        .unwrap();
+
+        for cid in ["older", "newer"] {
+            db.create_card(NewCard {
+                id: cid.into(),
+                project_id: "p1".into(),
+                title: cid.into(),
+                description: "".into(),
+                step: "in_progress".into(),
+                priority: 1,
+                workflow: None,
+                model: None,
+                effort: None,
+                created_at: ts.clone(),
+                updated_at: ts.clone(),
+            })
+            .await
+            .unwrap();
+        }
+
+        // Finish "older" first, sleep so the rfc3339 timestamps sort
+        // unambiguously, then finish "newer".
+        let older = db
+            .update_card(
+                "older",
+                UpdateCard {
+                    step: Some("done".into()),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(
+            older.completed_at.is_some(),
+            "completed_at must stamp on done"
+        );
+
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+
+        let newer = db
+            .update_card(
+                "newer",
+                UpdateCard {
+                    step: Some("done".into()),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(newer.completed_at.is_some());
+        assert!(
+            newer.completed_at.as_deref().unwrap() > older.completed_at.as_deref().unwrap(),
+            "later transition must produce a later timestamp"
+        );
+
+        // Sorting the project's `done` cards by completed_at DESC must
+        // put the more recently finished one first — the property the
+        // Kanban "Done" column relies on.
+        let mut done: Vec<_> = db
+            .list_cards_by_project("p1")
+            .await
+            .unwrap()
+            .into_iter()
+            .filter(|c| c.step == "done")
+            .collect();
+        done.sort_by(|a, b| b.completed_at.cmp(&a.completed_at));
+        assert_eq!(done[0].id, "newer");
+        assert_eq!(done[1].id, "older");
+
+        // Reopening must clear completed_at so a future re-finish gets
+        // a fresh timestamp instead of inheriting the original one.
+        let reopened = db
+            .update_card(
+                "older",
+                UpdateCard {
+                    step: Some("in_progress".into()),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(
+            reopened.completed_at.is_none(),
+            "leaving done must clear completed_at"
+        );
+
+        // Updating an already-done card without changing step must NOT
+        // re-stamp completed_at — otherwise priority edits would
+        // shuffle the Done order spuriously.
+        let same = db
+            .update_card(
+                "newer",
+                UpdateCard {
+                    priority: Some(2),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(same.completed_at, newer.completed_at);
+    }
 }
