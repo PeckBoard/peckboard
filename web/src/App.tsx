@@ -20,7 +20,6 @@ import ConfirmDialog from './components/ConfirmDialog'
 import ReportBrowser from './components/ReportBrowser'
 import ExpertsView from './components/ExpertsView'
 import RepeatingTasksView from './components/RepeatingTasksView'
-import GitView from './components/GitView'
 import UserManagement from './components/UserManagement'
 import ChangePasswordModal from './components/ChangePasswordModal'
 import TabBar from './components/TabBar'
@@ -35,7 +34,6 @@ type View =
   | 'folders'
   | 'settings'
   | 'reports'
-  | 'git'
   | 'users'
 
 /** Sub-view for an active session or project — 'chat' (the default
@@ -68,8 +66,6 @@ function parseRoute(): { view: View; activeId: string | null; sub: SessionSub } 
       return { view: 'settings', activeId: null, sub: 'chat' }
     case 'reports':
       return { view: 'reports', activeId: null, sub: 'chat' }
-    case 'git':
-      return { view: 'git', activeId: null, sub: 'chat' }
     case 'users':
       return { view: 'users', activeId: null, sub: 'chat' }
     default:
@@ -656,27 +652,6 @@ function App() {
             </svg>
           </button>
           <button
-            className={`rail-btn ${view === 'git' ? 'active' : ''}`}
-            onClick={() => navigate('git')}
-            title="Git"
-          >
-            <svg
-              width="18"
-              height="18"
-              viewBox="0 0 24 24"
-              fill="none"
-              stroke="currentColor"
-              strokeWidth="2"
-              strokeLinecap="round"
-              strokeLinejoin="round"
-            >
-              <circle cx="18" cy="18" r="3" />
-              <circle cx="6" cy="6" r="3" />
-              <path d="M13 6h3a2 2 0 0 1 2 2v7" />
-              <line x1="6" y1="9" x2="6" y2="21" />
-            </svg>
-          </button>
-          <button
             className={`rail-btn ${view === 'settings' ? 'active' : ''}`}
             onClick={() => navigate('settings')}
             title="Settings"
@@ -940,7 +915,6 @@ function App() {
         {view === 'folders' && <FoldersPage />}
         {view === 'settings' && <SettingsPage />}
         {view === 'reports' && <ReportBrowser />}
-        {view === 'git' && <GitView />}
         {view === 'users' && <UserManagement />}
       </main>
 

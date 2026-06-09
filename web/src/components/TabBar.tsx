@@ -13,7 +13,6 @@ interface TabBarProps {
     | 'folders'
     | 'settings'
     | 'reports'
-    | 'git'
     | 'users'
   activeSessionId: string | null
   activeProjectId: string | null

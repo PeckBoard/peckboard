@@ -1,7 +1,6 @@
 pub mod attachments;
 pub mod auth;
 pub mod folders;
-pub mod git;
 pub mod mcp;
 pub mod me;
 pub mod misc;
@@ -29,7 +28,6 @@ pub fn api_router(state: Arc<AppState>) -> Router<Arc<AppState>> {
         .merge(projects::router(state.clone()))
         .merge(repeating_tasks::router(state.clone()))
         .merge(reports::router(state.clone()))
-        .merge(git::router(state.clone()))
         .merge(attachments::router(state.clone()))
         .merge(notifications::router(state.clone()))
         .merge(me::router(state.clone()))
