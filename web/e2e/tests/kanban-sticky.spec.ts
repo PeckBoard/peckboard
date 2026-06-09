@@ -84,7 +84,11 @@ test('cards wrap onto multiple lines without horizontal page scroll', async ({
   expect(baseURL, 'baseURL configured').toBeTruthy()
   // Narrow viewport guarantees the row needs to wrap (cards are 320px;
   // 8 cards = 2560px of card content, far wider than the viewport).
-  await page.setViewportSize({ width: 800, height: 700 })
+  // Keep below the `md` breakpoint (768px) so the board renders in the
+  // mobile horizontal-rows layout that this test is asserting about —
+  // above `md` the kanban flips to classic vertical-columns kanban and
+  // there's nothing to "wrap" inside a row.
+  await page.setViewportSize({ width: 700, height: 700 })
 
   const { token, auth } = await authenticate(request)
   const { projectId } = await setupProject(request, auth, 'wrap', 8)
@@ -155,8 +159,11 @@ test('step header pins under the toolbar while scrolling its section, then yield
   expect(baseURL, 'baseURL configured').toBeTruthy()
   // Narrow + very short viewport so each row wraps into multiple lines
   // and the board genuinely needs to scroll vertically between adjacent
-  // step sections.
-  await page.setViewportSize({ width: 800, height: 480 })
+  // step sections. Width is below the `md` breakpoint (768px) so the
+  // board renders the mobile horizontal-rows layout where steps stack
+  // vertically — that's the layout the section-locked sticky header
+  // behaviour applies to.
+  await page.setViewportSize({ width: 700, height: 480 })
 
   const { token, auth } = await authenticate(request)
 
@@ -195,7 +202,6 @@ test('step header pins under the toolbar while scrolling its section, then yield
 
   await loadAt(page, token, `/projects/${project.id}`)
 
-  const board = page.locator('.kanban-board')
   const toolbar = page.locator('.kanban-board-header')
   // Match rows by their header heading exactly so the locator can't
   // catch a priority-badge "Backlog" inside a card.

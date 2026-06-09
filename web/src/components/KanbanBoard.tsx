@@ -4,6 +4,7 @@ import { useResourcesStore } from '../store/resources'
 import { useWsStore } from '../store/ws'
 import { authedFetch } from '../store/auth'
 import { useMentions, filterMentions } from '../hooks/useMentions'
+import { useMediaQuery } from '../hooks/useMediaQuery'
 import type { Card, Event } from '../types/api'
 import EditCardModal from './EditCardModal'
 import WorkerComms from './WorkerComms'
@@ -29,6 +30,15 @@ interface KanbanBoardProps {
 }
 
 export default function KanbanBoard({ projectId, onOpenTodos }: KanbanBoardProps) {
+  // Desktop (≥ md) flips the board to classic vertical-columns kanban:
+  // columns side by side, cards stacked top-to-bottom inside each column.
+  // CSS handles the layout; the JS only needs to know the orientation to
+  // pick the correct DnD insertion axis (horizontal midpoint test on
+  // mobile rows, vertical midpoint test on desktop columns). Reading
+  // through `matchMedia` instead of a resize listener means no
+  // orientation flash on first render.
+  const isDesktop = useMediaQuery('(min-width: 768px)')
+
   // Step headers are `position: sticky; top: var(--kanban-toolbar-h)`. The
   // toolbar above them is also sticky-top with a higher z-index, so the
   // step header must offset by the toolbar's measured height to sit flush
@@ -520,9 +530,12 @@ export default function KanbanBoard({ projectId, onOpenTodos }: KanbanBoardProps
     }
   }
 
-  // Dragover on a specific card. Left half → insert before this card; right
-  // half → insert after. Cross-row hover still falls through to the row
-  // accept band (no insert indicator) so the gesture matches the layout.
+  // Dragover on a specific card. Insertion axis tracks the layout: leading
+  // half of the card → insert before this card; trailing half → insert
+  // after. On desktop (vertical columns) "leading" is the top half; on
+  // mobile (horizontal rows) it's the left half. Cross-step hover still
+  // falls through to the row accept band (no insert indicator) so the
+  // gesture matches the layout.
   const handleCardDragOver = (
     e: React.DragEvent,
     stepKey: string,
@@ -537,8 +550,13 @@ export default function KanbanBoard({ projectId, onOpenTodos }: KanbanBoardProps
       return
     }
     const rect = cardEl.getBoundingClientRect()
-    const midX = rect.left + rect.width / 2
-    const insertIdx = e.clientX < midX ? cardIndex : cardIndex + 1
+    const insertIdx = isDesktop
+      ? e.clientY < rect.top + rect.height / 2
+        ? cardIndex
+        : cardIndex + 1
+      : e.clientX < rect.left + rect.width / 2
+        ? cardIndex
+        : cardIndex + 1
     setDragOver({ step: stepKey, insertIdx })
   }
 

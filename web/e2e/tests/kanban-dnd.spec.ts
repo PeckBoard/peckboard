@@ -4,22 +4,25 @@ import { tmpdir } from 'node:os'
 import path from 'node:path'
 
 /**
- * Drag-and-drop on the horizontal kanban board.
+ * Drag-and-drop on the kanban board at the default (desktop) viewport,
+ * where the board renders as classic vertical-columns kanban: steps
+ * side by side, cards stacked top-to-bottom inside each column.
  *
- * Two user-visible behaviours, one assertion each:
+ * Three user-visible behaviours, one assertion each:
  *
- *   1. **Cross-row** — dragging a card vertically from one row into another
- *      persists a step transition. The destination row shows the accept
- *      band while the drag is over it, and the card lands in the new row
- *      after the drop.
- *   2. **In-row** — dragging a card horizontally past a sibling persists a
- *      priority/bucket change (the backend orders by `priority ASC`). The
- *      drop indicator appears as a vertical line between cards; on release,
- *      the dragged card's priority adopts the leading neighbour's so the
- *      row order is preserved across a refresh.
- *   3. **Horizontal geometry** — the board renders step rows top-to-bottom
- *      in the canonical step order, cards within a row render left-to-right
- *      in priority-ASC order, and a cross-row drop survives a full reload.
+ *   1. **Cross-column** — dragging a card across a column boundary
+ *      persists a step transition.
+ *   2. **In-column** — dragging a card past a sibling within a column
+ *      persists a priority/bucket change (the backend orders by
+ *      `priority ASC`). On the desktop vertical-columns layout the
+ *      insertion axis is vertical (top half = insert before, bottom
+ *      half = insert after); on release, the dragged card's priority
+ *      adopts the leading neighbour's so the column order survives a
+ *      refresh.
+ *   3. **Column geometry** — the board renders step columns
+ *      left-to-right in the canonical step order, cards within a
+ *      column render top-to-bottom in priority-ASC order, and a
+ *      cross-column drop survives a full reload.
  *
  * Project is created with `worker_count: 0` so the orchestrator never
  * picks up our cards and changes their `step` / `worker_session_id`
@@ -99,7 +102,7 @@ async function setupProjectWithCards(
   return { projectId: project.id, cards }
 }
 
-test('cross-row drag from backlog to in_progress persists the step change', async ({
+test('cross-column drag from backlog to in_progress persists the step change', async ({
   request,
   page,
   baseURL,
@@ -128,7 +131,7 @@ test('cross-row drag from backlog to in_progress persists the step change', asyn
   expect(moved.step).toBe('in_progress')
 })
 
-test('in-row drag past a sibling adopts the leading neighbour priority', async ({
+test('in-column drag past a sibling adopts the leading neighbour priority', async ({
   request,
   page,
   baseURL,
@@ -145,12 +148,14 @@ test('in-row drag past a sibling adopts the leading neighbour priority', async (
   await expect(first).toBeVisible({ timeout: 10_000 })
   await expect(third).toBeVisible()
 
-  // Drop "Third" onto the left half of "First" — that's an insertIdx of 0,
-  // which adopts the trailing-neighbour priority (First's = 0).
+  // Drop "Third" onto the top half of "First" — on the desktop
+  // vertical-columns layout the insertion axis is vertical, so this is
+  // an insertIdx of 0, which adopts the trailing-neighbour priority
+  // (First's = 0).
   const firstBox = await first.boundingBox()
   expect(firstBox).toBeTruthy()
   await third.dragTo(first, {
-    targetPosition: { x: 4, y: firstBox!.height / 2 },
+    targetPosition: { x: firstBox!.width / 2, y: 4 },
   })
 
   // Wait for the priority write to round-trip.
@@ -175,7 +180,7 @@ test('in-row drag past a sibling adopts the leading neighbour priority', async (
   expect(reordered.step, 'Third stays in backlog').toBe('backlog')
 })
 
-test('rows stack vertically, cards stack horizontally, and order survives a reload', async ({
+test('columns stack horizontally, cards stack vertically, and order survives a reload', async ({
   request,
   page,
   baseURL,
@@ -185,8 +190,8 @@ test('rows stack vertically, cards stack horizontally, and order survives a relo
   const { projectId, cards } = await setupProjectWithCards(request, auth, 'geom')
 
   // Park one card in each of the first three steps so we can assert the
-  // vertical stacking order of rows independently of the priority order
-  // of cards within a row.
+  // horizontal ordering of columns independently of the priority order
+  // of cards within a column.
   await request.put(`/api/projects/${projectId}/cards/${cards[1].id}`, {
     headers: auth,
     data: { step: 'in_progress' },
@@ -198,72 +203,72 @@ test('rows stack vertically, cards stack horizontally, and order survives a relo
 
   await loadAt(page, token, `/projects/${projectId}`)
 
-  // Match rows by their header heading exactly — priority 4 cards render a
-  // "Backlog" badge inside the card, so a `hasText: 'Backlog'` filter on
-  // .kanban-column matches multiple rows once "Third" lands in Review.
-  const rowByLabel = (label: string) =>
+  // Match columns by their header heading exactly — priority 4 cards render
+  // a "Backlog" badge inside the card, so a `hasText: 'Backlog'` filter on
+  // .kanban-column matches multiple columns once "Third" lands in Review.
+  const columnByLabel = (label: string) =>
     page.locator('.kanban-column').filter({
       has: page.locator('.kanban-column-header h3', { hasText: new RegExp(`^${label}$`) }),
     })
-  const backlogRow = rowByLabel('Backlog')
-  const inProgressRow = rowByLabel('In Progress')
-  const reviewRow = rowByLabel('Review')
-  await expect(backlogRow.locator('.kanban-card-title', { hasText: 'First' })).toBeVisible({
+  const backlogCol = columnByLabel('Backlog')
+  const inProgressCol = columnByLabel('In Progress')
+  const reviewCol = columnByLabel('Review')
+  await expect(backlogCol.locator('.kanban-card-title', { hasText: 'First' })).toBeVisible({
     timeout: 10_000,
   })
-  await expect(inProgressRow.locator('.kanban-card-title', { hasText: 'Second' })).toBeVisible()
-  await expect(reviewRow.locator('.kanban-card-title', { hasText: 'Third' })).toBeVisible()
+  await expect(inProgressCol.locator('.kanban-card-title', { hasText: 'Second' })).toBeVisible()
+  await expect(reviewCol.locator('.kanban-card-title', { hasText: 'Third' })).toBeVisible()
 
-  // Rows stack top-to-bottom: Backlog above In Progress above Review.
-  const backlogBox = await backlogRow.boundingBox()
-  const inProgressBox = await inProgressRow.boundingBox()
-  const reviewBox = await reviewRow.boundingBox()
-  expect(backlogBox && inProgressBox && reviewBox, 'all three rows measurable').toBeTruthy()
-  expect(backlogBox!.y, 'Backlog above In Progress').toBeLessThan(inProgressBox!.y)
-  expect(inProgressBox!.y, 'In Progress above Review').toBeLessThan(reviewBox!.y)
+  // Columns stack left-to-right: Backlog left of In Progress left of Review.
+  const backlogBox = await backlogCol.boundingBox()
+  const inProgressBox = await inProgressCol.boundingBox()
+  const reviewBox = await reviewCol.boundingBox()
+  expect(backlogBox && inProgressBox && reviewBox, 'all three columns measurable').toBeTruthy()
+  expect(backlogBox!.x, 'Backlog left of In Progress').toBeLessThan(inProgressBox!.x)
+  expect(inProgressBox!.x, 'In Progress left of Review').toBeLessThan(reviewBox!.x)
 
-  // Move "Third" back into the backlog row so we have two siblings to
-  // assert horizontal ordering on. Priority 4 keeps it to the right of
-  // "First" (priority 0).
+  // Move "Third" back into the backlog column so we have two siblings to
+  // assert vertical ordering on. Priority 4 keeps it below "First"
+  // (priority 0).
   await request.put(`/api/projects/${projectId}/cards/${cards[2].id}`, {
     headers: auth,
     data: { step: 'backlog' },
   })
 
-  const first = backlogRow.locator('.kanban-card', { hasText: 'First' })
-  const third = backlogRow.locator('.kanban-card', { hasText: 'Third' })
+  const first = backlogCol.locator('.kanban-card', { hasText: 'First' })
+  const third = backlogCol.locator('.kanban-card', { hasText: 'Third' })
   await expect(third).toBeVisible({ timeout: 5_000 })
 
-  // Cards within a row stack left-to-right in priority-ASC order.
-  // Compare card-center x's so a tiny overlap from focus rings doesn't
+  // Cards within a column stack top-to-bottom in priority-ASC order.
+  // Compare card-center y's so a tiny overlap from focus rings doesn't
   // flip the comparison.
   const firstBox = await first.boundingBox()
   const thirdBox = await third.boundingBox()
   expect(firstBox && thirdBox, 'both backlog cards measurable').toBeTruthy()
   expect(
-    firstBox!.x + firstBox!.width / 2,
-    'First (priority 0) left of Third (priority 4)',
-  ).toBeLessThan(thirdBox!.x + thirdBox!.width / 2)
-  // And the row really is laid out horizontally — the cards' vertical
-  // extents overlap (a row layout), they're not stacked vertically.
-  const firstYRange = [firstBox!.y, firstBox!.y + firstBox!.height]
-  const thirdYRange = [thirdBox!.y, thirdBox!.y + thirdBox!.height]
+    firstBox!.y + firstBox!.height / 2,
+    'First (priority 0) above Third (priority 4)',
+  ).toBeLessThan(thirdBox!.y + thirdBox!.height / 2)
+  // And the column really is laid out vertically — the cards' horizontal
+  // extents overlap (a column layout), they're not stacked side-by-side.
+  const firstXRange = [firstBox!.x, firstBox!.x + firstBox!.width]
+  const thirdXRange = [thirdBox!.x, thirdBox!.x + thirdBox!.width]
   expect(
-    Math.min(firstYRange[1], thirdYRange[1]) - Math.max(firstYRange[0], thirdYRange[0]),
-    'siblings vertically overlap (horizontal row layout)',
+    Math.min(firstXRange[1], thirdXRange[1]) - Math.max(firstXRange[0], thirdXRange[0]),
+    'siblings horizontally overlap (vertical column layout)',
   ).toBeGreaterThan(0)
 
-  // Cross-row drag persists across reload. Drag "First" from backlog into
-  // the in-progress row, then reload and confirm it's still in the
-  // in-progress row (and gone from backlog).
-  await first.dragTo(inProgressRow)
-  await expect(inProgressRow.locator('.kanban-card-title', { hasText: 'First' })).toBeVisible({
+  // Cross-column drag persists across reload. Drag "First" from backlog
+  // into the in-progress column, then reload and confirm it's still in
+  // the in-progress column (and gone from backlog).
+  await first.dragTo(inProgressCol)
+  await expect(inProgressCol.locator('.kanban-card-title', { hasText: 'First' })).toBeVisible({
     timeout: 5_000,
   })
 
   await page.reload()
-  const reloadedInProgress = rowByLabel('In Progress')
-  const reloadedBacklog = rowByLabel('Backlog')
+  const reloadedInProgress = columnByLabel('In Progress')
+  const reloadedBacklog = columnByLabel('Backlog')
   await expect(reloadedInProgress.locator('.kanban-card-title', { hasText: 'First' })).toBeVisible({
     timeout: 10_000,
   })
