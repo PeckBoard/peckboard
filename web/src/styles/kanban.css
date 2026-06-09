@@ -13,14 +13,13 @@
   padding: 0 20px 20px;
   position: relative;
 }
-/* Top-level header pins above the rows as the user scrolls vertically.
-   Sits flush beneath the tabbar at rest and when pinned on scroll. */
+/* Top-level header sits flush beneath the tabbar at rest. It is NOT
+   sticky: as the user scrolls, the board header scrolls out and the
+   per-step sticky header (`.kanban-column-header`) takes over, pinning
+   flush against the bottom of the tabbar with no leftover gap. */
 .kanban-board .kanban-board-header {
-  position: sticky;
-  top: 0;
-  z-index: 30;
   background: var(--bg);
-  padding-top: 8px;
+  padding-top: 0;
   padding-bottom: 4px;
 }
 .kanban-columns {
@@ -65,10 +64,10 @@
   border-top-left-radius: var(--radius-lg);
   border-top-right-radius: var(--radius-lg);
   position: sticky;
-  /* `--kanban-toolbar-h` is set on `.kanban-board` from a ResizeObserver
-     on the board-header element so the offset tracks toolbar size
-     changes (wrapping at narrow widths, status badge appearing). */
-  top: var(--kanban-toolbar-h, 0px);
+  /* Pins flush against the bottom of the tabbar. The board itself is
+     the scroll container and sits directly under the tabbar with no
+     padding-top, so `top: 0` here equals the tabbar's bottom edge. */
+  top: 0;
   /* Above cards in the same column so cards scroll under the pinned
      header. Thought bubbles bump z-index higher so they never get
      clipped by the header when a card sits near the section top. */

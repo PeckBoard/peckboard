@@ -39,24 +39,8 @@ export default function KanbanBoard({ projectId, onOpenTodos }: KanbanBoardProps
   // orientation flash on first render.
   const isDesktop = useMediaQuery('(min-width: 768px)')
 
-  // Step headers are `position: sticky; top: var(--kanban-toolbar-h)`. The
-  // toolbar above them is also sticky-top with a higher z-index, so the
-  // step header must offset by the toolbar's measured height to sit flush
-  // beneath it instead of riding behind it.
-  const boardRef = useRef<HTMLDivElement>(null)
-  const boardHeaderRef = useRef<HTMLDivElement>(null)
-  useEffect(() => {
-    const headerEl = boardHeaderRef.current
-    const boardEl = boardRef.current
-    if (!headerEl || !boardEl) return
-    const apply = () => {
-      boardEl.style.setProperty('--kanban-toolbar-h', `${headerEl.offsetHeight}px`)
-    }
-    apply()
-    const ro = new ResizeObserver(apply)
-    ro.observe(headerEl)
-    return () => ro.disconnect()
-  }, [])
+  // Step headers pin at `top: 0` against the board's scroll container,
+  // which sits flush below the tabbar — no measured offset needed.
 
   const projects = useProjectsStore((s) => s.projects)
   const updateProject = useProjectsStore((s) => s.updateProject)
@@ -619,8 +603,8 @@ export default function KanbanBoard({ projectId, onOpenTodos }: KanbanBoardProps
   }
 
   return (
-    <div className="kanban-board" ref={boardRef}>
-      <div className="kanban-board-header" ref={boardHeaderRef}>
+    <div className="kanban-board">
+      <div className="kanban-board-header">
         {project && (
           <div className="kanban-project-info">
             <h2 className="kanban-project-name">{project.name}</h2>
