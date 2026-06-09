@@ -56,6 +56,19 @@ export default function SessionTodosView({ sessionId, onBack }: SessionTodosView
     }
   }, [sessionId])
 
+  // Same `session-cleared` reset as ChatView — the load-time fetch
+  // above is keyed on sessionId, so without this a clear from the chat
+  // toolbar leaves a stale snapshot showing in this standalone view.
+  useEffect(() => {
+    const onCleared = (e: CustomEvent<{ sessionId: string }>) => {
+      if (e.detail?.sessionId === sessionId) setLoadedTodos([])
+    }
+    window.addEventListener('peckboard:session-cleared', onCleared as EventListener)
+    return () => {
+      window.removeEventListener('peckboard:session-cleared', onCleared as EventListener)
+    }
+  }, [sessionId])
+
   // Make sure the events store has this session's history populated so live
   // `todo` events can override the load-time snapshot.
   useEffect(() => {

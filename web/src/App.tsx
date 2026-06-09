@@ -250,14 +250,26 @@ function App() {
       return el.isContentEditable
     }
 
+    // Only gate the shrink on Stage-Manager-capable widths (iPad-sized).
+    // On phones, document.hasFocus() can transiently return false while
+    // the keyboard animates open — which then unshrinks the layout and
+    // strands the input bar behind the keyboard. Phones don't have
+    // Stage Manager, so the isEditableFocused() check below is enough.
+    const isTablet = () => window.matchMedia('(min-width: 768px)').matches
+
     const update = () => {
       let height = `${window.innerHeight}px`
-      if (vv && document.hasFocus() && isEditableFocused()) {
+      const focusOwned = isTablet()
+        ? document.hasFocus() && isEditableFocused()
+        : isEditableFocused()
+      if (vv && focusOwned) {
         const delta = window.innerHeight - vv.height
         // Threshold filters out non-keyboard chrome shifts (e.g. iOS
         // URL bar) which we want `100dvh` semantics for, not a hard
-        // pixel pin.
-        if (delta > 80) height = `${vv.height}px`
+        // pixel pin. 50px is below the smallest realistic soft keyboard
+        // (typical iOS/Android keyboards are 240px+) but above the
+        // ~30-40px URL-bar collapse on iOS Safari.
+        if (delta > 50) height = `${vv.height}px`
       }
       root.style.setProperty('--app-height', height)
       // iOS Safari auto-scrolls the *layout* viewport so a focused

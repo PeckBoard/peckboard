@@ -229,6 +229,21 @@
     font-size: 12px;
     margin-right: 4px;
   }
+  /* Keep the tab strip the same height as the rail above it at this
+     breakpoint too — otherwise the rail shrinks to 48px while the
+     tabbar stays at 56px and the two bands look mismatched. */
+  .tabbar {
+    min-height: 48px;
+    padding: 0 6px;
+  }
+  .tab-wrap {
+    height: 36px;
+  }
+  .tab-new {
+    width: 32px;
+    height: 32px;
+    font-size: 18px;
+  }
   .chat-bubble {
     max-width: 95%;
     font-size: var(--text-sm);
@@ -320,9 +335,12 @@
   background: rgba(255, 255, 255, 0.2);
 }
 @media (max-width: 768px) {
+  /* Match the rail's `min-height` so the two horizontal strips read as
+     a single stacked toolbar instead of two mismatched bands. */
   .tabbar {
     gap: 8px;
-    padding: 8px 10px;
+    padding: 0 10px;
+    min-height: 56px;
   }
   .tab-wrap {
     height: 40px;

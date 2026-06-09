@@ -82,6 +82,12 @@ test.describe('mobile layout', () => {
     expect(content, 'viewport meta tag present').toBeTruthy()
     expect(content).toMatch(/user-scalable\s*=\s*no/)
     expect(content).toMatch(/maximum-scale\s*=\s*1/)
+    // Tells Chromium-based browsers to resize the layout viewport (not
+    // just the visual viewport) when the on-screen keyboard opens, so
+    // `100vh` / `height: 100%` chains actually shrink and the input bar
+    // doesn't end up behind the keyboard. iOS Safari ignores this and
+    // falls back to the visualViewport-driven --app-height var.
+    expect(content).toMatch(/interactive-widget\s*=\s*resizes-content/)
   })
 
   test('page does not horizontally overflow on a session view', async ({

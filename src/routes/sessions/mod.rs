@@ -297,6 +297,33 @@ async fn clear_session(
         )
     })?;
 
+    // Wipe the dedicated todos table too. The chat view's local memo
+    // falls back to empty once events load empty, but the load-time
+    // /todos endpoint and the dedicated SessionTodosView read straight
+    // from this table — without this, todos reappear after a reload or
+    // when the user opens the standalone tasks view.
+    state
+        .db
+        .replace_session_todos(&id, crate::todo::TodoSnapshot::default())
+        .await
+        .map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({ "error": e.to_string() })),
+            )
+        })?;
+
+    // Tell any live subscribers (chat view, session-todos view) to drop
+    // their cached snapshot. Sent as a typed transient frame rather than
+    // a persisted `todo` event so the cleared events list stays empty.
+    state
+        .broadcaster
+        .broadcast(crate::ws::broadcaster::WsEvent {
+            event_type: "session-cleared".into(),
+            session_id: id.clone(),
+            data: serde_json::json!({ "session_id": id }),
+        });
+
     // Delete attachments directory
     let attachments_dir = state.config.data_dir.join("attachments").join(&id);
     if attachments_dir.exists() {

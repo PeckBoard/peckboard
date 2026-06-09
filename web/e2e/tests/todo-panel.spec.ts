@@ -177,18 +177,54 @@ test('clearing the session removes the todo panel from the chat view', async ({
   const clearRes = await request.post(`/api/sessions/${sessionId}/clear`, { headers: authHeader })
   expect(clearRes.ok(), `clear failed: ${await clearRes.text()}`).toBeTruthy()
 
-  // Trigger a refetch the same way the UI's clear handlers do (the
-  // backend doesn't broadcast a "session cleared" event, so the open
-  // ChatView only learns by re-listing events).
-  const refetchRes = await request.get(`/api/sessions/${sessionId}/events`, {
-    headers: authHeader,
-  })
-  expect(refetchRes.ok()).toBeTruthy()
-  expect((await refetchRes.json()) as unknown[]).toEqual([])
+  // The backend now broadcasts `session-cleared`, so the panel disappears
+  // live — no reload required. Before this fix the cached snapshot was
+  // only dropped on a sessionId-change effect.
+  await expect(page.getByTestId('todo-panel')).toHaveCount(0, { timeout: 5_000 })
 
-  // Reload to re-enter the chat with a fresh fetch — this exercises the
-  // user-visible promise: after clear, no todo panel.
+  // Backend regression: the `/todos` snapshot must be empty too, otherwise
+  // re-opening the session would refetch and re-render the stale list.
+  const todosRes = await request.get(`/api/sessions/${sessionId}/todos`, { headers: authHeader })
+  expect(todosRes.ok()).toBeTruthy()
+  expect((await todosRes.json()) as { todos: unknown[] }).toEqual({ todos: [] })
+
+  // Reload also stays clean — confirms the server-side wipe took.
   await page.reload()
   await expect(page.locator('.chat-empty')).toBeVisible({ timeout: 10_000 })
+  await expect(page.getByTestId('todo-panel')).toHaveCount(0)
+})
+
+test('clearing the session live-clears the dedicated session-todos view', async ({
+  request,
+  page,
+  baseURL,
+}) => {
+  // The standalone SessionTodosView didn't have ChatView's events.length===0
+  // fallback, so a clear used to leave it rendering the load-time snapshot
+  // forever. The session-cleared broadcast now drops the cached snapshot
+  // here too.
+  expect(baseURL, 'baseURL configured').toBeTruthy()
+
+  const { token, authHeader } = await authenticate(request)
+  const { sessionId } = await seedAuthedSession(request, authHeader)
+
+  // Seed todos before opening the dedicated view so the load-time fetch
+  // hydrates `loadedTodos` with the pre-clear list.
+  const sendRes = await request.post(`/api/sessions/${sessionId}/message`, {
+    headers: authHeader,
+    data: { text: 'track some work', model: 'mock:todo' },
+  })
+  expect(sendRes.ok(), `send failed: ${await sendRes.text()}`).toBeTruthy()
+
+  await loadAppAt(page, token, `/sessions/${sessionId}/todos`)
+  await expect(page.getByTestId('session-todos-view')).toBeVisible({ timeout: 10_000 })
+  await expect(page.getByTestId('todo-panel')).toBeVisible({ timeout: 10_000 })
+  await expect(page.getByTestId('todo-item')).toHaveCount(3)
+
+  const clearRes = await request.post(`/api/sessions/${sessionId}/clear`, { headers: authHeader })
+  expect(clearRes.ok(), `clear failed: ${await clearRes.text()}`).toBeTruthy()
+
+  // Live: empty-state copy replaces the panel without a reload.
+  await expect(page.getByTestId('session-todos-empty')).toBeVisible({ timeout: 5_000 })
   await expect(page.getByTestId('todo-panel')).toHaveCount(0)
 })

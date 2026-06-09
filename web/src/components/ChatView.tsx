@@ -263,6 +263,20 @@ export default function ChatView({ sessionId, onOpenTodos }: ChatViewProps) {
     }
   }, [sessionId])
 
+  // Listen for the server's `session-cleared` broadcast and drop the
+  // cached snapshot. Without this the panel keeps rendering pre-clear
+  // todos until the user navigates away — the load-time fetch above
+  // only runs on sessionId change, not on a same-session wipe.
+  useEffect(() => {
+    const onCleared = (e: CustomEvent<{ sessionId: string }>) => {
+      if (e.detail?.sessionId === sessionId) setLoadedTodos([])
+    }
+    window.addEventListener('peckboard:session-cleared', onCleared as EventListener)
+    return () => {
+      window.removeEventListener('peckboard:session-cleared', onCleared as EventListener)
+    }
+  }, [sessionId])
+
   // Close menu on outside click
   useEffect(() => {
     if (!menuOpen) return

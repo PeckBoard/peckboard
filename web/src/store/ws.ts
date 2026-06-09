@@ -140,6 +140,36 @@ export const useWsStore = create<WsState>((set, get) => ({
         return
       }
 
+      if (msg.type === 'session-cleared') {
+        // Server wiped this session's events + todos. Two event caches
+        // need to drop the snapshot in lockstep — `useWsStore`'s
+        // (powers the project-todos aggregator and resume-seq logic)
+        // and `useSessionsStore`'s (powers ChatView, the chat-toolbar
+        // Tasks badge, and the tab unread state). Also reset the
+        // last-seq so a stale subscriber doesn't keep resuming from a
+        // now-deleted seq, then fan out to components that hold their
+        // own per-session snapshots (the todo loaders in ChatView /
+        // SessionTodosView).
+        const sessionId = msg.session_id as string
+        if (sessionId) {
+          const { eventsBySession, lastSeqBySession } = get()
+          const remainingSeqs = { ...lastSeqBySession }
+          delete remainingSeqs[sessionId]
+          saveLastSeqs(remainingSeqs)
+          set({
+            eventsBySession: { ...eventsBySession, [sessionId]: [] },
+            lastSeqBySession: remainingSeqs,
+          })
+          useSessionsStore.setState((s) => ({
+            eventsBySession: { ...s.eventsBySession, [sessionId]: [] },
+          }))
+          window.dispatchEvent(
+            new CustomEvent('peckboard:session-cleared', { detail: { sessionId } }),
+          )
+        }
+        return
+      }
+
       if (msg.type === 'event') {
         // Server sends { type: "event", session_id: "...", event: { id, seq, ts, kind, data } }
         const sessionId = msg.session_id as string

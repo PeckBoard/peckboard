@@ -90,6 +90,18 @@ pub(super) async fn send_message(
         (model.unwrap_or_else(|| "default".into()), effort)
     };
 
+    // Mark any pending question events as dismissed before appending
+    // the user's message. Otherwise the question card stays rendered
+    // in the chat after the user has clearly chosen to type past it,
+    // and the agent gets the new user input with no signal that the
+    // earlier question is no longer outstanding. The dismissal mirrors
+    // the explicit reject path (the question UI's "Skip" button) — but
+    // we persist + broadcast directly here rather than going through
+    // the `/events` route, to avoid the route's `question-resolved`
+    // side effect that respawns the agent (this turn is about to do
+    // exactly that with the user's actual text).
+    dismiss_pending_questions(&state, &id).await;
+
     // Always append the user event up front so the chat transcript
     // reflects the order the user typed in, regardless of whether the
     // agent is mid-turn or idle. In stream-json mode the Claude CLI
@@ -329,6 +341,81 @@ pub(super) async fn interrupt_session(
         });
 
     Ok::<_, (StatusCode, Json<serde_json::Value>)>(StatusCode::NO_CONTENT)
+}
+
+/// Resolve every outstanding `question` event for the session by appending a
+/// `question-resolved {rejected: true}` for each id that doesn't already have
+/// one. Persists + broadcasts directly (no `/events` route), so we don't
+/// trigger the route's question-resolved → agent-respawn side effect — the
+/// caller is about to dispatch the actual user message and start a turn on
+/// its own.
+async fn dismiss_pending_questions(state: &Arc<AppState>, session_id: &str) {
+    let events = match state.db.list_events_by_session(session_id, None).await {
+        Ok(events) => events,
+        Err(e) => {
+            tracing::warn!(
+                session_id = %session_id,
+                "Failed to scan events for pending questions: {e}"
+            );
+            return;
+        }
+    };
+
+    let mut resolved: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut question_ids: Vec<String> = Vec::new();
+    for ev in &events {
+        match ev.kind.as_str() {
+            "question" => question_ids.push(ev.id.clone()),
+            "question-resolved" => {
+                if let Ok(data) = serde_json::from_str::<serde_json::Value>(&ev.data) {
+                    let qid = data
+                        .get("question_id")
+                        .or_else(|| data.get("questionId"))
+                        .and_then(|v| v.as_str())
+                        .map(|s| s.to_string());
+                    if let Some(qid) = qid {
+                        resolved.insert(qid);
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    for qid in question_ids {
+        if resolved.contains(&qid) {
+            continue;
+        }
+        let data = serde_json::json!({
+            "question_id": qid,
+            "rejected": true,
+            "reason": "superseded-by-user-message",
+        });
+        match state
+            .db
+            .append_event(session_id, "question-resolved", data.clone())
+            .await
+        {
+            Ok(ev) => {
+                state.broadcaster.broadcast(crate::ws::broadcaster::WsEvent {
+                    event_type: "event".into(),
+                    session_id: session_id.to_string(),
+                    data: serde_json::json!({
+                        "id": ev.id,
+                        "seq": ev.seq,
+                        "ts": ev.ts,
+                        "kind": ev.kind,
+                        "data": serde_json::from_str::<serde_json::Value>(&ev.data).unwrap_or_default(),
+                    }),
+                });
+            }
+            Err(e) => tracing::warn!(
+                session_id = %session_id,
+                question_id = %qid,
+                "Failed to auto-dismiss pending question: {e}"
+            ),
+        }
+    }
 }
 
 /// GET /api/sessions/:id/status -- derive agent status from the event tail.
