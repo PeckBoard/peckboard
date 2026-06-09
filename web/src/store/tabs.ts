@@ -10,6 +10,13 @@ export interface Tab {
    *  Frontend computes the unread badge by comparing this against the
    *  source's own activity timestamp (session.last_activity, etc.). */
   lastActive: string
+  /** Denormalized name of the underlying session/project. The server
+   *  resolves this on the way out — see /api/me/tabs in src/routes/me.rs.
+   *  Worker sessions (`is_worker=true`) are not in the regular sessions
+   *  list, so the strip relied on this field to label them; without it
+   *  the chip rendered as a generic "Session" and the cleanup loop
+   *  closed the tab as soon as the sessions list loaded. */
+  name: string
 }
 
 interface TabsState {
@@ -34,10 +41,16 @@ interface ApiTab {
   item_type: TabType
   item_id: string
   last_active: string
+  name?: string
 }
 
 function fromApi(t: ApiTab): Tab {
-  return { itemType: t.item_type, itemId: t.item_id, lastActive: t.last_active }
+  return {
+    itemType: t.item_type,
+    itemId: t.item_id,
+    lastActive: t.last_active,
+    name: t.name ?? '',
+  }
 }
 
 /** Initial sort for tabs freshly loaded from the server: most recent
@@ -92,8 +105,10 @@ export const useTabsStore = create<TabsState>((set, get) => ({
       return
     }
     // New tab: prepend to the strip optimistically, then write through.
+    // Empty `name` is fine — the upsert response (or the next refetch)
+    // backfills it, and TabBar falls back to a sensible default.
     const now = new Date().toISOString()
-    set((s) => ({ tabs: [{ itemType, itemId, lastActive: now }, ...s.tabs] }))
+    set((s) => ({ tabs: [{ itemType, itemId, lastActive: now, name: '' }, ...s.tabs] }))
 
     try {
       const res = await authedFetch('/api/me/tabs', {

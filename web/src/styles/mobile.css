@@ -10,14 +10,17 @@
 
   /* Rail → top toolbar. `min-height` (not `height`) so the bar grows
      by the iPhone notch / status-bar safe area instead of being pushed
-     under it (`viewport-fit=cover` is set in index.html). */
+     under it (`viewport-fit=cover` is set in index.html). Horizontal
+     padding matches the rest of the mobile chrome (tabbar / chat
+     toolbar / input bar all use 12px) so the four stacked bars line
+     up vertically — previously each band had a different inset. */
   .rail {
     width: 100%;
     min-height: 56px;
     flex-direction: row;
     border-right: none;
     border-bottom: 1px solid var(--border);
-    padding: env(safe-area-inset-top, 0px) 8px 0;
+    padding: env(safe-area-inset-top, 0px) 12px 0;
     overflow-x: auto;
     flex-shrink: 0;
   }
@@ -114,31 +117,55 @@
     max-width: 90%;
   }
 
-  /* Chat toolbar */
+  /* Chat toolbar — narrow horizontal padding so it aligns with the
+     rail, tabbar, and input bar above and below. Without this override
+     it inherits the desktop's 24px inset, which left the chrome looking
+     unevenly indented on mobile. */
   .chat-toolbar {
     flex-wrap: wrap;
     gap: 6px;
+    padding-left: 12px;
+    padding-right: 12px;
   }
   .chat-toolbar-name {
     font-size: var(--text-sm);
   }
 
-  /* Input bar */
+  /* Input bar — same 12px inset as the rest of the mobile chrome.
+     Vertical stays at the tighter 8px (the pre-unification mobile
+     value); the desktop's 12px vertical eats too much chat real
+     estate on a phone. Keep the safe-area bottom inset so the send
+     button isn't covered by iOS's home indicator. */
   .input-bar {
-    padding: 8px 12px;
+    padding-left: 12px;
+    padding-right: 12px;
+    padding-top: 8px;
+    padding-bottom: calc(8px + var(--safe-bottom));
+  }
+
+  /* Message log — match the surrounding chrome so messages line up
+     under the chat toolbar instead of starting at a different x. */
+  .chat-messages {
+    padding-left: 12px;
+    padding-right: 12px;
   }
 
   /* Todo panel — much tighter on mobile so a long list doesn't eat the
-     chat scroll area. Default desktop cap is 38% of the chat column,
-     which on a phone leaves only a couple of message bubbles visible. */
+     chat scroll area. Use a percentage of the chat container (which is
+     constrained by `--app-height` and shrinks above the soft keyboard
+     via App.tsx's visualViewport sync), not `vh`. `vh` is the layout
+     viewport which does NOT shrink when the keyboard opens, so a
+     `28vh` panel was eating ~half the visible chat when the user was
+     typing on iOS. Capped by a hard 180px so even on landscape phones
+     the panel never crowds out the messages. */
   .todo-panel {
-    max-height: 28vh;
+    max-height: min(22%, 180px);
   }
   .todo-panel-header {
-    padding: 6px 14px;
+    padding: 6px 12px;
   }
   .todo-panel-body {
-    padding: 2px 14px 8px;
+    padding: 2px 12px 8px;
     gap: 6px;
   }
   .todo-group-items {
@@ -215,9 +242,24 @@
 
 /* Small phones */
 @media (max-width: 480px) {
+  /* Sub-480px — drop horizontal inset to 8px across all four stacked
+     bars (rail / tabbar / chat-toolbar / input bar) so the chrome
+     remains aligned on the narrowest phones. */
   .rail {
     min-height: 48px;
-    padding: env(safe-area-inset-top, 0px) 4px 0;
+    padding: env(safe-area-inset-top, 0px) 8px 0;
+  }
+  .chat-toolbar {
+    padding-left: 8px;
+    padding-right: 8px;
+  }
+  .input-bar {
+    padding-left: 8px;
+    padding-right: 8px;
+  }
+  .chat-messages {
+    padding-left: 8px;
+    padding-right: 8px;
   }
   .rail-btn {
     width: 36px;
@@ -229,20 +271,20 @@
     font-size: 12px;
     margin-right: 4px;
   }
-  /* Keep the tab strip the same height as the rail above it at this
-     breakpoint too — otherwise the rail shrinks to 48px while the
-     tabbar stays at 56px and the two bands look mismatched. */
+  /* Sub-480px rail is 48px; keep the tab strip ~20% shorter than that,
+     same ratio as the 768px breakpoint above (44/56 ≈ 0.78). */
   .tabbar {
-    min-height: 48px;
-    padding: 0 6px;
+    min-height: 38px;
+    padding: 0 8px;
   }
   .tab-wrap {
-    height: 36px;
+    height: 28px;
+    padding: 0 4px 0 10px;
   }
   .tab-new {
-    width: 32px;
-    height: 32px;
-    font-size: 18px;
+    width: 28px;
+    height: 28px;
+    font-size: 16px;
   }
   .chat-bubble {
     max-width: 95%;
@@ -335,16 +377,17 @@
   background: rgba(255, 255, 255, 0.2);
 }
 @media (max-width: 768px) {
-  /* Match the rail's `min-height` so the two horizontal strips read as
-     a single stacked toolbar instead of two mismatched bands. */
+  /* ~20% shorter than the rail above it so the strip reads as a slimmer
+     secondary toolbar — the user has lots of vertical chat to scroll;
+     the tab strip doesn't need to compete for space. */
   .tabbar {
     gap: 8px;
-    padding: 0 10px;
-    min-height: 56px;
+    padding: 0 12px;
+    min-height: 44px;
   }
   .tab-wrap {
-    height: 40px;
-    padding-right: 14px;
+    height: 32px;
+    padding-right: 12px;
   }
   .tab-close {
     display: none;
@@ -433,6 +476,18 @@
   background: var(--success);
   box-shadow: 0 0 6px var(--success);
 }
+/* On the active tab, the wrap's background is `--accent`, which makes
+   the running dot (also `--accent`) and its accent-tinted glow vanish
+   into the chrome. Re-skin both indicators to the inverse text color
+   used for the active tab's foreground so they stay legible. */
+.tab-wrap:has(.tab-active) .tab-dot-running {
+  background: var(--text-inverse);
+  animation-name: tab-dot-glow-inverse;
+}
+.tab-wrap:has(.tab-active) .tab-dot-unread {
+  background: var(--text-inverse);
+  box-shadow: 0 0 6px rgba(255, 255, 255, 0.55);
+}
 @keyframes tab-dot-glow {
   0%,
   100% {
@@ -446,6 +501,21 @@
       0 0 2px var(--accent),
       0 0 4px var(--accent);
     opacity: 0.6;
+  }
+}
+@keyframes tab-dot-glow-inverse {
+  0%,
+  100% {
+    box-shadow:
+      0 0 4px rgba(255, 255, 255, 0.7),
+      0 0 8px rgba(255, 255, 255, 0.45);
+    opacity: 1;
+  }
+  50% {
+    box-shadow:
+      0 0 2px rgba(255, 255, 255, 0.7),
+      0 0 4px rgba(255, 255, 255, 0.45);
+    opacity: 0.7;
   }
 }
 /* ── List view (sessions / projects inside main when no item active) ─ */

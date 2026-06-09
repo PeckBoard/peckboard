@@ -80,8 +80,8 @@ test('clicking Interrupt shows a subtle notice, not a crash banner', async ({
     page.locator('.chat-agent-start-label').filter({ hasText: 'Agent started' }),
   ).toBeVisible({ timeout: 10_000 })
 
-  // Click the Interrupt button.
-  await page.locator('.chat-interrupt-btn').click()
+  // Click the Interrupt button (inline next to the Thinking... indicator).
+  await page.locator('.chat-thinking-interrupt').click()
 
   // The "Agent interrupted" subtle notice must appear.
   await expect(

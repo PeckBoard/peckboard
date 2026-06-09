@@ -30,6 +30,8 @@ function fileToBase64(file: File): Promise<string> {
 export default function InputBar({ sessionId }: InputBarProps) {
   const getDraft = useSessionsStore((s) => s.getDraft)
   const setDraft = useSessionsStore((s) => s.setDraft)
+  const addPendingUserMessage = useSessionsStore((s) => s.addPendingUserMessage)
+  const removePendingUserMessage = useSessionsStore((s) => s.removePendingUserMessage)
   const allMentions = useMentions(sessionId)
 
   // The parent passes a `key={sessionId}` so this component remounts
@@ -135,20 +137,53 @@ export default function InputBar({ sessionId }: InputBarProps) {
     setText('')
     setDraft(sessionId, '')
     setAttachments([])
+    // Show the bubble optimistically. When the agent is mid-turn the
+    // backend queues the message and the WS `user` event can lag a few
+    // hundred ms behind the POST returning; without this the composer
+    // empties but nothing visible happens until the round-trip
+    // completes, which felt like the message had vanished. The real
+    // event auto-clears the matching pending entry on arrival.
+    const pendingId = trimmed ? addPendingUserMessage(sessionId, trimmed) : ''
     try {
       const body: Record<string, unknown> = { text: trimmed }
       if (attachmentIds.length > 0) {
         body.attachmentIds = attachmentIds
       }
-      await authedFetch(`/api/sessions/${sessionId}/message`, {
+      const res = await authedFetch(`/api/sessions/${sessionId}/message`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(body),
       })
+      if (!res.ok && pendingId) {
+        rollbackFailedSend(pendingId, trimmed)
+      }
+    } catch {
+      if (pendingId) rollbackFailedSend(pendingId, trimmed)
     } finally {
       setSending(false)
     }
-  }, [text, sending, sessionId, setDraft, attachments])
+
+    // Rolling back a failed send: drop the optimistic bubble, and
+    // restore the user's text only if the composer is still empty.
+    // Stomping over text the user has started typing for the *next*
+    // message would be exactly the clobber the up-front clear set
+    // out to avoid (see comment at the top of this handler).
+    function rollbackFailedSend(tempId: string, original: string) {
+      removePendingUserMessage(sessionId, tempId)
+      if (textareaRef.current?.value === '') {
+        setText(original)
+        setDraft(sessionId, original)
+      }
+    }
+  }, [
+    text,
+    sending,
+    sessionId,
+    setDraft,
+    attachments,
+    addPendingUserMessage,
+    removePendingUserMessage,
+  ])
 
   const handleKeyDown = (e: KeyboardEvent<HTMLTextAreaElement>) => {
     const isMobile = window.matchMedia('(pointer: coarse)').matches
