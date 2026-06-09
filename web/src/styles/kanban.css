@@ -6,17 +6,22 @@
   flex: 1;
   overflow-y: auto;
   overflow-x: hidden;
-  padding: 20px;
+  /* No top padding: position:sticky offsets are measured from the
+     scroll container's padding edge, so any padding-top here becomes
+     a visible gap between the tabbar and the pinned board header on
+     scroll. Give the header its own top padding instead. */
+  padding: 0 20px 20px;
   position: relative;
 }
-/* Top-level header pins above the rows as the user scrolls vertically. */
+/* Top-level header pins above the rows as the user scrolls vertically.
+   Sits flush beneath the tabbar at rest and when pinned on scroll. */
 .kanban-board .kanban-board-header {
   position: sticky;
   top: 0;
   z-index: 30;
   background: var(--bg);
-  padding-top: 4px;
-  margin-top: -4px;
+  padding-top: 8px;
+  padding-bottom: 4px;
 }
 .kanban-columns {
   display: flex;
