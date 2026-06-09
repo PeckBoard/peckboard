@@ -150,13 +150,11 @@
   }
 
   /* Tool blocks full width */
-  /* Per-row horizontal scroll is touch-friendly on mobile; the board
-     itself owns vertical scrolling. */
+  /* The board itself owns vertical scrolling; per-column overflow
+     would create a new sticky containing block and break the
+     section-locked header. */
   .kanban-column {
     -webkit-overflow-scrolling: touch;
-  }
-  .kanban-column-header {
-    width: 100px;
   }
 
   /* Kanban header stack */
@@ -237,9 +235,6 @@
   }
   .modal {
     padding: 20px !important;
-  }
-  .kanban-column-header {
-    width: 80px;
   }
 }
 

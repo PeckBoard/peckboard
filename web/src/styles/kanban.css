@@ -24,34 +24,50 @@
   gap: 12px;
   width: 100%;
 }
-/* Each row is a fixed-width header on the left and a wrapping card
-   strip on the right. The strip wraps onto additional lines as needed
-   so a step with many cards stays within the viewport instead of
-   spilling off-screen. The row grows tall to accommodate the wrap;
-   the board scrolls vertically. */
+/* Each row is a step section: a header on TOP spanning the full width,
+   with a wrapping card strip beneath. The strip wraps onto additional
+   lines as needed so a step with many cards stays within the viewport
+   instead of spilling off-screen. The row grows tall to accommodate
+   the wrap; the board scrolls vertically.
+
+   The board itself owns the vertical scroll, so the column has no
+   `overflow` of its own — that would create a new sticky containing
+   block per column, defeating the section-locked sticky header. */
 .kanban-column {
   background: var(--surface);
   border: 1px solid var(--border);
   border-radius: var(--radius-lg);
-  padding: 12px;
+  padding: 0;
   display: flex;
-  flex-direction: row;
-  gap: 12px;
+  flex-direction: column;
+  gap: 0;
   align-items: stretch;
   min-height: 88px;
 }
+/* Section-locked sticky header. Pins to the top of the board's scroll
+   container (offset by the toolbar above), then un-sticks and scrolls
+   away when the column's bottom passes — never stacks with the next
+   step's header. Width = full row; the count badge sits inline with
+   the label. */
 .kanban-column-header {
   display: flex;
-  flex-direction: column;
-  align-items: flex-start;
-  gap: 6px;
-  flex-shrink: 0;
-  width: 140px;
-  padding: 4px 8px 4px 4px;
+  flex-direction: row;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 12px;
   background: var(--surface);
-  border-right: 1px solid var(--border);
-  align-self: stretch;
-  justify-content: center;
+  border-bottom: 1px solid var(--border);
+  border-top-left-radius: var(--radius-lg);
+  border-top-right-radius: var(--radius-lg);
+  position: sticky;
+  /* `--kanban-toolbar-h` is set on `.kanban-board` from a ResizeObserver
+     on the board-header element so the offset tracks toolbar size
+     changes (wrapping at narrow widths, status badge appearing). */
+  top: var(--kanban-toolbar-h, 0px);
+  /* Above cards in the same column so cards scroll under the pinned
+     header. Thought bubbles bump z-index higher so they never get
+     clipped by the header when a card sits near the section top. */
+  z-index: 3;
 }
 .kanban-column-header h3 {
   margin: 0;
@@ -77,6 +93,7 @@
   align-items: center;
   gap: 8px;
   min-height: 64px;
+  padding: 12px;
   /* Take the row's remaining width so cards wrap inside it instead of
      forcing a horizontal scrollbar on the board. The last wrapped line
      keeps its leftover space on the right (cards have a fixed width
@@ -172,7 +189,9 @@
   position: absolute;
   top: -9px;
   right: 12px;
-  z-index: 5;
+  /* Higher than the sticky step header so the bubble stays visible when
+     a card sits near the top of its section. */
+  z-index: 6;
   max-width: 80%;
   padding: 3px 8px;
   background: var(--accent-subtle);
