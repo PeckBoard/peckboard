@@ -278,6 +278,32 @@ impl AgentProvider for ClaudeProvider {
             .unwrap_or(false)
     }
 
+    async fn wait_for_termination(&self, session_id: &str) {
+        // The stream task removes its run from `self.runs` only AFTER
+        // emitting any synthetic Crashed event and before sending the
+        // ProcessCompletion. So "no longer in the map" is the signal
+        // that all per-session events have hit the DB + broadcaster.
+        //
+        // 10s upper bound is generous — `start_kill` plus the CLI's
+        // tear-down is normally milliseconds; if we hit it, something
+        // is genuinely wedged and the caller is better off proceeding
+        // than blocking forever.
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        loop {
+            if !self.runs.lock().await.contains_key(session_id) {
+                return;
+            }
+            if std::time::Instant::now() >= deadline {
+                tracing::warn!(
+                    session_id = %session_id,
+                    "wait_for_termination timed out; claude run may still be winding down"
+                );
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    }
+
     fn supports_mid_stream_injection(&self) -> bool {
         // The CLI in stream-json mode reads user envelopes from
         // stdin at any time and consumes them after the current

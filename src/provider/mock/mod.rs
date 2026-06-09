@@ -127,17 +127,23 @@ impl AgentProvider for MockProvider {
     }
 
     async fn cancel(&self, session_id: &str) {
-        let removed = {
-            let mut runs = self.runs.lock().await;
-            runs.remove(session_id)
+        // Don't remove the run from `self.runs` here — the scenario task
+        // removes itself once `run_scenario` returns. Removing early
+        // makes `wait_for_termination` racy: the entry disappears before
+        // the synthetic Crashed event is emitted, and any caller that
+        // wipes events on the back of the cancel ends up resurrecting
+        // a stale "Agent crashed" line.
+        let cancel = {
+            let runs = self.runs.lock().await;
+            runs.get(session_id).map(|r| r.cancel.clone())
         };
-        if let Some(run) = removed {
+        if let Some(c) = cancel {
             tracing::info!(session_id = %session_id, "Cancelling mock run");
             // Notify the run to wind down cleanly so it emits an agent-end
             // (Crashed) event and delivers a ProcessCompletion to the
             // orchestrator. We deliberately do NOT abort the task; the run
             // is short and aborting would skip those signals.
-            run.cancel.notify_one();
+            c.notify_one();
         }
     }
 
@@ -164,6 +170,27 @@ impl AgentProvider for MockProvider {
         runs.get(session_id)
             .map(|r| !r.handle.is_finished())
             .unwrap_or(false)
+    }
+
+    async fn wait_for_termination(&self, session_id: &str) {
+        // Mirrors the Claude provider: the spawned task removes its run
+        // from `self.runs` only AFTER `run_scenario` has emitted any
+        // synthetic Crashed event. Polling map absence is the signal
+        // that the post-cancel events have hit the DB + broadcaster.
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        loop {
+            if !self.runs.lock().await.contains_key(session_id) {
+                return;
+            }
+            if std::time::Instant::now() >= deadline {
+                tracing::warn!(
+                    session_id = %session_id,
+                    "wait_for_termination timed out; mock run may still be winding down"
+                );
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
     }
 
     async fn cleanup(&self) {
@@ -402,10 +429,9 @@ async fn run_scenario(
                 _ = cancel.notified() => None,
                 ans = stdin_rx.recv() => ans,
             };
-            // `None` covers both the cancel branch AND the case where the
-            // stdin channel was closed (which happens when `cancel` removes
-            // the MockRun from the map and drops `stdin_tx`). Both mean the
-            // run was cancelled — emit Crashed and report not-completed.
+            // `None` from the cancel branch (or, defensively, from a
+            // closed stdin channel) means the run was cancelled before
+            // an answer arrived — emit Crashed and report not-completed.
             let Some(text) = answer else {
                 emit_event(
                     db,

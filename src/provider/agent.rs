@@ -76,6 +76,21 @@ pub trait AgentProvider: Send + Sync + 'static {
     /// Whether a run is currently in flight for this session.
     async fn is_running(&self, session_id: &str) -> bool;
 
+    /// Block until any background run for `session_id` has fully wound down
+    /// — including emitting any synthetic agent-end / Crashed event from the
+    /// cancel path. Returns immediately if no run is tracked.
+    ///
+    /// Callers that wipe persistent state after cancelling (e.g. the
+    /// `/clear` route) must call this between `cancel` and the wipe;
+    /// otherwise the synthetic Crashed event lands AFTER the wipe and
+    /// resurrects an "Agent crashed (interrupted)" line that the user
+    /// just tried to delete.
+    ///
+    /// Default implementation: return immediately. Providers that own a
+    /// background streaming task override this to poll their per-session
+    /// tracking until the entry disappears.
+    async fn wait_for_termination(&self, _session_id: &str) {}
+
     /// Whether `send_message` is safe to call again while a turn is
     /// already in flight.
     ///

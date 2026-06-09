@@ -376,6 +376,23 @@ impl SessionManager {
         }
     }
 
+    /// Cancel the run for `session_id` and block until the background
+    /// streaming task has actually wound down (including emitting any
+    /// synthetic `agent-end` event from the cancel path).
+    ///
+    /// Required for any caller that wipes persistent state immediately
+    /// after cancelling — e.g. `/sessions/:id/clear`. Without the wait,
+    /// the synthetic Crashed event from the dying process lands AFTER
+    /// the wipe and persists a stale "Agent crashed (interrupted)" line.
+    pub async fn cancel_and_wait(&self, session_id: &str) {
+        for info in self.registry.list_providers().await {
+            if let Some(p) = self.registry.get_provider(&info.id).await {
+                p.cancel(session_id).await;
+                p.wait_for_termination(session_id).await;
+            }
+        }
+    }
+
     pub async fn interrupt(&self, session_id: &str) {
         for info in self.registry.list_providers().await {
             if let Some(p) = self.registry.get_provider(&info.id).await {

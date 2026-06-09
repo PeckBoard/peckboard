@@ -286,8 +286,44 @@ async fn clear_session(
         ));
     }
 
-    // Kill any running process for this session
-    state.session_manager.cancel(&id).await;
+    // Kill any running process for this session AND wait for it to fully
+    // wind down. The streaming task emits a synthetic `agent-end` (Crashed
+    // reason "interrupted") on every cancel path; if we don't wait, that
+    // event lands AFTER `delete_events_by_session` below and resurrects
+    // a stale "Agent crashed (interrupted)" line on the cleared session.
+    //
+    // The pre-cancel `interrupt` event is for live UI consumers: ChatView
+    // suppresses any subsequent agent-end-with-reason-"interrupted" when
+    // it follows an `interrupt`, so the brief window between the Crashed
+    // broadcast and the `session-cleared` wipe doesn't flash a crash
+    // banner. Both events will themselves be wiped by `delete_events_by_session`
+    // and never re-appear after a reload.
+    if state.session_manager.is_running(&id).await {
+        if let Ok(event) = state
+            .db
+            .append_event(
+                &id,
+                "interrupt",
+                serde_json::json!({ "reason": "session-clear" }),
+            )
+            .await
+        {
+            state
+                .broadcaster
+                .broadcast(crate::ws::broadcaster::WsEvent {
+                    event_type: "event".into(),
+                    session_id: id.clone(),
+                    data: serde_json::json!({
+                        "id": event.id,
+                        "seq": event.seq,
+                        "ts": event.ts,
+                        "kind": event.kind,
+                        "data": serde_json::from_str::<serde_json::Value>(&event.data).unwrap_or_default(),
+                    }),
+                });
+        }
+        state.session_manager.cancel_and_wait(&id).await;
+    }
 
     // Delete all events for this session
     state.db.delete_events_by_session(&id).await.map_err(|e| {
