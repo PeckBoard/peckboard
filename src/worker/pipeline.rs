@@ -13,6 +13,15 @@ pub fn build_worker_prompt(
     handoff_context: Option<&str>,
     experts: &[Session],
 ) -> String {
+    // Per-step instructions come from the workflow registry. The workflow id
+    // is resolved with the same precedence the orchestrator uses (card,
+    // project, default), so the prompt's marching orders match the
+    // step-advance behaviour.
+    let workflow_id = card
+        .workflow
+        .as_deref()
+        .or(project.default_workflow.as_deref());
+    let step_instructions = crate::workflow::step_instructions(workflow_id, step);
     let mut prompt = String::new();
 
     // Project name is user-controlled; treat it as untrusted data, not
@@ -177,6 +186,11 @@ pub fn build_worker_prompt(
          step/worker; it advances the card by exactly one step and hands off via its \
          handoff_context. If you cannot complete the task, call `wont_do_card` with a reason.\n\n",
     );
+    if let Some(step_text) = step_instructions {
+        prompt.push_str("### Step-Specific Instructions\n\n");
+        prompt.push_str(step_text);
+        prompt.push_str("\n\n");
+    }
     prompt.push_str(
         "**Consult the question-expert before asking the user.** Before calling `ask_user`, \
          you MUST first consult the in-scope QUESTION expert (the in-scope expert whose \

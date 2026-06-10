@@ -9,17 +9,22 @@
   /* No top padding: position:sticky offsets are measured from the
      scroll container's padding edge, so any padding-top here becomes
      a visible gap between the tabbar and the pinned board header on
-     scroll. Give the header its own top padding instead. */
+     scroll. The board header gets a top margin of its own instead,
+     so there's breathing room above the project name without
+     breaking the section-locked sticky offsets in the columns
+     below. */
   padding: 0 20px 20px;
   position: relative;
 }
-/* Top-level header sits flush beneath the tabbar at rest. It is NOT
-   sticky: as the user scrolls, the board header scrolls out and the
-   per-step sticky header (`.kanban-column-header`) takes over, pinning
-   flush against the bottom of the tabbar with no leftover gap. */
+/* Top-level header sits below the tabbar with a small breathing-room
+   margin. It is NOT sticky: as the user scrolls, the board header
+   scrolls out and the per-step sticky header (`.kanban-column-header`)
+   takes over, pinning flush against the bottom of the tabbar with no
+   leftover gap. */
 .kanban-board .kanban-board-header {
   background: var(--bg);
-  padding-top: 0;
+  margin-top: 12px;
+  margin-bottom: 12px;
   padding-bottom: 4px;
 }
 .kanban-columns {
@@ -505,6 +510,25 @@
   text-transform: uppercase;
   letter-spacing: 0.04em;
   padding-top: 2px;
+}
+/* Description gets a roomy multi-line block so longer descriptions
+   don't collapse to a one-line strip. Stacks the label above the body
+   on this row so the body can use the full row width. */
+.card-detail-row-description {
+  flex-direction: column;
+  gap: 4px;
+}
+.card-detail-description {
+  min-height: 180px;
+  padding: 10px 12px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  white-space: pre-wrap;
+  word-break: break-word;
+  font-size: var(--text-sm);
+  line-height: 1.5;
+  color: var(--text);
 }
 .close-btn {
   padding: 8px 20px;

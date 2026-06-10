@@ -2,6 +2,7 @@ import { useEffect, useState, type FormEvent } from 'react'
 import { useProjectsStore } from '../store/projects'
 import { useFoldersStore } from '../store/folders'
 import { useResourcesStore } from '../store/resources'
+import WorkflowSelect from './WorkflowSelect'
 
 interface Props {
   onClose: () => void
@@ -21,7 +22,6 @@ export default function NewProjectModal({ onClose }: Props) {
   const setActiveProject = useProjectsStore((s) => s.setActiveProject)
   const folders = useFoldersStore((s) => s.folders)
   const fetchFolders = useFoldersStore((s) => s.fetchFolders)
-  const workflows = useResourcesStore((s) => s.workflows)
   const models = useResourcesStore((s) => s.models)
   const fetchWorkflows = useResourcesStore((s) => s.fetchWorkflows)
   const fetchModels = useResourcesStore((s) => s.fetchModels)
@@ -160,18 +160,7 @@ export default function NewProjectModal({ onClose }: Props) {
               </div>
               <div className="form-field">
                 <label className="form-label">Default workflow</label>
-                <select
-                  className="form-input"
-                  value={defaultWorkflow}
-                  onChange={(e) => setDefaultWorkflow(e.target.value)}
-                >
-                  <option value="">None (use default)</option>
-                  {workflows.map((w) => (
-                    <option key={w.id} value={w.id}>
-                      {w.name}
-                    </option>
-                  ))}
-                </select>
+                <WorkflowSelect value={defaultWorkflow} onChange={setDefaultWorkflow} />
                 <p className="form-hint">Pre-selected workflow when creating new cards.</p>
               </div>
               <div className="form-field">

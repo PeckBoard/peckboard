@@ -1,10 +1,17 @@
 import { create } from 'zustand'
 import { authedFetch } from './auth'
 
+export interface WorkflowStepInfo {
+  step: string
+  instructions: string
+}
+
 export interface WorkflowInfo {
   id: string
   name: string
-  steps: string[]
+  description: string
+  priority: number
+  steps: (string | WorkflowStepInfo)[]
 }
 
 export interface ModelInfo {

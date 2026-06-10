@@ -2,16 +2,13 @@ import { useEffect, useState, type FormEvent } from 'react'
 import { useProjectsStore } from '../store/projects'
 import { authedFetch } from '../store/auth'
 import type { Project } from '../types/api'
+import WorkflowSelect from './WorkflowSelect'
 
 interface Props {
   project: Project
   onClose: () => void
 }
 
-interface WorkflowInfo {
-  id: string
-  name: string
-}
 interface ModelInfo {
   id: string
   display_name: string
@@ -41,16 +38,9 @@ export default function EditProjectModal({ project, onClose }: Props) {
   const [error, setError] = useState('')
   const [loading, setLoading] = useState(false)
 
-  const [workflows, setWorkflows] = useState<WorkflowInfo[]>([])
   const [models, setModels] = useState<ModelInfo[]>([])
 
   useEffect(() => {
-    authedFetch('/api/workflows')
-      .then((res) => (res.ok ? res.json() : null))
-      .then((data) => {
-        if (data?.workflows) setWorkflows(data.workflows)
-      })
-      .catch(() => {})
     authedFetch('/api/models')
       .then((res) => (res.ok ? res.json() : null))
       .then((data) => {
@@ -125,18 +115,7 @@ export default function EditProjectModal({ project, onClose }: Props) {
           </div>
           <div className="form-field">
             <label className="form-label">Default workflow</label>
-            <select
-              className="form-input"
-              value={defaultWorkflow}
-              onChange={(e) => setDefaultWorkflow(e.target.value)}
-            >
-              <option value="">None</option>
-              {workflows.map((w) => (
-                <option key={w.id} value={w.id}>
-                  {w.name}
-                </option>
-              ))}
-            </select>
+            <WorkflowSelect value={defaultWorkflow} onChange={setDefaultWorkflow} />
           </div>
           <div className="form-field">
             <label className="form-label">Model</label>

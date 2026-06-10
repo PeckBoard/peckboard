@@ -2,23 +2,42 @@
    Kanban Board Header & Add Form
    ═══════════════════════════════════════════════════ */
 
-.kanban-board-header {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  margin-bottom: 12px;
+/* The project header now reuses the chat-toolbar look — name on the
+   left, status badge, action icons + a 3-dot menu on the right — so it
+   matches the session header instead of looking like a separate
+   component. The shared `.chat-toolbar` rules in chat-toolbar.css supply
+   the row layout and the menu styles; these additions are the bits
+   specific to the kanban header (the flex spacer that pushes actions to
+   the right, the borderless icon buttons, and the rounded corners that
+   make the header read as a card under the tabbar). */
+.kanban-board .kanban-board-header.chat-toolbar {
+  border-radius: var(--radius-lg);
+  border: 1px solid var(--border);
 }
-.kanban-project-info {
-  display: flex;
-  align-items: center;
-  gap: 10px;
+
+.chat-toolbar-spacer {
+  margin-left: auto;
 }
-.kanban-project-name {
-  margin: 0;
-  font-size: var(--text-base);
-  font-weight: 700;
+
+.kanban-header-icon-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 30px;
+  height: 30px;
+  border: none;
+  border-radius: var(--radius);
+  background: transparent;
+  color: var(--text2);
+  cursor: pointer;
+  flex-shrink: 0;
+  transition: all var(--transition);
+}
+.kanban-header-icon-btn:hover {
+  background: var(--surface-hover);
   color: var(--text);
 }
+
 .btn-sm {
   padding: 4px 12px;
   font-size: var(--text-xs);
@@ -221,6 +240,93 @@
   gap: 6px;
   font-size: var(--text-sm);
   cursor: pointer;
+}
+
+/* ─── Workflow Select ─── */
+
+/* WorkflowSelect renders a borderless dropdown that surfaces each
+   workflow's description below its name, so the user can tell Task /
+   Research / Breakdown / Develop apart without picking blindly. The
+   trigger looks like a regular form-input until you focus it; the menu
+   is absolutely positioned beneath. */
+.workflow-select {
+  position: relative;
+  width: 100%;
+}
+.workflow-select-trigger {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 2px;
+  text-align: left;
+  cursor: pointer;
+  background: var(--bg);
+}
+.workflow-select-trigger:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+.workflow-select-name {
+  font-size: var(--text-sm);
+  font-weight: 600;
+  color: var(--text);
+}
+.workflow-select-desc {
+  font-size: var(--text-xs);
+  color: var(--text3);
+  line-height: 1.35;
+}
+.workflow-select-menu {
+  position: absolute;
+  top: calc(100% + 4px);
+  left: 0;
+  right: 0;
+  z-index: 60;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  box-shadow: var(--shadow-lg);
+  padding: 4px;
+  max-height: 360px;
+  overflow-y: auto;
+}
+.workflow-select-option {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  width: 100%;
+  padding: 8px 10px;
+  border: none;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  cursor: pointer;
+  text-align: left;
+  transition: background var(--transition);
+}
+.workflow-select-option:hover {
+  background: var(--surface-hover);
+}
+.workflow-select-option.active {
+  background: var(--accent-subtle);
+}
+.workflow-select-option-name {
+  font-size: var(--text-sm);
+  font-weight: 600;
+  color: var(--text);
+}
+.workflow-select-option-desc {
+  margin-top: 2px;
+  font-size: var(--text-xs);
+  color: var(--text2);
+  line-height: 1.4;
+}
+
+/* Card form description: the field is the main editing surface, so
+   it gets a generous min-height. Vertical resize is still on so the
+   user can grow it further. */
+.card-form-description {
+  min-height: 180px;
+  resize: vertical;
 }
 
 /* ─── Card Detail Actions ─── */

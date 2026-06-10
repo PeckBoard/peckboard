@@ -6,12 +6,12 @@ import { authedFetch } from '../store/auth'
 import { useMentions, filterMentions } from '../hooks/useMentions'
 import { useMediaQuery } from '../hooks/useMediaQuery'
 import type { Card, Event } from '../types/api'
-import EditCardModal from './EditCardModal'
+import CardFormModal from './CardFormModal'
+import EditProjectModal from './EditProjectModal'
 import WorkerComms from './WorkerComms'
 import ProjectTodoSummary from './ProjectTodoSummary'
 import { useProjectTodos } from '../hooks/useProjectTodos'
 import {
-  EFFORT_OPTIONS,
   EMPTY_QUESTIONS,
   EMPTY_REPORTS,
   STEPS,
@@ -46,7 +46,6 @@ export default function KanbanBoard({ projectId, onOpenTodos }: KanbanBoardProps
   const updateProject = useProjectsStore((s) => s.updateProject)
   const cards = useProjectsStore((s) => s.cards)
   const fetchCards = useProjectsStore((s) => s.fetchCards)
-  const createCard = useProjectsStore((s) => s.createCard)
   const updateCard = useProjectsStore((s) => s.updateCard)
   const deleteCard = useProjectsStore((s) => s.deleteCard)
 
@@ -55,14 +54,9 @@ export default function KanbanBoard({ projectId, onOpenTodos }: KanbanBoardProps
   const todosByCard = useProjectTodos(cards)
   const [selectedCard, setSelectedCard] = useState<Card | null>(null)
   const [showAddForm, setShowAddForm] = useState(false)
-  const [addTitle, setAddTitle] = useState('')
-  const [addDescription, setAddDescription] = useState('')
-  const [addPriority, setAddPriority] = useState(2)
-  const [addWorkflow, setAddWorkflow] = useState('')
-  const [addModel, setAddModel] = useState('')
-  const [addEffort, setAddEffort] = useState('')
-  const [addDependsOn, setAddDependsOn] = useState<string[]>([])
-  const [addSubmitting, setAddSubmitting] = useState(false)
+  const [editingProject, setEditingProject] = useState(false)
+  const [projectMenuOpen, setProjectMenuOpen] = useState(false)
+  const projectMenuRef = useRef<HTMLDivElement>(null)
   const [confirmDeleteId, setConfirmDeleteId] = useState<string | null>(null)
   const [draggingCardId, setDraggingCardId] = useState<string | null>(null)
   // Active drop target. `insertIdx` is set only for an in-row reorder hover
@@ -104,8 +98,6 @@ export default function KanbanBoard({ projectId, onOpenTodos }: KanbanBoardProps
     fetchCardReports(projectId, selectedCard.id)
   }, [selectedCard, projectId, fetchCardReports])
 
-  const workflows = useResourcesStore((s) => s.workflows)
-  const models = useResourcesStore((s) => s.models)
   const allMentions = useMentions()
   const [mentionAutocomplete, setMentionAutocomplete] = useState<{
     eventId: string
@@ -117,7 +109,6 @@ export default function KanbanBoard({ projectId, onOpenTodos }: KanbanBoardProps
     { label: 'High', value: 1, description: 'Important' },
     { label: 'Medium', value: 2, description: 'Normal' },
     { label: 'Low', value: 3, description: 'Nice to have' },
-    { label: 'Backlog', value: 4, description: 'Someday' },
   ])
   const pendingQuestions = useProjectsStore(
     (s) => s.pendingQuestionsByProject[projectId] ?? EMPTY_QUESTIONS,
@@ -352,6 +343,16 @@ export default function KanbanBoard({ projectId, onOpenTodos }: KanbanBoardProps
     fetchCards(projectId)
   }, [projectId, fetchCards])
 
+  // Close the project header's 3-dot menu when the user clicks anywhere else.
+  useEffect(() => {
+    if (!projectMenuOpen) return
+    const onClick = (e: MouseEvent) => {
+      if (!projectMenuRef.current?.contains(e.target as Node)) setProjectMenuOpen(false)
+    }
+    document.addEventListener('mousedown', onClick)
+    return () => document.removeEventListener('mousedown', onClick)
+  }, [projectMenuOpen])
+
   const fetchWorkflows = useResourcesStore((s) => s.fetchWorkflows)
   const fetchModels = useResourcesStore((s) => s.fetchModels)
   useEffect(() => {
@@ -409,35 +410,6 @@ export default function KanbanBoard({ projectId, onOpenTodos }: KanbanBoardProps
     (card.depends_on ?? [])
       .map((id) => cardById.get(id))
       .filter((c): c is Card => c != null && normalizeStep(c.step) !== 'done')
-
-  const handleAddCard = async () => {
-    if (!addTitle.trim() || addSubmitting) return
-    setAddSubmitting(true)
-    try {
-      await createCard(projectId, {
-        title: addTitle.trim(),
-        description: addDescription.trim(),
-        step: 'backlog',
-        priority: addPriority,
-        workflow: addWorkflow || undefined,
-        model: addModel || undefined,
-        effort: addEffort || undefined,
-        depends_on: addDependsOn.length > 0 ? addDependsOn : undefined,
-      } as Partial<Card>)
-      setAddTitle('')
-      setAddDescription('')
-      setAddPriority(2)
-      setAddWorkflow('')
-      setAddModel('')
-      setAddEffort('')
-      setAddDependsOn([])
-      setShowAddForm(false)
-    } catch {
-      /* ignore */
-    } finally {
-      setAddSubmitting(false)
-    }
-  }
 
   const handleDeleteCard = async (cardId: string) => {
     try {
@@ -604,45 +576,97 @@ export default function KanbanBoard({ projectId, onOpenTodos }: KanbanBoardProps
 
   return (
     <div className="kanban-board">
-      <div className="kanban-board-header">
-        {project && (
-          <div className="kanban-project-info">
-            <h2 className="kanban-project-name">{project.name}</h2>
-            <span className={`status-badge status-${project.status}`}>{project.status}</span>
-            <button
-              className={
-                project.status === 'paused' ? 'btn-primary btn-sm' : 'btn-secondary btn-sm'
-              }
-              onClick={() =>
-                updateProject(projectId, {
-                  status: project.status === 'paused' ? 'active' : 'paused',
-                } as Record<string, unknown>)
-              }
-            >
-              {project.status === 'paused' ? 'Resume' : 'Pause'}
-            </button>
-          </div>
+      <div className="kanban-board-header chat-toolbar">
+        <span className="chat-toolbar-name">{project?.name ?? 'Project'}</span>
+        {project && project.status !== 'active' && (
+          <span className={`status-badge status-${project.status}`}>{project.status}</span>
         )}
+        <span className="chat-toolbar-spacer" />
         <button
-          className="btn-secondary"
+          type="button"
+          className="kanban-header-icon-btn"
           onClick={() => setShowComms(true)}
-          title="View worker communications"
+          title="Worker communications"
+          aria-label="Worker communications"
         >
-          Comms
+          <svg
+            width="16"
+            height="16"
+            viewBox="0 0 24 24"
+            fill="none"
+            stroke="currentColor"
+            strokeWidth="2"
+            strokeLinecap="round"
+            strokeLinejoin="round"
+            aria-hidden="true"
+          >
+            <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z" />
+          </svg>
         </button>
         {onOpenTodos && (
           <button
-            className="btn-secondary"
+            type="button"
+            className="kanban-header-icon-btn"
             onClick={onOpenTodos}
-            title="View aggregated todos across all cards"
+            title="Project todos"
+            aria-label="Project todos"
             data-testid="project-todos-button"
           >
-            Todos
+            <svg
+              width="16"
+              height="16"
+              viewBox="0 0 24 24"
+              fill="none"
+              stroke="currentColor"
+              strokeWidth="2"
+              strokeLinecap="round"
+              strokeLinejoin="round"
+              aria-hidden="true"
+            >
+              <polyline points="9 11 12 14 22 4" />
+              <path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11" />
+            </svg>
           </button>
         )}
-        <button className="btn-primary" onClick={() => setShowAddForm(!showAddForm)}>
-          {showAddForm ? 'Cancel' : 'Add Card'}
+        <button type="button" className="btn-primary btn-sm" onClick={() => setShowAddForm(true)}>
+          Add Card
         </button>
+        <div className="chat-toolbar-menu-wrapper" ref={projectMenuRef}>
+          <button
+            type="button"
+            className="chat-toolbar-menu"
+            onClick={() => setProjectMenuOpen(!projectMenuOpen)}
+            aria-label="Project menu"
+          >
+            <svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true">
+              <circle cx="8" cy="3" r="1.5" />
+              <circle cx="8" cy="8" r="1.5" />
+              <circle cx="8" cy="13" r="1.5" />
+            </svg>
+          </button>
+          {projectMenuOpen && project && (
+            <div className="chat-toolbar-dropdown">
+              <button
+                onClick={() => {
+                  setProjectMenuOpen(false)
+                  setEditingProject(true)
+                }}
+              >
+                Edit project
+              </button>
+              <button
+                onClick={() => {
+                  setProjectMenuOpen(false)
+                  updateProject(projectId, {
+                    status: project.status === 'paused' ? 'active' : 'paused',
+                  } as Record<string, unknown>)
+                }}
+              >
+                {project.status === 'paused' ? 'Resume' : 'Pause'}
+              </button>
+            </div>
+          )}
+        </div>
       </div>
 
       {/* Project-level todo roll-up across every card's worker session. */}
@@ -824,86 +848,7 @@ export default function KanbanBoard({ projectId, onOpenTodos }: KanbanBoardProps
         })()}
 
       {showAddForm && (
-        <div className="kanban-add-form">
-          <input
-            type="text"
-            placeholder="Card title"
-            value={addTitle}
-            onChange={(e) => setAddTitle(e.target.value)}
-            onKeyDown={(e) => {
-              if (e.key === 'Enter' && !e.shiftKey) handleAddCard()
-            }}
-            autoFocus
-          />
-          <textarea
-            placeholder="Description"
-            value={addDescription}
-            onChange={(e) => setAddDescription(e.target.value)}
-            rows={2}
-          />
-          <div className="kanban-add-row">
-            <select value={addPriority} onChange={(e) => setAddPriority(Number(e.target.value))}>
-              {priorities.map((p) => (
-                <option key={p.value} value={p.value}>
-                  {p.label}
-                </option>
-              ))}
-            </select>
-            <select value={addWorkflow} onChange={(e) => setAddWorkflow(e.target.value)}>
-              <option value="">Default workflow</option>
-              {workflows.map((w) => (
-                <option key={w.id} value={w.id}>
-                  {w.name}
-                </option>
-              ))}
-            </select>
-            <select value={addModel} onChange={(e) => setAddModel(e.target.value)}>
-              <option value="">Default model</option>
-              {models.map((m) => (
-                <option key={m.id} value={m.id}>
-                  {m.display_name}
-                </option>
-              ))}
-            </select>
-            <select value={addEffort} onChange={(e) => setAddEffort(e.target.value)}>
-              {EFFORT_OPTIONS.map((o) => (
-                <option key={o.value} value={o.value}>
-                  {o.label} effort
-                </option>
-              ))}
-            </select>
-          </div>
-          {cards.length > 0 && (
-            <div className="kanban-add-deps">
-              <span className="kanban-add-deps-label">
-                Depends on (starts after these are done):
-              </span>
-              <div className="kanban-deps-options">
-                {cards.map((c) => (
-                  <label key={c.id} className="kanban-dep-option">
-                    <input
-                      type="checkbox"
-                      checked={addDependsOn.includes(c.id)}
-                      onChange={(e) =>
-                        setAddDependsOn((prev) =>
-                          e.target.checked ? [...prev, c.id] : prev.filter((id) => id !== c.id),
-                        )
-                      }
-                    />
-                    <span>{c.title}</span>
-                  </label>
-                ))}
-              </div>
-            </div>
-          )}
-          <button
-            className="btn-primary"
-            onClick={handleAddCard}
-            disabled={!addTitle.trim() || addSubmitting}
-          >
-            {addSubmitting ? 'Creating...' : 'Create Card'}
-          </button>
-        </div>
+        <CardFormModal mode="create" projectId={projectId} onClose={() => setShowAddForm(false)} />
       )}
 
       <div className="kanban-columns">
@@ -1182,9 +1127,9 @@ export default function KanbanBoard({ projectId, onOpenTodos }: KanbanBoardProps
                 </div>
               )}
               {selectedCard.description && (
-                <div className="card-detail-row">
+                <div className="card-detail-row card-detail-row-description">
                   <span className="card-detail-label">Description</span>
-                  <span>{selectedCard.description}</span>
+                  <div className="card-detail-description">{selectedCard.description}</div>
                 </div>
               )}
               {selectedCard.handoff_context && (
@@ -1237,7 +1182,8 @@ export default function KanbanBoard({ projectId, onOpenTodos }: KanbanBoardProps
       )}
 
       {editingCard && (
-        <EditCardModal
+        <CardFormModal
+          mode="edit"
           projectId={projectId}
           card={editingCard}
           onClose={() => {
@@ -1245,6 +1191,10 @@ export default function KanbanBoard({ projectId, onOpenTodos }: KanbanBoardProps
             fetchCards(projectId)
           }}
         />
+      )}
+
+      {editingProject && project && (
+        <EditProjectModal project={project} onClose={() => setEditingProject(false)} />
       )}
     </div>
   )

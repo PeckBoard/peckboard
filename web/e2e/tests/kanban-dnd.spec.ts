@@ -89,7 +89,7 @@ async function setupProjectWithCards(
   // Three cards with distinct priorities so backend ASC sort places them
   // in a known order in the backlog row.
   const titles = ['First', 'Second', 'Third']
-  const priorities = [0, 2, 4]
+  const priorities = [0, 2, 3]
   const cards: Card[] = []
   for (let i = 0; i < titles.length; i++) {
     const res = await request.post(`/api/projects/${project.id}/cards`, {

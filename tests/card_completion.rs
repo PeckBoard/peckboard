@@ -153,8 +153,13 @@ async fn finish_drives_card_to_done_from_any_step() {
     // dependents.
     for start_step in ["backlog", "in_progress", "review"] {
         let state = build_state().await;
-        let (card_id, session_id) =
-            seed_card_with_worker(&state, start_step, Some("default"), Some("default")).await;
+        let (card_id, session_id) = seed_card_with_worker(
+            &state,
+            start_step,
+            Some("deep-develop-software"),
+            Some("deep-develop-software"),
+        )
+        .await;
 
         state
             .db
@@ -179,8 +184,13 @@ async fn finish_drives_card_to_done_from_any_step() {
 #[tokio::test]
 async fn complete_step_advances_exactly_one_step() {
     let state = build_state().await;
-    let (card_id, session_id) =
-        seed_card_with_worker(&state, "backlog", Some("default"), Some("default")).await;
+    let (card_id, session_id) = seed_card_with_worker(
+        &state,
+        "backlog",
+        Some("deep-develop-software"),
+        Some("deep-develop-software"),
+    )
+    .await;
 
     state
         .db
@@ -217,21 +227,29 @@ async fn advance_one_step(state: &Arc<AppState>, card_id: &str, session_id: &str
 #[tokio::test]
 async fn complete_step_follows_the_cards_own_workflow() {
     // Regression: the orchestrator used a hardcoded [backlog, in_progress,
-    // review, done] list and ignored the card's workflow. A `research` card
-    // (backlog → research → summarize → done) sitting on `research` would not
-    // match that list and jump straight to `done`, skipping `summarize`.
+    // review, done] list and ignored the card's workflow. A card on a
+    // workflow with intermediate steps must not skip them.
+    //
+    // deep-develop-software is backlog → in_progress → review → done; the
+    // card sits on `in_progress` and must advance to `review`, not jump
+    // straight to `done`.
     let state = build_state().await;
-    let (card_id, session_id) =
-        seed_card_with_worker(&state, "research", Some("research"), Some("default")).await;
+    let (card_id, session_id) = seed_card_with_worker(
+        &state,
+        "in_progress",
+        Some("deep-develop-software"),
+        Some("task"),
+    )
+    .await;
 
     let next = advance_one_step(&state, &card_id, &session_id).await;
     assert_eq!(
-        next, "summarize",
-        "research → summarize, not a skip to done"
+        next, "review",
+        "deep-develop-software in_progress → review, not a skip to done",
     );
 
     let next = advance_one_step(&state, &card_id, &session_id).await;
-    assert_eq!(next, "done", "summarize → done");
+    assert_eq!(next, "done", "review → done");
 }
 
 #[tokio::test]
@@ -239,9 +257,10 @@ async fn complete_step_falls_back_to_project_default_workflow() {
     // When the card names no workflow, the project's default_workflow drives
     // the step order.
     let state = build_state().await;
-    let (card_id, session_id) = seed_card_with_worker(&state, "design", None, Some("full")).await;
+    let (card_id, session_id) =
+        seed_card_with_worker(&state, "in_progress", None, Some("deep-develop-software")).await;
 
-    // full: backlog → design → implement → test → review → done
+    // deep-develop-software: backlog → in_progress → review → done.
     let next = advance_one_step(&state, &card_id, &session_id).await;
-    assert_eq!(next, "implement");
+    assert_eq!(next, "review");
 }

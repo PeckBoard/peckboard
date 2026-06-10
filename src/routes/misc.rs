@@ -47,7 +47,6 @@ pub const DEFAULT_PRIORITIES: &[(&str, i32, &str)] = &[
     ("High", 1, "Important, do soon"),
     ("Medium", 2, "Normal priority"),
     ("Low", 3, "Nice to have"),
-    ("Backlog", 4, "Someday / maybe"),
 ];
 
 /// Validate that a priority value is in the allowed set.
