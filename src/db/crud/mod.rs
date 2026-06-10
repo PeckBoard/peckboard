@@ -8,6 +8,7 @@ mod cascades;
 mod dependencies;
 mod events;
 mod folders;
+mod plugin_settings;
 mod pm_decisions;
 mod projects;
 mod push;

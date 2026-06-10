@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState, type FormEvent } from 'react'
 import type { RepeatingScheduleKind, RepeatingTask } from '../types/api'
 import { useFoldersStore } from '../store/folders'
 import { useRepeatingTasksStore } from '../store/repeatingTasks'
+import { useResourcesStore, type ModelInfo } from '../store/resources'
 import RepeatingTaskScheduleEditor from './RepeatingTaskScheduleEditor'
 
 interface Props {
@@ -10,11 +11,22 @@ interface Props {
   onSaved?: (task: RepeatingTask) => void
 }
 
+const EFFORT_OPTIONS = [
+  { value: '', label: 'Default' },
+  { value: 'low', label: 'Low' },
+  { value: 'medium', label: 'Medium' },
+  { value: 'high', label: 'High' },
+  { value: 'xhigh', label: 'Extra high' },
+  { value: 'max', label: 'Max' },
+]
+
 export default function NewRepeatingTaskModal({ initial, onClose, onSaved }: Props) {
   const folders = useFoldersStore((s) => s.folders)
   const fetchFolders = useFoldersStore((s) => s.fetchFolders)
   const createTask = useRepeatingTasksStore((s) => s.createTask)
   const updateTask = useRepeatingTasksStore((s) => s.updateTask)
+  const models = useResourcesStore((s) => s.models)
+  const fetchModels = useResourcesStore((s) => s.fetchModels)
 
   const editing = !!initial
 
@@ -36,13 +48,16 @@ export default function NewRepeatingTaskModal({ initial, onClose, onSaved }: Pro
     initial?.schedule_kind ?? 'interval',
   )
   const [scheduleValue, setScheduleValue] = useState<Record<string, number>>(initialScheduleValue)
+  const [model, setModel] = useState<string>(initial?.model ?? '')
+  const [effort, setEffort] = useState<string>(initial?.effort ?? '')
   const [enabled, setEnabled] = useState<boolean>(initial?.enabled ?? true)
   const [error, setError] = useState('')
   const [loading, setLoading] = useState(false)
 
   useEffect(() => {
     fetchFolders()
-  }, [fetchFolders])
+    fetchModels()
+  }, [fetchFolders, fetchModels])
 
   const handleSubmit = async (e: FormEvent) => {
     e.preventDefault()
@@ -68,6 +83,8 @@ export default function NewRepeatingTaskModal({ initial, onClose, onSaved }: Pro
           prompt,
           schedule_kind: scheduleKind,
           schedule_value: scheduleValue,
+          model: model || null,
+          effort: effort || null,
           enabled,
         })
         onSaved?.(task)
@@ -79,6 +96,8 @@ export default function NewRepeatingTaskModal({ initial, onClose, onSaved }: Pro
           prompt,
           schedule_kind: scheduleKind,
           schedule_value: scheduleValue,
+          model: model || null,
+          effort: effort || null,
           enabled,
         })
         onSaved?.(task)
@@ -168,6 +187,46 @@ export default function NewRepeatingTaskModal({ initial, onClose, onSaved }: Pro
               setScheduleValue(v)
             }}
           />
+
+          <div className="form-field">
+            <label className="form-label" htmlFor="repeating-task-model">
+              Model
+            </label>
+            <select
+              id="repeating-task-model"
+              className="form-input"
+              value={model}
+              onChange={(e) => setModel(e.target.value)}
+            >
+              <option value="">Default</option>
+              {(models as ModelInfo[]).map((m) => (
+                <option key={m.id} value={m.id}>
+                  {m.display_name}
+                </option>
+              ))}
+            </select>
+            <p className="form-help">
+              Each spawned run starts on this model. &quot;Default&quot; uses the system default.
+            </p>
+          </div>
+
+          <div className="form-field">
+            <label className="form-label" htmlFor="repeating-task-effort">
+              Effort
+            </label>
+            <select
+              id="repeating-task-effort"
+              className="form-input"
+              value={effort}
+              onChange={(e) => setEffort(e.target.value)}
+            >
+              {EFFORT_OPTIONS.map((o) => (
+                <option key={o.value} value={o.value}>
+                  {o.label}
+                </option>
+              ))}
+            </select>
+          </div>
 
           <div className="form-field">
             <label className="form-label" style={{ display: 'flex', gap: 8, alignItems: 'center' }}>

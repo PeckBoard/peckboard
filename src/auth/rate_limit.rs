@@ -16,6 +16,19 @@ use std::time::{Duration, Instant};
 ///   authenticate successfully aren't penalized just for making many
 ///   requests (e.g. an e2e suite that does dozens of logins in a row).
 ///
+/// Residual attack shape (intentional trade-off, not a bug): on an IP
+/// shared between an attacker and a legitimate user (e.g. shared NAT),
+/// the attacker can probe up to `max_per_minute - 1` failures, wait for
+/// the victim to log in successfully (which calls `reset` and wipes the
+/// attempt log), then resume. The 500ms × (failures - 2) delay ramp
+/// (capped at 5s) still throttles each probe, but the per-minute hard
+/// cap doesn't fire while a legitimate user is actively succeeding on
+/// the same key. Mitigations if this becomes a concern: key by
+/// (IP, username) instead of IP alone, or add a separate
+/// "failures-since-last-success" counter that `reset` does NOT clear
+/// and that triggers the cap independently. Not implemented preemptively
+/// — revisit if the shared-IP scenario starts mattering in practice.
+///
 /// Generic over the key type so the same machinery can throttle by IP
 /// address (login) or by user id (password change, etc.).
 pub struct RateLimiter<K: Eq + Hash + Clone = IpAddr> {

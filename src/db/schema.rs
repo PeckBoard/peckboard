@@ -213,6 +213,15 @@ diesel::table! {
     }
 }
 
+diesel::table! {
+    plugin_settings (plugin_id, key) {
+        plugin_id -> Text,
+        key -> Text,
+        value -> Text,
+        updated_at -> Text,
+    }
+}
+
 diesel::joinable!(sessions -> folders (folder_id));
 diesel::joinable!(sessions -> projects (project_id));
 diesel::joinable!(sessions -> repeating_tasks (repeating_task_id));
@@ -245,4 +254,5 @@ diesel::allow_tables_to_appear_in_same_query!(
     repeating_tasks,
     project_workflow_instructions,
     pm_decisions,
+    plugin_settings,
 );

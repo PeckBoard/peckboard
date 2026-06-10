@@ -40,20 +40,25 @@ fn broadcast_card_update(ctx: &ToolCallContext, card: &Card) {
     });
 }
 
-/// Fire-and-forget cancel of the current worker's underlying process so
-/// the next orchestrator tick can spawn a fresh worker (with a fresh
-/// prompt + clean context window) for the new step. For `finish` /
-/// `wont_do` the slot is already freed by the terminal step transition;
-/// cancelling there too just stops a now-pointless process. We don't
-/// wait on termination — `wait_for_termination` can take up to 10s and
-/// the agent has already gotten its tool response. The synthetic
-/// `Crashed { reason: "interrupted" }` event the cancel path emits is
-/// explicitly excluded from the auto-pause counter (see
-/// `pipeline::crash_reason_counts`), so cancelling a worker that just
-/// finished its card cleanly will not pause the project.
-async fn cancel_worker_process(ctx: &ToolCallContext) {
+/// Fire-and-forget request to tear down the current worker's underlying
+/// process *after* its in-flight turn finishes. The card has already
+/// been transitioned by the time we get here, so the worker has no more
+/// useful work — but a hard cancel would race the tool response we're
+/// about to return: the agent never sees its result, the CLI is killed
+/// mid-turn, and the stream loop appends a synthetic
+/// `Crashed { reason: "interrupted" }` event that surfaces to the user
+/// as "the worker crashed" even though the transition itself succeeded.
+///
+/// Using the graceful path routes through each provider's
+/// `shutdown_after_turn` (see `AgentProvider::shutdown_after_turn`),
+/// which lets the agent finish acknowledging the tool result before
+/// the run exits — no Crashed event, no race. The `complete_step` case
+/// still frees the worker slot via the DB write that precedes this
+/// call, so the next orchestrator tick spawns a fresh worker for the
+/// next step with a clean context window.
+async fn shutdown_worker_after_turn(ctx: &ToolCallContext) {
     if let Some(registry) = ctx.provider_registry.as_ref() {
-        crate::provider::manager::cancel_via_registry(registry, &ctx.session_id).await;
+        crate::provider::manager::shutdown_after_turn_via_registry(registry, &ctx.session_id).await;
     }
 }
 
@@ -133,7 +138,7 @@ impl McpToolRegistry {
 
         append_step_change(ctx, card_id, &prev_step, &card.step).await?;
         broadcast_card_update(ctx, &card);
-        cancel_worker_process(ctx).await;
+        shutdown_worker_after_turn(ctx).await;
 
         Ok(serde_json::json!({
             "status": "ok",
@@ -207,7 +212,7 @@ impl McpToolRegistry {
 
         append_step_change(ctx, card_id, &prev_step, "done").await?;
         broadcast_card_update(ctx, &card);
-        cancel_worker_process(ctx).await;
+        shutdown_worker_after_turn(ctx).await;
 
         Ok(serde_json::json!({
             "status": "ok",
@@ -273,7 +278,7 @@ impl McpToolRegistry {
 
         append_step_change(ctx, card_id, &prev_step, "wont_do").await?;
         broadcast_card_update(ctx, &card);
-        cancel_worker_process(ctx).await;
+        shutdown_worker_after_turn(ctx).await;
 
         Ok(serde_json::json!({
             "status": "ok",
@@ -346,6 +351,22 @@ impl McpToolRegistry {
             })
             .unwrap_or_default();
 
+        // Optional blocked flag + reason — lets the caller file a card in
+        // a blocked state (e.g. a code-review follow-up that needs human
+        // triage first) in a single round-trip rather than create + update.
+        // A non-empty `block_reason` without an explicit `blocked` implies
+        // blocked=true so callers don't have to set both.
+        let block_reason = args
+            .get("block_reason")
+            .and_then(|v| v.as_str())
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(|s| s.to_string());
+        let blocked = args
+            .get("blocked")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(block_reason.is_some());
+
         let now = chrono::Utc::now().to_rfc3339();
         let card_id = uuid::Uuid::new_v4().to_string();
         let card = ctx
@@ -360,6 +381,8 @@ impl McpToolRegistry {
                 workflow,
                 model,
                 effort,
+                blocked,
+                block_reason,
                 created_at: now.clone(),
                 updated_at: now,
             })
@@ -400,6 +423,8 @@ impl McpToolRegistry {
                 "title": card.title,
                 "step": card.step,
                 "priority": card.priority,
+                "blocked": card.blocked,
+                "block_reason": card.block_reason,
                 "depends_on": deps,
             }
         }))

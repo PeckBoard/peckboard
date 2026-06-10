@@ -1,7 +1,7 @@
 pub mod process;
 pub mod provider;
 
-pub use provider::register_claude_provider;
+pub use provider::{ClaudeProvider, register_claude_provider};
 
 use crate::provider::stream::{ModelInfo, SpawnConfig};
 

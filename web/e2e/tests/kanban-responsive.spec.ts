@@ -139,3 +139,56 @@ test('mobile viewport: kanban steps render as stacked rows (Backlog above In Pro
     docWidths.clientWidth + 1,
   )
 })
+
+test('mobile viewport: step rows are bare (no card-box border/background, divider between)', async ({
+  request,
+  page,
+  baseURL,
+}) => {
+  expect(baseURL, 'baseURL configured').toBeTruthy()
+
+  // Phone viewport — same logic the previous test pins.
+  await page.setViewportSize({ width: 390, height: 844 })
+
+  const { token, auth } = await authenticate(request)
+  const { projectId } = await seedProject(request, auth, 'mobile-bare')
+
+  await loadAt(page, token, `/projects/${projectId}`)
+
+  const backlog = page.locator('.kanban-column').filter({
+    has: page.locator('.kanban-column-header h3', { hasText: /^Backlog$/ }),
+  })
+  await expect(backlog.locator('.kanban-card-title', { hasText: 'Backlog item' })).toBeVisible({
+    timeout: 10_000,
+  })
+
+  // On mobile the step rows render bare: no per-section background or
+  // outer border, just a top divider between adjacent rows. The first
+  // .kanban-column has no top divider (it's the first child), so we
+  // assert against the second one (In Progress).
+  const inProgress = page.locator('.kanban-column').filter({
+    has: page.locator('.kanban-column-header h3', { hasText: /^In Progress$/ }),
+  })
+  const style = await inProgress.evaluate((el) => {
+    const cs = getComputedStyle(el)
+    return {
+      background: cs.backgroundColor,
+      borderTopWidth: cs.borderTopWidth,
+      borderLeftWidth: cs.borderLeftWidth,
+      borderRightWidth: cs.borderRightWidth,
+      borderBottomWidth: cs.borderBottomWidth,
+      borderRadius: cs.borderTopLeftRadius,
+    }
+  })
+  // Transparent background on the section itself — no nested card box.
+  expect(style.background, 'section has no background fill').toMatch(
+    /rgba\(\s*0,\s*0,\s*0,\s*0\s*\)|transparent/,
+  )
+  // Side and bottom borders cleared — the only border is the top
+  // divider between adjacent rows.
+  expect(style.borderLeftWidth).toBe('0px')
+  expect(style.borderRightWidth).toBe('0px')
+  expect(style.borderBottomWidth).toBe('0px')
+  expect(style.borderRadius).toBe('0px')
+  expect(parseFloat(style.borderTopWidth)).toBeGreaterThan(0)
+})

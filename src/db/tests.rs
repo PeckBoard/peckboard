@@ -357,6 +357,8 @@ mod tests {
                 workflow: "task".into(),
                 model: None,
                 effort: None,
+                blocked: false,
+                block_reason: None,
                 created_at: ts.clone(),
                 updated_at: ts.clone(),
             })
@@ -428,6 +430,8 @@ mod tests {
             workflow: "task".into(),
             model: None,
             effort: None,
+            blocked: false,
+            block_reason: None,
             created_at: ts.clone(),
             updated_at: ts.clone(),
         };
@@ -1085,6 +1089,8 @@ mod tests {
                 workflow: "task".into(),
                 model: None,
                 effort: None,
+                blocked: false,
+                block_reason: None,
                 created_at: ts.clone(),
                 updated_at: ts.clone(),
             })
@@ -1304,6 +1310,8 @@ mod tests {
                 workflow: "task".into(),
                 model: None,
                 effort: None,
+                blocked: false,
+                block_reason: None,
                 created_at: ts.clone(),
                 updated_at: ts.clone(),
             })

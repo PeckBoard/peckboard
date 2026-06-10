@@ -19,6 +19,13 @@ pub(super) struct CreateCardRequest {
     /// Ids of cards this card depends on (must be `done` before a worker
     /// will pick this card up).
     depends_on: Option<Vec<String>>,
+    /// File the card as already blocked so no worker picks it up until
+    /// a human (or another caller) unblocks it. A non-empty
+    /// `block_reason` implies `blocked = true` when this is omitted.
+    #[serde(default)]
+    blocked: Option<bool>,
+    #[serde(default)]
+    block_reason: Option<String>,
 }
 
 #[derive(Deserialize, serde::Serialize)]
@@ -118,6 +125,17 @@ pub(super) async fn create_card(
     let now = chrono::Utc::now().to_rfc3339();
     let id = uuid::Uuid::new_v4().to_string();
 
+    // Treat a non-empty `block_reason` as implicitly setting blocked, so
+    // a caller can file a blocked card with one field. Empty/whitespace
+    // strings are dropped to keep stored reasons meaningful.
+    let block_reason = body
+        .block_reason
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(|s| s.to_string());
+    let blocked = body.blocked.unwrap_or(block_reason.is_some());
+
     let card = state
         .db
         .create_card(NewCard {
@@ -130,6 +148,8 @@ pub(super) async fn create_card(
             workflow,
             model: body.model,
             effort: body.effort,
+            blocked,
+            block_reason,
             created_at: now.clone(),
             updated_at: now,
         })

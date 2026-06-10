@@ -1,5 +1,5 @@
 /* ═══════════════════════════════════════════════════
-   Settings Page
+   Settings Page / Modal
    ═══════════════════════════════════════════════════ */
 
 .settings-page {
@@ -14,6 +14,17 @@
   margin: 0 0 32px;
   letter-spacing: -0.03em;
 }
+
+/* Cap the dropdown-opened modals so a long content list (notably the
+   Plugins list with several built-ins) stays inside the viewport
+   instead of spilling under the keyboard or off-screen. `.modal`
+   already animates in and centers; we just add internal scrolling. */
+.settings-modal,
+.plugins-modal {
+  max-height: calc(var(--app-height) - 64px);
+  overflow-y: auto;
+}
+
 .settings-section {
   margin-bottom: 32px;
 }
@@ -69,4 +80,234 @@
   background: var(--surface);
   color: var(--text);
   box-shadow: var(--shadow-sm);
+}
+
+/* ─── Plugins list ────────────────────────────────── */
+.plugins-list {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+.plugin-card {
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 16px;
+  background: var(--surface);
+}
+.plugin-card-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 12px;
+}
+.plugin-card-name {
+  font-size: var(--text-base);
+  font-weight: 700;
+  color: var(--text);
+  margin: 0 0 4px;
+}
+.plugin-card-meta {
+  font-size: var(--text-xs);
+  color: var(--text3);
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+.plugin-card-meta-builtin {
+  color: var(--text2);
+  font-weight: 600;
+}
+.plugin-card-description {
+  font-size: var(--text-sm);
+  color: var(--text2);
+  margin: 12px 0 0;
+  line-height: 1.45;
+}
+.plugin-card-error {
+  font-size: var(--text-sm);
+  color: var(--danger, #c00);
+  margin: 8px 0 0;
+}
+.plugin-badge {
+  font-size: var(--text-xs);
+  padding: 3px 8px;
+  border-radius: 999px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+.plugin-badge--active {
+  background: rgba(0, 160, 80, 0.12);
+  color: rgb(0, 130, 65);
+}
+.plugin-badge--failed {
+  background: rgba(200, 40, 40, 0.12);
+  color: rgb(170, 30, 30);
+}
+.plugin-permissions {
+  margin-top: 14px;
+  padding-top: 14px;
+  border-top: 1px dashed var(--border);
+}
+.plugin-permissions-title {
+  font-size: var(--text-xs);
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--text3);
+  margin-bottom: 8px;
+}
+.plugin-permissions-empty {
+  font-size: var(--text-sm);
+  color: var(--text3);
+  margin: 0;
+}
+.plugin-permissions-list {
+  list-style: none;
+  padding: 0;
+  margin: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.plugin-permission {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  font-size: var(--text-sm);
+}
+.plugin-permission-label {
+  font-weight: 600;
+  color: var(--text);
+}
+.plugin-permission-desc {
+  color: var(--text3);
+  font-size: var(--text-xs);
+}
+.plugin-card-actions {
+  margin-top: 14px;
+  padding-top: 14px;
+  border-top: 1px dashed var(--border);
+  display: flex;
+  justify-content: flex-end;
+}
+.plugin-settings-open {
+  font-size: var(--text-sm);
+  padding: 6px 14px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--surface);
+  color: var(--text);
+  cursor: pointer;
+  font-weight: 600;
+}
+.plugin-settings-open:hover {
+  background: var(--surface-hover, rgba(0, 0, 0, 0.04));
+}
+.plugin-settings-modal {
+  max-height: calc(var(--app-height) - 64px);
+  overflow-y: auto;
+}
+.plugin-settings {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+.plugin-setting-field {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.plugin-setting-label {
+  font-size: var(--text-sm);
+  font-weight: 600;
+  color: var(--text);
+}
+.plugin-setting-required {
+  color: var(--danger, #c00);
+  margin-left: 4px;
+}
+.plugin-setting-desc {
+  font-size: var(--text-xs);
+  color: var(--text3);
+}
+.plugin-setting-input,
+.plugin-setting-select {
+  font: inherit;
+  padding: 6px 8px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--surface);
+  color: var(--text);
+}
+.plugin-setting-input--inline {
+  flex: 1;
+}
+.plugin-setting-checkbox {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.plugin-setting-secret-set {
+  font-size: var(--text-xs);
+  color: var(--text3);
+  font-style: italic;
+}
+.plugin-setting-kv-row {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+}
+.plugin-setting-kv-row > input {
+  font: inherit;
+  padding: 6px 8px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--surface);
+  color: var(--text);
+  flex: 1;
+}
+.plugin-setting-kv-remove,
+.plugin-setting-kv-add {
+  font-size: var(--text-xs);
+  padding: 4px 8px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: transparent;
+  color: var(--text2);
+  cursor: pointer;
+}
+.plugin-setting-kv-add {
+  align-self: flex-start;
+}
+.plugin-setting-kv-remove:hover,
+.plugin-setting-kv-add:hover {
+  background: var(--surface-hover, rgba(0, 0, 0, 0.04));
+}
+.plugin-settings-actions {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+.plugin-settings-save {
+  font-size: var(--text-sm);
+  padding: 6px 14px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--surface);
+  color: var(--text);
+  cursor: pointer;
+  font-weight: 600;
+}
+.plugin-settings-save[disabled] {
+  opacity: 0.5;
+  cursor: default;
+}
+.plugin-settings-error {
+  font-size: var(--text-xs);
+  color: var(--danger, #c00);
+}
+.plugin-settings-success {
+  font-size: var(--text-xs);
+  color: rgb(0, 130, 65);
 }

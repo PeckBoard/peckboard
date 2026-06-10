@@ -184,6 +184,62 @@
     -webkit-overflow-scrolling: touch;
   }
 
+  /* On mobile the per-step section is bare: no card box, just a
+     horizontal divider between rows. The desktop layout (≥ 768px)
+     keeps the rounded surface look; on a phone the boxes-within-a-box
+     nesting reads as visual clutter. */
+  .kanban-columns {
+    gap: 0;
+  }
+  .kanban-column {
+    background: transparent;
+    border: 0;
+    border-radius: 0;
+  }
+  .kanban-column + .kanban-column {
+    border-top: 1px solid var(--border);
+  }
+  .kanban-column-header {
+    background: transparent;
+    border-bottom: 0;
+    border-radius: 0;
+  }
+  /* On mobile each step row carries a horizontal-scroll card strip:
+     `flex-wrap: nowrap` keeps the cards on one line, `overflow-x: auto`
+     gives the strip its own horizontal scroll so the page doesn't
+     overflow horizontally. The board itself still scrolls vertically.
+     `overscroll-behavior-x: contain` stops a horizontal swipe from
+     turning into a browser back-gesture. */
+  .kanban-cards {
+    flex-wrap: nowrap;
+    overflow-x: auto;
+    overflow-y: visible;
+    -webkit-overflow-scrolling: touch;
+    overscroll-behavior-x: contain;
+    padding: 8px 12px 12px;
+    /* `align-items: stretch` lets every card in the strip take the same
+       height, so the strip reads as a single uniform row instead of a
+       ragged-bottom line. */
+    align-items: stretch;
+    /* Pad the strip's right edge so the trailing card isn't flush against
+       the viewport (and the user can tell more cards exist when scrolled
+       to the very end). */
+    scroll-padding: 12px;
+  }
+  /* Card width is slightly narrower than the desktop 320px so a small
+     part of the next card peeks past the viewport's right edge,
+     advertising the horizontal scroll. Height also bumps up so the
+     description block is genuinely usable rather than a one-liner. */
+  .kanban-card {
+    width: 280px;
+    height: 240px;
+  }
+  /* Empty row placeholder reads inline on a horizontal strip. */
+  .kanban-cards-empty {
+    align-self: center;
+    margin: 8px 12px;
+  }
+
   /* Kanban header stack */
   .kanban-board-header {
     flex-wrap: wrap;

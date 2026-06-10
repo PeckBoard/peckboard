@@ -531,10 +531,12 @@ async fn run_scenario(
     true
 }
 
-/// Register the mock provider in the registry.
-pub async fn register_mock_provider(registry: &ProviderRegistry) {
-    let provider = Arc::new(MockProvider::new());
-    let models = vec![
+/// Scripted models the mock provider exposes. Pulled out of
+/// `register_mock_provider` so the built-in `MockPlugin`
+/// (`src/plugin/builtins/mock.rs`) can call it without duplicating the
+/// list.
+pub fn mock_model_infos() -> Vec<ModelInfo> {
+    vec![
         ModelInfo {
             id: "echo".into(),
             display_name: "Mock: echo".into(),
@@ -570,15 +572,20 @@ pub async fn register_mock_provider(registry: &ProviderRegistry) {
             display_name: "Mock: markdown".into(),
             capabilities: vec!["mock".into(), "markdown".into()],
         },
-    ];
+    ]
+}
 
+/// Register the mock provider in the registry directly. Kept for tests
+/// that build a bare `ProviderRegistry` without going through the plugin
+/// catalog; production code paths flow through `MockPlugin`.
+pub async fn register_mock_provider(registry: &ProviderRegistry) {
     registry
         .register(
-            provider,
+            Arc::new(MockProvider::new()),
             ProviderInfo {
                 id: "mock".into(),
                 display_name: "Mock".into(),
-                models,
+                models: mock_model_infos(),
             },
         )
         .await;

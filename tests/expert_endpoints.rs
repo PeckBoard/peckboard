@@ -22,6 +22,7 @@ use peckboard::auth::token::{create_token, generate_jwt_secret, hash_token};
 use peckboard::config::Config;
 use peckboard::db::Db;
 use peckboard::db::models::{NewAuthSession, NewCard, NewFolder, NewProject, NewSession, NewUser};
+use peckboard::plugin::builtin::BuiltinPluginRegistry;
 use peckboard::plugin::manager::PluginManager;
 use peckboard::provider::manager::SessionManager;
 use peckboard::provider::registry::ProviderRegistry;
@@ -84,6 +85,7 @@ async fn build_state() -> (Arc<AppState>, String) {
         config,
         db,
         plugins,
+        builtin_plugins: Arc::new(BuiltinPluginRegistry::new()),
         jwt_secret,
         login_limiter: RateLimiter::new(60),
         password_change_limiter: RateLimiter::<String>::new(5),
@@ -151,6 +153,8 @@ async fn seed(state: &AppState) {
             workflow: "task".into(),
             model: None,
             effort: None,
+            blocked: false,
+            block_reason: None,
             created_at: ts.clone(),
             updated_at: ts.clone(),
         })

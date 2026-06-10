@@ -124,6 +124,14 @@ pub(super) fn tool_definitions() -> Vec<McpToolDef> {
                         "type": "array",
                         "items": { "type": "string" },
                         "description": "Optional ids of cards this card depends on. A worker only starts this card once every dependency is 'done'. Dependencies must be existing cards in the same project."
+                    },
+                    "blocked": {
+                        "type": "boolean",
+                        "description": "Optional. File the card already blocked so no worker picks it up until a human unblocks it. Defaults to true when `block_reason` is given."
+                    },
+                    "block_reason": {
+                        "type": "string",
+                        "description": "Optional reason the card is blocked at creation (e.g. 'needs human triage'). Setting this implies blocked=true unless `blocked` is set explicitly."
                     }
                 },
                 "required": ["title", "description"],

@@ -65,6 +65,14 @@ pub enum StdinMsg {
     /// frame, worker-comms delivery, etc.). Doesn't touch the
     /// turn-active flag.
     RawLine(String),
+    /// Request a graceful exit once the in-flight turn finishes. The
+    /// loop sets a local flag, finishes draining stdout up to and
+    /// including the next `result` event, then drops the stdin pipe
+    /// so the CLI sees EOF and exits cleanly — no `Crashed` event.
+    /// Used by the MCP terminal-step tools (`finish_card`,
+    /// `complete_step`, `wont_do_card`) so the tool response can
+    /// reach the agent before the process winds down.
+    ShutdownAfterTurn,
 }
 
 /// Handle to a running Claude CLI child process.
@@ -76,6 +84,30 @@ pub struct ClaudeProcess {
 impl ClaudeProcess {
     pub fn session_id(&self) -> &str {
         &self.session_id
+    }
+
+    /// Construct a `ClaudeProcess` from a pre-built `Command` instead of
+    /// going through `spawn_claude`. The default spawn path bakes in the
+    /// `claude` binary and stream-json arguments; tests that need a
+    /// stand-in subprocess (e.g. `cat` for an echo loop) reach for this.
+    /// Only compiled in test builds — production paths always go through
+    /// `spawn_claude`.
+    #[cfg(test)]
+    pub fn from_command_for_test(
+        mut cmd: Command,
+        session_id: &str,
+    ) -> anyhow::Result<ClaudeProcess> {
+        cmd.stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .kill_on_drop(true);
+        let child = cmd.spawn().map_err(|e| {
+            anyhow::anyhow!("Failed to spawn test subprocess for {session_id}: {e}")
+        })?;
+        Ok(ClaudeProcess {
+            child,
+            session_id: session_id.to_string(),
+        })
     }
 }
 
@@ -234,6 +266,15 @@ pub async fn stream_events(
 
     let mut was_cancelled = false;
     let mut saw_clean_completion = false;
+    // Set when a `ShutdownAfterTurn` arrives on `stdin_rx`. After the
+    // current `result` event we break out of the select loop without
+    // killing the child; dropping stdin gives it a clean EOF and the
+    // exit path produces no Crashed event (turn idle + clean
+    // completion). Race-wise the flag is checked AFTER each `result`,
+    // so a tool handler that sets the flag and returns immediately is
+    // guaranteed to still let its own response — and any follow-on
+    // assistant text — reach stdout before the loop tears down.
+    let mut shutdown_after_turn = false;
 
     // Track file-modifying tool calls for auto cross-worker notification
     let mut pending_file_changes: Vec<String> = Vec::new();
@@ -273,6 +314,26 @@ pub async fn stream_events(
                     }
                     Some(StdinMsg::RawLine(line)) => {
                         write_stdin_line(&mut stdin_pipe, &line, &session_id).await;
+                        continue;
+                    }
+                    Some(StdinMsg::ShutdownAfterTurn) => {
+                        tracing::info!(
+                            session_id = %session_id,
+                            "Graceful shutdown requested; will exit after current turn"
+                        );
+                        shutdown_after_turn = true;
+                        // If the turn has *already* completed by the time
+                        // this message lands (e.g. the agent finished and
+                        // we're idling between turns), break right now —
+                        // there's no `result` event coming to trigger the
+                        // post-result check below.
+                        if !state.turn_active.load(Ordering::Acquire) {
+                            tracing::info!(
+                                session_id = %session_id,
+                                "No active turn at shutdown request; breaking immediately"
+                            );
+                            break;
+                        }
                         continue;
                     }
                     None => {
@@ -554,6 +615,21 @@ pub async fn stream_events(
                 pending_tool_names.clear();
             }
             saw_clean_completion = true;
+
+            // Graceful-shutdown rendezvous: a tool handler (e.g.
+            // `finish_card`) set the flag mid-turn so the response
+            // could reach the agent. Now that the turn's `result`
+            // has been emitted and we recorded a Completed, drop
+            // stdin so the CLI sees EOF and exits naturally. The
+            // exit-decision branch below classifies this as turn
+            // idle + saw clean completion → no Crashed event.
+            if shutdown_after_turn {
+                tracing::info!(
+                    session_id = %session_id,
+                    "Turn complete after shutdown request; exiting stream loop"
+                );
+                break;
+            }
         }
     }
 
@@ -601,6 +677,11 @@ pub async fn stream_events(
 
     // Decide whether to emit a Crashed on process exit:
     //
+    //   - graceful shutdown requested (ShutdownAfterTurn) → silent
+    //     exit, no Crashed event. Takes priority over the
+    //     `turn_was_active` / `!saw_clean_completion` branches so a
+    //     handler that fires the signal immediately after spawn (no
+    //     turn yet, or mid-turn) still tears down cleanly.
     //   - cancelled mid-turn → emit Crashed{interrupted}
     //   - turn active at exit (no result event reached us) → Crashed
     //   - turn idle, clean stdout EOF after at least one completion
@@ -611,7 +692,9 @@ pub async fn stream_events(
     let turn_was_active = state.turn_active.load(Ordering::Acquire);
     state.turn_active.store(false, Ordering::Release);
 
-    let is_completed = if was_cancelled {
+    let is_completed = if shutdown_after_turn {
+        true
+    } else if was_cancelled {
         emit_event(
             &db,
             &broadcaster,
@@ -773,4 +856,247 @@ async fn write_stdin_line(
         return false;
     }
     true
+}
+
+#[cfg(test)]
+mod tests {
+    //! Integration-style tests for `stream_events`. We back the child
+    //! process with `cat` (echoes every line sent on stdin straight to
+    //! stdout) so we can synthesise the CLI's exact stream-json output
+    //! without depending on the real `claude` binary. Two scenarios
+    //! cover the load-bearing graceful-shutdown contract: (1)
+    //! `ShutdownAfterTurn` while a turn is in flight defers until the
+    //! next `result` event, and (2) the final exit produces no
+    //! `Crashed` event in the session log.
+    use super::*;
+    use crate::db::Db;
+    use crate::ws::broadcaster::Broadcaster;
+    use std::sync::atomic::{AtomicBool, AtomicU64};
+    use tokio::process::Command;
+    use tokio::time::timeout;
+
+    /// Drive `cat` as a stand-in CLI. Returns the channels and shared
+    /// state the caller needs to interact with the loop, plus a
+    /// JoinHandle on the spawned stream_events task. Creates the
+    /// folder + session rows so the loop's `emit_event` calls find a
+    /// valid foreign-key target — without these, the events table
+    /// rejects inserts and the test sees an empty event log.
+    async fn spawn_cat_loop(
+        session_id: &str,
+    ) -> (
+        Db,
+        mpsc::Sender<StdinMsg>,
+        Arc<Notify>,
+        Arc<AtomicBool>,
+        tokio::task::JoinHandle<bool>,
+    ) {
+        let db = Db::in_memory().unwrap();
+        let ts = chrono::Utc::now().to_rfc3339();
+        db.create_folder(crate::db::models::NewFolder {
+            id: "f1".into(),
+            name: "f".into(),
+            path: "/tmp".into(),
+            created_at: ts.clone(),
+        })
+        .await
+        .unwrap();
+        db.create_session(crate::db::models::NewSession {
+            id: session_id.into(),
+            name: "test".into(),
+            folder_id: "f1".into(),
+            model: None,
+            effort: None,
+            is_worker: false,
+            project_id: None,
+            card_id: None,
+            conversation_id: None,
+            created_at: ts.clone(),
+            last_activity: ts,
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+
+        let broadcaster = Broadcaster::new();
+        let (tx, rx) = mpsc::channel::<StdinMsg>(16);
+        let cancel = Arc::new(Notify::new());
+        let turn_active = Arc::new(AtomicBool::new(false));
+        let last_activity = Arc::new(AtomicU64::new(0));
+        let state = LoopState {
+            turn_active: turn_active.clone(),
+            last_activity,
+        };
+
+        let process = ClaudeProcess::from_command_for_test(Command::new("cat"), session_id)
+            .expect("spawn cat");
+
+        let db_clone = db.clone();
+        let cancel_clone = cancel.clone();
+        let handle = tokio::spawn(async move {
+            stream_events(
+                process,
+                db_clone,
+                broadcaster,
+                rx,
+                "/tmp".into(),
+                cancel_clone,
+                state,
+            )
+            .await
+        });
+
+        (db, tx, cancel, turn_active, handle)
+    }
+
+    /// Synthetic stream-json `result` frame matching the CLI's shape
+    /// closely enough for the loop's per-turn completion path to fire.
+    fn fake_result_frame(conv_id: &str) -> String {
+        serde_json::json!({
+            "type": "result",
+            "session_id": conv_id,
+            "result": "ok",
+        })
+        .to_string()
+    }
+
+    /// Spin until `turn_active` reaches `expected` or `deadline` runs
+    /// out. Polling is preferable to a fixed sleep because the loop
+    /// flips this flag on its own schedule (after writing the user
+    /// envelope), and a too-short sleep would race; a too-long sleep
+    /// would slow the suite unnecessarily.
+    async fn wait_for_turn_active(flag: &AtomicBool, expected: bool, deadline_ms: u64) {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_millis(deadline_ms);
+        while flag.load(Ordering::Acquire) != expected {
+            if std::time::Instant::now() >= deadline {
+                panic!("turn_active never reached {expected}");
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    }
+
+    #[tokio::test]
+    async fn shutdown_after_turn_during_turn_breaks_after_result() {
+        // The realistic flow: a tool handler calls shutdown_after_turn
+        // while the agent is mid-turn. The loop must finish processing
+        // the current turn (here, simulated by a `result` frame echoed
+        // back via cat) and then exit silently. The session must show
+        // a Completed agent-end, not a Crashed one.
+        let session = "loop-shutdown-mid-turn";
+        let (db, tx, _cancel, turn_active, handle) = spawn_cat_loop(session).await;
+
+        // Drive turn_active=true the same way production does: send a
+        // user envelope. The loop writes it to cat's stdin (cat echoes
+        // it back, which the parser ignores as a non-result type) and
+        // flips the flag after the write succeeds.
+        tx.send(StdinMsg::UserTurn("hello".into())).await.unwrap();
+        wait_for_turn_active(&turn_active, true, 2_000).await;
+
+        // Schedule graceful shutdown. The loop sets a flag and
+        // continues — does NOT break yet because the turn is active.
+        tx.send(StdinMsg::ShutdownAfterTurn).await.unwrap();
+
+        // Deliver the `result` frame as a raw line. cat echoes it,
+        // the loop reads it from "stdout", parses it as a result,
+        // emits Completed, then checks the flag and breaks.
+        tx.send(StdinMsg::RawLine(fake_result_frame("conv-1")))
+            .await
+            .unwrap();
+
+        let completed = timeout(std::time::Duration::from_secs(5), handle)
+            .await
+            .expect("stream loop must exit within 5s")
+            .expect("task must not panic");
+        assert!(
+            completed,
+            "graceful shutdown after result must report completed=true"
+        );
+
+        let events = db.list_events_by_session(session, None).await.unwrap();
+        let kinds: Vec<&str> = events.iter().map(|e| e.kind.as_str()).collect();
+        assert!(
+            kinds.contains(&"agent-end"),
+            "result event must emit a Completed agent-end, got kinds: {kinds:?}"
+        );
+        // Critical: no Crashed agent-end. The user-visible "worker
+        // crash" line in this card's description came from the
+        // agent-end whose status is Crashed; with graceful shutdown
+        // we get a Completed agent-end instead.
+        for e in &events {
+            if e.kind == "agent-end" {
+                let data: serde_json::Value = serde_json::from_str(&e.data).unwrap_or_default();
+                let status = data.get("status").and_then(|v| v.as_str()).unwrap_or("");
+                assert_ne!(
+                    status, "crashed",
+                    "graceful shutdown must not produce a Crashed agent-end, got {data}"
+                );
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn shutdown_after_turn_with_no_active_turn_exits_immediately() {
+        // Edge case: a stray shutdown_after_turn while no turn is in
+        // flight (e.g. the agent already finished and we're idling)
+        // should break out without waiting for a result event. The
+        // hardened exit branch is the load-bearing piece: even though
+        // `saw_clean_completion` is false here, we still exit silently
+        // because the break was due to the graceful path.
+        let session = "loop-shutdown-idle";
+        let (db, tx, _cancel, turn_active, handle) = spawn_cat_loop(session).await;
+        assert!(!turn_active.load(Ordering::Acquire));
+
+        tx.send(StdinMsg::ShutdownAfterTurn).await.unwrap();
+
+        let completed = timeout(std::time::Duration::from_secs(5), handle)
+            .await
+            .expect("stream loop must exit within 5s")
+            .expect("task must not panic");
+        assert!(completed, "graceful exit must report completed=true");
+
+        // No Crashed event even though we never saw a clean completion.
+        let events = db.list_events_by_session(session, None).await.unwrap();
+        for e in &events {
+            if e.kind == "agent-end" {
+                let data: serde_json::Value = serde_json::from_str(&e.data).unwrap_or_default();
+                let status = data.get("status").and_then(|v| v.as_str()).unwrap_or("");
+                assert_ne!(status, "crashed", "expected silent exit, got {data}");
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn explicit_cancel_still_produces_crashed_event() {
+        // Regression guard for the OTHER path: user-initiated cancel
+        // (the manual "kill worker" action) must still emit
+        // Crashed{interrupted}. The graceful flag short-circuits ONLY
+        // for ShutdownAfterTurn; cancel.notify must continue to write
+        // an explicit crash event so the UI distinguishes "user killed
+        // it" from "the worker finished and exited."
+        let session = "loop-explicit-cancel";
+        let (db, tx, cancel, turn_active, handle) = spawn_cat_loop(session).await;
+
+        // Park a turn in flight so the cancel path's "killed mid-turn"
+        // semantics fire. Using UserTurn avoids the race that would
+        // come from flipping the flag directly.
+        tx.send(StdinMsg::UserTurn("hello".into())).await.unwrap();
+        wait_for_turn_active(&turn_active, true, 2_000).await;
+
+        cancel.notify_one();
+
+        let completed = timeout(std::time::Duration::from_secs(5), handle)
+            .await
+            .expect("stream loop must exit within 5s")
+            .expect("task must not panic");
+        assert!(!completed, "cancelled run must report completed=false");
+
+        let events = db.list_events_by_session(session, None).await.unwrap();
+        let crashed = events.iter().find(|e| {
+            if e.kind != "agent-end" {
+                return false;
+            }
+            let data: serde_json::Value = serde_json::from_str(&e.data).unwrap_or_default();
+            data.get("status").and_then(|v| v.as_str()) == Some("crashed")
+        });
+        assert!(crashed.is_some(), "user cancel must emit a Crashed event");
+    }
 }

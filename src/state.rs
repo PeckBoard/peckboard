@@ -3,6 +3,7 @@ use std::sync::Arc;
 use crate::auth::rate_limit::RateLimiter;
 use crate::config::Config;
 use crate::db::Db;
+use crate::plugin::builtin::BuiltinPluginRegistry;
 use crate::plugin::manager::PluginManager;
 use crate::provider::manager::SessionManager;
 use crate::provider::registry::ProviderRegistry;
@@ -15,6 +16,9 @@ pub struct AppState {
     pub config: Config,
     pub db: Db,
     pub plugins: Arc<PluginManager>,
+    /// Catalog of statically-linked Rust plugins (currently `claude-code`
+    /// and `mock`). Surfaces in the Settings UI via `/api/plugins`.
+    pub builtin_plugins: Arc<BuiltinPluginRegistry>,
     pub jwt_secret: Vec<u8>,
     pub login_limiter: RateLimiter,
     /// Per-user throttle on `POST /api/auth/change-password`. Keyed by

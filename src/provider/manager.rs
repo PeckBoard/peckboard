@@ -545,6 +545,22 @@ pub async fn cancel_via_registry(registry: &ProviderRegistry, session_id: &str) 
     }
 }
 
+/// Request a graceful shutdown of `session_id` on every registered provider.
+/// Fan-out mirrors [`cancel_via_registry`] but routes through each
+/// provider's `shutdown_after_turn` so the in-flight turn (including any
+/// outstanding tool response) is allowed to finish before the run is torn
+/// down. Reach for this from the MCP terminal-step handlers
+/// (`finish_card`, `complete_step`, `wont_do_card`) where a hard cancel
+/// would race the tool response and surface as a worker crash even
+/// though the card transition itself succeeded.
+pub async fn shutdown_after_turn_via_registry(registry: &ProviderRegistry, session_id: &str) {
+    for info in registry.list_providers().await {
+        if let Some(p) = registry.get_provider(&info.id).await {
+            p.shutdown_after_turn(session_id).await;
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

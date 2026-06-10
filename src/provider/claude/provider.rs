@@ -232,6 +232,36 @@ impl AgentProvider for ClaudeProvider {
         }
     }
 
+    async fn shutdown_after_turn(&self, session_id: &str) {
+        // Send the rendezvous signal to the stream loop's stdin channel.
+        // The loop sets a flag and breaks out *after* the next `result`
+        // event, dropping the child's stdin so it exits cleanly — no
+        // synthetic Crashed event, no race with the in-flight tool
+        // response. If no run is tracked (already exited), nothing to do.
+        let stdin_tx = {
+            let runs = self.runs.lock().await;
+            runs.get(session_id).map(|r| r.stdin_tx.clone())
+        };
+        let Some(tx) = stdin_tx else {
+            tracing::debug!(
+                session_id = %session_id,
+                "No tracked claude run to shutdown gracefully (may have already exited)"
+            );
+            return;
+        };
+        if let Err(e) = tx.send(StdinMsg::ShutdownAfterTurn).await {
+            tracing::warn!(
+                session_id = %session_id,
+                "Failed to send ShutdownAfterTurn to stream loop: {e}"
+            );
+        } else {
+            tracing::info!(
+                session_id = %session_id,
+                "Scheduled graceful claude shutdown after current turn"
+            );
+        }
+    }
+
     async fn interrupt(&self, session_id: &str) {
         // Claude CLI in stream-json mode does not respond to in-band
         // interrupt bytes for a hard stop — the only reliable way to
@@ -343,6 +373,96 @@ fn now_ms() -> u64 {
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_millis() as u64)
         .unwrap_or(0)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tokio::time::timeout;
+
+    /// Insert a fake `ClaudeRun` for `session_id` without spawning a real
+    /// child process. Same-module access lets the test fixture build the
+    /// run struct directly. Returns the receiver end of the stdin channel
+    /// so the test can observe what the provider writes to it.
+    async fn install_fake_run(
+        provider: &ClaudeProvider,
+        session_id: &str,
+    ) -> mpsc::Receiver<super::super::process::StdinMsg> {
+        let (tx, rx) = mpsc::channel::<super::super::process::StdinMsg>(8);
+        let run = ClaudeRun {
+            cancel: Arc::new(Notify::new()),
+            stdin_tx: tx,
+            turn_active: Arc::new(AtomicBool::new(true)),
+            last_activity: Arc::new(AtomicU64::new(now_ms())),
+        };
+        provider
+            .runs
+            .lock()
+            .await
+            .insert(session_id.to_string(), run);
+        rx
+    }
+
+    #[tokio::test]
+    async fn shutdown_after_turn_sends_message_to_stream_loop() {
+        // The provider must NOT touch the cancel signal — the whole
+        // point of the graceful path is to let the in-flight turn
+        // finish. The only side-effect should be a single
+        // `ShutdownAfterTurn` message on the run's stdin channel.
+        let provider = ClaudeProvider::new();
+        let mut rx = install_fake_run(&provider, "s1").await;
+
+        provider.shutdown_after_turn("s1").await;
+
+        let received = timeout(Duration::from_secs(1), rx.recv())
+            .await
+            .expect("shutdown_after_turn should send a message")
+            .expect("channel must yield a message");
+        assert!(
+            matches!(received, super::super::process::StdinMsg::ShutdownAfterTurn),
+            "expected ShutdownAfterTurn, got something else"
+        );
+    }
+
+    #[tokio::test]
+    async fn shutdown_after_turn_is_noop_for_unknown_session() {
+        // No tracked run → no panic, no error. The MCP handler fires
+        // this fire-and-forget for every dispatched session id, so
+        // hitting one that already exited must be silent.
+        let provider = ClaudeProvider::new();
+        // Just make sure this returns without panicking.
+        provider.shutdown_after_turn("unknown-session").await;
+    }
+
+    #[tokio::test]
+    async fn shutdown_after_turn_does_not_fire_cancel() {
+        // Independent verification that the graceful path is separate
+        // from the hard-kill path: the cancel Notify on the run must
+        // not be triggered. We park a waiter on it and confirm it
+        // never fires within a reasonable window.
+        let provider = ClaudeProvider::new();
+        let (tx, _rx) = mpsc::channel::<super::super::process::StdinMsg>(8);
+        let cancel = Arc::new(Notify::new());
+        let run = ClaudeRun {
+            cancel: cancel.clone(),
+            stdin_tx: tx,
+            turn_active: Arc::new(AtomicBool::new(true)),
+            last_activity: Arc::new(AtomicU64::new(now_ms())),
+        };
+        provider.runs.lock().await.insert("s2".into(), run);
+
+        provider.shutdown_after_turn("s2").await;
+
+        // 200ms is plenty for any spurious notify to land; an
+        // intentional cancel would fire synchronously.
+        let cancel_fired = timeout(Duration::from_millis(200), cancel.notified())
+            .await
+            .is_ok();
+        assert!(
+            !cancel_fired,
+            "shutdown_after_turn must not trigger the hard-cancel signal"
+        );
+    }
 }
 
 /// Register the Claude CLI provider in the registry and start the

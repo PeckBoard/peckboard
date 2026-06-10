@@ -17,6 +17,11 @@ export interface Tab {
    *  the chip rendered as a generic "Session" and the cleanup loop
    *  closed the tab as soon as the sessions list loaded. */
   name: string
+  /** Denormalized `sessions.is_worker` for session tabs (always false
+   *  for project tabs). Tabs for worker sessions hide the "Delete
+   *  session" context-menu entry — worker sessions are owned by their
+   *  card and the backend refuses DELETE /api/sessions/:id for them. */
+  isWorker: boolean
 }
 
 interface TabsState {
@@ -42,6 +47,7 @@ interface ApiTab {
   item_id: string
   last_active: string
   name?: string
+  is_worker?: boolean
 }
 
 function fromApi(t: ApiTab): Tab {
@@ -50,6 +56,7 @@ function fromApi(t: ApiTab): Tab {
     itemId: t.item_id,
     lastActive: t.last_active,
     name: t.name ?? '',
+    isWorker: t.is_worker ?? false,
   }
 }
 
@@ -108,7 +115,9 @@ export const useTabsStore = create<TabsState>((set, get) => ({
     // Empty `name` is fine — the upsert response (or the next refetch)
     // backfills it, and TabBar falls back to a sensible default.
     const now = new Date().toISOString()
-    set((s) => ({ tabs: [{ itemType, itemId, lastActive: now, name: '' }, ...s.tabs] }))
+    set((s) => ({
+      tabs: [{ itemType, itemId, lastActive: now, name: '', isWorker: false }, ...s.tabs],
+    }))
 
     try {
       const res = await authedFetch('/api/me/tabs', {

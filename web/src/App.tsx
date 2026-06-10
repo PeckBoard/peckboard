@@ -13,7 +13,8 @@ import SessionTodosView from './components/SessionTodosView'
 import ProjectList from './components/ProjectList'
 import KanbanBoard from './components/KanbanBoard'
 import ProjectTodosView from './components/ProjectTodosView'
-import SettingsPage from './components/SettingsPage'
+import SettingsModal from './components/SettingsModal'
+import PluginsModal from './components/PluginsModal'
 import NewSessionModal from './components/NewSessionModal'
 import NewProjectModal from './components/NewProjectModal'
 import FoldersPage from './components/ManageFoldersModal'
@@ -28,25 +29,28 @@ import TabBar from './components/TabBar'
 import { startTabsAutoSync, useTabsStore, type TabType } from './store/tabs'
 import './App.css'
 
-type View =
-  | 'sessions'
-  | 'repeatingTasks'
-  | 'projects'
-  | 'experts'
-  | 'folders'
-  | 'settings'
-  | 'reports'
-  | 'users'
+type View = 'sessions' | 'repeatingTasks' | 'projects' | 'experts' | 'folders' | 'reports' | 'users'
+
+/** Modals reachable from the user-icon dropdown. The URL maps a couple of
+ *  paths (`/settings`, `/plugins`) to opening one of these on mount so
+ *  bookmarks and the existing e2e routes still land somewhere useful. */
+type DropdownModal = 'settings' | 'plugins' | null
 
 /** Sub-view for an active session or project — 'chat' (the default
  *  ChatView / KanbanBoard) or 'todos' (the dedicated *TodosView reachable at
  *  /{sessions,projects}/{id}/todos). */
 type SessionSub = 'chat' | 'todos'
 
-/** Parse the current URL pathname into a view, optional active ID, and an
+/** Parse the current URL pathname into a view, optional active ID, an
  *  optional sub-view (only meaningful when `view` is 'sessions' or
- *  'projects'). */
-function parseRoute(): { view: View; activeId: string | null; sub: SessionSub } {
+ *  'projects'), and an optional dropdown-modal hint for the few routes
+ *  that map straight to a modal (`/settings`, `/plugins`). */
+function parseRoute(): {
+  view: View
+  activeId: string | null
+  sub: SessionSub
+  modal: DropdownModal
+} {
   const path = window.location.pathname
   const segments = path.split('/').filter(Boolean)
   const first = segments[0] || 'sessions'
@@ -55,23 +59,35 @@ function parseRoute(): { view: View; activeId: string | null; sub: SessionSub } 
 
   switch (first) {
     case 'sessions':
-      return { view: 'sessions', activeId: id, sub: third === 'todos' ? 'todos' : 'chat' }
+      return {
+        view: 'sessions',
+        activeId: id,
+        sub: third === 'todos' ? 'todos' : 'chat',
+        modal: null,
+      }
     case 'projects':
-      return { view: 'projects', activeId: id, sub: third === 'todos' ? 'todos' : 'chat' }
+      return {
+        view: 'projects',
+        activeId: id,
+        sub: third === 'todos' ? 'todos' : 'chat',
+        modal: null,
+      }
     case 'experts':
-      return { view: 'experts', activeId: id, sub: 'chat' }
+      return { view: 'experts', activeId: id, sub: 'chat', modal: null }
     case 'repeating-tasks':
-      return { view: 'repeatingTasks', activeId: id, sub: 'chat' }
+      return { view: 'repeatingTasks', activeId: id, sub: 'chat', modal: null }
     case 'folders':
-      return { view: 'folders', activeId: null, sub: 'chat' }
+      return { view: 'folders', activeId: null, sub: 'chat', modal: null }
     case 'settings':
-      return { view: 'settings', activeId: null, sub: 'chat' }
+      return { view: 'sessions', activeId: null, sub: 'chat', modal: 'settings' }
+    case 'plugins':
+      return { view: 'sessions', activeId: null, sub: 'chat', modal: 'plugins' }
     case 'reports':
-      return { view: 'reports', activeId: null, sub: 'chat' }
+      return { view: 'reports', activeId: null, sub: 'chat', modal: null }
     case 'users':
-      return { view: 'users', activeId: null, sub: 'chat' }
+      return { view: 'users', activeId: null, sub: 'chat', modal: null }
     default:
-      return { view: 'sessions', activeId: null, sub: 'chat' }
+      return { view: 'sessions', activeId: null, sub: 'chat', modal: null }
   }
 }
 
@@ -185,6 +201,7 @@ function App() {
   const [announcement, setAnnouncement] = useState<Announcement | null>(null)
   const [userMenuOpen, setUserMenuOpen] = useState(false)
   const [showChangePassword, setShowChangePassword] = useState(false)
+  const [dropdownModal, setDropdownModal] = useState<DropdownModal>(initialRoute.modal)
   const userMenuRef = useRef<HTMLDivElement | null>(null)
 
   useEffect(() => {
@@ -218,6 +235,26 @@ function App() {
     [],
   )
 
+  // Open one of the dropdown-modal targets (Settings / Plugins) and reflect
+  // it in the URL so the modal is bookmarkable and survives a reload. The
+  // close handler simply navigates back, which pops the entry off history
+  // and clears `dropdownModal` via popstate.
+  const openDropdownModal = useCallback((target: Exclude<DropdownModal, null>) => {
+    setDropdownModal(target)
+    const path = `/${target}`
+    if (window.location.pathname !== path) {
+      history.pushState(null, '', path)
+    }
+  }, [])
+
+  const closeDropdownModal = useCallback(() => {
+    // Just clear modal state. The URL-sync effect notices `dropdownModal`
+    // went null and pushes the underlying view's path (typically `/`),
+    // which moves us off `/settings` or `/plugins` so a Back press
+    // re-enters the modal — natural Back/Forward UX.
+    setDropdownModal(null)
+  }, [])
+
   // Sync active IDs from initial URL once authenticated
   useEffect(() => {
     if (authenticated && initialRoute.activeId) {
@@ -235,6 +272,7 @@ function App() {
       const route = parseRoute()
       setViewRaw(route.view)
       setSessionSub(route.sub)
+      setDropdownModal(route.modal)
       if (route.view === 'sessions') {
         setActiveSession(route.activeId)
       } else if (route.view === 'projects') {
@@ -249,25 +287,31 @@ function App() {
     return () => window.removeEventListener('popstate', onPopState)
   }, [setActiveSession, setActiveProject])
 
-  // When activeSessionId changes, update URL.
+  // When activeSessionId changes, update URL — unless we're sitting on a
+  // dropdown-modal route (`/settings` or `/plugins`). Those routes map to
+  // `view: 'sessions'` but must keep their pathname so a reload still
+  // lands on the same modal; without this guard the sync rewrites
+  // `/plugins` back to `/` on first render and the modal vanishes.
   useEffect(() => {
+    if (dropdownModal) return
     if (view === 'sessions') {
       const path = buildPath('sessions', activeSessionId, activeSessionId ? sessionSub : 'chat')
       if (window.location.pathname !== path) {
         history.pushState(null, '', path)
       }
     }
-  }, [view, activeSessionId, sessionSub])
+  }, [view, activeSessionId, sessionSub, dropdownModal])
 
   // When activeProjectId changes, update URL.
   useEffect(() => {
+    if (dropdownModal) return
     if (view === 'projects') {
       const path = buildPath('projects', activeProjectId, activeProjectId ? sessionSub : 'chat')
       if (window.location.pathname !== path) {
         history.pushState(null, '', path)
       }
     }
-  }, [view, activeProjectId, sessionSub])
+  }, [view, activeProjectId, sessionSub, dropdownModal])
 
   useEffect(() => {
     const saved = localStorage.getItem('peckboard_theme')
@@ -717,25 +761,6 @@ function App() {
               <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z" />
             </svg>
           </button>
-          <button
-            className={`rail-btn ${view === 'settings' ? 'active' : ''}`}
-            onClick={() => navigate('settings')}
-            title="Settings"
-          >
-            <svg
-              width="18"
-              height="18"
-              viewBox="0 0 24 24"
-              fill="none"
-              stroke="currentColor"
-              strokeWidth="2"
-              strokeLinecap="round"
-              strokeLinejoin="round"
-            >
-              <circle cx="12" cy="12" r="3" />
-              <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z" />
-            </svg>
-          </button>
           {user?.role === 'admin' && (
             <button
               className={`rail-btn ${view === 'users' ? 'active' : ''}`}
@@ -781,6 +806,26 @@ function App() {
                   <div className="user-menu-name">{user?.username}</div>
                   <div className="user-menu-role">{user?.role}</div>
                 </div>
+                <button
+                  type="button"
+                  role="menuitem"
+                  onClick={() => {
+                    setUserMenuOpen(false)
+                    openDropdownModal('settings')
+                  }}
+                >
+                  Settings
+                </button>
+                <button
+                  type="button"
+                  role="menuitem"
+                  onClick={() => {
+                    setUserMenuOpen(false)
+                    openDropdownModal('plugins')
+                  }}
+                >
+                  Plugins
+                </button>
                 <button
                   type="button"
                   role="menuitem"
@@ -1009,7 +1054,6 @@ function App() {
           />
         )}
         {view === 'folders' && <FoldersPage />}
-        {view === 'settings' && <SettingsPage />}
         {view === 'reports' && <ReportBrowser />}
         {view === 'users' && <UserManagement />}
       </main>
@@ -1019,6 +1063,8 @@ function App() {
       {showChangePassword && (
         <ChangePasswordModal mode={{ kind: 'self' }} onClose={() => setShowChangePassword(false)} />
       )}
+      {dropdownModal === 'settings' && <SettingsModal onClose={closeDropdownModal} />}
+      {dropdownModal === 'plugins' && <PluginsModal onClose={closeDropdownModal} />}
       {confirmDeleteId && (
         <ConfirmDialog
           title="Delete session"

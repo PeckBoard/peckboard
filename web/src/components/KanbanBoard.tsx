@@ -10,6 +10,7 @@ import CardFormModal from './CardFormModal'
 import EditProjectModal from './EditProjectModal'
 import WorkerComms from './WorkerComms'
 import ProjectTodoSummary from './ProjectTodoSummary'
+import SafeMarkdown from './SafeMarkdown'
 import { useProjectTodos } from '../hooks/useProjectTodos'
 import {
   EMPTY_QUESTIONS,
@@ -395,6 +396,17 @@ export default function KanbanBoard({ projectId, onOpenTodos }: KanbanBoardProps
         return step
     }
   }
+  // Dependency ids resolve to titles/steps via this lookup so cards can
+  // show which prerequisites are still outstanding.
+  const cardById = new Map(cards.map((c) => [c.id, c]))
+  // A dependency is satisfied only when the prerequisite card is `done`
+  // (matches the backend gate). Deleted prerequisites resolve to undefined
+  // and no longer block.
+  const unmetDeps = (card: Card): Card[] =>
+    (card.depends_on ?? [])
+      .map((id) => cardById.get(id))
+      .filter((c): c is Card => c != null && normalizeStep(c.step) !== 'done')
+
   const cardsByStep = (step: string) => {
     const rows = cards.filter((c) => normalizeStep(c.step) === step)
     // Done column shows most-recently-finished first so a freshly
@@ -413,19 +425,27 @@ export default function KanbanBoard({ projectId, onOpenTodos }: KanbanBoardProps
         return bTs.localeCompare(aTs)
       })
     }
-    return rows
+    // Other columns show pickup order: cards already in-flight first,
+    // then ready-to-pick (deps met, unblocked), then waiting (blocked or
+    // deps unmet). Within each group, priority ASC then created_at ASC
+    // matches the orchestrator's pickup order — older same-priority
+    // cards queue ahead of new ones.
+    const pickupBucket = (c: Card): number => {
+      if (c.worker_session_id) return 0
+      if (c.blocked) return 2
+      if (unmetDeps(c).length > 0) return 2
+      return 1
+    }
+    return [...rows].sort((a, b) => {
+      const ba = pickupBucket(a)
+      const bb = pickupBucket(b)
+      if (ba !== bb) return ba - bb
+      if (a.priority !== b.priority) return a.priority - b.priority
+      const aTs = a.created_at ?? ''
+      const bTs = b.created_at ?? ''
+      return aTs.localeCompare(bTs)
+    })
   }
-
-  // Dependency ids resolve to titles/steps via this lookup so cards can
-  // show which prerequisites are still outstanding.
-  const cardById = new Map(cards.map((c) => [c.id, c]))
-  // A dependency is satisfied only when the prerequisite card is `done`
-  // (matches the backend gate). Deleted prerequisites resolve to undefined
-  // and no longer block.
-  const unmetDeps = (card: Card): Card[] =>
-    (card.depends_on ?? [])
-      .map((id) => cardById.get(id))
-      .filter((c): c is Card => c != null && normalizeStep(c.step) !== 'done')
 
   const handleDeleteCard = async (cardId: string) => {
     try {
@@ -904,7 +924,9 @@ export default function KanbanBoard({ projectId, onOpenTodos }: KanbanBoardProps
                     !card.worker_session_id && card.step !== 'done' && card.step !== 'wont_do'
                       ? unmetDeps(card)
                       : []
-                  const descPreview = (card.description ?? '').replace(/\s+/g, ' ').trim()
+                  const description = (card.description ?? '').trim()
+                  const sessionForCard = card.worker_session_id || card.last_worker_session_id
+                  const sessionVisible = !!sessionForCard && normalizeStep(card.step) !== 'backlog'
                   const dropBefore =
                     showInsertIndicator &&
                     dragOver?.insertIdx === cardIndex &&
@@ -938,20 +960,162 @@ export default function KanbanBoard({ projectId, onOpenTodos }: KanbanBoardProps
                           {bubbles[card.id].text}
                         </div>
                       )}
-                      <div
-                        className="kanban-card-left"
-                        onClick={() => setSelectedCard(card)}
-                        title={card.title}
-                      >
-                        <span className="kanban-card-title">{card.title}</span>
-                        {descPreview && (
-                          <span className="kanban-card-desc" title={descPreview}>
-                            {descPreview}
-                          </span>
-                        )}
+                      <div className="kanban-card-header">
+                        <div
+                          className="kanban-card-title-row"
+                          onClick={() => setSelectedCard(card)}
+                          title={card.title}
+                        >
+                          <span className="kanban-card-title">{card.title}</span>
+                          {priorityBadge(card.priority, priorities)}
+                        </div>
+                        <div className="kanban-card-actions">
+                          {sessionVisible && (
+                            <button
+                              type="button"
+                              className="kanban-card-quick-btn"
+                              data-testid="card-quick-session"
+                              title="View session"
+                              aria-label="View session"
+                              onClick={(e) => {
+                                e.stopPropagation()
+                                handleViewSession(sessionForCard!)
+                              }}
+                            >
+                              <svg
+                                width="14"
+                                height="14"
+                                viewBox="0 0 24 24"
+                                fill="none"
+                                stroke="currentColor"
+                                strokeWidth="2"
+                                strokeLinecap="round"
+                                strokeLinejoin="round"
+                                aria-hidden="true"
+                              >
+                                <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z" />
+                              </svg>
+                            </button>
+                          )}
+                          <button
+                            type="button"
+                            className="kanban-card-quick-btn"
+                            data-testid="card-quick-edit"
+                            title="Edit card"
+                            aria-label="Edit card"
+                            onClick={(e) => {
+                              e.stopPropagation()
+                              setEditingCard(card)
+                            }}
+                          >
+                            <svg
+                              width="14"
+                              height="14"
+                              viewBox="0 0 24 24"
+                              fill="none"
+                              stroke="currentColor"
+                              strokeWidth="2"
+                              strokeLinecap="round"
+                              strokeLinejoin="round"
+                              aria-hidden="true"
+                            >
+                              <path d="M12 20h9" />
+                              <path d="M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4 12.5-12.5z" />
+                            </svg>
+                          </button>
+                          <button
+                            className="kanban-card-menu-btn"
+                            aria-label="Card menu"
+                            onClick={(e) => {
+                              e.stopPropagation()
+                              openCardMenu(card.id, e.currentTarget as HTMLElement)
+                            }}
+                          >
+                            ...
+                          </button>
+                          {cardMenuId === card.id && cardMenuRect && (
+                            <div
+                              className="kanban-card-menu"
+                              style={{
+                                top: cardMenuRect.bottom + 4,
+                                right: Math.max(8, window.innerWidth - cardMenuRect.right),
+                              }}
+                            >
+                              {/* Worker affordances (View/Stop/Restart) are
+                                  hidden on backlog: cards in backlog haven't
+                                  been picked up yet and the orchestrator will
+                                  auto-spawn — "Restart Worker" there is
+                                  misleading. Done/wont_do keep View Session
+                                  so the user can review the worker's run. */}
+                              {sessionVisible && (
+                                <button onClick={() => handleViewSession(sessionForCard!)}>
+                                  View Session
+                                </button>
+                              )}
+                              <button
+                                onClick={() => {
+                                  closeCardMenu()
+                                  setEditingCard(card)
+                                }}
+                              >
+                                Edit
+                              </button>
+                              <button
+                                onClick={() => {
+                                  closeCardMenu()
+                                  setSelectedCard(card)
+                                }}
+                              >
+                                Details
+                              </button>
+                              {card.worker_session_id && normalizeStep(card.step) !== 'backlog' && (
+                                <button onClick={() => handleStopWorker(card)}>Stop Worker</button>
+                              )}
+                              {!card.worker_session_id &&
+                                normalizeStep(card.step) !== 'backlog' &&
+                                normalizeStep(card.step) !== 'done' &&
+                                normalizeStep(card.step) !== 'wont_do' && (
+                                  <button onClick={() => handleRestartWorker(card)}>
+                                    Restart Worker
+                                  </button>
+                                )}
+                              {card.step !== 'done' && card.step !== 'wont_do' && (
+                                <button className="danger" onClick={() => handleCancelWontDo(card)}>
+                                  Cancel as Won't Do
+                                </button>
+                              )}
+                              <button
+                                className="danger"
+                                onClick={() => {
+                                  closeCardMenu()
+                                  setConfirmDeleteId(card.id)
+                                }}
+                              >
+                                Delete
+                              </button>
+                            </div>
+                          )}
+                        </div>
                       </div>
-                      <div className="kanban-card-middle" onClick={() => setSelectedCard(card)}>
-                        {priorityBadge(card.priority, priorities)}
+                      {description ? (
+                        <div
+                          className="kanban-card-desc"
+                          data-testid="card-description"
+                          onClick={() => setSelectedCard(card)}
+                        >
+                          <SafeMarkdown className="kanban-card-desc-markdown">
+                            {description}
+                          </SafeMarkdown>
+                        </div>
+                      ) : (
+                        <div
+                          className="kanban-card-desc kanban-card-desc-empty"
+                          onClick={() => setSelectedCard(card)}
+                        >
+                          No description
+                        </div>
+                      )}
+                      <div className="kanban-card-footer" onClick={() => setSelectedCard(card)}>
                         {todos && todos.length > 0 && (
                           <span
                             className="card-todo-badge"
@@ -961,7 +1125,7 @@ export default function KanbanBoard({ projectId, onOpenTodos }: KanbanBoardProps
                             {todoDone}/{todos.length}
                           </span>
                         )}
-                        {card.worker_session_id && (
+                        {card.worker_session_id && normalizeStep(card.step) !== 'backlog' && (
                           <span className="kanban-card-worker" title="Worker active">
                             <span className="kanban-card-worker-dot" />
                             Worker
@@ -984,78 +1148,6 @@ export default function KanbanBoard({ projectId, onOpenTodos }: KanbanBoardProps
                             Waiting on {pendingDeps.length}{' '}
                             {pendingDeps.length === 1 ? 'dep' : 'deps'}
                           </span>
-                        )}
-                      </div>
-                      <div className="kanban-card-actions">
-                        <button
-                          className="kanban-card-menu-btn"
-                          onClick={(e) => {
-                            e.stopPropagation()
-                            openCardMenu(card.id, e.currentTarget as HTMLElement)
-                          }}
-                        >
-                          ...
-                        </button>
-                        {cardMenuId === card.id && cardMenuRect && (
-                          <div
-                            className="kanban-card-menu"
-                            style={{
-                              top: cardMenuRect.bottom + 4,
-                              right: Math.max(8, window.innerWidth - cardMenuRect.right),
-                            }}
-                          >
-                            {(card.worker_session_id || card.last_worker_session_id) && (
-                              <button
-                                onClick={() =>
-                                  handleViewSession(
-                                    (card.worker_session_id || card.last_worker_session_id)!,
-                                  )
-                                }
-                              >
-                                View Session
-                              </button>
-                            )}
-                            <button
-                              onClick={() => {
-                                closeCardMenu()
-                                setEditingCard(card)
-                              }}
-                            >
-                              Edit
-                            </button>
-                            <button
-                              onClick={() => {
-                                closeCardMenu()
-                                setSelectedCard(card)
-                              }}
-                            >
-                              Details
-                            </button>
-                            {card.worker_session_id && (
-                              <button onClick={() => handleStopWorker(card)}>Stop Worker</button>
-                            )}
-                            {!card.worker_session_id &&
-                              card.step !== 'done' &&
-                              card.step !== 'wont_do' && (
-                                <button onClick={() => handleRestartWorker(card)}>
-                                  Restart Worker
-                                </button>
-                              )}
-                            {card.step !== 'done' && card.step !== 'wont_do' && (
-                              <button className="danger" onClick={() => handleCancelWontDo(card)}>
-                                Cancel as Won't Do
-                              </button>
-                            )}
-                            <button
-                              className="danger"
-                              onClick={() => {
-                                closeCardMenu()
-                                setConfirmDeleteId(card.id)
-                              }}
-                            >
-                              Delete
-                            </button>
-                          </div>
                         )}
                       </div>
                     </div>
@@ -1151,7 +1243,9 @@ export default function KanbanBoard({ projectId, onOpenTodos }: KanbanBoardProps
               {selectedCard.description && (
                 <div className="card-detail-row card-detail-row-description">
                   <span className="card-detail-label">Description</span>
-                  <div className="card-detail-description">{selectedCard.description}</div>
+                  <SafeMarkdown className="card-detail-description">
+                    {selectedCard.description}
+                  </SafeMarkdown>
                 </div>
               )}
               {selectedCard.handoff_context && (
@@ -1183,18 +1277,19 @@ export default function KanbanBoard({ projectId, onOpenTodos }: KanbanBoardProps
               )}
             </div>
             <div className="card-detail-actions">
-              {(selectedCard.worker_session_id || selectedCard.last_worker_session_id) && (
-                <button
-                  className="btn-secondary"
-                  onClick={() =>
-                    handleViewSession(
-                      (selectedCard.worker_session_id || selectedCard.last_worker_session_id)!,
-                    )
-                  }
-                >
-                  View Session
-                </button>
-              )}
+              {(selectedCard.worker_session_id || selectedCard.last_worker_session_id) &&
+                normalizeStep(selectedCard.step) !== 'backlog' && (
+                  <button
+                    className="btn-secondary"
+                    onClick={() =>
+                      handleViewSession(
+                        (selectedCard.worker_session_id || selectedCard.last_worker_session_id)!,
+                      )
+                    }
+                  >
+                    View Session
+                  </button>
+                )}
               <button className="btn-secondary" onClick={() => setSelectedCard(null)}>
                 Close
               </button>

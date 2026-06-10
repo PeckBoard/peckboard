@@ -34,6 +34,13 @@ pub struct TabView {
     /// auto-cleanup loop closed them as soon as the sessions list
     /// loaded.
     pub name: String,
+    /// True iff this tab refers to a worker session (a session the
+    /// orchestrator spawned for a card). Worker sessions are owned by
+    /// their card / project, so the tab strip suppresses the "Delete
+    /// session" affordance for them — same reason the backend refuses
+    /// DELETE /api/sessions/:id for worker sessions. Always false for
+    /// project tabs.
+    pub is_worker: bool,
 }
 
 #[derive(Deserialize)]
@@ -92,22 +99,22 @@ async fn list_tabs(State(state): State<Arc<AppState>>, req: Request<Body>) -> im
 
     let mut out: Vec<TabView> = Vec::with_capacity(tabs.len());
     for t in tabs {
-        let name = match t.item_type.as_str() {
-            "session" => state
-                .db
-                .get_session(&t.item_id)
-                .await
-                .ok()
-                .flatten()
-                .map(|s| s.name),
-            "project" => state
-                .db
-                .get_project(&t.item_id)
-                .await
-                .ok()
-                .flatten()
-                .map(|p| p.name),
-            _ => None,
+        let (name, is_worker) = match t.item_type.as_str() {
+            "session" => match state.db.get_session(&t.item_id).await.ok().flatten() {
+                Some(s) => (Some(s.name), s.is_worker),
+                None => (None, false),
+            },
+            "project" => (
+                state
+                    .db
+                    .get_project(&t.item_id)
+                    .await
+                    .ok()
+                    .flatten()
+                    .map(|p| p.name),
+                false,
+            ),
+            _ => (None, false),
         };
         if let Some(name) = name {
             out.push(TabView {
@@ -115,6 +122,7 @@ async fn list_tabs(State(state): State<Arc<AppState>>, req: Request<Body>) -> im
                 item_id: t.item_id,
                 last_active: t.last_active,
                 name,
+                is_worker,
             });
         }
     }
@@ -163,30 +171,30 @@ async fn upsert_tab(State(state): State<Arc<AppState>>, req: Request<Body>) -> i
             // upsert path has already verified the item exists, so a
             // missing name here would be a TOCTOU race — fall back to
             // empty rather than 500ing.
-            let name = match tab.item_type.as_str() {
-                "session" => state
-                    .db
-                    .get_session(&tab.item_id)
-                    .await
-                    .ok()
-                    .flatten()
-                    .map(|s| s.name)
-                    .unwrap_or_default(),
-                "project" => state
-                    .db
-                    .get_project(&tab.item_id)
-                    .await
-                    .ok()
-                    .flatten()
-                    .map(|p| p.name)
-                    .unwrap_or_default(),
-                _ => String::new(),
+            let (name, is_worker) = match tab.item_type.as_str() {
+                "session" => match state.db.get_session(&tab.item_id).await.ok().flatten() {
+                    Some(s) => (s.name, s.is_worker),
+                    None => (String::new(), false),
+                },
+                "project" => (
+                    state
+                        .db
+                        .get_project(&tab.item_id)
+                        .await
+                        .ok()
+                        .flatten()
+                        .map(|p| p.name)
+                        .unwrap_or_default(),
+                    false,
+                ),
+                _ => (String::new(), false),
             };
             Ok(Json(TabView {
                 item_type: tab.item_type,
                 item_id: tab.item_id,
                 last_active: tab.last_active,
                 name,
+                is_worker,
             }))
         }
         // Item doesn't exist — refuse to create the tab. Stops phantom

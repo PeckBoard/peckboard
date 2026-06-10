@@ -52,7 +52,10 @@ impl Db {
             cards::table
                 .filter(cards::project_id.eq(&project_id))
                 .select(Card::as_select())
-                .order(cards::priority.asc())
+                // priority ASC is the pickup order; created_at ASC as
+                // tiebreaker means a brand-new card at the same priority
+                // queues behind existing ones rather than jumping ahead.
+                .order((cards::priority.asc(), cards::created_at.asc()))
                 .load(conn)
                 .map_err(Into::into)
         })

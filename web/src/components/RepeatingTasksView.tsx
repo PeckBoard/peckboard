@@ -188,6 +188,10 @@ export default function RepeatingTasksView({ activeTaskId, onNavigate, onOpenSes
               <dd>{folderMap.get(task.folder_id) ?? task.folder_id}</dd>
               <dt>Schedule</dt>
               <dd>{describeSchedule(task.schedule_kind, task.schedule_value)}</dd>
+              <dt>Model</dt>
+              <dd>{task.model ?? 'Default'}</dd>
+              <dt>Effort</dt>
+              <dd>{task.effort ?? 'Default'}</dd>
               <dt>Enabled</dt>
               <dd>{task.enabled ? 'Yes' : 'No'}</dd>
               <dt>Last run</dt>

@@ -319,6 +319,29 @@ async fn delete_session(
     Path(id): Path<String>,
 ) -> impl IntoResponse {
     tracing::info!(session_id = %id, "Deleting session");
+    // Worker sessions are owned by their card / project — their lifecycle
+    // is driven by the orchestrator and they're cleaned up via the
+    // card / project cascade. Letting a user delete one directly leaves
+    // the parent card pointing at a vanished `worker_session_id` and
+    // bypasses the orchestrator's bookkeeping. Refuse, and tell the
+    // caller to delete the card or project instead.
+    let session = state.db.get_session(&id).await.map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({ "error": e.to_string() })),
+        )
+    })?;
+    if let Some(ref s) = session
+        && s.is_worker
+    {
+        return Err((
+            StatusCode::CONFLICT,
+            Json(serde_json::json!({
+                "error": "worker sessions are owned by their card; delete the card or project to remove this session",
+            })),
+        ));
+    }
+
     // Delete associated events first
     state.db.delete_events_by_session(&id).await.map_err(|e| {
         (

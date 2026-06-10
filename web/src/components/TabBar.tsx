@@ -5,15 +5,7 @@ import { useTabsStore, type TabType } from '../store/tabs'
 import { useContextMenu, type ContextMenuItem } from '../hooks/useContextMenu'
 
 interface TabBarProps {
-  view:
-    | 'sessions'
-    | 'repeatingTasks'
-    | 'projects'
-    | 'experts'
-    | 'folders'
-    | 'settings'
-    | 'reports'
-    | 'users'
+  view: 'sessions' | 'repeatingTasks' | 'projects' | 'experts' | 'folders' | 'reports' | 'users'
   activeSessionId: string | null
   activeProjectId: string | null
   onOpenItem: (type: TabType, id: string) => void
@@ -106,6 +98,7 @@ export default function TabBar({
             active={isActive}
             running={isRunning}
             unread={isUnread}
+            isWorker={t.isWorker}
             onClick={() => onOpenItem(t.itemType, t.itemId)}
             onClose={() => closeTab(t.itemType, t.itemId)}
             onRename={() => onRenameItem(t.itemType, t.itemId)}
@@ -134,6 +127,7 @@ function OpenedTab({
   active,
   running,
   unread,
+  isWorker,
   onClick,
   onClose,
   onRename,
@@ -146,6 +140,7 @@ function OpenedTab({
   active: boolean
   running: boolean
   unread: boolean
+  isWorker: boolean
   onClick: () => void
   onClose: () => void
   onRename: () => void
@@ -162,6 +157,10 @@ function OpenedTab({
       label: type === 'session' ? 'Delete session' : 'Delete project',
       onSelect: onDelete,
       danger: true,
+      // Worker sessions are owned by their card — the backend refuses
+      // DELETE /api/sessions/:id for them, so hide rather than render a
+      // button that always 409s.
+      hidden: type === 'session' && isWorker,
     },
   ])
 

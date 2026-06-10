@@ -61,6 +61,28 @@ pub trait AgentProvider: Send + Sync + 'static {
     /// Cancel any in-flight run for `session_id`. Typically a hard kill.
     async fn cancel(&self, session_id: &str);
 
+    /// Request a graceful exit for `session_id` once its current turn
+    /// finishes. The caller does NOT block on completion.
+    ///
+    /// The contract: after `shutdown_after_turn` returns, the provider
+    /// guarantees that any in-flight tool response can still reach the
+    /// agent, the agent can emit any post-tool assistant text and a
+    /// final `result` event, AND no `Crashed { reason: "interrupted" }`
+    /// event will be appended on the way out. Providers whose runs are
+    /// per-turn tasks that self-terminate on completion (mock, ollama)
+    /// satisfy this contract trivially and can keep the default no-op.
+    /// Providers that own a long-lived child (Claude CLI in stream-json
+    /// mode) must arrange to close the child's stdin AFTER the current
+    /// turn's `result` has been observed, so the child sees EOF and
+    /// exits naturally.
+    ///
+    /// This is the *correct* way for the MCP terminal-step tools
+    /// (`finish_card`, `complete_step`, `wont_do_card`) to stop a
+    /// worker once its card has transitioned — using `cancel` there
+    /// races the tool response and surfaces as a worker crash in the
+    /// UI even though the transition itself succeeded.
+    async fn shutdown_after_turn(&self, _session_id: &str) {}
+
     /// Stop the in-flight run for `session_id`. Implementations MUST actually
     /// terminate the run (kill the process / abort the task) — there is no
     /// "soft interrupt" path because the Claude CLI in stream-json mode does

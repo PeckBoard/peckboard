@@ -17,15 +17,19 @@
 //! tests are about state, not subprocess management.
 
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
+use async_trait::async_trait;
 use peckboard::auth::rate_limit::RateLimiter;
 use peckboard::config::Config;
 use peckboard::db::Db;
 use peckboard::db::models::{NewCard, NewFolder, NewProject, NewSession, UpdateCard};
+use peckboard::plugin::builtin::BuiltinPluginRegistry;
 use peckboard::plugin::manager::PluginManager;
+use peckboard::provider::agent::{AgentProvider, SendMessageContext};
 use peckboard::provider::manager::SessionManager;
 use peckboard::provider::mock::register_mock_provider;
-use peckboard::provider::registry::ProviderRegistry;
+use peckboard::provider::registry::{ProviderInfo, ProviderRegistry};
 use peckboard::service::mcp_server::{McpTokenRegistry, McpToolRegistry, ToolCallContext};
 use peckboard::service::push::PushService;
 use peckboard::state::AppState;
@@ -54,6 +58,7 @@ async fn build_state() -> Arc<AppState> {
         },
         db,
         plugins,
+        builtin_plugins: Arc::new(BuiltinPluginRegistry::new()),
         jwt_secret: vec![0u8; 32],
         login_limiter: RateLimiter::new(100),
         password_change_limiter: RateLimiter::new(100),
@@ -123,6 +128,8 @@ async fn seed_card_with_worker(
             workflow: card_workflow.to_string(),
             model: None,
             effort: None,
+            blocked: false,
+            block_reason: None,
             created_at: ts.clone(),
             updated_at: ts.clone(),
         })
@@ -796,4 +803,375 @@ async fn complete_step_then_finish_yields_done_not_skip() {
         Some(review_session.as_str()),
         "the most-recent worker is the reviewer"
     );
+}
+
+// ── create_card ──────────────────────────────────────────────────────
+
+/// Seed only the folder + project + a worker session scoped to the
+/// project (no card). Returns the worker session id so we can use it as
+/// the calling session for `create_card`.
+async fn seed_project_with_worker(state: &Arc<AppState>) -> String {
+    let ts = chrono::Utc::now().to_rfc3339();
+    let session_id = uuid::Uuid::new_v4().to_string();
+
+    state
+        .db
+        .create_folder(NewFolder {
+            id: "f1".into(),
+            name: "F".into(),
+            path: "/tmp".into(),
+            created_at: ts.clone(),
+        })
+        .await
+        .ok();
+
+    state
+        .db
+        .create_project(NewProject {
+            id: "p1".into(),
+            name: "P".into(),
+            context: "ctx".into(),
+            folder_id: "f1".into(),
+            worker_count: 1,
+            status: "active".into(),
+            workflow: "task".into(),
+            model: None,
+            effort: None,
+            parallel_instructions: false,
+            auto_notify_changes: true,
+            worker_communication: false,
+            created_at: ts.clone(),
+            last_accessed_at: ts.clone(),
+        })
+        .await
+        .ok();
+
+    state
+        .db
+        .create_session(NewSession {
+            id: session_id.clone(),
+            name: "worker".into(),
+            folder_id: "f1".into(),
+            model: None,
+            effort: None,
+            is_worker: true,
+            project_id: Some("p1".into()),
+            card_id: None,
+            conversation_id: None,
+            created_at: ts.clone(),
+            last_activity: ts,
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+
+    session_id
+}
+
+fn ctx_for_project(state: &Arc<AppState>, session_id: &str) -> ToolCallContext {
+    ToolCallContext {
+        session_id: session_id.to_string(),
+        project_id: Some("p1".into()),
+        card_id: None,
+        db: Arc::new(state.db.clone()),
+        broadcaster: state.broadcaster.clone(),
+        provider_registry: None,
+        expert_dispatcher: None,
+    }
+}
+
+#[tokio::test]
+async fn create_card_persists_blocked_flag() {
+    // The whole point of this card: filing a card already-blocked must
+    // be a single MCP call. Pre-fix the agent had to create_card then
+    // update_card, which is the "two round-trips" complaint in the
+    // ticket description.
+    let state = build_state().await;
+    let session_id = seed_project_with_worker(&state).await;
+    let registry = McpToolRegistry::new();
+    let ctx = ctx_for_project(&state, &session_id);
+
+    let result = registry
+        .handle_tool_call(
+            "create_card",
+            serde_json::json!({
+                "title": "Pre-blocked card",
+                "description": "needs human triage",
+                "blocked": true,
+                "block_reason": "waiting on product review",
+            }),
+            &ctx,
+        )
+        .await
+        .unwrap();
+    assert_eq!(result["status"], "ok");
+    assert_eq!(result["card"]["blocked"], true);
+    assert_eq!(result["card"]["block_reason"], "waiting on product review");
+
+    let card_id = result["card"]["id"].as_str().unwrap();
+    let card = state.db.get_card(card_id).await.unwrap().unwrap();
+    assert!(card.blocked, "row persists blocked=true");
+    assert_eq!(
+        card.block_reason.as_deref(),
+        Some("waiting on product review")
+    );
+    assert_eq!(card.step, "backlog");
+}
+
+#[tokio::test]
+async fn create_card_block_reason_implies_blocked() {
+    // The schema lets a caller pass just `block_reason` without an
+    // explicit `blocked: true`; the handler must treat a non-empty
+    // reason as "yes, blocked". Otherwise we'd have a row with a
+    // reason but `blocked=false`, which is what the kanban filter
+    // queries against — making the card silently pickable anyway.
+    let state = build_state().await;
+    let session_id = seed_project_with_worker(&state).await;
+    let registry = McpToolRegistry::new();
+    let ctx = ctx_for_project(&state, &session_id);
+
+    let result = registry
+        .handle_tool_call(
+            "create_card",
+            serde_json::json!({
+                "title": "card",
+                "description": "desc",
+                "block_reason": "needs design review",
+            }),
+            &ctx,
+        )
+        .await
+        .unwrap();
+
+    let card_id = result["card"]["id"].as_str().unwrap();
+    let card = state.db.get_card(card_id).await.unwrap().unwrap();
+    assert!(card.blocked);
+    assert_eq!(card.block_reason.as_deref(), Some("needs design review"));
+}
+
+#[tokio::test]
+async fn create_card_defaults_to_unblocked() {
+    // The common case: a caller omits the new fields entirely. The card
+    // must land in the same unblocked state the pre-fix behaviour
+    // produced — no surprise blocking from defaults.
+    let state = build_state().await;
+    let session_id = seed_project_with_worker(&state).await;
+    let registry = McpToolRegistry::new();
+    let ctx = ctx_for_project(&state, &session_id);
+
+    let result = registry
+        .handle_tool_call(
+            "create_card",
+            serde_json::json!({
+                "title": "card",
+                "description": "desc",
+            }),
+            &ctx,
+        )
+        .await
+        .unwrap();
+
+    let card_id = result["card"]["id"].as_str().unwrap();
+    let card = state.db.get_card(card_id).await.unwrap().unwrap();
+    assert!(!card.blocked);
+    assert!(card.block_reason.is_none());
+}
+
+// ── worker-process tear-down semantics ──────────────────────────────
+
+/// Bare-bones `AgentProvider` that records every call to `cancel` and
+/// `shutdown_after_turn` on its counters. We don't need a working run
+/// loop here — these tests only assert which tear-down path the MCP
+/// handlers choose after a card transition. Every other trait method is
+/// a no-op.
+#[derive(Default)]
+struct RecordingProvider {
+    cancel_calls: AtomicUsize,
+    shutdown_after_turn_calls: AtomicUsize,
+}
+
+#[async_trait]
+impl AgentProvider for RecordingProvider {
+    fn id(&self) -> &str {
+        "recording"
+    }
+    async fn send_message(&self, _ctx: SendMessageContext) -> anyhow::Result<()> {
+        Ok(())
+    }
+    async fn cancel(&self, _session_id: &str) {
+        self.cancel_calls.fetch_add(1, Ordering::SeqCst);
+    }
+    async fn shutdown_after_turn(&self, _session_id: &str) {
+        self.shutdown_after_turn_calls
+            .fetch_add(1, Ordering::SeqCst);
+    }
+    async fn interrupt(&self, _session_id: &str) {}
+    async fn write_stdin(&self, _session_id: &str, _text: &str) -> bool {
+        false
+    }
+    async fn is_running(&self, _session_id: &str) -> bool {
+        false
+    }
+    async fn cleanup(&self) {}
+    async fn shutdown(&self) {}
+}
+
+/// Build a registry containing a single `RecordingProvider` and return
+/// a `(registry, provider)` pair so the test can both pass the registry
+/// into a `ToolCallContext` and observe the call counters afterwards.
+async fn registry_with_recorder() -> (Arc<ProviderRegistry>, Arc<RecordingProvider>) {
+    let registry = Arc::new(ProviderRegistry::new());
+    let recorder = Arc::new(RecordingProvider::default());
+    registry
+        .register(
+            recorder.clone(),
+            ProviderInfo {
+                id: "recording".into(),
+                display_name: "Recording".into(),
+                models: vec![],
+            },
+        )
+        .await;
+    (registry, recorder)
+}
+
+fn ctx_with_registry(
+    state: &Arc<AppState>,
+    session_id: &str,
+    card_id: &str,
+    registry: Arc<ProviderRegistry>,
+) -> ToolCallContext {
+    ToolCallContext {
+        session_id: session_id.to_string(),
+        project_id: Some("p1".into()),
+        card_id: Some(card_id.to_string()),
+        db: Arc::new(state.db.clone()),
+        broadcaster: state.broadcaster.clone(),
+        provider_registry: Some(registry),
+        expert_dispatcher: None,
+    }
+}
+
+#[tokio::test]
+async fn finish_card_schedules_graceful_shutdown_not_cancel() {
+    // The actual bug this card fixes: the pre-fix handler called
+    // `cancel` fire-and-forget, which raced the tool response back to
+    // the agent and surfaced as "Crashed (interrupted)" in the session
+    // log even though the card had transitioned cleanly. The handler
+    // must now route through `shutdown_after_turn` so the agent can
+    // finish acknowledging the tool result before the run exits.
+    let state = build_state().await;
+    let (card_id, session_id) = seed_card_with_worker(&state, "in_progress", "task", "task").await;
+    let (registry, recorder) = registry_with_recorder().await;
+    let tool_registry = McpToolRegistry::new();
+    let ctx = ctx_with_registry(&state, &session_id, &card_id, registry);
+
+    tool_registry
+        .handle_tool_call(
+            "finish_card",
+            serde_json::json!({ "summary": "shipped" }),
+            &ctx,
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(
+        recorder.shutdown_after_turn_calls.load(Ordering::SeqCst),
+        1,
+        "finish_card must route through shutdown_after_turn"
+    );
+    assert_eq!(
+        recorder.cancel_calls.load(Ordering::SeqCst),
+        0,
+        "finish_card must NOT hard-cancel the worker mid-tool-call"
+    );
+}
+
+#[tokio::test]
+async fn complete_step_schedules_graceful_shutdown_not_cancel() {
+    // Same contract as finish_card: `complete_step` frees the worker
+    // slot for the next step's spawn, but must not race the in-flight
+    // tool response.
+    let state = build_state().await;
+    let (card_id, session_id) = seed_card_with_worker(
+        &state,
+        "in_progress",
+        "deep-develop-software",
+        "deep-develop-software",
+    )
+    .await;
+    let (registry, recorder) = registry_with_recorder().await;
+    let tool_registry = McpToolRegistry::new();
+    let ctx = ctx_with_registry(&state, &session_id, &card_id, registry);
+
+    tool_registry
+        .handle_tool_call(
+            "complete_step",
+            serde_json::json!({ "handoff_context": "ready for review" }),
+            &ctx,
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(recorder.shutdown_after_turn_calls.load(Ordering::SeqCst), 1);
+    assert_eq!(recorder.cancel_calls.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test]
+async fn wont_do_card_schedules_graceful_shutdown_not_cancel() {
+    let state = build_state().await;
+    let (card_id, session_id) = seed_card_with_worker(&state, "in_progress", "task", "task").await;
+    let (registry, recorder) = registry_with_recorder().await;
+    let tool_registry = McpToolRegistry::new();
+    let ctx = ctx_with_registry(&state, &session_id, &card_id, registry);
+
+    tool_registry
+        .handle_tool_call(
+            "wont_do_card",
+            serde_json::json!({ "reason": "out of scope" }),
+            &ctx,
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(recorder.shutdown_after_turn_calls.load(Ordering::SeqCst), 1);
+    assert_eq!(recorder.cancel_calls.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test]
+async fn refused_terminal_transition_does_not_touch_worker() {
+    // A `finish_card` against a `wont_do` card is refused with an
+    // error before the tear-down branch runs. The worker must be left
+    // alone — neither cancel nor graceful shutdown — so the agent can
+    // see the error response and decide what to do next.
+    let state = build_state().await;
+    let (card_id, session_id) = seed_card_with_worker(&state, "in_progress", "task", "task").await;
+    state
+        .db
+        .update_card(
+            &card_id,
+            UpdateCard {
+                step: Some("wont_do".into()),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+
+    let (registry, recorder) = registry_with_recorder().await;
+    let tool_registry = McpToolRegistry::new();
+    let ctx = ctx_with_registry(&state, &session_id, &card_id, registry);
+
+    let err = tool_registry
+        .handle_tool_call("finish_card", serde_json::json!({}), &ctx)
+        .await
+        .unwrap_err();
+    assert!(err.to_string().contains("wont_do"));
+
+    assert_eq!(
+        recorder.shutdown_after_turn_calls.load(Ordering::SeqCst),
+        0,
+        "refused tool call must not schedule tear-down"
+    );
+    assert_eq!(recorder.cancel_calls.load(Ordering::SeqCst), 0);
 }

@@ -5,6 +5,7 @@ pub mod mcp;
 pub mod me;
 pub mod misc;
 pub mod notifications;
+pub mod plugins;
 pub mod projects;
 pub mod repeating_tasks;
 pub mod reports;
@@ -31,6 +32,7 @@ pub fn api_router(state: Arc<AppState>) -> Router<Arc<AppState>> {
         .merge(attachments::router(state.clone()))
         .merge(notifications::router(state.clone()))
         .merge(me::router(state.clone()))
+        .merge(plugins::router(state.clone()))
         .merge(misc::router(state))
         .fallback(static_handler)
 }

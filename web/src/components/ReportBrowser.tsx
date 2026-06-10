@@ -1,8 +1,7 @@
 import { useEffect, useState } from 'react'
 import { authedFetch } from '../store/auth'
 import { useReportsStore, type ReportEntry } from '../store/reports'
-import ReactMarkdown from 'react-markdown'
-import remarkGfm from 'remark-gfm'
+import SafeMarkdown from './SafeMarkdown'
 
 interface GroupedReports {
   [folder: string]: ReportEntry[]
@@ -123,9 +122,7 @@ export default function ReportBrowser() {
             <div className="loading-spinner" />
           </div>
         ) : (
-          <div className="report-content">
-            <ReactMarkdown remarkPlugins={[remarkGfm]}>{reportContent}</ReactMarkdown>
-          </div>
+          <SafeMarkdown className="report-content">{reportContent}</SafeMarkdown>
         )}
       </div>
     )

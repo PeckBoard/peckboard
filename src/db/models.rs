@@ -240,6 +240,8 @@ pub struct NewCard {
     pub workflow: String,
     pub model: Option<String>,
     pub effort: Option<String>,
+    pub blocked: bool,
+    pub block_reason: Option<String>,
     pub created_at: String,
     pub updated_at: String,
 }
@@ -509,5 +511,16 @@ pub struct ProjectWorkflowInstruction {
     pub step: String,
     pub instructions: String,
     pub created_at: String,
+    pub updated_at: String,
+}
+
+// ── Plugin settings ──────────────────────────────────────────────────
+
+#[derive(Queryable, Selectable, Insertable, Serialize, Debug, Clone)]
+#[diesel(table_name = plugin_settings)]
+pub struct PluginSettingRow {
+    pub plugin_id: String,
+    pub key: String,
+    pub value: String,
     pub updated_at: String,
 }

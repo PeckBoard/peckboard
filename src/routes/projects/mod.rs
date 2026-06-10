@@ -737,20 +737,14 @@ async fn upsert_workflow_instruction(
     // table and never reach a worker.
     let wf = workflow::workflow_by_id(workflow_id)
         .ok_or_else(|| bad_request(format!("unknown workflow id '{workflow_id}'")))?;
-    if !wf.steps.iter().any(|s| s.step == step) {
-        return Err(bad_request(format!(
-            "workflow '{workflow_id}' has no step '{step}'"
-        )));
-    }
-    // Don't let the user attach instructions to terminal steps — those
-    // never run a worker, so the override would be silently ignored.
-    if wf
+    let step_def = wf
         .steps
         .iter()
         .find(|s| s.step == step)
-        .map(|s| s.instructions.is_empty())
-        .unwrap_or(false)
-    {
+        .ok_or_else(|| bad_request(format!("workflow '{workflow_id}' has no step '{step}'")))?;
+    // Don't let the user attach instructions to terminal steps — those
+    // never run a worker, so the override would be silently ignored.
+    if step_def.instructions.is_empty() {
         return Err(bad_request(format!(
             "step '{step}' does not run a worker; cannot attach instructions"
         )));

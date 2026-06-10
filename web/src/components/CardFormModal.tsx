@@ -1,8 +1,9 @@
-import { useEffect, useState, type FormEvent } from 'react'
+import { useEffect, useMemo, useState, type FormEvent } from 'react'
 import { useProjectsStore } from '../store/projects'
 import { useResourcesStore } from '../store/resources'
 import { authedFetch } from '../store/auth'
 import type { Card } from '../types/api'
+import DependencyPickerModal from './DependencyPickerModal'
 import WorkflowSelect from './WorkflowSelect'
 
 interface CardFormBaseProps {
@@ -57,8 +58,13 @@ export default function CardFormModal(props: CardFormProps) {
   const [dependsOn, setDependsOn] = useState<string[]>(card?.depends_on ?? [])
   const [error, setError] = useState('')
   const [loading, setLoading] = useState(false)
+  const [pickerOpen, setPickerOpen] = useState(false)
 
   const dependencyCandidates = cards.filter((c) => c.id !== card?.id)
+  const selectedDependencies = useMemo(() => {
+    const byId = new Map(dependencyCandidates.map((c) => [c.id, c]))
+    return dependsOn.map((id) => byId.get(id)).filter((c): c is Card => c != null)
+  }, [dependencyCandidates, dependsOn])
 
   const workflows = useResourcesStore((s) => s.workflows)
   const fetchWorkflows = useResourcesStore((s) => s.fetchWorkflows)
@@ -104,6 +110,8 @@ export default function CardFormModal(props: CardFormProps) {
           model: model || undefined,
           effort: effort || undefined,
           depends_on: dependsOn.length > 0 ? dependsOn : undefined,
+          blocked,
+          block_reason: blocked ? blockReason.trim() || null : null,
         } as Partial<Card>)
       } else {
         const updates: Partial<Card> = {
@@ -251,52 +259,57 @@ export default function CardFormModal(props: CardFormProps) {
               ))}
             </select>
           </div>
-          {mode === 'edit' && (
-            <div className="form-field">
-              <label className="form-checkbox-label">
-                <input
-                  type="checkbox"
-                  checked={blocked}
-                  onChange={(e) => setBlocked(e.target.checked)}
-                />
-                <span>Blocked</span>
-              </label>
-              {blocked && (
-                <input
-                  className="form-input"
-                  style={{ marginTop: 6 }}
-                  placeholder="Block reason..."
-                  value={blockReason}
-                  onChange={(e) => setBlockReason(e.target.value)}
-                />
-              )}
-            </div>
-          )}
+          <div className="form-field">
+            <label className="form-checkbox-label">
+              <input
+                type="checkbox"
+                checked={blocked}
+                onChange={(e) => setBlocked(e.target.checked)}
+              />
+              <span>Blocked</span>
+            </label>
+            {blocked && (
+              <input
+                className="form-input"
+                style={{ marginTop: 6 }}
+                placeholder="Block reason..."
+                value={blockReason}
+                onChange={(e) => setBlockReason(e.target.value)}
+              />
+            )}
+          </div>
           {dependencyCandidates.length > 0 && (
             <div className="form-field">
               <label className="form-label">Depends On</label>
               <p className="form-hint" style={{ marginTop: 0, marginBottom: 6 }}>
                 A worker only starts this card once every selected card is done.
               </p>
-              <div className="kanban-deps-options">
-                {dependencyCandidates.map((c) => (
-                  <label key={c.id} className="kanban-dep-option">
-                    <input
-                      type="checkbox"
-                      checked={dependsOn.includes(c.id)}
-                      onChange={(e) =>
-                        setDependsOn((prev) =>
-                          e.target.checked ? [...prev, c.id] : prev.filter((id) => id !== c.id),
-                        )
-                      }
-                    />
-                    <span>
-                      {c.title}
-                      {c.step === 'done' ? ' (done)' : ''}
-                    </span>
-                  </label>
-                ))}
-              </div>
+              {selectedDependencies.length > 0 && (
+                <ul className="dependency-chip-list">
+                  {selectedDependencies.map((c) => (
+                    <li key={c.id} className="dependency-chip">
+                      <span className="dependency-chip-title">{c.title}</span>
+                      <button
+                        type="button"
+                        className="dependency-chip-remove"
+                        aria-label={`Remove dependency on ${c.title}`}
+                        onClick={() => setDependsOn((prev) => prev.filter((id) => id !== c.id))}
+                      >
+                        ×
+                      </button>
+                    </li>
+                  ))}
+                </ul>
+              )}
+              <button
+                type="button"
+                className="btn-secondary dependency-picker-trigger"
+                onClick={() => setPickerOpen(true)}
+              >
+                {selectedDependencies.length === 0
+                  ? 'Select Dependencies...'
+                  : `Edit Dependencies (${selectedDependencies.length})`}
+              </button>
             </div>
           )}
           {error && <p className="form-error">{error}</p>}
@@ -316,6 +329,17 @@ export default function CardFormModal(props: CardFormProps) {
           </div>
         </form>
       </div>
+      {pickerOpen && (
+        <DependencyPickerModal
+          candidates={dependencyCandidates}
+          selectedIds={dependsOn}
+          onCancel={() => setPickerOpen(false)}
+          onConfirm={(ids) => {
+            setDependsOn(ids)
+            setPickerOpen(false)
+          }}
+        />
+      )}
     </div>
   )
 }

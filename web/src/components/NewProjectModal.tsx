@@ -89,10 +89,11 @@ export default function NewProjectModal({ onClose }: Props) {
       } as Record<string, unknown>)
       // After the project exists, persist any staged per-step
       // instructions the user added across ANY workflow they touched.
-      // Failures here are non-fatal — the project itself is already
-      // created and the user can still edit the instructions from the
-      // edit modal.
-      const upserts: Promise<unknown>[] = []
+      // Project creation already succeeded — collect each failure so we
+      // can surface a single summary instead of silently dropping the
+      // user's drafts.
+      type Failure = { workflowId: string; step: string }
+      const upserts: Promise<Failure | null>[] = []
       for (const [workflowId, perStep] of Object.entries(instructionDrafts)) {
         for (const [step, instructions] of Object.entries(perStep)) {
           upserts.push(
@@ -100,14 +101,26 @@ export default function NewProjectModal({ onClose }: Props) {
               method: 'PUT',
               headers: { 'Content-Type': 'application/json' },
               body: JSON.stringify({ workflow_id: workflowId, step, instructions }),
-            }).catch(() => {
-              /* swallow — see comment above */
-            }),
+            })
+              .then((res) => (res.ok ? null : ({ workflowId, step } satisfies Failure)))
+              .catch(() => ({ workflowId, step }) satisfies Failure),
           )
         }
       }
-      if (upserts.length > 0) await Promise.all(upserts)
+      const failures = (upserts.length > 0 ? await Promise.all(upserts) : []).filter(
+        (f): f is Failure => f !== null,
+      )
       setActiveProject(project.id)
+      if (failures.length > 0) {
+        // Keep the modal open with a clear summary so the user knows
+        // their drafts didn't all land. The project itself exists and is
+        // reachable from the kanban list once they dismiss this dialog.
+        const detail = failures.map((f) => `${f.workflowId}/${f.step}`).join(', ')
+        setError(
+          `Project created, but ${failures.length} workflow-instruction(s) failed to save (${detail}). Open Edit Project to retry.`,
+        )
+        return
+      }
       onClose()
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to create project')

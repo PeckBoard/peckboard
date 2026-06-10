@@ -1,7 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import ReactMarkdown from 'react-markdown'
-import remarkGfm from 'remark-gfm'
 import rehypeHighlight from 'rehype-highlight'
+import SafeMarkdown from './SafeMarkdown'
 import type { Event, Session } from '../types/api'
 import { authedFetch } from '../store/auth'
 import { useWsStore } from '../store/ws'
@@ -608,9 +607,14 @@ export default function ChatView({ sessionId, onOpenTodos }: ChatViewProps) {
               <button onClick={handleTerminateAgent} data-testid="chat-toolbar-terminate">
                 Terminate agent
               </button>
-              <button className="danger" onClick={handleDelete}>
-                Delete
-              </button>
+              {/* Worker sessions are owned by their card; the backend
+                  refuses DELETE /api/sessions/:id for them. Hide the
+                  button rather than render a control that always 409s. */}
+              {!sessionDetail?.is_worker && (
+                <button className="danger" onClick={handleDelete}>
+                  Delete
+                </button>
+              )}
             </div>
           )}
         </div>
@@ -655,21 +659,9 @@ export default function ChatView({ sessionId, onOpenTodos }: ChatViewProps) {
               return (
                 <div key={item.key} className="chat-row chat-row-assistant">
                   <div className="chat-bubble chat-bubble-assistant">
-                    <div className="chat-markdown">
-                      <ReactMarkdown
-                        remarkPlugins={[remarkGfm]}
-                        rehypePlugins={[rehypeHighlight]}
-                        components={{
-                          a: ({ href, children }) => (
-                            <a href={href} target="_blank" rel="noreferrer noopener">
-                              {children}
-                            </a>
-                          ),
-                        }}
-                      >
-                        {item.text}
-                      </ReactMarkdown>
-                    </div>
+                    <SafeMarkdown className="chat-markdown" rehypePlugins={[rehypeHighlight]}>
+                      {item.text}
+                    </SafeMarkdown>
                     <div className="chat-time">{formatTime(item.ts)}</div>
                   </div>
                 </div>

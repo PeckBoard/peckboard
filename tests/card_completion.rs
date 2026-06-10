@@ -14,6 +14,7 @@ use peckboard::auth::rate_limit::RateLimiter;
 use peckboard::config::Config;
 use peckboard::db::Db;
 use peckboard::db::models::{NewCard, NewFolder, NewProject, NewSession};
+use peckboard::plugin::builtin::BuiltinPluginRegistry;
 use peckboard::plugin::manager::PluginManager;
 use peckboard::provider::manager::SessionManager;
 use peckboard::provider::mock::register_mock_provider;
@@ -48,6 +49,7 @@ async fn build_state() -> Arc<AppState> {
         },
         db,
         plugins,
+        builtin_plugins: Arc::new(BuiltinPluginRegistry::new()),
         jwt_secret: vec![0u8; 32],
         login_limiter: RateLimiter::new(100),
         password_change_limiter: RateLimiter::new(100),
@@ -126,6 +128,8 @@ async fn seed_card_with_worker(
                 .to_string(),
             model: None,
             effort: None,
+            blocked: false,
+            block_reason: None,
             created_at: ts.clone(),
             updated_at: ts.clone(),
         })

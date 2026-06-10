@@ -5,10 +5,10 @@ use peckboard::auth::reset::reset_user_password;
 use peckboard::auth::token::load_or_create_jwt_secret;
 use peckboard::config::{CliArgs, Config};
 use peckboard::db::Db;
+use peckboard::plugin::builtin::BuiltinPluginRegistry;
+use peckboard::plugin::builtins::register_all as register_builtin_plugins;
 use peckboard::plugin::manager::PluginManager;
-use peckboard::provider::claude::register_claude_provider;
 use peckboard::provider::manager::SessionManager;
-use peckboard::provider::mock::register_mock_provider;
 use peckboard::provider::registry::ProviderRegistry;
 use peckboard::repeating::RepeatingTaskManager;
 use peckboard::routes::api_router;
@@ -217,8 +217,12 @@ async fn main() -> anyhow::Result<()> {
     }
 
     let provider_registry = Arc::new(ProviderRegistry::new());
-    register_claude_provider(&provider_registry).await;
-    register_mock_provider(&provider_registry).await;
+    let builtin_plugins = Arc::new(BuiltinPluginRegistry::new());
+    // Each built-in plugin registers its capabilities (today: an
+    // AgentProvider) through the catalog, replacing the old direct
+    // `register_*_provider` calls. The catalog records the granted
+    // permissions for `/api/plugins` and the Settings UI.
+    register_builtin_plugins(&builtin_plugins, provider_registry.clone(), db.clone()).await;
     let session_manager =
         SessionManager::new(provider_registry.clone()).with_plugins(plugins.clone());
     let repeating_task_manager = RepeatingTaskManager::new();
@@ -230,6 +234,7 @@ async fn main() -> anyhow::Result<()> {
         config,
         db,
         plugins,
+        builtin_plugins,
         jwt_secret,
         login_limiter,
         password_change_limiter,
