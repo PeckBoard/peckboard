@@ -31,7 +31,7 @@ async fn seed_project(db: &Db, project_id: &str, folder_id: &str) {
         folder_id: folder_id.into(),
         worker_count: 1,
         status: "active".into(),
-        default_workflow: None,
+        workflow: "task".into(),
         model: Some("mock:happy-path".into()),
         effort: None,
         parallel_instructions: false,

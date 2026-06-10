@@ -418,7 +418,13 @@ test.describe('tabs', () => {
     const folder = (await folderRes.json()) as { id: string }
     const projectRes = await request.post('/api/projects', {
       headers: auth,
-      data: { name: 'menu-proj', folder_id: folder.id, worker_count: 1, model: 'mock:happy-path' },
+      data: {
+        name: 'menu-proj',
+        folder_id: folder.id,
+        worker_count: 1,
+        model: 'mock:happy-path',
+        workflow: 'task',
+      },
     })
     expect(projectRes.ok()).toBeTruthy()
     const project = (await projectRes.json()) as { id: string }

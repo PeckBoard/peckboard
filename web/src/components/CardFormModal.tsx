@@ -82,7 +82,8 @@ export default function CardFormModal(props: CardFormProps) {
       .catch(() => {})
   }, [fetchWorkflows, fetchModels])
 
-  const projectDefaultName = workflows.find((w) => w.id === project?.default_workflow)?.name ?? null
+  const projectWorkflowId = project?.workflow
+  const projectWorkflowName = workflows.find((w) => w.id === projectWorkflowId)?.name ?? null
 
   const handleSubmit = async (e: FormEvent) => {
     e.preventDefault()
@@ -216,8 +217,8 @@ export default function CardFormModal(props: CardFormProps) {
             <WorkflowSelect
               value={workflow}
               onChange={setWorkflow}
-              projectDefaultId={project?.default_workflow ?? null}
-              projectDefaultName={projectDefaultName}
+              projectWorkflowId={projectWorkflowId ?? undefined}
+              projectWorkflowName={projectWorkflowName}
               disabled={!isBacklog}
             />
           </div>

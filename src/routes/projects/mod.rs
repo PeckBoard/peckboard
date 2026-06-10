@@ -32,7 +32,7 @@ struct CreateProjectRequest {
     worker_count: i32,
     model: Option<String>,
     effort: Option<String>,
-    default_workflow: Option<String>,
+    workflow: Option<String>,
     #[serde(default)]
     parallel_instructions: bool,
     #[serde(default = "default_true")]
@@ -60,7 +60,7 @@ struct UpdateProjectRequest {
     context: Option<String>,
     worker_count: Option<i32>,
     status: Option<String>,
-    default_workflow: Option<Option<String>>,
+    workflow: Option<String>,
     model: Option<Option<String>>,
     effort: Option<Option<String>>,
     parallel_instructions: Option<bool>,
@@ -237,6 +237,17 @@ async fn create_project(
     Json(body): Json<CreateProjectRequest>,
 ) -> impl IntoResponse {
     tracing::info!(name = %body.name, folder_id = %body.folder_id, "Creating project");
+
+    // A project's workflow is a required (NOT NULL) column. Reject
+    // create requests that omit it or name an unknown workflow.
+    let workflow_id = match body.workflow.as_deref().map(str::trim) {
+        Some(id) if !id.is_empty() => id.to_string(),
+        _ => return Err(bad_request("workflow is required")),
+    };
+    if crate::workflow::workflow_by_id(&workflow_id).is_none() {
+        return Err(bad_request(format!("unknown workflow id '{workflow_id}'")));
+    }
+
     let now = chrono::Utc::now().to_rfc3339();
     let id = uuid::Uuid::new_v4().to_string();
 
@@ -249,7 +260,7 @@ async fn create_project(
             folder_id: body.folder_id,
             worker_count: body.worker_count,
             status: "active".to_string(),
-            default_workflow: body.default_workflow,
+            workflow: workflow_id,
             model: body.model,
             effort: body.effort,
             parallel_instructions: body.parallel_instructions,
@@ -346,12 +357,30 @@ async fn update_project(
     Json(body): Json<UpdateProjectRequest>,
 ) -> impl IntoResponse {
     tracing::info!(project_id = %id, "Updating project");
+
+    // A project's workflow is required (NOT NULL). Omitting the field
+    // is fine — other updates can land without touching the workflow.
+    // An explicit empty string or unknown id is rejected.
+    let workflow = match body.workflow {
+        Some(s) => {
+            let trimmed = s.trim();
+            if trimmed.is_empty() {
+                return Err(bad_request("workflow is required"));
+            }
+            if crate::workflow::workflow_by_id(trimmed).is_none() {
+                return Err(bad_request(format!("unknown workflow id '{trimmed}'")));
+            }
+            Some(trimmed.to_string())
+        }
+        None => None,
+    };
+
     let update = UpdateProject {
         name: body.name,
         context: body.context,
         worker_count: body.worker_count,
         status: body.status,
-        default_workflow: body.default_workflow,
+        workflow,
         model: body.model,
         effort: body.effort,
         parallel_instructions: body.parallel_instructions,

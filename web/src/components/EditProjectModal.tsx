@@ -29,7 +29,7 @@ export default function EditProjectModal({ project, onClose }: Props) {
   const [name, setName] = useState(project.name)
   const [context, setContext] = useState(project.context)
   const [workerCount, setWorkerCount] = useState(project.worker_count)
-  const [defaultWorkflow, setDefaultWorkflow] = useState(project.default_workflow ?? '')
+  const [workflow, setWorkflow] = useState(project.workflow)
   const [model, setModel] = useState(project.model ?? '')
   const [effort, setEffort] = useState(project.effort ?? '')
   const [parallelInstructions, setParallelInstructions] = useState(project.parallel_instructions)
@@ -55,6 +55,10 @@ export default function EditProjectModal({ project, onClose }: Props) {
       setError('Name is required')
       return
     }
+    if (!workflow) {
+      setError('Workflow is required')
+      return
+    }
     setLoading(true)
     setError('')
     try {
@@ -62,7 +66,7 @@ export default function EditProjectModal({ project, onClose }: Props) {
         name: name.trim(),
         context: context.trim(),
         worker_count: workerCount,
-        default_workflow: defaultWorkflow || null,
+        workflow,
         model: model || null,
         effort: effort || null,
         parallel_instructions: parallelInstructions,
@@ -114,8 +118,8 @@ export default function EditProjectModal({ project, onClose }: Props) {
             />
           </div>
           <div className="form-field">
-            <label className="form-label">Default workflow</label>
-            <WorkflowSelect value={defaultWorkflow} onChange={setDefaultWorkflow} />
+            <label className="form-label">Workflow</label>
+            <WorkflowSelect value={workflow} onChange={setWorkflow} />
           </div>
           <div className="form-field">
             <label className="form-label">Model</label>
@@ -183,7 +187,11 @@ export default function EditProjectModal({ project, onClose }: Props) {
             <button type="button" className="btn-secondary" onClick={onClose}>
               Cancel
             </button>
-            <button type="submit" className="btn-primary" disabled={loading || !name.trim()}>
+            <button
+              type="submit"
+              className="btn-primary"
+              disabled={loading || !name.trim() || !workflow}
+            >
               {loading ? 'Saving...' : 'Save'}
             </button>
           </div>

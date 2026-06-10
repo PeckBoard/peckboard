@@ -3,9 +3,9 @@
 //! to the worker prompt.
 //!
 //! A card selects a workflow by id: its own `workflow` field, falling back to
-//! the project's `default_workflow`, falling back to [`DEFAULT_WORKFLOW_ID`].
-//! An unknown or missing id resolves to the default workflow rather than an
-//! empty list, so `complete_step` can always find the next step (an empty list
+//! the project's `workflow` (a NOT NULL column on the projects table). An
+//! unknown id resolves to [`DEFAULT_WORKFLOW_ID`] rather than an empty list,
+//! so `complete_step` can always find the next step (an empty list
 //! would strand the card or jump it straight to `done`).
 //!
 //! Everything that needs step order — the worker prompt, `complete_step`
@@ -387,8 +387,8 @@ pub fn default_workflow() -> &'static Workflow {
 /// Resolve a workflow id to its ordered step names, falling back to the
 /// default workflow when the id is `None` or unrecognized.
 ///
-/// Callers pass `card.workflow.as_deref().or(project.default_workflow.as_deref())`
-/// so a card's own choice wins, then the project default, then the default.
+/// Callers pass `card.workflow.as_deref().or(Some(&project.workflow))` so a
+/// card's own choice wins, then the project's required workflow.
 pub fn steps_for(id: Option<&str>) -> Vec<String> {
     let wf = id.and_then(workflow_by_id).unwrap_or_else(default_workflow);
     wf.steps.iter().map(|s| s.step.to_string()).collect()

@@ -62,8 +62,9 @@ async fn build_state() -> Arc<AppState> {
 
 /// Seed a folder + project + a single card at `step`, plus a worker session
 /// assigned to that card. `card_workflow` and `project_default` set the card's
-/// `workflow` and the project's `default_workflow` so a test can exercise how
-/// `complete_step` resolves the step order. Returns `(card_id, session_id)`.
+/// `workflow` and the project's required `workflow` so a test can exercise how
+/// `complete_step` resolves the step order. `project_default = None` keeps the
+/// platform default ("task"). Returns `(card_id, session_id)`.
 async fn seed_card_with_worker(
     state: &Arc<AppState>,
     step: &str,
@@ -94,7 +95,7 @@ async fn seed_card_with_worker(
             folder_id: "f1".into(),
             worker_count: 1,
             status: "active".into(),
-            default_workflow: project_default.map(str::to_string),
+            workflow: project_default.unwrap_or("task").to_string(),
             model: None,
             effort: None,
             parallel_instructions: false,
@@ -253,9 +254,9 @@ async fn complete_step_follows_the_cards_own_workflow() {
 }
 
 #[tokio::test]
-async fn complete_step_falls_back_to_project_default_workflow() {
-    // When the card names no workflow, the project's default_workflow drives
-    // the step order.
+async fn complete_step_falls_back_to_project_workflow() {
+    // When the card names no workflow, the project's required `workflow`
+    // drives the step order.
     let state = build_state().await;
     let (card_id, session_id) =
         seed_card_with_worker(&state, "in_progress", None, Some("deep-develop-software")).await;

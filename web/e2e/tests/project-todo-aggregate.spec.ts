@@ -124,7 +124,13 @@ test('project page aggregates worker todos and updates live', async ({
 
   const projectRes = await request.post('/api/projects', {
     headers: authHeader,
-    data: { name: 'agg project', folder_id: folder.id, worker_count: 1, model: MODEL },
+    data: {
+      name: 'agg project',
+      folder_id: folder.id,
+      worker_count: 1,
+      model: MODEL,
+      workflow: 'task',
+    },
   })
   expect(projectRes.ok(), `create project failed: ${await projectRes.text()}`).toBeTruthy()
   const project = (await projectRes.json()) as { id: string }

@@ -54,7 +54,12 @@ async function seedProject(
 
   const projectRes = await request.post('/api/projects', {
     headers: auth,
-    data: { name: `responsive ${suffix}`, folder_id: folder.id, worker_count: 0 },
+    data: {
+      name: `responsive ${suffix}`,
+      folder_id: folder.id,
+      worker_count: 0,
+      workflow: 'task',
+    },
   })
   expect(projectRes.ok(), `create project failed: ${await projectRes.text()}`).toBeTruthy()
   const project = (await projectRes.json()) as { id: string }

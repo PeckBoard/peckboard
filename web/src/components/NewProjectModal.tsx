@@ -34,7 +34,7 @@ export default function NewProjectModal({ onClose }: Props) {
   const folderId = chosenFolderId ?? folders[0]?.id ?? ''
   const [context, setContext] = useState('')
   const [workerCount, setWorkerCount] = useState(1)
-  const [defaultWorkflow, setDefaultWorkflow] = useState('')
+  const [workflow, setWorkflow] = useState('')
   const [model, setModel] = useState('')
   const [effort, setEffort] = useState('')
   const [parallelInstructions, setParallelInstructions] = useState(false)
@@ -59,6 +59,10 @@ export default function NewProjectModal({ onClose }: Props) {
       setError('Name and folder are required')
       return
     }
+    if (!workflow) {
+      setError('Workflow is required')
+      return
+    }
     setLoading(true)
     setError('')
     try {
@@ -67,7 +71,7 @@ export default function NewProjectModal({ onClose }: Props) {
         folder_id: folderId,
         context: context.trim(),
         worker_count: workerCount,
-        default_workflow: defaultWorkflow || undefined,
+        workflow,
         model: model || undefined,
         effort: effort || undefined,
         parallel_instructions: parallelInstructions,
@@ -120,6 +124,10 @@ export default function NewProjectModal({ onClose }: Props) {
             )}
           </div>
           <div className="form-field">
+            <label className="form-label">Workflow</label>
+            <WorkflowSelect value={workflow} onChange={setWorkflow} />
+          </div>
+          <div className="form-field">
             <label className="form-label">
               Context <span className="optional">(optional)</span>
             </label>
@@ -157,11 +165,6 @@ export default function NewProjectModal({ onClose }: Props) {
                   Number of parallel workers. Keep at 1 unless the repo is set up for parallel work
                   (git worktrees).
                 </p>
-              </div>
-              <div className="form-field">
-                <label className="form-label">Default workflow</label>
-                <WorkflowSelect value={defaultWorkflow} onChange={setDefaultWorkflow} />
-                <p className="form-hint">Pre-selected workflow when creating new cards.</p>
               </div>
               <div className="form-field">
                 <label className="form-label">Model</label>
@@ -250,7 +253,7 @@ export default function NewProjectModal({ onClose }: Props) {
             <button
               type="submit"
               className="btn-primary"
-              disabled={loading || !name.trim() || !folderId}
+              disabled={loading || !name.trim() || !folderId || !workflow}
             >
               {loading ? 'Creating...' : 'Create Project'}
             </button>

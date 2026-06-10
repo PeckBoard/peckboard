@@ -27,6 +27,7 @@ pub fn ensure_schema(conn: &mut SqliteConnection) -> anyhow::Result<()> {
     ensure_sessions_expert_columns(conn)?;
     ensure_repeating_tasks_schema(conn)?;
     ensure_sessions_pagination_indexes(conn)?;
+    ensure_projects_workflow_column(conn)?;
     Ok(())
 }
 
@@ -375,6 +376,35 @@ fn ensure_projects_worker_communication_columns(conn: &mut SqliteConnection) -> 
     Ok(())
 }
 
+/// Heal DBs that predate `1781053574_projects_workflow_required`. That
+/// migration is a bare `ALTER TABLE … ADD COLUMN` plus a backfill UPDATE;
+/// ADD COLUMN cannot be made idempotent in SQLite, so this detect-then-skip
+/// path is the only safe way to add the column to an older data dir.
+///
+/// The new column is `NOT NULL DEFAULT 'task'`; the backfill copies the
+/// project's previously-stored `default_workflow` whenever it was set.
+fn ensure_projects_workflow_column(conn: &mut SqliteConnection) -> anyhow::Result<()> {
+    let existing = project_columns(conn)?;
+    if existing.is_empty() {
+        return Ok(());
+    }
+    if !existing.iter().any(|c| c == "workflow") {
+        tracing::info!("Repairing schema: adding projects.workflow");
+        sql_query("ALTER TABLE projects ADD COLUMN workflow TEXT NOT NULL DEFAULT 'task'")
+            .execute(conn)?;
+        if existing.iter().any(|c| c == "default_workflow") {
+            sql_query(
+                "UPDATE projects \
+                    SET workflow = default_workflow \
+                  WHERE default_workflow IS NOT NULL \
+                    AND default_workflow != ''",
+            )
+            .execute(conn)?;
+        }
+    }
+    Ok(())
+}
+
 #[derive(QueryableByName, Debug)]
 struct PragmaColumn {
     #[diesel(sql_type = diesel::sql_types::Text)]
@@ -624,6 +654,66 @@ mod tests {
         assert!(!rows[0].is_permanent);
 
         // Second run must be a no-op (no double-add error).
+        ensure_schema(&mut conn).unwrap();
+    }
+
+    /// A DB that predates `1781053574_projects_workflow_required` has a
+    /// `projects` table with the legacy nullable `default_workflow` column
+    /// and no `workflow` column. ensure_schema must add the new column with
+    /// the NOT NULL constraint, copy each project's `default_workflow` when
+    /// set, and fall through to the platform default ('task') otherwise.
+    /// The legacy column stays in place — per migration policy we never DROP
+    /// in a forward step.
+    #[test]
+    fn ensure_schema_adds_projects_workflow_with_backfill() {
+        let mut conn = SqliteConnection::establish(":memory:").unwrap();
+        sql_query(
+            "CREATE TABLE projects (
+                id TEXT PRIMARY KEY NOT NULL,
+                auto_notify_changes BOOLEAN NOT NULL DEFAULT 1,
+                worker_communication BOOLEAN NOT NULL DEFAULT 1,
+                default_workflow TEXT
+            )",
+        )
+        .execute(&mut conn)
+        .unwrap();
+        sql_query(
+            "INSERT INTO projects (id, default_workflow) VALUES \
+             ('p_null', NULL), \
+             ('p_empty', ''), \
+             ('p_set', 'research')",
+        )
+        .execute(&mut conn)
+        .unwrap();
+
+        ensure_schema(&mut conn).unwrap();
+
+        let cols = project_columns(&mut conn).unwrap();
+        assert!(cols.iter().any(|c| c == "workflow"));
+        assert!(
+            cols.iter().any(|c| c == "default_workflow"),
+            "legacy column must survive the heal",
+        );
+
+        #[derive(QueryableByName)]
+        struct Row {
+            #[diesel(sql_type = diesel::sql_types::Text)]
+            id: String,
+            #[diesel(sql_type = diesel::sql_types::Text)]
+            workflow: String,
+        }
+        let rows: Vec<Row> = sql_query("SELECT id, workflow FROM projects ORDER BY id")
+            .load(&mut conn)
+            .unwrap();
+        let by_id: std::collections::HashMap<_, _> = rows
+            .iter()
+            .map(|r| (r.id.as_str(), r.workflow.as_str()))
+            .collect();
+        assert_eq!(by_id["p_null"], "task");
+        assert_eq!(by_id["p_empty"], "task");
+        assert_eq!(by_id["p_set"], "research");
+
+        // Second call must be a no-op.
         ensure_schema(&mut conn).unwrap();
     }
 }

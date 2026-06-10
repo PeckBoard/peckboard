@@ -49,7 +49,7 @@ async fn spin_up_experts_creates_persistent_hidden_experts() {
         folder_id: "f1".into(),
         worker_count: 1,
         status: "active".into(),
-        default_workflow: None,
+        workflow: "task".into(),
         model: Some("mock:happy-path".into()),
         effort: None,
         parallel_instructions: false,

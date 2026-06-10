@@ -138,7 +138,7 @@ async fn qa_export_persists_rehydrates_and_lists_through_reports_api() {
             folder_id: "f1".into(),
             worker_count: 1,
             status: "active".into(),
-            default_workflow: None,
+            workflow: "task".into(),
             model: None,
             effort: None,
             parallel_instructions: false,

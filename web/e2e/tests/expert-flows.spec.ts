@@ -125,7 +125,7 @@ async function seedProject(
 
   const projectRes = await request.post('/api/projects', {
     headers: authHeader,
-    data: { name, folder_id: folder.id, model: 'mock:echo' },
+    data: { name, folder_id: folder.id, model: 'mock:echo', workflow: 'task' },
   })
   expect(projectRes.ok(), `create project failed: ${await projectRes.text()}`).toBeTruthy()
   const project = (await projectRes.json()) as { id: string }

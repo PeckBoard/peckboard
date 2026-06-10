@@ -61,7 +61,12 @@ async function setupProject(
 
   const projectRes = await request.post('/api/projects', {
     headers: auth,
-    data: { name: `wrap project ${suffix}`, folder_id: folder.id, worker_count: 0 },
+    data: {
+      name: `wrap project ${suffix}`,
+      folder_id: folder.id,
+      worker_count: 0,
+      workflow: 'task',
+    },
   })
   expect(projectRes.ok(), `create project failed: ${await projectRes.text()}`).toBeTruthy()
   const project = (await projectRes.json()) as { id: string }
@@ -178,7 +183,12 @@ test('step header pins under the toolbar while scrolling its section, then yield
   const folder = (await folderRes.json()) as { id: string }
   const projectRes = await request.post('/api/projects', {
     headers: auth,
-    data: { name: `sticky scroll`, folder_id: folder.id, worker_count: 0 },
+    data: {
+      name: `sticky scroll`,
+      folder_id: folder.id,
+      worker_count: 0,
+      workflow: 'task',
+    },
   })
   expect(projectRes.ok(), `create project failed: ${await projectRes.text()}`).toBeTruthy()
   const project = (await projectRes.json()) as { id: string }

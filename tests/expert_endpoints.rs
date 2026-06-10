@@ -126,7 +126,7 @@ async fn seed(state: &AppState) {
             folder_id: "f1".into(),
             worker_count: 1,
             status: "active".into(),
-            default_workflow: None,
+            workflow: "task".into(),
             model: None,
             effort: None,
             parallel_instructions: false,

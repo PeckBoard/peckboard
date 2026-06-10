@@ -378,11 +378,8 @@ async fn spawn_worker_for_card(
         .await;
 
     // 5. Build worker prompt
-    let workflow_steps = crate::workflow::steps_for(
-        card.workflow
-            .as_deref()
-            .or(project.default_workflow.as_deref()),
-    );
+    let workflow_steps =
+        crate::workflow::steps_for(card.workflow.as_deref().or(Some(&project.workflow)));
     // In-scope experts (project + global) so the worker can consult them.
     // A lookup failure here must not block the spawn — degrade to none.
     let experts = match state.db.list_expert_sessions_by_scope(&project.id).await {
@@ -541,7 +538,7 @@ pub async fn handle_worker_done(state: &Arc<AppState>, session_id: &str) {
             let workflow_steps = crate::workflow::steps_for(
                 card.workflow
                     .as_deref()
-                    .or(project.as_ref().and_then(|p| p.default_workflow.as_deref())),
+                    .or(project.as_ref().map(|p| p.workflow.as_str())),
             );
 
             if let Some(next_step) = pipeline::find_next_step(&card.step, &workflow_steps) {

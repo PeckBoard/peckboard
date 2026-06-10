@@ -63,7 +63,7 @@ export interface Project {
   folder_id: string
   worker_count: number
   status: string
-  default_workflow: string | null
+  workflow: string
   model: string | null
   effort: string | null
   parallel_instructions: boolean

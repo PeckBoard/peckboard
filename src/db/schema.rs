@@ -60,7 +60,7 @@ diesel::table! {
         folder_id -> Text,
         worker_count -> Integer,
         status -> Text,
-        default_workflow -> Nullable<Text>,
+        workflow -> Text,
         model -> Nullable<Text>,
         effort -> Nullable<Text>,
         parallel_instructions -> Bool,

@@ -161,7 +161,7 @@ async fn startup_backfills_a_question_expert_for_a_preexisting_project() {
         folder_id: "f1".into(),
         worker_count: 1,
         status: "active".into(),
-        default_workflow: None,
+        workflow: "task".into(),
         model: None,
         effort: None,
         parallel_instructions: false,

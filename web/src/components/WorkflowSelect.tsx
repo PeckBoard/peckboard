@@ -2,15 +2,18 @@ import { useEffect, useRef, useState } from 'react'
 import { useResourcesStore, type WorkflowInfo } from '../store/resources'
 
 interface Props {
-  /** Currently selected workflow id, or '' to mean "use the project default". */
+  /** Currently selected workflow id. In the card form, '' means "inherit
+   *  from the project". In the project modals (no `projectWorkflowId` prop),
+   *  '' means "nothing picked yet" and the caller should treat it as invalid. */
   value: string
   onChange: (id: string) => void
-  /** When set, shows a "Default workflow" option that resolves to this id —
-   *  used in the card form so the card can inherit the project's default. */
-  projectDefaultId?: string | null
-  /** When set, shown as the label on the inherit option (e.g. the project
-   *  default workflow's display name). */
-  projectDefaultName?: string | null
+  /** When set, surfaces a "Project workflow (<name>)" option that resolves
+   *  to this id — used in the card form so a card can inherit its project's
+   *  workflow. Omit in the project modals so the project must pick an
+   *  actual workflow rather than deferring to itself. */
+  projectWorkflowId?: string
+  /** Display name of the project's workflow, shown on the inherit option. */
+  projectWorkflowName?: string | null
   disabled?: boolean
   /** id passed through to the trigger button for label association. */
   id?: string
@@ -25,8 +28,8 @@ interface Props {
 export default function WorkflowSelect({
   value,
   onChange,
-  projectDefaultId,
-  projectDefaultName,
+  projectWorkflowId,
+  projectWorkflowName,
   disabled,
   id,
 }: Props) {
@@ -54,17 +57,18 @@ export default function WorkflowSelect({
   })
 
   const selected = sorted.find((w) => w.id === value)
-  const defaultWf =
-    projectDefaultId != null ? (sorted.find((w) => w.id === projectDefaultId) ?? null) : null
-  const defaultLabel = projectDefaultName ?? defaultWf?.name ?? 'project default'
+  const projectWf = projectWorkflowId
+    ? (sorted.find((w) => w.id === projectWorkflowId) ?? null)
+    : null
+  const projectLabel = projectWorkflowName ?? projectWf?.name ?? 'project workflow'
 
   const triggerLabel = selected
     ? selected.name
-    : projectDefaultId != null
-      ? `Default workflow (${defaultLabel})`
-      : 'Default workflow'
+    : projectWorkflowId
+      ? `Project workflow (${projectLabel})`
+      : 'Select a workflow…'
 
-  const triggerDescription = selected?.description ?? defaultWf?.description ?? ''
+  const triggerDescription = selected?.description ?? projectWf?.description ?? ''
 
   return (
     <div className="workflow-select" ref={wrapperRef}>
@@ -80,24 +84,11 @@ export default function WorkflowSelect({
       </button>
       {open && (
         <div className="workflow-select-menu">
-          {projectDefaultId != null && (
+          {projectWorkflowId && (
             <WorkflowOption
               active={value === ''}
-              name={`Default workflow (${defaultLabel})`}
-              description={
-                defaultWf?.description ?? "Use whatever the project's default workflow is."
-              }
-              onClick={() => {
-                onChange('')
-                setOpen(false)
-              }}
-            />
-          )}
-          {projectDefaultId == null && (
-            <WorkflowOption
-              active={value === ''}
-              name="Default workflow"
-              description="Use the project's default workflow."
+              name={`Project workflow (${projectLabel})`}
+              description={projectWf?.description ?? "Use the project's workflow."}
               onClick={() => {
                 onChange('')
                 setOpen(false)

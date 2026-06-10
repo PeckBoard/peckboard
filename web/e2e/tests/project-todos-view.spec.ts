@@ -122,7 +122,13 @@ test('Todos button opens dedicated view that aggregates worker todos', async ({
 
   const projectRes = await request.post('/api/projects', {
     headers: authHeader,
-    data: { name: 'todos view project', folder_id: folder.id, worker_count: 1, model: MODEL },
+    data: {
+      name: 'todos view project',
+      folder_id: folder.id,
+      worker_count: 1,
+      model: MODEL,
+      workflow: 'task',
+    },
   })
   expect(projectRes.ok(), `create project failed: ${await projectRes.text()}`).toBeTruthy()
   const project = (await projectRes.json()) as { id: string }
@@ -196,7 +202,13 @@ test('dedicated project todos view renders explicit empty state when there are n
   // Paused project with no cards — no worker sessions, no todos.
   const projectRes = await request.post('/api/projects', {
     headers: authHeader,
-    data: { name: 'empty todos project', folder_id: folder.id, worker_count: 1, model: MODEL },
+    data: {
+      name: 'empty todos project',
+      folder_id: folder.id,
+      worker_count: 1,
+      model: MODEL,
+      workflow: 'task',
+    },
   })
   expect(projectRes.ok(), `create project failed: ${await projectRes.text()}`).toBeTruthy()
   const project = (await projectRes.json()) as { id: string }

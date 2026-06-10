@@ -17,10 +17,7 @@ pub fn build_worker_prompt(
     // is resolved with the same precedence the orchestrator uses (card,
     // project, default), so the prompt's marching orders match the
     // step-advance behaviour.
-    let workflow_id = card
-        .workflow
-        .as_deref()
-        .or(project.default_workflow.as_deref());
+    let workflow_id = card.workflow.as_deref().or(Some(&project.workflow));
     let step_instructions = crate::workflow::step_instructions(workflow_id, step);
     let mut prompt = String::new();
 
@@ -394,7 +391,7 @@ mod tests {
             folder_id: "f1".into(),
             worker_count: 2,
             status: "active".into(),
-            default_workflow: Some("default".into()),
+            workflow: "task".into(),
             model: None,
             effort: None,
             parallel_instructions: false,

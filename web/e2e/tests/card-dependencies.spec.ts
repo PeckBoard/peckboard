@@ -85,7 +85,13 @@ test('a dependent card is not picked up until its dependency is done', async ({ 
   // about A occupying the only slot.
   const projectRes = await request.post('/api/projects', {
     headers: authHeader,
-    data: { name: 'deps project', folder_id: folder.id, worker_count: 2, model: MODEL },
+    data: {
+      name: 'deps project',
+      folder_id: folder.id,
+      worker_count: 2,
+      model: MODEL,
+      workflow: 'task',
+    },
   })
   expect(projectRes.ok(), `create project failed: ${await projectRes.text()}`).toBeTruthy()
   const project = (await projectRes.json()) as { id: string }

@@ -58,7 +58,12 @@ test('a card shows a thought bubble while its worker emits events', async ({
   // A paused project keeps the orchestrator from touching our card.
   const projectRes = await request.post('/api/projects', {
     headers: auth,
-    data: { name: 'bubble project', folder_id: folder.id, worker_count: 0 },
+    data: {
+      name: 'bubble project',
+      folder_id: folder.id,
+      worker_count: 0,
+      workflow: 'task',
+    },
   })
   expect(projectRes.ok(), `create project failed: ${await projectRes.text()}`).toBeTruthy()
   const project = (await projectRes.json()) as { id: string }

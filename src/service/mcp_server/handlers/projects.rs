@@ -23,7 +23,7 @@ impl McpToolRegistry {
                     "folder_id": p.folder_id,
                     "status": p.status,
                     "worker_count": p.worker_count,
-                    "default_workflow": p.default_workflow,
+                    "workflow": p.workflow,
                     "model": p.model,
                     "effort": p.effort,
                 })
@@ -83,6 +83,20 @@ impl McpToolRegistry {
             .and_then(|v| v.as_i64())
             .unwrap_or(1) as i32;
 
+        // Project workflow is a required (NOT NULL) column. MCP callers
+        // may pass an explicit `workflow`; otherwise we assign the
+        // platform default so the resulting project ends up with an
+        // actual workflow.
+        let workflow_id = match args.get("workflow").and_then(|v| v.as_str()).map(str::trim) {
+            Some(w) if !w.is_empty() => {
+                if crate::workflow::workflow_by_id(w).is_none() {
+                    anyhow::bail!("unknown workflow id '{w}'");
+                }
+                w.to_string()
+            }
+            _ => crate::workflow::DEFAULT_WORKFLOW_ID.to_string(),
+        };
+
         let now = chrono::Utc::now().to_rfc3339();
         let project = ctx
             .db
@@ -93,7 +107,7 @@ impl McpToolRegistry {
                 folder_id: folder_id.clone(),
                 worker_count,
                 status: "active".to_string(),
-                default_workflow: None,
+                workflow: workflow_id,
                 model: None,
                 effort: None,
                 parallel_instructions: false,

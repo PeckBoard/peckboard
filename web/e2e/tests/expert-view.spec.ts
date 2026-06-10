@@ -93,7 +93,12 @@ test('experts view shows experts grouped by project; chat list hides them', asyn
     headers: authHeader,
     // mock:echo so the experts' eager-capture dispatch uses the mock
     // provider (no real `claude` CLI) and returns fast.
-    data: { name: 'Expert Demo', folder_id: folder.id, model: 'mock:echo' },
+    data: {
+      name: 'Expert Demo',
+      folder_id: folder.id,
+      model: 'mock:echo',
+      workflow: 'task',
+    },
   })
   expect(projectRes.ok(), `create project failed: ${await projectRes.text()}`).toBeTruthy()
   const project = (await projectRes.json()) as { id: string; name: string }

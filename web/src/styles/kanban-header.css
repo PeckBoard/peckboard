@@ -2,18 +2,13 @@
    Kanban Board Header & Add Form
    ═══════════════════════════════════════════════════ */
 
-/* The project header now reuses the chat-toolbar look — name on the
-   left, status badge, action icons + a 3-dot menu on the right — so it
+/* The project header reuses the chat-toolbar look — name on the left,
+   status badge, action icons + a 3-dot menu on the right — so it
    matches the session header instead of looking like a separate
    component. The shared `.chat-toolbar` rules in chat-toolbar.css supply
-   the row layout and the menu styles; these additions are the bits
-   specific to the kanban header (the flex spacer that pushes actions to
-   the right, the borderless icon buttons, and the rounded corners that
-   make the header read as a card under the tabbar). */
-.kanban-board .kanban-board-header.chat-toolbar {
-  border-radius: var(--radius-lg);
-  border: 1px solid var(--border);
-}
+   the row layout, background, and bottom border; the additions below
+   are the bits specific to the kanban header (flex spacer that pushes
+   actions to the right, borderless icon buttons). */
 
 .chat-toolbar-spacer {
   margin-left: auto;
