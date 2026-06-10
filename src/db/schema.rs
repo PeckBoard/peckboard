@@ -222,6 +222,23 @@ diesel::table! {
     }
 }
 
+diesel::table! {
+    usage_events (id) {
+        id -> Text,
+        session_id -> Text,
+        event_id -> Nullable<Text>,
+        turn_seq -> Nullable<Integer>,
+        ts -> BigInt,
+        input_tokens -> BigInt,
+        output_tokens -> BigInt,
+        cache_read_tokens -> BigInt,
+        cache_creation_tokens -> BigInt,
+        total_tokens -> BigInt,
+        context_tokens -> BigInt,
+        model -> Nullable<Text>,
+    }
+}
+
 diesel::joinable!(sessions -> folders (folder_id));
 diesel::joinable!(sessions -> projects (project_id));
 diesel::joinable!(sessions -> repeating_tasks (repeating_task_id));
@@ -234,6 +251,7 @@ diesel::joinable!(todos -> sessions (session_id));
 diesel::joinable!(repeating_tasks -> folders (folder_id));
 diesel::joinable!(project_workflow_instructions -> projects (project_id));
 diesel::joinable!(pm_decisions -> projects (project_id));
+diesel::joinable!(usage_events -> sessions (session_id));
 
 diesel::joinable!(user_tabs -> users (user_id));
 
@@ -255,4 +273,5 @@ diesel::allow_tables_to_appear_in_same_query!(
     project_workflow_instructions,
     pm_decisions,
     plugin_settings,
+    usage_events,
 );

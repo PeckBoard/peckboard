@@ -1802,4 +1802,193 @@ mod tests {
                 .is_empty()
         );
     }
+
+    // ── Usage events ─────────────────────────────────────────────────
+
+    /// Standard folder → project → card → session chain so usage rows
+    /// have a valid FK target (and project/card attribution is derivable
+    /// via the session row, not denormalized onto usage_events).
+    async fn seed_usage_session(db: &Db, session_id: &str) {
+        let ts = now();
+        db.create_folder(NewFolder {
+            id: "f1".into(),
+            name: "Folder".into(),
+            path: "/tmp/f".into(),
+            created_at: ts.clone(),
+        })
+        .await
+        .unwrap();
+        db.create_project(NewProject {
+            id: "p1".into(),
+            name: "Project".into(),
+            context: "".into(),
+            folder_id: "f1".into(),
+            worker_count: 1,
+            status: "active".into(),
+            workflow: "task".into(),
+            model: None,
+            effort: None,
+            parallel_instructions: false,
+            auto_notify_changes: true,
+            worker_communication: false,
+            created_at: ts.clone(),
+            last_accessed_at: ts.clone(),
+        })
+        .await
+        .unwrap();
+        db.create_card(NewCard {
+            id: "c1".into(),
+            project_id: "p1".into(),
+            title: "Card".into(),
+            description: "".into(),
+            step: "backlog".into(),
+            priority: 1,
+            workflow: "task".into(),
+            model: None,
+            effort: None,
+            blocked: false,
+            block_reason: None,
+            created_at: ts.clone(),
+            updated_at: ts.clone(),
+        })
+        .await
+        .unwrap();
+        db.create_session(NewSession {
+            id: session_id.into(),
+            name: "Session".into(),
+            folder_id: "f1".into(),
+            project_id: Some("p1".into()),
+            card_id: Some("c1".into()),
+            is_worker: true,
+            created_at: ts.clone(),
+            last_activity: ts.clone(),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    }
+
+    /// The real capture path: a `ProviderEvent::Usage` flowing through
+    /// `emit_event` must land both as an `agent-usage` event AND a mirrored
+    /// `usage_events` row linked back to that event, with turn_seq assigned.
+    #[tokio::test]
+    async fn usage_events_captured_via_emit_event() {
+        use crate::provider::agent::emit_event;
+        use crate::provider::stream::ProviderEvent;
+        use crate::ws::broadcaster::Broadcaster;
+
+        let db = test_db();
+        seed_usage_session(&db, "s1").await;
+        let broadcaster = Broadcaster::new();
+
+        for _ in 0..2 {
+            emit_event(
+                &db,
+                &broadcaster,
+                "s1",
+                ProviderEvent::Usage {
+                    input_tokens: 100,
+                    output_tokens: 20,
+                    cache_read_tokens: 5,
+                    cache_creation_tokens: 3,
+                    total_tokens: 128,
+                    context_tokens: 108,
+                    model: Some("claude:claude-opus-4-8".into()),
+                },
+            )
+            .await;
+        }
+
+        let rows = db.usage_events_for_session("s1").await.unwrap();
+        assert_eq!(rows.len(), 2, "two turns must mirror two usage rows");
+        assert_eq!(rows[0].input_tokens, 100);
+        assert_eq!(rows[0].output_tokens, 20);
+        assert_eq!(rows[0].cache_read_tokens, 5);
+        assert_eq!(rows[0].cache_creation_tokens, 3);
+        assert_eq!(rows[0].total_tokens, 128);
+        assert_eq!(rows[0].context_tokens, 108);
+        assert_eq!(rows[0].model.as_deref(), Some("claude:claude-opus-4-8"));
+        // turn_seq is auto-assigned per session: 1, 2, …
+        assert_eq!(rows[0].turn_seq, Some(1));
+        assert_eq!(rows[1].turn_seq, Some(2));
+        // Each row back-links to its originating agent-usage event.
+        let event_id = rows[0].event_id.clone().expect("event_id linked");
+        let ev = db
+            .get_event(&event_id)
+            .await
+            .unwrap()
+            .expect("event exists");
+        assert_eq!(ev.kind, "agent-usage");
+    }
+
+    /// CRUD query helpers: rows are queryable by session and by inclusive
+    /// time range, and a query for one session never leaks another's rows.
+    #[tokio::test]
+    async fn usage_events_query_by_session_and_time_range() {
+        let db = test_db();
+        seed_usage_session(&db, "s1").await;
+        // A second session in the same project to prove isolation.
+        db.create_session(NewSession {
+            id: "s2".into(),
+            name: "Other".into(),
+            folder_id: "f1".into(),
+            project_id: Some("p1".into()),
+            card_id: Some("c1".into()),
+            is_worker: true,
+            created_at: now(),
+            last_activity: now(),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+
+        // Five usage rows on s1 at distinct, increasing timestamps.
+        for i in 0..5i64 {
+            db.record_usage_event(NewUsageEvent {
+                id: format!("u{i}"),
+                session_id: "s1".into(),
+                event_id: None,
+                turn_seq: None,
+                ts: 1_000 + i * 10,
+                input_tokens: 10 * (i + 1),
+                output_tokens: i + 1,
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        }
+        // One row on s2 inside s1's time window — must not leak.
+        db.record_usage_event(NewUsageEvent {
+            id: "v0".into(),
+            session_id: "s2".into(),
+            event_id: None,
+            turn_seq: None,
+            ts: 1_020,
+            input_tokens: 999,
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+
+        // By session: all five, oldest-first, isolated from s2.
+        let all = db.usage_events_for_session("s1").await.unwrap();
+        assert_eq!(all.len(), 5);
+        assert_eq!(all[0].ts, 1_000);
+        assert_eq!(all[4].ts, 1_040);
+        assert!(all.iter().all(|r| r.session_id == "s1"));
+
+        // By time range: inclusive on both ends — ts in [1_010, 1_030].
+        let window = db
+            .usage_events_for_session_in_range("s1", 1_010, 1_030)
+            .await
+            .unwrap();
+        let tss: Vec<i64> = window.iter().map(|r| r.ts).collect();
+        assert_eq!(tss, vec![1_010, 1_020, 1_030]);
+
+        // s2's row at ts=1_020 stays out of s1's range query.
+        assert!(window.iter().all(|r| r.session_id == "s1"));
+        let s2 = db.usage_events_for_session("s2").await.unwrap();
+        assert_eq!(s2.len(), 1);
+        assert_eq!(s2[0].input_tokens, 999);
+    }
 }

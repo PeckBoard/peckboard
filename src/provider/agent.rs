@@ -190,6 +190,45 @@ pub async fn emit_event(
                 }
             }
 
+            // Mirror per-turn token usage into the dedicated `usage_events`
+            // table — the source of truth for usage/analytics rollups. The
+            // event still drives live WS updates; the table is what the
+            // aggregation queries read. Same colocation as the `todo`
+            // mirror above. `db_event` gives us the originating event id
+            // and the server-stamped ts.
+            if let ProviderEvent::Usage {
+                input_tokens,
+                output_tokens,
+                cache_read_tokens,
+                cache_creation_tokens,
+                total_tokens,
+                context_tokens,
+                ref model,
+            } = event
+            {
+                let new_usage = crate::db::models::NewUsageEvent {
+                    id: uuid::Uuid::new_v4().to_string(),
+                    session_id: session_id.to_string(),
+                    event_id: Some(db_event.id.clone()),
+                    turn_seq: None,
+                    ts: db_event.ts,
+                    input_tokens,
+                    output_tokens,
+                    cache_read_tokens,
+                    cache_creation_tokens,
+                    total_tokens,
+                    context_tokens,
+                    model: model.clone(),
+                };
+                if let Err(e) = db.record_usage_event(new_usage).await {
+                    tracing::error!(
+                        session_id = session_id,
+                        "Failed to persist usage_event: {}",
+                        e
+                    );
+                }
+            }
+
             if let ProviderEvent::Completed {
                 conversation_id: Some(ref cid),
             } = event

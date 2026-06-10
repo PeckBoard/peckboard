@@ -524,3 +524,41 @@ pub struct PluginSettingRow {
     pub value: String,
     pub updated_at: String,
 }
+
+// ── Usage events ─────────────────────────────────────────────────────
+
+#[derive(Queryable, Selectable, Serialize, Debug, Clone)]
+#[diesel(table_name = usage_events)]
+pub struct UsageEvent {
+    pub id: String,
+    pub session_id: String,
+    pub event_id: Option<String>,
+    pub turn_seq: Option<i32>,
+    pub ts: i64,
+    pub input_tokens: i64,
+    pub output_tokens: i64,
+    pub cache_read_tokens: i64,
+    pub cache_creation_tokens: i64,
+    pub total_tokens: i64,
+    pub context_tokens: i64,
+    pub model: Option<String>,
+}
+
+#[derive(Insertable, Debug, Default)]
+#[diesel(table_name = usage_events)]
+pub struct NewUsageEvent {
+    pub id: String,
+    pub session_id: String,
+    pub event_id: Option<String>,
+    /// Left `None` by live callers; [`Db::record_usage_event`] assigns
+    /// the next per-session turn number on insert.
+    pub turn_seq: Option<i32>,
+    pub ts: i64,
+    pub input_tokens: i64,
+    pub output_tokens: i64,
+    pub cache_read_tokens: i64,
+    pub cache_creation_tokens: i64,
+    pub total_tokens: i64,
+    pub context_tokens: i64,
+    pub model: Option<String>,
+}

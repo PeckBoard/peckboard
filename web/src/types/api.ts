@@ -187,3 +187,114 @@ export interface ApiError {
 export interface HealthResponse {
   ok: boolean
 }
+
+// ── Usage dashboard ──────────────────────────────────────────────────
+// Mirrors the Rust contract in `src/routes/usage/mod.rs` (and the cost
+// model in `src/routes/usage/cost.rs`). snake_case throughout, matching
+// the backend's bare serde field names. Cost figures (`est_cost`) are USD;
+// `*_ts` / `bucket_ts` fields are epoch milliseconds.
+
+/** What an `EntityUsage` row aggregates over. */
+export type UsageEntityKind = 'session' | 'project' | 'card' | 'expert'
+
+/** What kind of operation an `OperationCost` attributes spend to. */
+export type UsageOperationKind = 'file_update' | 'ask_expert' | 'qa'
+
+/** USD-per-million-token rates for one model, by token kind, as advertised
+ *  by the running binary's cost table. */
+export interface ModelRates {
+  input_per_mtok: number
+  output_per_mtok: number
+  cache_read_per_mtok: number
+  cache_creation_per_mtok: number
+}
+
+/** The per-model rate table from `GET /api/usage/costs`, keyed by bare
+ *  model id. Fetch once at boot and cache it; never hardcode rates on the
+ *  client — price trends with `tokenCost` from `util/cost` so the numbers
+ *  match the backend's `est_cost`. */
+export interface CostTable {
+  rates: Record<string, ModelRates>
+}
+
+/** Token totals + estimated cost for one entity (session/project/card/
+ *  expert). */
+export interface EntityUsage {
+  id: string
+  name: string
+  kind: UsageEntityKind
+  input_tokens: number
+  output_tokens: number
+  cache_read_tokens: number
+  cache_creation_tokens: number
+  /** Provider-reported turn total. Overlaps the four billed slices, so it
+   *  is a display roll-up only and is never re-priced. */
+  total_tokens: number
+  /** Latest context-window occupancy snapshot for the entity. */
+  context_tokens: number
+  /** Estimated cost in USD, computed by the backend from the cost table. */
+  est_cost: number
+  /** Owning project id — present (non-null) only for `kind: 'card'` rows, so
+   *  the cards panel can filter to a selected project; `null`/absent for
+   *  session/project/expert kinds. Optional so consumers that never read it
+   *  are unaffected. */
+  project_id?: string | null
+}
+
+/** A session row: `EntityUsage` plus its explicit lifetime totals. */
+export interface SessionUsage extends EntityUsage {
+  total_tokens_used: number
+  total_context_tokens: number
+}
+
+/** Cost attributed to a single operation — one file update, one
+ *  `ask_expert` round-trip, or one question/answer combination. `ref_id`
+ *  points at the underlying thing (file path, expert id, decision id). */
+export interface OperationCost {
+  kind: UsageOperationKind
+  ref_id: string
+  label: string
+  tokens: number
+  est_cost: number
+  ts: number
+}
+
+/** One point in a usage time-series. `bucket_ts` is the epoch-ms bucket
+ *  start. */
+export interface TrendPoint {
+  bucket_ts: number
+  tokens: number
+  est_cost: number
+}
+
+/** A named time-series for one entity — e.g. `metric: 'tokens'` or
+ *  `'cost'` over time. */
+export interface TrendSeries {
+  metric: string
+  entity_id: string
+  points: TrendPoint[]
+}
+
+/** Install-wide token + cost totals, summed across every entity. */
+export interface UsageTotals {
+  input_tokens: number
+  output_tokens: number
+  cache_read_tokens: number
+  cache_creation_tokens: number
+  total_tokens: number
+  context_tokens: number
+  est_cost: number
+}
+
+/** Single-fetch envelope for the whole usage dashboard view: totals, the
+ *  per-entity breakdowns, the per-operation cost list, and the trend
+ *  series the charts render. */
+export interface UsageDashboard {
+  totals: UsageTotals
+  sessions: SessionUsage[]
+  projects: EntityUsage[]
+  cards: EntityUsage[]
+  experts: EntityUsage[]
+  operations: OperationCost[]
+  trends: TrendSeries[]
+}

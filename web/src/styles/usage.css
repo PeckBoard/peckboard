@@ -1,0 +1,570 @@
+/* ─── Usage Dashboard ─── */
+.usage-page {
+  flex: 1;
+  height: 100%;
+  overflow-y: auto;
+  padding: var(--space-6);
+}
+
+.usage-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: var(--space-5);
+}
+
+.usage-title {
+  margin: 0;
+  font-size: var(--text-xl);
+  font-weight: 700;
+  color: var(--text);
+  letter-spacing: -0.01em;
+}
+
+/* ─── Top-line totals ─── */
+.usage-stat-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+  gap: var(--space-3);
+  margin-bottom: var(--space-6);
+}
+
+.usage-stat-card {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  padding: var(--space-4);
+  box-shadow: var(--shadow-sm);
+  transition: box-shadow var(--transition);
+}
+
+.usage-stat-card:hover {
+  box-shadow: var(--shadow);
+}
+
+.usage-stat-label {
+  font-size: var(--text-xs);
+  color: var(--text3);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+
+.usage-stat-value {
+  margin-top: var(--space-1);
+  font-size: var(--text-2xl);
+  font-weight: 600;
+  color: var(--text);
+  font-variant-numeric: tabular-nums;
+}
+
+/* ─── Panel grid ─── */
+.usage-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+  gap: var(--space-4);
+  align-items: start;
+}
+
+.usage-panel {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  overflow: hidden;
+}
+
+.usage-panel-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: var(--space-3) var(--space-4);
+  border-bottom: 1px solid var(--border);
+}
+
+.usage-panel-title {
+  margin: 0;
+  font-size: var(--text-sm);
+  font-weight: 600;
+  color: var(--text);
+}
+
+.usage-panel-count {
+  min-width: 22px;
+  padding: 1px 8px;
+  border-radius: var(--radius-full);
+  background: var(--surface2);
+  color: var(--text3);
+  font-size: var(--text-xs);
+  font-weight: 600;
+  text-align: center;
+  font-variant-numeric: tabular-nums;
+}
+
+.usage-panel-body {
+  padding: var(--space-4);
+  min-height: 96px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.usage-panel-empty {
+  color: var(--text3);
+  font-size: var(--text-sm);
+}
+
+.usage-panel-placeholder {
+  color: var(--text2);
+  font-size: var(--text-sm);
+}
+
+@media (max-width: 767px) {
+  .usage-page {
+    padding: var(--space-4);
+  }
+
+  .usage-grid {
+    grid-template-columns: 1fr;
+  }
+}
+
+/* ═══════════════════════════════════════════════════
+   Cost Breakdown + Trends (Cost/Trends card)
+   ═══════════════════════════════════════════════════ */
+
+.usage-section {
+  margin-top: var(--space-6);
+}
+
+.usage-section-title {
+  margin: 0 0 var(--space-3);
+  font-size: var(--text-lg);
+  font-weight: 700;
+  color: var(--text);
+  letter-spacing: -0.01em;
+}
+
+.usage-subgrid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+  gap: var(--space-4);
+  align-items: start;
+}
+
+.usage-trend-grid {
+  grid-template-columns: repeat(auto-fit, minmax(360px, 1fr));
+}
+
+/* ─── Cost breakdown panels ─── */
+.usage-cost-subtotal {
+  font-size: var(--text-sm);
+  font-weight: 600;
+  color: var(--text);
+  font-variant-numeric: tabular-nums;
+}
+
+.usage-cost-body {
+  padding: var(--space-2) var(--space-4) var(--space-3);
+}
+
+.usage-op-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.usage-op-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  grid-template-areas:
+    'label figs'
+    'bar bar';
+  align-items: center;
+  gap: var(--space-1) var(--space-3);
+  padding: var(--space-2) 0;
+  border-bottom: 1px solid var(--border);
+}
+
+.usage-op-row:last-child {
+  border-bottom: none;
+}
+
+.usage-op-label {
+  grid-area: label;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: var(--text-sm);
+  color: var(--text);
+}
+
+/* Truncate paths from the START so the filename stays visible. */
+.usage-op-label-path {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: var(--text-xs);
+  direction: rtl;
+  text-align: left;
+}
+
+.usage-op-figs {
+  grid-area: figs;
+  display: flex;
+  align-items: baseline;
+  gap: var(--space-2);
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+}
+
+.usage-op-tokens {
+  font-size: var(--text-xs);
+  color: var(--text3);
+}
+
+.usage-op-cost {
+  font-size: var(--text-sm);
+  font-weight: 600;
+  color: var(--text);
+}
+
+.usage-op-bar {
+  grid-area: bar;
+  height: 4px;
+  border-radius: var(--radius-full);
+  background: var(--surface2);
+  overflow: hidden;
+}
+
+.usage-op-bar-fill {
+  display: block;
+  height: 100%;
+  background: var(--accent);
+  border-radius: var(--radius-full);
+}
+
+.usage-op-more {
+  padding-top: var(--space-2);
+  font-size: var(--text-xs);
+  color: var(--text3);
+}
+
+/* ─── Trend widgets ─── */
+.usage-trend-header {
+  flex-wrap: wrap;
+  gap: var(--space-2);
+}
+
+.usage-trend-controls {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+}
+
+.usage-seg {
+  display: inline-flex;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  overflow: hidden;
+}
+
+.usage-seg-btn {
+  border: none;
+  background: var(--surface);
+  color: var(--text2);
+  font-family: inherit;
+  font-size: var(--text-xs);
+  font-weight: 600;
+  padding: 4px 10px;
+  cursor: pointer;
+  transition: all var(--transition);
+}
+
+.usage-seg-btn:hover {
+  background: var(--surface-hover);
+  color: var(--text);
+}
+
+.usage-seg-btn.active {
+  background: var(--accent-subtle);
+  color: var(--accent);
+}
+
+.usage-seg-btn + .usage-seg-btn {
+  border-left: 1px solid var(--border);
+}
+
+.usage-trend-select {
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--surface);
+  color: var(--text);
+  font-family: inherit;
+  font-size: var(--text-xs);
+  font-weight: 600;
+  padding: 4px 8px;
+  cursor: pointer;
+}
+
+.usage-trend-select:focus {
+  outline: none;
+  border-color: var(--accent);
+  box-shadow: 0 0 0 2px var(--accent-subtle);
+}
+
+.usage-trend-body {
+  padding: var(--space-4);
+}
+
+.usage-chart {
+  display: block;
+  width: 100%;
+}
+
+.usage-chart-grid {
+  stroke: var(--border);
+  stroke-width: 1;
+  opacity: 0.6;
+}
+
+.usage-chart-axis {
+  fill: var(--text3);
+  font-size: 10px;
+  font-variant-numeric: tabular-nums;
+}
+
+.usage-legend {
+  list-style: none;
+  margin: var(--space-3) 0 0;
+  padding: 0;
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2) var(--space-4);
+}
+
+.usage-legend-item {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  min-width: 0;
+  font-size: var(--text-xs);
+  color: var(--text2);
+}
+
+.usage-legend-swatch {
+  width: 10px;
+  height: 10px;
+  border-radius: 2px;
+  flex-shrink: 0;
+}
+
+.usage-legend-label {
+  max-width: 160px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.usage-legend-more {
+  font-size: var(--text-xs);
+  color: var(--text3);
+}
+
+@media (max-width: 767px) {
+  .usage-subgrid,
+  .usage-trend-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .usage-trend-header {
+    flex-direction: column;
+    align-items: flex-start;
+  }
+
+  .usage-trend-controls {
+    width: 100%;
+  }
+}
+
+/* ═══════════════════════════════════════════════════
+   Entity rollups: sessions, projects, cards, experts
+   (Entity Token Usage + Context Gauges card)
+   ═══════════════════════════════════════════════════ */
+
+/* When a panel body holds a list, let the rows run edge-to-edge and stack
+   from the top instead of being centered as a single block. */
+.usage-panel-body:has(.usage-list) {
+  align-items: stretch;
+  justify-content: flex-start;
+  padding: 0;
+}
+
+.usage-list {
+  width: 100%;
+  display: flex;
+  flex-direction: column;
+}
+
+.usage-row {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  padding: var(--space-3) var(--space-4);
+  border-bottom: 1px solid var(--border);
+}
+
+.usage-row:last-child {
+  border-bottom: none;
+}
+
+.usage-row-clickable {
+  cursor: pointer;
+  transition: background var(--transition);
+}
+
+.usage-row-clickable:hover {
+  background: var(--surface-hover);
+}
+
+.usage-row.is-selected {
+  background: var(--accent-subtle);
+}
+
+.usage-row-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: var(--space-3);
+}
+
+.usage-row-name {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: var(--text-sm);
+  font-weight: 600;
+  color: var(--text);
+}
+
+.usage-row-figs {
+  white-space: nowrap;
+  font-size: var(--text-sm);
+  color: var(--text2);
+  font-variant-numeric: tabular-nums;
+}
+
+.usage-row-sub {
+  font-size: var(--text-xs);
+  color: var(--text3);
+  font-variant-numeric: tabular-nums;
+}
+
+/* Single-value gauge bar — context fill (sessions) or share-of-max (entities). */
+.usage-gauge {
+  width: 100%;
+  height: 8px;
+  border-radius: var(--radius-full);
+  background: var(--surface2);
+  overflow: hidden;
+}
+
+.usage-gauge-fill {
+  display: block;
+  height: 100%;
+  background: var(--accent);
+  border-radius: var(--radius-full);
+  transition: width var(--transition-slow);
+}
+
+.usage-gauge-fill.is-warn {
+  background: var(--warning);
+}
+
+.usage-gauge-fill.is-danger {
+  background: var(--danger);
+}
+
+/* Sort toolbar (sessions panel). */
+.usage-toolbar {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  padding: var(--space-2) var(--space-4);
+  border-bottom: 1px solid var(--border);
+}
+
+.usage-toolbar-label {
+  font-size: var(--text-xs);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--text3);
+}
+
+.usage-sort-btn {
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--surface);
+  color: var(--text2);
+  font-family: inherit;
+  font-size: var(--text-xs);
+  font-weight: 600;
+  padding: 3px 10px;
+  cursor: pointer;
+  transition: all var(--transition);
+}
+
+.usage-sort-btn:hover {
+  background: var(--surface-hover);
+  color: var(--text);
+}
+
+.usage-sort-btn.is-active {
+  background: var(--accent-subtle);
+  color: var(--accent);
+  border-color: var(--accent-muted);
+}
+
+/* Cards filter bar — shown when a project is selected in the Projects panel. */
+.usage-filter-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-2);
+  padding: var(--space-2) var(--space-4);
+  border-bottom: 1px solid var(--border);
+  background: var(--accent-subtle);
+  font-size: var(--text-xs);
+  color: var(--text2);
+}
+
+.usage-filter-label {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.usage-clear-btn {
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--surface);
+  color: var(--text2);
+  font-family: inherit;
+  font-size: var(--text-xs);
+  font-weight: 600;
+  padding: 2px 10px;
+  cursor: pointer;
+  transition: all var(--transition);
+}
+
+.usage-clear-btn:hover {
+  background: var(--surface-hover);
+  color: var(--text);
+}
+
+.usage-empty-sub {
+  padding: var(--space-4);
+  font-size: var(--text-sm);
+  color: var(--text3);
+}

@@ -79,6 +79,7 @@ async fn build_state() -> (Arc<AppState>, String) {
         config,
         db,
         plugins,
+        builtin_plugins: Arc::new(peckboard::plugin::builtin::BuiltinPluginRegistry::new()),
         jwt_secret,
         login_limiter: RateLimiter::new(60),
         password_change_limiter: RateLimiter::<String>::new(5),

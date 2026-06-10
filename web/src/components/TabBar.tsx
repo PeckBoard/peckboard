@@ -5,7 +5,15 @@ import { useTabsStore, type TabType } from '../store/tabs'
 import { useContextMenu, type ContextMenuItem } from '../hooks/useContextMenu'
 
 interface TabBarProps {
-  view: 'sessions' | 'repeatingTasks' | 'projects' | 'experts' | 'folders' | 'reports' | 'users'
+  view:
+    | 'sessions'
+    | 'repeatingTasks'
+    | 'projects'
+    | 'experts'
+    | 'usage'
+    | 'folders'
+    | 'reports'
+    | 'users'
   activeSessionId: string | null
   activeProjectId: string | null
   onOpenItem: (type: TabType, id: string) => void

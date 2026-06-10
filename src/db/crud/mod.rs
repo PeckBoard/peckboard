@@ -17,10 +17,12 @@ mod repeating_tasks;
 mod sessions;
 mod tabs;
 mod todos;
+mod usage;
 mod users;
 mod workflow_instructions;
 
 pub use todos::ProjectCardTodos;
+pub use usage::UsageRollupRow;
 
 /// Outcome of `Db::delete_folder_if_empty`. Avoids the older check-then-
 /// act pattern (`list_sessions_by_folder().await` + `delete_folder().await`)

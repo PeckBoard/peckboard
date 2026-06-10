@@ -877,6 +877,8 @@ fn ctx_for_project(state: &Arc<AppState>, session_id: &str) -> ToolCallContext {
         broadcaster: state.broadcaster.clone(),
         provider_registry: None,
         expert_dispatcher: None,
+        data_dir: None,
+        pm_authorizations: Default::default(),
     }
 }
 
@@ -1049,6 +1051,8 @@ fn ctx_with_registry(
         broadcaster: state.broadcaster.clone(),
         provider_registry: Some(registry),
         expert_dispatcher: None,
+        data_dir: None,
+        pm_authorizations: Default::default(),
     }
 }
 

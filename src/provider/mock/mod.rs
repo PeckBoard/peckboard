@@ -19,6 +19,10 @@ use crate::provider::stream::{ModelInfo, ProviderEvent};
 /// * `echo` — Started → Text(echo of message) → Completed
 /// * `happy-path` — Started → Text → ToolStart/ToolEnd → Text → Completed
 /// * `tool-use` — Started → ToolStart/ToolEnd (with input/output) → Completed
+/// * `usage` — Started → Text → Edit ToolStart/ToolEnd → ask_expert
+///   ToolStart/ToolEnd → Usage(token rollup) → Completed. Drives the usage
+///   dashboard (entity rollups, file_update + ask_expert cost breakdowns,
+///   token/cost trends) deterministically.
 /// * `crash` — Started → Text → Crashed
 /// * `ask` — Started → ControlRequest, waits for stdin → Text(reply) → Completed
 /// * `todo` — Started → ToolStart/ToolEnd(TodoWrite) → Todo(snapshot) → Completed
@@ -314,6 +318,96 @@ async fn run_scenario(
             )
             .await;
         }
+        "usage" => {
+            // A turn that exercises everything the usage dashboard reads:
+            // a file-editing tool call (drives the file_update breakdown), an
+            // ask_expert consultation (the ask_expert breakdown), and a
+            // per-turn Usage event (the source of every token/cost rollup and
+            // trend). Deterministic token counts so e2e assertions are stable.
+            emit_event(
+                db,
+                broadcaster,
+                session_id,
+                ProviderEvent::Text {
+                    text: "Editing a file and consulting an expert...".into(),
+                },
+            )
+            .await;
+            tick().await;
+            let edit_id = format!("tool-{}", uuid::Uuid::new_v4());
+            emit_event(
+                db,
+                broadcaster,
+                session_id,
+                ProviderEvent::ToolStart {
+                    tool_use_id: edit_id.clone(),
+                    name: "Edit".into(),
+                    input: serde_json::json!({ "file_path": "/workspace/src/lib.rs" }),
+                },
+            )
+            .await;
+            tick().await;
+            emit_event(
+                db,
+                broadcaster,
+                session_id,
+                ProviderEvent::ToolEnd {
+                    tool_use_id: edit_id,
+                    output: Some("edited".into()),
+                    error: None,
+                },
+            )
+            .await;
+            tick().await;
+            let ask_id = format!("tool-{}", uuid::Uuid::new_v4());
+            emit_event(
+                db,
+                broadcaster,
+                session_id,
+                ProviderEvent::ToolStart {
+                    tool_use_id: ask_id.clone(),
+                    name: "mcp__peckboard__ask_expert".into(),
+                    input: serde_json::json!({
+                        "area": "src",
+                        "question": "How does the usage rollup work?",
+                    }),
+                },
+            )
+            .await;
+            tick().await;
+            emit_event(
+                db,
+                broadcaster,
+                session_id,
+                ProviderEvent::ToolEnd {
+                    tool_use_id: ask_id,
+                    output: Some("delivered".into()),
+                    error: None,
+                },
+            )
+            .await;
+            tick().await;
+            // End-of-turn token usage. Emitted after the tool calls (usage `ts`
+            // is the turn boundary), so the edits/consult above attribute to
+            // this turn's cost. Priced at the Opus fallback tier since
+            // `mock:usage` isn't a real registry model — so `est_cost` is
+            // non-zero, which the dashboard assertions rely on.
+            emit_event(
+                db,
+                broadcaster,
+                session_id,
+                ProviderEvent::Usage {
+                    input_tokens: 1200,
+                    output_tokens: 400,
+                    cache_read_tokens: 800,
+                    cache_creation_tokens: 200,
+                    total_tokens: 2600,
+                    context_tokens: 1500,
+                    model: Some(model_label.to_string()),
+                },
+            )
+            .await;
+        }
         "tool-use" => {
             let tool_id = format!("tool-{}", uuid::Uuid::new_v4());
             emit_event(
@@ -555,6 +649,11 @@ pub fn mock_model_infos() -> Vec<ModelInfo> {
         ModelInfo {
             id: "tool-use".into(),
             display_name: "Mock: tool use".into(),
+            capabilities: vec!["mock".into(), "tools".into()],
+        },
+        ModelInfo {
+            id: "usage".into(),
+            display_name: "Mock: usage".into(),
             capabilities: vec!["mock".into(), "tools".into()],
         },
         ModelInfo {

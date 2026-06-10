@@ -32,6 +32,22 @@ pub enum ProviderEvent {
     /// of its trackable work items). Provider-agnostic — any provider that can
     /// surface work items emits this; the latest one wins.
     Todo { todos: Vec<TodoItem> },
+    /// Per-turn token usage rollup. Emitted once per turn from the
+    /// provider's end-of-turn `result`, just before `Completed`.
+    /// `context_tokens` is the context-window size at end of turn
+    /// (input + cache_read + cache_creation); `total_tokens` adds the
+    /// generated output on top. Providers that don't expose usage simply
+    /// never emit this. Mirrored into the `usage_events` table by
+    /// `emit_event`, the same way `Todo` is mirrored into `todos`.
+    Usage {
+        input_tokens: i64,
+        output_tokens: i64,
+        cache_read_tokens: i64,
+        cache_creation_tokens: i64,
+        total_tokens: i64,
+        context_tokens: i64,
+        model: Option<String>,
+    },
     /// Agent finished normally.
     Completed { conversation_id: Option<String> },
     /// Agent failed / crashed.
@@ -57,6 +73,7 @@ impl ProviderEvent {
             ProviderEvent::ToolStart { .. } => "agent-tool-start",
             ProviderEvent::ToolEnd { .. } => "agent-tool-end",
             ProviderEvent::Todo { .. } => "todo",
+            ProviderEvent::Usage { .. } => "agent-usage",
             ProviderEvent::Completed { .. } => "agent-end",
             ProviderEvent::Crashed { .. } => "agent-end",
             ProviderEvent::ControlRequest { .. } => "question",
@@ -95,6 +112,23 @@ impl ProviderEvent {
                 "error": error,
             }),
             ProviderEvent::Todo { todos } => serde_json::json!({ "todos": todos }),
+            ProviderEvent::Usage {
+                input_tokens,
+                output_tokens,
+                cache_read_tokens,
+                cache_creation_tokens,
+                total_tokens,
+                context_tokens,
+                model,
+            } => serde_json::json!({
+                "inputTokens": input_tokens,
+                "outputTokens": output_tokens,
+                "cacheReadTokens": cache_read_tokens,
+                "cacheCreationTokens": cache_creation_tokens,
+                "totalTokens": total_tokens,
+                "contextTokens": context_tokens,
+                "model": model,
+            }),
             ProviderEvent::Completed { conversation_id } => serde_json::json!({
                 "status": "complete",
                 "conversationId": conversation_id,

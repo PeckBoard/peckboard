@@ -49,6 +49,8 @@ async fn worker_prompt_includes_pm_expert_and_rules() {
         workflow: "task".into(),
         model: None,
         effort: None,
+        blocked: false,
+        block_reason: None,
         created_at: ts.clone(),
         updated_at: ts,
     })

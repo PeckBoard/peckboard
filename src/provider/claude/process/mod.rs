@@ -591,6 +591,34 @@ pub async fn stream_events(
                 )
                 .await;
             }
+            // The CLI's `result` event carries the per-turn token usage in
+            // `usage`. The parser drops it (it's per-turn, not per-line),
+            // so read it from the raw JSON here and emit a `Usage` event
+            // BEFORE `Completed` — so a usage_events row joined to this
+            // turn's agent-end finds its sibling already persisted. A
+            // missing/malformed usage object just skips the event.
+            if let Some(usage) = json.get("usage").and_then(|v| v.as_object()) {
+                let field = |k: &str| usage.get(k).and_then(|v| v.as_i64()).unwrap_or(0);
+                let input = field("input_tokens");
+                let output = field("output_tokens");
+                let cache_read = field("cache_read_input_tokens");
+                let cache_creation = field("cache_creation_input_tokens");
+                emit_event(
+                    &db,
+                    &broadcaster,
+                    &session_id,
+                    ProviderEvent::Usage {
+                        input_tokens: input,
+                        output_tokens: output,
+                        cache_read_tokens: cache_read,
+                        cache_creation_tokens: cache_creation,
+                        total_tokens: input + output + cache_read + cache_creation,
+                        context_tokens: input + cache_read + cache_creation,
+                        model: model_name.clone(),
+                    },
+                )
+                .await;
+            }
             emit_event(
                 &db,
                 &broadcaster,

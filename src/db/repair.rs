@@ -33,6 +33,72 @@ pub fn ensure_schema(conn: &mut SqliteConnection) -> anyhow::Result<()> {
     ensure_project_workflow_instructions_table(conn)?;
     ensure_plugin_settings_table(conn)?;
     ensure_pm_decisions_table(conn)?;
+    ensure_usage_events_table(conn)?;
+    Ok(())
+}
+
+/// Heal DBs that predate `1781120408_usage_events`. `CREATE TABLE IF NOT
+/// EXISTS` + `CREATE INDEX IF NOT EXISTS` no-op on a healthy DB; the
+/// `WHERE NOT EXISTS`-guarded backfill rebuilds any usage row whose live
+/// mirror-write was lost. DDL + backfill mirror the migration. Runs every
+/// startup, so the guard keeps the warm path cheap. (mirrors the
+/// cards_completed_at structure-then-backfill heal pattern.)
+fn ensure_usage_events_table(conn: &mut SqliteConnection) -> anyhow::Result<()> {
+    // `usage_events` FKs onto `sessions` and `events` and backfills from
+    // `events`, so it's only meaningful once the base schema exists. Skip
+    // entirely on the minimal partial schemas the repair tests build (and
+    // any conceivable pre-migration-1 DB). Real DBs always have both.
+    let has_sessions: Vec<PragmaColumn> = sql_query("PRAGMA table_info(sessions)").load(conn)?;
+    let has_events: Vec<PragmaColumn> = sql_query("PRAGMA table_info(events)").load(conn)?;
+    if has_sessions.is_empty() || has_events.is_empty() {
+        return Ok(());
+    }
+    sql_query(
+        "CREATE TABLE IF NOT EXISTS usage_events (
+            id                    TEXT    PRIMARY KEY NOT NULL,
+            session_id            TEXT    NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+            event_id              TEXT    REFERENCES events(id) ON DELETE SET NULL,
+            turn_seq              INTEGER,
+            ts                    INTEGER NOT NULL,
+            input_tokens          INTEGER NOT NULL DEFAULT 0,
+            output_tokens         INTEGER NOT NULL DEFAULT 0,
+            cache_read_tokens     INTEGER NOT NULL DEFAULT 0,
+            cache_creation_tokens INTEGER NOT NULL DEFAULT 0,
+            total_tokens          INTEGER NOT NULL DEFAULT 0,
+            context_tokens        INTEGER NOT NULL DEFAULT 0,
+            model                 TEXT
+        )",
+    )
+    .execute(conn)?;
+    sql_query(
+        "CREATE INDEX IF NOT EXISTS idx_usage_events_session \
+         ON usage_events (session_id, ts)",
+    )
+    .execute(conn)?;
+    sql_query(
+        "INSERT INTO usage_events (
+            id, session_id, event_id, turn_seq, ts,
+            input_tokens, output_tokens, cache_read_tokens, cache_creation_tokens,
+            total_tokens, context_tokens, model
+        )
+        SELECT
+            lower(hex(randomblob(16))),
+            e.session_id,
+            e.id,
+            ROW_NUMBER() OVER (PARTITION BY e.session_id ORDER BY e.ts, e.seq),
+            e.ts,
+            COALESCE(json_extract(e.data, '$.inputTokens'), 0),
+            COALESCE(json_extract(e.data, '$.outputTokens'), 0),
+            COALESCE(json_extract(e.data, '$.cacheReadTokens'), 0),
+            COALESCE(json_extract(e.data, '$.cacheCreationTokens'), 0),
+            COALESCE(json_extract(e.data, '$.totalTokens'), 0),
+            COALESCE(json_extract(e.data, '$.contextTokens'), 0),
+            json_extract(e.data, '$.model')
+        FROM events e
+        WHERE e.kind = 'agent-usage'
+          AND NOT EXISTS (SELECT 1 FROM usage_events u WHERE u.event_id = e.id)",
+    )
+    .execute(conn)?;
     Ok(())
 }
 

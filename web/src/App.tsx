@@ -23,13 +23,22 @@ import ReportBrowser from './components/ReportBrowser'
 import ExpertsView from './components/ExpertsView'
 import PmExpertView from './components/PmExpertView'
 import RepeatingTasksView from './components/RepeatingTasksView'
+import UsageDashboard from './components/UsageDashboard'
 import UserManagement from './components/UserManagement'
 import ChangePasswordModal from './components/ChangePasswordModal'
 import TabBar from './components/TabBar'
 import { startTabsAutoSync, useTabsStore, type TabType } from './store/tabs'
 import './App.css'
 
-type View = 'sessions' | 'repeatingTasks' | 'projects' | 'experts' | 'folders' | 'reports' | 'users'
+type View =
+  | 'sessions'
+  | 'repeatingTasks'
+  | 'projects'
+  | 'experts'
+  | 'usage'
+  | 'folders'
+  | 'reports'
+  | 'users'
 
 /** Modals reachable from the user-icon dropdown. The URL maps a couple of
  *  paths (`/settings`, `/plugins`) to opening one of these on mount so
@@ -74,6 +83,8 @@ function parseRoute(): {
       }
     case 'experts':
       return { view: 'experts', activeId: id, sub: 'chat', modal: null }
+    case 'usage':
+      return { view: 'usage', activeId: null, sub: 'chat', modal: null }
     case 'repeating-tasks':
       return { view: 'repeatingTasks', activeId: id, sub: 'chat', modal: null }
     case 'folders':
@@ -742,6 +753,26 @@ function App() {
               <polyline points="10 9 9 9 8 9" />
             </svg>
           </button>
+          <button
+            className={`rail-btn ${view === 'usage' ? 'active' : ''}`}
+            onClick={() => navigate('usage')}
+            title="Usage"
+          >
+            <svg
+              width="18"
+              height="18"
+              viewBox="0 0 24 24"
+              fill="none"
+              stroke="currentColor"
+              strokeWidth="2"
+              strokeLinecap="round"
+              strokeLinejoin="round"
+            >
+              <path d="M3 3v18h18" />
+              <rect x="7" y="11" width="3" height="6" />
+              <rect x="13" y="7" width="3" height="10" />
+            </svg>
+          </button>
           <div className="rail-separator" aria-hidden="true" />
           <button
             className={`rail-btn ${view === 'folders' ? 'active' : ''}`}
@@ -1053,6 +1084,7 @@ function App() {
             }}
           />
         )}
+        {view === 'usage' && <UsageDashboard />}
         {view === 'folders' && <FoldersPage />}
         {view === 'reports' && <ReportBrowser />}
         {view === 'users' && <UserManagement />}
