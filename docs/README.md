@@ -49,5 +49,8 @@ gh api repos/PeckBoard/peckboard/pages -X POST -f build_type=workflow
 (or Settings → Pages → Source → "GitHub Actions" in the web UI).
 
 **Note:** GitHub Pages is not available for private repositories on
-the free plan. The repo must be public (or the org on a paid plan)
-before Pages can be enabled — until then the deploy job will fail.
+the free plan, so this step is deferred until the owner makes the repo
+public. Until then the workflow fails at the "Setup Pages" step — this
+is expected. No code change is needed when the repo goes public: enable
+Pages with the command above and the workflow starts succeeding
+automatically on the next push to `main`.
