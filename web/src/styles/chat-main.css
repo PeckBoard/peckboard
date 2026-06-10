@@ -12,10 +12,18 @@
 .chat-messages {
   flex: 1;
   overflow-y: auto;
-  padding: 20px 24px;
+  /* Lighter than the bubble fill (light mode: white vs gray bubble;
+     dark mode: an in-between dark surface) so the assistant bubble has
+     real contrast against the column instead of blending in. */
+  background: var(--surface);
+  /* Horizontal padding holds the bubbles off the chrome; vertical is
+     tight so the transcript packs more turns on screen. */
+  padding: 12px 36px;
   display: flex;
   flex-direction: column;
-  gap: 6px;
+  /* Small gap between consecutive bubbles — enough to separate
+     speaker turns, not enough to feel airy. */
+  gap: 8px;
 }
 
 .chat-loading,
@@ -269,7 +277,9 @@
 
 .chat-bubble {
   max-width: 72%;
-  padding: 10px 14px;
+  /* Tight vertical padding; full horizontal so text doesn't kiss the
+     bubble edge. */
+  padding: 8px 18px;
   font-size: var(--text-base);
   line-height: 1.6;
   white-space: pre-wrap;
@@ -290,13 +300,14 @@
 }
 
 .chat-bubble-assistant {
-  background: var(--surface);
+  /* Surface3 fill — one step darker than surface2 — so the bubble sits
+     clearly above the lighter chat column. The border is the same fill
+     mixed toward black so it stays on the surface3 hue/sat ramp
+     instead of drifting toward the neutral `--border` token, which
+     in dark mode is identical to the bubble background and disappears. */
+  background: var(--surface3);
   color: var(--text);
-  /* Outline matches the user bubble's *background* (the accent color)
-     so the two sides of the conversation read as paired. Background
-     intentionally stays `--surface` so the assistant's longer-form
-     content doesn't shout. */
-  border: 1px solid var(--accent);
+  border: 1px solid color-mix(in srgb, var(--surface3) 80%, black);
   border-radius: 16px 16px 16px 4px;
 }
 
