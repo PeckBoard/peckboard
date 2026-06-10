@@ -429,11 +429,7 @@ impl SessionManager {
     /// Each provider's `cancel` is a no-op if it isn't running that session,
     /// so fan-out is cheap and avoids needing a session→provider map.
     pub async fn cancel(&self, session_id: &str) {
-        for info in self.registry.list_providers().await {
-            if let Some(p) = self.registry.get_provider(&info.id).await {
-                p.cancel(session_id).await;
-            }
-        }
+        cancel_via_registry(&self.registry, session_id).await
     }
 
     /// Cancel the run for `session_id` and block until the background
@@ -517,6 +513,19 @@ impl SessionManager {
         }
 
         None
+    }
+}
+
+/// Cancel `session_id` on every registered provider, identical fan-out to
+/// [`SessionManager::cancel`], but reachable from places that only carry an
+/// [`Arc<ProviderRegistry>`] (e.g. the MCP tool handlers, which receive the
+/// registry through `ToolCallContext` rather than the full manager). Cheap:
+/// each provider's `cancel` is a no-op when it isn't running the session.
+pub async fn cancel_via_registry(registry: &ProviderRegistry, session_id: &str) {
+    for info in registry.list_providers().await {
+        if let Some(p) = registry.get_provider(&info.id).await {
+            p.cancel(session_id).await;
+        }
     }
 }
 
