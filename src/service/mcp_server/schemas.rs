@@ -647,7 +647,7 @@ pub(super) fn tool_definitions() -> Vec<McpToolDef> {
         },
         McpToolDef {
             name: "list_experts".into(),
-            description: "List the long-lived EXPERT sessions you may consult: experts scoped to your project plus globally-scoped experts. Each entry returns session_id, name, expert_kind ('knowledge'|'question'), knowledge_area, a compact knowledge_summary, scope_path (boundaries), project_id (null = global), is_permanent, and last_activity. Use this to pick a target session_id for ask_expert.".into(),
+            description: "List the long-lived EXPERT sessions you may consult: experts scoped to your project plus globally-scoped experts. Each entry returns session_id, name, expert_kind ('knowledge'|'question'|'pm'), knowledge_area, a compact knowledge_summary, scope_path (boundaries), project_id (null = global), is_permanent, and last_activity. Use this to pick a target session_id for ask_expert.".into(),
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {

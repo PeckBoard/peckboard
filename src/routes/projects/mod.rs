@@ -291,6 +291,11 @@ async fn create_project(
         tracing::warn!(project_id = %project.id, "Failed to ensure project question-expert: {e}");
     }
 
+    // Likewise its PM expert (durable store of project-direction decisions).
+    if let Err(e) = crate::service::pm_expert::ensure_project_pm_expert(&state.db, &project).await {
+        tracing::warn!(project_id = %project.id, "Failed to ensure project PM expert: {e}");
+    }
+
     Ok::<_, (StatusCode, Json<serde_json::Value>)>((
         StatusCode::CREATED,
         Json(serde_json::json!(project)),

@@ -218,7 +218,7 @@ mod tests {
         // Upsert is idempotent under a stable id: a second call must not
         // clobber the accumulated row.
         let first = db
-            .upsert_permanent_question_expert(NewSession {
+            .upsert_permanent_expert(NewSession {
                 id: "q-stable".into(),
                 name: "Stable Q expert".into(),
                 folder_id: "f1".into(),
@@ -235,7 +235,7 @@ mod tests {
         assert_eq!(first.knowledge_summary.as_deref(), Some("v1"));
 
         let second = db
-            .upsert_permanent_question_expert(NewSession {
+            .upsert_permanent_expert(NewSession {
                 id: "q-stable".into(),
                 name: "Rehydrated".into(),
                 folder_id: "f1".into(),

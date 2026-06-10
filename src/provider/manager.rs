@@ -235,6 +235,22 @@ impl SessionManager {
             .await
             .ok_or_else(|| anyhow::anyhow!("unknown agent provider: {}", provider_id))?;
 
+        // A PM expert always carries its role prompt regardless of how the
+        // message reached it, so derive it here from the session row (same
+        // reasoning as `restrict_to_qa` below) rather than trusting each
+        // caller to set it on the incoming config.
+        let system_prompt_suffix = if session.expert_kind.as_deref() == Some("pm") {
+            Some(match config.system_prompt_suffix.as_deref() {
+                Some(s) if !s.is_empty() => format!(
+                    "{}\n{s}",
+                    crate::service::pm_expert::PM_EXPERT_SYSTEM_PROMPT
+                ),
+                _ => crate::service::pm_expert::PM_EXPERT_SYSTEM_PROMPT.to_string(),
+            })
+        } else {
+            config.system_prompt_suffix
+        };
+
         let final_config = SpawnConfig {
             working_dir,
             model: final_model,
@@ -244,7 +260,7 @@ impl SessionManager {
             permission_mode: config.permission_mode,
             timeout_ms: config.timeout_ms,
             metadata: config.metadata,
-            system_prompt_suffix: config.system_prompt_suffix,
+            system_prompt_suffix,
             // A question-expert always runs in answer-only mode regardless of
             // how the message reached it (UI, worker consult, Q&A feedback),
             // so derive the flag here from the session rather than trusting

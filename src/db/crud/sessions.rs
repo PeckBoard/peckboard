@@ -279,15 +279,13 @@ impl Db {
         .await
     }
 
-    /// Insert the permanent (stable-id) question-expert if it doesn't yet
-    /// exist; otherwise return the existing row untouched. This is how a
-    /// question-expert rehydrates under its stable id across restarts
-    /// without clobbering the accumulated session. The caller is expected
-    /// to set `is_expert`, `is_permanent`, and `expert_kind` on `new`.
-    pub async fn upsert_permanent_question_expert(
-        &self,
-        new: NewSession,
-    ) -> anyhow::Result<Session> {
+    /// Insert a permanent (stable-id) expert if it doesn't yet exist;
+    /// otherwise return the existing row untouched. This is how the
+    /// question- and PM-experts rehydrate under their stable ids across
+    /// restarts without clobbering the accumulated session. The caller is
+    /// expected to set `is_expert`, `is_permanent`, and `expert_kind` on
+    /// `new`.
+    pub async fn upsert_permanent_expert(&self, new: NewSession) -> anyhow::Result<Session> {
         self.with_conn(move |conn| {
             let id = new.id.clone();
             diesel::insert_or_ignore_into(sessions::table)

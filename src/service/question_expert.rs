@@ -8,7 +8,7 @@
 //!   rehydrate under the same id. The id is derived from a fixed key for the
 //!   global one and from `project_id` for per-project ones.
 //! - Creation is idempotent: re-running `ensure_*` never clobbers an existing
-//!   row (see [`Db::upsert_permanent_question_expert`]), so the accumulated
+//!   row (see [`Db::upsert_permanent_expert`]), so the accumulated
 //!   session/Q&A survives a server restart or a repeated `spin_up_experts`.
 //! - When the user answers a question, the resolved Q&A is fed BACK to the
 //!   in-scope question-expert coupled with the original question context, so
@@ -42,7 +42,7 @@ pub async fn ensure_global_question_expert(db: &Db, data_dir: &Path) -> anyhow::
     let folder_id = ensure_global_folder(db, data_dir).await?;
     let now = chrono::Utc::now().to_rfc3339();
     let expert = db
-        .upsert_permanent_question_expert(NewSession {
+        .upsert_permanent_expert(NewSession {
             id: GLOBAL_QUESTION_EXPERT_ID.into(),
             name: "Question Expert (Global)".into(),
             folder_id,
@@ -71,7 +71,7 @@ pub async fn ensure_global_question_expert(db: &Db, data_dir: &Path) -> anyhow::
 pub async fn ensure_project_question_expert(db: &Db, project: &Project) -> anyhow::Result<Session> {
     let now = chrono::Utc::now().to_rfc3339();
     let expert = db
-        .upsert_permanent_question_expert(NewSession {
+        .upsert_permanent_expert(NewSession {
             id: project_question_expert_id(&project.id),
             name: format!("Question Expert ({})", project.name),
             folder_id: project.folder_id.clone(),

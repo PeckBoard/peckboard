@@ -171,6 +171,19 @@ async fn main() -> anyhow::Result<()> {
                         "Failed to ensure project question-expert: {e}"
                     ),
                 }
+
+                // Likewise backfill the project's PM expert (durable store of
+                // project-direction decisions) so projects created before the
+                // feature gain one on upgrade. Idempotent; per-project failure
+                // is logged and skipped.
+                if let Err(e) =
+                    peckboard::service::pm_expert::ensure_project_pm_expert(&db, project).await
+                {
+                    tracing::warn!(
+                        project_id = %project.id,
+                        "Failed to ensure project PM expert: {e}"
+                    );
+                }
             }
         }
         Err(e) => tracing::warn!("Failed to list projects for question-expert backfill: {e}"),

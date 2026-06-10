@@ -103,6 +103,13 @@ impl McpToolRegistry {
             tracing::warn!(project_id = %project_id, "failed to ensure project question-expert: {e}");
         }
 
+        // And its PM expert, so projects created before the PM-expert feature
+        // gain one here too. Equally idempotent and non-fatal.
+        if let Err(e) = crate::service::pm_expert::ensure_project_pm_expert(&ctx.db, &project).await
+        {
+            tracing::warn!(project_id = %project_id, "failed to ensure project PM expert: {e}");
+        }
+
         let partitions = partition_codebase(&root, max_experts);
         if partitions.is_empty() {
             return Ok(json!({

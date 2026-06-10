@@ -129,6 +129,12 @@ impl McpToolRegistry {
             tracing::warn!(project_id = %project.id, "Failed to ensure project question-expert: {e}");
         }
 
+        // Likewise its PM expert (durable store of project-direction decisions).
+        if let Err(e) = crate::service::pm_expert::ensure_project_pm_expert(&ctx.db, &project).await
+        {
+            tracing::warn!(project_id = %project.id, "Failed to ensure project PM expert: {e}");
+        }
+
         Ok(serde_json::json!({
             "status": "ok",
             "project": {
