@@ -66,7 +66,8 @@ impl McpToolRegistry {
             "list_card_dependencies" => self.handle_list_card_dependencies(args, ctx).await,
             "get_card_dependency_tree" => self.handle_get_card_dependency_tree(args, ctx).await,
             "list_projects" => self.handle_list_projects(ctx).await,
-            "list_workflows" => self.handle_list_workflows(ctx).await,
+            "list_workflows" => self.handle_list_workflows(args, ctx).await,
+            "set_workflow_instructions" => self.handle_set_workflow_instructions(args, ctx).await,
             "write_report" => self.handle_write_report(args, ctx).await,
             "attach_report_file" => self.handle_attach_report_file(args, ctx).await,
             "update_card" => self.handle_update_card(args, ctx).await,
@@ -270,6 +271,7 @@ mod tests {
         assert!(names.contains(&"get_card_dependency_tree"));
         assert!(names.contains(&"list_projects"));
         assert!(names.contains(&"list_workflows"));
+        assert!(names.contains(&"set_workflow_instructions"));
         assert!(names.contains(&"write_report"));
         assert!(names.contains(&"attach_report_file"));
         assert!(names.contains(&"update_card"));
@@ -290,7 +292,7 @@ mod tests {
         assert!(names.contains(&"create_repeating_task"));
         assert!(names.contains(&"update_repeating_task"));
         assert!(names.contains(&"delete_repeating_task"));
-        assert_eq!(names.len(), 40);
+        assert_eq!(names.len(), 41);
     }
 
     #[test]

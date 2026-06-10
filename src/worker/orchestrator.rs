@@ -388,6 +388,17 @@ async fn spawn_worker_for_card(
             Vec::new()
         }
     };
+    // Per-project additional step instructions, if the user set any in
+    // the edit-project modal. A lookup failure must not block the spawn;
+    // we fall back to no extras.
+    let extra_step_instructions = state
+        .db
+        .get_project_workflow_instruction(&project.id, &card.workflow, &card.step)
+        .await
+        .unwrap_or_else(|err| {
+            tracing::warn!(error = %err, "failed to load project workflow instructions");
+            None
+        });
     let prompt = pipeline::build_worker_prompt(
         project,
         card,
@@ -395,6 +406,7 @@ async fn spawn_worker_for_card(
         &workflow_steps,
         card.handoff_context.as_deref(),
         &experts,
+        extra_step_instructions.as_deref(),
     );
 
     // 6. Build spawn config and send message

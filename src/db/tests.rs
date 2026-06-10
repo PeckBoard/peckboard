@@ -1675,4 +1675,123 @@ mod tests {
         let oldest_seqs: Vec<i32> = oldest.iter().map(|e| e.seq).collect();
         assert_eq!(oldest_seqs, vec![1, 2]);
     }
+
+    #[tokio::test]
+    async fn test_project_workflow_instructions_crud() {
+        let db = test_db();
+        let ts = now();
+        db.create_folder(NewFolder {
+            id: "f1".into(),
+            name: "F".into(),
+            path: "/tmp/f".into(),
+            created_at: ts.clone(),
+        })
+        .await
+        .unwrap();
+        db.create_project(NewProject {
+            id: "p1".into(),
+            name: "P".into(),
+            context: "".into(),
+            folder_id: "f1".into(),
+            worker_count: 1,
+            status: "active".into(),
+            workflow: "fast-develop-software".into(),
+            model: None,
+            effort: None,
+            parallel_instructions: false,
+            auto_notify_changes: true,
+            worker_communication: false,
+            created_at: ts.clone(),
+            last_accessed_at: ts.clone(),
+        })
+        .await
+        .unwrap();
+
+        // Nothing set yet.
+        assert!(
+            db.list_project_workflow_instructions("p1")
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        assert!(
+            db.get_project_workflow_instruction("p1", "fast-develop-software", "in_progress")
+                .await
+                .unwrap()
+                .is_none()
+        );
+
+        // Insert.
+        let row = db
+            .upsert_project_workflow_instruction(
+                "p1",
+                "fast-develop-software",
+                "in_progress",
+                "Commit to master and push.",
+            )
+            .await
+            .unwrap();
+        assert!(row.is_some());
+        assert_eq!(
+            db.get_project_workflow_instruction("p1", "fast-develop-software", "in_progress")
+                .await
+                .unwrap()
+                .as_deref(),
+            Some("Commit to master and push."),
+        );
+
+        // Update.
+        db.upsert_project_workflow_instruction(
+            "p1",
+            "fast-develop-software",
+            "in_progress",
+            "Push to staging instead.",
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            db.get_project_workflow_instruction("p1", "fast-develop-software", "in_progress")
+                .await
+                .unwrap()
+                .as_deref(),
+            Some("Push to staging instead."),
+        );
+
+        // Empty input clears the row rather than storing whitespace.
+        let cleared = db
+            .upsert_project_workflow_instruction(
+                "p1",
+                "fast-develop-software",
+                "in_progress",
+                "  \n\t  ",
+            )
+            .await
+            .unwrap();
+        assert!(cleared.is_none());
+        assert!(
+            db.get_project_workflow_instruction("p1", "fast-develop-software", "in_progress")
+                .await
+                .unwrap()
+                .is_none()
+        );
+
+        // Cascade on project delete.
+        db.upsert_project_workflow_instruction(
+            "p1",
+            "fast-develop-software",
+            "in_progress",
+            "Anything.",
+        )
+        .await
+        .unwrap();
+        db.delete_project_cascade("p1").await.unwrap();
+        // After delete the table should be empty for that project — the
+        // FK CASCADE drops the row.
+        assert!(
+            db.list_project_workflow_instructions("p1")
+                .await
+                .unwrap()
+                .is_empty()
+        );
+    }
 }

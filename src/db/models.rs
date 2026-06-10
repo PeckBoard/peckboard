@@ -468,3 +468,16 @@ pub struct UserTab {
     pub item_id: String,
     pub last_active: String,
 }
+
+// ── Project workflow instructions ────────────────────────────────────
+
+#[derive(Queryable, Selectable, Insertable, Serialize, Debug, Clone)]
+#[diesel(table_name = project_workflow_instructions)]
+pub struct ProjectWorkflowInstruction {
+    pub project_id: String,
+    pub workflow_id: String,
+    pub step: String,
+    pub instructions: String,
+    pub created_at: String,
+    pub updated_at: String,
+}

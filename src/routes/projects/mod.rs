@@ -19,6 +19,7 @@ use std::sync::Arc;
 use crate::auth::middleware::require_auth;
 use crate::db::models::{Card, NewProject, UpdateProject};
 use crate::state::AppState;
+use crate::workflow;
 
 // ── Request / query types ───────────────────────────────────────────
 
@@ -226,6 +227,10 @@ pub fn router(state: Arc<AppState>) -> Router<Arc<AppState>> {
             get(list_pending_questions),
         )
         .route("/api/projects/{id}/todos", get(list_project_todos))
+        .route(
+            "/api/projects/{id}/workflow-instructions",
+            get(list_workflow_instructions).put(upsert_workflow_instruction),
+        )
         .route_layer(middleware::from_fn_with_state(state, require_auth))
 }
 
@@ -494,11 +499,13 @@ async fn pause_project(
         }
     }
 
-    state.broadcaster.broadcast(crate::ws::broadcaster::WsEvent {
-        event_type: "project-update".into(),
-        session_id: id,
-        data: serde_json::json!({ "project": &project }),
-    });
+    state
+        .broadcaster
+        .broadcast(crate::ws::broadcaster::WsEvent {
+            event_type: "project-update".into(),
+            session_id: id,
+            data: serde_json::json!({ "project": &project }),
+        });
     Ok::<_, (StatusCode, Json<serde_json::Value>)>(Json(serde_json::json!(project)))
 }
 
@@ -536,11 +543,13 @@ async fn resume_project(
 
     match project {
         Some(p) => {
-            state.broadcaster.broadcast(crate::ws::broadcaster::WsEvent {
-                event_type: "project-update".into(),
-                session_id: id,
-                data: serde_json::json!({ "project": &p }),
-            });
+            state
+                .broadcaster
+                .broadcast(crate::ws::broadcaster::WsEvent {
+                    event_type: "project-update".into(),
+                    session_id: id,
+                    data: serde_json::json!({ "project": &p }),
+                });
             Ok(Json(serde_json::json!(p)))
         }
         None => Err((
@@ -638,6 +647,118 @@ async fn list_project_todos(
         )
     })?;
     Ok::<_, (StatusCode, Json<serde_json::Value>)>(Json(serde_json::json!({ "cards": cards })))
+}
+
+#[derive(Deserialize)]
+struct UpsertWorkflowInstructionRequest {
+    workflow_id: String,
+    step: String,
+    /// Empty / whitespace-only text deletes the override — the absence
+    /// of a row is the canonical "no additional instructions" state.
+    instructions: String,
+}
+
+/// GET /api/projects/:id/workflow-instructions — list every per-step
+/// override the project has set, paired with the built-in step text so
+/// the UI doesn't have to look the platform defaults up separately.
+async fn list_workflow_instructions(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> impl IntoResponse {
+    tracing::info!(project_id = %id, "Listing project workflow instructions");
+    let rows = state
+        .db
+        .list_project_workflow_instructions(&id)
+        .await
+        .map_err(internal_error)?;
+    // Build a lookup keyed by (workflow_id, step) so the UI can match
+    // overrides up against each built-in step cheaply.
+    let overrides: Vec<serde_json::Value> = rows
+        .iter()
+        .map(|r| {
+            serde_json::json!({
+                "workflow_id": r.workflow_id,
+                "step": r.step,
+                "instructions": r.instructions,
+                "updated_at": r.updated_at,
+            })
+        })
+        .collect();
+    Ok::<_, RouteError>(Json(serde_json::json!({ "instructions": overrides })))
+}
+
+/// PUT /api/projects/:id/workflow-instructions — upsert a single
+/// (workflow_id, step) override. Empty instructions delete the row, so
+/// the same endpoint clears an override too.
+async fn upsert_workflow_instruction(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+    Json(body): Json<UpsertWorkflowInstructionRequest>,
+) -> impl IntoResponse {
+    tracing::info!(
+        project_id = %id,
+        workflow_id = %body.workflow_id,
+        step = %body.step,
+        "Upserting workflow instruction",
+    );
+
+    let workflow_id = body.workflow_id.trim();
+    let step = body.step.trim();
+    if workflow_id.is_empty() {
+        return Err(bad_request("workflow_id is required"));
+    }
+    if step.is_empty() {
+        return Err(bad_request("step is required"));
+    }
+    // Validate the (workflow, step) pair against the in-code workflow
+    // registry. Without this a typo'd step would silently land in the
+    // table and never reach a worker.
+    let wf = workflow::workflow_by_id(workflow_id)
+        .ok_or_else(|| bad_request(format!("unknown workflow id '{workflow_id}'")))?;
+    if !wf.steps.iter().any(|s| s.step == step) {
+        return Err(bad_request(format!(
+            "workflow '{workflow_id}' has no step '{step}'"
+        )));
+    }
+    // Don't let the user attach instructions to terminal steps — those
+    // never run a worker, so the override would be silently ignored.
+    if wf
+        .steps
+        .iter()
+        .find(|s| s.step == step)
+        .map(|s| s.instructions.is_empty())
+        .unwrap_or(false)
+    {
+        return Err(bad_request(format!(
+            "step '{step}' does not run a worker; cannot attach instructions"
+        )));
+    }
+
+    // Ensure the project exists so we don't insert orphan rows.
+    let exists = state
+        .db
+        .get_project(&id)
+        .await
+        .map_err(internal_error)?
+        .is_some();
+    if !exists {
+        return Err((
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({ "error": "project not found" })),
+        ));
+    }
+
+    let row = state
+        .db
+        .upsert_project_workflow_instruction(&id, workflow_id, step, &body.instructions)
+        .await
+        .map_err(internal_error)?;
+
+    Ok::<_, RouteError>(Json(serde_json::json!({
+        "workflow_id": workflow_id,
+        "step": step,
+        "instructions": row.map(|r| r.instructions).unwrap_or_default(),
+    })))
 }
 
 #[cfg(test)]

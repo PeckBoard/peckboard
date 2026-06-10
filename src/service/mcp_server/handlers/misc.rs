@@ -176,11 +176,137 @@ impl McpToolRegistry {
 
     pub(crate) async fn handle_list_workflows(
         &self,
+        args: Value,
         ctx: &ToolCallContext,
     ) -> anyhow::Result<Value> {
         tracing::info!(session_id = %ctx.session_id, "MCP tool: list_workflows");
 
-        Ok(serde_json::json!({ "workflows": crate::workflow::WORKFLOWS }))
+        // Optional project_id: if supplied (and the caller has scope to
+        // it), every step that has a project-specific override gets
+        // an extra `project_instructions` field so the caller sees the
+        // built-in text AND the project extension side by side.
+        let project_id_arg = args.get("project_id").and_then(|v| v.as_str());
+        let scoped_project_id = if project_id_arg.is_some() {
+            Some(ctx.scope_project(project_id_arg)?.as_str().to_string())
+        } else {
+            None
+        };
+
+        let overrides: std::collections::HashMap<(String, String), String> =
+            if let Some(pid) = scoped_project_id.as_deref() {
+                ctx.db
+                    .list_project_workflow_instructions(pid)
+                    .await?
+                    .into_iter()
+                    .map(|r| ((r.workflow_id, r.step), r.instructions))
+                    .collect()
+            } else {
+                std::collections::HashMap::new()
+            };
+
+        let workflows: Vec<Value> = crate::workflow::WORKFLOWS
+            .iter()
+            .map(|wf| {
+                let steps: Vec<Value> = wf
+                    .steps
+                    .iter()
+                    .map(|s| {
+                        let mut entry = serde_json::json!({
+                            "step": s.step,
+                            "instructions": s.instructions,
+                        });
+                        if let Some(extra) = overrides.get(&(wf.id.to_string(), s.step.to_string()))
+                        {
+                            entry["project_instructions"] =
+                                serde_json::Value::String(extra.clone());
+                        }
+                        entry
+                    })
+                    .collect();
+                serde_json::json!({
+                    "id": wf.id,
+                    "name": wf.name,
+                    "description": wf.description,
+                    "priority": wf.priority,
+                    "steps": steps,
+                })
+            })
+            .collect();
+
+        Ok(serde_json::json!({
+            "workflows": workflows,
+            "project_id": scoped_project_id,
+        }))
+    }
+
+    /// `set_workflow_instructions` MCP tool. Lets a worker (or operator,
+    /// via the MCP CLI) edit a project's per-step prompt extension —
+    /// the same data the edit-project UI writes to. Empty / missing
+    /// `instructions` deletes the override.
+    pub(crate) async fn handle_set_workflow_instructions(
+        &self,
+        args: Value,
+        ctx: &ToolCallContext,
+    ) -> anyhow::Result<Value> {
+        let scope = ctx.scope_project(args.get("project_id").and_then(|v| v.as_str()))?;
+        let project_id = scope.as_str();
+
+        let workflow_id = args
+            .get("workflow_id")
+            .and_then(|v| v.as_str())
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .ok_or_else(|| anyhow::anyhow!("set_workflow_instructions requires 'workflow_id'"))?;
+        let step = args
+            .get("step")
+            .and_then(|v| v.as_str())
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .ok_or_else(|| anyhow::anyhow!("set_workflow_instructions requires 'step'"))?;
+        let instructions = args
+            .get("instructions")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+
+        tracing::info!(
+            session_id = %ctx.session_id,
+            project_id = %project_id,
+            workflow_id = %workflow_id,
+            step = %step,
+            "MCP tool: set_workflow_instructions",
+        );
+
+        // Validate the (workflow, step) pair so a typo isn't silently
+        // stored and ignored at worker-spawn time.
+        let wf = crate::workflow::workflow_by_id(workflow_id)
+            .ok_or_else(|| anyhow::anyhow!("unknown workflow id '{workflow_id}'"))?;
+        let step_def = wf
+            .steps
+            .iter()
+            .find(|s| s.step == step)
+            .ok_or_else(|| anyhow::anyhow!("workflow '{workflow_id}' has no step '{step}'"))?;
+        if step_def.instructions.is_empty() {
+            anyhow::bail!("step '{step}' does not run a worker; cannot attach instructions");
+        }
+
+        // Ensure the project exists so we don't insert orphan rows.
+        let exists = ctx.db.get_project(project_id).await?.is_some();
+        if !exists {
+            anyhow::bail!("project not found: {project_id}");
+        }
+
+        let row = ctx
+            .db
+            .upsert_project_workflow_instruction(project_id, workflow_id, step, instructions)
+            .await?;
+
+        Ok(serde_json::json!({
+            "status": "ok",
+            "project_id": project_id,
+            "workflow_id": workflow_id,
+            "step": step,
+            "instructions": row.map(|r| r.instructions).unwrap_or_default(),
+        }))
     }
 
     pub(crate) async fn handle_fetch_url(

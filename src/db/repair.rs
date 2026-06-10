@@ -30,6 +30,31 @@ pub fn ensure_schema(conn: &mut SqliteConnection) -> anyhow::Result<()> {
     ensure_projects_workflow_column(conn)?;
     ensure_cards_workflow_column(conn)?;
     ensure_projects_pause_reason_column(conn)?;
+    ensure_project_workflow_instructions_table(conn)?;
+    Ok(())
+}
+
+/// Heal DBs that predate `1781062932_project_workflow_instructions`.
+/// `CREATE TABLE IF NOT EXISTS` is idempotent so this is safe on a
+/// fully-migrated DB and only does work on one that lacks the table.
+fn ensure_project_workflow_instructions_table(conn: &mut SqliteConnection) -> anyhow::Result<()> {
+    sql_query(
+        "CREATE TABLE IF NOT EXISTS project_workflow_instructions (
+            project_id   TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+            workflow_id  TEXT NOT NULL,
+            step         TEXT NOT NULL,
+            instructions TEXT NOT NULL,
+            created_at   TEXT NOT NULL,
+            updated_at   TEXT NOT NULL,
+            PRIMARY KEY (project_id, workflow_id, step)
+        )",
+    )
+    .execute(conn)?;
+    sql_query(
+        "CREATE INDEX IF NOT EXISTS idx_pwi_project \
+         ON project_workflow_instructions (project_id)",
+    )
+    .execute(conn)?;
     Ok(())
 }
 

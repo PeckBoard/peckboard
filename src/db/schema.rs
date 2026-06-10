@@ -188,6 +188,17 @@ diesel::table! {
     }
 }
 
+diesel::table! {
+    project_workflow_instructions (project_id, workflow_id, step) {
+        project_id -> Text,
+        workflow_id -> Text,
+        step -> Text,
+        instructions -> Text,
+        created_at -> Text,
+        updated_at -> Text,
+    }
+}
+
 diesel::joinable!(sessions -> folders (folder_id));
 diesel::joinable!(sessions -> projects (project_id));
 diesel::joinable!(sessions -> repeating_tasks (repeating_task_id));
@@ -198,6 +209,7 @@ diesel::joinable!(auth_sessions -> users (user_id));
 diesel::joinable!(queued_messages -> sessions (session_id));
 diesel::joinable!(todos -> sessions (session_id));
 diesel::joinable!(repeating_tasks -> folders (folder_id));
+diesel::joinable!(project_workflow_instructions -> projects (project_id));
 
 diesel::joinable!(user_tabs -> users (user_id));
 
@@ -216,4 +228,5 @@ diesel::allow_tables_to_appear_in_same_query!(
     user_tabs,
     todos,
     repeating_tasks,
+    project_workflow_instructions,
 );

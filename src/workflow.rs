@@ -142,25 +142,14 @@ other workers can pick up.
 - Otherwise call `finish_card` with a short handoff_context like \
   \"report in folder <name>; filed N follow-up cards\".";
 
-const FAST_DEVELOP_INSTRUCTIONS: &str =
-    "Implement and self-review the change described in the card.
-
-### Implement
+const FAST_DEVELOP_INSTRUCTIONS: &str = "Implement the change described in the card.
 
 Read any relevant existing code first, then make the change.
 
-- **If the working directory is a git repo**, unless the card gives \
-  specific git instructions, do your work on its own branch. Pick a \
-  short, descriptive branch name; if a branch already exists for this \
-  card, reuse it. Commit your changes on that branch. Do NOT push \
-  unless instructed to.
-- If the working directory is NOT a git repo, just edit the files \
-  directly in place. No branch needed.
-- Keep the change tight to what the card actually asks for — don't \
-  refactor unrelated code, add speculative abstractions, or expand \
-  scope.
-- Run the project's tests and linter. If nothing is set up, at minimum \
-  run a type check.
+- After you finish the change, run the project's tests, linter, and any \
+  other checks the repo configures (formatter, type checker, build, etc). \
+  If nothing is set up, at minimum run a type check. Fix anything that \
+  surfaces — don't leave the card done with red checks behind it.
 - If the card is underspecified or you hit a blocker you can't resolve, \
   write up what you found and call `finish_card` so a human can decide \
   what to do.
@@ -170,25 +159,7 @@ Read any relevant existing code first, then make the change.
   `create_card` to split out follow-ups and keep this card's scope \
   narrow.
 
-### Self-review
-
-Review your own change as if it were a pull request:
-
-- **Correctness** — does the code actually solve the card? Trace the \
-  logic; don't just read the tests. Look for off-by-one, wrong branch, \
-  missed edge cases.
-- **Security** — input validation at boundaries, no secrets in code, no \
-  obvious injection/XSS/SSRF.
-- **Tests** — did you add tests for the new behavior and edge cases? If \
-  tests are missing, add them now or file a follow-up with `create_card`.
-- **Style & scope** — no unrelated refactors, no dead code, names make \
-  sense, comments only where the \"why\" is non-obvious.
-
-Fix any issues you find directly on the same branch, then re-run tests \
-+ lint.
-
-When done, call `finish_card`. If you created a branch, include it in \
-handoff_context (e.g. `\"branch feat/queue\"`).";
+When done, call `finish_card`.";
 
 const DEEP_DEVELOP_EXECUTION_INSTRUCTIONS: &str =
     "Implement the work described in the card. Read any relevant existing \
@@ -330,8 +301,8 @@ pub const WORKFLOWS: &[Workflow] = &[
     Workflow {
         id: "fast-develop-software",
         name: "Fast Develop Software",
-        description: "Normal software development with built-in self-review. Lower cost \
-                      than Deep Develop Software.",
+        description: "Normal software development. Lower cost than Deep Develop Software, \
+                      which adds a separate reviewer pass.",
         priority: 400,
         steps: &[
             WorkflowStep {

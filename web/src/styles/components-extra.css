@@ -441,3 +441,111 @@ select.form-input {
   accent-color: var(--accent);
   flex-shrink: 0;
 }
+
+/* ── Workflow instructions modal ─────────────────────────────────────
+   Each column gets a "built-in card + plus + your textarea" stack so
+   the user sees what's already in place before extending it. */
+.workflow-instructions-modal {
+  max-height: calc(100vh - 80px);
+  overflow-y: auto;
+}
+
+.workflow-step-block {
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  padding: 14px 14px 16px;
+  margin-top: 16px;
+  background: var(--surface2);
+}
+
+.workflow-step-header {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 10px;
+}
+
+.workflow-step-title {
+  margin: 0;
+  font-size: var(--text-base);
+  font-weight: 600;
+  color: var(--text);
+}
+
+.workflow-step-badge {
+  display: inline-block;
+  font-size: var(--text-xs);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  background: var(--accent-subtle);
+  color: var(--accent);
+  padding: 2px 8px;
+  border-radius: var(--radius-sm);
+}
+
+.workflow-step-builtin {
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--surface);
+  padding: 10px 12px;
+}
+
+.workflow-step-builtin-label {
+  font-size: var(--text-xs);
+  font-weight: 600;
+  color: var(--text3);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  margin-bottom: 6px;
+}
+
+.workflow-step-builtin-body {
+  margin: 0;
+  font-family: inherit;
+  font-size: var(--text-sm);
+  color: var(--text2, var(--text));
+  white-space: pre-wrap;
+  word-break: break-word;
+  max-height: 180px;
+  overflow-y: auto;
+  line-height: 1.45;
+}
+
+.workflow-step-plus {
+  text-align: center;
+  font-size: 28px;
+  line-height: 1;
+  color: var(--text3);
+  margin: 8px 0;
+  user-select: none;
+}
+
+.workflow-step-extra {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.workflow-step-actions {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-top: 4px;
+}
+
+.workflow-step-saved {
+  color: var(--accent);
+}
+
+.form-workflow-extras {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-top: 8px;
+}
+
+.btn-small {
+  padding: 6px 12px;
+  font-size: var(--text-sm);
+  align-self: flex-start;
+}

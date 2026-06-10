@@ -176,10 +176,42 @@ pub(super) fn tool_definitions() -> Vec<McpToolDef> {
         },
         McpToolDef {
             name: "list_workflows".into(),
-            description: "List available workflow definitions.".into(),
+            description: "List available workflow definitions. Each step includes the built-in `instructions` text. If you pass `project_id`, every step that has a project-specific override also includes `project_instructions` — the additional text the project owner appended to the built-in prompt for that (workflow, step) combination.".into(),
             input_schema: serde_json::json!({
                 "type": "object",
-                "properties": {},
+                "properties": {
+                    "project_id": {
+                        "type": "string",
+                        "description": "Optional project id. When supplied, the response merges in any per-step `project_instructions` overrides that project has set."
+                    }
+                },
+                "additionalProperties": false
+            }),
+        },
+        McpToolDef {
+            name: "set_workflow_instructions".into(),
+            description: "Set (or clear) the additional instructions a project appends to a workflow's per-step prompt. The text is appended below the built-in step instructions a worker receives — both apply. Pass an empty `instructions` string to clear the override.".into(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "project_id": {
+                        "type": "string",
+                        "description": "Project whose workflow instructions to edit (optional if the session already has project context)."
+                    },
+                    "workflow_id": {
+                        "type": "string",
+                        "description": "Workflow id (e.g. `fast-develop-software`). Must exist in `list_workflows`."
+                    },
+                    "step": {
+                        "type": "string",
+                        "description": "Step name within the workflow (e.g. `in_progress`). Must be a step that runs a worker — terminal steps like `done`/`backlog` are rejected."
+                    },
+                    "instructions": {
+                        "type": "string",
+                        "description": "Additional instructions to append to the built-in step prompt. Empty string clears the override."
+                    }
+                },
+                "required": ["workflow_id", "step", "instructions"],
                 "additionalProperties": false
             }),
         },

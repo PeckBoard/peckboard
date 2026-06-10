@@ -5,6 +5,12 @@ use crate::db::models::{Card, Event, Project, Session};
 /// `experts` is the list of in-scope expert sessions (project experts plus
 /// globally-scoped experts) the worker may consult; pass an empty slice when
 /// there are none and the experts section is omitted.
+///
+/// `extra_step_instructions` is the project's per-(workflow,step) override
+/// text loaded from `project_workflow_instructions`. It's appended to the
+/// built-in step prompt under its own heading so the worker sees both — the
+/// platform default and the project-specific extension — without one
+/// overwriting the other.
 pub fn build_worker_prompt(
     project: &Project,
     card: &Card,
@@ -12,6 +18,7 @@ pub fn build_worker_prompt(
     workflow_steps: &[String],
     handoff_context: Option<&str>,
     experts: &[Session],
+    extra_step_instructions: Option<&str>,
 ) -> String {
     // Per-step instructions come from the workflow registry. The card's
     // workflow is baked in at create time (NOT NULL), so it's always set
@@ -184,6 +191,22 @@ pub fn build_worker_prompt(
         prompt.push_str("### Step-Specific Instructions\n\n");
         prompt.push_str(step_text);
         prompt.push_str("\n\n");
+    }
+    // Per-project extension to the step prompt. Treated as additional
+    // instructions on top of the built-in step text — both apply. Coming
+    // from a project-edit form (UI), so still untrusted from a prompt-
+    // injection standpoint; fence it.
+    if let Some(extra) = extra_step_instructions {
+        let trimmed = extra.trim();
+        if !trimmed.is_empty() {
+            prompt.push_str("### Additional Project Instructions for This Step\n\n");
+            prompt.push_str(
+                "The project owner added these on top of the platform's built-in step \
+                 instructions above. Follow both.\n\n",
+            );
+            prompt.push_str(&fence("project.workflow_instructions", trimmed));
+            prompt.push_str("\n\n");
+        }
     }
     prompt.push_str(
         "**Consult the question-expert before asking the user.** Before calling `ask_user`, \
@@ -477,6 +500,7 @@ mod tests {
             &sample_steps(),
             None,
             &[],
+            None,
         );
         assert!(prompt.contains("Test Project"));
         assert!(prompt.contains("Implement auth"));
@@ -493,6 +517,7 @@ mod tests {
             &sample_steps(),
             Some("Auth module is at src/auth/"),
             &[],
+            None,
         );
         assert!(prompt.contains("Handoff Context"));
         assert!(prompt.contains("Auth module is at src/auth/"));
@@ -507,6 +532,7 @@ mod tests {
             &sample_steps(),
             None,
             &[],
+            None,
         );
         // The ordered steps are rendered.
         assert!(prompt.contains("backlog → in_progress → review → done"));
@@ -537,6 +563,7 @@ mod tests {
             &sample_steps(),
             None,
             &[],
+            None,
         );
 
         // The untrusted-content warning is present.
@@ -571,6 +598,7 @@ mod tests {
             &sample_steps(),
             None,
             &experts,
+            None,
         );
         // The section and per-expert metadata are present.
         assert!(prompt.contains("In-Scope Experts"));
@@ -594,9 +622,45 @@ mod tests {
             &sample_steps(),
             None,
             &[],
+            None,
         );
         // With no in-scope experts the section is omitted entirely.
         assert!(!prompt.contains("In-Scope Experts"));
+    }
+
+    #[test]
+    fn test_build_worker_prompt_appends_project_extra_instructions() {
+        let prompt = build_worker_prompt(
+            &sample_project(),
+            &sample_card(),
+            "in-progress",
+            &sample_steps(),
+            None,
+            &[],
+            Some("At the end, commit to master and push."),
+        );
+        // The extra section header and body are present alongside the
+        // built-in step instructions — neither overrides the other.
+        assert!(prompt.contains("Additional Project Instructions for This Step"));
+        assert!(prompt.contains("commit to master and push"));
+        // Fenced as untrusted data so a project owner can't escape the
+        // prompt with cleverly crafted instructions.
+        assert!(prompt.contains("<<<UNTRUSTED project.workflow_instructions"));
+    }
+
+    #[test]
+    fn test_build_worker_prompt_skips_empty_extra_instructions() {
+        let prompt = build_worker_prompt(
+            &sample_project(),
+            &sample_card(),
+            "in-progress",
+            &sample_steps(),
+            None,
+            &[],
+            Some("   \n\t  "),
+        );
+        // Whitespace-only extras shouldn't add a stray section.
+        assert!(!prompt.contains("Additional Project Instructions for This Step"));
     }
 
     #[test]

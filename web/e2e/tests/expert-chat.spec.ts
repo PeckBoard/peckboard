@@ -56,7 +56,14 @@ test('an expert can be opened from the Experts view, viewed, and asked a questio
 
   const projectRes = await request.post('/api/projects', {
     headers: authHeader,
-    data: { name: 'Expert Chat', folder_id: folder.id, model: 'mock:echo' },
+    data: {
+      name: 'Expert Chat',
+      folder_id: folder.id,
+      model: 'mock:echo',
+      // `workflow` is NOT NULL since `1781053574_projects_workflow_required`;
+      // the test predates that migration so it has to pass an explicit value.
+      workflow: 'task',
+    },
   })
   expect(projectRes.ok(), `create project failed: ${await projectRes.text()}`).toBeTruthy()
   const project = (await projectRes.json()) as { id: string; name: string }

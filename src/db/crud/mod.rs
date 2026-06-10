@@ -16,6 +16,7 @@ mod sessions;
 mod tabs;
 mod todos;
 mod users;
+mod workflow_instructions;
 
 pub use todos::ProjectCardTodos;
 
