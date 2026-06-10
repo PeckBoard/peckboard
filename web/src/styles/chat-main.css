@@ -16,9 +16,10 @@
      dark mode: an in-between dark surface) so the assistant bubble has
      real contrast against the column instead of blending in. */
   background: var(--surface);
-  /* Horizontal padding holds the bubbles off the chrome; vertical is
-     tight so the transcript packs more turns on screen. */
-  padding: 12px 36px;
+  /* Roomy outside padding so the bubbles sit well inset from the
+     chrome on both axes. Inter-bubble gap stays tight so the
+     transcript still reads as a packed timeline. */
+  padding: 20px 44px;
   display: flex;
   flex-direction: column;
   /* Small gap between consecutive bubbles — enough to separate
@@ -307,7 +308,7 @@
      in dark mode is identical to the bubble background and disappears. */
   background: var(--surface3);
   color: var(--text);
-  border: 1px solid color-mix(in srgb, var(--surface3) 80%, black);
+  border: 1px solid color-mix(in srgb, var(--surface3) 90%, black);
   border-radius: 16px 16px 16px 4px;
 }
 
