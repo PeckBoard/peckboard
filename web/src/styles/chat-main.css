@@ -12,19 +12,10 @@
 .chat-messages {
   flex: 1;
   overflow-y: auto;
-  /* Lighter than the bubble fill (light mode: white vs gray bubble;
-     dark mode: an in-between dark surface) so the assistant bubble has
-     real contrast against the column instead of blending in. */
-  background: var(--surface);
-  /* Roomy outside padding so the bubbles sit well inset from the
-     chrome on both axes. Inter-bubble gap stays tight so the
-     transcript still reads as a packed timeline. */
-  padding: 20px 44px;
+  padding: 20px 24px;
   display: flex;
   flex-direction: column;
-  /* Small gap between consecutive bubbles — enough to separate
-     speaker turns, not enough to feel airy. */
-  gap: 8px;
+  gap: 6px;
 }
 
 .chat-loading,
@@ -278,9 +269,7 @@
 
 .chat-bubble {
   max-width: 72%;
-  /* Tight vertical padding; full horizontal so text doesn't kiss the
-     bubble edge. */
-  padding: 8px 18px;
+  padding: 10px 14px;
   font-size: var(--text-base);
   line-height: 1.6;
   white-space: pre-wrap;
