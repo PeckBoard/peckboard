@@ -208,6 +208,8 @@ function App() {
   const [showNewProject, setShowNewProject] = useState(false)
   const [contextSession, setContextSession] = useState<string | null>(null)
   const [confirmDeleteId, setConfirmDeleteId] = useState<string | null>(null)
+  const [selectedSessions, setSelectedSessions] = useState<Set<string>>(() => new Set())
+  const [confirmBulkDelete, setConfirmBulkDelete] = useState(false)
   const [confirmDeleteProjectId, setConfirmDeleteProjectId] = useState<string | null>(null)
   const [confirmClearSessionId, setConfirmClearSessionId] = useState<string | null>(null)
   const [announcement, setAnnouncement] = useState<Announcement | null>(null)
@@ -566,6 +568,29 @@ function App() {
   const handleDeleteSession = (id: string) => {
     setConfirmDeleteId(id)
     setContextSession(null)
+  }
+
+  const toggleSessionSelected = (id: string) => {
+    setSelectedSessions((prev) => {
+      const next = new Set(prev)
+      if (next.has(id)) next.delete(id)
+      else next.add(id)
+      return next
+    })
+  }
+
+  // Bulk equivalents of the per-session 3-dot actions, applied to every
+  // checked session. Currently the only such action is delete.
+  const confirmBulkDeleteSessions = async () => {
+    for (const id of Array.from(selectedSessions)) {
+      try {
+        await deleteSession(id)
+      } catch {
+        /* ignore */
+      }
+    }
+    setSelectedSessions(new Set())
+    setConfirmBulkDelete(false)
   }
 
   const confirmDelete = async () => {
@@ -941,6 +966,25 @@ function App() {
                 actionLabel="+ New session"
                 onAction={() => setShowNewSession(true)}
               />
+              {selectedSessions.size > 0 && (
+                <div className="bulk-action-bar">
+                  <span className="bulk-action-count">{selectedSessions.size} selected</span>
+                  <div className="bulk-action-buttons">
+                    <button
+                      className="bulk-action-btn danger"
+                      onClick={() => setConfirmBulkDelete(true)}
+                    >
+                      Delete
+                    </button>
+                    <button
+                      className="bulk-action-btn"
+                      onClick={() => setSelectedSessions(new Set())}
+                    >
+                      Clear
+                    </button>
+                  </div>
+                </div>
+              )}
               <div
                 className="list-view-body"
                 // Scroll-load: when the user gets within 200px of the
@@ -960,8 +1004,16 @@ function App() {
                 {chatSessions.map((s) => (
                   <div
                     key={s.id}
-                    className={`list-view-row ${s.id === activeSessionId ? 'active' : ''}`}
+                    className={`list-view-row ${s.id === activeSessionId ? 'active' : ''} ${selectedSessions.has(s.id) ? 'selected' : ''}`}
                   >
+                    <input
+                      type="checkbox"
+                      className="list-view-select"
+                      checked={selectedSessions.has(s.id)}
+                      onClick={(e) => e.stopPropagation()}
+                      onChange={() => toggleSessionSelected(s.id)}
+                      aria-label={`Select ${s.name}`}
+                    />
                     <button
                       className="list-view-item"
                       onClick={() => {
@@ -1102,6 +1154,19 @@ function App() {
           danger
           onConfirm={confirmDelete}
           onCancel={() => setConfirmDeleteId(null)}
+        />
+      )}
+      {confirmBulkDelete && (
+        <ConfirmDialog
+          title="Delete sessions"
+          message={`Delete ${selectedSessions.size} selected session${
+            selectedSessions.size === 1 ? '' : 's'
+          } and all their events?`}
+          confirmLabel="Delete"
+          cancelLabel="Cancel"
+          danger
+          onConfirm={confirmBulkDeleteSessions}
+          onCancel={() => setConfirmBulkDelete(false)}
         />
       )}
       {confirmDeleteProjectId && (

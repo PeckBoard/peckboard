@@ -656,6 +656,63 @@
   background: var(--accent-subtle);
   border-color: var(--accent);
 }
+.list-view-row.selected {
+  border-color: var(--accent);
+  box-shadow: inset 2px 0 0 var(--accent);
+}
+/* Left-edge multi-select checkbox. Sits outside the clickable item button
+   so toggling selection never opens the session. */
+.list-view-select {
+  flex: 0 0 auto;
+  align-self: center;
+  margin-left: 12px;
+  width: 16px;
+  height: 16px;
+  cursor: pointer;
+  accent-color: var(--accent);
+}
+/* Bulk-action toolbar shown above the list when one or more rows are
+   checked. Hosts the same actions as a row's 3-dot menu (currently
+   delete), applied to every selected session. */
+.bulk-action-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin: 0 12px;
+  padding: 8px 12px;
+  background: var(--accent-subtle);
+  border: 1px solid var(--accent);
+  border-radius: var(--radius-md);
+}
+.bulk-action-count {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text);
+}
+.bulk-action-buttons {
+  display: flex;
+  gap: 8px;
+}
+.bulk-action-btn {
+  padding: 6px 12px;
+  font-size: 13px;
+  color: var(--text);
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+}
+.bulk-action-btn:hover {
+  background: var(--surface-hover);
+}
+.bulk-action-btn.danger {
+  color: var(--danger);
+  border-color: var(--danger);
+}
+.bulk-action-btn.danger:hover {
+  background: var(--danger-bg);
+}
 .list-view-item {
   flex: 1;
   display: flex;
