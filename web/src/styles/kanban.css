@@ -16,16 +16,16 @@
   padding: 0 20px 20px;
   position: relative;
 }
-/* Top-level header sits below the tabbar with a small breathing-room
-   margin. It is NOT sticky: as the user scrolls, the board header
+/* Top-level header is the standard chat-toolbar — same surface fill,
+   symmetric padding, single bottom border — so it reads identically to
+   the session header and the list-view header on the projects/sessions
+   index pages. It is NOT sticky: as the user scrolls, the board header
    scrolls out and the per-step sticky header (`.kanban-column-header`)
    takes over, pinning flush against the bottom of the tabbar with no
-   leftover gap. */
+   leftover gap. A small bottom margin gives the section headers below
+   a beat of breathing room before they take over. */
 .kanban-board .kanban-board-header {
-  background: var(--bg);
-  margin-top: 12px;
   margin-bottom: 12px;
-  padding-bottom: 4px;
 }
 
 /* Auto-pause banner: sits between the toolbar and the kanban columns.
