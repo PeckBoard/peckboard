@@ -175,6 +175,11 @@ Hard rules — these are not optional:
 pub(crate) fn discover_models() -> Vec<ModelInfo> {
     let mut models = vec![
         ModelInfo {
+            id: "claude-fable-5".into(),
+            display_name: "Claude Fable 5".into(),
+            capabilities: vec!["code".into(), "reasoning".into(), "vision".into()],
+        },
+        ModelInfo {
             id: "claude-opus-4-8".into(),
             display_name: "Claude Opus 4.8".into(),
             capabilities: vec!["code".into(), "reasoning".into(), "vision".into()],
@@ -407,6 +412,7 @@ mod tests {
     fn test_discover_models() {
         let models = discover_models();
         assert!(models.len() >= 5);
+        assert!(models.iter().any(|m| m.id == "claude-fable-5"));
         assert!(models.iter().any(|m| m.id == "claude-opus-4-8"));
         assert!(models.iter().any(|m| m.id == "claude-sonnet-4-6"));
         assert!(models.iter().any(|m| m.id == "claude-haiku-4-5"));
