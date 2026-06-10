@@ -249,9 +249,14 @@ impl McpToolRegistry {
 
         tracing::info!(session_id = %ctx.session_id, project_id = %project_id, "MCP tool: resume_project");
 
+        // Mirror `/api/projects/:id/resume`: clear pause_reason so a stale
+        // auto-pause message doesn't linger on the project page, and
+        // append the auto-pause counter reset marker so the next crash
+        // gets its full retry budget.
         let update = UpdateProject {
             status: Some("active".to_string()),
             last_accessed_at: Some(chrono::Utc::now().to_rfc3339()),
+            pause_reason: Some(None),
             ..Default::default()
         };
 
@@ -260,6 +265,11 @@ impl McpToolRegistry {
             .update_project(project_id, update)
             .await?
             .ok_or_else(|| anyhow::anyhow!("project not found: {project_id}"))?;
+
+        if let Err(e) = crate::worker::orchestrator::mark_project_resumed(&ctx.db, project_id).await
+        {
+            tracing::warn!(project_id = %project_id, "Failed to mark resume sentinel: {e}");
+        }
 
         Ok(serde_json::json!({
             "status": "ok",

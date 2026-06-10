@@ -71,6 +71,10 @@ export interface Project {
   worker_communication: boolean
   created_at: string
   last_accessed_at: string
+  /** Human-readable reason the project is paused, set automatically when
+   *  a card's worker keeps crashing. Null when the project was paused
+   *  manually or is active. Cleared on resume. */
+  pause_reason: string | null
 }
 
 export interface Card {

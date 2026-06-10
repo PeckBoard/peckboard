@@ -364,6 +364,22 @@ async fn main() -> anyhow::Result<()> {
                                                 },
                                             )
                                             .await;
+
+                                        // Auto-pause defense: if this card has
+                                        // been crashing in a tight loop (e.g.
+                                        // rate-limit, bad credentials, broken
+                                        // sandbox), stop the project so we don't
+                                        // burn cycles. Stderr from this run goes
+                                        // into the pause reason so the user has
+                                        // a starting point.
+                                        let last_stderr =
+                                            last_crash_stderr(&orchestrator_state.db, &sid).await;
+                                        peckboard::worker::orchestrator::maybe_auto_pause_after_crash(
+                                            &orchestrator_state,
+                                            card_id,
+                                            last_stderr.as_deref(),
+                                        )
+                                        .await;
                                     }
                                 }
                             }
@@ -565,4 +581,26 @@ async fn shutdown_signal() {
         _ = ctrl_c => {},
         _ = terminate => {},
     }
+}
+
+/// Read the stderr text from the session's most recent crash `agent-end`
+/// event. The completion listener uses this to enrich the auto-pause
+/// reason — knowing the worker crashed isn't useful on its own; the user
+/// needs the underlying CLI error to act on it.
+async fn last_crash_stderr(db: &peckboard::db::Db, session_id: &str) -> Option<String> {
+    let events = db.events_tail(session_id, 16).await.ok()?;
+    for event in events.iter().rev() {
+        if event.kind != "agent-end" {
+            continue;
+        }
+        let data: serde_json::Value = serde_json::from_str(&event.data).ok()?;
+        if data.get("status").and_then(|s| s.as_str()) != Some("crashed") {
+            continue;
+        }
+        return data
+            .get("stderr")
+            .and_then(|s| s.as_str())
+            .map(str::to_string);
+    }
+    None
 }

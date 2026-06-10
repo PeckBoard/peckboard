@@ -165,6 +165,7 @@ pub struct Project {
     pub worker_communication: bool,
     pub created_at: String,
     pub last_accessed_at: String,
+    pub pause_reason: Option<String>,
 }
 
 #[derive(Insertable, Deserialize, Debug)]
@@ -200,6 +201,7 @@ pub struct UpdateProject {
     pub auto_notify_changes: Option<bool>,
     pub worker_communication: Option<bool>,
     pub last_accessed_at: Option<String>,
+    pub pause_reason: Option<Option<String>>,
 }
 
 // ── Cards ────────────────────────────────────────────────────────────

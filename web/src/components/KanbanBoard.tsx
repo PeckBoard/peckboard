@@ -5,7 +5,7 @@ import { useWsStore } from '../store/ws'
 import { authedFetch } from '../store/auth'
 import { useMentions, filterMentions } from '../hooks/useMentions'
 import { useMediaQuery } from '../hooks/useMediaQuery'
-import type { Card, Event } from '../types/api'
+import type { Card, Event, Project } from '../types/api'
 import CardFormModal from './CardFormModal'
 import EditProjectModal from './EditProjectModal'
 import WorkerComms from './WorkerComms'
@@ -170,6 +170,22 @@ export default function KanbanBoard({ projectId, onOpenTodos }: KanbanBoardProps
     }
     window.addEventListener('peckboard:card-update', handler)
     return () => window.removeEventListener('peckboard:card-update', handler)
+  }, [projectId])
+
+  // Listen for project-update broadcasts — currently the auto-pause path
+  // is the only emitter, so this is how the "project paused, here's why"
+  // banner appears without the user having to refresh.
+  useEffect(() => {
+    const handler = (e: globalThis.Event) => {
+      const detail = (e as CustomEvent).detail
+      const project = detail?.data?.project as Project | undefined
+      if (!project || project.id !== projectId) return
+      useProjectsStore.setState((s) => ({
+        projects: s.projects.map((p) => (p.id === project.id ? project : p)),
+      }))
+    }
+    window.addEventListener('peckboard:project-update', handler)
+    return () => window.removeEventListener('peckboard:project-update', handler)
   }, [projectId])
 
   // Listen for card-delete WebSocket events
@@ -668,6 +684,12 @@ export default function KanbanBoard({ projectId, onOpenTodos }: KanbanBoardProps
           )}
         </div>
       </div>
+
+      {project?.pause_reason && (
+        <div className="project-pause-banner" role="status" data-testid="project-pause-banner">
+          <strong>Project paused.</strong> {project.pause_reason}
+        </div>
+      )}
 
       {/* Project-level todo roll-up across every card's worker session. */}
       <ProjectTodoSummary todosByCard={todosByCard} />

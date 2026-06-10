@@ -317,40 +317,66 @@ pub fn find_next_step(current_step: &str, workflow_steps: &[String]) -> Option<S
     workflow_steps.get(pos + 1).cloned()
 }
 
-/// Walk the event tail and count consecutive crashes. Returns
-/// `(crash_count, should_block)`. Blocks on 4th consecutive crash.
-/// The counter resets on an `agent-end` with status "complete" or on a
-/// `step-change` event.
-pub fn detect_retry_loop(events: &[Event]) -> (u32, bool) {
-    let mut crash_count: u32 = 0;
+/// Auto-pause threshold: a card whose worker crashes this many times in a
+/// row (without a successful turn or step change in between) pauses the
+/// owning project. Set deliberately low — a single "out of tokens" or
+/// "API outage" issue would otherwise tarpit the orchestrator in a 5-second
+/// spin-respawn-crash loop until the user noticed.
+pub const PAUSE_AFTER_CRASHES: u32 = 2;
 
-    // Walk events in order (oldest to newest).
+/// Crash reasons that DON'T count toward [`PAUSE_AFTER_CRASHES`] because
+/// they aren't the agent's fault:
+///
+/// - `"interrupted"`: someone called `cancel()` (user, watchdog, project
+///   pause). Retrying isn't going to keep failing.
+/// - `"server-shutdown"`: synthesized by `repair_dangling_sessions` at
+///   startup when an in-flight session was orphaned by a restart. The
+///   underlying agent never failed; the server just stopped.
+fn crash_reason_counts(reason: Option<&str>) -> bool {
+    !matches!(reason, Some("interrupted") | Some("server-shutdown"))
+}
+
+/// Walk a card's lifecycle events oldest-first and return how many
+/// consecutive process crashes have happened since the last "reset"
+/// marker: a successful turn (`agent-end status=complete`), a step
+/// change, or an explicit [`PAUSE_CLEARED_KIND`] event appended when the
+/// user resumes the owning project. Crashes whose `reason` is in the
+/// exclusion list (see [`crash_reason_counts`]) are ignored — they
+/// aren't agent failures, so they shouldn't decide whether the card
+/// "keeps failing".
+pub fn count_consecutive_crashes(events: &[Event]) -> u32 {
+    let mut crash_count: u32 = 0;
     for event in events {
         match event.kind.as_str() {
             "agent-end" => {
-                // Parse data to check status.
-                if let Ok(data) = serde_json::from_str::<serde_json::Value>(&event.data) {
-                    match data.get("status").and_then(|s| s.as_str()) {
-                        Some("crashed") => {
+                let Ok(data) = serde_json::from_str::<serde_json::Value>(&event.data) else {
+                    continue;
+                };
+                match data.get("status").and_then(|s| s.as_str()) {
+                    Some("crashed") => {
+                        let reason = data.get("reason").and_then(|r| r.as_str());
+                        if crash_reason_counts(reason) {
                             crash_count += 1;
                         }
-                        Some("complete") => {
-                            crash_count = 0;
-                        }
-                        _ => {}
                     }
+                    Some("complete") => crash_count = 0,
+                    _ => {}
                 }
             }
-            "step-change" => {
-                crash_count = 0;
-            }
+            "step-change" => crash_count = 0,
+            k if k == PAUSE_CLEARED_KIND => crash_count = 0,
             _ => {}
         }
     }
-
-    let should_block = crash_count >= 4;
-    (crash_count, should_block)
+    crash_count
 }
+
+/// Event kind appended to a card's last worker session when the user
+/// resumes a project. Resets [`count_consecutive_crashes`] so the
+/// auto-pause doesn't re-fire on the very next crash after a manual
+/// retry — without it, the user would have a one-crash budget instead
+/// of the [`PAUSE_AFTER_CRASHES`] budget the threshold advertises.
+pub const PAUSE_CLEARED_KIND: &str = "auto-pause-cleared";
 
 #[cfg(test)]
 mod tests {
@@ -396,6 +422,7 @@ mod tests {
             worker_communication: false,
             created_at: "2025-01-01T00:00:00Z".into(),
             last_accessed_at: "2025-01-01T00:00:00Z".into(),
+            pause_reason: None,
         }
     }
 
@@ -595,71 +622,92 @@ mod tests {
     }
 
     #[test]
-    fn test_detect_retry_loop_no_crashes() {
+    fn test_count_consecutive_crashes_no_crashes() {
         let events = vec![make_event("agent-end", r#"{"status":"complete"}"#)];
-        let (count, blocked) = detect_retry_loop(&events);
-        assert_eq!(count, 0);
-        assert!(!blocked);
+        assert_eq!(count_consecutive_crashes(&events), 0);
     }
 
     #[test]
-    fn test_detect_retry_loop_under_threshold() {
+    fn test_count_consecutive_crashes_counts_process_crashes() {
         let events = vec![
-            make_event("agent-end", r#"{"status":"crashed","reason":"timeout"}"#),
-            make_event("agent-end", r#"{"status":"crashed","reason":"timeout"}"#),
-            make_event("agent-end", r#"{"status":"crashed","reason":"timeout"}"#),
+            make_event(
+                "agent-end",
+                r#"{"status":"crashed","reason":"process exited mid-turn (code 1)"}"#,
+            ),
+            make_event(
+                "agent-end",
+                r#"{"status":"crashed","reason":"process exited mid-turn (code 1)"}"#,
+            ),
         ];
-        let (count, blocked) = detect_retry_loop(&events);
-        assert_eq!(count, 3);
-        assert!(!blocked);
+        assert_eq!(count_consecutive_crashes(&events), 2);
     }
 
     #[test]
-    fn test_detect_retry_loop_at_threshold() {
+    fn test_count_consecutive_crashes_reset_on_complete() {
         let events = vec![
-            make_event("agent-end", r#"{"status":"crashed","reason":"oom"}"#),
-            make_event("agent-end", r#"{"status":"crashed","reason":"oom"}"#),
-            make_event("agent-end", r#"{"status":"crashed","reason":"oom"}"#),
-            make_event("agent-end", r#"{"status":"crashed","reason":"oom"}"#),
-        ];
-        let (count, blocked) = detect_retry_loop(&events);
-        assert_eq!(count, 4);
-        assert!(blocked);
-    }
-
-    #[test]
-    fn test_detect_retry_loop_reset_on_complete() {
-        let events = vec![
-            make_event("agent-end", r#"{"status":"crashed","reason":"x"}"#),
             make_event("agent-end", r#"{"status":"crashed","reason":"x"}"#),
             make_event("agent-end", r#"{"status":"crashed","reason":"x"}"#),
             make_event("agent-end", r#"{"status":"complete"}"#),
             make_event("agent-end", r#"{"status":"crashed","reason":"x"}"#),
         ];
-        let (count, blocked) = detect_retry_loop(&events);
-        assert_eq!(count, 1);
-        assert!(!blocked);
+        assert_eq!(count_consecutive_crashes(&events), 1);
     }
 
     #[test]
-    fn test_detect_retry_loop_reset_on_step_change() {
+    fn test_count_consecutive_crashes_reset_on_step_change() {
         let events = vec![
-            make_event("agent-end", r#"{"status":"crashed","reason":"x"}"#),
             make_event("agent-end", r#"{"status":"crashed","reason":"x"}"#),
             make_event("agent-end", r#"{"status":"crashed","reason":"x"}"#),
             make_event("step-change", r#"{"from":"todo","to":"in-progress"}"#),
             make_event("agent-end", r#"{"status":"crashed","reason":"x"}"#),
-            make_event("agent-end", r#"{"status":"crashed","reason":"x"}"#),
         ];
-        let (count, blocked) = detect_retry_loop(&events);
-        assert_eq!(count, 2);
-        assert!(!blocked);
+        assert_eq!(count_consecutive_crashes(&events), 1);
+    }
+
+    /// User/watchdog cancellation and the startup repair both surface as
+    /// crash events, but neither is the agent's fault — they MUST NOT
+    /// count toward the auto-pause threshold.
+    #[test]
+    fn test_count_consecutive_crashes_skips_excluded_reasons() {
+        let events = vec![
+            make_event(
+                "agent-end",
+                r#"{"status":"crashed","reason":"interrupted"}"#,
+            ),
+            make_event(
+                "agent-end",
+                r#"{"status":"crashed","reason":"server-shutdown"}"#,
+            ),
+            make_event(
+                "agent-end",
+                r#"{"status":"crashed","reason":"process exited mid-turn (code 1)"}"#,
+            ),
+            make_event(
+                "agent-end",
+                r#"{"status":"crashed","reason":"interrupted"}"#,
+            ),
+        ];
+        // Only the "process exited" crash should count.
+        assert_eq!(count_consecutive_crashes(&events), 1);
     }
 
     #[test]
-    fn test_detect_retry_loop_empty() {
-        let (count, blocked) = detect_retry_loop(&[]);
-        assert_eq!(count, 0);
-        assert!(!blocked);
+    fn test_count_consecutive_crashes_empty() {
+        assert_eq!(count_consecutive_crashes(&[]), 0);
+    }
+
+    /// User-driven resume must reset the consecutive-crash counter —
+    /// otherwise the old crash events would still trip the threshold on
+    /// the very next crash after retry, collapsing the user's retry
+    /// budget to one attempt.
+    #[test]
+    fn test_count_consecutive_crashes_reset_on_pause_cleared() {
+        let events = vec![
+            make_event("agent-end", r#"{"status":"crashed","reason":"x"}"#),
+            make_event("agent-end", r#"{"status":"crashed","reason":"x"}"#),
+            make_event(PAUSE_CLEARED_KIND, r#"{"card_id":"c1"}"#),
+            make_event("agent-end", r#"{"status":"crashed","reason":"x"}"#),
+        ];
+        assert_eq!(count_consecutive_crashes(&events), 1);
     }
 }

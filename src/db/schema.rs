@@ -68,6 +68,7 @@ diesel::table! {
         worker_communication -> Bool,
         created_at -> Text,
         last_accessed_at -> Text,
+        pause_reason -> Nullable<Text>,
     }
 }
 

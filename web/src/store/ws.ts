@@ -130,6 +130,11 @@ export const useWsStore = create<WsState>((set, get) => ({
         return
       }
 
+      if (msg.type === 'project-update') {
+        window.dispatchEvent(new CustomEvent('peckboard:project-update', { detail: msg }))
+        return
+      }
+
       if (msg.type === 'card-delete') {
         window.dispatchEvent(new CustomEvent('peckboard:card-delete', { detail: msg }))
         return

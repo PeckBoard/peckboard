@@ -27,6 +27,24 @@
   margin-bottom: 12px;
   padding-bottom: 4px;
 }
+
+/* Auto-pause banner: sits between the toolbar and the kanban columns.
+   Uses --color-warning-* if the theme defines them, falls back to a
+   muted amber so it's visible on both light and dark themes. */
+.project-pause-banner {
+  margin: 0 0 12px;
+  padding: 10px 14px;
+  border-radius: 6px;
+  background: var(--color-warning-bg, rgba(217, 119, 6, 0.12));
+  border: 1px solid var(--color-warning-border, rgba(217, 119, 6, 0.4));
+  color: var(--color-warning-fg, #92400e);
+  line-height: 1.4;
+  font-size: 0.92rem;
+}
+.project-pause-banner strong {
+  font-weight: 600;
+  margin-right: 4px;
+}
 .kanban-columns {
   display: flex;
   flex-direction: column;

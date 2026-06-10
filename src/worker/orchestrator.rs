@@ -1,12 +1,29 @@
 use std::sync::Arc;
 
-use crate::db::models::{Card, NewSession, Project, UpdateCard};
+use crate::db::models::{Card, NewSession, Project, UpdateCard, UpdateProject};
 use crate::provider::stream::SpawnConfig;
 use crate::service::mcp_server;
 use crate::state::AppState;
 use crate::worker::pipeline;
 use crate::worker::scheduler::{self, WorkerIntent};
 use crate::ws::broadcaster::WsEvent;
+
+/// Broadcast a project update so the project page can re-render fields
+/// like `status` and `pause_reason` without a full reload.
+fn broadcast_project_update(state: &AppState, project_id: &str) {
+    let db = state.db.clone();
+    let broadcaster = state.broadcaster.clone();
+    let project_id = project_id.to_string();
+    tokio::spawn(async move {
+        if let Ok(Some(project)) = db.get_project(&project_id).await {
+            broadcaster.broadcast(WsEvent {
+                event_type: "project-update".into(),
+                session_id: project_id,
+                data: serde_json::json!({ "project": project }),
+            });
+        }
+    });
+}
 
 /// Broadcast a card update via WebSocket so the project page gets live updates.
 fn broadcast_card_update(state: &AppState, card_id: &str, project_id: &str) {
@@ -298,32 +315,12 @@ async fn spawn_worker_for_card(
         card.title
     );
 
-    // Check money-loop defense
-    let events = state
-        .db
-        .events_tail(&session.id, 64)
-        .await
-        .unwrap_or_default();
-    let (crash_count, should_block) = pipeline::detect_retry_loop(&events);
-    if should_block {
-        // Block the card
-        let _ = state
-            .db
-            .update_card(
-                &card.id,
-                UpdateCard {
-                    blocked: Some(true),
-                    block_reason: Some(Some(format!(
-                        "Money-loop defense: {} consecutive crashes",
-                        crash_count
-                    ))),
-                    ..Default::default()
-                },
-            )
-            .await;
-        tracing::warn!(card_id = %card.id, crash_count, "Card blocked by money-loop defense");
-        return Ok(());
-    }
+    // Repeated worker crashes are caught at completion time, not here:
+    // `maybe_auto_pause_after_crash` in main.rs's completion listener
+    // pauses the owning project once a card's lifecycle events show
+    // `PAUSE_AFTER_CRASHES` consecutive non-excluded crashes. The
+    // `project.status != "active"` filter at the top of
+    // `check_and_spawn_workers` then skips the spawn next tick.
 
     // 3. Hook: mcp.token.issue.before
     let token_hook = state.plugins.dispatch(
@@ -784,4 +781,362 @@ pub async fn drain_queue_for_session(
         .drain_queued(session_id, &state.db, &state.broadcaster, config)
         .await?;
     Ok(())
+}
+
+/// After a worker crash, count consecutive crashes for the owning card
+/// (across every session it has ever had) and pause the project once we
+/// hit [`pipeline::PAUSE_AFTER_CRASHES`]. Skipped if the project is
+/// already paused — re-pausing would clobber a more specific reason that
+/// a different card hit first.
+///
+/// This is the load-bearing defense against the 5-second
+/// spawn-respawn-crash loop when something durable is broken (rate limit,
+/// invalid credentials, malformed system prompt). We never count crashes
+/// whose `reason` is excluded by `pipeline::count_consecutive_crashes`
+/// (e.g. `"interrupted"`, `"server-shutdown"`) — those aren't the agent's
+/// fault and shouldn't poison the counter.
+pub async fn maybe_auto_pause_after_crash(
+    state: &Arc<AppState>,
+    card_id: &str,
+    last_stderr: Option<&str>,
+) {
+    if auto_pause_after_crash(&state.db, card_id, last_stderr).await {
+        // Only broadcast on the transition (active → paused). If the
+        // helper returned false (already paused, threshold not reached,
+        // card/project missing) there's nothing for the UI to render.
+        if let Ok(Some(card)) = state.db.get_card(card_id).await {
+            broadcast_project_update(state, &card.project_id);
+        }
+    }
+}
+
+/// Db-only auto-pause kernel. Returns true iff the project was just
+/// flipped from "active" to "paused" by this call; the wrapper above
+/// broadcasts on that transition. Factored out so the integration test
+/// can drive it without standing up an `AppState`.
+async fn auto_pause_after_crash(
+    db: &crate::db::Db,
+    card_id: &str,
+    last_stderr: Option<&str>,
+) -> bool {
+    let card = match db.get_card(card_id).await {
+        Ok(Some(c)) => c,
+        _ => return false,
+    };
+    let project = match db.get_project(&card.project_id).await {
+        Ok(Some(p)) => p,
+        _ => return false,
+    };
+    if project.status != "active" {
+        // Already paused (manually or by an earlier auto-pause). Don't
+        // overwrite a reason that was set first — leave it as-is so the
+        // user sees the originating failure.
+        return false;
+    }
+
+    let events = match db.card_lifecycle_events(card_id, 256).await {
+        Ok(e) => e,
+        Err(err) => {
+            tracing::warn!(card_id = %card_id, error = %err, "auto-pause: card_lifecycle_events failed");
+            return false;
+        }
+    };
+    let crash_count = pipeline::count_consecutive_crashes(&events);
+    if crash_count < pipeline::PAUSE_AFTER_CRASHES {
+        return false;
+    }
+
+    let reason = format_pause_reason(&card.title, crash_count, last_stderr);
+    tracing::warn!(
+        project_id = %project.id,
+        card_id = %card.id,
+        crash_count,
+        "Auto-pausing project after repeated worker crashes"
+    );
+    let _ = db
+        .update_project(
+            &project.id,
+            UpdateProject {
+                status: Some("paused".into()),
+                pause_reason: Some(Some(reason)),
+                last_accessed_at: Some(chrono::Utc::now().to_rfc3339()),
+                ..Default::default()
+            },
+        )
+        .await;
+    true
+}
+
+/// Append a [`pipeline::PAUSE_CLEARED_KIND`] sentinel event to the most
+/// recent worker session of every card in the project that has one. The
+/// auto-pause counter treats this kind as a reset marker, so the user's
+/// next retry-on-resume gets a fresh [`pipeline::PAUSE_AFTER_CRASHES`]
+/// attempt budget rather than failing on the first crash. Cards that
+/// have never had a worker assigned have no session to anchor against
+/// and are skipped — they had no crashes to count anyway.
+pub async fn mark_project_resumed(db: &crate::db::Db, project_id: &str) -> anyhow::Result<()> {
+    let cards = db.list_cards_by_project(project_id).await?;
+    for card in cards {
+        let Some(session_id) = card.last_worker_session_id.as_ref() else {
+            continue;
+        };
+        db.append_event(
+            session_id,
+            pipeline::PAUSE_CLEARED_KIND,
+            serde_json::json!({ "card_id": card.id }),
+        )
+        .await?;
+    }
+    Ok(())
+}
+
+/// Human-readable pause reason shown on the project page banner. Includes
+/// the card title and a short snippet of the last crash's stderr so the
+/// user has a starting point for what went wrong.
+fn format_pause_reason(card_title: &str, crash_count: u32, stderr: Option<&str>) -> String {
+    let stderr_snippet = stderr.map(str::trim).filter(|s| !s.is_empty()).map(|s| {
+        // Cap at ~240 chars to keep the banner readable; rate-limit
+        // notices and panic backtraces can be much longer.
+        const MAX: usize = 240;
+        if s.len() <= MAX {
+            s.to_string()
+        } else {
+            let mut cut = MAX;
+            while !s.is_char_boundary(cut) {
+                cut -= 1;
+            }
+            format!("{}…", &s[..cut])
+        }
+    });
+    match stderr_snippet {
+        Some(snippet) => format!(
+            "Worker for \"{card_title}\" crashed {crash_count} times in a row. Last error: {snippet}"
+        ),
+        None => format!("Worker for \"{card_title}\" crashed {crash_count} times in a row."),
+    }
+}
+
+#[cfg(test)]
+mod auto_pause_tests {
+    use super::*;
+    use crate::db::Db;
+    use crate::db::models::{NewCard, NewFolder, NewProject, NewSession, UpdateCard};
+
+    #[test]
+    fn format_pause_reason_includes_title_and_count() {
+        let msg = format_pause_reason("Ship the thing", 2, None);
+        assert!(msg.contains("Ship the thing"));
+        assert!(msg.contains("2 times"));
+    }
+
+    #[test]
+    fn format_pause_reason_truncates_long_stderr() {
+        let long = "x".repeat(1000);
+        let msg = format_pause_reason("Card", 2, Some(&long));
+        // The "…" marker indicates truncation occurred.
+        assert!(msg.contains('…'));
+        assert!(msg.len() < long.len());
+    }
+
+    #[test]
+    fn format_pause_reason_omits_blank_stderr() {
+        let msg = format_pause_reason("Card", 2, Some("   "));
+        assert!(!msg.contains("Last error"));
+    }
+
+    /// Build the minimal DB state the auto-pause kernel walks: a folder,
+    /// a project ("active"), a card, and `crash_count` distinct worker
+    /// sessions each with an `agent-end` crash event whose `reason` is
+    /// supplied by the caller. Sessions are timestamped so the
+    /// `card_lifecycle_events` ordering is deterministic.
+    async fn setup_card_with_crashes(crashes: &[(&str, &str)]) -> (Db, String, String) {
+        let db = Db::in_memory().unwrap();
+        let ts = chrono::Utc::now().to_rfc3339();
+        db.create_folder(NewFolder {
+            id: "f1".into(),
+            name: "F".into(),
+            path: "/tmp".into(),
+            created_at: ts.clone(),
+        })
+        .await
+        .unwrap();
+        db.create_project(NewProject {
+            id: "p1".into(),
+            name: "P".into(),
+            context: "".into(),
+            folder_id: "f1".into(),
+            worker_count: 1,
+            status: "active".into(),
+            workflow: "task".into(),
+            model: Some("mock:crash".into()),
+            effort: None,
+            parallel_instructions: false,
+            auto_notify_changes: true,
+            worker_communication: false,
+            created_at: ts.clone(),
+            last_accessed_at: ts.clone(),
+        })
+        .await
+        .unwrap();
+        db.create_card(NewCard {
+            id: "c1".into(),
+            project_id: "p1".into(),
+            title: "Add auth".into(),
+            description: "".into(),
+            step: "in_progress".into(),
+            priority: 1,
+            workflow: "task".into(),
+            model: None,
+            effort: None,
+            created_at: ts.clone(),
+            updated_at: ts.clone(),
+        })
+        .await
+        .unwrap();
+
+        // Each crash gets its own session so the test mirrors production
+        // (every spawn allocates a fresh UUID). card_id links them all to
+        // c1 so `card_lifecycle_events` can join them back.
+        for (i, (reason, stderr)) in crashes.iter().enumerate() {
+            let sid = format!("ws{i}");
+            db.create_session(NewSession {
+                id: sid.clone(),
+                name: format!("worker-{i}"),
+                folder_id: "f1".into(),
+                model: Some("mock:crash".into()),
+                effort: None,
+                is_worker: true,
+                project_id: Some("p1".into()),
+                card_id: Some("c1".into()),
+                conversation_id: None,
+                created_at: ts.clone(),
+                last_activity: ts.clone(),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+            db.update_card(
+                "c1",
+                UpdateCard {
+                    last_worker_session_id: Some(Some(sid.clone())),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+            db.append_event(
+                &sid,
+                "agent-end",
+                serde_json::json!({
+                    "status": "crashed",
+                    "reason": reason,
+                    "stderr": stderr,
+                }),
+            )
+            .await
+            .unwrap();
+        }
+
+        (db, "c1".into(), "p1".into())
+    }
+
+    #[tokio::test]
+    async fn pauses_project_after_two_process_crashes() {
+        let (db, card_id, project_id) = setup_card_with_crashes(&[
+            ("process exited mid-turn (code 1)", "rate limit"),
+            ("process exited mid-turn (code 1)", "rate limit"),
+        ])
+        .await;
+
+        let paused = auto_pause_after_crash(&db, &card_id, Some("rate limit")).await;
+        assert!(paused, "kernel should report it flipped the project");
+
+        let project = db.get_project(&project_id).await.unwrap().unwrap();
+        assert_eq!(project.status, "paused");
+        let reason = project.pause_reason.expect("pause_reason set");
+        assert!(
+            reason.contains("Add auth"),
+            "card title in reason: {reason}"
+        );
+        assert!(
+            reason.contains("2 times"),
+            "crash count in reason: {reason}"
+        );
+        assert!(
+            reason.contains("rate limit"),
+            "stderr snippet in reason: {reason}"
+        );
+    }
+
+    #[tokio::test]
+    async fn does_not_pause_after_one_crash() {
+        let (db, card_id, project_id) =
+            setup_card_with_crashes(&[("process exited mid-turn (code 1)", "boom")]).await;
+        let paused = auto_pause_after_crash(&db, &card_id, None).await;
+        assert!(!paused);
+        let project = db.get_project(&project_id).await.unwrap().unwrap();
+        assert_eq!(project.status, "active");
+        assert!(project.pause_reason.is_none());
+    }
+
+    /// User cancellation and the startup repair both surface as crash
+    /// events but MUST NOT count — they aren't agent failures. Two
+    /// `interrupted` crashes followed by one real crash must NOT pause,
+    /// because the consecutive count is 1.
+    #[tokio::test]
+    async fn does_not_pause_on_excluded_reasons() {
+        let (db, card_id, project_id) = setup_card_with_crashes(&[
+            ("interrupted", ""),
+            ("server-shutdown", ""),
+            ("process exited mid-turn (code 1)", "boom"),
+        ])
+        .await;
+        let paused = auto_pause_after_crash(&db, &card_id, None).await;
+        assert!(!paused);
+        let project = db.get_project(&project_id).await.unwrap().unwrap();
+        assert_eq!(project.status, "active");
+    }
+
+    /// Two real crashes mixed with an "interrupted" between them still
+    /// hits the threshold — the interrupted one is skipped, leaving two
+    /// genuine consecutive crashes.
+    #[tokio::test]
+    async fn pauses_when_excluded_reason_is_interleaved() {
+        let (db, card_id, _) = setup_card_with_crashes(&[
+            ("process exited mid-turn (code 1)", "boom"),
+            ("interrupted", ""),
+            ("process exited mid-turn (code 1)", "boom"),
+        ])
+        .await;
+        let paused = auto_pause_after_crash(&db, &card_id, Some("boom")).await;
+        assert!(paused);
+    }
+
+    /// If the project was already paused (e.g. user paused manually, or
+    /// a different card auto-paused first), don't overwrite the
+    /// pre-existing reason.
+    #[tokio::test]
+    async fn does_not_overwrite_existing_pause_reason() {
+        let (db, card_id, project_id) = setup_card_with_crashes(&[
+            ("process exited mid-turn (code 1)", "boom"),
+            ("process exited mid-turn (code 1)", "boom"),
+        ])
+        .await;
+        // Manually pause first with a distinct reason.
+        db.update_project(
+            &project_id,
+            UpdateProject {
+                status: Some("paused".into()),
+                pause_reason: Some(Some("manual".into())),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+
+        let paused = auto_pause_after_crash(&db, &card_id, Some("boom")).await;
+        assert!(!paused, "should not re-pause an already-paused project");
+        let project = db.get_project(&project_id).await.unwrap().unwrap();
+        assert_eq!(project.pause_reason.as_deref(), Some("manual"));
+    }
 }

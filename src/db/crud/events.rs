@@ -78,6 +78,38 @@ impl Db {
         .await
     }
 
+    /// Lifecycle events across every session that has ever been assigned
+    /// to this card, ordered oldest-first by wall-clock `ts` (per-session
+    /// `seq` is monotonic only within a session so it can't order
+    /// cross-session events). Used by the auto-pause counter, which
+    /// recognizes three reset markers — `agent-end status=complete`,
+    /// `step-change`, and the resume sentinel `auto-pause-cleared`
+    /// (see `pipeline::PAUSE_CLEARED_KIND`).
+    pub async fn card_lifecycle_events(
+        &self,
+        card_id: &str,
+        limit: i64,
+    ) -> anyhow::Result<Vec<Event>> {
+        let card_id = card_id.to_string();
+        self.with_conn(move |conn| {
+            let mut rows: Vec<Event> = events::table
+                .inner_join(sessions::table.on(sessions::id.eq(events::session_id)))
+                .filter(sessions::card_id.eq(&card_id))
+                .filter(events::kind.eq_any([
+                    "agent-end",
+                    "step-change",
+                    crate::worker::pipeline::PAUSE_CLEARED_KIND,
+                ]))
+                .select(Event::as_select())
+                .order((events::ts.desc(), events::seq.desc()))
+                .limit(limit)
+                .load(conn)?;
+            rows.reverse();
+            Ok(rows)
+        })
+        .await
+    }
+
     pub async fn delete_events_by_session(&self, session_id: &str) -> anyhow::Result<usize> {
         let session_id = session_id.to_string();
         self.with_conn(move |conn| {

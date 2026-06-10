@@ -375,6 +375,12 @@ async fn update_project(
         None => None,
     };
 
+    // Generic PUT is also the path the KanbanBoard's "Resume" menu hits
+    // (it sends `{status: "active"}`). Treat any status flip to active as
+    // an implicit "I've acknowledged the auto-pause reason" and clear the
+    // banner so a stale message doesn't linger forever.
+    let clear_pause_reason = body.status.as_deref() == Some("active");
+
     let update = UpdateProject {
         name: body.name,
         context: body.context,
@@ -387,6 +393,7 @@ async fn update_project(
         auto_notify_changes: body.auto_notify_changes,
         worker_communication: body.worker_communication,
         last_accessed_at: Some(chrono::Utc::now().to_rfc3339()),
+        pause_reason: if clear_pause_reason { Some(None) } else { None },
     };
 
     let project = state.db.update_project(&id, update).await.map_err(|e| {
@@ -487,6 +494,11 @@ async fn pause_project(
         }
     }
 
+    state.broadcaster.broadcast(crate::ws::broadcaster::WsEvent {
+        event_type: "project-update".into(),
+        session_id: id,
+        data: serde_json::json!({ "project": &project }),
+    });
     Ok::<_, (StatusCode, Json<serde_json::Value>)>(Json(serde_json::json!(project)))
 }
 
@@ -496,11 +508,24 @@ async fn resume_project(
     Path(id): Path<String>,
 ) -> impl IntoResponse {
     tracing::info!(project_id = %id, "Resuming project");
+    // Clearing `pause_reason` on resume is required for the auto-pause
+    // path: it only fires when `project.status == "active"`, so a stale
+    // reason left behind from an earlier auto-pause would still show in
+    // the UI even after the user resumed.
     let update = UpdateProject {
         status: Some("active".to_string()),
         last_accessed_at: Some(chrono::Utc::now().to_rfc3339()),
+        pause_reason: Some(None),
         ..Default::default()
     };
+
+    // Reset the consecutive-crash counter for every card the user is
+    // about to retry. Without this, the next crash hits the threshold
+    // immediately (the old crash events are still on disk) and the
+    // user's manual retry budget collapses to one attempt.
+    if let Err(e) = crate::worker::orchestrator::mark_project_resumed(&state.db, &id).await {
+        tracing::warn!(project_id = %id, "Failed to mark resume sentinel: {e}");
+    }
 
     let project = state.db.update_project(&id, update).await.map_err(|e| {
         (
@@ -510,7 +535,14 @@ async fn resume_project(
     })?;
 
     match project {
-        Some(p) => Ok(Json(serde_json::json!(p))),
+        Some(p) => {
+            state.broadcaster.broadcast(crate::ws::broadcaster::WsEvent {
+                event_type: "project-update".into(),
+                session_id: id,
+                data: serde_json::json!({ "project": &p }),
+            });
+            Ok(Json(serde_json::json!(p)))
+        }
         None => Err((
             StatusCode::NOT_FOUND,
             Json(serde_json::json!({ "error": "project not found" })),

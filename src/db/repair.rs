@@ -29,6 +29,23 @@ pub fn ensure_schema(conn: &mut SqliteConnection) -> anyhow::Result<()> {
     ensure_sessions_pagination_indexes(conn)?;
     ensure_projects_workflow_column(conn)?;
     ensure_cards_workflow_column(conn)?;
+    ensure_projects_pause_reason_column(conn)?;
+    Ok(())
+}
+
+/// Heal DBs that predate `1781058245_projects_pause_reason`. The migration
+/// is a bare `ALTER TABLE … ADD COLUMN` (SQLite has no IF NOT EXISTS for
+/// that), so this detect-then-skip path is the only safe way to add the
+/// column to an older data dir. NULL-able with no backfill.
+fn ensure_projects_pause_reason_column(conn: &mut SqliteConnection) -> anyhow::Result<()> {
+    let existing = project_columns(conn)?;
+    if existing.is_empty() {
+        return Ok(());
+    }
+    if !existing.iter().any(|c| c == "pause_reason") {
+        tracing::info!("Repairing schema: adding projects.pause_reason");
+        sql_query("ALTER TABLE projects ADD COLUMN pause_reason TEXT").execute(conn)?;
+    }
     Ok(())
 }
 

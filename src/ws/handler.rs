@@ -235,7 +235,12 @@ async fn handle_connection(socket: WebSocket, state: Arc<AppState>) {
                     // Global events (card-update, announcement, queue) go to all clients
                     let is_global = matches!(
                         ws_event.event_type.as_str(),
-                        "card-update" | "card-delete" | "worker-question" | "announcement" | "queue"
+                        "card-update"
+                            | "card-delete"
+                            | "worker-question"
+                            | "announcement"
+                            | "queue"
+                            | "project-update"
                     );
 
                     let should_send = if is_global {
