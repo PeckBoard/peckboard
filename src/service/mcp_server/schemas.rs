@@ -710,6 +710,10 @@ pub(super) fn tool_definitions() -> Vec<McpToolDef> {
                     "supersedes_decision_id": {
                         "type": "string",
                         "description": "Id of an existing decision this one replaces. RESTRICTED: only the PM expert acting with explicit user authorization may supersede; all other callers are rejected."
+                    },
+                    "project_id": {
+                        "type": "string",
+                        "description": "Target project. Only used when the calling session has no project context (e.g. a plain chat session); a project-scoped session's own project is authoritative and a conflicting value is rejected."
                     }
                 },
                 "required": ["title", "decision"],
@@ -730,6 +734,10 @@ pub(super) fn tool_definitions() -> Vec<McpToolDef> {
                         "type": "array",
                         "items": { "type": "string" },
                         "description": "Optional keywords to narrow the returned decisions (matched case-insensitively against title and decision text)"
+                    },
+                    "project_id": {
+                        "type": "string",
+                        "description": "Target project. Only used when the calling session has no project context (e.g. a plain chat session); a project-scoped session's own project is authoritative and a conflicting value is rejected."
                     }
                 },
                 "required": ["planned_change"],

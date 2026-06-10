@@ -6,7 +6,10 @@
 //! - a worker's supersede attempt is rejected (ADD-only for workers),
 //! - pm_check_decisions returns active decisions, excludes superseded ones,
 //!   and carries the ask-the-PM-expert instruction,
-//! - the keyword filter narrows but never hides everything.
+//! - the keyword filter narrows but never hides everything,
+//! - project resolution: token scope is authoritative (a conflicting explicit
+//!   project_id is rejected); an unscoped caller (e.g. a plain chat session)
+//!   may pass an explicit project_id that must name an existing project.
 
 use std::sync::Arc;
 
@@ -55,6 +58,24 @@ async fn seed_worker(db: &Db, id: &str, folder_id: &str, project_id: &str) {
         model: Some("mock:happy-path".into()),
         is_worker: true,
         project_id: Some(project_id.into()),
+        created_at: ts.clone(),
+        last_activity: ts,
+        ..Default::default()
+    })
+    .await
+    .unwrap();
+}
+
+/// A plain chat session: not a worker, bound to no project.
+async fn seed_chat_session(db: &Db, id: &str, folder_id: &str) {
+    let ts = chrono::Utc::now().to_rfc3339();
+    db.create_session(NewSession {
+        id: id.into(),
+        name: format!("session {id}"),
+        folder_id: folder_id.into(),
+        model: Some("mock:happy-path".into()),
+        is_worker: false,
+        project_id: None,
         created_at: ts.clone(),
         last_activity: ts,
         ..Default::default()
@@ -306,21 +327,143 @@ async fn pm_check_decisions_keyword_filter_narrows_but_never_empties() {
 }
 
 #[tokio::test]
-async fn pm_tools_resolve_project_from_token_scope_only() {
-    // The project comes from the MCP token; an unscoped caller is rejected
-    // outright, and input cannot redirect a scoped caller (the schemas accept
-    // no project_id field at all).
+async fn pm_check_decisions_accepts_explicit_project_id_from_unscoped_session() {
+    // A plain chat session has no project context; an explicit project_id
+    // input is honoured as a fallback so it can consult the decision log.
     let db = Arc::new(Db::in_memory().unwrap());
     seed_project(&db, "p1", "f1").await;
+    seed_chat_session(&db, "chat-1", "f1").await;
+    let decision = db
+        .record_decision("p1", "Currency handling", "Integer cents only.", None)
+        .await
+        .unwrap();
+
+    let registry = McpToolRegistry::new();
+    let result = registry
+        .handle_tool_call(
+            "pm_check_decisions",
+            serde_json::json!({
+                "planned_change": "Refactor the payments module",
+                "project_id": "p1",
+            }),
+            &ctx(&db, "chat-1", None),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(result["status"], "ok");
+    assert_eq!(result["count"], 1);
+    assert_eq!(result["decisions"][0]["id"], decision.id.as_str());
+}
+
+#[tokio::test]
+async fn pm_record_decision_accepts_explicit_project_id_from_unscoped_session() {
+    let db = Arc::new(Db::in_memory().unwrap());
+    seed_project(&db, "p1", "f1").await;
+    seed_chat_session(&db, "chat-1", "f1").await;
+
+    let registry = McpToolRegistry::new();
+    let result = registry
+        .handle_tool_call(
+            "pm_record_decision",
+            serde_json::json!({
+                "project_id": "p1",
+                "title": "Currency handling",
+                "decision": "Integer cents only.",
+            }),
+            &ctx(&db, "chat-1", None),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(result["status"], "ok");
+    let stored = db.list_answered_pm_decisions("p1").await.unwrap();
+    assert_eq!(stored.len(), 1);
+    assert_eq!(stored[0].asked_by_session_id.as_deref(), Some("chat-1"));
+}
+
+#[tokio::test]
+async fn pm_tools_reject_explicit_project_id_conflicting_with_token_scope() {
+    // Token scope is authoritative: a caller scoped to p1 cannot redirect a
+    // PM tool to p2 via the input.
+    let db = Arc::new(Db::in_memory().unwrap());
+    seed_project(&db, "p1", "f1").await;
+    seed_project(&db, "p2", "f2").await;
     seed_worker(&db, "worker-1", "f1", "p1").await;
 
     let registry = McpToolRegistry::new();
     let err = registry
         .handle_tool_call(
             "pm_check_decisions",
-            serde_json::json!({ "planned_change": "anything" }),
-            &ctx(&db, "worker-1", None),
+            serde_json::json!({
+                "planned_change": "anything",
+                "project_id": "p2",
+            }),
+            &ctx(&db, "worker-1", Some("p1")),
         )
         .await;
-    assert!(err.is_err(), "unscoped caller must be rejected");
+    let msg = err.unwrap_err().to_string();
+    assert!(
+        msg.contains("p1") && msg.contains("p2"),
+        "conflict rejection must name both project ids, got: {msg}"
+    );
+
+    let err = registry
+        .handle_tool_call(
+            "pm_record_decision",
+            serde_json::json!({
+                "project_id": "p2",
+                "title": "Currency handling",
+                "decision": "Integer cents only.",
+            }),
+            &ctx(&db, "worker-1", Some("p1")),
+        )
+        .await;
+    assert!(err.is_err(), "scoped caller must not record into p2");
+    assert!(
+        db.list_answered_pm_decisions("p2")
+            .await
+            .unwrap()
+            .is_empty()
+    );
+}
+
+#[tokio::test]
+async fn pm_tools_reject_unknown_explicit_project_id() {
+    let db = Arc::new(Db::in_memory().unwrap());
+    seed_project(&db, "p1", "f1").await;
+    seed_chat_session(&db, "chat-1", "f1").await;
+
+    let registry = McpToolRegistry::new();
+    let err = registry
+        .handle_tool_call(
+            "pm_check_decisions",
+            serde_json::json!({
+                "planned_change": "anything",
+                "project_id": "no-such-project",
+            }),
+            &ctx(&db, "chat-1", None),
+        )
+        .await;
+    let msg = err.unwrap_err().to_string();
+    assert!(msg.contains("not found"), "got: {msg}");
+}
+
+#[tokio::test]
+async fn pm_tools_reject_caller_with_neither_scope_nor_explicit_project_id() {
+    // No token scope and no explicit project_id: still rejected outright.
+    let db = Arc::new(Db::in_memory().unwrap());
+    seed_project(&db, "p1", "f1").await;
+    seed_chat_session(&db, "chat-1", "f1").await;
+
+    let registry = McpToolRegistry::new();
+    let err = registry
+        .handle_tool_call(
+            "pm_check_decisions",
+            serde_json::json!({ "planned_change": "anything" }),
+            &ctx(&db, "chat-1", None),
+        )
+        .await;
+    let msg = err.unwrap_err().to_string();
+    assert!(msg.contains("project_id required"), "got: {msg}");
 }

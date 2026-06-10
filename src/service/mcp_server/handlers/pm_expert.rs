@@ -15,6 +15,11 @@
 //! (non-superseded) decision set straight from the DB and returns it, so a
 //! worker can self-check a planned change without blocking on any expert.
 //!
+//! Both tools resolve their project from the MCP token's scope first; an
+//! explicit `project_id` input is honoured only when the calling session has
+//! no project context (e.g. a plain chat session), so chat sessions can
+//! consult and append to a project's decision log too.
+//!
 //! `pm_escalate_to_user` is callable ONLY by the project's PM expert: it
 //! parks a question the PM cannot answer from recorded decisions as a
 //! pending row (`pending_count > 0` is the waiting-for-user state the
@@ -24,7 +29,7 @@ use serde_json::{Value, json};
 
 use super::super::McpToolRegistry;
 use crate::db::models::PmDecision;
-use crate::service::mcp_server::context::ToolCallContext;
+use crate::service::mcp_server::context::{ScopedProjectId, ToolCallContext};
 
 fn required_str<'a>(args: &'a Value, field: &str, tool: &str) -> anyhow::Result<&'a str> {
     args.get(field)
@@ -32,6 +37,34 @@ fn required_str<'a>(args: &'a Value, field: &str, tool: &str) -> anyhow::Result<
         .map(str::trim)
         .filter(|s| !s.is_empty())
         .ok_or_else(|| anyhow::anyhow!("{tool} requires a non-empty '{field}'"))
+}
+
+/// Resolve the project for `pm_record_decision` / `pm_check_decisions`.
+/// The session's project scope (from the MCP token) is authoritative —
+/// `scope_project` rejects an explicit `project_id` that conflicts with it.
+/// The explicit input is honoured only as a fallback for sessions with no
+/// project context (e.g. plain chat sessions), and must name an existing
+/// project. `pm_escalate_to_user` deliberately does NOT use this: it stays
+/// token-scope-only.
+async fn resolve_pm_project(
+    args: &Value,
+    ctx: &ToolCallContext,
+) -> anyhow::Result<ScopedProjectId> {
+    let explicit = args
+        .get("project_id")
+        .and_then(|v| v.as_str())
+        .map(str::trim)
+        .filter(|s| !s.is_empty());
+
+    if ctx.project_id.is_none()
+        && let Some(p) = explicit
+    {
+        ctx.db
+            .get_project(p)
+            .await?
+            .ok_or_else(|| anyhow::anyhow!("project not found: {p}"))?;
+    }
+    ctx.scope_project(explicit)
 }
 
 /// The shape both tools return per decision: `title` is the stored question,
@@ -64,8 +97,9 @@ impl McpToolRegistry {
             .map(str::trim)
             .filter(|s| !s.is_empty());
 
-        // Project scope comes from the MCP token only — never from input.
-        let project = ctx.scope_project(None)?;
+        // Token scope is authoritative; explicit project_id is only a
+        // fallback for sessions with no project context.
+        let project = resolve_pm_project(&args, ctx).await?;
         let pm_expert_id = crate::service::pm_expert::project_pm_expert_id(project.as_str());
         let caller_is_pm_expert = ctx.session_id == pm_expert_id;
 
@@ -192,8 +226,9 @@ impl McpToolRegistry {
             })
             .unwrap_or_default();
 
-        // Project scope comes from the MCP token only — never from input.
-        let project = ctx.scope_project(None)?;
+        // Token scope is authoritative; explicit project_id is only a
+        // fallback for sessions with no project context.
+        let project = resolve_pm_project(&args, ctx).await?;
 
         tracing::info!(
             session_id = %ctx.session_id,
