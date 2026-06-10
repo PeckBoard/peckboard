@@ -27,7 +27,7 @@ pub(super) struct UpdateCardRequest {
     description: Option<String>,
     step: Option<String>,
     priority: Option<i32>,
-    workflow: Option<Option<String>>,
+    workflow: Option<String>,
     model: Option<Option<String>>,
     effort: Option<Option<String>>,
     worker_session_id: Option<Option<String>>,
@@ -77,7 +77,11 @@ pub(super) async fn create_card(
         ));
     }
 
-    // Verify project exists
+    // Verify project exists. We also need its workflow as the bake-in
+    // default when the request doesn't name one explicitly: cards now
+    // store a concrete workflow id at create time rather than deferring
+    // resolution to read time, so a project workflow change later won't
+    // silently re-route an existing card's step order.
     let project = state.db.get_project(&project_id).await.map_err(|e| {
         (
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -85,12 +89,31 @@ pub(super) async fn create_card(
         )
     })?;
 
-    if project.is_none() {
-        return Err((
-            StatusCode::NOT_FOUND,
-            Json(serde_json::json!({ "error": "project not found" })),
-        ));
-    }
+    let project = match project {
+        Some(p) => p,
+        None => {
+            return Err((
+                StatusCode::NOT_FOUND,
+                Json(serde_json::json!({ "error": "project not found" })),
+            ));
+        }
+    };
+
+    // Resolve the card's workflow once, at create time. If the client
+    // sent a non-empty id we validate it against the registry; otherwise
+    // we copy the project's workflow into the card.
+    let workflow = match body.workflow.as_deref().map(str::trim) {
+        Some(id) if !id.is_empty() => {
+            if crate::workflow::workflow_by_id(id).is_none() {
+                return Err((
+                    StatusCode::BAD_REQUEST,
+                    Json(serde_json::json!({ "error": format!("unknown workflow id '{id}'") })),
+                ));
+            }
+            id.to_string()
+        }
+        _ => project.workflow.clone(),
+    };
 
     let now = chrono::Utc::now().to_rfc3339();
     let id = uuid::Uuid::new_v4().to_string();
@@ -104,7 +127,7 @@ pub(super) async fn create_card(
             description: body.description,
             step: body.step,
             priority: body.priority,
-            workflow: body.workflow,
+            workflow,
             model: body.model,
             effort: body.effort,
             created_at: now.clone(),
@@ -206,6 +229,26 @@ pub(super) async fn update_card(
                 ),
             ));
         }
+    }
+
+    // Validate workflow id up front if the client is changing it. A
+    // card's workflow is NOT NULL at the schema level, so an explicit
+    // clear or an unknown id is rejected.
+    if let Some(ref wf) = body.workflow {
+        let trimmed = wf.trim();
+        if trimmed.is_empty() {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({ "error": "workflow is required" })),
+            ));
+        }
+        if crate::workflow::workflow_by_id(trimmed).is_none() {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({ "error": format!("unknown workflow id '{trimmed}'") })),
+            ));
+        }
+        body.workflow = Some(trimmed.to_string());
     }
 
     // Hook: card.update.before

@@ -147,7 +147,7 @@ async fn seed(state: &AppState) {
             description: "".into(),
             step: "backlog".into(),
             priority: 1,
-            workflow: None,
+            workflow: "task".into(),
             model: None,
             effort: None,
             created_at: ts.clone(),

@@ -377,9 +377,10 @@ async fn spawn_worker_for_card(
         )
         .await;
 
-    // 5. Build worker prompt
-    let workflow_steps =
-        crate::workflow::steps_for(card.workflow.as_deref().or(Some(&project.workflow)));
+    // 5. Build worker prompt. The card's workflow is baked in at create
+    // time, so it always carries a concrete id and the per-step prompt
+    // doesn't need to consult the project as a fallback.
+    let workflow_steps = crate::workflow::steps_for(Some(&card.workflow));
     // In-scope experts (project + global) so the worker can consult them.
     // A lookup failure here must not block the spawn — degrade to none.
     let experts = match state.db.list_expert_sessions_by_scope(&project.id).await {
@@ -530,16 +531,11 @@ pub async fn handle_worker_done(state: &Arc<AppState>, session_id: &str) {
             // lands on `done` from any step) via the prompt + tool-description
             // disambiguation in build_worker_prompt / schemas.rs.
             //
-            // Resolve the card's own workflow (falling back to the project
-            // default, then the built-in default) so `complete_step` walks the
-            // configured steps — not a hardcoded list that would skip e.g.
-            // research's `research`/`summarize` stages.
-            let project = state.db.get_project(&project_id).await.ok().flatten();
-            let workflow_steps = crate::workflow::steps_for(
-                card.workflow
-                    .as_deref()
-                    .or(project.as_ref().map(|p| p.workflow.as_str())),
-            );
+            // The card's workflow is baked in at create time, so we read
+            // it directly — no project lookup needed — to walk the
+            // configured steps. Without this, `complete_step` would skip
+            // e.g. research's `research`/`summarize` stages.
+            let workflow_steps = crate::workflow::steps_for(Some(&card.workflow));
 
             if let Some(next_step) = pipeline::find_next_step(&card.step, &workflow_steps) {
                 // Advance step

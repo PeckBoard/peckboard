@@ -28,6 +28,7 @@ pub fn ensure_schema(conn: &mut SqliteConnection) -> anyhow::Result<()> {
     ensure_repeating_tasks_schema(conn)?;
     ensure_sessions_pagination_indexes(conn)?;
     ensure_projects_workflow_column(conn)?;
+    ensure_cards_workflow_column(conn)?;
     Ok(())
 }
 
@@ -376,6 +377,90 @@ fn ensure_projects_worker_communication_columns(conn: &mut SqliteConnection) -> 
     Ok(())
 }
 
+/// Heal DBs that predate `1781054693_cards_workflow_required`. That
+/// migration renames the legacy nullable `cards.workflow` column to
+/// `workflow_legacy` and adds a NOT NULL `workflow` column with a
+/// per-row backfill (card legacy value → owning project's workflow →
+/// 'task'). Neither rename nor ADD COLUMN can be made idempotent in
+/// SQLite, so the detect-then-skip path is the only safe way to apply
+/// this to an older data dir.
+fn ensure_cards_workflow_column(conn: &mut SqliteConnection) -> anyhow::Result<()> {
+    let cols: Vec<(String, bool)> = sql_query(
+        "SELECT name AS name, CAST(\"notnull\" AS INTEGER) AS not_null \
+         FROM pragma_table_info('cards')",
+    )
+    .load::<NotNullColumn>(conn)?
+    .into_iter()
+    .map(|c| (c.name, c.not_null != 0))
+    .collect();
+    if cols.is_empty() {
+        return Ok(());
+    }
+    let has = |n: &str| cols.iter().any(|(name, _)| name == n);
+    let workflow_not_null = cols
+        .iter()
+        .find(|(name, _)| name == "workflow")
+        .map(|(_, nn)| *nn)
+        .unwrap_or(false);
+
+    // Healthy: the migration has run, `workflow` exists with NOT NULL,
+    // and the legacy column is preserved alongside.
+    if has("workflow") && workflow_not_null && has("workflow_legacy") {
+        return Ok(());
+    }
+
+    // Decide what to add and whether to backfill. The backfill only runs
+    // when we touch the schema — on a healthy DB we exit above without
+    // ever rewriting the live `workflow` values.
+    let mut needs_backfill = false;
+    if has("workflow_legacy") && !has("workflow") {
+        // Resumed mid-state from a crash between RENAME and ADD COLUMN.
+        sql_query("ALTER TABLE cards ADD COLUMN workflow TEXT NOT NULL DEFAULT 'task'")
+            .execute(conn)?;
+        needs_backfill = true;
+    } else if !has("workflow_legacy") && has("workflow") && !workflow_not_null {
+        // Legacy schema: nullable `workflow` only. Rename + add + backfill.
+        tracing::info!("Repairing schema: renaming cards.workflow → workflow_legacy");
+        sql_query("ALTER TABLE cards RENAME COLUMN workflow TO workflow_legacy").execute(conn)?;
+        sql_query("ALTER TABLE cards ADD COLUMN workflow TEXT NOT NULL DEFAULT 'task'")
+            .execute(conn)?;
+        needs_backfill = true;
+    } else if !has("workflow") {
+        // Cards table predates having a workflow column at all (vanishingly
+        // rare). Additive ADD is safe; no legacy values to backfill from.
+        sql_query("ALTER TABLE cards ADD COLUMN workflow TEXT NOT NULL DEFAULT 'task'")
+            .execute(conn)?;
+        needs_backfill = true;
+    }
+
+    if needs_backfill {
+        // Prefer the card's legacy value, fall back to the owning project's
+        // workflow, then 'task'. Only rows that landed on the ADD COLUMN
+        // default ('task') get re-evaluated; if a legitimate post-heal write
+        // already set the value, we wouldn't be here (healthy-path early
+        // exit catches that).
+        sql_query(
+            "UPDATE cards
+                SET workflow = COALESCE(
+                    NULLIF(workflow_legacy, ''),
+                    (SELECT workflow FROM projects WHERE projects.id = cards.project_id),
+                    'task'
+                )",
+        )
+        .execute(conn)?;
+    }
+
+    Ok(())
+}
+
+#[derive(QueryableByName, Debug)]
+struct NotNullColumn {
+    #[diesel(sql_type = diesel::sql_types::Text)]
+    name: String,
+    #[diesel(sql_type = diesel::sql_types::Integer)]
+    not_null: i32,
+}
+
 /// Heal DBs that predate `1781053574_projects_workflow_required`. That
 /// migration is a bare `ALTER TABLE … ADD COLUMN` plus a backfill UPDATE;
 /// ADD COLUMN cannot be made idempotent in SQLite, so this detect-then-skip
@@ -714,6 +799,99 @@ mod tests {
         assert_eq!(by_id["p_set"], "research");
 
         // Second call must be a no-op.
+        ensure_schema(&mut conn).unwrap();
+    }
+
+    /// A DB that predates `1781054693_cards_workflow_required` has a
+    /// `cards` table with a nullable `workflow` column. ensure_schema
+    /// must rename it to `workflow_legacy`, add a NOT NULL `workflow`
+    /// column, and backfill per row: card's own legacy value if set,
+    /// then the owning project's workflow, then 'task'.
+    #[test]
+    fn ensure_schema_adds_cards_workflow_with_per_card_backfill() {
+        let mut conn = SqliteConnection::establish(":memory:").unwrap();
+
+        // Minimal projects table — the heal's `(SELECT workflow FROM
+        // projects WHERE projects.id = cards.project_id)` subquery
+        // needs the table to exist with a workflow column.
+        sql_query(
+            "CREATE TABLE projects (
+                id TEXT PRIMARY KEY NOT NULL,
+                auto_notify_changes BOOLEAN NOT NULL DEFAULT 1,
+                worker_communication BOOLEAN NOT NULL DEFAULT 1,
+                workflow TEXT NOT NULL DEFAULT 'task'
+            )",
+        )
+        .execute(&mut conn)
+        .unwrap();
+        sql_query(
+            "INSERT INTO projects (id, workflow) VALUES \
+             ('p_task', 'task'), \
+             ('p_research', 'research')",
+        )
+        .execute(&mut conn)
+        .unwrap();
+
+        // Pre-migration `cards` shape with a nullable workflow. `step`,
+        // `updated_at`, and `completed_at` exist because the
+        // ensure_cards_completed_at_column heal runs first and reads
+        // them; we're not testing that path here.
+        sql_query(
+            "CREATE TABLE cards (
+                id TEXT PRIMARY KEY NOT NULL,
+                project_id TEXT NOT NULL,
+                step TEXT NOT NULL DEFAULT 'backlog',
+                workflow TEXT,
+                updated_at TEXT NOT NULL DEFAULT '',
+                completed_at TEXT
+            )",
+        )
+        .execute(&mut conn)
+        .unwrap();
+        sql_query(
+            "INSERT INTO cards (id, project_id, workflow) VALUES \
+             ('c_own', 'p_task', 'breakdown'), \
+             ('c_inherit_research', 'p_research', NULL), \
+             ('c_inherit_task', 'p_task', NULL), \
+             ('c_empty', 'p_research', '')",
+        )
+        .execute(&mut conn)
+        .unwrap();
+
+        ensure_schema(&mut conn).unwrap();
+
+        // Both columns must now exist: new NOT NULL `workflow` and the
+        // preserved `workflow_legacy`.
+        let rows: Vec<PragmaColumn> = sql_query("PRAGMA table_info(cards)")
+            .load(&mut conn)
+            .unwrap();
+        let names: Vec<String> = rows.into_iter().map(|r| r.name).collect();
+        assert!(names.iter().any(|n| n == "workflow"));
+        assert!(names.iter().any(|n| n == "workflow_legacy"));
+
+        #[derive(QueryableByName)]
+        struct Row {
+            #[diesel(sql_type = diesel::sql_types::Text)]
+            id: String,
+            #[diesel(sql_type = diesel::sql_types::Text)]
+            workflow: String,
+        }
+        let rows: Vec<Row> = sql_query("SELECT id, workflow FROM cards ORDER BY id")
+            .load(&mut conn)
+            .unwrap();
+        let by_id: std::collections::HashMap<_, _> = rows
+            .iter()
+            .map(|r| (r.id.as_str(), r.workflow.as_str()))
+            .collect();
+        // Own value wins, regardless of the project's workflow.
+        assert_eq!(by_id["c_own"], "breakdown");
+        // Null legacy inherits from the project.
+        assert_eq!(by_id["c_inherit_research"], "research");
+        assert_eq!(by_id["c_inherit_task"], "task");
+        // Empty-string legacy is treated the same as null and inherits.
+        assert_eq!(by_id["c_empty"], "research");
+
+        // Second call must be a no-op (healthy-path early exit).
         ensure_schema(&mut conn).unwrap();
     }
 }

@@ -117,7 +117,11 @@ export default function CardFormModal(props: CardFormProps) {
         }
         if (isBacklog) {
           updates.description = description.trim()
-          updates.workflow = workflow || null
+          // card.workflow is NOT NULL — when the picker is set to the
+          // inherit option (empty string), resolve to the project's
+          // workflow id rather than sending an empty value the backend
+          // would reject.
+          updates.workflow = workflow || project?.workflow
         }
         await updateCard(projectId, card!.id, updates)
       }

@@ -116,7 +116,13 @@ async fn seed_card_with_worker(
             description: "desc".into(),
             step: step.into(),
             priority: 1,
-            workflow: card_workflow.map(str::to_string),
+            // Mirror the HTTP create_card bake-in: if the caller doesn't
+            // name a card workflow, copy the project's. card.workflow is
+            // NOT NULL.
+            workflow: card_workflow
+                .or(project_default)
+                .unwrap_or("task")
+                .to_string(),
             model: None,
             effort: None,
             created_at: ts.clone(),

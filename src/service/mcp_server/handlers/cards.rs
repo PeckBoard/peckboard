@@ -127,10 +127,25 @@ impl McpToolRegistry {
 
         let priority = args.get("priority").and_then(|v| v.as_i64()).unwrap_or(3) as i32;
 
-        let workflow = args
-            .get("workflow")
-            .and_then(|v| v.as_str())
-            .map(|s| s.to_string());
+        // A card's workflow is baked in at create time. If the caller
+        // names one we validate it; otherwise we copy the project's
+        // workflow into the card so the schema's NOT NULL constraint is
+        // always satisfied and the card doesn't shift if the project's
+        // workflow is changed later.
+        let project = ctx
+            .db
+            .get_project(project_id)
+            .await?
+            .ok_or_else(|| anyhow::anyhow!("project not found: {project_id}"))?;
+        let workflow = match args.get("workflow").and_then(|v| v.as_str()).map(str::trim) {
+            Some(w) if !w.is_empty() => {
+                if crate::workflow::workflow_by_id(w).is_none() {
+                    anyhow::bail!("unknown workflow id '{w}'");
+                }
+                w.to_string()
+            }
+            _ => project.workflow.clone(),
+        };
         let model = args
             .get("model")
             .and_then(|v| v.as_str())

@@ -13,12 +13,11 @@ pub fn build_worker_prompt(
     handoff_context: Option<&str>,
     experts: &[Session],
 ) -> String {
-    // Per-step instructions come from the workflow registry. The workflow id
-    // is resolved with the same precedence the orchestrator uses (card,
-    // project, default), so the prompt's marching orders match the
-    // step-advance behaviour.
-    let workflow_id = card.workflow.as_deref().or(Some(&project.workflow));
-    let step_instructions = crate::workflow::step_instructions(workflow_id, step);
+    // Per-step instructions come from the workflow registry. The card's
+    // workflow is baked in at create time (NOT NULL), so it's always set
+    // and the orchestrator's step list, this prompt, and `complete_step`
+    // all read from the same id.
+    let step_instructions = crate::workflow::step_instructions(Some(&card.workflow), step);
     let mut prompt = String::new();
 
     // Project name is user-controlled; treat it as untrusted data, not
@@ -53,11 +52,9 @@ pub fn build_worker_prompt(
     prompt.push_str(&fence("card.description", &card.description));
     prompt.push_str("\n\n");
 
-    if let Some(workflow) = &card.workflow {
-        prompt.push_str("**Workflow:** ");
-        prompt.push_str(workflow);
-        prompt.push_str("\n\n");
-    }
+    prompt.push_str("**Workflow:** ");
+    prompt.push_str(&card.workflow);
+    prompt.push_str("\n\n");
 
     // The ordered workflow steps, the current step, and the terminal step are
     // all derived from our own controlled pipeline (not user input), so they
@@ -410,7 +407,7 @@ mod tests {
             description: "Add JWT-based authentication.".into(),
             step: "in-progress".into(),
             priority: 1,
-            workflow: Some("default".into()),
+            workflow: "task".into(),
             model: None,
             effort: None,
             worker_session_id: None,

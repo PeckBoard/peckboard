@@ -79,7 +79,7 @@ diesel::table! {
         description -> Text,
         step -> Text,
         priority -> Integer,
-        workflow -> Nullable<Text>,
+        workflow -> Text,
         model -> Nullable<Text>,
         effort -> Nullable<Text>,
         worker_session_id -> Nullable<Text>,

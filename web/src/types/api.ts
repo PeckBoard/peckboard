@@ -80,7 +80,7 @@ export interface Card {
   description: string
   step: string
   priority: number
-  workflow: string | null
+  workflow: string
   model: string | null
   effort: string | null
   worker_session_id: string | null
