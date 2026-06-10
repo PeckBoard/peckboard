@@ -64,6 +64,9 @@ impl ExpertDispatcher for AppExpertDispatcher {
                 timeout_ms: None,
                 metadata: serde_json::json!({ "expert": true, "capture": true }),
                 system_prompt_suffix: None,
+                // Knowledge-expert capture; the manager flips this on only for
+                // question-experts anyway, but be explicit.
+                restrict_to_qa: false,
             };
 
             let lock = state.session_manager.lock_session(expert_session_id).await;

@@ -766,6 +766,13 @@
   border: 1px solid var(--border);
   border-radius: var(--radius-md);
 }
+.expert-row-clickable {
+  cursor: pointer;
+  transition: border-color 0.12s ease;
+}
+.expert-row-clickable:hover {
+  border-color: var(--accent, var(--border));
+}
 .expert-row-head {
   display: flex;
   align-items: center;

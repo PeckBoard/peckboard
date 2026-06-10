@@ -29,10 +29,31 @@ function kindLabel(kind: string | null): string {
   return 'Expert'
 }
 
-function ExpertRow({ expert, projectLabel }: { expert: Expert; projectLabel: string }) {
+function ExpertRow({
+  expert,
+  projectLabel,
+  onOpen,
+}: {
+  expert: Expert
+  projectLabel: string
+  onOpen: (id: string) => void
+}) {
   const kind = expert.expert_kind
   return (
-    <div className="expert-row" data-testid="expert-row" data-expert-kind={kind ?? 'expert'}>
+    <div
+      className="expert-row expert-row-clickable"
+      data-testid="expert-row"
+      data-expert-kind={kind ?? 'expert'}
+      role="button"
+      tabIndex={0}
+      onClick={() => onOpen(expert.id)}
+      onKeyDown={(e) => {
+        if (e.key === 'Enter' || e.key === ' ') {
+          e.preventDefault()
+          onOpen(expert.id)
+        }
+      }}
+    >
       <div className="expert-row-head">
         <span className="expert-name">{expert.name}</span>
         <span className={`expert-kind-badge expert-kind-${kind ?? 'expert'}`}>
@@ -58,7 +79,7 @@ function ExpertRow({ expert, projectLabel }: { expert: Expert; projectLabel: str
   )
 }
 
-export default function ExpertsView() {
+export default function ExpertsView({ onOpenExpert }: { onOpenExpert: (id: string) => void }) {
   const experts = useSessionsStore((s) => s.experts)
   const expertsLoaded = useSessionsStore((s) => s.expertsLoaded)
   const fetchExperts = useSessionsStore((s) => s.fetchExperts)
@@ -133,6 +154,7 @@ export default function ExpertsView() {
                 <ExpertRow
                   key={expert.id}
                   expert={expert}
+                  onOpen={onOpenExpert}
                   projectLabel={
                     expert.project_id ? (projectName.get(expert.project_id) ?? 'Project') : 'Global'
                   }

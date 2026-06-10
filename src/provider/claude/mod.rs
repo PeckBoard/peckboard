@@ -155,6 +155,22 @@ Resolved user answers are automatically fed back to the question expert, so each
 You are restricted to the current working directory and its subdirectories. Do NOT read, write, edit, or access any files or directories outside of this project folder. Any attempt to access paths outside the project directory will be denied. All file paths must be within the project root.
 "#;
 
+/// Extra system prompt appended ONLY for a question-expert
+/// (`SpawnConfig::restrict_to_qa`). It runs in answer-only mode: its code,
+/// filesystem, shell, and web tools are disabled at the CLI layer (see
+/// `build_cli_args`), and this prompt tells it to behave accordingly.
+const QUESTION_EXPERT_SYSTEM_PROMPT: &str = r#"
+# You Are a Question Expert (Answer-Only Mode)
+
+You are a long-lived "question expert." Your ONLY job is to answer questions from the knowledge you have already accumulated in THIS conversation — the answers the user has given over time. You exist so that other sessions (and the user) don't have to re-answer something the user already decided.
+
+Hard rules — these are not optional:
+- Answer ONLY from your accumulated conversation / Q&A history. Do NOT investigate, explore, or look anything up.
+- You have NO access to the codebase, the filesystem, the web, or a shell. Those tools are disabled for you. Do not attempt to read or search files, run commands, or fetch URLs — the attempts will fail.
+- If you do not already know the answer from a prior user answer, say so plainly (e.g. "I don't have a recorded answer for that yet"). Do not guess and do not try to derive it from the code. The asking session will fall back to the human, whose answer will then be recorded with you for next time.
+- When another session consults you (you'll see an "Expert consultation request"), reply by calling `mcp__peckboard__ask_expert` with `reply_to_session_id` set to the asking session and `answer` set to your reply. That is the only tool you need.
+"#;
+
 /// Discover available Claude models.
 pub(crate) fn discover_models() -> Vec<ModelInfo> {
     let mut models = vec![
@@ -237,16 +253,34 @@ pub(crate) fn discover_models() -> Vec<ModelInfo> {
 /// stdin), so there is no positional argument to worry about. Both
 /// properties are exercised by the regression tests below.
 pub fn build_cli_args(config: &SpawnConfig, conversation_id: Option<&str>) -> Vec<String> {
-    // Concatenate the standing Peckboard system prompt with any
-    // per-spawn suffix (used by e.g. repeating tasks) into a single
-    // --append-system-prompt flag value. Claude's CLI takes only one
-    // --append-system-prompt, so combining them here keeps the wiring
-    // tidy and avoids relying on flag-multiplicity behaviour.
-    let combined_system_prompt = match config.system_prompt_suffix.as_deref() {
-        Some(suffix) if !suffix.is_empty() => {
-            format!("{PECKBOARD_SYSTEM_PROMPT}\n{suffix}")
-        }
-        _ => PECKBOARD_SYSTEM_PROMPT.to_string(),
+    // Build the single --append-system-prompt value. Claude's CLI takes only
+    // one such flag, so we fold three sources into it: the standing Peckboard
+    // prompt, the answer-only prompt for a question-expert, and any per-spawn
+    // suffix (e.g. repeating tasks).
+    let mut combined_system_prompt = PECKBOARD_SYSTEM_PROMPT.to_string();
+    if config.restrict_to_qa {
+        combined_system_prompt.push('\n');
+        combined_system_prompt.push_str(QUESTION_EXPERT_SYSTEM_PROMPT);
+    }
+    if let Some(suffix) = config.system_prompt_suffix.as_deref()
+        && !suffix.is_empty()
+    {
+        combined_system_prompt.push('\n');
+        combined_system_prompt.push_str(suffix);
+    }
+
+    // `--disallowedTools` is a hard denylist that overrides
+    // `--dangerously-skip-permissions`, so it's the real enforcement point.
+    // AskUserQuestion is denied for every session (it doesn't work headless).
+    // A question-expert additionally has every code/filesystem/shell/web tool
+    // denied — including the web-capable `fetch_url` MCP tool — so it cannot
+    // read the codebase or crawl the web; it may only answer from memory.
+    let disallowed = if config.restrict_to_qa {
+        "AskUserQuestion,Bash,BashOutput,KillShell,Read,Write,Edit,MultiEdit,\
+         NotebookEdit,NotebookRead,Glob,Grep,LS,WebFetch,WebSearch,Task,TodoWrite,\
+         mcp__peckboard__fetch_url"
+    } else {
+        "AskUserQuestion"
     };
 
     let mut args = vec![
@@ -255,9 +289,7 @@ pub fn build_cli_args(config: &SpawnConfig, conversation_id: Option<&str>) -> Ve
         "--output-format=stream-json".to_string(),
         "--verbose".to_string(),
         format!("--append-system-prompt={combined_system_prompt}"),
-        // Block the built-in AskUserQuestion tool — it doesn't work in headless
-        // mode. The agent must use mcp__peckboard__ask_user instead.
-        "--disallowedTools=AskUserQuestion".to_string(),
+        format!("--disallowedTools={disallowed}"),
     ];
 
     if config.model != "default" {
@@ -284,8 +316,10 @@ pub fn build_cli_args(config: &SpawnConfig, conversation_id: Option<&str>) -> Ve
     if let Some(mcp_path) = &config.mcp_config_path {
         args.push(format!("--mcp-config={mcp_path}"));
 
-        // Tell Claude which MCP tools are allowed
-        let mcp_tools = [
+        // Tell Claude which MCP tools are allowed. A question-expert only ever
+        // needs to reply to consulting sessions, so it gets `ask_expert` and
+        // nothing else.
+        let full_mcp_tools = [
             "create_card",
             "list_projects",
             "list_workflows",
@@ -320,6 +354,11 @@ pub fn build_cli_args(config: &SpawnConfig, conversation_id: Option<&str>) -> Ve
             "list_worker_sessions",
             "list_models",
         ];
+        let mcp_tools: &[&str] = if config.restrict_to_qa {
+            &["ask_expert"]
+        } else {
+            &full_mcp_tools
+        };
         let allowed: Vec<String> = mcp_tools
             .iter()
             .map(|t| format!("mcp__peckboard__{t}"))
@@ -384,6 +423,7 @@ mod tests {
             timeout_ms: None,
             metadata: serde_json::Value::Null,
             system_prompt_suffix: None,
+            restrict_to_qa: false,
         }
     }
 
@@ -458,6 +498,7 @@ mod tests {
             timeout_ms: None,
             metadata: serde_json::Value::Null,
             system_prompt_suffix: None,
+            restrict_to_qa: false,
         };
 
         let args = build_cli_args(&config, Some("conv-123"));
@@ -465,6 +506,73 @@ mod tests {
         assert!(args.contains(&"--effort=high".to_string()));
         assert!(args.contains(&"--mcp-config=/tmp/mcp.json".to_string()));
         assert!(args.contains(&"--permission-prompt-tool=stdio".to_string()));
+    }
+
+    #[test]
+    fn test_build_cli_args_question_expert_is_answer_only() {
+        // A question-expert (restrict_to_qa) must have every code/web/shell
+        // tool denied and its MCP surface narrowed to just ask_expert, so it
+        // can only answer from its accumulated conversation.
+        let config = SpawnConfig {
+            mcp_config_path: Some("/tmp/mcp.json".into()),
+            restrict_to_qa: true,
+            ..default_spawn("claude-opus-4-8")
+        };
+        let args = build_cli_args(&config, None);
+
+        let disallowed = args
+            .iter()
+            .find(|a| a.starts_with("--disallowedTools="))
+            .expect("disallowedTools present");
+        for denied in [
+            "Read",
+            "Write",
+            "Edit",
+            "Bash",
+            "Glob",
+            "Grep",
+            "WebFetch",
+            "WebSearch",
+            "Task",
+            "mcp__peckboard__fetch_url",
+        ] {
+            assert!(
+                disallowed.contains(denied),
+                "question-expert must deny {denied}; got: {disallowed}"
+            );
+        }
+
+        // MCP allowlist is exactly ask_expert — no code/report/web tools.
+        let allowed = args
+            .iter()
+            .find(|a| a.starts_with("--allowedTools="))
+            .expect("allowedTools present");
+        assert_eq!(allowed, "--allowedTools=mcp__peckboard__ask_expert");
+
+        // The answer-only system prompt is appended on top of the base one.
+        assert!(
+            args.iter()
+                .any(|a| a.contains("You Are a Question Expert (Answer-Only Mode)")),
+            "answer-only system prompt must be appended"
+        );
+    }
+
+    #[test]
+    fn test_build_cli_args_plain_session_keeps_full_toolset() {
+        // A non-restricted session keeps the full MCP allowlist and only the
+        // baseline AskUserQuestion denial.
+        let config = SpawnConfig {
+            mcp_config_path: Some("/tmp/mcp.json".into()),
+            ..default_spawn("claude-opus-4-8")
+        };
+        let args = build_cli_args(&config, None);
+        assert!(args.contains(&"--disallowedTools=AskUserQuestion".to_string()));
+        let allowed = args
+            .iter()
+            .find(|a| a.starts_with("--allowedTools="))
+            .expect("allowedTools present");
+        assert!(allowed.contains("mcp__peckboard__create_card"));
+        assert!(allowed.contains("mcp__peckboard__fetch_url"));
     }
 
     #[test]

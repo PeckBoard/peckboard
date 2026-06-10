@@ -123,7 +123,7 @@ impl ProviderEvent {
 }
 
 /// Configuration for spawning an agent run.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct SpawnConfig {
     pub model: String,
     pub effort: Option<String>,
@@ -142,6 +142,14 @@ pub struct SpawnConfig {
     /// and to point at the per-task notes file convention.
     #[serde(default)]
     pub system_prompt_suffix: Option<String>,
+    /// When true, the spawned agent is a question-expert running in
+    /// answer-only mode: it may answer ONLY from its accumulated
+    /// conversation/Q&A. Every code, filesystem, shell, and web tool is
+    /// disallowed and its MCP surface is narrowed to replying to consults.
+    /// Set centrally in [`crate::provider::manager`] from the session's
+    /// `expert_kind`, so callers never have to remember to flip it.
+    #[serde(default)]
+    pub restrict_to_qa: bool,
 }
 
 /// Model info from a provider.

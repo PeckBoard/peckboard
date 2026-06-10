@@ -57,7 +57,7 @@ function parseRoute(): { view: View; activeId: string | null; sub: SessionSub } 
     case 'projects':
       return { view: 'projects', activeId: id, sub: third === 'todos' ? 'todos' : 'chat' }
     case 'experts':
-      return { view: 'experts', activeId: null, sub: 'chat' }
+      return { view: 'experts', activeId: id, sub: 'chat' }
     case 'repeating-tasks':
       return { view: 'repeatingTasks', activeId: id, sub: 'chat' }
     case 'folders':
@@ -156,6 +156,12 @@ function App() {
   const [activeRepeatingTaskId, setActiveRepeatingTaskId] = useState<string | null>(
     initialRoute.view === 'repeatingTasks' ? initialRoute.activeId : null,
   )
+  // The expert whose transcript is open (route `/experts/:id`). Tracked
+  // locally rather than in a store: experts are deliberately kept out of the
+  // session list / tab system, so this never feeds the MRU tab logic.
+  const [activeExpertId, setActiveExpertId] = useState<string | null>(
+    initialRoute.view === 'experts' ? initialRoute.activeId : null,
+  )
   const [showNewSession, setShowNewSession] = useState(false)
   const [showNewProject, setShowNewProject] = useState(false)
   const [contextSession, setContextSession] = useState<string | null>(null)
@@ -221,6 +227,8 @@ function App() {
         setActiveProject(route.activeId)
       } else if (route.view === 'repeatingTasks') {
         setActiveRepeatingTaskId(route.activeId)
+      } else if (route.view === 'experts') {
+        setActiveExpertId(route.activeId)
       }
     }
     window.addEventListener('popstate', onPopState)
@@ -592,7 +600,10 @@ function App() {
           </button>
           <button
             className={`rail-btn ${view === 'experts' ? 'active' : ''}`}
-            onClick={() => navigate('experts')}
+            onClick={() => {
+              setActiveExpertId(null)
+              navigate('experts')
+            }}
             title="Experts"
           >
             <svg
@@ -898,7 +909,17 @@ function App() {
               <ProjectList onNewProject={() => setShowNewProject(true)} />
             </div>
           ))}
-        {view === 'experts' && <ExpertsView />}
+        {view === 'experts' &&
+          (activeExpertId ? (
+            <ChatView sessionId={activeExpertId} />
+          ) : (
+            <ExpertsView
+              onOpenExpert={(id) => {
+                setActiveExpertId(id)
+                navigate('experts', id)
+              }}
+            />
+          ))}
         {view === 'repeatingTasks' && (
           <RepeatingTasksView
             activeTaskId={activeRepeatingTaskId}
