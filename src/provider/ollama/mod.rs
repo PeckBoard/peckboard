@@ -169,11 +169,15 @@ impl AgentProvider for OllamaProvider {
         let endpoint = build_endpoint(&base_url, "/api/chat")?;
 
         {
+            // Ollama's text chat endpoint doesn't take Anthropic-style
+            // image content blocks, so we pass only the text body here.
+            // Attachments (if any) are silently dropped — the user can
+            // still see them in the event log via the dispatch route.
             let mut conv = self.conversations.lock().await;
             let history = conv.entry(session_id.clone()).or_default();
             history.push(ChatMessage {
                 role: "user".into(),
-                content: message.clone(),
+                content: message.text.clone(),
             });
             // O(turns²) bandwidth otherwise — Ollama is stateless so
             // we'd resend the entire transcript on every turn forever.

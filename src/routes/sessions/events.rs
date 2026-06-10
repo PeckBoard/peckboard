@@ -414,7 +414,7 @@ pub(super) async fn append_event(
                 .session_manager
                 .send_or_queue(
                     &id_clone,
-                    &answer_text,
+                    crate::provider::message::UserMessage::from_text(answer_text),
                     &state_clone.db,
                     &state_clone.broadcaster,
                     config,

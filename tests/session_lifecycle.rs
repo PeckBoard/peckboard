@@ -20,6 +20,7 @@ use peckboard::db::models::{NewFolder, NewQueuedMessage, NewSession};
 use peckboard::provider::agent::ProcessCompletion;
 use peckboard::provider::claude::register_claude_provider;
 use peckboard::provider::manager::{SendOutcome, SessionManager};
+use peckboard::provider::message::UserMessage;
 use peckboard::provider::mock::register_mock_provider;
 use peckboard::provider::registry::ProviderRegistry;
 use peckboard::provider::stream::SpawnConfig;
@@ -101,7 +102,13 @@ async fn interrupt_aborts_blocking_run_and_delivers_completion() {
 
     // mock:ask blocks indefinitely waiting on stdin.
     manager
-        .send_or_queue("s1", "go", &db, &broadcaster, cfg("mock:ask"))
+        .send_or_queue(
+            "s1",
+            UserMessage::from_text("go"),
+            &db,
+            &broadcaster,
+            cfg("mock:ask"),
+        )
         .await
         .unwrap();
 
@@ -146,7 +153,13 @@ async fn send_or_queue_queues_when_agent_already_running() {
 
     // First message starts a blocking run.
     let first = manager
-        .send_or_queue("s2", "first", &db, &broadcaster, cfg("mock:ask"))
+        .send_or_queue(
+            "s2",
+            UserMessage::from_text("first"),
+            &db,
+            &broadcaster,
+            cfg("mock:ask"),
+        )
         .await
         .unwrap();
     assert_eq!(first, SendOutcome::Started);
@@ -154,7 +167,13 @@ async fn send_or_queue_queues_when_agent_already_running() {
 
     // Second message must be queued, not spawn a parallel agent.
     let second = manager
-        .send_or_queue("s2", "second", &db, &broadcaster, cfg("mock:ask"))
+        .send_or_queue(
+            "s2",
+            UserMessage::from_text("second"),
+            &db,
+            &broadcaster,
+            cfg("mock:ask"),
+        )
         .await
         .unwrap();
     assert_eq!(second, SendOutcome::Queued);
@@ -188,7 +207,13 @@ async fn drain_queued_delivers_after_clean_completion() {
 
     // Start (and let complete) a short echo run.
     manager
-        .send_or_queue("s3", "first", &db, &broadcaster, cfg("mock:echo"))
+        .send_or_queue(
+            "s3",
+            UserMessage::from_text("first"),
+            &db,
+            &broadcaster,
+            cfg("mock:echo"),
+        )
         .await
         .unwrap();
     let first = wait_for_completion(&mut rx, "s3").await;
@@ -235,7 +260,13 @@ async fn drain_queued_delivers_after_interrupted_run() {
 
     // Start a blocking run and queue a message while it's busy.
     manager
-        .send_or_queue("s4", "first", &db, &broadcaster, cfg("mock:ask"))
+        .send_or_queue(
+            "s4",
+            UserMessage::from_text("first"),
+            &db,
+            &broadcaster,
+            cfg("mock:ask"),
+        )
         .await
         .unwrap();
     tokio::time::sleep(Duration::from_millis(50)).await;
@@ -294,7 +325,13 @@ async fn drain_queued_is_noop_while_already_running() {
 
     // Start a long-running ask scenario.
     manager
-        .send_or_queue("s6", "go", &db, &broadcaster, cfg("mock:ask"))
+        .send_or_queue(
+            "s6",
+            UserMessage::from_text("go"),
+            &db,
+            &broadcaster,
+            cfg("mock:ask"),
+        )
         .await
         .unwrap();
     tokio::time::sleep(Duration::from_millis(50)).await;
@@ -332,14 +369,26 @@ async fn concurrent_send_or_queue_never_double_spawns() {
 
     // Two concurrent send_or_queue calls on the same session.
     let h_a = tokio::spawn(async move {
-        m_a.send_or_queue("s7", "A", &db_a, &broadcaster_a, cfg("mock:ask"))
-            .await
-            .unwrap()
+        m_a.send_or_queue(
+            "s7",
+            UserMessage::from_text("A"),
+            &db_a,
+            &broadcaster_a,
+            cfg("mock:ask"),
+        )
+        .await
+        .unwrap()
     });
     let h_b = tokio::spawn(async move {
-        m_b.send_or_queue("s7", "B", &db_b, &broadcaster_b, cfg("mock:ask"))
-            .await
-            .unwrap()
+        m_b.send_or_queue(
+            "s7",
+            UserMessage::from_text("B"),
+            &db_b,
+            &broadcaster_b,
+            cfg("mock:ask"),
+        )
+        .await
+        .unwrap()
     });
     let outcomes = [h_a.await.unwrap(), h_b.await.unwrap()];
     let started = outcomes
@@ -413,6 +462,7 @@ mod midstream {
     use peckboard::db::models::{NewFolder, NewSession};
     use peckboard::provider::agent::{AgentProvider, SendMessageContext};
     use peckboard::provider::manager::{SendOutcome, SessionManager};
+    use peckboard::provider::message::UserMessage;
     use peckboard::provider::registry::{ProviderInfo, ProviderRegistry};
     use peckboard::provider::stream::{ModelInfo, SpawnConfig};
     use peckboard::ws::broadcaster::Broadcaster;
@@ -433,7 +483,7 @@ mod midstream {
         }
 
         async fn send_message(&self, ctx: SendMessageContext) -> anyhow::Result<()> {
-            self.sent.lock().await.push(ctx.message);
+            self.sent.lock().await.push(ctx.message.text);
             // First send latches turn_active; subsequent sends just
             // record and return so the SessionManager sees the
             // "running" state and dispatches anyway (no queue).
@@ -543,7 +593,13 @@ mod midstream {
 
         // First send: turn is not active → Started outcome.
         let first = manager
-            .send_or_queue("mid", "first", &db, &broadcaster, cfg())
+            .send_or_queue(
+                "mid",
+                UserMessage::from_text("first"),
+                &db,
+                &broadcaster,
+                cfg(),
+            )
             .await
             .unwrap();
         assert_eq!(first, SendOutcome::Started);
@@ -556,7 +612,13 @@ mod midstream {
         // gets it via send_message, NOT the durable queue. Outcome is
         // Queued (which now means "delivered mid-turn").
         let second = manager
-            .send_or_queue("mid", "second", &db, &broadcaster, cfg())
+            .send_or_queue(
+                "mid",
+                UserMessage::from_text("second"),
+                &db,
+                &broadcaster,
+                cfg(),
+            )
             .await
             .unwrap();
         assert_eq!(second, SendOutcome::Queued);

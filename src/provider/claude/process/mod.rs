@@ -45,6 +45,7 @@ use tokio::sync::mpsc;
 
 use crate::db::Db;
 use crate::provider::agent::emit_event;
+use crate::provider::message::UserMessage;
 use crate::provider::stream::ProviderEvent;
 use crate::ws::broadcaster::{Broadcaster, WsEvent};
 
@@ -55,12 +56,14 @@ use sandbox::check_path_violation;
 
 /// One message bound for the CLI's stdin.
 pub enum StdinMsg {
-    /// Start a new user turn. The string is the prompt body; the
-    /// loop wraps it in the stream-json envelope before writing.
+    /// Start a new user turn. Carries the prompt body and any
+    /// attachments; the loop wraps both in the stream-json envelope
+    /// (string content for text-only turns, `[image…, text]` content
+    /// blocks when attachments are present) before writing.
     /// Setting the turn-active flag is delegated to the loop so the
     /// "is mid-turn" bit only flips once the bytes have actually
     /// reached the child.
-    UserTurn(String),
+    UserTurn(UserMessage),
     /// Write an already-formed JSON line verbatim (control_response
     /// frame, worker-comms delivery, etc.). Doesn't touch the
     /// turn-active flag.
@@ -304,8 +307,8 @@ pub async fn stream_events(
             }
             msg = stdin_rx.recv() => {
                 match msg {
-                    Some(StdinMsg::UserTurn(text)) => {
-                        let frame = super::build_user_message_frame(&text);
+                    Some(StdinMsg::UserTurn(message)) => {
+                        let frame = super::build_user_message_frame(&message);
                         if write_stdin_line(&mut stdin_pipe, &frame, &session_id).await {
                             state.turn_active.store(true, Ordering::Release);
                             state.last_activity.store(now_ms(), Ordering::Release);
@@ -361,8 +364,13 @@ pub async fn stream_events(
                             );
                             // Inter-worker deliveries are user messages,
                             // not raw control frames, so they need the
-                            // stream-json envelope.
-                            let frame = super::build_user_message_frame(text);
+                            // stream-json envelope. Inter-worker comms
+                            // are text-only (no attachment plumbing on
+                            // that path), so we build a plain
+                            // `UserMessage::from_text`.
+                            let frame = super::build_user_message_frame(&UserMessage::from_text(
+                                text,
+                            ));
                             if write_stdin_line(&mut stdin_pipe, &frame, &session_id).await {
                                 state.turn_active.store(true, Ordering::Release);
                                 state.last_activity.store(now_ms(), Ordering::Release);
@@ -988,7 +996,9 @@ mod tests {
         // user envelope. The loop writes it to cat's stdin (cat echoes
         // it back, which the parser ignores as a non-result type) and
         // flips the flag after the write succeeds.
-        tx.send(StdinMsg::UserTurn("hello".into())).await.unwrap();
+        tx.send(StdinMsg::UserTurn(UserMessage::from_text("hello")))
+            .await
+            .unwrap();
         wait_for_turn_active(&turn_active, true, 2_000).await;
 
         // Schedule graceful shutdown. The loop sets a flag and
@@ -1078,7 +1088,9 @@ mod tests {
         // Park a turn in flight so the cancel path's "killed mid-turn"
         // semantics fire. Using UserTurn avoids the race that would
         // come from flipping the flag directly.
-        tx.send(StdinMsg::UserTurn("hello".into())).await.unwrap();
+        tx.send(StdinMsg::UserTurn(UserMessage::from_text("hello")))
+            .await
+            .unwrap();
         wait_for_turn_active(&turn_active, true, 2_000).await;
 
         cancel.notify_one();

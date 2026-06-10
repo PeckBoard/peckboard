@@ -91,7 +91,13 @@ impl ExpertDispatcher for AppExpertDispatcher {
             let lock = state.session_manager.lock_session(expert_session_id).await;
             state
                 .session_manager
-                .send_message_locked(&lock, prompt, &state.db, &state.broadcaster, config)
+                .send_message_locked(
+                    &lock,
+                    crate::provider::message::UserMessage::from_text(prompt),
+                    &state.db,
+                    &state.broadcaster,
+                    config,
+                )
                 .await?;
             Ok(())
         })
@@ -112,7 +118,13 @@ impl ExpertDispatcher for AppExpertDispatcher {
             // run if idle, or queues / injects mid-stream if already running.
             state
                 .session_manager
-                .send_or_queue(session_id, text, &state.db, &state.broadcaster, config)
+                .send_or_queue(
+                    session_id,
+                    crate::provider::message::UserMessage::from_text(text),
+                    &state.db,
+                    &state.broadcaster,
+                    config,
+                )
                 .await?;
             Ok(())
         })

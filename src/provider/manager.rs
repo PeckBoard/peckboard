@@ -9,6 +9,7 @@ use crate::db::Db;
 use crate::db::models::NewQueuedMessage;
 use crate::plugin::manager::PluginManager;
 use crate::provider::agent::{ProcessCompletion, SendMessageContext};
+use crate::provider::message::UserMessage;
 use crate::provider::registry::ProviderRegistry;
 use crate::provider::stream::SpawnConfig;
 use crate::ws::broadcaster::{Broadcaster, WsEvent};
@@ -195,7 +196,7 @@ impl SessionManager {
     pub async fn send_message_locked(
         &self,
         lock: &SessionLock,
-        message: &str,
+        message: UserMessage,
         db: &Db,
         broadcaster: &Arc<Broadcaster>,
         config: SpawnConfig,
@@ -270,7 +271,7 @@ impl SessionManager {
 
         let ctx = SendMessageContext {
             session_id: session_id.to_string(),
-            message: message.to_string(),
+            message,
             db: db.clone(),
             broadcaster: broadcaster.clone(),
             config: final_config,
@@ -310,7 +311,7 @@ impl SessionManager {
     pub async fn send_or_queue(
         &self,
         session_id: &str,
-        message: &str,
+        message: UserMessage,
         db: &Db,
         broadcaster: &Arc<Broadcaster>,
         config: SpawnConfig,
@@ -324,11 +325,15 @@ impl SessionManager {
         if was_running && !supports_mid_stream {
             // Per-turn provider — fall back to the durable queue so
             // the completion listener can deliver this message when
-            // the current run finishes.
+            // the current run finishes. The persistent queue is
+            // text-only; per-turn providers (mock, ollama) can't
+            // make use of multimodal attachments, so dropping them
+            // here is lossless for the providers that actually take
+            // this branch.
             let now = chrono::Utc::now().to_rfc3339();
             db.upsert_queued_message(NewQueuedMessage {
                 session_id: session_id.to_string(),
-                text: message.to_string(),
+                text: message.text.clone(),
                 queued_at: now,
                 model: Some(config.model.clone()),
                 effort: config.effort.clone(),
@@ -337,7 +342,7 @@ impl SessionManager {
             broadcaster.broadcast(WsEvent {
                 event_type: "queue".into(),
                 session_id: session_id.to_string(),
-                data: serde_json::json!({ "action": "set", "text": message }),
+                data: serde_json::json!({ "action": "set", "text": message.text }),
             });
             tracing::info!(
                 session_id = %session_id,
@@ -346,14 +351,23 @@ impl SessionManager {
             return Ok(SendOutcome::Queued);
         }
 
+        // Capture the text for the post-dispatch broadcast — the
+        // dispatch path moves the whole `UserMessage` into the
+        // provider context.
+        let mid_turn_text = if was_running {
+            Some(message.text.clone())
+        } else {
+            None
+        };
+
         self.send_message_locked(&lock, message, db, broadcaster, config)
             .await?;
 
-        if was_running {
+        if let Some(text) = mid_turn_text {
             broadcaster.broadcast(WsEvent {
                 event_type: "queue".into(),
                 session_id: session_id.to_string(),
-                data: serde_json::json!({ "action": "set", "text": message }),
+                data: serde_json::json!({ "action": "set", "text": text }),
             });
             tracing::info!(
                 session_id = %session_id,
@@ -436,8 +450,14 @@ impl SessionManager {
             session_id = %session_id,
             "Draining queued message and spawning agent run"
         );
-        self.send_message_locked(&lock, &queued.text, db, broadcaster, config)
-            .await?;
+        self.send_message_locked(
+            &lock,
+            UserMessage::from_text(queued.text),
+            db,
+            broadcaster,
+            config,
+        )
+        .await?;
         Ok(true)
     }
 

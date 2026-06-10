@@ -3,7 +3,9 @@ use serde::Deserialize;
 use std::sync::Arc;
 
 use crate::db::models::UpdateSession;
+use crate::provider::message::{UserAttachment, UserMessage};
 use crate::provider::stream::SpawnConfig;
+use crate::routes::attachments::load_attachment_payload;
 use crate::state::AppState;
 
 use super::resolve_references;
@@ -175,13 +177,31 @@ pub(super) async fn send_message(
         restrict_to_qa: false,
     };
 
+    // Resolve attachment IDs to bytes BEFORE handing off to the
+    // dispatcher: the provider context owns the payload (move, not
+    // borrow), so doing the disk reads here means the provider's
+    // mid-stream injection path never has to reach back into the
+    // attachments dir. Unknown/missing ids drop with a warning rather
+    // than failing the send — losing a stale id should not throw
+    // away the rest of the message.
+    let user_attachments = load_attachments(&id, attachment_ids.as_deref(), &state).await;
+
     // `send_or_queue` acquires the per-session lock internally,
     // dispatches through the long-lived child (spawning lazily on
     // the first turn) and returns `Queued` iff the agent was
     // already mid-turn when the bytes hit stdin.
     let outcome = state
         .session_manager
-        .send_or_queue(&id, &resolved_text, &state.db, &state.broadcaster, config)
+        .send_or_queue(
+            &id,
+            UserMessage {
+                text: resolved_text,
+                attachments: user_attachments,
+            },
+            &state.db,
+            &state.broadcaster,
+            config,
+        )
         .await;
 
     let outcome = match outcome {
@@ -409,6 +429,39 @@ pub(super) async fn terminate_agent(
         });
 
     Ok::<_, (StatusCode, Json<serde_json::Value>)>(StatusCode::NO_CONTENT)
+}
+
+/// Read every attachment referenced by the request into memory so the
+/// provider can build a multimodal envelope without a second round-trip
+/// through the data dir. A missing id drops with a warning — at
+/// dispatch time we want best-effort delivery of the rest of the
+/// message rather than a hard failure that the user can't recover
+/// from (the id might be stale because the FE held on to a soft-
+/// deleted upload, etc.).
+async fn load_attachments(
+    session_id: &str,
+    ids: Option<&[String]>,
+    state: &Arc<AppState>,
+) -> Vec<UserAttachment> {
+    let Some(ids) = ids else {
+        return Vec::new();
+    };
+    let mut out = Vec::with_capacity(ids.len());
+    for aid in ids {
+        match load_attachment_payload(&state.config.data_dir, session_id, aid).await {
+            Some(payload) => out.push(UserAttachment {
+                filename: payload.filename,
+                mime_type: payload.mime_type,
+                data: payload.data,
+            }),
+            None => tracing::warn!(
+                session_id = %session_id,
+                attachment_id = %aid,
+                "Skipping unknown attachment in send_message"
+            ),
+        }
+    }
+    out
 }
 
 /// Resolve every outstanding `question` event for the session by appending a

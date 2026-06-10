@@ -1,6 +1,7 @@
 pub mod agent;
 pub mod claude;
 pub mod manager;
+pub mod message;
 pub mod mock;
 pub mod ollama;
 pub mod registry;

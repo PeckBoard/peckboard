@@ -396,10 +396,57 @@ pub fn build_cli_args(config: &SpawnConfig, conversation_id: Option<&str>) -> Ve
 /// Build the JSON envelope for a user message sent over stdin in
 /// stream-json mode. The CLI consumes one envelope per line and treats
 /// each as a fresh user turn.
-pub fn build_user_message_frame(text: &str) -> String {
+///
+/// A message with no attachments uses the simple string-content form
+/// (back-compat with the long-standing single-text-turn path). A
+/// message with image attachments switches to the Anthropic content
+/// blocks array, with one `image` block per attachment followed by a
+/// `text` block — that's the only shape the CLI accepts for multimodal
+/// turns. Non-image attachments are dropped with a warning rather than
+/// silently corrupting the envelope: the Messages API rejects anything
+/// other than `image` / `text` blocks in a user turn.
+pub fn build_user_message_frame(msg: &crate::provider::message::UserMessage) -> String {
+    use base64::Engine as _;
+
+    if msg.attachments.is_empty() {
+        return serde_json::json!({
+            "type": "user",
+            "message": { "role": "user", "content": msg.text },
+        })
+        .to_string();
+    }
+
+    let mut blocks: Vec<serde_json::Value> = Vec::with_capacity(msg.attachments.len() + 1);
+    for att in &msg.attachments {
+        if att.mime_type.starts_with("image/") {
+            let encoded = base64::engine::general_purpose::STANDARD.encode(&att.data);
+            blocks.push(serde_json::json!({
+                "type": "image",
+                "source": {
+                    "type": "base64",
+                    "media_type": att.mime_type,
+                    "data": encoded,
+                },
+            }));
+        } else {
+            tracing::warn!(
+                filename = %att.filename,
+                mime = %att.mime_type,
+                "Dropping non-image attachment — Anthropic user turns only accept image / text blocks"
+            );
+        }
+    }
+
+    // Text block follows the images so the model reads them as
+    // "here's a picture, now my question." If text is empty we still
+    // emit an empty text block — Anthropic accepts it, and dropping
+    // the block entirely would leave an unusual "image only" turn
+    // that some downstream tooling stumbles over.
+    blocks.push(serde_json::json!({ "type": "text", "text": msg.text }));
+
     serde_json::json!({
         "type": "user",
-        "message": { "role": "user", "content": text },
+        "message": { "role": "user", "content": blocks },
     })
     .to_string()
 }
@@ -593,8 +640,11 @@ mod tests {
     fn test_user_message_frame_round_trips() {
         // The frame is what we write to the CLI's stdin to start (or
         // queue) a new turn. The CLI parses each line as a JSON object
-        // with shape `{type:"user", message:{role,content}}`.
-        let frame = build_user_message_frame("hello world");
+        // with shape `{type:"user", message:{role,content}}`. With no
+        // attachments, content stays a string for back-compat with
+        // every prior dispatcher.
+        use crate::provider::message::UserMessage;
+        let frame = build_user_message_frame(&UserMessage::from_text("hello world"));
         let parsed: serde_json::Value = serde_json::from_str(&frame).unwrap();
         assert_eq!(parsed["type"], "user");
         assert_eq!(parsed["message"]["role"], "user");
@@ -607,13 +657,69 @@ mod tests {
         // can't break the one-line-per-envelope framing the CLI uses on
         // stdin. (No matter the prompt content, `serde_json::to_string`
         // will produce a single JSON line with embedded escapes.)
-        let frame = build_user_message_frame("line one\nline two with \"quotes\"");
+        use crate::provider::message::UserMessage;
+        let frame = build_user_message_frame(&UserMessage::from_text(
+            "line one\nline two with \"quotes\"",
+        ));
         assert!(!frame.contains('\n'));
         let parsed: serde_json::Value = serde_json::from_str(&frame).unwrap();
         assert_eq!(
             parsed["message"]["content"],
             "line one\nline two with \"quotes\""
         );
+    }
+
+    #[test]
+    fn test_user_message_frame_emits_image_blocks() {
+        // With image attachments, the frame switches to the content
+        // blocks array shape: `[{image…}, {image…}, {text}]`. Each
+        // image carries the base64-encoded bytes + media type the
+        // Anthropic Messages API expects.
+        use crate::provider::message::{UserAttachment, UserMessage};
+        let msg = UserMessage {
+            text: "what's in this picture?".into(),
+            attachments: vec![UserAttachment {
+                filename: "shot.png".into(),
+                mime_type: "image/png".into(),
+                data: vec![0xDE, 0xAD, 0xBE, 0xEF],
+            }],
+        };
+        let frame = build_user_message_frame(&msg);
+        let parsed: serde_json::Value = serde_json::from_str(&frame).unwrap();
+        let content = parsed["message"]["content"]
+            .as_array()
+            .expect("content is an array when attachments are present");
+        assert_eq!(content.len(), 2);
+        assert_eq!(content[0]["type"], "image");
+        assert_eq!(content[0]["source"]["type"], "base64");
+        assert_eq!(content[0]["source"]["media_type"], "image/png");
+        assert_eq!(content[0]["source"]["data"], "3q2+7w==");
+        assert_eq!(content[1]["type"], "text");
+        assert_eq!(content[1]["text"], "what's in this picture?");
+    }
+
+    #[test]
+    fn test_user_message_frame_drops_non_image_attachments() {
+        // The Messages API rejects unknown content block types in a
+        // user turn, so a non-image attachment must not make it into
+        // the envelope. The text block still goes through.
+        use crate::provider::message::{UserAttachment, UserMessage};
+        let msg = UserMessage {
+            text: "see attached".into(),
+            attachments: vec![UserAttachment {
+                filename: "notes.txt".into(),
+                mime_type: "text/plain".into(),
+                data: b"hello".to_vec(),
+            }],
+        };
+        let frame = build_user_message_frame(&msg);
+        let parsed: serde_json::Value = serde_json::from_str(&frame).unwrap();
+        let content = parsed["message"]["content"]
+            .as_array()
+            .expect("content is an array when attachments are present");
+        assert_eq!(content.len(), 1);
+        assert_eq!(content[0]["type"], "text");
+        assert_eq!(content[0]["text"], "see attached");
     }
 
     // ── Argument-injection regression tests ────────────────────────

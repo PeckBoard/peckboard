@@ -15,6 +15,7 @@ use peckboard::db::Db;
 use peckboard::db::models::{NewFolder, NewSession};
 use peckboard::provider::claude::register_claude_provider;
 use peckboard::provider::manager::SessionManager;
+use peckboard::provider::message::UserMessage;
 use peckboard::provider::mock::register_mock_provider;
 use peckboard::provider::registry::ProviderRegistry;
 use peckboard::provider::stream::SpawnConfig;
@@ -81,7 +82,13 @@ async fn mock_echo_flows_through_dispatcher() {
     };
 
     manager
-        .send_or_queue("s1", "hello mock", &db, &broadcaster, config)
+        .send_or_queue(
+            "s1",
+            UserMessage::from_text("hello mock"),
+            &db,
+            &broadcaster,
+            config,
+        )
         .await
         .expect("dispatch succeeds");
 
@@ -148,7 +155,13 @@ async fn mock_todo_emits_normalized_todo_event() {
     };
 
     manager
-        .send_or_queue("s1", "track some work", &db, &broadcaster, config)
+        .send_or_queue(
+            "s1",
+            UserMessage::from_text("track some work"),
+            &db,
+            &broadcaster,
+            config,
+        )
         .await
         .expect("dispatch succeeds");
 

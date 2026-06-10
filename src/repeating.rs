@@ -361,7 +361,13 @@ impl RepeatingTaskManager {
         // held until this function returns, which guarantees no other
         // call can pass the is_running check above and double-spawn.
         let dispatch_result = session_manager
-            .send_or_queue(&session_id, &task.prompt, db, broadcaster, config)
+            .send_or_queue(
+                &session_id,
+                crate::provider::message::UserMessage::from_text(task.prompt.clone()),
+                db,
+                broadcaster,
+                config,
+            )
             .await;
         if let Err(e) = dispatch_result {
             // Dispatch failed: the session row already exists but no

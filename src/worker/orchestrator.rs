@@ -252,7 +252,13 @@ pub async fn check_and_spawn_workers(state: &Arc<AppState>) {
 
                 if let Err(e) = state
                     .session_manager
-                    .send_message_locked(&lock, &prompt, &state.db, &state.broadcaster, config)
+                    .send_message_locked(
+                        &lock,
+                        crate::provider::message::UserMessage::from_text(prompt),
+                        &state.db,
+                        &state.broadcaster,
+                        config,
+                    )
                     .await
                 {
                     tracing::error!(session_id = %ws.id, "Failed to resume for pending message: {e}");
@@ -432,7 +438,13 @@ async fn spawn_worker_for_card(
     let lock = state.session_manager.lock_session(&session_id).await;
     state
         .session_manager
-        .send_message_locked(&lock, &prompt, &state.db, &state.broadcaster, config)
+        .send_message_locked(
+            &lock,
+            crate::provider::message::UserMessage::from_text(prompt),
+            &state.db,
+            &state.broadcaster,
+            config,
+        )
         .await?;
     drop(lock);
 

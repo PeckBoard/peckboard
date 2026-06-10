@@ -19,6 +19,13 @@ struct UploadRequest {
     #[serde(alias = "name")]
     filename: String,
     data: String, // base64-encoded
+    /// MIME type as detected by the browser at upload time. The frontend
+    /// already populates this from `File.type` so we capture it as an
+    /// optional sidecar; the message-send path falls back to extension
+    /// sniffing when it's missing (older uploads, or a browser that
+    /// couldn't guess).
+    #[serde(default, rename = "mime_type", alias = "mimeType")]
+    mime_type: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -169,7 +176,7 @@ async fn resolve_attachment_path(dir: &std::path::Path, aid: &str) -> Option<std
     let mut entries = tokio::fs::read_dir(dir).await.ok()?;
     while let Ok(Some(entry)) = entries.next_entry().await {
         let name = entry.file_name().to_string_lossy().to_string();
-        if name.starts_with(&prefix) && !name.ends_with(".meta") {
+        if name.starts_with(&prefix) && !name.ends_with(".meta") && !name.ends_with(".mime") {
             return Some(entry.path());
         }
     }
@@ -220,6 +227,26 @@ async fn upload_attachment(
         .map_err(|e| internal(e.to_string()))?;
     let _ = restrict_file(&meta_path);
 
+    // Persist the browser-supplied MIME type next to the bytes so the
+    // dispatch path can build the correct image content block at send
+    // time. Sidecar (not extension on the main file) keeps the storage
+    // model identical to existing uploads — a missing `.mime` sidecar
+    // simply falls back to filename sniffing.
+    if let Some(mime) = body.mime_type.as_deref().filter(|s| !s.is_empty()) {
+        let sanitized = sanitize_mime_type(mime);
+        if !sanitized.is_empty() {
+            let mime_path = dir.join(format!("{}.mime", attachment_id));
+            if let Err(e) = tokio::fs::write(&mime_path, &sanitized).await {
+                tracing::warn!(
+                    attachment_id = %attachment_id,
+                    "Failed to persist mime sidecar (continuing without): {e}"
+                );
+            } else {
+                let _ = restrict_file(&mime_path);
+            }
+        }
+    }
+
     Ok::<_, (StatusCode, Json<serde_json::Value>)>((
         StatusCode::CREATED,
         Json(serde_json::json!(UploadResponse {
@@ -228,6 +255,81 @@ async fn upload_attachment(
             size: decoded.len() as u64,
         })),
     ))
+}
+
+/// Read an attachment's bytes + metadata from disk. Returns `None` if the
+/// attachment can't be found (already deleted, never existed, or an id
+/// outside the safe charset). Shared by the dispatch path so it can
+/// build a `UserMessage` carrying the right MIME type without
+/// duplicating the on-disk layout assumptions.
+pub async fn load_attachment_payload(
+    data_dir: &std::path::Path,
+    session_id: &str,
+    aid: &str,
+) -> Option<AttachmentPayload> {
+    if !is_safe_id(session_id) || !is_safe_id(aid) {
+        return None;
+    }
+    let dir = data_dir.join("attachments").join(session_id);
+    let file_path = resolve_attachment_path(&dir, aid).await?;
+    let bytes = tokio::fs::read(&file_path).await.ok()?;
+
+    let meta_path = dir.join(format!("{}.meta", aid));
+    let filename = tokio::fs::read_to_string(&meta_path)
+        .await
+        .map(|s| sanitize_filename(&s))
+        .unwrap_or_else(|_| aid.to_string());
+
+    // Prefer the upload-time mime sidecar; fall back to extension
+    // sniffing for older uploads or browsers that didn't send one.
+    let mime_path = dir.join(format!("{}.mime", aid));
+    let mime_type = match tokio::fs::read_to_string(&mime_path).await {
+        Ok(s) => {
+            let cleaned = sanitize_mime_type(s.trim());
+            if cleaned.is_empty() {
+                crate::provider::message::mime_from_filename(&filename).to_string()
+            } else {
+                cleaned
+            }
+        }
+        Err(_) => crate::provider::message::mime_from_filename(&filename).to_string(),
+    };
+
+    Some(AttachmentPayload {
+        filename,
+        mime_type,
+        data: bytes,
+    })
+}
+
+/// Bytes + metadata for a single attachment, as consumed by the
+/// provider dispatch path. The data field is owned: callers move it
+/// straight into the `UserMessage` they hand to the provider.
+pub struct AttachmentPayload {
+    pub filename: String,
+    pub mime_type: String,
+    pub data: Vec<u8>,
+}
+
+/// Strip everything outside a conservative MIME charset so a crafted
+/// sidecar can't smuggle CR/LF or arbitrary bytes into the Anthropic
+/// envelope (where `media_type` becomes part of the JSON body sent to
+/// the model). Anything that doesn't match `<token>/<token>` after
+/// cleaning is treated as missing.
+fn sanitize_mime_type(input: &str) -> String {
+    const ALLOWED_EXTRAS: &[u8] = b"-._+/";
+    let cleaned: String = input
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric() || ALLOWED_EXTRAS.contains(&(*c as u8)))
+        .collect();
+    let mut parts = cleaned.split('/');
+    let (Some(major), Some(minor), None) = (parts.next(), parts.next(), parts.next()) else {
+        return String::new();
+    };
+    if major.is_empty() || minor.is_empty() {
+        return String::new();
+    }
+    cleaned
 }
 
 /// GET /api/sessions/:id/attachments
@@ -254,7 +356,7 @@ async fn list_attachments(
 
     while let Ok(Some(entry)) = entries.next_entry().await {
         let name = entry.file_name().to_string_lossy().to_string();
-        if name.ends_with(".meta") {
+        if name.ends_with(".meta") || name.ends_with(".mime") {
             continue;
         }
         // New layout: file name IS the uuid. Legacy layout: <uuid>.<ext>.
@@ -366,6 +468,8 @@ async fn delete_attachment(
 
     let meta_path = dir.join(format!("{}.meta", aid));
     let _ = tokio::fs::remove_file(&meta_path).await;
+    let mime_path = dir.join(format!("{}.mime", aid));
+    let _ = tokio::fs::remove_file(&mime_path).await;
 
     Ok::<_, (StatusCode, Json<serde_json::Value>)>(StatusCode::NO_CONTENT)
 }
@@ -501,5 +605,95 @@ mod tests {
         restrict_dir(tmp.path()).unwrap();
         let mode = std::fs::metadata(tmp.path()).unwrap().permissions().mode();
         assert_eq!(mode & 0o777, 0o700);
+    }
+
+    #[test]
+    fn sanitize_mime_type_accepts_well_formed() {
+        assert_eq!(sanitize_mime_type("image/png"), "image/png");
+        assert_eq!(sanitize_mime_type("image/jpeg"), "image/jpeg");
+        assert_eq!(sanitize_mime_type("application/json"), "application/json");
+    }
+
+    #[test]
+    fn sanitize_mime_type_rejects_malformed() {
+        assert_eq!(sanitize_mime_type(""), "");
+        assert_eq!(sanitize_mime_type("notamime"), "");
+        assert_eq!(sanitize_mime_type("a/b/c"), "");
+        assert_eq!(sanitize_mime_type("/png"), "");
+        assert_eq!(sanitize_mime_type("image/"), "");
+    }
+
+    #[test]
+    fn sanitize_mime_type_strips_control_and_quotes() {
+        // CR/LF would let a crafted sidecar smuggle a fake header
+        // into the Content-Disposition path; quotes/backslashes do
+        // similar damage in JSON contexts. Anything outside the
+        // narrow token charset gets dropped, which here turns the
+        // input into something that no longer matches `a/b` and is
+        // rejected entirely.
+        assert_eq!(sanitize_mime_type("image\r\n/png"), "image/png");
+        assert_eq!(sanitize_mime_type("\"image/png\""), "image/png");
+        assert_eq!(sanitize_mime_type("image\\\\/png"), "image/png");
+    }
+
+    #[tokio::test]
+    async fn load_attachment_payload_prefers_mime_sidecar() {
+        let tmp = tempfile::tempdir().unwrap();
+        let data_dir = tmp.path();
+        let sid = "sess1";
+        let aid = "att1";
+        let dir = data_dir.join("attachments").join(sid);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join(aid), b"PNGBYTES").unwrap();
+        std::fs::write(dir.join(format!("{aid}.meta")), "shot.png").unwrap();
+        std::fs::write(dir.join(format!("{aid}.mime")), "image/webp").unwrap();
+
+        let payload = load_attachment_payload(data_dir, sid, aid).await.unwrap();
+        assert_eq!(payload.filename, "shot.png");
+        // Sidecar wins over extension sniffing — the upload-time
+        // mime is the source of truth.
+        assert_eq!(payload.mime_type, "image/webp");
+        assert_eq!(payload.data, b"PNGBYTES");
+    }
+
+    #[tokio::test]
+    async fn load_attachment_payload_falls_back_to_filename_sniff() {
+        let tmp = tempfile::tempdir().unwrap();
+        let data_dir = tmp.path();
+        let sid = "sess2";
+        let aid = "att2";
+        let dir = data_dir.join("attachments").join(sid);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join(aid), b"JPGBYTES").unwrap();
+        std::fs::write(dir.join(format!("{aid}.meta")), "pic.jpg").unwrap();
+        // No .mime sidecar — typical for older uploads.
+
+        let payload = load_attachment_payload(data_dir, sid, aid).await.unwrap();
+        assert_eq!(payload.mime_type, "image/jpeg");
+    }
+
+    #[tokio::test]
+    async fn load_attachment_payload_returns_none_for_missing() {
+        let tmp = tempfile::tempdir().unwrap();
+        assert!(
+            load_attachment_payload(tmp.path(), "sess3", "missing")
+                .await
+                .is_none()
+        );
+    }
+
+    #[tokio::test]
+    async fn load_attachment_payload_rejects_unsafe_ids() {
+        let tmp = tempfile::tempdir().unwrap();
+        assert!(
+            load_attachment_payload(tmp.path(), "../etc", "att")
+                .await
+                .is_none()
+        );
+        assert!(
+            load_attachment_payload(tmp.path(), "sess", "../passwd")
+                .await
+                .is_none()
+        );
     }
 }

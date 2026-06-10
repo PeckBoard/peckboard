@@ -85,11 +85,16 @@ impl AgentProvider for MockProvider {
         let sid = session_id.clone();
         let model_label = config.model.clone();
 
+        // The mock provider scripts text-only scenarios; attachments
+        // (if any) ride along in the `UserMessage` but the scripted
+        // engine only inspects the text body, matching the
+        // pre-multimodal contract for per-turn providers.
+        let message_text = message.text;
         let handle = tokio::spawn(async move {
             let completed = run_scenario(
                 &scenario,
                 &sid,
-                &message,
+                &message_text,
                 &model_label,
                 &db,
                 &broadcaster,

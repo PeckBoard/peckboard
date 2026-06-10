@@ -5,6 +5,7 @@ use tokio::sync::mpsc;
 
 use crate::db::Db;
 use crate::plugin::manager::PluginManager;
+use crate::provider::message::UserMessage;
 use crate::provider::stream::{ProviderEvent, SpawnConfig};
 use crate::ws::broadcaster::{Broadcaster, WsEvent};
 
@@ -25,7 +26,7 @@ pub struct ProcessCompletion {
 /// don't need to repeat that bookkeeping.
 pub struct SendMessageContext {
     pub session_id: String,
-    pub message: String,
+    pub message: UserMessage,
     pub db: Db,
     pub broadcaster: Arc<Broadcaster>,
     pub config: SpawnConfig,

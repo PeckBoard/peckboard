@@ -205,6 +205,8 @@ impl AgentProvider for ClaudeProvider {
         // Dispatch the user turn. Errors here mean the stream task
         // has already shut down (channel closed) — return the error
         // so the caller can append a Crashed and let the user retry.
+        // The `UserMessage` carries any attachments; the stream loop
+        // builds the multimodal envelope in `build_user_message_frame`.
         stdin_tx
             .send(StdinMsg::UserTurn(message))
             .await
