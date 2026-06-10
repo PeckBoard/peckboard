@@ -55,6 +55,15 @@ pub struct ToolCallContext {
     /// still create + persist experts and their captured knowledge but skip
     /// the live agent dispatch.
     pub expert_dispatcher: Option<Arc<dyn ExpertDispatcher>>,
+    /// Data dir for durable exports (e.g. the PM decision log). `Some` on
+    /// real tool calls from the `mcp` route; when `None`, handlers skip the
+    /// export hook (the boot-time backfill regenerates it instead).
+    pub data_dir: Option<std::path::PathBuf>,
+    /// Shared store of outstanding user authorizations to change recorded PM
+    /// decisions. MUST be the app-wide instance (`AppState`), not a fresh
+    /// one, or grants issued by the answer route would never reach the
+    /// `pm_record_decision` supersession check.
+    pub pm_authorizations: crate::service::pm_expert::PmUserAuthorizations,
 }
 
 /// Proof token: a project id verified against the current MCP token's
@@ -227,6 +236,8 @@ mod tests {
             broadcaster: crate::ws::broadcaster::Broadcaster::new(),
             provider_registry: None,
             expert_dispatcher: None,
+            data_dir: None,
+            pm_authorizations: Default::default(),
         }
     }
 
@@ -319,6 +330,8 @@ mod tests {
             expert_dispatcher: None,
             broadcaster: crate::ws::broadcaster::Broadcaster::new(),
             provider_registry: None,
+            data_dir: None,
+            pm_authorizations: Default::default(),
         }
     }
 

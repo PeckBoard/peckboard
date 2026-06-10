@@ -145,7 +145,7 @@ pub fn build_rehydration_prompt(export_body: &str) -> String {
 /// Strip a leading `---\n...\n---` YAML frontmatter block, mirroring the
 /// reader in `routes::reports`. Returns the body unchanged when there is
 /// no frontmatter.
-fn strip_frontmatter(content: &str) -> String {
+pub(crate) fn strip_frontmatter(content: &str) -> String {
     let content = content.trim_start();
     if !content.starts_with("---") {
         return content.to_string();

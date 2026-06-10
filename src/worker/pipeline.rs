@@ -220,6 +220,23 @@ pub fn build_worker_prompt(
          question expert automatically, so each question only bothers the user once.\n\n",
     );
     prompt.push_str(
+        "**Follow the PM-expert rules for project direction and business logic.** The \
+         in-scope PM expert (the in-scope expert whose `expert_kind` is `\"pm\"`) is the \
+         durable store of the user's project-direction and business-logic decisions:\n\
+         - BEFORE making any change that touches project direction or business logic, \
+         call `pm_check_decisions` with your planned change and respect every active \
+         decision it returns.\n\
+         - When a matter of direction or business logic is unknown or not covered by a \
+         recorded decision, do NOT guess and do NOT ask the user directly — consult the \
+         PM expert via `ask_expert` (use its `expert_id`, or the area \"pm\"); it answers \
+         from recorded decisions and escalates to the user itself when none applies.\n\
+         - When a new direction or business-logic decision is settled, record it with \
+         `pm_record_decision` so future workers respect it.\n\
+         - NEVER change, reverse, or reinterpret an existing decision — decisions belong \
+         to the user, and changing one happens only through the PM expert's \
+         user-authorized escalation flow.\n\n",
+    );
+    prompt.push_str(
         "## Parallel Worker Awareness\n\n\
          You are one of multiple workers running in parallel on this project. \
          Other workers are working on different tasks at the same time.\n\n\
@@ -611,6 +628,49 @@ mod tests {
         assert!(prompt.contains("ASYNCHRONOUS"));
         // Prefer experts over re-deriving / bothering the user.
         assert!(prompt.contains("bothering the user"));
+    }
+
+    #[test]
+    fn test_build_worker_prompt_states_pm_rules() {
+        let prompt = build_worker_prompt(
+            &sample_project(),
+            &sample_card(),
+            "in-progress",
+            &sample_steps(),
+            None,
+            &[],
+            None,
+        );
+        // Rule (a): check decisions before direction/business-logic changes.
+        assert!(prompt.contains("pm_check_decisions"));
+        // Rule (b): unknowns go to the PM expert, not guesses or the user.
+        assert!(prompt.contains("do NOT guess and do NOT ask the user directly"));
+        // Rule (c): record new decisions.
+        assert!(prompt.contains("pm_record_decision"));
+        // Rule (d): decision changes are user-only.
+        assert!(prompt.contains("NEVER change, reverse, or reinterpret"));
+        assert!(prompt.contains("decisions belong to the user"));
+    }
+
+    #[test]
+    fn test_build_worker_prompt_renders_pm_expert() {
+        let mut pm = sample_expert("pm-expert-project-p1", Some("p1"));
+        pm.expert_kind = Some("pm".into());
+        pm.knowledge_area = Some("Project direction & decisions (PM)".into());
+        pm.scope_path = None;
+        let prompt = build_worker_prompt(
+            &sample_project(),
+            &sample_card(),
+            "in-progress",
+            &sample_steps(),
+            None,
+            &[pm],
+            None,
+        );
+        // The PM expert is addressable by its stable id and tagged with
+        // its kind, so the PM-rules instruction can be followed directly.
+        assert!(prompt.contains("pm-expert-project-p1"));
+        assert!(prompt.contains("kind: pm"));
     }
 
     #[test]

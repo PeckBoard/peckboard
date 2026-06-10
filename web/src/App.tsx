@@ -1,10 +1,11 @@
 import { useEffect, useState, useMemo, useCallback, useRef } from 'react'
 import { useAuthStore, authedFetch } from './store/auth'
-import type { Announcement } from './types/api'
+import type { Announcement, PmDecisionsChangedEvent } from './types/api'
 import { useUiStore } from './store/ui'
 import { useWsStore } from './store/ws'
 import { useSessionsStore } from './store/sessions'
 import { useProjectsStore } from './store/projects'
+import { usePmStore } from './store/pmStore'
 import { useFoldersStore } from './store/folders'
 import LoginModal from './components/LoginModal'
 import ChatView from './components/ChatView'
@@ -19,6 +20,7 @@ import FoldersPage from './components/ManageFoldersModal'
 import ConfirmDialog from './components/ConfirmDialog'
 import ReportBrowser from './components/ReportBrowser'
 import ExpertsView from './components/ExpertsView'
+import PmExpertView from './components/PmExpertView'
 import RepeatingTasksView from './components/RepeatingTasksView'
 import UserManagement from './components/UserManagement'
 import ChangePasswordModal from './components/ChangePasswordModal'
@@ -127,6 +129,9 @@ function App() {
   const fetchEvents = useSessionsStore((s) => s.fetchEvents)
   const processing = useSessionsStore((s) => s.processing)
   const unreadSessions = useSessionsStore((s) => s.unreadSessions)
+  const experts = useSessionsStore((s) => s.experts)
+  const expertsLoaded = useSessionsStore((s) => s.expertsLoaded)
+  const fetchExperts = useSessionsStore((s) => s.fetchExperts)
   const projects = useProjectsStore((s) => s.projects)
   const projectsLoaded = useProjectsStore((s) => s.projectsLoaded)
   const activeProjectId = useProjectsStore((s) => s.activeProjectId)
@@ -135,6 +140,9 @@ function App() {
   const fetchProjects = useProjectsStore((s) => s.fetchProjects)
   const folders = useFoldersStore((s) => s.folders)
   const fetchFolders = useFoldersStore((s) => s.fetchFolders)
+  const pmPendingTotal = usePmStore((s) =>
+    Object.values(s.pendingCountByProject).reduce((sum, n) => sum + n, 0),
+  )
 
   const folderMap = useMemo(() => {
     const m = new Map<string, string>()
@@ -161,6 +169,12 @@ function App() {
   // session list / tab system, so this never feeds the MRU tab logic.
   const [activeExpertId, setActiveExpertId] = useState<string | null>(
     initialRoute.view === 'experts' ? initialRoute.activeId : null,
+  )
+  // Resolve the open expert so the detail surface can branch on kind:
+  // the PM expert renders a Q&A form, every other kind keeps ChatView.
+  const activeExpert = useMemo(
+    () => (activeExpertId ? (experts.find((e) => e.id === activeExpertId) ?? null) : null),
+    [experts, activeExpertId],
   )
   const [showNewSession, setShowNewSession] = useState(false)
   const [showNewProject, setShowNewProject] = useState(false)
@@ -371,8 +385,24 @@ function App() {
       // closes a real tab.
       fetchProjects()
       fetchFolders()
+      // Experts are needed at startup (not just when ExpertsView mounts)
+      // so a deep link to /experts/:id can branch on expert_kind — the
+      // PM expert opens a Q&A form, not the chat transcript.
+      fetchExperts()
       useTabsStore.getState().fetchTabs()
       const stopTabsSync = startTabsAutoSync()
+      // PM decision-log live updates: ws.ts re-dispatches the
+      // `pm-decisions-changed` broadcast as a window event; apply it to
+      // the PM store here so pending counts stay live even when no PM
+      // component is mounted.
+      const onPmChange = (e: globalThis.Event) => {
+        const detail = (e as CustomEvent).detail as { data?: PmDecisionsChangedEvent } | undefined
+        const data = detail?.data
+        if (data?.projectId) {
+          usePmStore.getState().applyPmChange(data.projectId, data.pending_count)
+        }
+      }
+      window.addEventListener('peckboard:pm-decisions-changed', onPmChange)
       // Fetch announcements
       authedFetch('/api/announcements')
         .then((res) => (res.ok ? res.json() : []))
@@ -385,9 +415,26 @@ function App() {
       return () => {
         disconnect()
         stopTabsSync()
+        window.removeEventListener('peckboard:pm-decisions-changed', onPmChange)
       }
     }
-  }, [authenticated, connect, disconnect, fetchSessions, fetchProjects, fetchFolders])
+  }, [authenticated, connect, disconnect, fetchSessions, fetchProjects, fetchFolders, fetchExperts])
+
+  // Seed pending PM-question counts for the rail badge: fetchPmState also
+  // subscribes to the project's `pm-decisions-changed` broadcasts, so one
+  // fetch per project keeps the count live thereafter.
+  const pmSeededProjects = useRef<Set<string>>(new Set())
+  useEffect(() => {
+    if (!authenticated) return
+    for (const p of projects) {
+      if (pmSeededProjects.current.has(p.id)) continue
+      pmSeededProjects.current.add(p.id)
+      usePmStore
+        .getState()
+        .fetchPmState(p.id)
+        .catch(() => {})
+    }
+  }, [authenticated, projects])
 
   // Open / promote a tab whenever the user activates a session or
   // project — this is what makes "MRU + cross-device sync" Just Work,
@@ -620,6 +667,14 @@ function App() {
               <line x1="10" y1="19" x2="14" y2="19" />
               <line x1="11" y1="22" x2="13" y2="22" />
             </svg>
+            {pmPendingTotal > 0 && (
+              <span
+                className="unread-dot rail-btn-dot"
+                data-testid="pm-expert-waiting-badge"
+                aria-label="PM expert waiting for answers"
+                title="PM expert waiting for answers"
+              />
+            )}
           </button>
           <button
             className={`rail-btn ${view === 'reports' ? 'active' : ''}`}
@@ -911,7 +966,27 @@ function App() {
           ))}
         {view === 'experts' &&
           (activeExpertId ? (
-            <ChatView sessionId={activeExpertId} />
+            activeExpert?.expert_kind === 'pm' && activeExpert.project_id ? (
+              <PmExpertView
+                projectId={activeExpert.project_id}
+                expertName={activeExpert.name}
+                onBack={() => {
+                  setActiveExpertId(null)
+                  navigate('experts')
+                }}
+              />
+            ) : expertsLoaded || activeExpert ? (
+              <ChatView sessionId={activeExpertId} />
+            ) : (
+              // Deep link before the experts list resolves: hold off on
+              // mounting ChatView so a PM expert never flashes a chat
+              // transcript while its kind is still unknown.
+              <div className="list-view">
+                <div className="list-view-empty">
+                  <p>Loading expert…</p>
+                </div>
+              </div>
+            )
           ) : (
             <ExpertsView
               onOpenExpert={(id) => {

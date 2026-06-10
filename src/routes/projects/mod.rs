@@ -4,6 +4,7 @@
 //! module so both layers can call them without re-exporting.
 
 mod cards;
+mod pm;
 
 use axum::{
     Json, Router,
@@ -225,6 +226,22 @@ pub fn router(state: Arc<AppState>) -> Router<Arc<AppState>> {
         .route(
             "/api/projects/{id}/pending-questions",
             get(list_pending_questions),
+        )
+        .route(
+            "/api/projects/{id}/pm/decisions",
+            get(pm::list_pm_decisions),
+        )
+        .route(
+            "/api/projects/{id}/pm/decisions/{did}",
+            put(pm::update_pm_decision),
+        )
+        .route(
+            "/api/projects/{id}/pm/questions",
+            get(pm::list_pm_questions),
+        )
+        .route(
+            "/api/projects/{id}/pm/questions/{qid}/answer",
+            post(pm::answer_pm_question),
         )
         .route("/api/projects/{id}/todos", get(list_project_todos))
         .route(

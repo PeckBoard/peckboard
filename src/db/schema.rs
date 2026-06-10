@@ -189,6 +189,20 @@ diesel::table! {
 }
 
 diesel::table! {
+    pm_decisions (id) {
+        id -> Text,
+        project_id -> Text,
+        question -> Text,
+        answer -> Nullable<Text>,
+        status -> Text,
+        asked_by_session_id -> Nullable<Text>,
+        superseded_by -> Nullable<Text>,
+        created_at -> Text,
+        answered_at -> Nullable<Text>,
+    }
+}
+
+diesel::table! {
     project_workflow_instructions (project_id, workflow_id, step) {
         project_id -> Text,
         workflow_id -> Text,
@@ -210,6 +224,7 @@ diesel::joinable!(queued_messages -> sessions (session_id));
 diesel::joinable!(todos -> sessions (session_id));
 diesel::joinable!(repeating_tasks -> folders (folder_id));
 diesel::joinable!(project_workflow_instructions -> projects (project_id));
+diesel::joinable!(pm_decisions -> projects (project_id));
 
 diesel::joinable!(user_tabs -> users (user_id));
 
@@ -229,4 +244,5 @@ diesel::allow_tables_to_appear_in_same_query!(
     todos,
     repeating_tasks,
     project_workflow_instructions,
+    pm_decisions,
 );

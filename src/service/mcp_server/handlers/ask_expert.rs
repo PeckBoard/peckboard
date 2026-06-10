@@ -39,7 +39,14 @@
 //!   cross-project **chat session** that consulted it (never a worker in
 //!   another project). A project-scoped **question** expert may only answer
 //!   sessions in its own project (global experts may answer any in-scope
-//!   caller).
+//!   caller). **PM** experts are project-scoped like question experts, so
+//!   the same rule confines their replies to their own project.
+//!
+//! The per-project **PM expert** is additionally addressable by the
+//! shorthand "pm" (as `expert_id` or `area`) or by its stable
+//! `pm-expert-project-<id>`, resolving to the caller's own project's PM
+//! expert and lazily ensuring the row exists (idempotent upsert) — so it is
+//! reachable even on DBs whose bootstrap predates the PM-expert feature.
 
 use serde_json::{Value, json};
 
@@ -84,29 +91,36 @@ impl McpToolRegistry {
         // unscoped (e.g. global chat) caller, which may only reach globals.
         let caller_project = ctx.project_id.clone();
 
-        // Resolve the target expert, enforcing scope.
-        let expert = match expert_id {
-            Some(id) => {
-                let e = ctx
-                    .db
-                    .get_expert_session(id)
-                    .await?
-                    .ok_or_else(|| anyhow::anyhow!("expert not found: {id}"))?;
-                ensure_expert_in_scope(&e, caller_project.as_deref())?;
-                e
-            }
-            None => {
-                let candidates = self
-                    .in_scope_experts(ctx, caller_project.as_deref())
-                    .await?;
-                match pick_expert(candidates, area) {
-                    Some(e) => e,
-                    None => {
-                        return Ok(json!({
-                            "status": "no_expert",
-                            "message": "no in-scope expert is available to answer; \
-                                        spin up experts first or widen the scope",
-                        }));
+        // Resolve the target expert, enforcing scope. The PM expert is
+        // special-cased: the "pm" shorthand (or its stable id) resolves to
+        // the caller's own project's PM expert, lazily ensured.
+        let expert = if is_pm_target(expert_id, area, caller_project.as_deref()) {
+            self.resolve_pm_expert(ctx, caller_project.as_deref())
+                .await?
+        } else {
+            match expert_id {
+                Some(id) => {
+                    let e = ctx
+                        .db
+                        .get_expert_session(id)
+                        .await?
+                        .ok_or_else(|| anyhow::anyhow!("expert not found: {id}"))?;
+                    ensure_expert_in_scope(&e, caller_project.as_deref())?;
+                    e
+                }
+                None => {
+                    let candidates = self
+                        .in_scope_experts(ctx, caller_project.as_deref())
+                        .await?;
+                    match pick_expert(candidates, area) {
+                        Some(e) => e,
+                        None => {
+                            return Ok(json!({
+                                "status": "no_expert",
+                                "message": "no in-scope expert is available to answer; \
+                                            spin up experts first or widen the scope",
+                            }));
+                        }
                     }
                 }
             }
@@ -225,6 +239,31 @@ impl McpToolRegistry {
         }))
     }
 
+    /// Resolve the caller's per-project PM expert by its stable
+    /// `pm-expert-project-<id>`, lazily ensuring the row exists (idempotent
+    /// upsert) so the PM expert is reachable even when no bootstrap has run
+    /// for this project yet. In scope by construction: it always belongs to
+    /// the caller's own project.
+    pub(super) async fn resolve_pm_expert(
+        &self,
+        ctx: &ToolCallContext,
+        caller_project: Option<&str>,
+    ) -> anyhow::Result<Session> {
+        let project_id = caller_project.ok_or_else(|| {
+            anyhow::anyhow!("the PM expert is per-project; this caller has no project scope")
+        })?;
+        let id = crate::service::pm_expert::project_pm_expert_id(project_id);
+        if let Some(e) = ctx.db.get_expert_session(&id).await? {
+            return Ok(e);
+        }
+        let project = ctx
+            .db
+            .get_project(project_id)
+            .await?
+            .ok_or_else(|| anyhow::anyhow!("project not found: {project_id}"))?;
+        crate::service::pm_expert::ensure_project_pm_expert(&ctx.db, &project).await
+    }
+
     /// Experts the caller may consult: those scoped to its project, plus
     /// globally-scoped experts, plus any knowledge expert in another project
     /// (which only answers within its own boundary). An unscoped caller sees
@@ -247,7 +286,7 @@ impl McpToolRegistry {
     /// `send_or_queue` so an idle session spawns a turn (and a running one gets
     /// the message queued / injected mid-stream). With no dispatcher (headless
     /// / tests) the event is still persisted; only the resume is skipped.
-    async fn deliver_as_user_message(
+    pub(super) async fn deliver_as_user_message(
         &self,
         ctx: &ToolCallContext,
         target_session_id: &str,
@@ -278,6 +317,23 @@ impl McpToolRegistry {
                 "ask_expert: failed to resume session after delivery: {e}"
             );
         }
+    }
+}
+
+/// True when the caller addressed the per-project PM expert: the shorthand
+/// "pm" (as `expert_id` or, with no `expert_id`, as the `area` hint), or the
+/// caller's own project's stable `pm-expert-project-<id>`. Another project's
+/// PM expert deliberately does NOT match — it falls through to the generic
+/// path, where the scope check rejects it.
+fn is_pm_target(expert_id: Option<&str>, area: Option<&str>, caller_project: Option<&str>) -> bool {
+    let is_pm = |s: &str| s.trim().eq_ignore_ascii_case("pm");
+    match expert_id {
+        Some(id) => {
+            is_pm(id)
+                || caller_project
+                    .is_some_and(|p| id == crate::service::pm_expert::project_pm_expert_id(p))
+        }
+        None => area.is_some_and(is_pm),
     }
 }
 

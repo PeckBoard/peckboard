@@ -201,6 +201,8 @@ async fn mcp_handler(
                 expert_dispatcher: Some(Arc::new(
                     crate::service::mcp_server::AppExpertDispatcher::new(state.clone()),
                 )),
+                data_dir: Some(state.config.data_dir.clone()),
+                pm_authorizations: state.pm_authorizations.clone(),
             };
 
             // ── Hook: mcp.tool.call.before ──

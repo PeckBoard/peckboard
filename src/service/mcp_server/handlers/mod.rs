@@ -8,6 +8,7 @@ mod cards;
 mod experts;
 mod folders;
 mod misc;
+mod pm_expert;
 mod projects;
 mod repeating_tasks;
 mod reports;

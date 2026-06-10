@@ -94,6 +94,9 @@ impl McpToolRegistry {
             "spin_up_experts" => self.handle_spin_up_experts(args, ctx).await,
             "list_experts" => self.handle_list_experts(args, ctx).await,
             "ask_expert" => self.handle_ask_expert(args, ctx).await,
+            "pm_record_decision" => self.handle_pm_record_decision(args, ctx).await,
+            "pm_check_decisions" => self.handle_pm_check_decisions(args, ctx).await,
+            "pm_escalate_to_user" => self.handle_pm_escalate_to_user(args, ctx).await,
             "list_repeating_tasks" => self.handle_list_repeating_tasks(ctx).await,
             "create_repeating_task" => self.handle_create_repeating_task(args, ctx).await,
             "update_repeating_task" => self.handle_update_repeating_task(args, ctx).await,
@@ -288,11 +291,14 @@ mod tests {
         assert!(names.contains(&"spin_up_experts"));
         assert!(names.contains(&"list_experts"));
         assert!(names.contains(&"ask_expert"));
+        assert!(names.contains(&"pm_record_decision"));
+        assert!(names.contains(&"pm_check_decisions"));
+        assert!(names.contains(&"pm_escalate_to_user"));
         assert!(names.contains(&"list_repeating_tasks"));
         assert!(names.contains(&"create_repeating_task"));
         assert!(names.contains(&"update_repeating_task"));
         assert!(names.contains(&"delete_repeating_task"));
-        assert_eq!(names.len(), 41);
+        assert_eq!(names.len(), 44);
     }
 
     #[test]
@@ -317,6 +323,8 @@ mod tests {
             broadcaster: crate::ws::broadcaster::Broadcaster::new(),
             provider_registry: None,
             expert_dispatcher: None,
+            data_dir: None,
+            pm_authorizations: Default::default(),
         };
 
         let result = registry
@@ -369,6 +377,8 @@ mod tests {
             broadcaster: crate::ws::broadcaster::Broadcaster::new(),
             provider_registry: None,
             expert_dispatcher: None,
+            data_dir: None,
+            pm_authorizations: Default::default(),
         };
 
         // Two prerequisites via create_card (no deps yet).
@@ -491,6 +501,8 @@ mod tests {
             broadcaster: crate::ws::broadcaster::Broadcaster::new(),
             provider_registry: None,
             expert_dispatcher: None,
+            data_dir: None,
+            pm_authorizations: Default::default(),
         };
 
         let result = registry
@@ -597,6 +609,8 @@ mod tests {
             broadcaster: crate::ws::broadcaster::Broadcaster::new(),
             provider_registry: None,
             expert_dispatcher: None,
+            data_dir: None,
+            pm_authorizations: Default::default(),
         };
 
         let result = registry

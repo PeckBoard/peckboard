@@ -1,6 +1,7 @@
 import { useEffect, useMemo } from 'react'
 import { useSessionsStore } from '../store/sessions'
 import { useProjectsStore } from '../store/projects'
+import { usePmStore } from '../store/pmStore'
 import type { Expert } from '../types/api'
 
 /**
@@ -26,16 +27,19 @@ const GLOBAL_KEY = '__global__'
 function kindLabel(kind: string | null): string {
   if (kind === 'question') return 'Question'
   if (kind === 'knowledge') return 'Knowledge'
+  if (kind === 'pm') return 'PM'
   return 'Expert'
 }
 
 function ExpertRow({
   expert,
   projectLabel,
+  pendingCount,
   onOpen,
 }: {
   expert: Expert
   projectLabel: string
+  pendingCount: number
   onOpen: (id: string) => void
 }) {
   const kind = expert.expert_kind
@@ -56,6 +60,17 @@ function ExpertRow({
     >
       <div className="expert-row-head">
         <span className="expert-name">{expert.name}</span>
+        {pendingCount > 0 && (
+          <span
+            className="expert-waiting-indicator"
+            data-testid="pm-expert-waiting-indicator"
+            aria-label="PM expert waiting for answers"
+            title="PM expert waiting for answers"
+          >
+            <span className="unread-dot" />
+            {pendingCount} question{pendingCount === 1 ? '' : 's'} waiting
+          </span>
+        )}
         <span className={`expert-kind-badge expert-kind-${kind ?? 'expert'}`}>
           {kindLabel(kind)}
         </span>
@@ -85,6 +100,7 @@ export default function ExpertsView({ onOpenExpert }: { onOpenExpert: (id: strin
   const fetchExperts = useSessionsStore((s) => s.fetchExperts)
   const projects = useProjectsStore((s) => s.projects)
   const fetchProjects = useProjectsStore((s) => s.fetchProjects)
+  const pendingCountByProject = usePmStore((s) => s.pendingCountByProject)
 
   useEffect(() => {
     fetchExperts()
@@ -155,6 +171,11 @@ export default function ExpertsView({ onOpenExpert }: { onOpenExpert: (id: strin
                   key={expert.id}
                   expert={expert}
                   onOpen={onOpenExpert}
+                  pendingCount={
+                    expert.expert_kind === 'pm' && expert.project_id
+                      ? (pendingCountByProject[expert.project_id] ?? 0)
+                      : 0
+                  }
                   projectLabel={
                     expert.project_id ? (projectName.get(expert.project_id) ?? 'Project') : 'Global'
                   }

@@ -174,15 +174,42 @@ async fn main() -> anyhow::Result<()> {
 
                 // Likewise backfill the project's PM expert (durable store of
                 // project-direction decisions) so projects created before the
-                // feature gain one on upgrade. Idempotent; per-project failure
-                // is logged and skipped.
-                if let Err(e) =
-                    peckboard::service::pm_expert::ensure_project_pm_expert(&db, project).await
-                {
-                    tracing::warn!(
+                // feature gain one on upgrade, then export its decision log
+                // (so the file always exists) and rehydrate the expert from
+                // it. All idempotent; per-project failure is logged and
+                // skipped.
+                match peckboard::service::pm_expert::ensure_project_pm_expert(&db, project).await {
+                    Ok(expert) => {
+                        if let Err(e) = peckboard::service::pm_expert::export_pm_decisions(
+                            &db,
+                            &config.data_dir,
+                            &project.id,
+                        )
+                        .await
+                        {
+                            tracing::warn!(
+                                project_id = %project.id,
+                                "Failed to export PM decisions: {e}"
+                            );
+                        }
+                        if let Err(e) = peckboard::service::pm_expert::rehydrate_pm_expert(
+                            &db,
+                            &broadcaster,
+                            &config.data_dir,
+                            &expert,
+                        )
+                        .await
+                        {
+                            tracing::warn!(
+                                project_id = %project.id,
+                                "Failed to rehydrate project PM expert: {e}"
+                            );
+                        }
+                    }
+                    Err(e) => tracing::warn!(
                         project_id = %project.id,
                         "Failed to ensure project PM expert: {e}"
-                    );
+                    ),
                 }
             }
         }
@@ -212,6 +239,7 @@ async fn main() -> anyhow::Result<()> {
         repeating_task_manager,
         mcp_tokens,
         push_service,
+        pm_authorizations: Default::default(),
     });
 
     // Resume any in-flight worker sessions after startup repair

@@ -63,6 +63,7 @@ async fn build_state() -> Arc<AppState> {
         repeating_task_manager: peckboard::repeating::RepeatingTaskManager::new(),
         mcp_tokens: McpTokenRegistry::new(),
         push_service: PushService::new(&data_dir),
+        pm_authorizations: Default::default(),
     })
 }
 
@@ -177,6 +178,8 @@ fn ctx_for_card(state: &Arc<AppState>, session_id: &str, card_id: &str) -> ToolC
         // and the cancel path is exercised by the live provider tests.
         provider_registry: None,
         expert_dispatcher: None,
+        data_dir: None,
+        pm_authorizations: Default::default(),
     }
 }
 

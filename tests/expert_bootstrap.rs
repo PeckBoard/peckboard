@@ -29,6 +29,8 @@ fn ctx(db: &Arc<Db>, session_id: &str) -> ToolCallContext {
         broadcaster: Broadcaster::new(),
         provider_registry: None,
         expert_dispatcher: None,
+        data_dir: None,
+        pm_authorizations: Default::default(),
     }
 }
 

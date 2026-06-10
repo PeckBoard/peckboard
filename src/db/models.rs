@@ -469,6 +469,36 @@ pub struct UserTab {
     pub last_active: String,
 }
 
+// ── PM Decisions ─────────────────────────────────────────────────────
+
+#[derive(Queryable, Selectable, Serialize, Debug, Clone)]
+#[diesel(table_name = pm_decisions)]
+pub struct PmDecision {
+    pub id: String,
+    pub project_id: String,
+    pub question: String,
+    pub answer: Option<String>,
+    pub status: String,
+    pub asked_by_session_id: Option<String>,
+    pub superseded_by: Option<String>,
+    pub created_at: String,
+    pub answered_at: Option<String>,
+}
+
+#[derive(Insertable, Deserialize, Debug)]
+#[diesel(table_name = pm_decisions)]
+pub struct NewPmDecision {
+    pub id: String,
+    pub project_id: String,
+    pub question: String,
+    pub answer: Option<String>,
+    pub status: String,
+    pub asked_by_session_id: Option<String>,
+    pub superseded_by: Option<String>,
+    pub created_at: String,
+    pub answered_at: Option<String>,
+}
+
 // ── Project workflow instructions ────────────────────────────────────
 
 #[derive(Queryable, Selectable, Insertable, Serialize, Debug, Clone)]

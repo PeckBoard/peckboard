@@ -57,6 +57,7 @@ async fn build_state() -> Arc<AppState> {
         repeating_task_manager: peckboard::repeating::RepeatingTaskManager::new(),
         mcp_tokens: McpTokenRegistry::new(),
         push_service: PushService::new(&data_dir),
+        pm_authorizations: Default::default(),
     })
 }
 

@@ -70,6 +70,8 @@ async fn spin_up_experts_creates_persistent_hidden_experts() {
         broadcaster: Broadcaster::new(),
         provider_registry: None,
         expert_dispatcher: None,
+        data_dir: None,
+        pm_authorizations: Default::default(),
     };
 
     let result = registry
@@ -150,6 +152,8 @@ async fn spin_up_experts_rejects_out_of_scope_project() {
         broadcaster: Broadcaster::new(),
         provider_registry: None,
         expert_dispatcher: None,
+        data_dir: None,
+        pm_authorizations: Default::default(),
     };
     let err = registry
         .handle_tool_call(

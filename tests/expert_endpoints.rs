@@ -93,6 +93,7 @@ async fn build_state() -> (Arc<AppState>, String) {
         repeating_task_manager: peckboard::repeating::RepeatingTaskManager::new(),
         mcp_tokens: McpTokenRegistry::new(),
         push_service,
+        pm_authorizations: Default::default(),
     });
 
     // Keep the tempdir alive for the lifetime of the test by leaking it;

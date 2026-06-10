@@ -150,7 +150,7 @@ test('experts view shows experts grouped by project; chat list hides them', asyn
   const experts = (await expertsRes.json()) as {
     id: string
     name: string
-    expert_kind: 'knowledge' | 'question' | null
+    expert_kind: 'knowledge' | 'question' | 'pm' | null
     knowledge_area: string | null
     knowledge_summary: string | null
     scope_path: string | null
@@ -191,8 +191,16 @@ test('experts view shows experts grouped by project; chat list hides them', asyn
         ? 'Question'
         : e.expert_kind === 'knowledge'
           ? 'Knowledge'
-          : 'Expert'
-    const row = rows.filter({ hasText: e.knowledge_area ?? '' }).first()
+          : e.expert_kind === 'pm'
+            ? 'PM'
+            : 'Expert'
+    // Match by the dedicated area element, not whole-row text — row text
+    // includes the summary, where loose substrings collide (e.g. the PM
+    // expert's summary contains "authorization", which matches an "auth"
+    // knowledge area).
+    const row = rows
+      .filter({ has: page.locator('.expert-area', { hasText: e.knowledge_area ?? '' }) })
+      .first()
     await expect(row).toBeVisible()
     await expect(row.locator('.expert-summary')).not.toBeEmpty()
     await expect(row).toContainText('Boundaries:')

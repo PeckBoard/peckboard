@@ -394,6 +394,8 @@ mod tests {
             broadcaster: crate::ws::broadcaster::Broadcaster::new(),
             provider_registry: None,
             expert_dispatcher: None,
+            data_dir: None,
+            pm_authorizations: Default::default(),
         }
     }
 

@@ -661,7 +661,7 @@ pub(super) fn tool_definitions() -> Vec<McpToolDef> {
         },
         McpToolDef {
             name: "ask_expert".into(),
-            description: "Ask a long-lived EXPERT session a question, ASYNCHRONOUSLY. You do NOT block waiting — the answer arrives as an event you read on a later turn. Target the expert either by explicit `expert_id` (from list_experts) or by an `area`/topic string the tool resolves to the best in-scope expert; you may only reach experts in your own project or globally-scoped experts. The question is delivered to the expert and a context-coupled answer (which expert, area, your question, the expert's captured knowledge) is returned to you. A live expert may also reply with a more specific answer on a later turn. EXPERTS answering a consultation use this same tool in reply mode by setting `answer` + `reply_to_session_id`.".into(),
+            description: "Ask a long-lived EXPERT session a question, ASYNCHRONOUSLY. You do NOT block waiting — the answer arrives as an event you read on a later turn. Target the expert either by explicit `expert_id` (from list_experts) or by an `area`/topic string the tool resolves to the best in-scope expert; you may only reach experts in your own project or globally-scoped experts. Your project's PM expert (the durable store of project-direction and business-logic decisions) is addressable with the shorthand `expert_id` (or `area`) \"pm\". The question is delivered to the expert and a context-coupled answer (which expert, area, your question, the expert's captured knowledge) is returned to you. A live expert may also reply with a more specific answer on a later turn. EXPERTS answering a consultation use this same tool in reply mode by setting `answer` + `reply_to_session_id`.".into(),
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
@@ -686,6 +686,76 @@ pub(super) fn tool_definitions() -> Vec<McpToolDef> {
                         "description": "EXPERT REPLY MODE: the session id to deliver the answer to (the original asker). Requires `answer`."
                     }
                 },
+                "additionalProperties": false
+            }),
+        },
+        McpToolDef {
+            name: "pm_record_decision".into(),
+            description: "Record a project-direction or business-logic decision in the project's durable PM decision log. Use when the user (or the PM expert relaying the user) has settled a question of product direction, scope, or business logic that future work must respect. Workers may only ADD new decisions — changing or superseding an existing decision must be routed through the PM expert so the user can authorize it. The project's PM expert is notified of every decision recorded by another session.".into(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "title": {
+                        "type": "string",
+                        "description": "Short title naming what was decided"
+                    },
+                    "decision": {
+                        "type": "string",
+                        "description": "The decision itself — the rule future changes must respect"
+                    },
+                    "rationale": {
+                        "type": "string",
+                        "description": "Why this was decided (optional)"
+                    },
+                    "supersedes_decision_id": {
+                        "type": "string",
+                        "description": "Id of an existing decision this one replaces. RESTRICTED: only the PM expert acting with explicit user authorization may supersede; all other callers are rejected."
+                    }
+                },
+                "required": ["title", "decision"],
+                "additionalProperties": false
+            }),
+        },
+        McpToolDef {
+            name: "pm_check_decisions".into(),
+            description: "Check a planned change against the project's active (non-superseded) PM decisions BEFORE making it. Synchronous — returns the active decision set (id, title, decision, decided_at) immediately, without consulting any expert. Optionally narrow with topic_keywords; if no keyword matches, the FULL active set is returned so a bad keyword can never hide a relevant decision.".into(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "planned_change": {
+                        "type": "string",
+                        "description": "Plain-language description of the change you are about to make"
+                    },
+                    "topic_keywords": {
+                        "type": "array",
+                        "items": { "type": "string" },
+                        "description": "Optional keywords to narrow the returned decisions (matched case-insensitively against title and decision text)"
+                    }
+                },
+                "required": ["planned_change"],
+                "additionalProperties": false
+            }),
+        },
+        McpToolDef {
+            name: "pm_escalate_to_user".into(),
+            description: "PM EXPERT ONLY: escalate a project-direction or business-logic question you cannot answer from recorded decisions to the user. The question lands in the project's PM decision log as PENDING — the waiting-for-user state the UI surfaces — and when the user answers, their answer is delivered back to you as an express user decision (the only authorization under which an existing decision may be superseded). Any other session calling this is rejected: route questions through the PM expert via ask_expert (expert_id/area \"pm\") instead.".into(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "question": {
+                        "type": "string",
+                        "description": "The decision question the user must answer"
+                    },
+                    "context": {
+                        "type": "string",
+                        "description": "Optional context for the user: why this is being asked, options considered, impact"
+                    },
+                    "asking_session_id": {
+                        "type": "string",
+                        "description": "Optional id of the worker session whose consultation triggered this escalation, so you can relay the eventual answer back to it via ask_expert reply mode"
+                    }
+                },
+                "required": ["question"],
                 "additionalProperties": false
             }),
         },

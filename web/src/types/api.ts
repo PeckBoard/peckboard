@@ -148,6 +148,37 @@ export interface Announcement {
   created_at: string
 }
 
+/** An answered PM decision as serialized by
+ *  GET /api/projects/:id/pm/decisions (and the answer/edit mutation
+ *  responses). `asked_by_session_id` is the provenance of the question
+ *  (which worker escalated it); null when the PM expert asked directly. */
+export interface PmDecision {
+  id: string
+  question: string
+  answer: string | null
+  status: string
+  decided_at: string | null
+  asked_by_session_id: string | null
+  asked_at: string
+}
+
+/** A PM question awaiting a user answer, from
+ *  GET /api/projects/:id/pm/questions. */
+export interface PmPendingQuestion {
+  id: string
+  question: string
+  asked_by_session_id: string | null
+  asked_at: string
+}
+
+/** Payload of the `pm-decisions-changed` WebSocket event, broadcast
+ *  after every PM decision-log mutation. */
+export interface PmDecisionsChangedEvent {
+  projectId: string
+  action: string
+  pending_count: number
+}
+
 // Common API response types
 export interface ApiError {
   error: string
