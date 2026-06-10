@@ -19,6 +19,7 @@ use std::sync::Arc;
 
 use crate::db::Db;
 use crate::db::models::{NewFolder, NewSession, Project, Session};
+use crate::service::mcp_server::ExpertDispatcher;
 use crate::ws::broadcaster::{Broadcaster, WsEvent};
 
 /// Stable id of the one global question-expert. Deterministic so it
@@ -112,11 +113,17 @@ pub async fn in_scope_question_expert(
 }
 
 /// Feed a resolved user Q&A back to the in-scope question-expert, coupled
-/// with the original question context, via the same async deliver mechanism
-/// other expert traffic uses (append a `user` event + broadcast a
-/// `worker-stdin-deliver`). Returns the question-expert id it delivered to,
-/// or `None` when no question-expert is in scope. A no-op for self-delivery
-/// (the question-expert never feeds answers to itself).
+/// with the original question context, delivered the same way a user message
+/// arrives: persist a `user` event + broadcast it, then resume the expert via
+/// `resume` (`send_or_queue`) so it actually takes a turn to internalize the
+/// answer rather than only seeing it on some future run. Returns the
+/// question-expert id it delivered to, or `None` when no question-expert is in
+/// scope. A no-op for self-delivery (the question-expert never feeds answers to
+/// itself).
+///
+/// `resume` is the live-app seam: `Some` in the running server (so the expert
+/// resumes), `None` in headless / tests (persist-only). See
+/// [`crate::service::delivery`].
 ///
 /// The Q&A is ALSO persisted EAGERLY to the scope's durable Q&A export file
 /// under `data_dir` (see [`crate::service::qa_report`]) so it survives a
@@ -128,6 +135,7 @@ pub async fn record_user_answer(
     db: &Db,
     broadcaster: &Arc<Broadcaster>,
     data_dir: &Path,
+    resume: Option<&Arc<dyn ExpertDispatcher>>,
     project_id: Option<&str>,
     qa_context: &str,
 ) -> anyhow::Result<Option<String>> {
@@ -159,22 +167,23 @@ pub async fn record_user_answer(
          (NOT from the user — recorded by Peckboard)\n\n{qa_context}"
     );
 
-    let _ = db
-        .append_event(
-            &expert.id,
-            "user",
-            serde_json::json!({
-                "text": message,
-                "source": "question-expert-feedback",
-            }),
-        )
-        .await;
+    if let Err(e) = crate::service::delivery::persist_user_message(
+        db,
+        broadcaster,
+        &expert.id,
+        &message,
+        "question-expert-feedback",
+    )
+    .await
+    {
+        tracing::warn!(expert_id = %expert.id, "failed to persist Q&A feedback: {e}");
+    }
 
-    broadcaster.broadcast(WsEvent {
-        event_type: "worker-stdin-deliver".into(),
-        session_id: expert.id.clone(),
-        data: serde_json::json!({ "text": message }),
-    });
+    if let Some(dispatcher) = resume
+        && let Err(e) = dispatcher.resume_session(&expert.id, &message).await
+    {
+        tracing::warn!(expert_id = %expert.id, "failed to resume question-expert after feedback: {e}");
+    }
 
     Ok(Some(expert.id))
 }
@@ -223,7 +232,12 @@ pub async fn rehydrate_question_expert(
 
     let message = crate::service::qa_report::build_rehydration_prompt(&export);
 
-    let _ = db
+    // Persist as a user-style event and broadcast it the same way a user
+    // message renders. Rehydration runs at early boot, before the
+    // `SessionManager` exists, so there is no resume here — the expert
+    // consumes this on its next run (e.g. when it's next consulted, which now
+    // resumes it). The `exportLen` marker keeps this idempotent across boots.
+    let event = db
         .append_event(
             &expert.id,
             "user",
@@ -233,12 +247,18 @@ pub async fn rehydrate_question_expert(
                 "exportLen": export_len,
             }),
         )
-        .await;
+        .await?;
 
     broadcaster.broadcast(WsEvent {
-        event_type: "worker-stdin-deliver".into(),
+        event_type: "event".into(),
         session_id: expert.id.clone(),
-        data: serde_json::json!({ "text": message }),
+        data: serde_json::json!({
+            "id": event.id,
+            "seq": event.seq,
+            "ts": event.ts,
+            "kind": event.kind,
+            "data": serde_json::from_str::<serde_json::Value>(&event.data).unwrap_or_default(),
+        }),
     });
 
     Ok(true)
@@ -406,6 +426,7 @@ mod tests {
             &bc,
             export_dir.path(),
             None,
+            None,
             "**Which database?**: PostgreSQL",
         )
         .await
@@ -429,7 +450,7 @@ mod tests {
         let db = mk_db().await;
         let bc = Broadcaster::new();
         let export_dir = tempfile::tempdir().unwrap();
-        let delivered = record_user_answer(&db, &bc, export_dir.path(), None, "q: a")
+        let delivered = record_user_answer(&db, &bc, export_dir.path(), None, None, "q: a")
             .await
             .unwrap();
         assert!(delivered.is_none());

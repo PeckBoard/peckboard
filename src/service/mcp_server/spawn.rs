@@ -22,6 +22,53 @@ impl AppExpertDispatcher {
     pub fn new(state: Arc<AppState>) -> Self {
         Self { state }
     }
+
+    /// Issue an MCP token + config for `session_id` and build a `SpawnConfig`
+    /// for it. Shared by the capture-run and resume paths. `metadata` lets the
+    /// caller tag the run (capture vs. ordinary resume). `send_message_locked`
+    /// resolves `working_dir` from the session's folder, so an empty string
+    /// here is fine.
+    async fn spawn_config_for(
+        &self,
+        session_id: &str,
+        metadata: serde_json::Value,
+    ) -> anyhow::Result<SpawnConfig> {
+        let state = &self.state;
+        let session = state
+            .db
+            .get_session(session_id)
+            .await?
+            .ok_or_else(|| anyhow::anyhow!("session not found: {session_id}"))?;
+
+        let mcp_token = state
+            .mcp_tokens
+            .issue_token(session_id.to_string(), session.project_id.clone())
+            .await;
+
+        let mcp_config_path = crate::service::mcp_server::write_mcp_config(
+            &state.config.data_dir,
+            session_id,
+            state.config.port,
+            &mcp_token,
+        )
+        .ok()
+        .map(|p| p.to_string_lossy().to_string());
+
+        Ok(SpawnConfig {
+            model: session.model.clone().unwrap_or_else(|| "default".into()),
+            effort: session.effort.clone(),
+            working_dir: String::new(),
+            mcp_config_path,
+            env: Default::default(),
+            permission_mode: Some("bypass".into()),
+            timeout_ms: None,
+            metadata,
+            system_prompt_suffix: None,
+            // `send_message_locked` re-derives this from the session
+            // (question-experts run answer-only), so the value here is moot.
+            restrict_to_qa: false,
+        })
+    }
 }
 
 impl ExpertDispatcher for AppExpertDispatcher {
@@ -32,47 +79,40 @@ impl ExpertDispatcher for AppExpertDispatcher {
     ) -> Pin<Box<dyn Future<Output = anyhow::Result<()>> + Send + 'a>> {
         Box::pin(async move {
             let state = &self.state;
-            let session = state
-                .db
-                .get_session(expert_session_id)
-                .await?
-                .ok_or_else(|| anyhow::anyhow!("expert session not found: {expert_session_id}"))?;
+            let config = self
+                .spawn_config_for(
+                    expert_session_id,
+                    serde_json::json!({ "expert": true, "capture": true }),
+                )
+                .await?;
 
-            let mcp_token = state
-                .mcp_tokens
-                .issue_token(expert_session_id.to_string(), session.project_id.clone())
-                .await;
-
-            let mcp_config_path = crate::service::mcp_server::write_mcp_config(
-                &state.config.data_dir,
-                expert_session_id,
-                state.config.port,
-                &mcp_token,
-            )
-            .ok()
-            .map(|p| p.to_string_lossy().to_string());
-
-            // `send_message_locked` resolves working_dir from the session's
-            // folder, so an empty string here is fine.
-            let config = SpawnConfig {
-                model: session.model.clone().unwrap_or_else(|| "default".into()),
-                effort: session.effort.clone(),
-                working_dir: String::new(),
-                mcp_config_path,
-                env: Default::default(),
-                permission_mode: Some("bypass".into()),
-                timeout_ms: None,
-                metadata: serde_json::json!({ "expert": true, "capture": true }),
-                system_prompt_suffix: None,
-                // Knowledge-expert capture; the manager flips this on only for
-                // question-experts anyway, but be explicit.
-                restrict_to_qa: false,
-            };
-
+            // Capture is a forced fresh run (re-read the scope), so dispatch
+            // through the locked path rather than send_or_queue.
             let lock = state.session_manager.lock_session(expert_session_id).await;
             state
                 .session_manager
                 .send_message_locked(&lock, prompt, &state.db, &state.broadcaster, config)
+                .await?;
+            Ok(())
+        })
+    }
+
+    fn resume_session<'a>(
+        &'a self,
+        session_id: &'a str,
+        text: &'a str,
+    ) -> Pin<Box<dyn Future<Output = anyhow::Result<()>> + Send + 'a>> {
+        Box::pin(async move {
+            let state = &self.state;
+            let config = self
+                .spawn_config_for(session_id, serde_json::Value::Null)
+                .await?;
+
+            // Resume exactly like a user message: send_or_queue spawns a fresh
+            // run if idle, or queues / injects mid-stream if already running.
+            state
+                .session_manager
+                .send_or_queue(session_id, text, &state.db, &state.broadcaster, config)
                 .await?;
             Ok(())
         })

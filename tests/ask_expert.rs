@@ -7,12 +7,44 @@
 //! - scope is enforced: a caller cannot reach an expert in another project,
 //! - reply-mode delivers an expert's answer back to the asking session.
 
-use std::sync::Arc;
+use std::future::Future;
+use std::pin::Pin;
+use std::sync::{Arc, Mutex};
 
 use peckboard::db::Db;
 use peckboard::db::models::{NewFolder, NewProject, NewSession};
-use peckboard::service::mcp_server::{McpToolRegistry, ToolCallContext};
+use peckboard::service::mcp_server::{ExpertDispatcher, McpToolRegistry, ToolCallContext};
 use peckboard::ws::broadcaster::Broadcaster;
+
+/// Test dispatcher that records every `resume_session` call so a test can
+/// assert which sessions got resumed (the production impl would call
+/// `send_or_queue`). `dispatch_capture` is a no-op here.
+#[derive(Default)]
+struct RecordingDispatcher {
+    resumed: Mutex<Vec<(String, String)>>,
+}
+
+impl ExpertDispatcher for RecordingDispatcher {
+    fn dispatch_capture<'a>(
+        &'a self,
+        _expert_session_id: &'a str,
+        _prompt: &'a str,
+    ) -> Pin<Box<dyn Future<Output = anyhow::Result<()>> + Send + 'a>> {
+        Box::pin(async { Ok(()) })
+    }
+
+    fn resume_session<'a>(
+        &'a self,
+        session_id: &'a str,
+        text: &'a str,
+    ) -> Pin<Box<dyn Future<Output = anyhow::Result<()>> + Send + 'a>> {
+        let entry = (session_id.to_string(), text.to_string());
+        Box::pin(async move {
+            self.resumed.lock().unwrap().push(entry);
+            Ok(())
+        })
+    }
+}
 
 async fn seed_project(db: &Db, project_id: &str, folder_id: &str) {
     let ts = chrono::Utc::now().to_rfc3339();
@@ -196,6 +228,68 @@ async fn ask_expert_delivers_question_and_answer() {
                 && t.contains("authentication")
         }),
         "caller must receive a context-coupled answer, got: {caller_events:?}"
+    );
+}
+
+#[tokio::test]
+async fn ask_expert_resumes_expert_and_caller_via_dispatcher() {
+    // With a live dispatcher present, ask-mode resumes BOTH the target expert
+    // (so an idle expert actually takes a turn to answer) AND the asking
+    // session (so it processes the returned answer) — exactly like a user
+    // message would.
+    let db = Arc::new(Db::in_memory().unwrap());
+    seed_project(&db, "p1", "f1").await;
+    seed_session(
+        &db,
+        "caller",
+        "f1",
+        Some("p1"),
+        true,
+        false,
+        None,
+        None,
+        None,
+    )
+    .await;
+    seed_session(
+        &db,
+        "expert-auth",
+        "f1",
+        Some("p1"),
+        false,
+        true,
+        Some("authentication"),
+        Some("auth knowledge"),
+        Some("src/auth"),
+    )
+    .await;
+
+    let recorder = Arc::new(RecordingDispatcher::default());
+    let dispatcher: Arc<dyn ExpertDispatcher> = recorder.clone();
+    let mut call_ctx = ctx(&db, "caller", Some("p1"));
+    call_ctx.expert_dispatcher = Some(dispatcher);
+
+    let registry = McpToolRegistry::new();
+    registry
+        .handle_tool_call(
+            "ask_expert",
+            serde_json::json!({
+                "expert_id": "expert-auth",
+                "question": "How are JWTs validated?",
+            }),
+            &call_ctx,
+        )
+        .await
+        .unwrap();
+
+    let resumed = recorder.resumed.lock().unwrap();
+    assert!(
+        resumed.iter().any(|(sid, _)| sid == "expert-auth"),
+        "the target expert must be resumed, got: {resumed:?}"
+    );
+    assert!(
+        resumed.iter().any(|(sid, _)| sid == "caller"),
+        "the asking session must be resumed, got: {resumed:?}"
     );
 }
 

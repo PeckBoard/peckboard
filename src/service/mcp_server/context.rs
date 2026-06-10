@@ -24,6 +24,20 @@ pub trait ExpertDispatcher: Send + Sync {
         expert_session_id: &'a str,
         prompt: &'a str,
     ) -> Pin<Box<dyn Future<Output = anyhow::Result<()>> + Send + 'a>>;
+
+    /// Resume a session with `text` exactly as an incoming user message would:
+    /// hand off to `SessionManager::send_or_queue`, which spawns a fresh agent
+    /// run when the session is idle, or queues / injects mid-stream when it is
+    /// already running. The caller is responsible for having already persisted
+    /// the matching `user` event (see
+    /// [`crate::service::delivery::persist_user_message`]); this only drives
+    /// the agent. A no-op seam in headless/test contexts (there is no
+    /// dispatcher to call), which is why persistence is kept separate.
+    fn resume_session<'a>(
+        &'a self,
+        session_id: &'a str,
+        text: &'a str,
+    ) -> Pin<Box<dyn Future<Output = anyhow::Result<()>> + Send + 'a>>;
 }
 
 /// Context scoped from the MCP token — identifies what session/project/card

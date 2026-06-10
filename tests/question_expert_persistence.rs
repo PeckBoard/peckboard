@@ -154,16 +154,24 @@ async fn qa_export_persists_rehydrates_and_lists_through_reports_api() {
     let project_expert = ensure_project_question_expert(db, &project).await.unwrap();
 
     // 1. Accumulate Q&A — one global, one project-scoped.
-    record_user_answer(db, bc, &data_dir, None, "**Which database?**: PostgreSQL")
-        .await
-        .unwrap();
-    record_user_answer(db, bc, &data_dir, None, "**Which HTTP port?**: 8080")
+    record_user_answer(
+        db,
+        bc,
+        &data_dir,
+        None,
+        None,
+        "**Which database?**: PostgreSQL",
+    )
+    .await
+    .unwrap();
+    record_user_answer(db, bc, &data_dir, None, None, "**Which HTTP port?**: 8080")
         .await
         .unwrap();
     record_user_answer(
         db,
         bc,
         &data_dir,
+        None,
         Some("p1"),
         "**Project test command?**: cargo test",
     )

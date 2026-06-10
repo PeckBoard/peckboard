@@ -130,6 +130,7 @@ async fn resolved_user_answer_is_fed_back_to_question_expert_with_context() {
         &bc,
         &data_dir(),
         None,
+        None,
         "**Which package manager should I use?**: pnpm",
     )
     .await

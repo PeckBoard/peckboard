@@ -2,17 +2,20 @@
 //! a long-lived expert session.
 //!
 //! LOCKED DESIGN: the exchange is fully asynchronous — the caller never
-//! blocks waiting for the expert. The flow has two directions, both built on
-//! the existing [`McpToolRegistry::deliver_to_worker`] mechanism (append a
-//! `user` event + broadcast `worker-stdin-deliver`):
+//! blocks waiting for the expert. Every delivery lands the same way a user
+//! message does (see [`deliver_as_user_message`]): a `user` event is persisted
+//! + broadcast, and — when a live app is present — the target session is
+//! resumed via `ExpertDispatcher::resume_session` (`send_or_queue`), so an idle
+//! expert actually spawns a turn to answer rather than only seeing the question
+//! on some future manual run. In headless / test contexts (no dispatcher) the
+//! event is still persisted; only the resume is skipped. The flow has two
+//! directions:
 //!
 //! 1. **Ask** (`question` + a target selector): the question is delivered to
-//!    the chosen expert session so it sees it on its next turn, and a
-//!    context-coupled answer is delivered back to the asking session sourced
-//!    from the expert's eagerly-captured `knowledge_summary`. This is the
-//!    "write the answer as an event the caller reads on its next turn"
-//!    approach — the caller always gets something on its next turn even with
-//!    no live agent driving the expert (e.g. in tests / headless).
+//!    the chosen expert session (resuming it), and a context-coupled answer is
+//!    delivered back to the asking session (resuming it too) sourced from the
+//!    expert's eagerly-captured `knowledge_summary` — so the caller always gets
+//!    something on its next turn even before a live expert replies.
 //! 2. **Reply** (`answer` + `reply_to_session_id`): the genuine async path —
 //!    a live expert that has taken a turn on the question delivers its answer
 //!    back to the asking session, coupled with which expert / area / the
@@ -129,7 +132,8 @@ impl McpToolRegistry {
             area = area_label,
             question = question,
         );
-        self.deliver_to_worker(ctx, &expert.id, &question_msg).await;
+        self.deliver_as_user_message(ctx, &expert.id, &question_msg, "expert-consultation")
+            .await;
 
         // 2. Deliver a context-coupled answer back to the asking session,
         //    sourced from the expert's eagerly-captured knowledge. The caller
@@ -156,7 +160,7 @@ impl McpToolRegistry {
                 scope.clone()
             },
         );
-        self.deliver_to_worker(ctx, &ctx.session_id, &answer_msg)
+        self.deliver_as_user_message(ctx, &ctx.session_id, &answer_msg, "expert-answer")
             .await;
 
         Ok(json!({
@@ -231,7 +235,8 @@ impl McpToolRegistry {
             regarding = regarding,
             answer = answer,
         );
-        self.deliver_to_worker(ctx, reply_to, &msg).await;
+        self.deliver_as_user_message(ctx, reply_to, &msg, "expert-answer")
+            .await;
 
         Ok(json!({
             "status": "ok",
@@ -254,6 +259,45 @@ impl McpToolRegistry {
             .into_iter()
             .filter(|e| expert_in_scope(e, caller_project))
             .collect())
+    }
+
+    /// Deliver `message` to `target_session_id` the same way a user message
+    /// arrives: persist a `user` event (tagged `source`) + broadcast it, then —
+    /// when a live dispatcher is present — resume the target via
+    /// `send_or_queue` so an idle session spawns a turn (and a running one gets
+    /// the message queued / injected mid-stream). With no dispatcher (headless
+    /// / tests) the event is still persisted; only the resume is skipped.
+    async fn deliver_as_user_message(
+        &self,
+        ctx: &ToolCallContext,
+        target_session_id: &str,
+        message: &str,
+        source: &str,
+    ) {
+        if let Err(e) = crate::service::delivery::persist_user_message(
+            &ctx.db,
+            &ctx.broadcaster,
+            target_session_id,
+            message,
+            source,
+        )
+        .await
+        {
+            tracing::warn!(
+                session_id = %target_session_id,
+                "ask_expert: failed to persist delivery: {e}"
+            );
+            return;
+        }
+
+        if let Some(dispatcher) = &ctx.expert_dispatcher
+            && let Err(e) = dispatcher.resume_session(target_session_id, message).await
+        {
+            tracing::warn!(
+                session_id = %target_session_id,
+                "ask_expert: failed to resume session after delivery: {e}"
+            );
+        }
     }
 }
 

@@ -327,10 +327,14 @@ pub(super) async fn append_event(
                     return;
                 }
                 let project_id = session.and_then(|s| s.project_id);
+                let dispatcher: Arc<dyn crate::service::mcp_server::ExpertDispatcher> = Arc::new(
+                    crate::service::mcp_server::AppExpertDispatcher::new(fb_state.clone()),
+                );
                 if let Err(e) = crate::service::question_expert::record_user_answer(
                     &fb_state.db,
                     &fb_state.broadcaster,
                     &fb_state.config.data_dir,
+                    Some(&dispatcher),
                     project_id.as_deref(),
                     &fb_qa,
                 )

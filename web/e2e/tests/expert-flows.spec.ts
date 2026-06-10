@@ -219,8 +219,8 @@ test('ask_expert delivers the question to the expert and a context-coupled answe
     `caller must receive a context-coupled answer; got: ${JSON.stringify(callerEvents.map((e) => e.data.text))}`,
   ).toBeTruthy()
 
-  // Scope enforcement: a project-scoped knowledge expert is NOT reachable by
-  // this unscoped caller.
+  // Scope: a project-scoped KNOWLEDGE expert only answers within its codebase
+  // boundary, so an unscoped chat session MAY consult it cross-project.
   const { projectId } = await seedProject(request, authHeader, 'Scope Demo')
   const spin = await mcpCall(request, callerToken, 'spin_up_experts', {
     project_id: projectId,
@@ -232,11 +232,39 @@ test('ask_expert delivers the question to the expert and a context-coupled answe
   )
   expect(projExperts.length, 'a project knowledge expert was created').toBeGreaterThan(0)
 
-  const denied = await mcpCall(request, callerToken, 'ask_expert', {
+  const allowed = await mcpCall(request, callerToken, 'ask_expert', {
     expert_id: projExperts[0].id,
+    question: 'what does this module do?',
+  })
+  expect(
+    allowed.error,
+    `unscoped chat caller should reach a project knowledge expert: ${JSON.stringify(allowed.error)}`,
+  ).toBeFalsy()
+  expect(allowed.result!.status).toBe('ok')
+
+  // But a project QUESTION expert holds private user Q&A with no boundary, so
+  // it stays project-scoped: the unscoped caller is rejected. (The per-project
+  // question-expert is created in the background — poll for it.)
+  let projQuestion: Awaited<ReturnType<typeof getExperts>>[number] | undefined
+  await expect
+    .poll(
+      async () => {
+        projQuestion = (await getExperts(request, authHeader)).find(
+          (e) => e.project_id === projectId && e.expert_kind === 'question',
+        )
+        return Boolean(projQuestion)
+      },
+      { message: 'project question-expert created', timeout: 10_000 },
+    )
+    .toBeTruthy()
+  const denied = await mcpCall(request, callerToken, 'ask_expert', {
+    expert_id: projQuestion!.id,
     question: 'leak project internals',
   })
-  expect(denied.error, 'unscoped caller must be rejected from a project expert').toBeTruthy()
+  expect(
+    denied.error,
+    'unscoped caller must be rejected from a project question-expert',
+  ).toBeTruthy()
   expect(denied.error!.message.toLowerCase()).toContain('scope')
 })
 
