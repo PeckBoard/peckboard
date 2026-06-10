@@ -166,7 +166,7 @@ async fn event_texts(db: &Db, session_id: &str) -> Vec<String> {
 }
 
 #[tokio::test]
-async fn ask_expert_delivers_question_and_answer() {
+async fn ask_expert_delivers_question_no_placeholder_answer() {
     let db = Arc::new(Db::in_memory().unwrap());
     seed_project(&db, "p1", "f1").await;
     seed_session(
@@ -209,6 +209,8 @@ async fn ask_expert_delivers_question_and_answer() {
 
     assert_eq!(result["status"], "ok");
     assert_eq!(result["expert_id"], "expert-auth");
+    // The asked question is echoed back in the tool result for the caller.
+    assert_eq!(result["question"], "How are JWTs validated?");
 
     // The question landed as an event on the expert session.
     let expert_events = event_texts(&db, "expert-auth").await;
@@ -219,24 +221,21 @@ async fn ask_expert_delivers_question_and_answer() {
         "expert must receive the question as an event, got: {expert_events:?}"
     );
 
-    // An answer event, coupled with context, was delivered back to the caller.
+    // No synchronous placeholder answer is delivered back to the caller: it
+    // receives only the genuine reply the expert produces later (reply-mode).
     let caller_events = event_texts(&db, "caller").await;
     assert!(
-        caller_events.iter().any(|t| {
-            t.contains("Expert answer")
-                && t.contains("How are JWTs validated?")
-                && t.contains("authentication")
-        }),
-        "caller must receive a context-coupled answer, got: {caller_events:?}"
+        !caller_events.iter().any(|t| t.contains("Expert answer")),
+        "caller must NOT receive a synchronous placeholder answer, got: {caller_events:?}"
     );
 }
 
 #[tokio::test]
-async fn ask_expert_resumes_expert_and_caller_via_dispatcher() {
-    // With a live dispatcher present, ask-mode resumes BOTH the target expert
-    // (so an idle expert actually takes a turn to answer) AND the asking
-    // session (so it processes the returned answer) — exactly like a user
-    // message would.
+async fn ask_expert_resumes_only_expert_via_dispatcher() {
+    // With a live dispatcher present, ask-mode resumes ONLY the target expert
+    // (so an idle expert actually takes a turn to answer). The asking session
+    // is not resumed in ask-mode, since nothing is delivered back to it until
+    // the expert replies via reply-mode.
     let db = Arc::new(Db::in_memory().unwrap());
     seed_project(&db, "p1", "f1").await;
     seed_session(
@@ -288,8 +287,8 @@ async fn ask_expert_resumes_expert_and_caller_via_dispatcher() {
         "the target expert must be resumed, got: {resumed:?}"
     );
     assert!(
-        resumed.iter().any(|(sid, _)| sid == "caller"),
-        "the asking session must be resumed, got: {resumed:?}"
+        !resumed.iter().any(|(sid, _)| sid == "caller"),
+        "the asking session must NOT be resumed in ask-mode, got: {resumed:?}"
     );
 }
 

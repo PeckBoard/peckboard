@@ -12,10 +12,11 @@
 //! directions:
 //!
 //! 1. **Ask** (`question` + a target selector): the question is delivered to
-//!    the chosen expert session (resuming it), and a context-coupled answer is
-//!    delivered back to the asking session (resuming it too) sourced from the
-//!    expert's eagerly-captured `knowledge_summary` — so the caller always gets
-//!    something on its next turn even before a live expert replies.
+//!    the chosen expert session (resuming it). Nothing is delivered back to the
+//!    asking session synchronously — the expert's pre-captured
+//!    `knowledge_summary` is not an answer to this specific question, so it is
+//!    no longer echoed back. The caller receives only the genuine answer the
+//!    live expert produces via reply-mode, which arrives as a later event.
 //! 2. **Reply** (`answer` + `reply_to_session_id`): the genuine async path —
 //!    a live expert that has taken a turn on the question delivers its answer
 //!    back to the asking session, coupled with which expert / area / the
@@ -135,44 +136,23 @@ impl McpToolRegistry {
         self.deliver_as_user_message(ctx, &expert.id, &question_msg, "expert-consultation")
             .await;
 
-        // 2. Deliver a context-coupled answer back to the asking session,
-        //    sourced from the expert's eagerly-captured knowledge. The caller
-        //    reads this on its next turn (no synchronous wait). A live expert
-        //    may additionally reply with a richer answer via reply-mode.
-        let knowledge = expert
-            .knowledge_summary
-            .clone()
-            .unwrap_or_else(|| "(this expert has not captured its scope yet)".into());
-        let scope = expert.scope_path.clone().unwrap_or_default();
-        let answer_msg = format!(
-            "[Expert answer — {area} (expert {expert_id})]\n\
-             In response to your question: \"{question}\"\n\n\
-             {knowledge}\n\n\
-             (Source: long-lived knowledge expert covering {scope}. A more specific \
-             live answer may arrive on a later turn.)",
-            area = area_label,
-            expert_id = expert.id,
-            question = question,
-            knowledge = knowledge,
-            scope = if scope.is_empty() {
-                "its scope".into()
-            } else {
-                scope.clone()
-            },
-        );
-        self.deliver_as_user_message(ctx, &ctx.session_id, &answer_msg, "expert-answer")
-            .await;
+        // No synchronous placeholder is delivered back to the caller: the
+        // expert's pre-captured knowledge_summary is not an answer to this
+        // specific question. The caller receives only the genuine answer the
+        // live expert produces via reply-mode (coupled with the original
+        // question), which arrives as a later event. The asked question is
+        // echoed in the tool result for the caller's own record.
 
         Ok(json!({
             "status": "ok",
             "expert_id": expert.id,
             "knowledge_area": expert.knowledge_area,
             "scope_path": expert.scope_path,
+            "question": question,
             "delivered": true,
-            "answer": answer_msg,
             "message": format!(
-                "Question delivered to expert {} ({}). An answer was returned and a \
-                 live follow-up may arrive on a later turn.",
+                "Question delivered to expert {} ({}). The expert's answer will \
+                 arrive as a later event once it takes a turn.",
                 expert.id, area_label
             ),
         }))

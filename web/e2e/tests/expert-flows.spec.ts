@@ -157,7 +157,7 @@ test('bootstrap: global question-expert exists on boot; per-project one after pr
     .toBeTruthy()
 })
 
-test('ask_expert delivers the question to the expert and a context-coupled answer to the caller', async ({
+test('ask_expert delivers the question to the expert and no placeholder answer to the caller', async ({
   request,
 }) => {
   const { authHeader } = await authenticate(request)
@@ -198,6 +198,8 @@ test('ask_expert delivers the question to the expert and a context-coupled answe
   expect(ask.error, `ask_expert errored: ${JSON.stringify(ask.error)}`).toBeFalsy()
   expect(ask.result!.status).toBe('ok')
   expect(ask.result!.delivered).toBe(true)
+  // The asked question is echoed back in the tool result for the caller.
+  expect(ask.result!.question).toBe(question)
 
   // The question landed on the expert session as a consultation event.
   const expertEvents = await getEvents(request, authHeader, target.id)
@@ -208,15 +210,12 @@ test('ask_expert delivers the question to the expert and a context-coupled answe
     `expert must receive the question; got: ${JSON.stringify(expertEvents.map((e) => e.data.text))}`,
   ).toBeTruthy()
 
-  // A context-coupled answer was delivered back to the caller (read on its
-  // next turn — the async contract).
+  // No synchronous placeholder answer is delivered back to the caller: it
+  // receives only the genuine reply the expert produces later (reply-mode).
   const callerEvents = await getEvents(request, authHeader, caller.id)
   expect(
-    callerEvents.some(
-      (e) =>
-        (e.data.text ?? '').includes('Expert answer') && (e.data.text ?? '').includes(question),
-    ),
-    `caller must receive a context-coupled answer; got: ${JSON.stringify(callerEvents.map((e) => e.data.text))}`,
+    callerEvents.every((e) => !(e.data.text ?? '').includes('Expert answer')),
+    `caller must NOT receive a placeholder answer; got: ${JSON.stringify(callerEvents.map((e) => e.data.text))}`,
   ).toBeTruthy()
 
   // Scope: a project-scoped KNOWLEDGE expert only answers within its codebase
