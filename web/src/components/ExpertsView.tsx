@@ -3,6 +3,7 @@ import { useSessionsStore } from '../store/sessions'
 import { useProjectsStore } from '../store/projects'
 import { usePmStore } from '../store/pmStore'
 import type { Expert } from '../types/api'
+import ListViewHeader from './ListViewHeader'
 
 /**
  * Expert Sessions view.
@@ -146,9 +147,7 @@ export default function ExpertsView({ onOpenExpert }: { onOpenExpert: (id: strin
 
   return (
     <div className="list-view experts-view">
-      <div className="list-view-header">
-        <h2 className="list-view-title">Experts</h2>
-      </div>
+      <ListViewHeader title="Experts" />
       <div className="list-view-body">
         {expertsLoaded && experts.length === 0 && (
           <div className="list-view-empty">

@@ -181,6 +181,15 @@
   }
 
   /* Tool blocks full width */
+  /* Drop the desktop board's side padding so each step row spans
+     edge-to-edge against the viewport. Padding now lives INSIDE the
+     row (on `.kanban-column-header` and `.kanban-cards`), which
+     keeps the heading + card strip readable while letting the row
+     background — and its top divider — touch the window sides. */
+  .kanban-board {
+    padding-left: 0;
+    padding-right: 0;
+  }
   /* The board itself owns vertical scrolling; per-column overflow
      would create a new sticky containing block and break the
      section-locked header. */

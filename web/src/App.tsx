@@ -10,6 +10,7 @@ import { useFoldersStore } from './store/folders'
 import LoginModal from './components/LoginModal'
 import ChatView from './components/ChatView'
 import SessionTodosView from './components/SessionTodosView'
+import ListViewHeader from './components/ListViewHeader'
 import ProjectList from './components/ProjectList'
 import KanbanBoard from './components/KanbanBoard'
 import ProjectTodosView from './components/ProjectTodosView'
@@ -935,16 +936,11 @@ function App() {
             )
           ) : (
             <div className="list-view">
-              <div className="list-view-header">
-                <h2 className="list-view-title">Sessions</h2>
-                <button
-                  className="list-view-action"
-                  onClick={() => setShowNewSession(true)}
-                  title="New session"
-                >
-                  + New session
-                </button>
-              </div>
+              <ListViewHeader
+                title="Sessions"
+                actionLabel="+ New session"
+                onAction={() => setShowNewSession(true)}
+              />
               <div
                 className="list-view-body"
                 // Scroll-load: when the user gets within 200px of the

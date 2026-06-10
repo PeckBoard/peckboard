@@ -3,6 +3,7 @@ import { useFoldersStore } from '../store/folders'
 import { useRepeatingTasksStore } from '../store/repeatingTasks'
 import type { RepeatingTask } from '../types/api'
 import ConfirmDialog from './ConfirmDialog'
+import ListViewHeader from './ListViewHeader'
 import NewRepeatingTaskModal from './NewRepeatingTaskModal'
 import { describeSchedule } from '../utils/repeatingSchedule'
 
@@ -244,12 +245,12 @@ export default function RepeatingTasksView({ activeTaskId, onNavigate, onOpenSes
 
   return (
     <div className="list-view">
-      <div className="list-view-header">
-        <h2 className="list-view-title">Repeating Tasks</h2>
-        <button className="list-view-action" onClick={() => setShowCreate(true)}>
-          + New task
-        </button>
-      </div>
+      <ListViewHeader
+        title="Repeating Tasks"
+        actionLabel="+ New task"
+        onAction={() => setShowCreate(true)}
+      />
+
       <div className="list-view-body">
         {!loaded ? (
           <div className="list-view-empty">Loading…</div>

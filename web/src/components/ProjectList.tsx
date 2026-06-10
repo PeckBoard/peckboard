@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react'
 import { useProjectsStore } from '../store/projects'
 import ConfirmDialog from './ConfirmDialog'
 import EditProjectModal from './EditProjectModal'
+import ListViewHeader from './ListViewHeader'
 
 interface ProjectListProps {
   onNewProject?: () => void
@@ -46,14 +47,11 @@ export default function ProjectList({ onNewProject }: ProjectListProps) {
 
   return (
     <>
-      <div className="list-view-header">
-        <h2 className="list-view-title">Projects</h2>
-        {onNewProject && (
-          <button className="list-view-action" onClick={onNewProject}>
-            + New project
-          </button>
-        )}
-      </div>
+      <ListViewHeader
+        title="Projects"
+        actionLabel={onNewProject ? '+ New project' : undefined}
+        onAction={onNewProject}
+      />
       <div className="list-view-body">
         {projects.length === 0 ? (
           <div className="list-view-empty">
