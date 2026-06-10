@@ -81,6 +81,33 @@ async fn seed_session(
     .unwrap();
 }
 
+/// Seed a project-scoped *question* expert (no codebase boundary).
+async fn seed_question_expert(db: &Db, id: &str, folder_id: &str, project_id: &str) {
+    let ts = chrono::Utc::now().to_rfc3339();
+    db.create_session(NewSession {
+        id: id.into(),
+        name: format!("question {id}"),
+        folder_id: folder_id.into(),
+        model: Some("mock:happy-path".into()),
+        effort: None,
+        is_worker: false,
+        project_id: Some(project_id.into()),
+        card_id: None,
+        conversation_id: None,
+        created_at: ts.clone(),
+        last_activity: ts.clone(),
+        is_expert: true,
+        expert_kind: Some("question".into()),
+        knowledge_summary: Some("Accumulated user Q&A.".into()),
+        knowledge_area: Some("User Q&A (project)".into()),
+        scope_path: None,
+        is_permanent: true,
+        repeating_task_id: None,
+    })
+    .await
+    .unwrap();
+}
+
 fn ctx(db: &Arc<Db>, session_id: &str, project_id: Option<&str>) -> ToolCallContext {
     ToolCallContext {
         session_id: session_id.into(),
@@ -234,7 +261,10 @@ async fn ask_expert_resolves_target_by_area() {
 }
 
 #[tokio::test]
-async fn ask_expert_rejects_cross_project_target() {
+async fn ask_expert_rejects_cross_project_question_expert() {
+    // A *question* expert holds private accumulated user Q&A and has no
+    // codebase boundary, so it must stay project-scoped: a caller in p1
+    // cannot reach p2's question expert.
     let db = Arc::new(Db::in_memory().unwrap());
     seed_project(&db, "p1", "f1").await;
     seed_project(&db, "p2", "f2").await;
@@ -250,32 +280,93 @@ async fn ask_expert_rejects_cross_project_target() {
         None,
     )
     .await;
-    // Expert lives in p2; caller is scoped to p1.
-    seed_session(
-        &db,
-        "expert-p2",
-        "f2",
-        Some("p2"),
-        false,
-        true,
-        Some("secrets"),
-        Some("p2 internals"),
-        Some("src"),
-    )
-    .await;
+    seed_question_expert(&db, "question-p2", "f2", "p2").await;
 
     let registry = McpToolRegistry::new();
     let err = registry
         .handle_tool_call(
             "ask_expert",
             serde_json::json!({
-                "expert_id": "expert-p2",
+                "expert_id": "question-p2",
                 "question": "leak something",
             }),
             &ctx(&db, "caller", Some("p1")),
         )
         .await;
-    assert!(err.is_err(), "cross-project expert target must be rejected");
+    assert!(
+        err.is_err(),
+        "cross-project question expert must be rejected"
+    );
+}
+
+#[tokio::test]
+async fn ask_expert_cross_project_knowledge_expert_chat_only() {
+    // A *knowledge* expert only answers within its codebase boundary. A chat
+    // session (unscoped token) may consult it cross-project; a worker (a
+    // project-scoped token) may not — workers stay confined to their project.
+    let db = Arc::new(Db::in_memory().unwrap());
+    seed_project(&db, "p1", "f1").await;
+    seed_project(&db, "p2", "f2").await;
+    // A worker in p1 and a plain chat session (no project).
+    seed_session(
+        &db,
+        "worker-p1",
+        "f1",
+        Some("p1"),
+        true,
+        false,
+        None,
+        None,
+        None,
+    )
+    .await;
+    seed_session(&db, "chat", "f1", None, false, false, None, None, None).await;
+    // Knowledge expert lives in p2.
+    seed_session(
+        &db,
+        "expert-p2-web",
+        "f2",
+        Some("p2"),
+        false,
+        true,
+        Some("web"),
+        Some("Knowledge area: web\nReact frontend."),
+        Some("web"),
+    )
+    .await;
+
+    let registry = McpToolRegistry::new();
+
+    // Worker scoped to p1 → rejected.
+    let worker_err = registry
+        .handle_tool_call(
+            "ask_expert",
+            serde_json::json!({
+                "expert_id": "expert-p2-web",
+                "question": "What guards the login form?",
+            }),
+            &ctx(&db, "worker-p1", Some("p1")),
+        )
+        .await;
+    assert!(
+        worker_err.is_err(),
+        "a worker must not reach a cross-project expert"
+    );
+
+    // Chat session (unscoped) → allowed.
+    let result = registry
+        .handle_tool_call(
+            "ask_expert",
+            serde_json::json!({
+                "expert_id": "expert-p2-web",
+                "question": "What guards the login form?",
+            }),
+            &ctx(&db, "chat", None),
+        )
+        .await
+        .unwrap();
+    assert_eq!(result["status"], "ok");
+    assert_eq!(result["expert_id"], "expert-p2-web");
 }
 
 #[tokio::test]
@@ -378,5 +469,120 @@ async fn ask_expert_reply_mode_routes_answer_to_caller() {
                 && t.contains("How are JWTs validated?")
         }),
         "caller must receive the expert's reply coupled with context, got: {caller_events:?}"
+    );
+}
+
+#[tokio::test]
+async fn ask_expert_reply_mode_knowledge_expert_crosses_to_chat_only() {
+    // A knowledge expert in p2 may reply to a cross-project *chat* session,
+    // but not to a worker in another project.
+    let db = Arc::new(Db::in_memory().unwrap());
+    seed_project(&db, "p1", "f1").await;
+    seed_project(&db, "p2", "f2").await;
+    // Chat session (no project) and a worker in p1.
+    seed_session(&db, "chat", "f1", None, false, false, None, None, None).await;
+    seed_session(
+        &db,
+        "worker-p1",
+        "f1",
+        Some("p1"),
+        true,
+        false,
+        None,
+        None,
+        None,
+    )
+    .await;
+    seed_session(
+        &db,
+        "expert-p2-web",
+        "f2",
+        Some("p2"),
+        false,
+        true,
+        Some("web"),
+        Some("web knowledge"),
+        Some("web"),
+    )
+    .await;
+
+    let registry = McpToolRegistry::new();
+
+    // Reply to the chat session → delivered.
+    let result = registry
+        .handle_tool_call(
+            "ask_expert",
+            serde_json::json!({
+                "reply_to_session_id": "chat",
+                "answer": "The login form is guarded by a CSRF token in the auth store.",
+                "question": "What guards the login form?",
+            }),
+            &ctx(&db, "expert-p2-web", Some("p2")),
+        )
+        .await
+        .unwrap();
+    assert_eq!(result["status"], "ok");
+    let chat_events = event_texts(&db, "chat").await;
+    assert!(
+        chat_events
+            .iter()
+            .any(|t| t.contains("Expert answer") && t.contains("CSRF token in the auth store")),
+        "cross-project knowledge-expert reply must reach the chat session, got: {chat_events:?}"
+    );
+
+    // Reply to a worker in another project → rejected.
+    let worker_err = registry
+        .handle_tool_call(
+            "ask_expert",
+            serde_json::json!({
+                "reply_to_session_id": "worker-p1",
+                "answer": "should not be delivered",
+                "question": "anything",
+            }),
+            &ctx(&db, "expert-p2-web", Some("p2")),
+        )
+        .await;
+    assert!(
+        worker_err.is_err(),
+        "a knowledge expert must not push answers into a cross-project worker"
+    );
+}
+
+#[tokio::test]
+async fn ask_expert_reply_mode_question_expert_blocked_cross_project() {
+    // A project-scoped question expert may NOT push an answer into a session
+    // in another project.
+    let db = Arc::new(Db::in_memory().unwrap());
+    seed_project(&db, "p1", "f1").await;
+    seed_project(&db, "p2", "f2").await;
+    seed_session(
+        &db,
+        "caller",
+        "f1",
+        Some("p1"),
+        true,
+        false,
+        None,
+        None,
+        None,
+    )
+    .await;
+    seed_question_expert(&db, "question-p2", "f2", "p2").await;
+
+    let registry = McpToolRegistry::new();
+    let err = registry
+        .handle_tool_call(
+            "ask_expert",
+            serde_json::json!({
+                "reply_to_session_id": "caller",
+                "answer": "private p2 user answer",
+                "question": "anything",
+            }),
+            &ctx(&db, "question-p2", Some("p2")),
+        )
+        .await;
+    assert!(
+        err.is_err(),
+        "cross-project question-expert reply must be rejected"
     );
 }

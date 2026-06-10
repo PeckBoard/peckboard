@@ -19,11 +19,23 @@
 //!    original question. The expert is told to use this in the ask-mode
 //!    prompt.
 //!
-//! Scope is enforced in both directions against the caller's MCP token: a
-//! caller can only reach experts in its own project or globally-scoped
-//! experts (`project_id IS NULL`), and an expert can only deliver answers to
-//! sessions in its own project (global experts may answer any in-scope
-//! caller).
+//! Scope is enforced in both directions against the caller's MCP token, with
+//! a deliberate carve-out for **knowledge** experts (which only ever answer
+//! within their own codebase `scope_path` boundary):
+//!
+//! - Ask: a caller may reach (a) globally-scoped experts (`project_id IS
+//!   NULL`) and (b) experts in its own project. Additionally a **chat
+//!   session** (an unscoped token) may reach any **knowledge** expert
+//!   regardless of project, to consult it about stuff inside that expert's
+//!   boundary. Workers (a project-scoped token) stay confined to their own
+//!   project plus globals. **Question** experts stay project/global-scoped:
+//!   they hold accumulated, potentially private user Q&A and have no codebase
+//!   boundary, so they are never reachable cross-project.
+//! - Reply: a **knowledge** expert may deliver its answer back to a
+//!   cross-project **chat session** that consulted it (never a worker in
+//!   another project). A project-scoped **question** expert may only answer
+//!   sessions in its own project (global experts may answer any in-scope
+//!   caller).
 
 use serde_json::{Value, json};
 
@@ -183,17 +195,24 @@ impl McpToolRegistry {
             .await?
             .ok_or_else(|| anyhow::anyhow!("target session not found: {reply_to}"))?;
 
-        // Scope: a project-scoped expert may only answer sessions in its own
-        // project; a global expert (unscoped token) may answer any in-scope
-        // caller.
-        if let Some(cp) = ctx.project_id.as_deref()
+        // Identify the replying expert for context.
+        let me = ctx.db.get_session(&ctx.session_id).await.ok().flatten();
+
+        // Scope: a project-scoped *question* expert may only answer sessions
+        // in its own project; a global expert (unscoped token) may answer any
+        // in-scope caller. A *knowledge* expert may answer cross-project, but
+        // only a **chat session** (the non-worker caller that's allowed to
+        // consult it cross-project in the first place) — never a worker in
+        // another project.
+        let me_is_knowledge = me.as_ref().map(is_knowledge_expert).unwrap_or(false);
+        let cross_project_ok = me_is_knowledge && !target.is_worker;
+        if !cross_project_ok
+            && let Some(cp) = ctx.project_id.as_deref()
             && target.project_id.as_deref() != Some(cp)
         {
             anyhow::bail!("cannot deliver answer to session in another project: {reply_to}");
         }
 
-        // Identify the replying expert for context.
-        let me = ctx.db.get_session(&ctx.session_id).await.ok().flatten();
         let area_label = me
             .as_ref()
             .and_then(|s| s.knowledge_area.clone())
@@ -221,36 +240,55 @@ impl McpToolRegistry {
         }))
     }
 
-    /// Experts the caller may consult: those scoped to its project plus
-    /// globally-scoped experts. An unscoped caller sees only globals.
+    /// Experts the caller may consult: those scoped to its project, plus
+    /// globally-scoped experts, plus any knowledge expert in another project
+    /// (which only answers within its own boundary). An unscoped caller sees
+    /// globals plus every knowledge expert.
     async fn in_scope_experts(
         &self,
         ctx: &ToolCallContext,
         caller_project: Option<&str>,
     ) -> anyhow::Result<Vec<Session>> {
-        match caller_project {
-            Some(p) => ctx.db.list_expert_sessions_by_scope(p).await,
-            None => {
-                let all = ctx.db.list_expert_sessions().await?;
-                Ok(all.into_iter().filter(|e| e.project_id.is_none()).collect())
-            }
-        }
+        let all = ctx.db.list_expert_sessions().await?;
+        Ok(all
+            .into_iter()
+            .filter(|e| expert_in_scope(e, caller_project))
+            .collect())
     }
 }
 
+/// A knowledge expert answers only within its codebase `scope_path` boundary,
+/// so it is safe to consult cross-project. A question expert holds accumulated
+/// user Q&A with no boundary and stays project/global-scoped.
+fn is_knowledge_expert(expert: &Session) -> bool {
+    expert.expert_kind.as_deref() == Some("knowledge")
+}
+
 /// An expert is in scope for a caller if it is global (`project_id IS NULL`)
-/// or owned by the caller's own project. Rejects cross-project access.
+/// or owned by the caller's own project. Additionally, a **chat session** (an
+/// unscoped token — `caller_project` is `None`) may reach any **knowledge**
+/// expert, since it only answers within its own boundary. Workers (a
+/// project-scoped token) stay confined to their own project plus globals, and
+/// cross-project access to a *question* expert is always rejected.
+fn expert_in_scope(expert: &Session, caller_project: Option<&str>) -> bool {
+    if expert.project_id.is_none() {
+        return true;
+    }
+    if caller_project.is_some() && expert.project_id.as_deref() == caller_project {
+        return true;
+    }
+    caller_project.is_none() && is_knowledge_expert(expert)
+}
+
 fn ensure_expert_in_scope(expert: &Session, caller_project: Option<&str>) -> anyhow::Result<()> {
-    match expert.project_id.as_deref() {
-        None => Ok(()), // global experts are reachable by anyone
-        Some(ep) => match caller_project {
-            Some(cp) if cp == ep => Ok(()),
-            _ => anyhow::bail!(
-                "expert {} is out of scope for this caller (belongs to project {})",
-                expert.id,
-                ep
-            ),
-        },
+    if expert_in_scope(expert, caller_project) {
+        Ok(())
+    } else {
+        anyhow::bail!(
+            "expert {} is out of scope for this caller (question-expert for project {})",
+            expert.id,
+            expert.project_id.as_deref().unwrap_or("?"),
+        )
     }
 }
 
