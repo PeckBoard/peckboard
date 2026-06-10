@@ -1179,3 +1179,136 @@ async fn refused_terminal_transition_does_not_touch_worker() {
     );
     assert_eq!(recorder.cancel_calls.load(Ordering::SeqCst), 0);
 }
+
+// ── list_cards: project scoping, status filter, slim summary ───────────
+
+async fn seed_project_p1(state: &Arc<AppState>) {
+    let ts = chrono::Utc::now().to_rfc3339();
+    state
+        .db
+        .create_folder(NewFolder {
+            id: "f1".into(),
+            name: "F".into(),
+            path: "/tmp".into(),
+            created_at: ts.clone(),
+        })
+        .await
+        .ok();
+    state
+        .db
+        .create_project(NewProject {
+            id: "p1".into(),
+            name: "P".into(),
+            context: "ctx".into(),
+            folder_id: "f1".into(),
+            worker_count: 1,
+            status: "active".into(),
+            workflow: "task".into(),
+            model: None,
+            effort: None,
+            parallel_instructions: false,
+            auto_notify_changes: true,
+            worker_communication: false,
+            created_at: ts.clone(),
+            last_accessed_at: ts.clone(),
+        })
+        .await
+        .ok();
+}
+
+async fn seed_plain_card(state: &Arc<AppState>, id: &str, step: &str, description: &str) {
+    let ts = chrono::Utc::now().to_rfc3339();
+    state
+        .db
+        .create_card(NewCard {
+            id: id.into(),
+            project_id: "p1".into(),
+            title: format!("card {id}"),
+            description: description.into(),
+            step: step.into(),
+            priority: 1,
+            workflow: "task".into(),
+            model: None,
+            effort: None,
+            blocked: false,
+            block_reason: None,
+            created_at: ts.clone(),
+            updated_at: ts.clone(),
+        })
+        .await
+        .unwrap();
+}
+
+fn unscoped_ctx(state: &Arc<AppState>) -> ToolCallContext {
+    ToolCallContext {
+        session_id: "chat".into(),
+        project_id: None,
+        card_id: None,
+        db: Arc::new(state.db.clone()),
+        broadcaster: state.broadcaster.clone(),
+        provider_registry: None,
+        expert_dispatcher: None,
+        data_dir: None,
+        pm_authorizations: Default::default(),
+    }
+}
+
+#[tokio::test]
+async fn list_cards_scopes_filters_and_slims() {
+    let state = build_state().await;
+    seed_project_p1(&state).await;
+    // A long single-line description to exercise summary truncation.
+    let long = format!("Alpha summary line. {}", "S".repeat(500));
+    seed_plain_card(&state, "c1", "backlog", &long).await;
+    seed_plain_card(&state, "c2", "in_progress", "Second card.").await;
+
+    let registry = McpToolRegistry::new();
+    let ctx = unscoped_ctx(&state);
+
+    // With an explicit project_id: both cards, slimmed.
+    let all = registry
+        .handle_tool_call(
+            "list_cards",
+            serde_json::json!({ "project_id": "p1" }),
+            &ctx,
+        )
+        .await
+        .unwrap();
+    assert_eq!(all["count"], 2);
+    let items = all["cards"].as_array().unwrap();
+    let c1 = items.iter().find(|c| c["id"] == "c1").unwrap();
+    assert!(
+        c1.get("description").is_none(),
+        "full description must not be in list_cards output"
+    );
+    let summary = c1["summary"].as_str().unwrap();
+    assert!(
+        summary.starts_with("Alpha summary line."),
+        "summary keeps the first line, got: {summary}"
+    );
+    assert!(
+        summary.chars().count() <= 201,
+        "summary must be capped (<=200 + ellipsis), got {} chars",
+        summary.chars().count()
+    );
+
+    // Status filter narrows to one step.
+    let backlog = registry
+        .handle_tool_call(
+            "list_cards",
+            serde_json::json!({ "project_id": "p1", "status": "backlog" }),
+            &ctx,
+        )
+        .await
+        .unwrap();
+    assert_eq!(backlog["count"], 1);
+    assert_eq!(backlog["cards"][0]["id"], "c1");
+
+    // No project_id and no project context: empty, not every card.
+    let none = registry
+        .handle_tool_call("list_cards", serde_json::json!({}), &ctx)
+        .await
+        .unwrap();
+    assert_eq!(none["count"], 0);
+    assert!(none["cards"].as_array().unwrap().is_empty());
+}

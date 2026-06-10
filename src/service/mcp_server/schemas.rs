@@ -140,11 +140,12 @@ pub(super) fn tool_definitions() -> Vec<McpToolDef> {
         },
         McpToolDef {
             name: "list_cards".into(),
-            description: "List all cards in a project. Uses current project context if available, or pass project_id explicitly.".into(),
+            description: "List cards in a project. A project_id is required (or call from a worker session that already has project context); without one this returns no cards rather than every card across PeckBoard. Optionally filter by status. Each card includes a short summary of its description, not the full text.".into(),
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
-                    "project_id": { "type": "string", "description": "Project ID (optional if in a worker session with project context)" }
+                    "project_id": { "type": "string", "description": "Project ID to list cards for. Required unless the calling session already has project context. Without it, no cards are returned." },
+                    "status": { "type": "string", "description": "Optional workflow step to filter by (e.g. backlog, in_progress, done, wont_do)." }
                 },
                 "additionalProperties": false
             }),

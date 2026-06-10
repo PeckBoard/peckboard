@@ -4,6 +4,25 @@ use super::super::{McpToolRegistry, build_dependency_tree, collect_transitive_de
 use crate::db::models::{Card, NewCard, UpdateCard};
 use crate::service::mcp_server::context::ToolCallContext;
 
+/// First non-empty line of a card description, capped, for the slim
+/// `list_cards` payload. The full description is intentionally omitted from
+/// list output — re-reading it on every agent step is what bloated the
+/// cached context — so callers fetch a single card for the full text.
+fn card_summary(description: &str) -> String {
+    const MAX: usize = 200;
+    let first = description
+        .lines()
+        .find(|l| !l.trim().is_empty())
+        .unwrap_or("")
+        .trim();
+    if first.chars().count() <= MAX {
+        first.to_string()
+    } else {
+        let truncated: String = first.chars().take(MAX).collect();
+        format!("{truncated}…")
+    }
+}
+
 /// Append a sentinel `step-change` event for `session_id` so any later
 /// `handle_worker_done` invocation reads it as the upper boundary in
 /// `derive_worker_intent` and ignores the `*-requested` event we already
@@ -437,8 +456,23 @@ impl McpToolRegistry {
     ) -> anyhow::Result<Value> {
         tracing::info!(session_id = %ctx.session_id, "MCP tool: list_cards");
 
-        let scope = ctx.scope_project(args.get("project_id").and_then(|v| v.as_str()))?;
+        let target = args.get("project_id").and_then(|v| v.as_str());
+
+        // Default to nothing when there is no project in play (no explicit
+        // project_id and no session project context), rather than returning
+        // every card across PeckBoard. Keeps results small and scoped.
+        if target.is_none() && ctx.project_id.is_none() {
+            return Ok(serde_json::json!({
+                "cards": [],
+                "count": 0,
+                "project_id": null,
+                "note": "Provide a project_id to list cards; PeckBoard-wide listing is disabled.",
+            }));
+        }
+
+        let scope = ctx.scope_project(target)?;
         let project_id = scope.as_str();
+        let status_filter = args.get("status").and_then(|v| v.as_str());
 
         let cards = ctx.db.list_cards_by_project(project_id).await?;
 
@@ -464,6 +498,7 @@ impl McpToolRegistry {
 
         let items: Vec<Value> = cards
             .iter()
+            .filter(|c| status_filter.is_none_or(|s| c.step == s))
             .map(|c| {
                 let deps = deps_by_card.get(c.id.as_str()).cloned().unwrap_or_default();
                 let dependencies_met = deps
@@ -472,7 +507,9 @@ impl McpToolRegistry {
                 serde_json::json!({
                     "id": c.id,
                     "title": c.title,
-                    "description": c.description,
+                    // Short summary, not the full description, to keep the
+                    // payload small; fetch a single card for the full text.
+                    "summary": card_summary(&c.description),
                     "step": c.step,
                     "priority": c.priority,
                     "blocked": c.blocked,
@@ -488,7 +525,12 @@ impl McpToolRegistry {
             })
             .collect();
 
-        Ok(serde_json::json!({ "cards": items, "count": items.len(), "project_id": project_id }))
+        Ok(serde_json::json!({
+            "cards": items,
+            "count": items.len(),
+            "project_id": project_id,
+            "status": status_filter,
+        }))
     }
 
     pub(crate) async fn handle_list_card_dependencies(
