@@ -4,15 +4,15 @@ import { tmpdir } from 'node:os'
 import path from 'node:path'
 
 /**
- * Card wrapping and section-locked sticky step headers inside the
+ * Card row scrolling and section-locked sticky step headers inside the
  * kanban board.
  *
  * User-visible behaviours covered, one assertion each:
  *
- *   1. **Wrap, don't overflow** — when a row has more cards than fit
- *      across the viewport, the cards wrap onto additional lines inside
- *      the row. The board itself never scrolls horizontally; cards
- *      visually stack on more than one line.
+ *   1. **Row scrolls, page doesn't** — on mobile, when a row has more
+ *      cards than fit across the viewport, the cards stay on a single
+ *      visual line and the row gets its own horizontal scrollbar. The
+ *      page itself never scrolls horizontally.
  *   2. **Empty state** — a row with no cards shows a "No cards in …"
  *      placeholder so the row doesn't collapse to a thin strip.
  *   3. **Sticky header pin** — while scrolling vertically through a
@@ -81,22 +81,21 @@ async function setupProject(
   return { projectId: project.id }
 }
 
-test('cards wrap onto multiple lines without horizontal page scroll', async ({
+test('cards form a single horizontal strip that scrolls inside the row, not the page', async ({
   request,
   page,
   baseURL,
 }) => {
   expect(baseURL, 'baseURL configured').toBeTruthy()
-  // Narrow viewport guarantees the row needs to wrap (cards are 320px;
-  // 8 cards = 2560px of card content, far wider than the viewport).
-  // Keep below the `md` breakpoint (768px) so the board renders in the
-  // mobile horizontal-rows layout that this test is asserting about —
-  // above `md` the kanban flips to classic vertical-columns kanban and
-  // there's nothing to "wrap" inside a row.
+  // Narrow viewport (below the 768px `md` breakpoint) so the board
+  // renders the mobile horizontal-strip layout: cards stay on one line
+  // and the row gets its own horizontal scroll. 8 cards × 280px =
+  // 2240px of card content, far wider than the 700px viewport, so the
+  // strip definitely needs to scroll.
   await page.setViewportSize({ width: 700, height: 700 })
 
   const { token, auth } = await authenticate(request)
-  const { projectId } = await setupProject(request, auth, 'wrap', 8)
+  const { projectId } = await setupProject(request, auth, 'strip', 8)
 
   await loadAt(page, token, `/projects/${projectId}`)
 
@@ -114,7 +113,7 @@ test('cards wrap onto multiple lines without horizontal page scroll', async ({
     })
 
   // The document never grows wider than the viewport — no horizontal
-  // scrollbar on the page.
+  // scrollbar on the page itself.
   const hScroll = await page.evaluate(() => ({
     scrollWidth: document.documentElement.scrollWidth,
     clientWidth: document.documentElement.clientWidth,
@@ -123,8 +122,8 @@ test('cards wrap onto multiple lines without horizontal page scroll', async ({
     hScroll.clientWidth + 1,
   )
 
-  // Cards visibly wrap: collect each card's top-y and confirm at least
-  // two distinct rows of cards appear inside the backlog row.
+  // All cards sit on a single visual line: their tops align. The strip
+  // itself absorbs the overflow via `overflow-x: auto`.
   const cards = backlogRow.locator('.kanban-card')
   const count = await cards.count()
   expect(count, 'all 8 cards rendered').toBe(8)
@@ -135,7 +134,18 @@ test('cards wrap onto multiple lines without horizontal page scroll', async ({
     tops.push(Math.round(box!.y))
   }
   const distinctRows = new Set(tops).size
-  expect(distinctRows, 'cards wrap onto at least two visual lines').toBeGreaterThanOrEqual(2)
+  expect(distinctRows, 'cards stay on a single horizontal line').toBe(1)
+
+  // The strip itself owns the horizontal overflow — its scroll width
+  // exceeds its client width because the cards don't fit.
+  const strip = backlogRow.locator('.kanban-cards')
+  const stripScroll = await strip.evaluate((el) => ({
+    scrollWidth: el.scrollWidth,
+    clientWidth: el.clientWidth,
+  }))
+  expect(stripScroll.scrollWidth, 'card strip scrolls horizontally inside the row').toBeGreaterThan(
+    stripScroll.clientWidth,
+  )
 })
 
 test('empty rows render a placeholder so they do not collapse', async ({
