@@ -249,6 +249,7 @@ export default function ChatView({ sessionId, onOpenTodos }: ChatViewProps) {
   const clearSession = useSessionsStore((s) => s.clearSession)
   const deleteSession = useSessionsStore((s) => s.deleteSession)
   const interruptSession = useSessionsStore((s) => s.interruptSession)
+  const terminateAgent = useSessionsStore((s) => s.terminateAgent)
 
   // Fetch session detail on mount
   useEffect(() => {
@@ -474,6 +475,19 @@ export default function ChatView({ sessionId, onOpenTodos }: ChatViewProps) {
     })
   }
 
+  const handleTerminateAgent = () => {
+    setMenuOpen(false)
+    setConfirmAction({
+      title: 'Terminate agent',
+      message:
+        'Terminate the agent process? Any in-flight turn will be interrupted. The next message will start a fresh process (picking up any new skills or config).',
+      onConfirm: async () => {
+        setConfirmAction(null)
+        await terminateAgent(sessionId)
+      },
+    })
+  }
+
   const handleDelete = () => {
     setMenuOpen(false)
     setConfirmAction({
@@ -591,6 +605,9 @@ export default function ChatView({ sessionId, onOpenTodos }: ChatViewProps) {
             <div className="chat-toolbar-dropdown">
               <button onClick={handleRename}>Rename</button>
               <button onClick={handleClear}>Clear</button>
+              <button onClick={handleTerminateAgent} data-testid="chat-toolbar-terminate">
+                Terminate agent
+              </button>
               <button className="danger" onClick={handleDelete}>
                 Delete
               </button>

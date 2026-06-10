@@ -98,6 +98,10 @@ pub fn router(state: Arc<AppState>) -> Router<Arc<AppState>> {
             post(dispatch::interrupt_session),
         )
         .route(
+            "/api/sessions/{id}/terminate",
+            post(dispatch::terminate_agent),
+        )
+        .route(
             "/api/sessions/{id}/status",
             get(dispatch::get_session_status),
         )

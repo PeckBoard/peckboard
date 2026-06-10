@@ -138,6 +138,7 @@ interface SessionsState {
   clearSession: (id: string) => Promise<void>
   cancelSession: (id: string) => Promise<void>
   interruptSession: (id: string) => Promise<void>
+  terminateAgent: (id: string) => Promise<void>
   setDraft: (sessionId: string, text: string) => void
   getDraft: (sessionId: string) => string
   handleEvent: (event: Event) => void
@@ -459,6 +460,14 @@ export const useSessionsStore = create<SessionsState>((set, get) => ({
     if (!res.ok) {
       const err = await res.json().catch(() => ({ error: 'Failed to interrupt session' }))
       throw new Error(err.error || 'Failed to interrupt session')
+    }
+  },
+
+  terminateAgent: async (id: string) => {
+    const res = await authedFetch(`/api/sessions/${id}/terminate`, { method: 'POST' })
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({ error: 'Failed to terminate agent' }))
+      throw new Error(err.error || 'Failed to terminate agent')
     }
   },
 

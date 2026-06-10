@@ -344,6 +344,72 @@ pub(super) async fn interrupt_session(
     Ok::<_, (StatusCode, Json<serde_json::Value>)>(StatusCode::NO_CONTENT)
 }
 
+/// POST /api/sessions/:id/terminate -- kill the long-lived agent process so
+/// the next message spawns a fresh one (picking up new skills, MCP config,
+/// etc). Distinct from /cancel and /interrupt: those exist to stop an active
+/// turn and append a `agent-end{crashed}` or `interrupt` event that pairs
+/// with an in-flight `agent-start`. Terminate is meant to be used between
+/// turns when the child is idle but still alive, so it emits a neutral
+/// `system` notice rather than a lifecycle event that would be misleading
+/// without a matching `agent-start`. Returns 204.
+pub(super) async fn terminate_agent(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> impl IntoResponse {
+    tracing::info!(session_id = %id, "Terminating agent process");
+    let session = state.db.get_session(&id).await.map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({ "error": e.to_string() })),
+        )
+    })?;
+
+    if session.is_none() {
+        return Err((
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({ "error": "session not found" })),
+        ));
+    }
+
+    // Wait for the provider's stream loop to wind down (and emit its own
+    // synthetic Crashed event if a turn was active) before appending the
+    // terminate notice, so the transcript order is process-end → notice.
+    state.session_manager.cancel_and_wait(&id).await;
+
+    let event = state
+        .db
+        .append_event(
+            &id,
+            "system",
+            serde_json::json!({
+                "text": "Agent terminated. The next message will start a fresh process.",
+            }),
+        )
+        .await
+        .map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({ "error": e.to_string() })),
+            )
+        })?;
+
+    state
+        .broadcaster
+        .broadcast(crate::ws::broadcaster::WsEvent {
+            event_type: "event".into(),
+            session_id: id,
+            data: serde_json::json!({
+                "id": event.id,
+                "seq": event.seq,
+                "ts": event.ts,
+                "kind": event.kind,
+                "data": serde_json::from_str::<serde_json::Value>(&event.data).unwrap_or_default(),
+            }),
+        });
+
+    Ok::<_, (StatusCode, Json<serde_json::Value>)>(StatusCode::NO_CONTENT)
+}
+
 /// Resolve every outstanding `question` event for the session by appending a
 /// `question-resolved {rejected: true}` for each id that doesn't already have
 /// one. Persists + broadcasts directly (no `/events` route), so we don't
