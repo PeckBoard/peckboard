@@ -433,6 +433,7 @@ async fn run_scenario(
                     total_tokens: 2600,
                     context_tokens: 1500,
                     model: Some(model_label.to_string()),
+                    turn_seq: None,
                 },
             )
             .await;

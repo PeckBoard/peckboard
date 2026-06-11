@@ -401,3 +401,58 @@ async fn single_session_breakdown_and_unknown_session() {
     let (status, _) = get_json(state.clone(), &token, "/api/usage/sessions/nope").await;
     assert_eq!(status, StatusCode::NOT_FOUND);
 }
+
+/// Every session must have a usage page regardless of type or activity: a
+/// session (or expert) with NO usage rows still appears in the listings,
+/// with all-zero totals.
+#[tokio::test]
+async fn zero_usage_sessions_appear_in_listings() {
+    let (state, token) = build_state().await;
+    seed(&state).await;
+    let ts = chrono::Utc::now().to_rfc3339();
+
+    // A never-used chat session and a never-used expert.
+    state
+        .db
+        .create_session(NewSession {
+            id: "idle1".into(),
+            name: "Idle Chat".into(),
+            folder_id: "f1".into(),
+            created_at: ts.clone(),
+            last_activity: ts.clone(),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    state
+        .db
+        .create_session(NewSession {
+            id: "idleE".into(),
+            name: "Idle Expert".into(),
+            folder_id: "f1".into(),
+            is_expert: true,
+            expert_kind: Some("knowledge".into()),
+            created_at: ts.clone(),
+            last_activity: ts,
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+
+    let (status, sessions) = get_json(state.clone(), &token, "/api/usage/sessions").await;
+    assert_eq!(status, StatusCode::OK);
+    // 4 seeded sessions with usage + the 2 idle ones.
+    assert_eq!(sessions.as_array().unwrap().len(), 6);
+    let idle = find(&sessions, "idle1");
+    assert_eq!(idle["name"], "Idle Chat");
+    assert_eq!(idle["input_tokens"], 0);
+    assert_eq!(idle["total_tokens_used"], 0);
+    assert_eq!(idle["est_cost"], 0.0);
+    assert_eq!(idle["is_worker"], false);
+
+    let (_, experts) = get_json(state.clone(), &token, "/api/usage/experts").await;
+    assert_eq!(experts.as_array().unwrap().len(), 3);
+    let idle_e = find(&experts, "idleE");
+    assert_eq!(idle_e["input_tokens"], 0);
+    assert_eq!(idle_e["est_cost"], 0.0);
+}

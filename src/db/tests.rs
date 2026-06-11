@@ -2198,6 +2198,7 @@ mod tests {
                     total_tokens: 128,
                     context_tokens: 108,
                     model: Some("claude:claude-opus-4-8".into()),
+                    turn_seq: None,
                 },
             )
             .await;

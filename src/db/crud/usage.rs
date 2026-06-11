@@ -86,6 +86,22 @@ impl Db {
         .await
     }
 
+    /// Next per-session turn number (max + 1). Used by providers that emit
+    /// several per-model usage rows for one turn — fetching the seq once and
+    /// stamping it on every row makes them roll up as a single turn.
+    pub async fn next_usage_turn_seq(&self, session_id: &str) -> anyhow::Result<i32> {
+        let session_id = session_id.to_string();
+        self.with_conn(move |conn| {
+            usage_events::table
+                .filter(usage_events::session_id.eq(&session_id))
+                .select(diesel::dsl::max(usage_events::turn_seq))
+                .first::<Option<i32>>(conn)
+                .map(|s| s.map(|s| s + 1).unwrap_or(1))
+                .map_err(Into::into)
+        })
+        .await
+    }
+
     /// All usage rows for a session, oldest-first by timestamp.
     pub async fn usage_events_for_session(
         &self,
@@ -126,17 +142,19 @@ impl Db {
         .await
     }
 
-    /// Per-session usage, one [`UsageRollupRow`] per (session, model). Every
-    /// session that has any usage row appears; the join supplies the session
-    /// name. Aggregation happens in SQL — rows are never loaded individually.
+    /// Per-session usage, one [`UsageRollupRow`] per (session, model). EVERY
+    /// session appears — a session with no usage yet gets a single all-zero
+    /// row (model NULL) via the LEFT JOIN, so each session has a usage page
+    /// regardless of type. Aggregation happens in SQL — rows are never
+    /// loaded individually.
     pub async fn usage_rollup_by_session(&self) -> anyhow::Result<Vec<UsageRollupRow>> {
         let sql = format!(
-            "SELECT u.session_id AS entity_id, s.name AS entity_name, u.model AS model, \
+            "SELECT s.id AS entity_id, s.name AS entity_name, u.model AS model, \
              s.project_id AS project_id, s.is_worker AS is_worker, s.is_expert AS is_expert, \
              {ROLLUP_AGG_COLS} \
-             FROM usage_events u \
-             JOIN sessions s ON s.id = u.session_id \
-             GROUP BY u.session_id, u.model"
+             FROM sessions s \
+             LEFT JOIN usage_events u ON u.session_id = s.id \
+             GROUP BY s.id, u.model"
         );
         self.with_conn(move |conn| {
             diesel::sql_query(sql)
@@ -190,16 +208,17 @@ impl Db {
     /// Per-expert usage. Each expert *session* (`is_expert = 1`) is its own
     /// entity (id = session id, name = session name) — experts are distinct
     /// long-lived sessions, not pooled by `expert_kind`. One row per
-    /// (expert session, model).
+    /// (expert session, model); an expert with no usage yet gets a single
+    /// all-zero row via the LEFT JOIN so it still has a usage page.
     pub async fn usage_rollup_by_expert(&self) -> anyhow::Result<Vec<UsageRollupRow>> {
         let sql = format!(
-            "SELECT u.session_id AS entity_id, s.name AS entity_name, u.model AS model, \
+            "SELECT s.id AS entity_id, s.name AS entity_name, u.model AS model, \
              s.project_id AS project_id, s.is_worker AS is_worker, s.is_expert AS is_expert, \
              {ROLLUP_AGG_COLS} \
-             FROM usage_events u \
-             JOIN sessions s ON s.id = u.session_id \
+             FROM sessions s \
+             LEFT JOIN usage_events u ON u.session_id = s.id \
              WHERE s.is_expert = 1 \
-             GROUP BY u.session_id, u.model"
+             GROUP BY s.id, u.model"
         );
         self.with_conn(move |conn| {
             diesel::sql_query(sql)

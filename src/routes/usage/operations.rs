@@ -67,32 +67,51 @@ struct Turn {
 }
 
 fn build_turns(usage: &[UsageEvent]) -> Vec<Turn> {
-    let mut turns: Vec<Turn> = usage
-        .iter()
-        .map(|u| {
-            let billed =
-                u.input_tokens + u.output_tokens + u.cache_read_tokens + u.cache_creation_tokens;
-            Turn {
-                ts: u.ts,
-                // `total_tokens` is the provider's roll-up; fall back to the
-                // billed slices when it wasn't reported.
-                tokens: if u.total_tokens > 0 {
-                    u.total_tokens
-                } else {
-                    billed
-                },
-                cost: cost::usage_cost(
-                    u.model.as_deref(),
-                    u.input_tokens,
-                    u.output_tokens,
-                    u.cache_read_tokens,
-                    u.cache_creation_tokens,
-                ),
-                cache_read_tokens: u.cache_read_tokens,
-                cache_read_cost: cost::usage_cost(u.model.as_deref(), 0, 0, u.cache_read_tokens, 0),
+    // A multi-model turn is several rows sharing a turn_seq (one per model);
+    // fold each group into one turn, pricing each row at its own model rate.
+    let mut sorted: Vec<&UsageEvent> = usage.iter().collect();
+    sorted.sort_by_key(|u| (u.turn_seq, u.ts));
+
+    let mut turns: Vec<Turn> = Vec::new();
+    let mut last_seq: Option<i32> = None;
+    for u in sorted {
+        let billed =
+            u.input_tokens + u.output_tokens + u.cache_read_tokens + u.cache_creation_tokens;
+        // `total_tokens` is the provider's roll-up; fall back to the
+        // billed slices when it wasn't reported.
+        let tokens = if u.total_tokens > 0 {
+            u.total_tokens
+        } else {
+            billed
+        };
+        let cost = cost::usage_cost(
+            u.model.as_deref(),
+            u.input_tokens,
+            u.output_tokens,
+            u.cache_read_tokens,
+            u.cache_creation_tokens,
+        );
+        let cache_read_cost = cost::usage_cost(u.model.as_deref(), 0, 0, u.cache_read_tokens, 0);
+        match turns.last_mut() {
+            Some(turn) if u.turn_seq.is_some() && last_seq == u.turn_seq => {
+                turn.ts = turn.ts.max(u.ts);
+                turn.tokens += tokens;
+                turn.cost += cost;
+                turn.cache_read_tokens += u.cache_read_tokens;
+                turn.cache_read_cost += cache_read_cost;
             }
-        })
-        .collect();
+            _ => {
+                last_seq = u.turn_seq;
+                turns.push(Turn {
+                    ts: u.ts,
+                    tokens,
+                    cost,
+                    cache_read_tokens: u.cache_read_tokens,
+                    cache_read_cost,
+                });
+            }
+        }
+    }
     turns.sort_by_key(|t| t.ts);
     turns
 }

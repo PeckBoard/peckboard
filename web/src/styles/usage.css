@@ -393,7 +393,8 @@
 
 /* When a panel body holds a list, let the rows run edge-to-edge and stack
    from the top instead of being centered as a single block. */
-.usage-panel-body:has(.usage-list) {
+.usage-panel-body:has(.usage-list),
+.usage-panel-body:has(.usage-turn-list) {
   align-items: stretch;
   justify-content: flex-start;
   padding: 0;
@@ -634,6 +635,11 @@
 .usage-turn-list {
   display: flex;
   flex-direction: column;
+  /* Flex item of .usage-panel-body — without these it refuses to shrink
+   * below its content width, and a long prompt blows the row out of the
+   * panel instead of truncating. */
+  width: 100%;
+  min-width: 0;
 }
 
 .usage-turn {
@@ -712,6 +718,15 @@
   font-size: var(--text-xs);
   color: var(--text3);
   font-variant-numeric: tabular-nums;
+}
+
+/* Per-model breakdown inside an expanded multi-model turn. */
+.usage-turn-models {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  padding-left: var(--space-3);
+  border-left: 2px solid var(--border);
 }
 
 .usage-turn-files {

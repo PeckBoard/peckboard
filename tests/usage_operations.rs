@@ -594,3 +594,94 @@ async fn operations_requires_auth() {
         .unwrap();
     assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
 }
+
+/// A turn that used several models is several `usage_events` rows sharing a
+/// `turn_seq` (one per model); the turns endpoint must fold them into ONE
+/// turn with summed slices, the peak context, and a per-model breakdown —
+/// not render phantom turns.
+#[tokio::test]
+async fn multi_model_turn_folds_into_one_turn_with_breakdown() {
+    let (state, token) = build_state().await;
+    let db = &state.db;
+    let now = chrono::Utc::now().to_rfc3339();
+    db.create_folder(NewFolder {
+        id: "f9".into(),
+        name: "F9".into(),
+        path: "/tmp/f9".into(),
+        created_at: now.clone(),
+    })
+    .await
+    .unwrap();
+    db.create_session(NewSession {
+        id: "s9".into(),
+        name: "multi-model".into(),
+        folder_id: "f9".into(),
+        created_at: now.clone(),
+        last_activity: now.clone(),
+        ..Default::default()
+    })
+    .await
+    .unwrap();
+
+    // Turn 1: opus main loop + a haiku subagent, same turn_seq.
+    for (id, model, input, output, cache_read, context) in [
+        ("u1", "claude-opus-4-8", 100i64, 200i64, 5000i64, 5100i64),
+        ("u2", "claude-haiku-4-5", 40, 10, 0, 0),
+    ] {
+        db.record_usage_event(NewUsageEvent {
+            id: id.into(),
+            session_id: "s9".into(),
+            model: Some(model.into()),
+            turn_seq: Some(1),
+            ts: 100,
+            input_tokens: input,
+            output_tokens: output,
+            cache_read_tokens: cache_read,
+            total_tokens: input + output + cache_read,
+            context_tokens: context,
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    }
+    // Turn 2: single-model row, auto turn boundary.
+    db.record_usage_event(NewUsageEvent {
+        id: "u3".into(),
+        session_id: "s9".into(),
+        model: Some("claude-opus-4-8".into()),
+        turn_seq: Some(2),
+        ts: 200,
+        input_tokens: 10,
+        output_tokens: 20,
+        total_tokens: 30,
+        context_tokens: 5200,
+        ..Default::default()
+    })
+    .await
+    .unwrap();
+
+    let (status, turns) = get(state.clone(), &token, "/api/usage/sessions/s9/turns").await;
+    assert_eq!(status, StatusCode::OK);
+    let turns = turns.as_array().unwrap();
+    assert_eq!(turns.len(), 2, "two turns, not three rows: {turns:?}");
+
+    let t1 = &turns[0];
+    assert_eq!(t1["turn_seq"], 1);
+    assert_eq!(t1["input_tokens"], 140); // 100 + 40 summed across models
+    assert_eq!(t1["output_tokens"], 210);
+    assert_eq!(t1["cache_read_tokens"], 5000);
+    assert_eq!(t1["context_tokens"], 5100); // peak, from the main-model row
+    assert_eq!(t1["model"], "claude-opus-4-8"); // context-carrying row wins
+    let models = t1["models"].as_array().unwrap();
+    assert_eq!(models.len(), 2, "per-model breakdown present");
+    assert!(t1["est_cost"].as_f64().unwrap() > 0.0);
+
+    let t2 = &turns[1];
+    assert_eq!(t2["turn_seq"], 2);
+    assert_eq!(t2["input_tokens"], 10);
+    assert_eq!(
+        t2["models"].as_array().unwrap().len(),
+        0,
+        "single-model turn has no breakdown"
+    );
+}

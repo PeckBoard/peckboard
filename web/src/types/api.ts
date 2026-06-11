@@ -252,6 +252,17 @@ export interface SessionUsage extends EntityUsage {
   is_expert: boolean
 }
 
+/** One model's share of a multi-model turn. Mirrors `TurnModelUsage` in
+ *  `src/routes/usage/turns.rs`. */
+export interface TurnModelUsage {
+  model: string | null
+  input_tokens: number
+  output_tokens: number
+  cache_read_tokens: number
+  cache_creation_tokens: number
+  total_tokens: number
+}
+
 /** One turn ("prompt") of a session, from
  *  `GET /api/usage/sessions/{id}/turns`. Mirrors `TurnUsage` in
  *  `src/routes/usage/turns.rs`. */
@@ -259,7 +270,11 @@ export interface TurnUsage {
   turn_seq: number | null
   /** End-of-turn timestamp (epoch ms). */
   ts: number
+  /** The turn's main model; per-model slices live in `models` when the
+   *  turn used more than one. */
   model: string | null
+  /** Per-model breakdown; populated only when the turn used >1 model. */
+  models: TurnModelUsage[]
   input_tokens: number
   output_tokens: number
   cache_read_tokens: number

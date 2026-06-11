@@ -88,6 +88,19 @@ function TurnRow({ turn }: { turn: TurnUsage }) {
           <span>cache write {fmtInt(turn.cache_creation_tokens)}</span>
           <span>context after {fmtTokens(turn.context_tokens)}</span>
         </div>
+        {turn.models.length > 1 && (
+          <div className="usage-turn-models" data-testid="usage-turn-models">
+            {turn.models.map((m) => (
+              <div className="usage-turn-meta" key={m.model ?? 'unknown'}>
+                <span>{bareModel(m.model)}</span>
+                <span>in {fmtInt(m.input_tokens)}</span>
+                <span>out {fmtInt(m.output_tokens)}</span>
+                <span>cache read {fmtInt(m.cache_read_tokens)}</span>
+                <span>cache write {fmtInt(m.cache_creation_tokens)}</span>
+              </div>
+            ))}
+          </div>
+        )}
         {hasFiles ? (
           <div className="usage-turn-files">
             {turn.files_read.length > 0 && (

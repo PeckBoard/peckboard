@@ -33,6 +33,7 @@
 
 mod parser;
 mod sandbox;
+mod usage;
 
 use std::process::Stdio;
 use std::sync::Arc;
@@ -53,6 +54,7 @@ use super::build_cli_args;
 use crate::provider::stream::SpawnConfig;
 use parser::{normalize_questions, parse_stream_json};
 use sandbox::check_path_violation;
+use usage::{TurnModelUsage, UsageTracker};
 
 /// One message bound for the CLI's stdin.
 pub enum StdinMsg {
@@ -278,6 +280,11 @@ pub async fn stream_events(
     // guaranteed to still let its own response — and any follow-on
     // assistant text — reach stdout before the loop tears down.
     let mut shutdown_after_turn = false;
+
+    // Per-process token accounting: diffs the result event's cumulative
+    // `modelUsage` into per-turn per-model rows, and accumulates per-message
+    // usage so a crashed turn still settles its tokens.
+    let mut usage_tracker = UsageTracker::default();
 
     // Track file-modifying tool calls for auto cross-worker notification
     let mut pending_file_changes: Vec<String> = Vec::new();
@@ -517,6 +524,8 @@ pub async fn stream_events(
         // fresh agent-start. The child keeps running.
         let is_result_event = json.get("type").and_then(|v| v.as_str()) == Some("result");
 
+        usage_tracker.observe_line(&json);
+
         let events = parse_stream_json(
             &json,
             &mut conversation_id,
@@ -611,34 +620,14 @@ pub async fn stream_events(
                 )
                 .await;
             }
-            // The CLI's `result` event carries the per-turn token usage in
-            // `usage`. The parser drops it (it's per-turn, not per-line),
-            // so read it from the raw JSON here and emit a `Usage` event
-            // BEFORE `Completed` — so a usage_events row joined to this
-            // turn's agent-end finds its sibling already persisted. A
-            // missing/malformed usage object just skips the event.
-            if let Some(usage) = json.get("usage").and_then(|v| v.as_object()) {
-                let field = |k: &str| usage.get(k).and_then(|v| v.as_i64()).unwrap_or(0);
-                let input = field("input_tokens");
-                let output = field("output_tokens");
-                let cache_read = field("cache_read_input_tokens");
-                let cache_creation = field("cache_creation_input_tokens");
-                emit_event(
-                    &db,
-                    &broadcaster,
-                    &session_id,
-                    ProviderEvent::Usage {
-                        input_tokens: input,
-                        output_tokens: output,
-                        cache_read_tokens: cache_read,
-                        cache_creation_tokens: cache_creation,
-                        total_tokens: input + output + cache_read + cache_creation,
-                        context_tokens: input + cache_read + cache_creation,
-                        model: model_name.clone(),
-                    },
-                )
-                .await;
-            }
+            // Settle the turn's token usage from the `result` event and
+            // emit `Usage` events BEFORE `Completed` — so a usage_events
+            // row joined to this turn's agent-end finds its sibling
+            // already persisted. The tracker prefers the per-model
+            // `modelUsage` deltas (which include subagent and utility-call
+            // tokens the main-loop `usage` object misses).
+            let turn_usages = usage_tracker.on_result(&json, model_name.as_deref());
+            emit_turn_usage(&db, &broadcaster, &session_id, turn_usages).await;
             emit_event(
                 &db,
                 &broadcaster,
@@ -748,6 +737,14 @@ pub async fn stream_events(
     let turn_was_active = state.turn_active.load(Ordering::Acquire);
     state.turn_active.store(false, Ordering::Release);
 
+    // A turn that dies before its `result` (kill, crash, interrupt) never
+    // reaches the settle-on-result path above — record whatever the
+    // per-message snapshots saw so its tokens aren't lost.
+    if turn_was_active {
+        let crash_usages = usage_tracker.take_crash_fallback(model_name.as_deref());
+        emit_turn_usage(&db, &broadcaster, &session_id, crash_usages).await;
+    }
+
     let is_completed = if shutdown_after_turn {
         true
     } else if was_cancelled {
@@ -807,6 +804,53 @@ pub async fn stream_events(
 
 enum EventSource {
     Stdout(String),
+}
+
+/// Emit one `Usage` event per model for a settled turn. Multi-model turns
+/// share a single pre-fetched `turn_seq` so the rows roll up as one turn;
+/// single-model turns let the DB layer auto-assign it.
+async fn emit_turn_usage(
+    db: &Db,
+    broadcaster: &Arc<Broadcaster>,
+    session_id: &str,
+    usages: Vec<TurnModelUsage>,
+) {
+    if usages.is_empty() {
+        return;
+    }
+    let turn_seq = if usages.len() > 1 {
+        match db.next_usage_turn_seq(session_id).await {
+            Ok(seq) => Some(seq),
+            Err(e) => {
+                tracing::error!(
+                    session_id = session_id,
+                    "Failed to fetch shared turn_seq; falling back to per-row seqs: {}",
+                    e
+                );
+                None
+            }
+        }
+    } else {
+        None
+    };
+    for u in usages {
+        emit_event(
+            db,
+            broadcaster,
+            session_id,
+            ProviderEvent::Usage {
+                input_tokens: u.slices.input,
+                output_tokens: u.slices.output,
+                cache_read_tokens: u.slices.cache_read,
+                cache_creation_tokens: u.slices.cache_creation,
+                total_tokens: u.slices.total(),
+                context_tokens: u.context_tokens,
+                model: u.model,
+                turn_seq,
+            },
+        )
+        .await;
+    }
 }
 
 /// Auto-notify worker peers about files this worker just modified.

@@ -155,6 +155,13 @@ test('usage dashboard reflects mock:usage activity with non-zero rollups, costs,
   expect(sessionRes.ok(), `create session failed: ${await sessionRes.text()}`).toBeTruthy()
   const session = (await sessionRes.json()) as { id: string }
 
+  // A session that never runs an agent — it must still get a usage page.
+  const idleRes = await request.post('/api/sessions', {
+    headers: authHeader,
+    data: { name: 'idle never used', folder_id: folder.id },
+  })
+  expect(idleRes.ok(), `create idle session failed: ${await idleRes.text()}`).toBeTruthy()
+
   const patchRes = await request.patch(`/api/sessions/${session.id}`, {
     headers: authHeader,
     data: { project_id: project.id },
@@ -167,9 +174,13 @@ test('usage dashboard reflects mock:usage activity with non-zero rollups, costs,
   const collectorPromise = collectEventsUntil(baseURL!, token, session.id, 'agent-end', 15_000)
   await new Promise((r) => setTimeout(r, 250))
 
+  // A deliberately long single-line prompt: the turns list must truncate it
+  // instead of letting the row blow out of its panel.
+  const longPrompt =
+    'go refactor the authentication middleware so the token validation, refresh rotation, audit logging, and rate limiter share one config struct and update every call site in the routes module plus the websocket handler without breaking the integration tests'
   const sendRes = await request.post(`/api/sessions/${session.id}/message`, {
     headers: authHeader,
-    data: { text: 'go', model: 'mock:usage' },
+    data: { text: longPrompt, model: 'mock:usage' },
   })
   expect(sendRes.ok(), `send message failed: ${await sendRes.text()}`).toBeTruthy()
 
@@ -224,7 +235,11 @@ test('usage dashboard reflects mock:usage activity with non-zero rollups, costs,
   // The one turn lists the prompt that started it; expanding it shows the
   // files read during that token spend.
   const turnRow = page.getByTestId('usage-turn-row').first()
-  await expect(turnRow).toContainText('go')
+  await expect(turnRow).toContainText('go refactor')
+  // The long prompt truncates instead of widening the row past its panel.
+  const summaryBox = await turnRow.locator('summary').boundingBox()
+  const panelBox = await page.getByTestId('usage-turns-panel').boundingBox()
+  expect(summaryBox && panelBox && summaryBox.width <= panelBox.width + 1).toBeTruthy()
   await turnRow.locator('summary').click()
   await expect(page.getByTestId('usage-turn-files-read')).toContainText('lib.rs')
   await expect(page.getByTestId('usage-turn-files-edited')).toContainText('lib.rs')
@@ -233,6 +248,16 @@ test('usage dashboard reflects mock:usage activity with non-zero rollups, costs,
   await expect(page.getByTestId('usage-cache-reads-panel')).toContainText('lib.rs')
 
   // Back to the overview.
+  await page.getByRole('button', { name: '← Usage' }).click()
+  await expect(page.getByTestId('usage-totals')).toBeVisible()
+
+  // Every session gets a usage page, even one that never ran an agent: the
+  // idle session is listed and drills down to an empty (not missing) page.
+  const idleRow = page.getByTestId('usage-session-row').filter({ hasText: 'idle never used' })
+  await expect(idleRow).toBeVisible()
+  await idleRow.click()
+  await expect(page.getByTestId('usage-session-detail')).toBeVisible()
+  await expect(page.getByTestId('usage-turns-panel')).toContainText('No usage recorded yet')
   await page.getByRole('button', { name: '← Usage' }).click()
   await expect(page.getByTestId('usage-totals')).toBeVisible()
 

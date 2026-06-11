@@ -32,13 +32,18 @@ pub enum ProviderEvent {
     /// of its trackable work items). Provider-agnostic — any provider that can
     /// surface work items emits this; the latest one wins.
     Todo { todos: Vec<TodoItem> },
-    /// Per-turn token usage rollup. Emitted once per turn from the
-    /// provider's end-of-turn `result`, just before `Completed`.
+    /// Per-turn token usage rollup. Emitted at end of turn from the
+    /// provider's `result` (or, on a crash, from accumulated per-message
+    /// usage), just before `Completed`/`Crashed`.
     /// `context_tokens` is the context-window size at end of turn
     /// (input + cache_read + cache_creation); `total_tokens` adds the
     /// generated output on top. Providers that don't expose usage simply
     /// never emit this. Mirrored into the `usage_events` table by
     /// `emit_event`, the same way `Todo` is mirrored into `todos`.
+    /// A turn that used several models emits one event per model; the
+    /// provider stamps them all with the same `turn_seq` so they roll up
+    /// as a single turn. `None` lets the DB layer auto-assign the next
+    /// per-session turn number.
     Usage {
         input_tokens: i64,
         output_tokens: i64,
@@ -47,6 +52,8 @@ pub enum ProviderEvent {
         total_tokens: i64,
         context_tokens: i64,
         model: Option<String>,
+        #[serde(default)]
+        turn_seq: Option<i32>,
     },
     /// Agent finished normally.
     Completed { conversation_id: Option<String> },
@@ -120,6 +127,7 @@ impl ProviderEvent {
                 total_tokens,
                 context_tokens,
                 model,
+                turn_seq,
             } => serde_json::json!({
                 "inputTokens": input_tokens,
                 "outputTokens": output_tokens,
@@ -128,6 +136,7 @@ impl ProviderEvent {
                 "totalTokens": total_tokens,
                 "contextTokens": context_tokens,
                 "model": model,
+                "turnSeq": turn_seq,
             }),
             ProviderEvent::Completed { conversation_id } => serde_json::json!({
                 "status": "complete",

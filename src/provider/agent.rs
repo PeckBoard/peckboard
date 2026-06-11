@@ -204,13 +204,14 @@ pub async fn emit_event(
                 total_tokens,
                 context_tokens,
                 ref model,
+                turn_seq,
             } = event
             {
                 let new_usage = crate::db::models::NewUsageEvent {
                     id: uuid::Uuid::new_v4().to_string(),
                     session_id: session_id.to_string(),
                     event_id: Some(db_event.id.clone()),
-                    turn_seq: None,
+                    turn_seq,
                     ts: db_event.ts,
                     input_tokens,
                     output_tokens,
