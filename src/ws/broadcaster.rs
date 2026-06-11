@@ -67,9 +67,15 @@ impl Broadcaster {
         self.tx.subscribe()
     }
 
-    /// Check if any clients are subscribed to a session.
-    pub async fn has_subscribers(&self, session_id: &str) -> bool {
+    /// Check if a specific client is subscribed to a session. The send
+    /// decision in the WS handler must be per-client — checking only
+    /// "does anyone subscribe" would fan every session's events out to
+    /// every connected client (including non-admins who are denied
+    /// subscribe in the first place).
+    pub async fn is_subscribed(&self, client_id: u64, session_id: &str) -> bool {
         let subs = self.subscriptions.lock().await;
-        subs.get(session_id).map(|c| !c.is_empty()).unwrap_or(false)
+        subs.get(session_id)
+            .map(|c| c.contains(&client_id))
+            .unwrap_or(false)
     }
 }

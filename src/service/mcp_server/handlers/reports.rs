@@ -3,6 +3,19 @@ use serde_json::Value;
 use super::super::McpToolRegistry;
 use crate::service::mcp_server::context::ToolCallContext;
 
+/// Root data dir for report storage. Prefer the configured `--data-dir`
+/// (threaded through the tool-call context); only fall back to the
+/// `~/.peckboard` default when the context has none (unit tests). The
+/// HTTP report routes read from `state.config.data_dir`, so writing
+/// anywhere else makes reports invisible to the UI.
+fn reports_base_dir(ctx: &ToolCallContext) -> std::path::PathBuf {
+    ctx.data_dir.clone().unwrap_or_else(|| {
+        dirs::home_dir()
+            .unwrap_or_else(|| std::path::PathBuf::from("."))
+            .join(".peckboard")
+    })
+}
+
 impl McpToolRegistry {
     pub(crate) async fn handle_write_report(
         &self,
@@ -22,9 +35,7 @@ impl McpToolRegistry {
         // Write to disk: <dataDir>/reports/<date>/<sanitized-title>.md
         let now = chrono::Utc::now();
         let date_folder = now.format("%Y-%m-%d").to_string();
-        let data_dir = dirs::home_dir()
-            .unwrap_or_else(|| std::path::PathBuf::from("."))
-            .join(".peckboard");
+        let data_dir = reports_base_dir(ctx);
         let reports_dir = data_dir.join("reports").join(&date_folder);
         std::fs::create_dir_all(&reports_dir)?;
 
@@ -130,7 +141,7 @@ impl McpToolRegistry {
     pub(crate) async fn handle_attach_report_file(
         &self,
         args: Value,
-        _ctx: &ToolCallContext,
+        ctx: &ToolCallContext,
     ) -> anyhow::Result<Value> {
         const ALLOWED_EXTENSIONS: &[&str] = &[
             "png", "pdf", "csv", "json", "txt", "md", "html", "svg", "jpg", "jpeg", "gif", "webp",
@@ -196,9 +207,7 @@ impl McpToolRegistry {
         }
 
         // Write to <dataDir>/reports/<folder>/<file>.<ext>
-        let data_dir = dirs::home_dir()
-            .unwrap_or_else(|| std::path::PathBuf::from("."))
-            .join(".peckboard");
+        let data_dir = reports_base_dir(ctx);
         let reports_dir = data_dir.join("reports").join(&safe_folder);
         std::fs::create_dir_all(&reports_dir)?;
 
@@ -230,9 +239,7 @@ impl McpToolRegistry {
         };
 
         // Scan reports directory for reports matching this project
-        let data_dir = dirs::home_dir()
-            .unwrap_or_else(|| std::path::PathBuf::from("."))
-            .join(".peckboard");
+        let data_dir = reports_base_dir(ctx);
         let reports_dir = data_dir.join("reports");
 
         let mut reports = Vec::new();
@@ -320,9 +327,7 @@ impl McpToolRegistry {
             anyhow::bail!("invalid path");
         }
 
-        let data_dir = dirs::home_dir()
-            .unwrap_or_else(|| std::path::PathBuf::from("."))
-            .join(".peckboard");
+        let data_dir = reports_base_dir(ctx);
         let path = data_dir.join("reports").join(folder).join(file);
 
         let content = tokio::fs::read_to_string(&path)

@@ -211,7 +211,9 @@ async fn upload_attachment(
     tokio::fs::create_dir_all(&dir)
         .await
         .map_err(|e| internal(e.to_string()))?;
-    let _ = restrict_dir(&dir);
+    if let Err(e) = restrict_dir(&dir) {
+        tracing::warn!(dir = %dir.display(), "Failed to restrict attachment dir permissions: {e}");
+    }
 
     // No extension on disk — the UUID is the only on-disk identifier. The
     // original filename lives in the .meta sidecar.
@@ -219,13 +221,17 @@ async fn upload_attachment(
     tokio::fs::write(&file_path, &decoded)
         .await
         .map_err(|e| internal(e.to_string()))?;
-    let _ = restrict_file(&file_path);
+    if let Err(e) = restrict_file(&file_path) {
+        tracing::warn!(path = %file_path.display(), "Failed to restrict attachment permissions: {e}");
+    }
 
     let meta_path = dir.join(format!("{}.meta", attachment_id));
     tokio::fs::write(&meta_path, &filename)
         .await
         .map_err(|e| internal(e.to_string()))?;
-    let _ = restrict_file(&meta_path);
+    if let Err(e) = restrict_file(&meta_path) {
+        tracing::warn!(path = %meta_path.display(), "Failed to restrict attachment meta permissions: {e}");
+    }
 
     // Persist the browser-supplied MIME type next to the bytes so the
     // dispatch path can build the correct image content block at send
@@ -241,8 +247,8 @@ async fn upload_attachment(
                     attachment_id = %attachment_id,
                     "Failed to persist mime sidecar (continuing without): {e}"
                 );
-            } else {
-                let _ = restrict_file(&mime_path);
+            } else if let Err(e) = restrict_file(&mime_path) {
+                tracing::warn!(path = %mime_path.display(), "Failed to restrict mime sidecar permissions: {e}");
             }
         }
     }

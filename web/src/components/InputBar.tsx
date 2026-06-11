@@ -41,6 +41,7 @@ export default function InputBar({ sessionId }: InputBarProps) {
   const [sending, setSending] = useState(false)
   const [attachments, setAttachments] = useState<PendingAttachment[]>([])
   const [uploading, setUploading] = useState(false)
+  const [uploadErrors, setUploadErrors] = useState<string[]>([])
   const [suggestions, setSuggestions] = useState<MentionItem[]>([])
   const [showAutocomplete, setShowAutocomplete] = useState(false)
   const textareaRef = useRef<HTMLTextAreaElement>(null)
@@ -100,17 +101,28 @@ export default function InputBar({ sessionId }: InputBarProps) {
       const files = e.target.files
       if (!files || files.length === 0) return
       setUploading(true)
+      setUploadErrors([])
       try {
         for (const file of Array.from(files)) {
-          const base64 = await fileToBase64(file)
-          const res = await authedFetch(`/api/sessions/${sessionId}/attachments`, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ name: file.name, data: base64, mime_type: file.type }),
-          })
-          if (res.ok) {
+          // Per-file try/catch: one failed upload must not abort the rest
+          // of the batch, and the user has to see WHICH file failed —
+          // silently dropping it looks like the app ignored the pick.
+          try {
+            const base64 = await fileToBase64(file)
+            const res = await authedFetch(`/api/sessions/${sessionId}/attachments`, {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ name: file.name, data: base64, mime_type: file.type }),
+            })
+            if (!res.ok) {
+              const detail = (await res.json().catch(() => null))?.error
+              throw new Error(typeof detail === 'string' ? detail : `upload failed (${res.status})`)
+            }
             const result = await res.json()
             setAttachments((prev) => [...prev, { id: result.id, name: file.name }])
+          } catch (err) {
+            const reason = err instanceof Error ? err.message : 'upload failed'
+            setUploadErrors((prev) => [...prev, `${file.name}: ${reason}`])
           }
         }
       } finally {
@@ -293,6 +305,23 @@ export default function InputBar({ sessionId }: InputBarProps) {
           </button>
         </div>
       </div>
+      {uploadErrors.length > 0 && (
+        <div className="attachment-chips" role="alert" data-testid="upload-error">
+          {uploadErrors.map((msg) => (
+            <span key={msg} className="attachment-chip attachment-chip-error">
+              <span className="attachment-chip-name">{msg}</span>
+            </span>
+          ))}
+          <button
+            className="attachment-chip-remove"
+            type="button"
+            aria-label="Dismiss upload errors"
+            onClick={() => setUploadErrors([])}
+          >
+            &times;
+          </button>
+        </div>
+      )}
       {attachments.length > 0 && (
         <div className="attachment-chips">
           {uploading && (

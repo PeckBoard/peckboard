@@ -77,3 +77,9 @@
 .attachment-chip-remove:hover {
   color: var(--danger);
 }
+
+.attachment-chip-error {
+  background: var(--danger-bg);
+  border-color: var(--danger-border);
+  color: var(--danger);
+}

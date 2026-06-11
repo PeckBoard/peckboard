@@ -246,7 +246,10 @@ async fn handle_connection(socket: WebSocket, state: Arc<AppState>) {
                     let should_send = if is_global {
                         true
                     } else {
-                        state.broadcaster.has_subscribers(&ws_event.session_id).await
+                        state
+                            .broadcaster
+                            .is_subscribed(client_id, &ws_event.session_id)
+                            .await
                     };
 
                     if should_send {

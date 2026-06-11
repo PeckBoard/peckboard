@@ -28,6 +28,8 @@ import UsageDashboard from './components/UsageDashboard'
 import UserManagement from './components/UserManagement'
 import ChangePasswordModal from './components/ChangePasswordModal'
 import TabBar from './components/TabBar'
+import ErrorBoundary from './components/ErrorBoundary'
+import ConnectionBanner from './components/ConnectionBanner'
 import { startTabsAutoSync, useTabsStore, type TabType } from './store/tabs'
 import './App.css'
 
@@ -670,6 +672,7 @@ function App() {
               navigate('sessions', null)
             }}
             title="Sessions"
+            aria-label="Sessions"
           >
             <svg
               width="18"
@@ -688,6 +691,7 @@ function App() {
             className={`rail-btn ${view === 'repeatingTasks' ? 'active' : ''}`}
             onClick={() => navigate('repeatingTasks', null)}
             title="Repeating Tasks"
+            aria-label="Repeating Tasks"
           >
             <svg
               width="18"
@@ -711,6 +715,7 @@ function App() {
               navigate('projects', null)
             }}
             title="Projects"
+            aria-label="Projects"
           >
             <svg
               width="18"
@@ -733,6 +738,7 @@ function App() {
               navigate('experts')
             }}
             title="Experts"
+            aria-label="Experts"
           >
             <svg
               width="18"
@@ -761,6 +767,7 @@ function App() {
             className={`rail-btn ${view === 'reports' ? 'active' : ''}`}
             onClick={() => navigate('reports')}
             title="Reports"
+            aria-label="Reports"
           >
             <svg
               width="18"
@@ -783,6 +790,7 @@ function App() {
             className={`rail-btn ${view === 'usage' ? 'active' : ''}`}
             onClick={() => navigate('usage')}
             title="Usage"
+            aria-label="Usage"
           >
             <svg
               width="18"
@@ -804,6 +812,7 @@ function App() {
             className={`rail-btn ${view === 'folders' ? 'active' : ''}`}
             onClick={() => navigate('folders')}
             title="Folders"
+            aria-label="Folders"
           >
             <svg
               width="18"
@@ -823,6 +832,7 @@ function App() {
               className={`rail-btn ${view === 'users' ? 'active' : ''}`}
               onClick={() => navigate('users')}
               title="Users"
+              aria-label="Users"
             >
               <svg
                 width="18"
@@ -846,12 +856,15 @@ function App() {
           <div
             className={`rail-status ${connected ? 'online' : ''}`}
             title={connected ? 'Connected' : 'Disconnected'}
+            role="status"
+            aria-label={connected ? 'Connected' : 'Disconnected'}
           />
           <div className="user-menu" ref={userMenuRef}>
             <button
               className="rail-btn rail-avatar"
               onClick={() => setUserMenuOpen((open) => !open)}
               title={user?.username}
+              aria-label="User menu"
               aria-haspopup="menu"
               aria-expanded={userMenuOpen}
             >
@@ -946,196 +959,204 @@ function App() {
             </button>
           </div>
         )}
-        {view === 'sessions' &&
-          (activeSessionId ? (
-            sessionSub === 'todos' ? (
-              <SessionTodosView
-                sessionId={activeSessionId}
-                onBack={() => navigate('sessions', activeSessionId, 'chat')}
-              />
+        <ConnectionBanner connected={connected} />
+        <ErrorBoundary
+          label="view"
+          resetKey={`${view}:${activeSessionId}:${activeProjectId}:${activeExpertId}:${sessionSub}`}
+        >
+          {view === 'sessions' &&
+            (activeSessionId ? (
+              sessionSub === 'todos' ? (
+                <SessionTodosView
+                  sessionId={activeSessionId}
+                  onBack={() => navigate('sessions', activeSessionId, 'chat')}
+                />
+              ) : (
+                <ChatView
+                  sessionId={activeSessionId}
+                  onOpenTodos={() => navigate('sessions', activeSessionId, 'todos')}
+                />
+              )
             ) : (
-              <ChatView
-                sessionId={activeSessionId}
-                onOpenTodos={() => navigate('sessions', activeSessionId, 'todos')}
-              />
-            )
-          ) : (
-            <div className="list-view">
-              <ListViewHeader
-                title="Sessions"
-                actionLabel="+ New session"
-                onAction={() => setShowNewSession(true)}
-              />
-              {selectedSessions.size > 0 && (
-                <div className="bulk-action-bar">
-                  <span className="bulk-action-count">{selectedSessions.size} selected</span>
-                  <div className="bulk-action-buttons">
-                    <button
-                      className="bulk-action-btn danger"
-                      onClick={() => setConfirmBulkDelete(true)}
-                    >
-                      Delete
-                    </button>
-                    <button
-                      className="bulk-action-btn"
-                      onClick={() => setSelectedSessions(new Set())}
-                    >
-                      Clear
-                    </button>
-                  </div>
-                </div>
-              )}
-              <div
-                className="list-view-body"
-                // Scroll-load: when the user gets within 200px of the
-                // bottom of the list AND there's a next-page cursor
-                // AND we're not already fetching, pull the next page.
-                // The store debounces with `sessionsLoadingMore`, so
-                // the burst of scroll events fired during a flick is
-                // collapsed into a single fetch.
-                onScroll={(e) => {
-                  if (!sessionsNextCursor || sessionsLoadingMore) return
-                  const el = e.currentTarget
-                  if (el.scrollHeight - el.scrollTop - el.clientHeight < 200) {
-                    void fetchMoreSessions()
-                  }
-                }}
-              >
-                {chatSessions.map((s) => (
-                  <div
-                    key={s.id}
-                    className={`list-view-row ${s.id === activeSessionId ? 'active' : ''} ${selectedSessions.has(s.id) ? 'selected' : ''}`}
-                  >
-                    <input
-                      type="checkbox"
-                      className="list-view-select"
-                      checked={selectedSessions.has(s.id)}
-                      onClick={(e) => e.stopPropagation()}
-                      onChange={() => toggleSessionSelected(s.id)}
-                      aria-label={`Select ${s.name}`}
-                    />
-                    <button
-                      className="list-view-item"
-                      onClick={() => {
-                        setActiveSession(s.id)
-                        setContextSession(null)
-                      }}
-                    >
-                      {processing.has(s.id) && <span className="processing-dot" />}
-                      {!processing.has(s.id) && unreadSessions.has(s.id) && (
-                        <span className="unread-dot" />
-                      )}
-                      <span className="list-view-name">{s.name}</span>
-                      <span className="list-view-meta">
-                        {folderMap.get(s.folder_id) && (
-                          <span className="list-view-tag">{folderMap.get(s.folder_id)}</span>
-                        )}
-                        <span className="list-view-time">
-                          {formatRelativeTime(s.last_activity)}
-                        </span>
-                      </span>
-                    </button>
-                    <button
-                      className="list-view-menu"
-                      onClick={(e) => {
-                        e.stopPropagation()
-                        setContextSession(contextSession === s.id ? null : s.id)
-                      }}
-                    >
-                      ···
-                    </button>
-                    {contextSession === s.id && (
-                      <div className="list-view-dropdown">
-                        <button onClick={() => handleDeleteSession(s.id)}>Delete session</button>
-                      </div>
-                    )}
-                  </div>
-                ))}
-                {chatSessions.length === 0 && (
-                  <div className="list-view-empty">
-                    <p>No sessions yet</p>
-                    <button
-                      className="list-view-empty-action"
-                      onClick={() => setShowNewSession(true)}
-                    >
-                      Create your first session
-                    </button>
-                  </div>
-                )}
-                {sessionsLoadingMore && (
-                  <div className="list-view-loading-more" data-testid="sessions-loading-more">
-                    Loading more sessions…
-                  </div>
-                )}
-              </div>
-            </div>
-          ))}
-        {view === 'projects' &&
-          (activeProjectId ? (
-            sessionSub === 'todos' ? (
-              <ProjectTodosView
-                projectId={activeProjectId}
-                onClose={() => navigate('projects', activeProjectId, 'chat')}
-              />
-            ) : (
-              <KanbanBoard
-                projectId={activeProjectId}
-                onOpenTodos={() => navigate('projects', activeProjectId, 'todos')}
-              />
-            )
-          ) : (
-            <div className="list-view">
-              <ProjectList onNewProject={() => setShowNewProject(true)} />
-            </div>
-          ))}
-        {view === 'experts' &&
-          (activeExpertId ? (
-            activeExpert?.expert_kind === 'pm' && activeExpert.project_id ? (
-              <PmExpertView
-                projectId={activeExpert.project_id}
-                expertName={activeExpert.name}
-                onBack={() => {
-                  setActiveExpertId(null)
-                  navigate('experts')
-                }}
-              />
-            ) : expertsLoaded || activeExpert ? (
-              <ChatView sessionId={activeExpertId} />
-            ) : (
-              // Deep link before the experts list resolves: hold off on
-              // mounting ChatView so a PM expert never flashes a chat
-              // transcript while its kind is still unknown.
               <div className="list-view">
-                <div className="list-view-empty">
-                  <p>Loading expert…</p>
+                <ListViewHeader
+                  title="Sessions"
+                  actionLabel="+ New session"
+                  onAction={() => setShowNewSession(true)}
+                />
+                {selectedSessions.size > 0 && (
+                  <div className="bulk-action-bar">
+                    <span className="bulk-action-count">{selectedSessions.size} selected</span>
+                    <div className="bulk-action-buttons">
+                      <button
+                        className="bulk-action-btn danger"
+                        onClick={() => setConfirmBulkDelete(true)}
+                      >
+                        Delete
+                      </button>
+                      <button
+                        className="bulk-action-btn"
+                        onClick={() => setSelectedSessions(new Set())}
+                      >
+                        Clear
+                      </button>
+                    </div>
+                  </div>
+                )}
+                <div
+                  className="list-view-body"
+                  // Scroll-load: when the user gets within 200px of the
+                  // bottom of the list AND there's a next-page cursor
+                  // AND we're not already fetching, pull the next page.
+                  // The store debounces with `sessionsLoadingMore`, so
+                  // the burst of scroll events fired during a flick is
+                  // collapsed into a single fetch.
+                  onScroll={(e) => {
+                    if (!sessionsNextCursor || sessionsLoadingMore) return
+                    const el = e.currentTarget
+                    if (el.scrollHeight - el.scrollTop - el.clientHeight < 200) {
+                      void fetchMoreSessions()
+                    }
+                  }}
+                >
+                  {chatSessions.map((s) => (
+                    <div
+                      key={s.id}
+                      className={`list-view-row ${s.id === activeSessionId ? 'active' : ''} ${selectedSessions.has(s.id) ? 'selected' : ''}`}
+                    >
+                      <input
+                        type="checkbox"
+                        className="list-view-select"
+                        checked={selectedSessions.has(s.id)}
+                        onClick={(e) => e.stopPropagation()}
+                        onChange={() => toggleSessionSelected(s.id)}
+                        aria-label={`Select ${s.name}`}
+                      />
+                      <button
+                        className="list-view-item"
+                        onClick={() => {
+                          setActiveSession(s.id)
+                          setContextSession(null)
+                        }}
+                      >
+                        {processing.has(s.id) && <span className="processing-dot" />}
+                        {!processing.has(s.id) && unreadSessions.has(s.id) && (
+                          <span className="unread-dot" />
+                        )}
+                        <span className="list-view-name">{s.name}</span>
+                        <span className="list-view-meta">
+                          {folderMap.get(s.folder_id) && (
+                            <span className="list-view-tag">{folderMap.get(s.folder_id)}</span>
+                          )}
+                          <span className="list-view-time">
+                            {formatRelativeTime(s.last_activity)}
+                          </span>
+                        </span>
+                      </button>
+                      <button
+                        className="list-view-menu"
+                        aria-label={`Actions for ${s.name}`}
+                        aria-haspopup="menu"
+                        onClick={(e) => {
+                          e.stopPropagation()
+                          setContextSession(contextSession === s.id ? null : s.id)
+                        }}
+                      >
+                        ···
+                      </button>
+                      {contextSession === s.id && (
+                        <div className="list-view-dropdown">
+                          <button onClick={() => handleDeleteSession(s.id)}>Delete session</button>
+                        </div>
+                      )}
+                    </div>
+                  ))}
+                  {chatSessions.length === 0 && (
+                    <div className="list-view-empty">
+                      <p>No sessions yet</p>
+                      <button
+                        className="list-view-empty-action"
+                        onClick={() => setShowNewSession(true)}
+                      >
+                        Create your first session
+                      </button>
+                    </div>
+                  )}
+                  {sessionsLoadingMore && (
+                    <div className="list-view-loading-more" data-testid="sessions-loading-more">
+                      Loading more sessions…
+                    </div>
+                  )}
                 </div>
               </div>
-            )
-          ) : (
-            <ExpertsView
-              onOpenExpert={(id) => {
-                setActiveExpertId(id)
-                navigate('experts', id)
+            ))}
+          {view === 'projects' &&
+            (activeProjectId ? (
+              sessionSub === 'todos' ? (
+                <ProjectTodosView
+                  projectId={activeProjectId}
+                  onClose={() => navigate('projects', activeProjectId, 'chat')}
+                />
+              ) : (
+                <KanbanBoard
+                  projectId={activeProjectId}
+                  onOpenTodos={() => navigate('projects', activeProjectId, 'todos')}
+                />
+              )
+            ) : (
+              <div className="list-view">
+                <ProjectList onNewProject={() => setShowNewProject(true)} />
+              </div>
+            ))}
+          {view === 'experts' &&
+            (activeExpertId ? (
+              activeExpert?.expert_kind === 'pm' && activeExpert.project_id ? (
+                <PmExpertView
+                  projectId={activeExpert.project_id}
+                  expertName={activeExpert.name}
+                  onBack={() => {
+                    setActiveExpertId(null)
+                    navigate('experts')
+                  }}
+                />
+              ) : expertsLoaded || activeExpert ? (
+                <ChatView sessionId={activeExpertId} />
+              ) : (
+                // Deep link before the experts list resolves: hold off on
+                // mounting ChatView so a PM expert never flashes a chat
+                // transcript while its kind is still unknown.
+                <div className="list-view">
+                  <div className="list-view-empty">
+                    <p>Loading expert…</p>
+                  </div>
+                </div>
+              )
+            ) : (
+              <ExpertsView
+                onOpenExpert={(id) => {
+                  setActiveExpertId(id)
+                  navigate('experts', id)
+                }}
+              />
+            ))}
+          {view === 'repeatingTasks' && (
+            <RepeatingTasksView
+              activeTaskId={activeRepeatingTaskId}
+              onNavigate={(id) => {
+                setActiveRepeatingTaskId(id)
+                navigate('repeatingTasks', id)
+              }}
+              onOpenSession={(id) => {
+                setActiveSession(id)
+                navigate('sessions', id)
               }}
             />
-          ))}
-        {view === 'repeatingTasks' && (
-          <RepeatingTasksView
-            activeTaskId={activeRepeatingTaskId}
-            onNavigate={(id) => {
-              setActiveRepeatingTaskId(id)
-              navigate('repeatingTasks', id)
-            }}
-            onOpenSession={(id) => {
-              setActiveSession(id)
-              navigate('sessions', id)
-            }}
-          />
-        )}
-        {view === 'usage' && <UsageDashboard />}
-        {view === 'folders' && <FoldersPage />}
-        {view === 'reports' && <ReportBrowser />}
-        {view === 'users' && <UserManagement />}
+          )}
+          {view === 'usage' && <UsageDashboard />}
+          {view === 'folders' && <FoldersPage />}
+          {view === 'reports' && <ReportBrowser />}
+          {view === 'users' && <UserManagement />}
+        </ErrorBoundary>
       </main>
 
       {showNewSession && <NewSessionModal onClose={() => setShowNewSession(false)} />}

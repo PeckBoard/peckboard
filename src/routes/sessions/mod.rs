@@ -352,8 +352,14 @@ async fn delete_session(
 
     // Remove attachments directory for this session
     let attachments_dir = state.config.data_dir.join("attachments").join(&id);
-    if attachments_dir.exists() {
-        let _ = std::fs::remove_dir_all(&attachments_dir);
+    if attachments_dir.exists()
+        && let Err(e) = std::fs::remove_dir_all(&attachments_dir)
+    {
+        tracing::warn!(
+            session_id = %id,
+            dir = %attachments_dir.display(),
+            "Failed to remove attachments dir during session delete: {e}"
+        );
     }
 
     // Clean up MCP config and tokens
@@ -508,8 +514,14 @@ async fn clear_session(
 
     // Delete attachments directory
     let attachments_dir = state.config.data_dir.join("attachments").join(&id);
-    if attachments_dir.exists() {
-        let _ = tokio::fs::remove_dir_all(&attachments_dir).await;
+    if attachments_dir.exists()
+        && let Err(e) = tokio::fs::remove_dir_all(&attachments_dir).await
+    {
+        tracing::warn!(
+            session_id = %id,
+            dir = %attachments_dir.display(),
+            "Failed to remove attachments dir during session clear: {e}"
+        );
     }
 
     // Reset conversation_id to None

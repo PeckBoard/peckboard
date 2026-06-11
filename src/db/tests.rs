@@ -386,6 +386,113 @@ mod tests {
         assert!(db.delete_card("c1").await.unwrap());
     }
 
+    /// The worker-claim must be atomic: only one of two competing claims
+    /// can land, and a claim on an already-assigned card must fail. This
+    /// is the guard that prevents the orchestrator's concurrent spawn
+    /// paths from assigning two workers to one card.
+    #[tokio::test]
+    async fn test_claim_card_for_worker_is_exclusive() {
+        let db = test_db();
+        let ts = now();
+
+        db.create_folder(NewFolder {
+            id: "f1".into(),
+            name: "Folder".into(),
+            path: "/tmp/f".into(),
+            created_at: ts.clone(),
+        })
+        .await
+        .unwrap();
+        db.create_project(NewProject {
+            id: "p1".into(),
+            name: "Project".into(),
+            context: "".into(),
+            folder_id: "f1".into(),
+            worker_count: 1,
+            status: "active".into(),
+            workflow: "task".into(),
+            model: None,
+            effort: None,
+            parallel_instructions: false,
+            auto_notify_changes: true,
+            worker_communication: false,
+            created_at: ts.clone(),
+            last_accessed_at: ts.clone(),
+        })
+        .await
+        .unwrap();
+        for wid in ["w1", "w2", "w3"] {
+            db.create_session(NewSession {
+                id: wid.into(),
+                name: format!("worker {wid}"),
+                folder_id: "f1".into(),
+                is_worker: true,
+                project_id: Some("p1".into()),
+                created_at: ts.clone(),
+                last_activity: ts.clone(),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        }
+
+        db.create_card(NewCard {
+            id: "c1".into(),
+            project_id: "p1".into(),
+            title: "Race me".into(),
+            description: "".into(),
+            step: "backlog".into(),
+            priority: 1,
+            workflow: "task".into(),
+            model: None,
+            effort: None,
+            blocked: false,
+            block_reason: None,
+            created_at: ts.clone(),
+            updated_at: ts.clone(),
+        })
+        .await
+        .unwrap();
+
+        // First claim wins and applies the step advance.
+        let first = db
+            .claim_card_for_worker("c1", "w1", Some("in_progress".into()), &ts)
+            .await
+            .unwrap();
+        assert!(first);
+        let card = db.get_card("c1").await.unwrap().unwrap();
+        assert_eq!(card.worker_session_id.as_deref(), Some("w1"));
+        assert_eq!(card.last_worker_session_id.as_deref(), Some("w1"));
+        assert_eq!(card.step, "in_progress");
+
+        // Second claim loses and changes nothing.
+        let second = db
+            .claim_card_for_worker("c1", "w2", Some("research".into()), &ts)
+            .await
+            .unwrap();
+        assert!(!second);
+        let card = db.get_card("c1").await.unwrap().unwrap();
+        assert_eq!(card.worker_session_id.as_deref(), Some("w1"));
+        assert_eq!(card.step, "in_progress");
+
+        // After release (worker done / spawn rollback), the card is
+        // claimable again.
+        db.update_card(
+            "c1",
+            UpdateCard {
+                worker_session_id: Some(None),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        let reclaimed = db
+            .claim_card_for_worker("c1", "w3", None, &ts)
+            .await
+            .unwrap();
+        assert!(reclaimed);
+    }
+
     // ── Card dependencies ────────────────────────────────────────────
 
     #[tokio::test]
