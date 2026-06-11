@@ -203,7 +203,10 @@ test('WorkflowInstructionsModal persists text via Edit Project and round-trips o
   // Open the project menu → Edit project → Edit workflow instructions….
   const openInstructionsModal = async () => {
     await page.getByRole('button', { name: 'Project menu' }).click()
-    await page.getByRole('button', { name: 'Edit project' }).click()
+    // Items inside the shared Dropdown carry `role="menuitem"` per the menu
+    // a11y pattern, so query by that role (not `button`) — same shape as the
+    // user-menu / change-password tests use for their dropdown items.
+    await page.getByRole('menuitem', { name: 'Edit project' }).click()
     await page.getByRole('button', { name: 'Edit workflow instructions…' }).click()
     // Wait for the per-step editor to render — its textarea proves both
     // the modal is open AND the workflow registry + existing overrides

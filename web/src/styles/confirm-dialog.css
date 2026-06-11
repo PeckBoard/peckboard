@@ -10,6 +10,8 @@
   max-width: 380px;
   box-shadow: var(--shadow-overlay);
   animation: modalIn 0.2s ease;
+  /* See `.modal` in auth.css for the auto-margin pattern. */
+  margin: auto 0;
 }
 
 .confirm-dialog-title {

@@ -47,8 +47,14 @@
      full layout viewport, which doesn't shrink with the keyboard. */
   height: var(--app-height);
   display: flex;
+  flex-direction: column;
+  /* `align-items: center` would clip the TOP of an overflowing modal
+     because flex centering with `overflow-y: auto` makes negative
+     overflow unreachable. We center horizontally on the cross axis
+     and let auto margins on the modal handle vertical centering;
+     auto margins collapse to 0 once the modal is taller than the
+     backdrop, so the top stays in view. */
   align-items: center;
-  justify-content: center;
   background: rgba(0, 0, 0, 0.5);
   backdrop-filter: blur(4px);
   z-index: 100;
@@ -69,11 +75,21 @@
 .modal {
   background: var(--surface);
   border-radius: var(--radius-xl);
-  padding: 32px;
+  /* Desktop modals used to inset their content by 32px on every side, which
+     left a generous gutter between the panel edge and the first form
+     field. Tightening to 20px brings the form fields closer to the panel
+     edge so a typical modal reads as a focused dialog instead of a
+     half-empty card. The mobile override further down clamps this to
+     20px (was 32px) for the same reason. */
+  padding: 20px;
   width: 100%;
   max-width: 400px;
   box-shadow: var(--shadow-overlay);
   animation: modalIn 0.2s ease;
+  /* Vertical-centering counterpart to the backdrop's column flex —
+     auto margins absorb leftover space, so a short modal sits in the
+     middle and a tall one falls back to flex-start without clipping. */
+  margin: auto 0;
 }
 
 @keyframes modalIn {

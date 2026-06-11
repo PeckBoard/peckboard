@@ -133,6 +133,13 @@ interface SessionsState {
     effort?: string,
   ) => Promise<Session>
   deleteSession: (id: string) => Promise<void>
+  /** Apply the local cleanup for a session that's been deleted on the
+   *  server — either by THIS client (via `deleteSession`) or another
+   *  device (via the `session-deleted` WS broadcast). Drops the session
+   *  row, clears `activeSessionId` if it matched, wipes cached events
+   *  and pending bubbles, and closes the tab strip entry so the body
+   *  switches off ChatView when the deleted session was active. */
+  applySessionDeleted: (id: string) => void
   setActiveSession: (id: string | null) => void
   renameSession: (id: string, name: string) => Promise<void>
   clearSession: (id: string) => Promise<void>
@@ -390,16 +397,35 @@ export const useSessionsStore = create<SessionsState>((set, get) => ({
       const err = await res.json().catch(() => ({ error: 'Failed to delete session' }))
       throw new Error(err.error || 'Failed to delete session')
     }
+    // Optimistic local cleanup so the UI updates instantly instead of
+    // waiting for the `session-deleted` broadcast round-trip. The
+    // broadcast handler calls `applySessionDeleted` again for every
+    // connected client (including this one) — it's idempotent.
+    get().applySessionDeleted(id)
+  },
+
+  applySessionDeleted: (id: string) => {
     set((s) => {
       const { [id]: _drop, ...remainingEvents } = s.eventsBySession
       const { [id]: _dropPending, ...remainingPending } = s.pendingUserMessages
       void _drop
       void _dropPending
+      // Clear unread + processing too — leftover keys for a deleted
+      // session would otherwise stick around as a leaked Set entry the
+      // next session list never overwrites.
+      const nextUnread = s.unreadSessions.has(id)
+        ? new Set([...s.unreadSessions].filter((sid) => sid !== id))
+        : s.unreadSessions
+      const nextProcessing = s.processing.has(id)
+        ? new Set([...s.processing].filter((sid) => sid !== id))
+        : s.processing
       return {
         sessions: s.sessions.filter((sess) => sess.id !== id),
         activeSessionId: s.activeSessionId === id ? null : s.activeSessionId,
         eventsBySession: remainingEvents,
         pendingUserMessages: remainingPending,
+        unreadSessions: nextUnread,
+        processing: nextProcessing,
       }
     })
     // Drop the tab for the now-deleted session so it doesn't render as

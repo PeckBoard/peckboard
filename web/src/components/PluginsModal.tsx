@@ -1,3 +1,4 @@
+import Modal from './Modal'
 import PluginsSection from './PluginsSection'
 
 interface Props {
@@ -6,21 +7,14 @@ interface Props {
 
 export default function PluginsModal({ onClose }: Props) {
   return (
-    <div className="modal-backdrop" onClick={onClose}>
-      <div
-        className="modal plugins-modal"
-        onClick={(e) => e.stopPropagation()}
-        data-testid="plugins-modal"
-        style={{ maxWidth: 720 }}
-      >
-        <h2>Plugins</h2>
-        <PluginsSection />
-        <div className="form-actions">
-          <button type="button" className="btn-secondary" onClick={onClose}>
-            Close
-          </button>
-        </div>
+    <Modal onClose={onClose} className="plugins-modal" maxWidth={720} data-testid="plugins-modal">
+      <h2>Plugins</h2>
+      <PluginsSection />
+      <div className="form-actions">
+        <button type="button" className="btn-secondary" onClick={onClose}>
+          Close
+        </button>
       </div>
-    </div>
+    </Modal>
   )
 }

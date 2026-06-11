@@ -241,6 +241,13 @@ async fn handle_connection(socket: WebSocket, state: Arc<AppState>) {
                             | "announcement"
                             | "queue"
                             | "project-update"
+                            // session-deleted must reach every connected
+                            // client — devices that had the session open
+                            // but unsubscribed (or never subscribed,
+                            // because they were sitting on a different
+                            // session) still need to drop the tab + clear
+                            // an orphaned activeSessionId.
+                            | "session-deleted"
                     );
 
                     let should_send = if is_global {

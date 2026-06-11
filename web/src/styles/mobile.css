@@ -13,14 +13,21 @@
      under it (`viewport-fit=cover` is set in index.html). Horizontal
      padding matches the rest of the mobile chrome (tabbar / chat
      toolbar / input bar all use 12px) so the four stacked bars line
-     up vertically — previously each band had a different inset. */
+     up vertically — previously each band had a different inset.
+
+     `max(12px, env(safe-area-inset-left/right))` pushes the rail's
+     contents clear of iPadOS window controls (the close/minimize
+     buttons that appear at the top-left of a windowed app). The 12px
+     floor keeps phones unchanged — they report 0 for those insets in
+     portrait. */
   .rail {
     width: 100%;
     min-height: 56px;
     flex-direction: row;
     border-right: none;
     border-bottom: 1px solid var(--border);
-    padding: env(safe-area-inset-top, 0px) 12px 0;
+    padding: env(safe-area-inset-top, 0px) max(12px, env(safe-area-inset-right, 0px)) 0
+      max(12px, env(safe-area-inset-left, 0px));
     overflow-x: auto;
     flex-shrink: 0;
   }
@@ -120,9 +127,10 @@
   /* Chat toolbar — narrow horizontal padding so it aligns with the
      rail, tabbar, and input bar above and below. Without this override
      it inherits the desktop's 24px inset, which left the chrome looking
-     unevenly indented on mobile. */
+     unevenly indented on mobile. Stays single-line on mobile (no wrap)
+     so the toolbar reads as one strip; the session name takes the
+     overflow with ellipsis, every other child stays flex-shrink: 0. */
   .chat-toolbar {
-    flex-wrap: wrap;
     gap: 6px;
     padding-left: 12px;
     padding-right: 12px;
@@ -192,13 +200,12 @@
     -webkit-overflow-scrolling: touch;
   }
 
-  /* Kanban header stack */
+  /* Kanban header — same single-line rule as the chat toolbar: no wrap on
+     mobile so the strip stays one row, the project name ellipses to take
+     the overflow, and the icon buttons + status badge stay
+     `flex-shrink: 0` to keep their full size. */
   .kanban-board-header {
-    flex-wrap: wrap;
     gap: 8px;
-  }
-  .kanban-project-info {
-    flex-wrap: wrap;
   }
 
   /* Add card form */
@@ -209,20 +216,17 @@
     min-width: auto;
   }
 
-  /* Modals full width on mobile. Cap to the visible viewport via
-     `--app-height` so a long form stays inside the keyboard-shrunk
-     region — `100vh` is the layout viewport, which doesn't shrink
-     when the keyboard opens. */
+  /* Modals full width on mobile. The backdrop itself owns the scroll
+     (see `.modal-backdrop` in `auth.css`), so we cap the modal's
+     width but never its height — a long form flows naturally and the
+     page (backdrop) scrolls. */
   .modal {
     max-width: calc(100vw - 32px) !important;
-    max-height: calc(var(--app-height) - 32px);
-    overflow-y: auto;
   }
 
   /* Question dialog */
   .question-dialog {
     max-width: calc(100vw - 32px) !important;
-    max-height: calc(var(--app-height) - 32px);
   }
 
   /* Settings/Reports pages */
@@ -255,7 +259,8 @@
      remains aligned on the narrowest phones. */
   .rail {
     min-height: 48px;
-    padding: env(safe-area-inset-top, 0px) 8px 0;
+    padding: env(safe-area-inset-top, 0px) max(8px, env(safe-area-inset-right, 0px)) 0
+      max(8px, env(safe-area-inset-left, 0px));
   }
   .chat-toolbar {
     padding-left: 8px;
@@ -299,7 +304,7 @@
     font-size: var(--text-sm);
   }
   .modal {
-    padding: 20px !important;
+    padding: 16px !important;
   }
 }
 
@@ -772,6 +777,53 @@
   .list-view-meta {
     flex-wrap: wrap;
   }
+}
+
+/* ── Reports view ──────────────────────────────────────────────────── */
+.report-group {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.report-group + .report-group {
+  margin-top: 8px;
+}
+.report-group-title {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 0;
+  padding: 4px 2px;
+  background: transparent;
+  border: 0;
+  font-family: inherit;
+  font-size: var(--text-xs);
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--text3);
+  cursor: pointer;
+  text-align: left;
+}
+.report-group-chevron {
+  display: inline-flex;
+  width: 12px;
+  font-size: 10px;
+  color: var(--text3);
+}
+.report-group-count {
+  margin-left: auto;
+  min-width: 18px;
+  height: 18px;
+  padding: 0 5px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 11px;
+  font-weight: 700;
+  border-radius: 9px;
+  background: var(--surface2, var(--surface));
+  color: var(--text3);
 }
 
 /* ── Experts view ──────────────────────────────────────────────────── */

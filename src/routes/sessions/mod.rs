@@ -374,6 +374,20 @@ async fn delete_session(
         ));
     }
 
+    // Tell every connected client the session is gone so other devices
+    // (or other tabs on the same device) drop their tab strip entry,
+    // wipe any cached events, and switch the body off the now-deleted
+    // session if it was the active one. Without this the only cleanup
+    // path is the focus-driven `/api/me/tabs` refetch, which closes the
+    // tab but leaves ChatView mounted against a 404'd session id.
+    state
+        .broadcaster
+        .broadcast(crate::ws::broadcaster::WsEvent {
+            event_type: "session-deleted".into(),
+            session_id: id.clone(),
+            data: serde_json::json!({ "session_id": id }),
+        });
+
     Ok(StatusCode::NO_CONTENT)
 }
 

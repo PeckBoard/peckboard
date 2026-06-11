@@ -27,9 +27,9 @@
    remaining flex space and owns the vertical scroll. Padding lives
    here so the columns + headers inset from the chrome — the shell
    above stays edge-to-edge so the header bar background can extend
-   the full width of the panel. The `--kanban-board-bg` token is a
-   touch darker than the cards in both themes so the cards pop
-   forward instead of blending into the column. */
+   the full width of the panel. The `--kanban-board-bg` token sits a
+   touch lighter than the cards in both themes so the cards read as
+   raised chips on a calm, paper-like field. */
 .kanban-board-scroll {
   flex: 1;
   /* The board itself only scrolls horizontally — vertical scroll
@@ -37,7 +37,10 @@
      stays put while the cards underneath scroll. */
   overflow-y: hidden;
   overflow-x: auto;
-  padding: 0 20px 20px;
+  /* Top padding lifts the columns off the toolbar; the larger side and
+     bottom inset give the board real breathing room against the
+     surrounding chrome. */
+  padding: 16px 28px 24px;
   min-height: 0;
   position: relative;
   background: var(--kanban-board-bg);
@@ -87,7 +90,10 @@
 .kanban-columns {
   display: flex;
   flex-direction: row;
-  gap: 12px;
+  /* Tight gap so the columns read as one ribbon broken by their headers
+     rather than as four floating cards. The padding inside each
+     `.kanban-cards` container provides the visual separation. */
+  gap: 4px;
   /* Take the remaining vertical space inside `.kanban-board-scroll`
      so each column has a meaningful height to scroll within. */
   flex: 1;
@@ -195,7 +201,10 @@
      instead of a sharp seam against the board. */
   border: 1px solid color-mix(in srgb, var(--kanban-card-bg) 88%, black);
   border-radius: var(--radius-md);
-  padding: 6px 10px;
+  /* Collapsed default: tight padding so a column of header-only cards
+     reads as a dense list. Expanded cards override this rule further
+     down to get a roomier inset for the description / meta / buttons. */
+  padding: 4px 10px;
   text-align: left;
   flex-shrink: 0;
   font-family: inherit;
@@ -239,6 +248,13 @@
 }
 .kanban-card.blocked {
   border-left: 3px solid var(--danger);
+}
+/* Expanded card — the body (description, meta row, button row) is
+   visible so the card needs more breathing room than the collapsed
+   header-only form. Targets `data-expanded="true"` (set by KanbanBoard)
+   so the rule never depends on CSS class ordering. */
+.kanban-card[data-expanded='true'] {
+  padding: 10px 12px;
 }
 /* Cross-row step-move target: the destination row gets a horizontal accept
    band so the gesture matches the rotated layout. */

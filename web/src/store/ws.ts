@@ -160,6 +160,31 @@ export const useWsStore = create<WsState>((set, get) => ({
         return
       }
 
+      if (msg.type === 'session-deleted') {
+        // Another device deleted this session (or the orchestrator's
+        // worker-session cleanup did). Drop every trace of it locally so
+        // the tab vanishes from the strip and the body switches off
+        // ChatView/SessionTodosView if the deleted session was active.
+        // The optimistic local cleanup in `deleteSession` already covers
+        // the case where this client did the delete itself — handling
+        // the broadcast a second time is idempotent.
+        const sessionId = msg.session_id as string
+        if (sessionId) {
+          const { eventsBySession, lastSeqBySession } = get()
+          const remainingSeqs = { ...lastSeqBySession }
+          delete remainingSeqs[sessionId]
+          saveLastSeqs(remainingSeqs)
+          const { [sessionId]: _drop, ...remainingEvents } = eventsBySession
+          void _drop
+          set({
+            eventsBySession: remainingEvents,
+            lastSeqBySession: remainingSeqs,
+          })
+          useSessionsStore.getState().applySessionDeleted(sessionId)
+        }
+        return
+      }
+
       if (msg.type === 'session-cleared') {
         // Server wiped this session's events + todos. Two event caches
         // need to drop the snapshot in lockstep — `useWsStore`'s

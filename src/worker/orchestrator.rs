@@ -61,6 +61,83 @@ fn broadcast_card_update(state: &AppState, card_id: &str, project_id: &str) {
     });
 }
 
+/// Clear the persisted todo snapshot for a worker session whose card
+/// just landed on a terminal step. The todo panel is the agent's
+/// in-flight scratchpad — once the card is `done` / `wont_do` the items
+/// no longer represent live work, and leaving them showing in the chat
+/// session view, the dedicated session-todos view, and the project
+/// todos roll-up makes the board look like there's outstanding work
+/// when there isn't.
+///
+/// Three writes, in order, so every read path agrees on "no todos":
+///   1. Wipe the dedicated `todos` table for this session — the source
+///      of truth the `/api/sessions/:id/todos` and
+///      `/api/projects/:id/todos` endpoints read.
+///   2. Append an empty `todo` event so any client live-subscribed via
+///      the WS drops its in-memory snapshot through the normal
+///      replace-all path (`latestTodoSnapshot` returns `[]` ⇒
+///      `TodoPanel` hides itself).
+///   3. Broadcast that event so the drop is immediate.
+///
+/// No-op when the session never reported any todos — we don't want to
+/// pollute every just-completed worker's event log with an empty `todo`
+/// event for sessions that wouldn't have shown anything anyway.
+pub async fn clear_session_todos(
+    db: &crate::db::Db,
+    broadcaster: &crate::ws::broadcaster::Broadcaster,
+    session_id: &str,
+) {
+    let existing = match db.list_session_todos(session_id).await {
+        Ok(items) => items,
+        Err(e) => {
+            tracing::warn!(
+                session_id = %session_id,
+                "clear_session_todos: list_session_todos failed: {e}"
+            );
+            return;
+        }
+    };
+    if existing.is_empty() {
+        return;
+    }
+
+    if let Err(e) = db
+        .replace_session_todos(session_id, crate::todo::TodoSnapshot::default())
+        .await
+    {
+        tracing::warn!(
+            session_id = %session_id,
+            "clear_session_todos: replace_session_todos failed: {e}"
+        );
+        return;
+    }
+
+    match db
+        .append_event(session_id, "todo", serde_json::json!({ "todos": [] }))
+        .await
+    {
+        Ok(event) => {
+            broadcaster.broadcast(WsEvent {
+                event_type: "event".into(),
+                session_id: session_id.to_string(),
+                data: serde_json::json!({
+                    "id": event.id,
+                    "seq": event.seq,
+                    "ts": event.ts,
+                    "kind": "todo",
+                    "data": { "todos": [] },
+                }),
+            });
+        }
+        Err(e) => {
+            tracing::warn!(
+                session_id = %session_id,
+                "clear_session_todos: append_event failed: {e}"
+            );
+        }
+    }
+}
+
 /// Scan all active projects, find cards that need workers, and spawn them.
 ///
 /// For each active project:
@@ -483,6 +560,34 @@ async fn spawn_worker_for_card(
     Ok(())
 }
 
+/// Hard-cancel the worker assigned to `card_id`, if any, because an
+/// external action (drag-drop, MCP `move_card_to_*`, etc.) made its
+/// current task obsolete.
+///
+/// The atomic card update is the caller's job; this helper only:
+/// 1. fires a cancel through every registered provider, then
+/// 2. waits for the streaming task to actually wind down so the
+///    synthetic `Crashed { reason: "interrupted" }` event lands before
+///    we return.
+///
+/// Why wait: without it, the cancel's completion listener fires later
+/// and runs `clear_card_worker_if_matches(card_id, session_id)`. With
+/// the caller having already cleared the ref in the same atomic update,
+/// the conditional-clear becomes a no-op (the values no longer match),
+/// so the orchestrator's next 5s tick is free to spawn a replacement
+/// for the new step without the listener clobbering its assignment.
+///
+/// Auto-pause is also skipped: the synthetic Crashed event carries
+/// `reason: "interrupted"`, which `pipeline::count_consecutive_crashes`
+/// explicitly excludes.
+pub async fn cancel_worker_for_card_move(state: &Arc<AppState>, session_id: &str) {
+    state.session_manager.cancel_and_wait(session_id).await;
+    // Also drop any persisted queued message — the worker is going away
+    // because the card moved, not because the user wants their last input
+    // delivered to a fresh run.
+    let _ = state.db.delete_queued_message(session_id).await;
+}
+
 /// Handle a worker session completing (called after `stream_events` finishes
 /// with a Completed status).
 ///
@@ -530,6 +635,40 @@ pub async fn handle_worker_done(state: &Arc<AppState>, session_id: &str) {
             return;
         }
     };
+
+    // Stale-completion guard: if the card no longer references THIS
+    // session (the user moved the card, called move_card_to_done, or the
+    // orchestrator already reassigned after a cancel), our intent is
+    // obsolete. Acting on it would clobber a fresh assignment or
+    // re-advance from a now-incorrect step. Skip the entire intent +
+    // step-update block; the MCP-config / token cleanup below still
+    // runs so we don't leak per-session resources.
+    if card.worker_session_id.as_deref() != Some(session_id) {
+        tracing::info!(
+            session_id = %session_id,
+            card_id = %card_id,
+            current_worker = ?card.worker_session_id,
+            "handle_worker_done: card reassigned, skipping intent + step update"
+        );
+        // Still run the resource-cleanup tail block below.
+        mcp_server::delete_mcp_config(&state.config.data_dir, session_id);
+        state
+            .plugins
+            .dispatch(
+                "mcp.config.delete.after",
+                serde_json::json!({ "sessionId": session_id }),
+            )
+            .await;
+        state.mcp_tokens.revoke_by_session(session_id).await;
+        state
+            .plugins
+            .dispatch(
+                "mcp.token.revoke.after",
+                serde_json::json!({ "sessionId": session_id }),
+            )
+            .await;
+        return;
+    }
 
     // 2. Get events, derive intent
     let events = match state.db.list_events_by_session(session_id, None).await {
@@ -611,6 +750,7 @@ pub async fn handle_worker_done(state: &Arc<AppState>, session_id: &str) {
                         },
                     )
                     .await;
+                clear_session_todos(&state.db, &state.broadcaster, session_id).await;
 
                 tracing::info!(card_id = %card_id, "Worker completed final step, card done");
             }
@@ -630,6 +770,7 @@ pub async fn handle_worker_done(state: &Arc<AppState>, session_id: &str) {
                     },
                 )
                 .await;
+            clear_session_todos(&state.db, &state.broadcaster, session_id).await;
 
             tracing::info!(card_id = %card_id, "Worker finished card");
         }
@@ -648,6 +789,7 @@ pub async fn handle_worker_done(state: &Arc<AppState>, session_id: &str) {
                     },
                 )
                 .await;
+            clear_session_todos(&state.db, &state.broadcaster, session_id).await;
 
             tracing::info!(card_id = %card_id, reason = %reason, "Worker marked card as won't-do");
         }
@@ -736,6 +878,27 @@ pub async fn drain_queue_for_session(
         Some(s) => s,
         None => return Ok(()),
     };
+
+    // Pause-aware: if this is a worker session whose owning project is
+    // paused, do NOT drain. Pause means "stop the work"; draining here
+    // would spawn a fresh agent run for a paused project the moment the
+    // cancel's completion listener fires. We also drop the row so a
+    // later resume doesn't re-trigger this branch with a stale message.
+    if session.is_worker
+        && let Some(project_id) = session.project_id.as_deref()
+        && let Ok(Some(project)) = state.db.get_project(project_id).await
+        && project.status != "active"
+    {
+        if let Ok(Some(_)) = state.db.get_queued_message(session_id).await {
+            let _ = state.db.delete_queued_message(session_id).await;
+            tracing::info!(
+                session_id = %session_id,
+                project_id = %project_id,
+                "drain_queue_for_session: dropping queued message for paused project"
+            );
+        }
+        return Ok(());
+    }
 
     // Peek at the queued message so we can use the model/effort the user
     // picked when they enqueued, if any. Falls back to the session →

@@ -219,7 +219,12 @@ impl McpToolRegistry {
 
         // Cancel any in-flight workers so pause means stop, not "stop
         // spawning new ones but let the current turn finish and advance
-        // the card." Mirrors the HTTP /pause route.
+        // the card." Mirrors the HTTP /pause route, including the
+        // queued-message drop so the cancel's completion listener can't
+        // drain a buffered message into a fresh agent run.
+        if let Err(e) = ctx.db.delete_queued_messages_for_project(project_id).await {
+            tracing::warn!(project_id = %project_id, "Failed to clear queued messages on pause: {e}");
+        }
         if let Some(registry) = ctx.provider_registry.as_ref() {
             if let Ok(workers) = ctx.db.list_worker_sessions_by_project(project_id).await {
                 for ws in &workers {

@@ -12,6 +12,9 @@
 }
 
 /* ─── Navigation Rail (left icon bar) ─── */
+/* `padding-top` includes `env(safe-area-inset-top)` so iPadOS window
+   controls (the close/minimize buttons in the newer windowed mode)
+   don't sit on top of the brand icon at the top of the rail. */
 .rail {
   width: 56px;
   background: var(--surface);
@@ -19,7 +22,7 @@
   display: flex;
   flex-direction: column;
   align-items: center;
-  padding: 12px 0;
+  padding: calc(12px + env(safe-area-inset-top, 0px)) 0 12px;
   flex-shrink: 0;
   z-index: 20;
 }

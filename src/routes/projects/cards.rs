@@ -303,7 +303,17 @@ pub(super) async fn update_card(
     // concurrent transitions from both seeing the same pre-state and
     // both applying their write (e.g. two `complete_step` calls racing
     // and producing inconsistent step values).
+    //
+    // `stale_worker` carries the worker_session_id that was assigned to
+    // the card BEFORE this update applied a step change — captured
+    // inside the closure (so it's atomic against parallel writers) and
+    // cancelled after the response is shipped. Without this, a user
+    // dragging an in-flight card to a different column would leave the
+    // worker running on the old step, and the worker could then call
+    // `complete_step` against a now-incorrect base step.
     let depends_on_present = depends_on.is_some();
+    let stale_worker_cell = std::sync::Arc::new(std::sync::Mutex::new(None::<String>));
+    let stale_worker_writer = stale_worker_cell.clone();
     let card = state
         .db
         .update_card_atomic(&card_id, move |existing| {
@@ -341,6 +351,23 @@ pub(super) async fn update_card(
                 );
             }
 
+            // If this update changes the step and the caller did NOT
+            // explicitly touch worker_session_id, force-clear the
+            // assignment (and stamp last_worker_session_id) so the
+            // worker we're about to cancel can't keep advancing a stale
+            // base step. The stash drives the post-update cancel.
+            let mut worker_session_id = body.worker_session_id.clone();
+            let mut last_worker_session_id = body.last_worker_session_id.clone();
+            let step_changing = body.step.as_deref().is_some_and(|s| s != existing.step);
+            if step_changing
+                && worker_session_id.is_none()
+                && let Some(sid) = existing.worker_session_id.clone()
+            {
+                *stale_worker_writer.lock().unwrap() = Some(sid.clone());
+                worker_session_id = Some(None);
+                last_worker_session_id = Some(Some(sid));
+            }
+
             Ok(UpdateCard {
                 title: body.title,
                 description: body.description,
@@ -349,8 +376,8 @@ pub(super) async fn update_card(
                 workflow: body.workflow,
                 model: body.model,
                 effort: body.effort,
-                worker_session_id: body.worker_session_id,
-                last_worker_session_id: body.last_worker_session_id,
+                worker_session_id,
+                last_worker_session_id,
                 handoff_context: body.handoff_context,
                 blocked: body.blocked,
                 block_reason: body.block_reason,
@@ -405,6 +432,38 @@ pub(super) async fn update_card(
             session_id: c.project_id.clone(),
             data: serde_json::json!({ "card": card_value }),
         });
+
+    // If the user dragged the card to a terminal step, clear the prior
+    // worker's todos so the chat session view, the standalone session
+    // todos view, and the project todos panel all stop showing what is
+    // now stale scratchpad. Falls back to `last_worker_session_id` when
+    // the card was already idle on a non-terminal step before this
+    // update (the just-cleared `stale_worker_cell` is empty in that case).
+    let stale_sid = stale_worker_cell.lock().unwrap().take();
+    if c.step == "done" || c.step == "wont_do" {
+        let cleanup_sid = stale_sid
+            .clone()
+            .or_else(|| c.last_worker_session_id.clone());
+        if let Some(sid) = cleanup_sid {
+            crate::worker::orchestrator::clear_session_todos(&state.db, &state.broadcaster, &sid)
+                .await;
+        }
+    }
+
+    // Cancel the worker that was running against the pre-update step.
+    // Done after the broadcast so the UI sees the new state immediately
+    // and the (slower) `cancel_and_wait` doesn't gate the HTTP response.
+    if let Some(sid) = stale_sid {
+        tracing::info!(
+            card_id = %card_id,
+            session_id = %sid,
+            "Cancelling worker after user moved card to a different step"
+        );
+        let state_for_cancel = state.clone();
+        tokio::spawn(async move {
+            crate::worker::orchestrator::cancel_worker_for_card_move(&state_for_cancel, &sid).await;
+        });
+    }
     Ok(Json(card_value))
 }
 
@@ -566,6 +625,19 @@ pub(super) async fn cancel_card_wont_do(
     // Stop existing worker
     if let Some(session_id) = &card.worker_session_id {
         state.session_manager.cancel(session_id).await;
+    }
+
+    // Clear the prior worker's todos so the in-progress scratchpad
+    // disappears with the card. Use the current `worker_session_id`
+    // when present, or `last_worker_session_id` to catch the case
+    // where the user cancels an already-idle card whose previous run
+    // left a snapshot.
+    let cleanup_sid = card
+        .worker_session_id
+        .clone()
+        .or_else(|| card.last_worker_session_id.clone());
+    if let Some(sid) = cleanup_sid {
+        crate::worker::orchestrator::clear_session_todos(&state.db, &state.broadcaster, &sid).await;
     }
 
     // Move card to wont_do

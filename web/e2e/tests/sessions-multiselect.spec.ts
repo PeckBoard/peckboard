@@ -4,9 +4,12 @@ import { tmpdir } from 'node:os'
 import path from 'node:path'
 
 /**
- * E2E for multi-selecting sessions on the sessions list and running a bulk
- * action (delete) — the same action offered by a row's 3-dot menu, applied
- * to every checked session at once.
+ * E2E for multi-selecting sessions on the sessions list. The list intentionally
+ * does NOT expose delete — that lives on the chat-toolbar 3-dot menu and the
+ * tab right-click menu so the user has the session open and can act
+ * intentionally. The bar surfaces non-destructive bulk actions only (currently
+ * just "Mark as read", which is hidden unless any selected session is unread),
+ * plus a Clear button that empties the selection.
  */
 
 const E2E_USER = 'e2e-user'
@@ -53,7 +56,7 @@ async function loadAs(page: Page, token: string, route: string) {
   await expect(page.locator('.rail-avatar')).toBeVisible({ timeout: 10_000 })
 }
 
-test('multi-select delete removes the checked sessions and leaves the rest', async ({
+test('multi-select surfaces a non-destructive bulk bar with no delete option', async ({
   request,
   page,
 }) => {
@@ -86,15 +89,16 @@ test('multi-select delete removes the checked sessions and leaves the rest', asy
   const bar = page.locator('.bulk-action-bar')
   await expect(bar).toContainText('2 selected')
 
-  // Bulk delete → confirm the dialog.
-  await bar.locator('.bulk-action-btn.danger').click()
-  const dialog = page.locator('.confirm-dialog')
-  await expect(dialog).toContainText('Delete 2 selected sessions')
-  await dialog.locator('.confirm-dialog-danger').click()
+  // The card-level requirement is that the sessions list NEVER offers delete
+  // — neither as a bulk action nor as a row 3-dot menu item. Assert both.
+  await expect(bar.locator('.bulk-action-btn.danger')).toHaveCount(0)
+  await expect(bar.locator('.bulk-action-btn', { hasText: /delete/i })).toHaveCount(0)
+  await expect(rowA.locator('.list-view-menu')).toHaveCount(0)
 
-  // A and B are gone, C survives, and the bar clears.
-  await expect(rowA).toHaveCount(0)
-  await expect(rowB).toHaveCount(0)
-  await expect(rowC).toBeVisible()
+  // Clear empties the selection and dismisses the bar; rows survive.
+  await bar.locator('.bulk-action-btn', { hasText: 'Clear' }).click()
   await expect(bar).toHaveCount(0)
+  await expect(rowA).toBeVisible()
+  await expect(rowB).toBeVisible()
+  await expect(rowC).toBeVisible()
 })

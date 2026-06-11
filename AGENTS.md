@@ -169,6 +169,75 @@ its definition with `// Proof token: bearer has done X. See
 [caller] for an example.` so future readers know it's load-bearing
 and not just bookkeeping.
 
+## Component Reuse — Prefer Existing Components
+
+**Before writing a new component, check whether one of the shared
+primitives already does the job.** Repeatedly hand-rolling list rows,
+dropdowns, headers, and context menus is how the app accumulates four
+slightly different versions of the same widget that drift apart over
+releases.
+
+The frontend has a small set of shared primitives that every screen is
+expected to use:
+
+- **`Modal`** (`web/src/components/Modal.tsx`) — portal-rendered modal
+  shell. Every dialog goes through this; don't render `.modal-backdrop`
+  inline.
+- **`List`** (`web/src/components/List.tsx`) — the list-of-things
+  view (sessions / projects / repeating tasks / reports). Owns the row
+  chrome, the 3-dot menu, right-click / long-press context menus,
+  multi-select selection, and the floating bulk-action bar. New list
+  views MUST use it.
+- **`ListViewHeader`** (`web/src/components/ListViewHeader.tsx`) — the
+  title + primary-action bar above a `List`. Use it for every top-level
+  list page (Sessions, Projects, Repeating Tasks, Reports, Experts).
+- **`Dropdown` + `MenuButton`** (`web/src/components/Dropdown.tsx`) —
+  the only popup-menu primitive. Replaces every ad-hoc
+  `list-view-dropdown` / `chat-toolbar-dropdown` / inline 3-dot menu.
+  Supports dividers (`{ divider: true }`), danger items, submenus, and
+  active markers. Don't roll a new menu shape — extend `MenuItem` if you
+  truly need a new affordance.
+- **`useContextMenu`** (`web/src/hooks/useContextMenu.tsx`) —
+  right-click + long-press menu primitive. Shares the `MenuItem` shape
+  with `Dropdown` so a row's right-click menu and its 3-dot menu can
+  be built from the same list (`List` does this for you).
+- **`ConfirmDialog`** (`web/src/components/ConfirmDialog.tsx`) — every
+  destructive confirmation. Don't reach for `window.confirm`.
+
+**Naming and ordering of menu items must match across surfaces.** If a
+session's chat-toolbar 3-dot menu says "Clear session", the tab
+right-click menu and the sessions-list row menu must say the same.
+"Clear session" / "Terminate agent" / "Delete" / etc. — same label,
+same order, everywhere. The current canonical session menu order is:
+
+```
+Rename
+─────────
+Model >       (submenu, current value as hint)
+Effort >      (submenu, current value as hint)
+─────────
+Clear session
+Terminate agent
+Delete        (danger)
+```
+
+The TabBar tab context menu adds "Close tab" above (it's a tab
+property, not a session property), but the rest matches.
+
+**Don't invent new dropdown shapes.** The model picker, effort picker,
+workflow picker, and 3-dot overflow menu are all the same primitive
+with different items. Replace any new variant with `MenuButton` / a
+`MenuItem[]` list.
+
+**Don't invent new card or row chrome.** `.list-view-row` and its
+descendants are the shared row skin. If you need a new column on a row,
+add it inside the `renderItem` slot, not as a new component.
+
+**When you DO need something new**, add it next to the existing shared
+primitives (`web/src/components/`) and document it here. A "shared
+primitive" is a component used by ≥ 2 different views; until then, leave
+it where it lives.
+
 ## Migrations — READ THIS BEFORE ADDING ONE
 
 **Peckboard runs on real user data. Data loss is not acceptable. A

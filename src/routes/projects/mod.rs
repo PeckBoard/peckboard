@@ -508,6 +508,23 @@ async fn pause_project(
     // project. Without this, a worker mid-turn would keep running,
     // advance its card on completion, and leave the project in an
     // inconsistent state (paused on the kanban; cards still moving).
+    //
+    // Three things have to happen for pause to mean "stop":
+    //   1. Drop every persisted queued message belonging to a worker on
+    //      this project, so the cancel's completion listener can't drain
+    //      a buffered message into a fresh agent run.
+    //   2. Cancel every running worker. We do NOT block on
+    //      `cancel_and_wait` here because the HTTP response time would
+    //      then be bounded by the slowest CLI's shutdown; the
+    //      `clear_card_worker_if_matches` guard in the completion
+    //      listener makes the unblocked path race-safe.
+    //   3. (Implicit) `check_and_spawn_workers` already filters out
+    //      paused projects, and `drain_queue_for_session` now bails on
+    //      paused projects too, so no listener pass can resurrect a
+    //      worker we just killed.
+    if let Err(e) = state.db.delete_queued_messages_for_project(&id).await {
+        tracing::warn!(project_id = %id, "Failed to clear queued messages on pause: {e}");
+    }
     if let Ok(workers) = state.db.list_worker_sessions_by_project(&id).await {
         let mut cancelled = 0u32;
         for ws in &workers {

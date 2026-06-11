@@ -68,6 +68,22 @@ function sortByMru(tabs: Tab[]): Tab[] {
   return [...tabs].sort((a, b) => (a.lastActive < b.lastActive ? 1 : -1))
 }
 
+/** Build a stable key for a (type, id) pair so we can intern it in a
+ *  Set. Used by the tombstone logic below to avoid re-inserting a tab
+ *  whose underlying item was deleted while its openTab POST was in
+ *  flight. */
+function tabKey(itemType: TabType, itemId: string): string {
+  return `${itemType}:${itemId}`
+}
+
+/** Items whose tab was just removed by `removeTabsForItem` while an
+ *  `openTab` POST for the same id is still in flight. Without this set,
+ *  the POST response handler unconditionally re-inserts the tab — which
+ *  resurrects a chip for a session that was just deleted on another
+ *  device. The set is process-global (not in zustand state) because it's
+ *  a transient race guard, not user-visible state. */
+const recentTombstones = new Set<string>()
+
 export const useTabsStore = create<TabsState>((set, get) => ({
   tabs: [],
   loaded: false,
@@ -130,16 +146,27 @@ export const useTabsStore = create<TabsState>((set, get) => ({
         // Replace the optimistic entry in place. If a concurrent
         // `fetchTabs` happened to wipe it before our POST returned
         // (race during initial auth), re-insert at the front so the
-        // tab isn't silently lost.
+        // tab isn't silently lost. EXCEPT when the wipe came from an
+        // explicit `removeTabsForItem` (the session was deleted on
+        // another device while our POST was in flight) — the
+        // tombstone tells us not to resurrect a chip for an item
+        // that no longer exists.
+        const key = tabKey(tab.itemType, tab.itemId)
+        const tombstoned = recentTombstones.has(key)
+        if (tombstoned) recentTombstones.delete(key)
         set((s) => {
           const exists = s.tabs.some((t) => t.itemType === tab.itemType && t.itemId === tab.itemId)
-          return exists
-            ? {
-                tabs: s.tabs.map((t) =>
-                  t.itemType === tab.itemType && t.itemId === tab.itemId ? tab : t,
-                ),
-              }
-            : { tabs: [tab, ...s.tabs] }
+          if (exists) {
+            return {
+              tabs: s.tabs.map((t) =>
+                t.itemType === tab.itemType && t.itemId === tab.itemId ? tab : t,
+              ),
+            }
+          }
+          // Disappeared from the strip while we were waiting on the
+          // POST. If it was tombstoned (deleted-elsewhere), leave it
+          // out; otherwise restore (initial-auth fetchTabs race).
+          return tombstoned ? {} : { tabs: [tab, ...s.tabs] }
         })
       } else {
         // Server refused (404 = referenced item is gone, 4xx more
@@ -169,6 +196,10 @@ export const useTabsStore = create<TabsState>((set, get) => ({
   },
 
   removeTabsForItem: (itemType, itemId) => {
+    // Tombstone the id so an in-flight `openTab` POST response can't
+    // re-insert the chip after we drop it here. The set is cleared as
+    // soon as the response is processed or the next openTab succeeds.
+    recentTombstones.add(tabKey(itemType, itemId))
     set((s) => ({
       tabs: s.tabs.filter((t) => !(t.itemType === itemType && t.itemId === itemId)),
     }))

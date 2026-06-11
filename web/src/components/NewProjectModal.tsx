@@ -3,6 +3,7 @@ import { useProjectsStore } from '../store/projects'
 import { useFoldersStore } from '../store/folders'
 import { useResourcesStore } from '../store/resources'
 import { authedFetch } from '../store/auth'
+import Modal from './Modal'
 import WorkflowSelect from './WorkflowSelect'
 import WorkflowInstructionsModal, {
   type WorkflowInstructionsDraft,
@@ -131,198 +132,195 @@ export default function NewProjectModal({ onClose }: Props) {
 
   return (
     <>
-      <div className="modal-backdrop" onClick={onClose}>
-        <div className="modal" onClick={(e) => e.stopPropagation()} style={{ maxWidth: 520 }}>
-          <h2>New Project</h2>
-          <form onSubmit={handleSubmit}>
-            <div className="form-field">
-              <label className="form-label">Name</label>
-              <input
+      <Modal onClose={onClose} maxWidth={520}>
+        <h2>New Project</h2>
+        <form onSubmit={handleSubmit}>
+          <div className="form-field">
+            <label className="form-label">Name</label>
+            <input
+              className="form-input"
+              value={name}
+              onChange={(e) => setName(e.target.value)}
+              placeholder="My project"
+              autoFocus
+              required
+            />
+          </div>
+          <div className="form-field">
+            <label className="form-label">Folder</label>
+            {folders.length > 0 ? (
+              <select
                 className="form-input"
-                value={name}
-                onChange={(e) => setName(e.target.value)}
-                placeholder="My project"
-                autoFocus
-                required
-              />
+                value={folderId}
+                onChange={(e) => setChosenFolderId(e.target.value)}
+              >
+                {folders.map((f) => (
+                  <option key={f.id} value={f.id}>
+                    {f.name} — {f.path}
+                  </option>
+                ))}
+              </select>
+            ) : (
+              <p style={{ fontSize: 'var(--text-sm)', color: 'var(--text3)' }}>
+                No folders. Create one from the folder manager first.
+              </p>
+            )}
+          </div>
+          <div className="form-field">
+            <label className="form-label">Default card workflow</label>
+            <WorkflowSelect value={workflow} onChange={setWorkflow} />
+            <p className="form-hint">
+              Cards default to this workflow when created here. Each card can still override it
+              individually.
+            </p>
+            <div className="form-workflow-extras">
+              <button
+                type="button"
+                className="btn-secondary btn-small"
+                onClick={() => setShowInstructions(true)}
+              >
+                Edit workflow instructions…
+              </button>
+              <p className="form-hint">
+                Add extra instructions every card runs at a given column — e.g. "commit to master
+                and push when done." Customize any workflow your project uses, not just the default.
+                Your text is appended to the built-in step prompts, not replacing them.
+              </p>
             </div>
-            <div className="form-field">
-              <label className="form-label">Folder</label>
-              {folders.length > 0 ? (
+          </div>
+          <div className="form-field">
+            <label className="form-label">
+              Context <span className="optional">(optional)</span>
+            </label>
+            <textarea
+              className="form-input"
+              value={context}
+              onChange={(e) => setContext(e.target.value)}
+              placeholder="High-level background and instructions for workers on this project..."
+              rows={3}
+              style={{ resize: 'vertical' }}
+            />
+          </div>
+
+          <button
+            type="button"
+            className="form-toggle-advanced"
+            onClick={() => setShowAdvanced(!showAdvanced)}
+          >
+            {showAdvanced ? 'Hide' : 'Show'} advanced settings
+          </button>
+
+          {showAdvanced && (
+            <div className="form-advanced-section">
+              <div className="form-field">
+                <label className="form-label">Worker count</label>
+                <input
+                  className="form-input"
+                  type="number"
+                  min={1}
+                  max={10}
+                  value={workerCount}
+                  onChange={(e) => setWorkerCount(Number(e.target.value))}
+                />
+                <p className="form-hint">
+                  Number of parallel workers. Keep at 1 unless the repo is set up for parallel work
+                  (git worktrees).
+                </p>
+              </div>
+              <div className="form-field">
+                <label className="form-label">Model</label>
                 <select
                   className="form-input"
-                  value={folderId}
-                  onChange={(e) => setChosenFolderId(e.target.value)}
+                  value={model}
+                  onChange={(e) => setModel(e.target.value)}
                 >
-                  {folders.map((f) => (
-                    <option key={f.id} value={f.id}>
-                      {f.name} — {f.path}
+                  <option value="">Default</option>
+                  {models.map((m) => (
+                    <option key={m.id} value={m.id}>
+                      {m.display_name}
                     </option>
                   ))}
                 </select>
-              ) : (
-                <p style={{ fontSize: 'var(--text-sm)', color: 'var(--text3)' }}>
-                  No folders. Create one from the folder manager first.
-                </p>
-              )}
-            </div>
-            <div className="form-field">
-              <label className="form-label">Default card workflow</label>
-              <WorkflowSelect value={workflow} onChange={setWorkflow} />
-              <p className="form-hint">
-                Cards default to this workflow when created here. Each card can still override it
-                individually.
-              </p>
-              <div className="form-workflow-extras">
-                <button
-                  type="button"
-                  className="btn-secondary btn-small"
-                  onClick={() => setShowInstructions(true)}
-                >
-                  Edit workflow instructions…
-                </button>
                 <p className="form-hint">
-                  Add extra instructions every card runs at a given column — e.g. "commit to master
-                  and push when done." Customize any workflow your project uses, not just the
-                  default. Your text is appended to the built-in step prompts, not replacing them.
+                  Project-level model override. Cards and workflow steps can further override this.
+                </p>
+              </div>
+              <div className="form-field">
+                <label className="form-label">Effort</label>
+                <select
+                  className="form-input"
+                  value={effort}
+                  onChange={(e) => setEffort(e.target.value)}
+                >
+                  {EFFORT_OPTIONS.map((o) => (
+                    <option key={o.value} value={o.value}>
+                      {o.label}
+                    </option>
+                  ))}
+                </select>
+                <p className="form-hint">
+                  Controls reasoning budget. Higher effort = slower but more thorough.
+                </p>
+              </div>
+              <div className="form-field">
+                <label className="form-checkbox-label">
+                  <input
+                    type="checkbox"
+                    checked={parallelInstructions}
+                    onChange={(e) => setParallelInstructions(e.target.checked)}
+                  />
+                  <span>Inject parallel-workflow instructions</span>
+                </label>
+                <p className="form-hint">
+                  Appends guidance on git worktrees, dependency isolation, and test isolation to
+                  worker prompts. Enable when running multiple workers.
+                </p>
+              </div>
+              <div className="form-field">
+                <label className="form-checkbox-label">
+                  <input
+                    type="checkbox"
+                    checked={autoNotifyChanges}
+                    onChange={(e) => setAutoNotifyChanges(e.target.checked)}
+                  />
+                  <span>Auto-notify file changes</span>
+                </label>
+                <p className="form-hint">
+                  Automatically notify other workers when files are modified. Prevents merge
+                  conflicts.
+                </p>
+              </div>
+              <div className="form-field">
+                <label className="form-checkbox-label">
+                  <input
+                    type="checkbox"
+                    checked={workerCommunication}
+                    onChange={(e) => setWorkerCommunication(e.target.checked)}
+                  />
+                  <span>Inter-worker communication</span>
+                </label>
+                <p className="form-hint">
+                  Allow workers to share findings and send messages to each other.
                 </p>
               </div>
             </div>
-            <div className="form-field">
-              <label className="form-label">
-                Context <span className="optional">(optional)</span>
-              </label>
-              <textarea
-                className="form-input"
-                value={context}
-                onChange={(e) => setContext(e.target.value)}
-                placeholder="High-level background and instructions for workers on this project..."
-                rows={3}
-                style={{ resize: 'vertical' }}
-              />
-            </div>
+          )}
 
-            <button
-              type="button"
-              className="form-toggle-advanced"
-              onClick={() => setShowAdvanced(!showAdvanced)}
-            >
-              {showAdvanced ? 'Hide' : 'Show'} advanced settings
+          {error && <p className="form-error">{error}</p>}
+          <div className="form-actions">
+            <button type="button" className="btn-secondary" onClick={onClose}>
+              Cancel
             </button>
-
-            {showAdvanced && (
-              <div className="form-advanced-section">
-                <div className="form-field">
-                  <label className="form-label">Worker count</label>
-                  <input
-                    className="form-input"
-                    type="number"
-                    min={1}
-                    max={10}
-                    value={workerCount}
-                    onChange={(e) => setWorkerCount(Number(e.target.value))}
-                  />
-                  <p className="form-hint">
-                    Number of parallel workers. Keep at 1 unless the repo is set up for parallel
-                    work (git worktrees).
-                  </p>
-                </div>
-                <div className="form-field">
-                  <label className="form-label">Model</label>
-                  <select
-                    className="form-input"
-                    value={model}
-                    onChange={(e) => setModel(e.target.value)}
-                  >
-                    <option value="">Default</option>
-                    {models.map((m) => (
-                      <option key={m.id} value={m.id}>
-                        {m.display_name}
-                      </option>
-                    ))}
-                  </select>
-                  <p className="form-hint">
-                    Project-level model override. Cards and workflow steps can further override
-                    this.
-                  </p>
-                </div>
-                <div className="form-field">
-                  <label className="form-label">Effort</label>
-                  <select
-                    className="form-input"
-                    value={effort}
-                    onChange={(e) => setEffort(e.target.value)}
-                  >
-                    {EFFORT_OPTIONS.map((o) => (
-                      <option key={o.value} value={o.value}>
-                        {o.label}
-                      </option>
-                    ))}
-                  </select>
-                  <p className="form-hint">
-                    Controls reasoning budget. Higher effort = slower but more thorough.
-                  </p>
-                </div>
-                <div className="form-field">
-                  <label className="form-checkbox-label">
-                    <input
-                      type="checkbox"
-                      checked={parallelInstructions}
-                      onChange={(e) => setParallelInstructions(e.target.checked)}
-                    />
-                    <span>Inject parallel-workflow instructions</span>
-                  </label>
-                  <p className="form-hint">
-                    Appends guidance on git worktrees, dependency isolation, and test isolation to
-                    worker prompts. Enable when running multiple workers.
-                  </p>
-                </div>
-                <div className="form-field">
-                  <label className="form-checkbox-label">
-                    <input
-                      type="checkbox"
-                      checked={autoNotifyChanges}
-                      onChange={(e) => setAutoNotifyChanges(e.target.checked)}
-                    />
-                    <span>Auto-notify file changes</span>
-                  </label>
-                  <p className="form-hint">
-                    Automatically notify other workers when files are modified. Prevents merge
-                    conflicts.
-                  </p>
-                </div>
-                <div className="form-field">
-                  <label className="form-checkbox-label">
-                    <input
-                      type="checkbox"
-                      checked={workerCommunication}
-                      onChange={(e) => setWorkerCommunication(e.target.checked)}
-                    />
-                    <span>Inter-worker communication</span>
-                  </label>
-                  <p className="form-hint">
-                    Allow workers to share findings and send messages to each other.
-                  </p>
-                </div>
-              </div>
-            )}
-
-            {error && <p className="form-error">{error}</p>}
-            <div className="form-actions">
-              <button type="button" className="btn-secondary" onClick={onClose}>
-                Cancel
-              </button>
-              <button
-                type="submit"
-                className="btn-primary"
-                disabled={loading || !name.trim() || !folderId || !workflow}
-              >
-                {loading ? 'Creating...' : 'Create Project'}
-              </button>
-            </div>
-          </form>
-        </div>
-      </div>
+            <button
+              type="submit"
+              className="btn-primary"
+              disabled={loading || !name.trim() || !folderId || !workflow}
+            >
+              {loading ? 'Creating...' : 'Create Project'}
+            </button>
+          </div>
+        </form>
+      </Modal>
       {showInstructions && (
         <WorkflowInstructionsModal
           mode="draft"

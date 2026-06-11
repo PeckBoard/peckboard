@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from 'react'
 import { authedFetch } from '../store/auth'
 import { useResourcesStore, type WorkflowInfo, type WorkflowStepInfo } from '../store/resources'
+import Modal from './Modal'
 
 /** All overrides for a project, keyed by workflow id then by step. */
 export type WorkflowInstructionsDraft = Record<string, Record<string, string>>
@@ -220,127 +221,121 @@ export default function WorkflowInstructionsModal(props: Props) {
     : []
 
   return (
-    <div className="modal-backdrop" onClick={onClose}>
-      <div
-        className="modal workflow-instructions-modal"
-        onClick={(e) => e.stopPropagation()}
-        style={{ maxWidth: 720 }}
-      >
-        <h2>Workflow Instructions</h2>
-        <p className="form-hint" style={{ marginTop: 0, marginBottom: 16 }}>
-          Cards in this project can each use a different workflow, so customize whichever ones you
-          need. Your text is appended below the built-in instructions a worker receives — both
-          apply. Use it for things every card on that workflow should do, like "commit to master and
-          push when finished."
-        </p>
+    <Modal onClose={onClose} className="workflow-instructions-modal" maxWidth={720}>
+      <h2>Workflow Instructions</h2>
+      <p className="form-hint" style={{ marginTop: 0, marginBottom: 16 }}>
+        Cards in this project can each use a different workflow, so customize whichever ones you
+        need. Your text is appended below the built-in instructions a worker receives — both apply.
+        Use it for things every card on that workflow should do, like "commit to master and push
+        when finished."
+      </p>
 
-        <div className="form-field">
-          <label className="form-label" htmlFor="workflow-instructions-picker">
-            Workflow
-          </label>
-          <select
-            id="workflow-instructions-picker"
-            className="form-input"
-            value={selectedWorkflowId}
-            onChange={(e) => {
-              setExplicitSelection(e.target.value)
-              setSavedKey(null)
-            }}
-            disabled={sortedWorkflows.length === 0}
-          >
-            {sortedWorkflows.map((w) => (
-              <option key={w.id} value={w.id}>
-                {w.name}
-                {hasOverridesFor(w.id) ? ' • customized' : ''}
-              </option>
-            ))}
-          </select>
-          {selectedWorkflow?.description && (
-            <p className="form-hint">{selectedWorkflow.description}</p>
-          )}
-        </div>
-
-        {loading && <p className="form-hint">Loading current instructions…</p>}
-
-        {!loading &&
-          selectedWorkflow &&
-          editableSteps.map((s) => {
-            const draft = drafts[selectedWorkflowId]?.[s.step] ?? ''
-            const saved = overrides[selectedWorkflowId]?.[s.step] ?? ''
-            const dirty = draft.trim() !== saved.trim()
-            const stepKey = `${selectedWorkflowId}/${s.step}`
-            const saving = savingKey === stepKey
-            return (
-              <section key={s.step} className="workflow-step-block">
-                <header className="workflow-step-header">
-                  <h3 className="workflow-step-title">{prettyStepName(s.step)}</h3>
-                  {saved && <span className="workflow-step-badge">customized</span>}
-                </header>
-
-                <div className="workflow-step-builtin" aria-label="Built-in instructions">
-                  <div className="workflow-step-builtin-label">Built-in instructions</div>
-                  <pre className="workflow-step-builtin-body">{s.instructions}</pre>
-                </div>
-
-                <div className="workflow-step-plus" aria-hidden="true">
-                  +
-                </div>
-
-                <div className="workflow-step-extra">
-                  <label className="form-label" htmlFor={`extra-${selectedWorkflowId}-${s.step}`}>
-                    Your additional instructions
-                  </label>
-                  <textarea
-                    id={`extra-${selectedWorkflowId}-${s.step}`}
-                    className="form-input"
-                    value={draft}
-                    onChange={(e) => {
-                      const v = e.target.value
-                      setDrafts((prev) => {
-                        const next = { ...prev }
-                        next[selectedWorkflowId] = {
-                          ...(next[selectedWorkflowId] ?? {}),
-                          [s.step]: v,
-                        }
-                        return next
-                      })
-                      if (savedKey === stepKey) setSavedKey(null)
-                    }}
-                    placeholder="e.g. At the end, commit to master and push."
-                    rows={4}
-                    style={{ resize: 'vertical' }}
-                  />
-                  <div className="workflow-step-actions">
-                    <button
-                      type="button"
-                      className="btn-primary"
-                      disabled={saving || !dirty}
-                      onClick={() => handleSave(s.step)}
-                    >
-                      {saving ? 'Saving…' : 'Save'}
-                    </button>
-                    {savedKey === stepKey && !dirty && (
-                      <span className="form-hint workflow-step-saved">Saved.</span>
-                    )}
-                  </div>
-                </div>
-              </section>
-            )
-          })}
-
-        {!loading && selectedWorkflow && editableSteps.length === 0 && (
-          <p className="form-hint">This workflow has no worker steps to customize.</p>
+      <div className="form-field">
+        <label className="form-label" htmlFor="workflow-instructions-picker">
+          Workflow
+        </label>
+        <select
+          id="workflow-instructions-picker"
+          className="form-input"
+          value={selectedWorkflowId}
+          onChange={(e) => {
+            setExplicitSelection(e.target.value)
+            setSavedKey(null)
+          }}
+          disabled={sortedWorkflows.length === 0}
+        >
+          {sortedWorkflows.map((w) => (
+            <option key={w.id} value={w.id}>
+              {w.name}
+              {hasOverridesFor(w.id) ? ' • customized' : ''}
+            </option>
+          ))}
+        </select>
+        {selectedWorkflow?.description && (
+          <p className="form-hint">{selectedWorkflow.description}</p>
         )}
-
-        {error && <p className="form-error">{error}</p>}
-
-        <div className="form-actions">
-          <button type="button" className="btn-secondary" onClick={onClose}>
-            Close
-          </button>
-        </div>
       </div>
-    </div>
+
+      {loading && <p className="form-hint">Loading current instructions…</p>}
+
+      {!loading &&
+        selectedWorkflow &&
+        editableSteps.map((s) => {
+          const draft = drafts[selectedWorkflowId]?.[s.step] ?? ''
+          const saved = overrides[selectedWorkflowId]?.[s.step] ?? ''
+          const dirty = draft.trim() !== saved.trim()
+          const stepKey = `${selectedWorkflowId}/${s.step}`
+          const saving = savingKey === stepKey
+          return (
+            <section key={s.step} className="workflow-step-block">
+              <header className="workflow-step-header">
+                <h3 className="workflow-step-title">{prettyStepName(s.step)}</h3>
+                {saved && <span className="workflow-step-badge">customized</span>}
+              </header>
+
+              <div className="workflow-step-builtin" aria-label="Built-in instructions">
+                <div className="workflow-step-builtin-label">Built-in instructions</div>
+                <pre className="workflow-step-builtin-body">{s.instructions}</pre>
+              </div>
+
+              <div className="workflow-step-plus" aria-hidden="true">
+                +
+              </div>
+
+              <div className="workflow-step-extra">
+                <label className="form-label" htmlFor={`extra-${selectedWorkflowId}-${s.step}`}>
+                  Your additional instructions
+                </label>
+                <textarea
+                  id={`extra-${selectedWorkflowId}-${s.step}`}
+                  className="form-input"
+                  value={draft}
+                  onChange={(e) => {
+                    const v = e.target.value
+                    setDrafts((prev) => {
+                      const next = { ...prev }
+                      next[selectedWorkflowId] = {
+                        ...(next[selectedWorkflowId] ?? {}),
+                        [s.step]: v,
+                      }
+                      return next
+                    })
+                    if (savedKey === stepKey) setSavedKey(null)
+                  }}
+                  placeholder="e.g. At the end, commit to master and push."
+                  rows={4}
+                  style={{ resize: 'vertical' }}
+                />
+                <div className="workflow-step-actions">
+                  <button
+                    type="button"
+                    className="btn-primary"
+                    disabled={saving || !dirty}
+                    onClick={() => handleSave(s.step)}
+                  >
+                    {saving ? 'Saving…' : 'Save'}
+                  </button>
+                  {savedKey === stepKey && !dirty && (
+                    <span className="form-hint workflow-step-saved">Saved.</span>
+                  )}
+                </div>
+              </div>
+            </section>
+          )
+        })}
+
+      {!loading && selectedWorkflow && editableSteps.length === 0 && (
+        <p className="form-hint">This workflow has no worker steps to customize.</p>
+      )}
+
+      {error && <p className="form-error">{error}</p>}
+
+      <div className="form-actions">
+        <button type="button" className="btn-secondary" onClick={onClose}>
+          Close
+        </button>
+      </div>
+    </Modal>
   )
 }
 

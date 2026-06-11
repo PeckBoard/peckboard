@@ -444,11 +444,10 @@ select.form-input {
 
 /* ── Workflow instructions modal ─────────────────────────────────────
    Each column gets a "built-in card + plus + your textarea" stack so
-   the user sees what's already in place before extending it. */
-.workflow-instructions-modal {
-  max-height: calc(100vh - 80px);
-  overflow-y: auto;
-}
+   the user sees what's already in place before extending it. The
+   modal panel flows naturally — `.modal-backdrop` (auth.css) owns
+   the scroll, so a tall list scrolls the page instead of trapping
+   the user inside a nested scroll area. */
 
 .workflow-step-block {
   border: 1px solid var(--border);

@@ -84,12 +84,14 @@
      pre-JS paint and as a non-mobile fallback. */
   --app-height: 100dvh;
 
-  /* Kanban — cards sit lighter than the board so they pop forward
-     against the scrolling background. In light mode that means
-     white-ish cards on a faint gray board; the dark-mode block below
-     swaps the role so the same "lighter card on darker board" still
-     reads correctly. */
-  --kanban-board-bg: var(--surface3);
+  /* Kanban — the board sits LIGHTER than the cards so the cards read as
+     filled chips floating on a near-paper field. Light mode uses the
+     base `--bg` token (a hair lighter than `--surface2`); the dark-mode
+     block below uses a value between `--surface2` and the card's
+     `--surface3` so the same "calm light field with raised cards"
+     impression carries across themes. The tonal differential is
+     deliberately subtle so the board never competes with the cards. */
+  --kanban-board-bg: var(--bg);
   --kanban-card-bg: var(--surface);
 }
 
@@ -128,10 +130,11 @@
   --shadow-lg: 0 10px 25px rgba(0, 0, 0, 0.4), 0 4px 10px rgba(0, 0, 0, 0.2);
   --shadow-overlay: 0 16px 48px rgba(0, 0, 0, 0.5), 0 4px 12px rgba(0, 0, 0, 0.3);
 
-  /* In dark mode the surface ramp runs the other direction (surface
-     is the darkest), so swap the kanban tokens so the cards still end
-     up lighter than the board. */
-  --kanban-board-bg: var(--surface);
+  /* In dark mode we keep the same "lighter board, raised cards" feel by
+     setting the board a touch lighter than `--surface2` (and lighter
+     than the card so the card edges still read). The hex is hand-picked
+     between `--surface2` (#22252f) and `--surface3` (#2a2d38). */
+  --kanban-board-bg: #262932;
   --kanban-card-bg: var(--surface3);
 }
 
@@ -165,7 +168,7 @@
     --shadow-md: 0 4px 6px rgba(0, 0, 0, 0.3), 0 2px 4px rgba(0, 0, 0, 0.2);
     --shadow-lg: 0 10px 25px rgba(0, 0, 0, 0.4), 0 4px 10px rgba(0, 0, 0, 0.2);
     --shadow-overlay: 0 16px 48px rgba(0, 0, 0, 0.5), 0 4px 12px rgba(0, 0, 0, 0.3);
-    --kanban-board-bg: var(--surface);
+    --kanban-board-bg: #262932;
     --kanban-card-bg: var(--surface3);
   }
 }

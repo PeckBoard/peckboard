@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react'
 import { useFoldersStore } from '../store/folders'
 import { authedFetch } from '../store/auth'
 import type { Folder } from '../types/api'
+import Modal from './Modal'
 
 export default function FoldersPage() {
   const folders = useFoldersStore((s) => s.folders)
@@ -165,70 +166,68 @@ export default function FoldersPage() {
 
       {/* Delete folder dialog — shown when folder has sessions */}
       {deleteTarget && (
-        <div className="modal-backdrop" onClick={() => setDeleteTarget(null)}>
-          <div className="modal" onClick={(e) => e.stopPropagation()}>
-            <h2>Delete "{deleteTarget.name}"</h2>
-            <p className="modal-subtitle">
-              This folder has {deleteSessionCount} session{deleteSessionCount !== 1 ? 's' : ''}.
-              Choose how to proceed:
-            </p>
+        <Modal onClose={() => setDeleteTarget(null)}>
+          <h2>Delete "{deleteTarget.name}"</h2>
+          <p className="modal-subtitle">
+            This folder has {deleteSessionCount} session{deleteSessionCount !== 1 ? 's' : ''}.
+            Choose how to proceed:
+          </p>
 
-            <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
-              {/* Option 1: Delete sessions */}
-              <button
-                className="folder-delete-option"
-                onClick={handleDeleteWithSessions}
-                disabled={deleting}
-              >
-                <strong>Delete all sessions</strong>
-                <span>
-                  Permanently delete all sessions and their events in this folder, then delete the
-                  folder.
-                </span>
-              </button>
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+            {/* Option 1: Delete sessions */}
+            <button
+              className="folder-delete-option"
+              onClick={handleDeleteWithSessions}
+              disabled={deleting}
+            >
+              <strong>Delete all sessions</strong>
+              <span>
+                Permanently delete all sessions and their events in this folder, then delete the
+                folder.
+              </span>
+            </button>
 
-              {/* Option 2: Move sessions */}
-              {otherFolders.length > 0 && (
-                <div className="folder-delete-option-group">
-                  <div className="folder-delete-option-move">
-                    <strong>Move sessions to another folder</strong>
-                    <div style={{ display: 'flex', gap: 8, marginTop: 8 }}>
-                      <select
-                        className="form-input"
-                        value={moveTargetId}
-                        onChange={(e) => setMoveTargetId(e.target.value)}
-                        style={{ flex: 1 }}
-                      >
-                        {otherFolders.map((f) => (
-                          <option key={f.id} value={f.id}>
-                            {f.name}
-                          </option>
-                        ))}
-                      </select>
-                      <button
-                        className="btn-primary"
-                        onClick={handleMoveThenDelete}
-                        disabled={deleting || !moveTargetId}
-                        style={{ whiteSpace: 'nowrap' }}
-                      >
-                        Move & Delete
-                      </button>
-                    </div>
+            {/* Option 2: Move sessions */}
+            {otherFolders.length > 0 && (
+              <div className="folder-delete-option-group">
+                <div className="folder-delete-option-move">
+                  <strong>Move sessions to another folder</strong>
+                  <div style={{ display: 'flex', gap: 8, marginTop: 8 }}>
+                    <select
+                      className="form-input"
+                      value={moveTargetId}
+                      onChange={(e) => setMoveTargetId(e.target.value)}
+                      style={{ flex: 1 }}
+                    >
+                      {otherFolders.map((f) => (
+                        <option key={f.id} value={f.id}>
+                          {f.name}
+                        </option>
+                      ))}
+                    </select>
+                    <button
+                      className="btn-primary"
+                      onClick={handleMoveThenDelete}
+                      disabled={deleting || !moveTargetId}
+                      style={{ whiteSpace: 'nowrap' }}
+                    >
+                      Move & Delete
+                    </button>
                   </div>
                 </div>
-              )}
+              </div>
+            )}
 
-              {/* Option 3: Cancel */}
-              <button
-                className="btn-secondary"
-                onClick={() => setDeleteTarget(null)}
-                style={{ alignSelf: 'flex-start' }}
-              >
-                Cancel
-              </button>
-            </div>
+            {/* Option 3: Cancel */}
+            <button
+              className="btn-secondary"
+              onClick={() => setDeleteTarget(null)}
+              style={{ alignSelf: 'flex-start' }}
+            >
+              Cancel
+            </button>
           </div>
-        </div>
+        </Modal>
       )}
     </div>
   )

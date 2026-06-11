@@ -75,16 +75,15 @@
   font-size: 16px;
 }
 
-/* Question dialog */
+/* Question dialog. The modal panel flows naturally — the backdrop
+   (`.modal-backdrop`) owns the scroll, so the page scrolls when the
+   question + options run long instead of trapping the user inside a
+   nested scroll area. */
 .question-dialog {
   max-width: 520px;
   padding: 0 !important;
-  overflow: hidden;
   display: flex;
   flex-direction: column;
-  /* `--app-height` tracks `visualViewport.height` (App.tsx), so the
-     dialog shrinks above the soft keyboard instead of being clipped. */
-  max-height: min(80vh, calc(var(--app-height) - 32px));
 }
 
 .question-dialog-header {
@@ -130,9 +129,6 @@
 
 .question-dialog-body {
   padding: 20px 24px;
-  flex: 1;
-  overflow-y: auto;
-  min-height: 0;
 }
 
 .question-dialog-footer {
@@ -315,11 +311,11 @@
 
 /* ─── Workflow Select ─── */
 
-/* WorkflowSelect renders a borderless dropdown that surfaces each
-   workflow's description below its name, so the user can tell Task /
-   Research / Breakdown / Develop apart without picking blindly. The
-   trigger looks like a regular form-input until you focus it; the menu
-   is absolutely positioned beneath. */
+/* WorkflowSelect's trigger looks like a regular form-input (two lines:
+   workflow name + description), but the popup itself uses the shared
+   `Dropdown` primitive so every menu in the app behaves the same way.
+   The `.workflow-select-dropdown` rule below pins the popup width to
+   the trigger so the menu lines up with the form field. */
 .workflow-select {
   position: relative;
   width: 100%;
@@ -347,49 +343,9 @@
   color: var(--text3);
   line-height: 1.35;
 }
-.workflow-select-menu {
-  position: absolute;
-  top: calc(100% + 4px);
-  left: 0;
-  right: 0;
-  z-index: 60;
-  background: var(--surface);
-  border: 1px solid var(--border);
-  border-radius: var(--radius-md);
-  box-shadow: var(--shadow-lg);
-  padding: 4px;
+.workflow-select-dropdown {
   max-height: 360px;
   overflow-y: auto;
-}
-.workflow-select-option {
-  display: flex;
-  flex-direction: column;
-  align-items: flex-start;
-  width: 100%;
-  padding: 8px 10px;
-  border: none;
-  border-radius: var(--radius-sm);
-  background: transparent;
-  cursor: pointer;
-  text-align: left;
-  transition: background var(--transition);
-}
-.workflow-select-option:hover {
-  background: var(--surface-hover);
-}
-.workflow-select-option.active {
-  background: var(--accent-subtle);
-}
-.workflow-select-option-name {
-  font-size: var(--text-sm);
-  font-weight: 600;
-  color: var(--text);
-}
-.workflow-select-option-desc {
-  margin-top: 2px;
-  font-size: var(--text-xs);
-  color: var(--text2);
-  line-height: 1.4;
 }
 
 /* Card form description: the field is the main editing surface, so

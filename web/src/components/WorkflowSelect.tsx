@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
 import { useResourcesStore, type WorkflowInfo } from '../store/resources'
+import Dropdown, { type MenuItem } from './Dropdown'
 
 interface Props {
   /** Currently selected workflow id. In the card form, '' means "inherit
@@ -20,10 +21,12 @@ interface Props {
 }
 
 /**
- * Workflow picker that surfaces each workflow's description below its name,
- * so the user can tell Task from Research from Breakdown without having to
- * pick blindly. Mirrors the chat-toolbar dropdown look: a borderless trigger
- * that pops a fixed-position menu showing one card per workflow.
+ * Workflow picker. The trigger looks like a form input (name on top,
+ * description underneath) so it slots into modal forms; the menu uses the
+ * shared `Dropdown` primitive so every popup in the app behaves the same
+ * way (portal-rendered, viewport-clamped, Esc/outside-click to close,
+ * matching item chrome). The two-line item shape comes from
+ * `MenuItem.description` — see Dropdown.tsx.
  */
 export default function WorkflowSelect({
   value,
@@ -35,21 +38,12 @@ export default function WorkflowSelect({
 }: Props) {
   const workflows = useResourcesStore((s) => s.workflows)
   const fetchWorkflows = useResourcesStore((s) => s.fetchWorkflows)
-  const [open, setOpen] = useState(false)
-  const wrapperRef = useRef<HTMLDivElement>(null)
+  const [anchor, setAnchor] = useState<{ x: number; y: number; width: number } | null>(null)
+  const triggerRef = useRef<HTMLButtonElement>(null)
 
   useEffect(() => {
     fetchWorkflows()
   }, [fetchWorkflows])
-
-  useEffect(() => {
-    if (!open) return
-    const onClick = (e: MouseEvent) => {
-      if (!wrapperRef.current?.contains(e.target as Node)) setOpen(false)
-    }
-    document.addEventListener('mousedown', onClick)
-    return () => document.removeEventListener('mousedown', onClick)
-  }, [open])
 
   const sorted = [...workflows].sort((a, b) => {
     if (a.priority !== b.priority) return a.priority - b.priority
@@ -70,68 +64,58 @@ export default function WorkflowSelect({
 
   const triggerDescription = selected?.description ?? projectWf?.description ?? ''
 
+  const open = () => {
+    const el = triggerRef.current
+    if (!el || disabled) return
+    const r = el.getBoundingClientRect()
+    setAnchor({ x: r.left, y: r.bottom + 4, width: r.width })
+  }
+  const close = () => setAnchor(null)
+
+  const items: MenuItem[] = [
+    ...(projectWorkflowId
+      ? [
+          {
+            label: `Project workflow (${projectLabel})`,
+            description: projectWf?.description ?? "Use the project's workflow.",
+            active: value === '',
+            onSelect: () => onChange(''),
+          } satisfies MenuItem,
+        ]
+      : []),
+    ...sorted.map(
+      (wf: WorkflowInfo) =>
+        ({
+          label: wf.name,
+          description: wf.description,
+          active: value === wf.id,
+          onSelect: () => onChange(wf.id),
+        }) satisfies MenuItem,
+    ),
+  ]
+
   return (
-    <div className="workflow-select" ref={wrapperRef}>
+    <div className="workflow-select">
       <button
+        ref={triggerRef}
         type="button"
         id={id}
         className="workflow-select-trigger form-input"
-        onClick={() => !disabled && setOpen(!open)}
+        onClick={() => (anchor ? close() : open())}
         disabled={disabled}
       >
         <span className="workflow-select-name">{triggerLabel}</span>
         {triggerDescription && <span className="workflow-select-desc">{triggerDescription}</span>}
       </button>
-      {open && (
-        <div className="workflow-select-menu">
-          {projectWorkflowId && (
-            <WorkflowOption
-              active={value === ''}
-              name={`Project workflow (${projectLabel})`}
-              description={projectWf?.description ?? "Use the project's workflow."}
-              onClick={() => {
-                onChange('')
-                setOpen(false)
-              }}
-            />
-          )}
-          {sorted.map((wf: WorkflowInfo) => (
-            <WorkflowOption
-              key={wf.id}
-              active={value === wf.id}
-              name={wf.name}
-              description={wf.description}
-              onClick={() => {
-                onChange(wf.id)
-                setOpen(false)
-              }}
-            />
-          ))}
-        </div>
+      {anchor && (
+        <Dropdown
+          anchor={{ x: anchor.x, y: anchor.y }}
+          items={items}
+          onClose={close}
+          align="left"
+          className="workflow-select-dropdown"
+        />
       )}
     </div>
-  )
-}
-
-function WorkflowOption({
-  active,
-  name,
-  description,
-  onClick,
-}: {
-  active: boolean
-  name: string
-  description: string
-  onClick: () => void
-}) {
-  return (
-    <button
-      type="button"
-      className={`workflow-select-option${active ? ' active' : ''}`}
-      onClick={onClick}
-    >
-      <span className="workflow-select-option-name">{name}</span>
-      {description && <span className="workflow-select-option-desc">{description}</span>}
-    </button>
   )
 }

@@ -10,11 +10,13 @@ import { useFoldersStore } from './store/folders'
 import LoginModal from './components/LoginModal'
 import ChatView from './components/ChatView'
 import SessionTodosView from './components/SessionTodosView'
+import List from './components/List'
 import ListViewHeader from './components/ListViewHeader'
 import ProjectList from './components/ProjectList'
 import KanbanBoard from './components/KanbanBoard'
 import ProjectTodosView from './components/ProjectTodosView'
 import SettingsModal from './components/SettingsModal'
+import { applyThemeColor } from './util/themeColor'
 import PluginsModal from './components/PluginsModal'
 import NewSessionModal from './components/NewSessionModal'
 import NewProjectModal from './components/NewProjectModal'
@@ -154,9 +156,11 @@ function App() {
   const deleteSession = useSessionsStore((s) => s.deleteSession)
   const renameSession = useSessionsStore((s) => s.renameSession)
   const clearSession = useSessionsStore((s) => s.clearSession)
+  const terminateAgent = useSessionsStore((s) => s.terminateAgent)
   const fetchEvents = useSessionsStore((s) => s.fetchEvents)
   const processing = useSessionsStore((s) => s.processing)
   const unreadSessions = useSessionsStore((s) => s.unreadSessions)
+  const markSessionRead = useSessionsStore((s) => s.markSessionRead)
   const experts = useSessionsStore((s) => s.experts)
   const expertsLoaded = useSessionsStore((s) => s.expertsLoaded)
   const fetchExperts = useSessionsStore((s) => s.fetchExperts)
@@ -206,12 +210,11 @@ function App() {
   )
   const [showNewSession, setShowNewSession] = useState(false)
   const [showNewProject, setShowNewProject] = useState(false)
-  const [contextSession, setContextSession] = useState<string | null>(null)
   const [confirmDeleteId, setConfirmDeleteId] = useState<string | null>(null)
   const [selectedSessions, setSelectedSessions] = useState<Set<string>>(() => new Set())
-  const [confirmBulkDelete, setConfirmBulkDelete] = useState(false)
   const [confirmDeleteProjectId, setConfirmDeleteProjectId] = useState<string | null>(null)
   const [confirmClearSessionId, setConfirmClearSessionId] = useState<string | null>(null)
+  const [confirmTerminateSessionId, setConfirmTerminateSessionId] = useState<string | null>(null)
   const [announcement, setAnnouncement] = useState<Announcement | null>(null)
   const [userMenuOpen, setUserMenuOpen] = useState(false)
   const [showChangePassword, setShowChangePassword] = useState(false)
@@ -331,6 +334,9 @@ function App() {
     const saved = localStorage.getItem('peckboard_theme')
     if (saved === 'dark' || saved === 'light') {
       document.documentElement.setAttribute('data-theme', saved)
+      applyThemeColor(saved)
+    } else {
+      applyThemeColor('auto')
     }
   }, [])
 
@@ -565,11 +571,6 @@ function App() {
     }
   }
 
-  const handleDeleteSession = (id: string) => {
-    setConfirmDeleteId(id)
-    setContextSession(null)
-  }
-
   const toggleSessionSelected = (id: string) => {
     setSelectedSessions((prev) => {
       const next = new Set(prev)
@@ -577,20 +578,6 @@ function App() {
       else next.add(id)
       return next
     })
-  }
-
-  // Bulk equivalents of the per-session 3-dot actions, applied to every
-  // checked session. Currently the only such action is delete.
-  const confirmBulkDeleteSessions = async () => {
-    for (const id of Array.from(selectedSessions)) {
-      try {
-        await deleteSession(id)
-      } catch {
-        /* ignore */
-      }
-    }
-    setSelectedSessions(new Set())
-    setConfirmBulkDelete(false)
   }
 
   const confirmDelete = async () => {
@@ -624,6 +611,17 @@ function App() {
       // the cleared session, but the view subscribes by id and won't
       // notice an in-place mutation.
       await fetchEvents(id)
+    } catch {
+      /* ignore */
+    }
+  }
+
+  const confirmTerminateSession = async () => {
+    if (!confirmTerminateSessionId) return
+    const id = confirmTerminateSessionId
+    setConfirmTerminateSessionId(null)
+    try {
+      await terminateAgent(id)
     } catch {
       /* ignore */
     }
@@ -929,6 +927,9 @@ function App() {
           onClearItem={(type, id) => {
             if (type === 'session') setConfirmClearSessionId(id)
           }}
+          onTerminateItem={(type, id) => {
+            if (type === 'session') setConfirmTerminateSessionId(id)
+          }}
           onDeleteItem={(type, id) => {
             if (type === 'session') setConfirmDeleteId(id)
             else setConfirmDeleteProjectId(id)
@@ -966,33 +967,42 @@ function App() {
                 actionLabel="+ New session"
                 onAction={() => setShowNewSession(true)}
               />
-              {selectedSessions.size > 0 && (
-                <div className="bulk-action-bar">
-                  <span className="bulk-action-count">{selectedSessions.size} selected</span>
-                  <div className="bulk-action-buttons">
-                    <button
-                      className="bulk-action-btn danger"
-                      onClick={() => setConfirmBulkDelete(true)}
-                    >
-                      Delete
-                    </button>
-                    <button
-                      className="bulk-action-btn"
-                      onClick={() => setSelectedSessions(new Set())}
-                    >
-                      Clear
-                    </button>
-                  </div>
-                </div>
-              )}
-              <div
-                className="list-view-body"
-                // Scroll-load: when the user gets within 200px of the
-                // bottom of the list AND there's a next-page cursor
-                // AND we're not already fetching, pull the next page.
-                // The store debounces with `sessionsLoadingMore`, so
-                // the burst of scroll events fired during a flick is
-                // collapsed into a single fetch.
+              <List
+                items={chatSessions}
+                getKey={(s) => s.id}
+                activeId={activeSessionId}
+                onActivate={(s) => setActiveSession(s.id)}
+                selectedIds={selectedSessions}
+                onToggleSelected={(s) => toggleSessionSelected(s.id)}
+                onClearSelection={() => setSelectedSessions(new Set())}
+                bulkActions={[
+                  // No destructive actions in the list — delete lives on the
+                  // chat-toolbar 3-dot menu and tab right-click menu, where
+                  // the user has the session open and can act intentionally.
+                  {
+                    label: 'Mark as read',
+                    onClick: () => {
+                      for (const id of Array.from(selectedSessions)) markSessionRead(id)
+                      setSelectedSessions(new Set())
+                    },
+                    hidden: ![...selectedSessions].some((id) => unreadSessions.has(id)),
+                  },
+                ]}
+                renderItem={(s) => (
+                  <>
+                    {processing.has(s.id) && <span className="processing-dot" />}
+                    {!processing.has(s.id) && unreadSessions.has(s.id) && (
+                      <span className="unread-dot" />
+                    )}
+                    <span className="list-view-name">{s.name}</span>
+                    <span className="list-view-meta">
+                      {folderMap.get(s.folder_id) && (
+                        <span className="list-view-tag">{folderMap.get(s.folder_id)}</span>
+                      )}
+                      <span className="list-view-time">{formatRelativeTime(s.last_activity)}</span>
+                    </span>
+                  </>
+                )}
                 onScroll={(e) => {
                   if (!sessionsNextCursor || sessionsLoadingMore) return
                   const el = e.currentTarget
@@ -1000,58 +1010,7 @@ function App() {
                     void fetchMoreSessions()
                   }
                 }}
-              >
-                {chatSessions.map((s) => (
-                  <div
-                    key={s.id}
-                    className={`list-view-row ${s.id === activeSessionId ? 'active' : ''} ${selectedSessions.has(s.id) ? 'selected' : ''}`}
-                  >
-                    <input
-                      type="checkbox"
-                      className="list-view-select"
-                      checked={selectedSessions.has(s.id)}
-                      onClick={(e) => e.stopPropagation()}
-                      onChange={() => toggleSessionSelected(s.id)}
-                      aria-label={`Select ${s.name}`}
-                    />
-                    <button
-                      className="list-view-item"
-                      onClick={() => {
-                        setActiveSession(s.id)
-                        setContextSession(null)
-                      }}
-                    >
-                      {processing.has(s.id) && <span className="processing-dot" />}
-                      {!processing.has(s.id) && unreadSessions.has(s.id) && (
-                        <span className="unread-dot" />
-                      )}
-                      <span className="list-view-name">{s.name}</span>
-                      <span className="list-view-meta">
-                        {folderMap.get(s.folder_id) && (
-                          <span className="list-view-tag">{folderMap.get(s.folder_id)}</span>
-                        )}
-                        <span className="list-view-time">
-                          {formatRelativeTime(s.last_activity)}
-                        </span>
-                      </span>
-                    </button>
-                    <button
-                      className="list-view-menu"
-                      onClick={(e) => {
-                        e.stopPropagation()
-                        setContextSession(contextSession === s.id ? null : s.id)
-                      }}
-                    >
-                      ···
-                    </button>
-                    {contextSession === s.id && (
-                      <div className="list-view-dropdown">
-                        <button onClick={() => handleDeleteSession(s.id)}>Delete session</button>
-                      </div>
-                    )}
-                  </div>
-                ))}
-                {chatSessions.length === 0 && (
+                emptyState={
                   <div className="list-view-empty">
                     <p>No sessions yet</p>
                     <button
@@ -1061,13 +1020,15 @@ function App() {
                       Create your first session
                     </button>
                   </div>
-                )}
-                {sessionsLoadingMore && (
-                  <div className="list-view-loading-more" data-testid="sessions-loading-more">
-                    Loading more sessions…
-                  </div>
-                )}
-              </div>
+                }
+                footer={
+                  sessionsLoadingMore ? (
+                    <div className="list-view-loading-more" data-testid="sessions-loading-more">
+                      Loading more sessions…
+                    </div>
+                  ) : null
+                }
+              />
             </div>
           ))}
         {view === 'projects' &&
@@ -1156,19 +1117,6 @@ function App() {
           onCancel={() => setConfirmDeleteId(null)}
         />
       )}
-      {confirmBulkDelete && (
-        <ConfirmDialog
-          title="Delete sessions"
-          message={`Delete ${selectedSessions.size} selected session${
-            selectedSessions.size === 1 ? '' : 's'
-          } and all their events?`}
-          confirmLabel="Delete"
-          cancelLabel="Cancel"
-          danger
-          onConfirm={confirmBulkDeleteSessions}
-          onCancel={() => setConfirmBulkDelete(false)}
-        />
-      )}
       {confirmDeleteProjectId && (
         <ConfirmDialog
           title="Delete project"
@@ -1189,6 +1137,17 @@ function App() {
           danger
           onConfirm={confirmClearSession}
           onCancel={() => setConfirmClearSessionId(null)}
+        />
+      )}
+      {confirmTerminateSessionId && (
+        <ConfirmDialog
+          title="Terminate agent"
+          message="Terminate the agent process? Any in-flight turn will be interrupted. The next message will start a fresh process."
+          confirmLabel="Terminate"
+          cancelLabel="Cancel"
+          danger
+          onConfirm={confirmTerminateSession}
+          onCancel={() => setConfirmTerminateSessionId(null)}
         />
       )}
     </div>

@@ -2,7 +2,10 @@ import { useEffect, useState } from 'react'
 import { useProjectsStore } from '../store/projects'
 import ConfirmDialog from './ConfirmDialog'
 import EditProjectModal from './EditProjectModal'
+import List from './List'
 import ListViewHeader from './ListViewHeader'
+import type { MenuItem } from './Dropdown'
+import type { Project } from '../types/api'
 
 interface ProjectListProps {
   onNewProject?: () => void
@@ -19,7 +22,6 @@ export default function ProjectList({ onNewProject }: ProjectListProps) {
   const fetchCards = useProjectsStore((s) => s.fetchCards)
 
   const [confirmDelete, setConfirmDelete] = useState<string | null>(null)
-  const [menuOpen, setMenuOpen] = useState<string | null>(null)
   const [editingProject, setEditingProject] = useState<string | null>(null)
 
   useEffect(() => {
@@ -32,18 +34,31 @@ export default function ProjectList({ onNewProject }: ProjectListProps) {
     }
   }, [activeProjectId, fetchCards])
 
-  const handleTogglePause = async (projectId: string, currentStatus: string) => {
-    setMenuOpen(null)
-    await updateProject(projectId, {
-      status: currentStatus === 'paused' ? 'active' : 'paused',
+  const handleTogglePause = async (project: Project) => {
+    await updateProject(project.id, {
+      status: project.status === 'paused' ? 'active' : 'paused',
     })
   }
 
   const handleDelete = async (projectId: string) => {
     setConfirmDelete(null)
-    setMenuOpen(null)
     await deleteProject(projectId)
   }
+
+  const buildMenu = (project: Project): MenuItem[] => [
+    { label: 'Edit', onSelect: () => setEditingProject(project.id) },
+    { divider: true },
+    {
+      label: project.status === 'paused' ? 'Resume' : 'Pause',
+      onSelect: () => handleTogglePause(project),
+    },
+    { divider: true },
+    {
+      label: 'Delete',
+      danger: true,
+      onSelect: () => setConfirmDelete(project.id),
+    },
+  ]
 
   return (
     <>
@@ -52,8 +67,26 @@ export default function ProjectList({ onNewProject }: ProjectListProps) {
         actionLabel={onNewProject ? '+ New project' : undefined}
         onAction={onNewProject}
       />
-      <div className="list-view-body">
-        {projects.length === 0 ? (
+      <List<Project>
+        items={projects}
+        getKey={(p) => p.id}
+        activeId={activeProjectId}
+        onActivate={(p) => setActiveProject(p.id)}
+        getMenuItems={buildMenu}
+        renderItem={(project) => (
+          <>
+            {project.status !== 'active' && (
+              <span className={`status-badge status-${project.status}`}>{project.status}</span>
+            )}
+            <span className="list-view-name">{project.name}</span>
+            <span className="list-view-meta">
+              {project.id === activeProjectId && (
+                <span className="list-view-tag">{cards.length} cards</span>
+              )}
+            </span>
+          </>
+        )}
+        emptyState={
           <div className="list-view-empty">
             <p>No projects yet</p>
             {onNewProject && (
@@ -62,63 +95,8 @@ export default function ProjectList({ onNewProject }: ProjectListProps) {
               </button>
             )}
           </div>
-        ) : (
-          projects.map((project) => {
-            const cardCount = project.id === activeProjectId ? cards.length : null
-            return (
-              <div
-                key={project.id}
-                className={`list-view-row ${project.id === activeProjectId ? 'active' : ''}`}
-              >
-                <button className="list-view-item" onClick={() => setActiveProject(project.id)}>
-                  {project.status !== 'active' && (
-                    <span className={`status-badge status-${project.status}`}>
-                      {project.status}
-                    </span>
-                  )}
-                  <span className="list-view-name">{project.name}</span>
-                  <span className="list-view-meta">
-                    {cardCount !== null && <span className="list-view-tag">{cardCount} cards</span>}
-                  </span>
-                </button>
-                <button
-                  className="list-view-menu"
-                  onClick={(e) => {
-                    e.stopPropagation()
-                    setMenuOpen(menuOpen === project.id ? null : project.id)
-                  }}
-                  aria-label="Project menu"
-                >
-                  ···
-                </button>
-                {menuOpen === project.id && (
-                  <div className="list-view-dropdown">
-                    <button
-                      onClick={() => {
-                        setMenuOpen(null)
-                        setEditingProject(project.id)
-                      }}
-                    >
-                      Edit
-                    </button>
-                    <button onClick={() => handleTogglePause(project.id, project.status)}>
-                      {project.status === 'paused' ? 'Resume' : 'Pause'}
-                    </button>
-                    <button
-                      onClick={() => {
-                        setMenuOpen(null)
-                        setConfirmDelete(project.id)
-                      }}
-                    >
-                      Delete
-                    </button>
-                  </div>
-                )}
-              </div>
-            )
-          })
-        )}
-      </div>
+        }
+      />
 
       {editingProject &&
         (() => {

@@ -393,22 +393,20 @@ async fn main() -> anyhow::Result<()> {
                                     )
                                     .await;
                                 } else {
-                                    // Worker crashed/interrupted — clear
-                                    // worker_session_id so the orchestrator can
-                                    // re-spawn or the watchdog can detect the
-                                    // dead worker.
+                                    // Worker crashed/interrupted — clear the
+                                    // card's `worker_session_id` ONLY if it
+                                    // still points at THIS session. The
+                                    // orchestrator can have spawned a
+                                    // replacement between an outgoing cancel
+                                    // and this listener firing (5s tick); an
+                                    // unconditional clear would free the
+                                    // replacement's slot and produce two
+                                    // concurrent workers for the same card.
                                     tracing::warn!(session_id = %sid, "Worker crashed or interrupted");
                                     if let Some(card_id) = &session.card_id {
                                         let _ = orchestrator_state
                                             .db
-                                            .update_card(
-                                                card_id,
-                                                peckboard::db::models::UpdateCard {
-                                                    worker_session_id: Some(None),
-                                                    last_worker_session_id: Some(Some(sid.clone())),
-                                                    ..Default::default()
-                                                },
-                                            )
+                                            .clear_card_worker_if_matches(card_id, &sid)
                                             .await;
 
                                         // Auto-pause defense: if this card has

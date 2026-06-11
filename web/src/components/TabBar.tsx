@@ -20,6 +20,8 @@ interface TabBarProps {
   onRenameItem: (type: TabType, id: string) => void
   /** Clear all messages in a session. Only invoked for `type === 'session'`. */
   onClearItem: (type: TabType, id: string) => void
+  /** Terminate the agent for a session. Only invoked for `type === 'session'`. */
+  onTerminateItem: (type: TabType, id: string) => void
   onDeleteItem: (type: TabType, id: string) => void
   /** Open the New Session modal. Renders as a trailing `+` button. */
   onNewSession: () => void
@@ -47,6 +49,7 @@ export default function TabBar({
   onOpenItem,
   onRenameItem,
   onClearItem,
+  onTerminateItem,
   onDeleteItem,
   onNewSession,
 }: TabBarProps) {
@@ -111,6 +114,7 @@ export default function TabBar({
             onClose={() => closeTab(t.itemType, t.itemId)}
             onRename={() => onRenameItem(t.itemType, t.itemId)}
             onClear={() => onClearItem(t.itemType, t.itemId)}
+            onTerminate={() => onTerminateItem(t.itemType, t.itemId)}
             onDelete={() => onDeleteItem(t.itemType, t.itemId)}
           />
         )
@@ -140,6 +144,7 @@ function OpenedTab({
   onClose,
   onRename,
   onClear,
+  onTerminate,
   onDelete,
 }: {
   type: TabType
@@ -153,14 +158,28 @@ function OpenedTab({
   onClose: () => void
   onRename: () => void
   onClear: () => void
+  onTerminate: () => void
   onDelete: () => void
 }) {
+  // Same item shape and order as ChatView's 3-dot menu so a session's
+  // controls read identically wherever they surface. See CLAUDE.md
+  // "Component Reuse".
+  //   rename, clear session, terminate agent, delete
+  // "Close tab" is tab-specific — the tab is the surface, not a session
+  // attribute — so it sits at the top, divided off from the
+  // session-mutating actions below.
   const { triggerProps, menu, consumeLongPressClick } = useContextMenu((): ContextMenuItem[] => [
     { label: 'Close tab', onSelect: onClose },
     { label: 'Rename', onSelect: onRename },
-    // Clear messages is session-specific — there's no equivalent for
-    // projects, so hide rather than disable to avoid menu noise.
-    { label: 'Clear messages', onSelect: onClear, hidden: type !== 'session' },
+    // Clear-session, terminate-agent are session-specific — there's no
+    // project equivalent, so they're hidden for project tabs to avoid
+    // menu noise.
+    { label: 'Clear session', onSelect: onClear, hidden: type !== 'session' },
+    {
+      label: 'Terminate agent',
+      onSelect: onTerminate,
+      hidden: type !== 'session',
+    },
     {
       label: type === 'session' ? 'Delete session' : 'Delete project',
       onSelect: onDelete,

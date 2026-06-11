@@ -4,6 +4,7 @@ import { useResourcesStore } from '../store/resources'
 import { authedFetch } from '../store/auth'
 import type { Card } from '../types/api'
 import DependencyPickerModal from './DependencyPickerModal'
+import Modal from './Modal'
 import WorkflowSelect from './WorkflowSelect'
 
 interface CardFormBaseProps {
@@ -143,47 +144,45 @@ export default function CardFormModal(props: CardFormProps) {
 
   if (mode === 'edit' && isTerminal) {
     return (
-      <div className="modal-backdrop" onClick={onClose}>
-        <div className="modal" onClick={(e) => e.stopPropagation()} style={{ maxWidth: 440 }}>
-          <h2>Card Details</h2>
-          <p className="form-hint" style={{ marginBottom: 12 }}>
-            Cards in terminal state (done / won't do) are read-only.
-          </p>
-          <div className="card-detail-grid">
-            <div className="card-detail-row">
-              <span className="card-detail-label">Title</span>
-              <span>{card!.title}</span>
-            </div>
-            <div className="card-detail-row">
-              <span className="card-detail-label">Step</span>
-              <span>{card!.step}</span>
-            </div>
-            {card!.description && (
-              <div className="card-detail-row">
-                <span className="card-detail-label">Description</span>
-                <span>{card!.description}</span>
-              </div>
-            )}
-            {card!.workflow && (
-              <div className="card-detail-row">
-                <span className="card-detail-label">Workflow</span>
-                <span>{card!.workflow}</span>
-              </div>
-            )}
+      <Modal onClose={onClose} maxWidth={440}>
+        <h2>Card Details</h2>
+        <p className="form-hint" style={{ marginBottom: 12 }}>
+          Cards in terminal state (done / won't do) are read-only.
+        </p>
+        <div className="card-detail-grid">
+          <div className="card-detail-row">
+            <span className="card-detail-label">Title</span>
+            <span>{card!.title}</span>
           </div>
-          <div className="form-actions">
-            <button type="button" className="btn-secondary" onClick={onClose}>
-              Close
-            </button>
+          <div className="card-detail-row">
+            <span className="card-detail-label">Step</span>
+            <span>{card!.step}</span>
           </div>
+          {card!.description && (
+            <div className="card-detail-row">
+              <span className="card-detail-label">Description</span>
+              <span>{card!.description}</span>
+            </div>
+          )}
+          {card!.workflow && (
+            <div className="card-detail-row">
+              <span className="card-detail-label">Workflow</span>
+              <span>{card!.workflow}</span>
+            </div>
+          )}
         </div>
-      </div>
+        <div className="form-actions">
+          <button type="button" className="btn-secondary" onClick={onClose}>
+            Close
+          </button>
+        </div>
+      </Modal>
     )
   }
 
   return (
-    <div className="modal-backdrop" onClick={onClose}>
-      <div className="modal" onClick={(e) => e.stopPropagation()} style={{ maxWidth: 520 }}>
+    <>
+      <Modal onClose={onClose} maxWidth={520}>
         <h2>{mode === 'create' ? 'New Card' : 'Edit Card'}</h2>
         <form onSubmit={handleSubmit}>
           <div className="form-field">
@@ -328,7 +327,7 @@ export default function CardFormModal(props: CardFormProps) {
             </button>
           </div>
         </form>
-      </div>
+      </Modal>
       {pickerOpen && (
         <DependencyPickerModal
           candidates={dependencyCandidates}
@@ -340,6 +339,6 @@ export default function CardFormModal(props: CardFormProps) {
           }}
         />
       )}
-    </div>
+    </>
   )
 }

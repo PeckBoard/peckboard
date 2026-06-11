@@ -227,3 +227,36 @@ async fn plain_session_still_deletes_cleanly() {
     let gone = state.db.get_session("plain").await.unwrap();
     assert!(gone.is_none(), "plain session must be removed");
 }
+
+#[tokio::test]
+async fn plain_session_delete_broadcasts_session_deleted() {
+    // Without this broadcast, another device with the now-deleted session
+    // open keeps showing its ChatView body — the only cross-device cleanup
+    // path is the focus-driven `/api/me/tabs` refetch, which closes the
+    // tab strip entry but leaves the body pointed at a 404'd session id.
+    let (state, token) = build_state().await;
+    seed(&state).await;
+
+    let mut rx = state.broadcaster.subscribe_all();
+    let status = delete_session(state.clone(), &token, "plain").await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+
+    // Drain at most a handful of frames looking for `session-deleted` —
+    // the route can emit unrelated events first (interrupt cleanup, etc).
+    let mut found = false;
+    for _ in 0..8 {
+        match tokio::time::timeout(std::time::Duration::from_millis(250), rx.recv()).await {
+            Ok(Ok(event)) => {
+                if event.event_type == "session-deleted" && event.session_id == "plain" {
+                    found = true;
+                    break;
+                }
+            }
+            _ => break,
+        }
+    }
+    assert!(
+        found,
+        "DELETE /api/sessions/:id must broadcast a session-deleted frame",
+    );
+}

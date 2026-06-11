@@ -81,6 +81,34 @@ async fn shutdown_worker_after_turn(ctx: &ToolCallContext) {
     }
 }
 
+/// Hard-cancel a worker that just lost its task because the calling
+/// MCP tool moved its card out from under it (e.g. `move_card_to_done`
+/// from a non-worker session, or `update_card` with a step change).
+///
+/// Distinct from `shutdown_worker_after_turn`, which is for the worker
+/// gracefully completing its own card and waits for the in-flight turn
+/// to finish — that's appropriate only when the same agent owns the
+/// transition. Here the worker is unrelated to the caller, so a hard
+/// cancel is the right tool: a graceful shutdown would let the worker
+/// keep advancing the (now stale) step until its current turn finishes.
+///
+/// Spawned in the background so the MCP tool can return immediately.
+/// The conditional clear in the completion listener
+/// (`Db::clear_card_worker_if_matches`) makes the cancel race-safe even
+/// if the orchestrator spawns a replacement before the listener fires.
+fn cancel_stale_worker(ctx: &ToolCallContext, session_id: &str) {
+    let Some(registry) = ctx.provider_registry.clone() else {
+        return;
+    };
+    let db = ctx.db.clone();
+    let session_id = session_id.to_string();
+    tracing::info!(session_id = %session_id, "MCP: cancelling worker after card move");
+    tokio::spawn(async move {
+        crate::provider::manager::cancel_via_registry(&registry, &session_id).await;
+        let _ = db.delete_queued_message(&session_id).await;
+    });
+}
+
 impl McpToolRegistry {
     pub(crate) async fn handle_complete_step(
         &self,
@@ -157,6 +185,17 @@ impl McpToolRegistry {
 
         append_step_change(ctx, card_id, &prev_step, &card.step).await?;
         broadcast_card_update(ctx, &card);
+        // Reaching a terminal step from `complete_step` (no next step
+        // in the workflow) makes the todo snapshot stale the same way
+        // `finish_card` does; clear it so the panel doesn't linger.
+        if card.step == "done" || card.step == "wont_do" {
+            crate::worker::orchestrator::clear_session_todos(
+                &ctx.db,
+                &ctx.broadcaster,
+                &ctx.session_id,
+            )
+            .await;
+        }
         shutdown_worker_after_turn(ctx).await;
 
         Ok(serde_json::json!({
@@ -231,6 +270,12 @@ impl McpToolRegistry {
 
         append_step_change(ctx, card_id, &prev_step, "done").await?;
         broadcast_card_update(ctx, &card);
+        crate::worker::orchestrator::clear_session_todos(
+            &ctx.db,
+            &ctx.broadcaster,
+            &ctx.session_id,
+        )
+        .await;
         shutdown_worker_after_turn(ctx).await;
 
         Ok(serde_json::json!({
@@ -297,6 +342,12 @@ impl McpToolRegistry {
 
         append_step_change(ctx, card_id, &prev_step, "wont_do").await?;
         broadcast_card_update(ctx, &card);
+        crate::worker::orchestrator::clear_session_todos(
+            &ctx.db,
+            &ctx.broadcaster,
+            &ctx.session_id,
+        )
+        .await;
         shutdown_worker_after_turn(ctx).await;
 
         Ok(serde_json::json!({
@@ -651,34 +702,58 @@ impl McpToolRegistry {
 
         tracing::info!(session_id = %ctx.session_id, card_id = %card_id, "MCP tool: update_card");
 
-        let update = UpdateCard {
-            title: args
-                .get("title")
-                .and_then(|v| v.as_str())
-                .map(|s| s.to_string()),
-            description: args
-                .get("description")
-                .and_then(|v| v.as_str())
-                .map(|s| s.to_string()),
-            priority: args
-                .get("priority")
-                .and_then(|v| v.as_i64())
-                .map(|n| n as i32),
-            step: args
-                .get("step")
-                .and_then(|v| v.as_str())
-                .map(|s| s.to_string()),
-            blocked: args.get("blocked").and_then(|v| v.as_bool()),
-            block_reason: args
-                .get("block_reason")
-                .map(|v| v.as_str().map(|s| s.to_string())),
-            updated_at: Some(chrono::Utc::now().to_rfc3339()),
-            ..Default::default()
-        };
+        let title = args
+            .get("title")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string());
+        let description = args
+            .get("description")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string());
+        let priority = args
+            .get("priority")
+            .and_then(|v| v.as_i64())
+            .map(|n| n as i32);
+        let new_step = args
+            .get("step")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string());
+        let blocked = args.get("blocked").and_then(|v| v.as_bool());
+        let block_reason = args
+            .get("block_reason")
+            .map(|v| v.as_str().map(|s| s.to_string()));
+        let updated_at = Some(chrono::Utc::now().to_rfc3339());
 
+        // Capture the previously assigned worker if this update is going
+        // to change the step out from under it. The cancel runs after the
+        // DB write succeeds so a failed update doesn't kill a worker for
+        // no reason.
+        let stale_worker_cell = std::sync::Arc::new(std::sync::Mutex::new(None::<String>));
+        let stale_worker_writer = stale_worker_cell.clone();
         let card = ctx
             .db
-            .update_card(card_id, update)
+            .update_card_atomic(card_id, move |existing| {
+                let step_changing = new_step.as_deref().is_some_and(|s| s != existing.step);
+                let (worker_session_id, last_worker_session_id) =
+                    if step_changing && let Some(sid) = existing.worker_session_id.clone() {
+                        *stale_worker_writer.lock().unwrap() = Some(sid.clone());
+                        (Some(None), Some(Some(sid)))
+                    } else {
+                        (None, None)
+                    };
+                Ok(UpdateCard {
+                    title,
+                    description,
+                    priority,
+                    step: new_step,
+                    blocked,
+                    block_reason,
+                    worker_session_id,
+                    last_worker_session_id,
+                    updated_at,
+                    ..Default::default()
+                })
+            })
             .await?
             .ok_or_else(|| anyhow::anyhow!("card not found: {card_id}"))?;
 
@@ -687,6 +762,10 @@ impl McpToolRegistry {
             session_id: card.project_id.clone(),
             data: serde_json::json!({ "card": card }),
         });
+
+        if let Some(sid) = stale_worker_cell.lock().unwrap().take() {
+            cancel_stale_worker(ctx, &sid);
+        }
 
         Ok(serde_json::json!({
             "status": "ok",
@@ -749,33 +828,7 @@ impl McpToolRegistry {
         let _scope = ctx.scope_card(card_id).await?;
 
         tracing::info!(session_id = %ctx.session_id, card_id = %card_id, "MCP tool: move_card_to_done");
-
-        let update = UpdateCard {
-            step: Some("done".to_string()),
-            updated_at: Some(chrono::Utc::now().to_rfc3339()),
-            ..Default::default()
-        };
-
-        let card = ctx
-            .db
-            .update_card(card_id, update)
-            .await?
-            .ok_or_else(|| anyhow::anyhow!("card not found: {card_id}"))?;
-
-        ctx.broadcaster.broadcast(crate::ws::broadcaster::WsEvent {
-            event_type: "card-update".into(),
-            session_id: card.project_id.clone(),
-            data: serde_json::json!({ "card": card }),
-        });
-
-        Ok(serde_json::json!({
-            "status": "ok",
-            "card": {
-                "id": card.id,
-                "title": card.title,
-                "step": card.step,
-            }
-        }))
+        move_card_to_terminal_step(ctx, card_id, "done", None).await
     }
 
     pub(crate) async fn handle_move_card_to_wont_do(
@@ -795,33 +848,79 @@ impl McpToolRegistry {
             .get("reason")
             .and_then(|v| v.as_str())
             .map(|s| s.to_string());
-
-        let update = UpdateCard {
-            step: Some("wont_do".to_string()),
-            block_reason: Some(reason),
-            updated_at: Some(chrono::Utc::now().to_rfc3339()),
-            ..Default::default()
-        };
-
-        let card = ctx
-            .db
-            .update_card(card_id, update)
-            .await?
-            .ok_or_else(|| anyhow::anyhow!("card not found: {card_id}"))?;
-
-        ctx.broadcaster.broadcast(crate::ws::broadcaster::WsEvent {
-            event_type: "card-update".into(),
-            session_id: card.project_id.clone(),
-            data: serde_json::json!({ "card": card }),
-        });
-
-        Ok(serde_json::json!({
-            "status": "ok",
-            "card": {
-                "id": card.id,
-                "title": card.title,
-                "step": card.step,
-            }
-        }))
+        move_card_to_terminal_step(ctx, card_id, "wont_do", reason).await
     }
+}
+
+/// Shared implementation for `move_card_to_done` / `move_card_to_wont_do`.
+/// Both terminal moves need to (a) atomically advance the step, (b) capture
+/// any worker that was previously assigned, and (c) cancel that worker so
+/// it can't keep advancing a now-obsolete step. The path is identical apart
+/// from the target step + optional `wont_do` reason.
+async fn move_card_to_terminal_step(
+    ctx: &ToolCallContext,
+    card_id: &str,
+    target_step: &str,
+    block_reason: Option<String>,
+) -> anyhow::Result<Value> {
+    let stale_worker_cell = std::sync::Arc::new(std::sync::Mutex::new(None::<String>));
+    let stale_worker_writer = stale_worker_cell.clone();
+    let target_step_owned = target_step.to_string();
+    let target_for_closure = target_step_owned.clone();
+
+    let card = ctx
+        .db
+        .update_card_atomic(card_id, move |existing| {
+            // Idempotent re-move is a no-op; the closure's UpdateCard
+            // returned below still applies, but we skip the cancel.
+            let step_changing = existing.step != target_for_closure;
+            let (worker_session_id, last_worker_session_id) =
+                if step_changing && let Some(sid) = existing.worker_session_id.clone() {
+                    *stale_worker_writer.lock().unwrap() = Some(sid.clone());
+                    (Some(None), Some(Some(sid)))
+                } else {
+                    (None, None)
+                };
+            Ok(UpdateCard {
+                step: Some(target_for_closure.clone()),
+                block_reason: block_reason.clone().map(Some),
+                worker_session_id,
+                last_worker_session_id,
+                updated_at: Some(chrono::Utc::now().to_rfc3339()),
+                ..Default::default()
+            })
+        })
+        .await?
+        .ok_or_else(|| anyhow::anyhow!("card not found: {card_id}"))?;
+
+    ctx.broadcaster.broadcast(crate::ws::broadcaster::WsEvent {
+        event_type: "card-update".into(),
+        session_id: card.project_id.clone(),
+        data: serde_json::json!({ "card": card }),
+    });
+
+    // Capture the prior worker session for cleanup, then also clear its
+    // todos before the cancel kicks in. We use `last_worker_session_id`
+    // as a fallback when the card was already unassigned (a previously
+    // finished worker still leaves a snapshot behind), so the panel
+    // disappears even when the move just reaffirms an idle terminal state.
+    let stale_sid = stale_worker_cell.lock().unwrap().take();
+    let cleanup_sid = stale_sid
+        .clone()
+        .or_else(|| card.last_worker_session_id.clone());
+    if let Some(sid) = cleanup_sid {
+        crate::worker::orchestrator::clear_session_todos(&ctx.db, &ctx.broadcaster, &sid).await;
+    }
+    if let Some(sid) = stale_sid {
+        cancel_stale_worker(ctx, &sid);
+    }
+
+    Ok(serde_json::json!({
+        "status": "ok",
+        "card": {
+            "id": card.id,
+            "title": card.title,
+            "step": card.step,
+        }
+    }))
 }

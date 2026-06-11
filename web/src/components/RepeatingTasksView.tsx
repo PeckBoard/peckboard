@@ -3,7 +3,9 @@ import { useFoldersStore } from '../store/folders'
 import { useRepeatingTasksStore } from '../store/repeatingTasks'
 import type { RepeatingTask } from '../types/api'
 import ConfirmDialog from './ConfirmDialog'
+import List from './List'
 import ListViewHeader from './ListViewHeader'
+import type { MenuItem } from './Dropdown'
 import NewRepeatingTaskModal from './NewRepeatingTaskModal'
 import { describeSchedule } from '../utils/repeatingSchedule'
 
@@ -56,7 +58,6 @@ export default function RepeatingTasksView({ activeTaskId, onNavigate, onOpenSes
   const [confirmDeleteId, setConfirmDeleteId] = useState<string | null>(null)
   const [runStatus, setRunStatus] = useState<string | null>(null)
   const [runStatusTaskId, setRunStatusTaskId] = useState<string | null>(null)
-  const [contextOpenId, setContextOpenId] = useState<string | null>(null)
 
   useEffect(() => {
     fetchTasks().catch(() => {})
@@ -243,6 +244,18 @@ export default function RepeatingTasksView({ activeTaskId, onNavigate, onOpenSes
     )
   }
 
+  const buildMenu = (t: RepeatingTask): MenuItem[] => [
+    { label: 'Run now', onSelect: () => handleRun(t.id) },
+    { label: 'Edit', onSelect: () => setEditingTask(t) },
+    { divider: true },
+    {
+      label: t.enabled ? 'Pause' : 'Resume',
+      onSelect: () => handleToggleEnabled(t),
+    },
+    { divider: true },
+    { label: 'Delete', danger: true, onSelect: () => setConfirmDeleteId(t.id) },
+  ]
+
   return (
     <div className="list-view">
       <ListViewHeader
@@ -251,86 +264,45 @@ export default function RepeatingTasksView({ activeTaskId, onNavigate, onOpenSes
         onAction={() => setShowCreate(true)}
       />
 
-      <div className="list-view-body">
-        {!loaded ? (
+      {!loaded ? (
+        <div className="list-view-body">
           <div className="list-view-empty">Loading…</div>
-        ) : tasks.length === 0 ? (
-          <div className="list-view-empty">
-            <p>No repeating tasks yet</p>
-            <button className="list-view-empty-action" onClick={() => setShowCreate(true)}>
-              Create your first task
-            </button>
-          </div>
-        ) : (
-          tasks.map((t) => (
-            <div key={t.id} className="list-view-row">
-              <button className="list-view-item" onClick={() => onNavigate(t.id)}>
-                {!t.enabled && <span className="status-badge status-paused">paused</span>}
-                <span className="list-view-name">{t.name}</span>
-                <span className="list-view-meta">
-                  {folderMap.get(t.folder_id) && (
-                    <span className="list-view-tag">{folderMap.get(t.folder_id)}</span>
-                  )}
-                  <span className="list-view-tag">
-                    {describeSchedule(t.schedule_kind, t.schedule_value)}
-                  </span>
-                  <span className="list-view-time">
-                    {t.enabled
-                      ? `next ${formatRelative(t.next_run_at)}`
-                      : `last ${formatRelative(t.last_run_at)}`}
-                  </span>
+        </div>
+      ) : (
+        <List<RepeatingTask>
+          items={tasks}
+          getKey={(t) => t.id}
+          onActivate={(t) => onNavigate(t.id)}
+          getMenuItems={buildMenu}
+          renderItem={(t) => (
+            <>
+              {!t.enabled && <span className="status-badge status-paused">paused</span>}
+              <span className="list-view-name">{t.name}</span>
+              <span className="list-view-meta">
+                {folderMap.get(t.folder_id) && (
+                  <span className="list-view-tag">{folderMap.get(t.folder_id)}</span>
+                )}
+                <span className="list-view-tag">
+                  {describeSchedule(t.schedule_kind, t.schedule_value)}
                 </span>
+                <span className="list-view-time">
+                  {t.enabled
+                    ? `next ${formatRelative(t.next_run_at)}`
+                    : `last ${formatRelative(t.last_run_at)}`}
+                </span>
+              </span>
+            </>
+          )}
+          emptyState={
+            <div className="list-view-empty">
+              <p>No repeating tasks yet</p>
+              <button className="list-view-empty-action" onClick={() => setShowCreate(true)}>
+                Create your first task
               </button>
-              <button
-                className="list-view-menu"
-                onClick={(e) => {
-                  e.stopPropagation()
-                  setContextOpenId(contextOpenId === t.id ? null : t.id)
-                }}
-                aria-label="Task menu"
-              >
-                ···
-              </button>
-              {contextOpenId === t.id && (
-                <div className="list-view-dropdown">
-                  <button
-                    onClick={() => {
-                      setContextOpenId(null)
-                      handleRun(t.id)
-                    }}
-                  >
-                    Run now
-                  </button>
-                  <button
-                    onClick={() => {
-                      setContextOpenId(null)
-                      handleToggleEnabled(t)
-                    }}
-                  >
-                    {t.enabled ? 'Pause' : 'Resume'}
-                  </button>
-                  <button
-                    onClick={() => {
-                      setContextOpenId(null)
-                      setEditingTask(t)
-                    }}
-                  >
-                    Edit
-                  </button>
-                  <button
-                    onClick={() => {
-                      setContextOpenId(null)
-                      setConfirmDeleteId(t.id)
-                    }}
-                  >
-                    Delete
-                  </button>
-                </div>
-              )}
             </div>
-          ))
-        )}
-      </div>
+          }
+        />
+      )}
 
       {showCreate && (
         <NewRepeatingTaskModal

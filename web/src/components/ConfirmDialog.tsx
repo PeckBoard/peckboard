@@ -1,4 +1,5 @@
-import { useEffect, useRef } from 'react'
+import { useEffect } from 'react'
+import { createPortal } from 'react-dom'
 
 interface ConfirmDialogProps {
   title: string
@@ -19,8 +20,6 @@ export default function ConfirmDialog({
   onConfirm,
   onCancel,
 }: ConfirmDialogProps) {
-  const backdropRef = useRef<HTMLDivElement>(null)
-
   useEffect(() => {
     const handleKey = (e: KeyboardEvent) => {
       if (e.key === 'Escape') onCancel()
@@ -29,13 +28,18 @@ export default function ConfirmDialog({
     return () => document.removeEventListener('keydown', handleKey)
   }, [onCancel])
 
-  const handleBackdropClick = (e: React.MouseEvent) => {
-    if (e.target === backdropRef.current) onCancel()
-  }
-
-  return (
-    <div className="modal-backdrop" ref={backdropRef} onClick={handleBackdropClick}>
-      <div className="confirm-dialog">
+  return createPortal(
+    <div
+      className="modal-backdrop"
+      onMouseDown={(e) => {
+        if (e.target === e.currentTarget) onCancel()
+      }}
+    >
+      <div
+        className="confirm-dialog"
+        onMouseDown={(e) => e.stopPropagation()}
+        onClick={(e) => e.stopPropagation()}
+      >
         <h3 className="confirm-dialog-title">{title}</h3>
         <p className="confirm-dialog-message">{message}</p>
         <div className="confirm-dialog-actions">
@@ -50,6 +54,7 @@ export default function ConfirmDialog({
           </button>
         </div>
       </div>
-    </div>
+    </div>,
+    document.body,
   )
 }

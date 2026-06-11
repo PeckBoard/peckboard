@@ -1,11 +1,9 @@
 import { useEffect, useState } from 'react'
 import { authedFetch } from '../store/auth'
 import { useReportsStore, type ReportEntry } from '../store/reports'
+import List from './List'
+import ListViewHeader from './ListViewHeader'
 import SafeMarkdown from './SafeMarkdown'
-
-interface GroupedReports {
-  [folder: string]: ReportEntry[]
-}
 
 export default function ReportBrowser() {
   const reports = useReportsStore((s) => s.reports)
@@ -66,7 +64,21 @@ export default function ReportBrowser() {
     }
   }
 
-  const grouped: GroupedReports = {}
+  const downloadReport = async (folder: string, file: string) => {
+    const res = await authedFetch(
+      `/api/reports/${encodeURIComponent(folder)}/${encodeURIComponent(file)}/download`,
+    )
+    if (!res.ok) return
+    const blob = await res.blob()
+    const url = URL.createObjectURL(blob)
+    const a = document.createElement('a')
+    a.href = url
+    a.download = file
+    a.click()
+    URL.revokeObjectURL(url)
+  }
+
+  const grouped: Record<string, ReportEntry[]> = {}
   for (const r of reports) {
     if (!grouped[r.folder]) grouped[r.folder] = []
     grouped[r.folder].push(r)
@@ -100,19 +112,7 @@ export default function ReportBrowser() {
           </div>
           <button
             className="btn-secondary"
-            onClick={async () => {
-              const res = await authedFetch(
-                `/api/reports/${encodeURIComponent(activeReport.folder)}/${encodeURIComponent(activeReport.file)}/download`,
-              )
-              if (!res.ok) return
-              const blob = await res.blob()
-              const url = URL.createObjectURL(blob)
-              const a = document.createElement('a')
-              a.href = url
-              a.download = activeReport.file
-              a.click()
-              URL.revokeObjectURL(url)
-            }}
+            onClick={() => downloadReport(activeReport.folder, activeReport.file)}
           >
             Download
           </button>
@@ -129,72 +129,62 @@ export default function ReportBrowser() {
   }
 
   return (
-    <div className="settings-page">
-      <h2>Reports</h2>
+    <div className="list-view">
+      <ListViewHeader title="Reports" />
+      <div className="list-view-body">
+        {loading && (
+          <div className="chat-loading">
+            <div className="loading-spinner" />
+          </div>
+        )}
+        {error && <p className="form-error">{error}</p>}
 
-      {loading && (
-        <div className="chat-loading">
-          <div className="loading-spinner" />
-        </div>
-      )}
-      {error && <p className="form-error">{error}</p>}
+        {!loading && reports.length === 0 && !error && (
+          <div className="list-view-empty">
+            <p>No reports found</p>
+          </div>
+        )}
 
-      {!loading && reports.length === 0 && !error && (
-        <p style={{ color: 'var(--text3)', fontSize: 'var(--text-sm)' }}>No reports found.</p>
-      )}
-
-      {Object.keys(grouped).map((folder) => (
-        <section key={folder} className="settings-section">
-          <h3
-            style={{ cursor: 'pointer', userSelect: 'none' }}
-            onClick={() => toggleFolder(folder)}
-          >
-            <span style={{ display: 'inline-block', width: 16, fontSize: 10 }}>
-              {expandedFolders.has(folder) ? '\u25BC' : '\u25B6'}
-            </span>
-            {folder}
-          </h3>
-          {expandedFolders.has(folder) && (
-            <div className="folder-list">
-              {grouped[folder].map((r) => (
-                <div
-                  key={`${r.folder}/${r.file}`}
-                  className="folder-row"
-                  style={{ cursor: 'pointer' }}
-                >
-                  <button className="report-list-item" onClick={() => viewReport(r)}>
-                    <div className="folder-info">
-                      <strong>{r.title || r.file}</strong>
-                      <span className="folder-path">{r.date}</span>
-                    </div>
-                    {r.projectName && <span className="report-list-project">{r.projectName}</span>}
-                  </button>
-                  <button
-                    className="btn-secondary"
-                    style={{ fontSize: 'var(--text-xs)', padding: '4px 10px' }}
-                    onClick={async (e) => {
-                      e.stopPropagation()
-                      const res = await authedFetch(
-                        `/api/reports/${encodeURIComponent(r.folder)}/${encodeURIComponent(r.file)}/download`,
-                      )
-                      if (!res.ok) return
-                      const blob = await res.blob()
-                      const url = URL.createObjectURL(blob)
-                      const a = document.createElement('a')
-                      a.href = url
-                      a.download = r.file
-                      a.click()
-                      URL.revokeObjectURL(url)
-                    }}
-                  >
-                    Download
-                  </button>
-                </div>
-              ))}
-            </div>
-          )}
-        </section>
-      ))}
+        {Object.keys(grouped).map((folder) => (
+          <section key={folder} className="report-group">
+            <button
+              type="button"
+              className="report-group-title"
+              onClick={() => toggleFolder(folder)}
+              aria-expanded={expandedFolders.has(folder)}
+            >
+              <span className="report-group-chevron" aria-hidden="true">
+                {expandedFolders.has(folder) ? '▼' : '▶'}
+              </span>
+              {folder}
+              <span className="report-group-count">{grouped[folder].length}</span>
+            </button>
+            {expandedFolders.has(folder) && (
+              <List
+                items={grouped[folder]}
+                getKey={(r) => `${r.folder}/${r.file}`}
+                onActivate={viewReport}
+                bodyClassName="list-view-rows"
+                getMenuItems={(r) => [
+                  {
+                    label: 'Download',
+                    onSelect: () => downloadReport(r.folder, r.file),
+                  },
+                ]}
+                renderItem={(r) => (
+                  <>
+                    <span className="list-view-name">{r.title || r.file}</span>
+                    <span className="list-view-meta">
+                      {r.projectName && <span className="list-view-tag">{r.projectName}</span>}
+                      <span className="list-view-time">{r.date}</span>
+                    </span>
+                  </>
+                )}
+              />
+            )}
+          </section>
+        ))}
+      </div>
     </div>
   )
 }

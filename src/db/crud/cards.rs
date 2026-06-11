@@ -133,6 +133,51 @@ impl Db {
         .await
     }
 
+    /// Clear `cards.worker_session_id` ONLY if it currently equals the
+    /// supplied `session_id`, and stamp `last_worker_session_id` so the
+    /// auto-pause counter and the card-history view can still join through
+    /// this session's events. Returns the updated card on success, `None`
+    /// if the card's worker ref no longer matches (already cleared, or
+    /// reassigned to a different worker) — in which case the caller MUST
+    /// NOT treat its action as having freed a slot.
+    ///
+    /// Race this guards against: the orchestrator can spawn a replacement
+    /// worker on the same card between an outgoing cancel and its
+    /// completion listener firing. An unconditional clear in the listener
+    /// would wipe the replacement's `worker_session_id`, freeing the slot
+    /// a second time and producing two concurrent workers for one card.
+    pub async fn clear_card_worker_if_matches(
+        &self,
+        card_id: &str,
+        session_id: &str,
+    ) -> anyhow::Result<Option<Card>> {
+        let card_id = card_id.to_string();
+        let session_id = session_id.to_string();
+        self.with_conn(move |conn| {
+            let n = diesel::update(
+                cards::table
+                    .find(&card_id)
+                    .filter(cards::worker_session_id.eq(&session_id)),
+            )
+            .set((
+                cards::worker_session_id.eq::<Option<String>>(None),
+                cards::last_worker_session_id.eq(Some(&session_id)),
+                cards::updated_at.eq(chrono::Utc::now().to_rfc3339()),
+            ))
+            .execute(conn)?;
+            if n == 0 {
+                return Ok(None);
+            }
+            cards::table
+                .find(&card_id)
+                .select(Card::as_select())
+                .first(conn)
+                .optional()
+                .map_err(Into::into)
+        })
+        .await
+    }
+
     pub async fn delete_cards_by_project(&self, project_id: &str) -> anyhow::Result<usize> {
         let project_id = project_id.to_string();
         self.with_conn(move |conn| {

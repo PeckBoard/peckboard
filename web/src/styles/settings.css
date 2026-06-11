@@ -15,15 +15,9 @@
   letter-spacing: -0.03em;
 }
 
-/* Cap the dropdown-opened modals so a long content list (notably the
-   Plugins list with several built-ins) stays inside the viewport
-   instead of spilling under the keyboard or off-screen. `.modal`
-   already animates in and centers; we just add internal scrolling. */
-.settings-modal,
-.plugins-modal {
-  max-height: calc(var(--app-height) - 64px);
-  overflow-y: auto;
-}
+/* The modal panel flows naturally — `.modal-backdrop` owns the scroll
+   (see `auth.css`), so a long Plugins or Settings list scrolls the
+   page instead of trapping the user inside a nested scroll area. */
 
 .settings-section {
   margin-bottom: 32px;

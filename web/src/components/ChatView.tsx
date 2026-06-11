@@ -8,6 +8,7 @@ import { useSessionsStore, type PendingUserMessage } from '../store/sessions'
 import InputBar from './InputBar'
 import ToolUseBlock from './ToolUseBlock'
 import ConfirmDialog from './ConfirmDialog'
+import { MenuButton, type MenuItem } from './Dropdown'
 import TodoPanel from './TodoPanel'
 import { parseTodoItems, latestTodoSnapshot, type TodoItem } from '../types/todo'
 import {
@@ -220,18 +221,14 @@ export default function ChatView({ sessionId, onOpenTodos }: ChatViewProps) {
   )
   const prunePendingUserMessages = useSessionsStore((s) => s.prunePendingUserMessages)
   const [sessionDetail, setSessionDetail] = useState<Session | null>(null)
-  const [menuOpen, setMenuOpen] = useState(false)
   const [confirmAction, setConfirmAction] = useState<{
     title: string
     message: string
     onConfirm: () => void
   } | null>(null)
-  const [modelDropdownOpen, setModelDropdownOpen] = useState(false)
   const [availableModels, setAvailableModels] = useState<ModelInfo[]>([])
   const [loadedTodos, setLoadedTodos] = useState<TodoItem[]>([])
   const scrollRef = useRef<HTMLDivElement>(null)
-  const menuRef = useRef<HTMLDivElement>(null)
-  const modelRef = useRef<HTMLDivElement>(null)
   const userScrolledUp = useRef(false)
   /** Saved scroll-height immediately before a "Load older" fetch so
    *  we can restore the user's viewport position after the new rows
@@ -295,33 +292,10 @@ export default function ChatView({ sessionId, onOpenTodos }: ChatViewProps) {
     }
   }, [sessionId])
 
-  // Close menu on outside click
+  // Load the model catalogue once per session mount so the 3-dot menu's
+  // "Model" submenu has options ready the first time the user opens it.
   useEffect(() => {
-    if (!menuOpen) return
-    const handleClick = (e: MouseEvent) => {
-      if (menuRef.current && !menuRef.current.contains(e.target as Node)) {
-        setMenuOpen(false)
-      }
-    }
-    document.addEventListener('mousedown', handleClick)
-    return () => document.removeEventListener('mousedown', handleClick)
-  }, [menuOpen])
-
-  // Close model dropdown on outside click
-  useEffect(() => {
-    if (!modelDropdownOpen) return
-    const handleClick = (e: MouseEvent) => {
-      if (modelRef.current && !modelRef.current.contains(e.target as Node)) {
-        setModelDropdownOpen(false)
-      }
-    }
-    document.addEventListener('mousedown', handleClick)
-    return () => document.removeEventListener('mousedown', handleClick)
-  }, [modelDropdownOpen])
-
-  // Fetch available models when model dropdown opens
-  useEffect(() => {
-    if (!modelDropdownOpen || availableModels.length > 0) return
+    if (availableModels.length > 0) return
     authedFetch('/api/models')
       .then((res) => (res.ok ? res.json() : null))
       .then((data) => {
@@ -330,7 +304,7 @@ export default function ChatView({ sessionId, onOpenTodos }: ChatViewProps) {
         }
       })
       .catch(() => {})
-  }, [modelDropdownOpen, availableModels.length])
+  }, [availableModels.length])
 
   // Fetch initial events
   useEffect(() => {
@@ -452,7 +426,6 @@ export default function ChatView({ sessionId, onOpenTodos }: ChatViewProps) {
 
   // Toolbar actions
   const handleRename = async () => {
-    setMenuOpen(false)
     const currentName = sessionDetail?.name ?? ''
     const newName = window.prompt('Rename session:', currentName)
     if (newName && newName !== currentName) {
@@ -462,7 +435,6 @@ export default function ChatView({ sessionId, onOpenTodos }: ChatViewProps) {
   }
 
   const handleClear = () => {
-    setMenuOpen(false)
     setConfirmAction({
       title: 'Clear session',
       message: 'Clear all messages in this session?',
@@ -475,7 +447,6 @@ export default function ChatView({ sessionId, onOpenTodos }: ChatViewProps) {
   }
 
   const handleTerminateAgent = () => {
-    setMenuOpen(false)
     setConfirmAction({
       title: 'Terminate agent',
       message:
@@ -488,7 +459,6 @@ export default function ChatView({ sessionId, onOpenTodos }: ChatViewProps) {
   }
 
   const handleDelete = () => {
-    setMenuOpen(false)
     setConfirmAction({
       title: 'Delete session',
       message: 'Delete this session and all its events?',
@@ -499,13 +469,12 @@ export default function ChatView({ sessionId, onOpenTodos }: ChatViewProps) {
     })
   }
 
-  const handleModelChange = async (modelId: string) => {
-    setModelDropdownOpen(false)
+  const patchSession = async (patch: Record<string, unknown>) => {
     try {
       const res = await authedFetch(`/api/sessions/${sessionId}`, {
         method: 'PATCH',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ model: modelId }),
+        body: JSON.stringify(patch),
       })
       if (res.ok) {
         const updated: Session = await res.json()
@@ -515,6 +484,67 @@ export default function ChatView({ sessionId, onOpenTodos }: ChatViewProps) {
       /* ignore */
     }
   }
+
+  const EFFORT_LEVELS: { id: string; label: string }[] = [
+    { id: 'low', label: 'Low' },
+    { id: 'medium', label: 'Medium' },
+    { id: 'high', label: 'High' },
+  ]
+
+  const modelDisplayName = (id: string | null | undefined): string => {
+    if (!id) return 'default'
+    const m = availableModels.find((x) => x.id === id)
+    return m?.display_name ?? id
+  }
+
+  // Three-dot menu. Order is shared with the TabBar context menu (see
+  // TabBar.tsx) so a session's controls read the same wherever they
+  // surface — that's the rule in CLAUDE.md "Component Reuse".
+  //   rename, divider, clear session, terminate agent, delete
+  // Plus a Model and Effort submenu so users can change either from the
+  // 3-dot menu without hunting for a separate picker.
+  const sessionMenuItems: MenuItem[] = [
+    { label: 'Rename', onSelect: handleRename, testId: 'chat-menu-rename' },
+    { divider: true },
+    {
+      label: 'Model',
+      hint: modelDisplayName(sessionDetail?.model),
+      submenu:
+        availableModels.length > 0
+          ? availableModels.map((m) => ({
+              label: m.display_name,
+              active: m.id === sessionDetail?.model,
+              onSelect: () => patchSession({ model: m.id }),
+            }))
+          : [{ label: 'Loading models…', disabled: true }],
+    },
+    {
+      label: 'Effort',
+      hint: sessionDetail?.effort ?? 'default',
+      submenu: EFFORT_LEVELS.map((e) => ({
+        label: e.label,
+        active: e.id === sessionDetail?.effort,
+        onSelect: () => patchSession({ effort: e.id }),
+      })),
+    },
+    { divider: true },
+    { label: 'Clear session', onSelect: handleClear, testId: 'chat-menu-clear' },
+    {
+      label: 'Terminate agent',
+      onSelect: handleTerminateAgent,
+      testId: 'chat-toolbar-terminate',
+    },
+    {
+      label: 'Delete',
+      danger: true,
+      // Worker sessions are owned by their card; the backend refuses
+      // DELETE /api/sessions/:id for them. Hide rather than render an
+      // always-409 control.
+      hidden: !!sessionDetail?.is_worker,
+      onSelect: handleDelete,
+      testId: 'chat-menu-delete',
+    },
+  ]
 
   if (loading) {
     return (
@@ -529,31 +559,23 @@ export default function ChatView({ sessionId, onOpenTodos }: ChatViewProps) {
       {/* Toolbar */}
       <div className="chat-toolbar">
         <span className="chat-toolbar-name">{sessionDetail?.name ?? 'Session'}</span>
-        <div className="chat-toolbar-model-wrapper" ref={modelRef}>
-          <button
-            className="chat-toolbar-model"
-            onClick={() => setModelDropdownOpen(!modelDropdownOpen)}
-            type="button"
-          >
-            {sessionDetail?.model ?? 'default'}
-          </button>
-          {modelDropdownOpen && (
-            <div className="chat-toolbar-dropdown chat-model-dropdown">
-              {availableModels.length === 0 && (
-                <div className="chat-model-loading">Loading models...</div>
-              )}
-              {availableModels.map((m) => (
-                <button
-                  key={m.id}
-                  className={m.id === sessionDetail?.model ? 'active' : ''}
-                  onClick={() => handleModelChange(m.id)}
-                >
-                  {m.display_name}
-                </button>
-              ))}
-            </div>
-          )}
-        </div>
+        <MenuButton
+          ariaLabel="Change model"
+          title="Change model"
+          triggerClassName="chat-toolbar-model"
+          align="left"
+          items={
+            availableModels.length > 0
+              ? availableModels.map((m) => ({
+                  label: m.display_name,
+                  active: m.id === sessionDetail?.model,
+                  onSelect: () => patchSession({ model: m.id }),
+                }))
+              : [{ label: 'Loading models…', disabled: true }]
+          }
+        >
+          <span>{modelDisplayName(sessionDetail?.model)}</span>
+        </MenuButton>
         <span className="chat-toolbar-status">
           <span className={getStatusDotClass(agentStatus)} />
           {getStatusLabel(agentStatus)}
@@ -588,36 +610,12 @@ export default function ChatView({ sessionId, onOpenTodos }: ChatViewProps) {
             )}
           </button>
         )}
-        <div className="chat-toolbar-menu-wrapper" ref={menuRef}>
-          <button
-            className="chat-toolbar-menu"
-            onClick={() => setMenuOpen(!menuOpen)}
-            type="button"
-          >
-            <svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor">
-              <circle cx="8" cy="3" r="1.5" />
-              <circle cx="8" cy="8" r="1.5" />
-              <circle cx="8" cy="13" r="1.5" />
-            </svg>
-          </button>
-          {menuOpen && (
-            <div className="chat-toolbar-dropdown">
-              <button onClick={handleRename}>Rename</button>
-              <button onClick={handleClear}>Clear</button>
-              <button onClick={handleTerminateAgent} data-testid="chat-toolbar-terminate">
-                Terminate agent
-              </button>
-              {/* Worker sessions are owned by their card; the backend
-                  refuses DELETE /api/sessions/:id for them. Hide the
-                  button rather than render a control that always 409s. */}
-              {!sessionDetail?.is_worker && (
-                <button className="danger" onClick={handleDelete}>
-                  Delete
-                </button>
-              )}
-            </div>
-          )}
-        </div>
+        <MenuButton
+          ariaLabel="Session menu"
+          triggerClassName="chat-toolbar-menu"
+          items={sessionMenuItems}
+          testId="chat-toolbar-menu"
+        />
       </div>
 
       <TodoPanel todos={todos} />

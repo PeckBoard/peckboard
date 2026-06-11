@@ -38,3 +38,123 @@
 .context-menu-danger:hover:not(:disabled) {
   background: var(--danger-bg);
 }
+
+/* Shared dropdown menu — same surface, padding, and behaviour as
+   `.context-menu` above, but anchored from a click (3-dot button, model
+   picker, etc.) rather than a right-click. Always portal-rendered so it
+   escapes any overflow-clipping ancestor. */
+.dropdown-menu {
+  z-index: 100;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  box-shadow: var(--shadow-overlay, 0 8px 32px rgba(0, 0, 0, 0.18));
+  min-width: 180px;
+  padding: 4px;
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+.dropdown-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 8px 12px;
+  background: transparent;
+  border: 0;
+  text-align: left;
+  font-family: inherit;
+  font-size: var(--text-sm);
+  color: var(--text);
+  cursor: pointer;
+  border-radius: var(--radius-sm);
+  white-space: nowrap;
+}
+.dropdown-item:hover:not(:disabled) {
+  background: var(--surface-hover, var(--bg));
+}
+.dropdown-item:disabled {
+  color: var(--text3);
+  cursor: not-allowed;
+}
+.dropdown-item-label {
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.dropdown-item-hint {
+  font-size: var(--text-xs);
+  color: var(--text3);
+  font-weight: 500;
+}
+.dropdown-item-chev {
+  color: var(--text3);
+  font-size: 14px;
+  margin-left: 4px;
+}
+.dropdown-item-danger {
+  color: var(--danger);
+}
+.dropdown-item-danger:hover:not(:disabled) {
+  background: var(--danger-bg);
+}
+.dropdown-item-active {
+  background: var(--accent-subtle);
+  color: var(--accent);
+  font-weight: 600;
+}
+.dropdown-item-active:hover:not(:disabled) {
+  background: var(--accent-subtle);
+}
+.dropdown-divider {
+  height: 1px;
+  margin: 4px 6px;
+  background: var(--border);
+}
+/* Two-line variant: name on the top row (with optional hint), description
+   muted underneath. Used by pickers where the value alone isn't
+   self-describing (workflow, model variant, etc.). */
+.dropdown-item-with-desc {
+  flex-direction: column;
+  align-items: stretch;
+  gap: 2px;
+  white-space: normal;
+}
+.dropdown-item-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+}
+.dropdown-item-desc {
+  font-size: var(--text-xs);
+  color: var(--text3);
+  line-height: 1.35;
+  white-space: normal;
+}
+.dropdown-item-active .dropdown-item-desc {
+  color: color-mix(in srgb, var(--accent) 70%, var(--text2));
+}
+/* Shared 3-dot trigger button — used by `<MenuButton>` and any inline
+   3-dot trigger that prefers consistent chrome over local tuning. */
+.menu-button {
+  width: 30px;
+  height: 30px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: none;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--text3);
+  cursor: pointer;
+  transition:
+    background var(--transition, 0.12s ease),
+    color var(--transition, 0.12s ease);
+  flex-shrink: 0;
+}
+.menu-button:hover {
+  background: var(--surface-hover, var(--bg));
+  color: var(--text);
+}

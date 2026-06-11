@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react'
 import { useAuthStore, authedFetch } from '../store/auth'
-
-type Theme = 'light' | 'dark' | 'auto'
+import { applyThemeColor, type Theme } from '../util/themeColor'
+import Modal from './Modal'
 
 const THEME_KEY = 'peckboard_theme'
 const HUE_KEY = 'peckboard_hue'
@@ -26,6 +26,7 @@ function applyTheme(theme: Theme) {
   } else {
     root.setAttribute('data-theme', theme)
   }
+  applyThemeColor(theme)
 }
 
 function getStoredHue(): number {
@@ -77,89 +78,83 @@ export default function SettingsModal({ onClose }: Props) {
   }
 
   return (
-    <div className="modal-backdrop" onClick={onClose}>
-      <div
-        className="modal settings-modal"
-        onClick={(e) => e.stopPropagation()}
-        data-testid="settings-modal"
-      >
-        <h2>Settings</h2>
+    <Modal onClose={onClose} className="settings-modal" data-testid="settings-modal">
+      <h2>Settings</h2>
 
-        <section className="settings-section">
-          <h3>User Info</h3>
-          {user && (
-            <div className="settings-info-grid">
-              <div className="settings-row">
-                <span className="settings-label">Username</span>
-                <span>{user.username}</span>
-              </div>
-              <div className="settings-row">
-                <span className="settings-label">Role</span>
-                <span>{user.role}</span>
-              </div>
+      <section className="settings-section">
+        <h3>User Info</h3>
+        {user && (
+          <div className="settings-info-grid">
+            <div className="settings-row">
+              <span className="settings-label">Username</span>
+              <span>{user.username}</span>
             </div>
-          )}
-        </section>
-
-        <section className="settings-section">
-          <h3>Server</h3>
-          {serverConfig ? (
-            <div className="settings-info-grid">
-              <div className="settings-row">
-                <span className="settings-label">HTTP Port</span>
-                <span>{serverConfig.port}</span>
-              </div>
-              <div className="settings-row">
-                <span className="settings-label">HTTPS Port</span>
-                <span>{serverConfig.https_port}</span>
-              </div>
-              <div className="settings-row">
-                <span className="settings-label">Data Directory</span>
-                <span>{serverConfig.data_dir}</span>
-              </div>
+            <div className="settings-row">
+              <span className="settings-label">Role</span>
+              <span>{user.role}</span>
             </div>
-          ) : (
-            <p className="settings-loading">Loading server config...</p>
-          )}
-        </section>
-
-        <section className="settings-section">
-          <h3>Theme</h3>
-          <div className="theme-toggle">
-            {(['light', 'dark', 'auto'] as Theme[]).map((t) => (
-              <button
-                key={t}
-                className={`theme-btn ${theme === t ? 'active' : ''}`}
-                onClick={() => changeTheme(t)}
-              >
-                {t.charAt(0).toUpperCase() + t.slice(1)}
-              </button>
-            ))}
           </div>
-        </section>
+        )}
+      </section>
 
-        <section className="settings-section">
-          <h3>Accent Hue</h3>
-          <div className="settings-hue">
-            <input
-              type="range"
-              min={0}
-              max={360}
-              value={hue}
-              onChange={(e) => changeHue(parseInt(e.target.value, 10))}
-              className="hue-slider"
-            />
-            <span className="hue-value">{hue}</span>
-            <span className="hue-preview" style={{ backgroundColor: `hsl(${hue}, 72%, 50%)` }} />
+      <section className="settings-section">
+        <h3>Server</h3>
+        {serverConfig ? (
+          <div className="settings-info-grid">
+            <div className="settings-row">
+              <span className="settings-label">HTTP Port</span>
+              <span>{serverConfig.port}</span>
+            </div>
+            <div className="settings-row">
+              <span className="settings-label">HTTPS Port</span>
+              <span>{serverConfig.https_port}</span>
+            </div>
+            <div className="settings-row">
+              <span className="settings-label">Data Directory</span>
+              <span>{serverConfig.data_dir}</span>
+            </div>
           </div>
-        </section>
+        ) : (
+          <p className="settings-loading">Loading server config...</p>
+        )}
+      </section>
 
-        <div className="form-actions">
-          <button type="button" className="btn-secondary" onClick={onClose}>
-            Close
-          </button>
+      <section className="settings-section">
+        <h3>Theme</h3>
+        <div className="theme-toggle">
+          {(['light', 'dark', 'auto'] as Theme[]).map((t) => (
+            <button
+              key={t}
+              className={`theme-btn ${theme === t ? 'active' : ''}`}
+              onClick={() => changeTheme(t)}
+            >
+              {t.charAt(0).toUpperCase() + t.slice(1)}
+            </button>
+          ))}
         </div>
+      </section>
+
+      <section className="settings-section">
+        <h3>Accent Hue</h3>
+        <div className="settings-hue">
+          <input
+            type="range"
+            min={0}
+            max={360}
+            value={hue}
+            onChange={(e) => changeHue(parseInt(e.target.value, 10))}
+            className="hue-slider"
+          />
+          <span className="hue-value">{hue}</span>
+          <span className="hue-preview" style={{ backgroundColor: `hsl(${hue}, 72%, 50%)` }} />
+        </div>
+      </section>
+
+      <div className="form-actions">
+        <button type="button" className="btn-secondary" onClick={onClose}>
+          Close
+        </button>
       </div>
-    </div>
+    </Modal>
   )
 }

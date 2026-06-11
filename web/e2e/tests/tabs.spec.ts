@@ -356,7 +356,7 @@ test.describe('tabs', () => {
     expect(sessionBody.name).toBe('new-name')
   })
 
-  test('right-click → Clear messages confirms then POSTs the clear endpoint', async ({
+  test('right-click → Clear session confirms then POSTs the clear endpoint', async ({
     request,
     page,
     baseURL,
@@ -371,7 +371,9 @@ test.describe('tabs', () => {
     await expect(tab).toBeVisible()
 
     await tab.click({ button: 'right' })
-    const clearBtn = page.locator('.context-menu button', { hasText: 'Clear messages' })
+    // The tab right-click menu and the chat-toolbar 3-dot menu both use the
+    // same label — "Clear session" — per CLAUDE.md's "Component Reuse" rule.
+    const clearBtn = page.locator('.context-menu button', { hasText: 'Clear session' })
     await expect(clearBtn).toBeVisible()
     await clearBtn.click()
 

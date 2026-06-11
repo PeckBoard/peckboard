@@ -721,6 +721,203 @@ mod tests {
         assert!(db.get_queued_message("s1").await.unwrap().is_none());
     }
 
+    /// Bulk-delete every queued message belonging to a worker on the
+    /// given project. Used by the pause flow to ensure a cancel's
+    /// completion listener can't drain a buffered message into a fresh
+    /// agent run on a paused project.
+    #[tokio::test]
+    async fn test_delete_queued_messages_for_project_scopes_correctly() {
+        let db = test_db();
+        let ts = now();
+
+        db.create_folder(NewFolder {
+            id: "f1".into(),
+            name: "F".into(),
+            path: "/tmp/f".into(),
+            created_at: ts.clone(),
+        })
+        .await
+        .unwrap();
+        for pid in ["p1", "p2"] {
+            db.create_project(NewProject {
+                id: pid.into(),
+                name: pid.into(),
+                context: "".into(),
+                folder_id: "f1".into(),
+                worker_count: 1,
+                status: "active".into(),
+                workflow: "task".into(),
+                model: None,
+                effort: None,
+                parallel_instructions: false,
+                auto_notify_changes: true,
+                worker_communication: false,
+                created_at: ts.clone(),
+                last_accessed_at: ts.clone(),
+            })
+            .await
+            .unwrap();
+        }
+
+        // Workers on p1 (target) and p2 (kept), plus a plain
+        // non-worker session (also kept — pause only affects worker
+        // queues).
+        let seed = |id: &str, project: Option<&str>, is_worker: bool| {
+            let id = id.to_string();
+            let project = project.map(|s| s.to_string());
+            let ts2 = ts.clone();
+            let db_ref = &db;
+            async move {
+                db_ref
+                    .create_session(NewSession {
+                        id: id.clone(),
+                        name: id.clone(),
+                        folder_id: "f1".into(),
+                        model: None,
+                        effort: None,
+                        is_worker,
+                        project_id: project,
+                        card_id: None,
+                        conversation_id: None,
+                        created_at: ts2.clone(),
+                        last_activity: ts2.clone(),
+                        ..Default::default()
+                    })
+                    .await
+                    .unwrap();
+                db_ref
+                    .upsert_queued_message(NewQueuedMessage {
+                        session_id: id,
+                        text: "msg".into(),
+                        queued_at: ts2,
+                        ..Default::default()
+                    })
+                    .await
+                    .unwrap();
+            }
+        };
+        seed("w1", Some("p1"), true).await;
+        seed("w2", Some("p1"), true).await;
+        seed("w3", Some("p2"), true).await;
+        seed("plain", None, false).await;
+
+        let deleted = db.delete_queued_messages_for_project("p1").await.unwrap();
+        assert_eq!(deleted, 2, "should delete both p1-worker queues");
+
+        assert!(db.get_queued_message("w1").await.unwrap().is_none());
+        assert!(db.get_queued_message("w2").await.unwrap().is_none());
+        assert!(
+            db.get_queued_message("w3").await.unwrap().is_some(),
+            "p2 worker preserved"
+        );
+        assert!(
+            db.get_queued_message("plain").await.unwrap().is_some(),
+            "plain session preserved"
+        );
+    }
+
+    /// `clear_card_worker_if_matches` must be a no-op when the card's
+    /// worker_session_id doesn't match — that's the load-bearing race
+    /// guard: a stale completion listener firing after the orchestrator
+    /// already reassigned must NOT clobber the new assignment.
+    #[tokio::test]
+    async fn test_clear_card_worker_if_matches_is_conditional() {
+        let db = test_db();
+        let ts = now();
+        db.create_folder(NewFolder {
+            id: "f1".into(),
+            name: "F".into(),
+            path: "/tmp/f".into(),
+            created_at: ts.clone(),
+        })
+        .await
+        .unwrap();
+        db.create_project(NewProject {
+            id: "p1".into(),
+            name: "P".into(),
+            context: "".into(),
+            folder_id: "f1".into(),
+            worker_count: 1,
+            status: "active".into(),
+            workflow: "task".into(),
+            model: None,
+            effort: None,
+            parallel_instructions: false,
+            auto_notify_changes: true,
+            worker_communication: false,
+            created_at: ts.clone(),
+            last_accessed_at: ts.clone(),
+        })
+        .await
+        .unwrap();
+        db.create_card(NewCard {
+            id: "c1".into(),
+            project_id: "p1".into(),
+            title: "T".into(),
+            description: "".into(),
+            step: "in_progress".into(),
+            priority: 1,
+            workflow: "task".into(),
+            model: None,
+            effort: None,
+            blocked: false,
+            block_reason: None,
+            created_at: ts.clone(),
+            updated_at: ts.clone(),
+        })
+        .await
+        .unwrap();
+        // FK target: the card's worker_session_id REFERENCES sessions(id),
+        // so the replacement-worker row must exist before we point the
+        // card at it.
+        db.create_session(NewSession {
+            id: "new-worker".into(),
+            name: "new-worker".into(),
+            folder_id: "f1".into(),
+            model: None,
+            effort: None,
+            is_worker: true,
+            project_id: Some("p1".into()),
+            card_id: Some("c1".into()),
+            conversation_id: None,
+            created_at: ts.clone(),
+            last_activity: ts,
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+        db.update_card(
+            "c1",
+            UpdateCard {
+                worker_session_id: Some(Some("new-worker".into())),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+
+        // Stale completion handler firing for old-worker must NOT clear
+        // the new-worker assignment.
+        let result = db
+            .clear_card_worker_if_matches("c1", "old-worker")
+            .await
+            .unwrap();
+        assert!(result.is_none(), "non-matching clear must be a no-op");
+        let card = db.get_card("c1").await.unwrap().unwrap();
+        assert_eq!(card.worker_session_id.as_deref(), Some("new-worker"));
+
+        // Matching clear DOES wipe the ref.
+        let result = db
+            .clear_card_worker_if_matches("c1", "new-worker")
+            .await
+            .unwrap();
+        assert!(result.is_some(), "matching clear must return updated card");
+        let card = db.get_card("c1").await.unwrap().unwrap();
+        assert!(card.worker_session_id.is_none());
+        // And stamps last_worker_session_id for crash-count joins.
+        assert_eq!(card.last_worker_session_id.as_deref(), Some("new-worker"));
+    }
+
     // ── Announcements ────────────────────────────────────────────────
 
     #[tokio::test]

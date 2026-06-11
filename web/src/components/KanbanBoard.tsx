@@ -7,6 +7,8 @@ import { useMentions, filterMentions } from '../hooks/useMentions'
 import type { Card, Event, Project } from '../types/api'
 import CardFormModal from './CardFormModal'
 import EditProjectModal from './EditProjectModal'
+import { MenuButton, type MenuItem } from './Dropdown'
+import Modal from './Modal'
 import WorkerComms from './WorkerComms'
 import ProjectTodoSummary from './ProjectTodoSummary'
 import SafeMarkdown from './SafeMarkdown'
@@ -50,8 +52,6 @@ export default function KanbanBoard({ projectId, onOpenTodos }: KanbanBoardProps
   const [selectedCard, setSelectedCard] = useState<Card | null>(null)
   const [showAddForm, setShowAddForm] = useState(false)
   const [editingProject, setEditingProject] = useState(false)
-  const [projectMenuOpen, setProjectMenuOpen] = useState(false)
-  const projectMenuRef = useRef<HTMLDivElement>(null)
   const [confirmDeleteId, setConfirmDeleteId] = useState<string | null>(null)
   const [draggingCardId, setDraggingCardId] = useState<string | null>(null)
   // Active drop target. `insertIdx` is set only for an in-row reorder hover
@@ -366,16 +366,6 @@ export default function KanbanBoard({ projectId, onOpenTodos }: KanbanBoardProps
     fetchCards(projectId)
   }, [projectId, fetchCards])
 
-  // Close the project header's 3-dot menu when the user clicks anywhere else.
-  useEffect(() => {
-    if (!projectMenuOpen) return
-    const onClick = (e: MouseEvent) => {
-      if (!projectMenuRef.current?.contains(e.target as Node)) setProjectMenuOpen(false)
-    }
-    document.addEventListener('mousedown', onClick)
-    return () => document.removeEventListener('mousedown', onClick)
-  }, [projectMenuOpen])
-
   const fetchWorkflows = useResourcesStore((s) => s.fetchWorkflows)
   const fetchModels = useResourcesStore((s) => s.fetchModels)
   useEffect(() => {
@@ -667,42 +657,28 @@ export default function KanbanBoard({ projectId, onOpenTodos }: KanbanBoardProps
         <button type="button" className="btn-primary btn-sm" onClick={() => setShowAddForm(true)}>
           Add Card
         </button>
-        <div className="chat-toolbar-menu-wrapper" ref={projectMenuRef}>
-          <button
-            type="button"
-            className="chat-toolbar-menu"
-            onClick={() => setProjectMenuOpen(!projectMenuOpen)}
-            aria-label="Project menu"
-          >
-            <svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true">
-              <circle cx="8" cy="3" r="1.5" />
-              <circle cx="8" cy="8" r="1.5" />
-              <circle cx="8" cy="13" r="1.5" />
-            </svg>
-          </button>
-          {projectMenuOpen && project && (
-            <div className="chat-toolbar-dropdown">
-              <button
-                onClick={() => {
-                  setProjectMenuOpen(false)
-                  setEditingProject(true)
-                }}
-              >
-                Edit project
-              </button>
-              <button
-                onClick={() => {
-                  setProjectMenuOpen(false)
-                  updateProject(projectId, {
-                    status: project.status === 'paused' ? 'active' : 'paused',
-                  } as Record<string, unknown>)
-                }}
-              >
-                {project.status === 'paused' ? 'Resume' : 'Pause'}
-              </button>
-            </div>
-          )}
-        </div>
+        <MenuButton
+          ariaLabel="Project menu"
+          triggerClassName="chat-toolbar-menu"
+          items={
+            project
+              ? ([
+                  {
+                    label: 'Edit project',
+                    onSelect: () => setEditingProject(true),
+                  },
+                  { divider: true },
+                  {
+                    label: project.status === 'paused' ? 'Resume' : 'Pause',
+                    onSelect: () =>
+                      updateProject(projectId, {
+                        status: project.status === 'paused' ? 'active' : 'paused',
+                      } as Record<string, unknown>),
+                  },
+                ] as MenuItem[])
+              : []
+          }
+        />
       </div>
 
       <div className="kanban-board-scroll">
@@ -734,159 +710,154 @@ export default function KanbanBoard({ projectId, onOpenTodos }: KanbanBoardProps
             const remaining = pendingQuestions.length - 1
 
             return (
-              <div className="modal-backdrop" onClick={() => setQuestionDialogOpen(false)}>
-                <div
-                  className="modal question-dialog"
-                  onClick={(e) => e.stopPropagation()}
-                  style={{ maxWidth: 520 }}
-                >
-                  {/* Header with context */}
-                  <div className="question-dialog-header">
-                    <div className="question-dialog-counter">
-                      {remaining > 0
-                        ? `${pendingQuestions.length} questions remaining`
-                        : 'Last question'}
-                    </div>
-                    {pq.cardTitle && (
-                      <div className="question-dialog-context">
-                        <span className="question-dialog-card-label">Card:</span>
-                        <span className="question-dialog-card-title">{pq.cardTitle}</span>
-                      </div>
-                    )}
-                    {pq.cardDescription && (
-                      <div className="question-dialog-card-desc">{pq.cardDescription}</div>
-                    )}
+              <Modal
+                onClose={() => setQuestionDialogOpen(false)}
+                maxWidth={520}
+                className="question-dialog"
+              >
+                {/* Header with context */}
+                <div className="question-dialog-header">
+                  <div className="question-dialog-counter">
+                    {remaining > 0
+                      ? `${pendingQuestions.length} questions remaining`
+                      : 'Last question'}
                   </div>
+                  {pq.cardTitle && (
+                    <div className="question-dialog-context">
+                      <span className="question-dialog-card-label">Card:</span>
+                      <span className="question-dialog-card-title">{pq.cardTitle}</span>
+                    </div>
+                  )}
+                  {pq.cardDescription && (
+                    <div className="question-dialog-card-desc">{pq.cardDescription}</div>
+                  )}
+                </div>
 
-                  {/* Question content */}
-                  <div className="question-dialog-body">
-                    {pq.questions.map((q, idx) => (
-                      <div key={idx} className="question-item">
-                        {q.header && <div className="question-header">{q.header}</div>}
-                        <div className="question-card-text">{q.question}</div>
-                        {q.options && q.options.length > 0 ? (
-                          <div className="question-options">
-                            {q.options.map((opt, optIdx) => {
-                              const optObj = q.optionObjects?.[optIdx]
-                              return (
-                                <label key={opt} className="question-option-label">
-                                  {q.multiSelect ? (
-                                    <input
-                                      type="checkbox"
-                                      checked={(answers[idx] ?? '').split(',').includes(opt)}
-                                      onChange={() => toggleQuestionMulti(pq.eventId, idx, opt)}
-                                      disabled={isSubmitting}
-                                    />
-                                  ) : (
-                                    <input
-                                      type="radio"
-                                      name={`wq-${pq.eventId}-${idx}`}
-                                      checked={answers[idx] === opt}
-                                      onChange={() => setQuestionAnswer(pq.eventId, idx, opt)}
-                                      disabled={isSubmitting}
-                                    />
+                {/* Question content */}
+                <div className="question-dialog-body">
+                  {pq.questions.map((q, idx) => (
+                    <div key={idx} className="question-item">
+                      {q.header && <div className="question-header">{q.header}</div>}
+                      <div className="question-card-text">{q.question}</div>
+                      {q.options && q.options.length > 0 ? (
+                        <div className="question-options">
+                          {q.options.map((opt, optIdx) => {
+                            const optObj = q.optionObjects?.[optIdx]
+                            return (
+                              <label key={opt} className="question-option-label">
+                                {q.multiSelect ? (
+                                  <input
+                                    type="checkbox"
+                                    checked={(answers[idx] ?? '').split(',').includes(opt)}
+                                    onChange={() => toggleQuestionMulti(pq.eventId, idx, opt)}
+                                    disabled={isSubmitting}
+                                  />
+                                ) : (
+                                  <input
+                                    type="radio"
+                                    name={`wq-${pq.eventId}-${idx}`}
+                                    checked={answers[idx] === opt}
+                                    onChange={() => setQuestionAnswer(pq.eventId, idx, opt)}
+                                    disabled={isSubmitting}
+                                  />
+                                )}
+                                <span className="question-option-text">
+                                  <span>{opt}</span>
+                                  {optObj?.description && (
+                                    <span className="question-option-desc">
+                                      {optObj.description}
+                                    </span>
                                   )}
-                                  <span className="question-option-text">
-                                    <span>{opt}</span>
-                                    {optObj?.description && (
-                                      <span className="question-option-desc">
-                                        {optObj.description}
-                                      </span>
-                                    )}
-                                  </span>
-                                </label>
+                                </span>
+                              </label>
+                            )
+                          })}
+                        </div>
+                      ) : (
+                        <div className="question-input-wrapper">
+                          <input
+                            className="question-input"
+                            type="text"
+                            placeholder="Type your answer... (@ to reference a report)"
+                            value={answers[idx] ?? ''}
+                            onChange={(e) => setQuestionAnswer(pq.eventId, idx, e.target.value)}
+                            onKeyDown={(e) => {
+                              if (
+                                e.key === 'Enter' &&
+                                pq.questions.length === 1 &&
+                                hasAnswers &&
+                                !mentionAutocomplete
                               )
-                            })}
-                          </div>
-                        ) : (
-                          <div className="question-input-wrapper">
-                            <input
-                              className="question-input"
-                              type="text"
-                              placeholder="Type your answer... (@ to reference a report)"
-                              value={answers[idx] ?? ''}
-                              onChange={(e) => setQuestionAnswer(pq.eventId, idx, e.target.value)}
-                              onKeyDown={(e) => {
-                                if (
-                                  e.key === 'Enter' &&
-                                  pq.questions.length === 1 &&
-                                  hasAnswers &&
-                                  !mentionAutocomplete
-                                )
-                                  handleAnswerQuestion(pq)
-                              }}
-                              onBlur={() => setTimeout(() => setMentionAutocomplete(null), 200)}
-                              disabled={isSubmitting}
-                              autoFocus
-                            />
-                            {mentionAutocomplete &&
-                              mentionAutocomplete.eventId === pq.eventId &&
-                              mentionAutocomplete.idx === idx && (
-                                <div className="autocomplete-dropdown autocomplete-inline">
-                                  <div className="autocomplete-header">
-                                    @ — reports &amp; sessions
-                                  </div>
-                                  {mentionAutocomplete.suggestions.map((m, i) => (
-                                    <button
-                                      key={`${m.type}-${m.detail}-${i}`}
-                                      className="autocomplete-item"
-                                      onMouseDown={(e) => {
-                                        e.preventDefault()
-                                        insertMentionInAnswer(pq.eventId, idx, m)
-                                      }}
-                                    >
-                                      <span className="autocomplete-item-title">
-                                        <span
-                                          className={`autocomplete-type-badge autocomplete-type-${m.type}`}
-                                        >
-                                          {m.type}
-                                        </span>
-                                        {m.label}
-                                      </span>
-                                      <span className="autocomplete-item-path">{m.detail}</span>
-                                    </button>
-                                  ))}
+                                handleAnswerQuestion(pq)
+                            }}
+                            onBlur={() => setTimeout(() => setMentionAutocomplete(null), 200)}
+                            disabled={isSubmitting}
+                            autoFocus
+                          />
+                          {mentionAutocomplete &&
+                            mentionAutocomplete.eventId === pq.eventId &&
+                            mentionAutocomplete.idx === idx && (
+                              <div className="autocomplete-dropdown autocomplete-inline">
+                                <div className="autocomplete-header">
+                                  @ — reports &amp; sessions
                                 </div>
-                              )}
-                          </div>
-                        )}
-                      </div>
-                    ))}
-                  </div>
-
-                  {/* Footer */}
-                  <div className="question-dialog-footer">
-                    <div className="question-dialog-left-actions">
-                      <button
-                        className="btn-secondary"
-                        onClick={() => setQuestionDialogOpen(false)}
-                      >
-                        Answer Later
-                      </button>
-                      <button
-                        className="btn-secondary btn-danger-text"
-                        onClick={async () => {
-                          await handleDismissQuestion(pq)
-                          if (pendingQuestions.length <= 1) setQuestionDialogOpen(false)
-                        }}
-                        disabled={isSubmitting}
-                      >
-                        Dismiss
-                      </button>
+                                {mentionAutocomplete.suggestions.map((m, i) => (
+                                  <button
+                                    key={`${m.type}-${m.detail}-${i}`}
+                                    className="autocomplete-item"
+                                    onMouseDown={(e) => {
+                                      e.preventDefault()
+                                      insertMentionInAnswer(pq.eventId, idx, m)
+                                    }}
+                                  >
+                                    <span className="autocomplete-item-title">
+                                      <span
+                                        className={`autocomplete-type-badge autocomplete-type-${m.type}`}
+                                      >
+                                        {m.type}
+                                      </span>
+                                      {m.label}
+                                    </span>
+                                    <span className="autocomplete-item-path">{m.detail}</span>
+                                  </button>
+                                ))}
+                              </div>
+                            )}
+                        </div>
+                      )}
                     </div>
+                  ))}
+                </div>
+
+                {/* Footer */}
+                <div className="question-dialog-footer">
+                  <div className="question-dialog-left-actions">
+                    <button className="btn-secondary" onClick={() => setQuestionDialogOpen(false)}>
+                      Answer Later
+                    </button>
                     <button
-                      className="btn-primary"
+                      className="btn-secondary btn-danger-text"
                       onClick={async () => {
-                        await handleAnswerQuestion(pq)
+                        await handleDismissQuestion(pq)
                         if (pendingQuestions.length <= 1) setQuestionDialogOpen(false)
                       }}
-                      disabled={!hasAnswers || isSubmitting}
+                      disabled={isSubmitting}
                     >
-                      {isSubmitting ? 'Submitting...' : 'Submit'}
+                      Dismiss
                     </button>
                   </div>
+                  <button
+                    className="btn-primary"
+                    onClick={async () => {
+                      await handleAnswerQuestion(pq)
+                      if (pendingQuestions.length <= 1) setQuestionDialogOpen(false)
+                    }}
+                    disabled={!hasAnswers || isSubmitting}
+                  >
+                    {isSubmitting ? 'Submitting...' : 'Submit'}
+                  </button>
                 </div>
-              </div>
+              </Modal>
             )
           })()}
 
@@ -1215,142 +1186,136 @@ export default function KanbanBoard({ projectId, onOpenTodos }: KanbanBoardProps
       <ProjectTodoSummary cards={cards} todosByCard={todosByCard} />
 
       {confirmDeleteId && (
-        <div className="modal-backdrop" onClick={() => setConfirmDeleteId(null)}>
-          <div className="modal" onClick={(e) => e.stopPropagation()} style={{ maxWidth: 360 }}>
-            <h2>Delete card?</h2>
-            <p style={{ fontSize: 'var(--text-sm)', color: 'var(--text2)' }}>
-              This will stop any active worker and permanently delete the card.
-            </p>
-            <div className="form-actions" style={{ marginTop: 16 }}>
-              <button className="btn-secondary" onClick={() => setConfirmDeleteId(null)}>
-                Cancel
-              </button>
-              <button className="btn-danger" onClick={() => handleDeleteCard(confirmDeleteId)}>
-                Delete
-              </button>
-            </div>
+        <Modal onClose={() => setConfirmDeleteId(null)} maxWidth={360}>
+          <h2>Delete card?</h2>
+          <p style={{ fontSize: 'var(--text-sm)', color: 'var(--text2)' }}>
+            This will stop any active worker and permanently delete the card.
+          </p>
+          <div className="form-actions" style={{ marginTop: 16 }}>
+            <button className="btn-secondary" onClick={() => setConfirmDeleteId(null)}>
+              Cancel
+            </button>
+            <button className="btn-danger" onClick={() => handleDeleteCard(confirmDeleteId)}>
+              Delete
+            </button>
           </div>
-        </div>
+        </Modal>
       )}
 
       {selectedCard && (
-        <div className="modal-backdrop" onClick={() => setSelectedCard(null)}>
-          <div className="modal" onClick={(e) => e.stopPropagation()}>
-            <h2>{selectedCard.title}</h2>
-            <div className="card-detail-grid">
+        <Modal onClose={() => setSelectedCard(null)}>
+          <h2>{selectedCard.title}</h2>
+          <div className="card-detail-grid">
+            <div className="card-detail-row">
+              <span className="card-detail-label">Step</span>
+              <span>
+                {STEPS.find((s) => s.key === selectedCard.step)?.label ?? selectedCard.step}
+              </span>
+            </div>
+            <div className="card-detail-row">
+              <span className="card-detail-label">Priority</span>
+              {priorityBadge(selectedCard.priority, priorities)}
+            </div>
+            {selectedCard.workflow && (
               <div className="card-detail-row">
-                <span className="card-detail-label">Step</span>
+                <span className="card-detail-label">Workflow</span>
+                <span>{selectedCard.workflow}</span>
+              </div>
+            )}
+            {selectedCard.model && (
+              <div className="card-detail-row">
+                <span className="card-detail-label">Model</span>
+                <span>{selectedCard.model}</span>
+              </div>
+            )}
+            {selectedCard.effort && (
+              <div className="card-detail-row">
+                <span className="card-detail-label">Effort</span>
+                <span>{selectedCard.effort}</span>
+              </div>
+            )}
+            <div className="card-detail-row">
+              <span className="card-detail-label">Blocked</span>
+              <span>{selectedCard.blocked ? 'Yes' : 'No'}</span>
+            </div>
+            {selectedCard.block_reason && (
+              <div className="card-detail-row">
+                <span className="card-detail-label">Block Reason</span>
+                <span>{selectedCard.block_reason}</span>
+              </div>
+            )}
+            {(selectedCard.depends_on?.length ?? 0) > 0 && (
+              <div className="card-detail-row">
+                <span className="card-detail-label">Depends On</span>
                 <span>
-                  {STEPS.find((s) => s.key === selectedCard.step)?.label ?? selectedCard.step}
+                  {selectedCard.depends_on!.map((id) => {
+                    const dep = cardById.get(id)
+                    if (!dep) return null
+                    const done = normalizeStep(dep.step) === 'done'
+                    return (
+                      <span key={id} className={done ? 'dep-done' : 'dep-pending'}>
+                        {dep.title}
+                        {done ? ' ✓' : ' (pending)'}
+                        {'  '}
+                      </span>
+                    )
+                  })}
                 </span>
               </div>
-              <div className="card-detail-row">
-                <span className="card-detail-label">Priority</span>
-                {priorityBadge(selectedCard.priority, priorities)}
+            )}
+            {selectedCard.description && (
+              <div className="card-detail-row card-detail-row-description">
+                <span className="card-detail-label">Description</span>
+                <SafeMarkdown className="card-detail-description">
+                  {selectedCard.description}
+                </SafeMarkdown>
               </div>
-              {selectedCard.workflow && (
-                <div className="card-detail-row">
-                  <span className="card-detail-label">Workflow</span>
-                  <span>{selectedCard.workflow}</span>
-                </div>
-              )}
-              {selectedCard.model && (
-                <div className="card-detail-row">
-                  <span className="card-detail-label">Model</span>
-                  <span>{selectedCard.model}</span>
-                </div>
-              )}
-              {selectedCard.effort && (
-                <div className="card-detail-row">
-                  <span className="card-detail-label">Effort</span>
-                  <span>{selectedCard.effort}</span>
-                </div>
-              )}
+            )}
+            {selectedCard.handoff_context && (
               <div className="card-detail-row">
-                <span className="card-detail-label">Blocked</span>
-                <span>{selectedCard.blocked ? 'Yes' : 'No'}</span>
+                <span className="card-detail-label">Handoff Context</span>
+                <span>{selectedCard.handoff_context}</span>
               </div>
-              {selectedCard.block_reason && (
-                <div className="card-detail-row">
-                  <span className="card-detail-label">Block Reason</span>
-                  <span>{selectedCard.block_reason}</span>
+            )}
+            {cardReports.length > 0 && (
+              <div className="card-detail-row" style={{ flexDirection: 'column', gap: 6 }}>
+                <span className="card-detail-label">Reports ({cardReports.length})</span>
+                <div className="card-reports-list">
+                  {cardReports.map((r) => (
+                    <button
+                      key={`${r.folder}/${r.file}`}
+                      className="card-report-link"
+                      onClick={() => {
+                        window.location.assign('/reports')
+                      }}
+                    >
+                      <span className="card-report-title">{r.title}</span>
+                      <span className="card-report-date">{r.date?.split('T')[0] ?? r.folder}</span>
+                    </button>
+                  ))}
                 </div>
-              )}
-              {(selectedCard.depends_on?.length ?? 0) > 0 && (
-                <div className="card-detail-row">
-                  <span className="card-detail-label">Depends On</span>
-                  <span>
-                    {selectedCard.depends_on!.map((id) => {
-                      const dep = cardById.get(id)
-                      if (!dep) return null
-                      const done = normalizeStep(dep.step) === 'done'
-                      return (
-                        <span key={id} className={done ? 'dep-done' : 'dep-pending'}>
-                          {dep.title}
-                          {done ? ' ✓' : ' (pending)'}
-                          {'  '}
-                        </span>
-                      )
-                    })}
-                  </span>
-                </div>
-              )}
-              {selectedCard.description && (
-                <div className="card-detail-row card-detail-row-description">
-                  <span className="card-detail-label">Description</span>
-                  <SafeMarkdown className="card-detail-description">
-                    {selectedCard.description}
-                  </SafeMarkdown>
-                </div>
-              )}
-              {selectedCard.handoff_context && (
-                <div className="card-detail-row">
-                  <span className="card-detail-label">Handoff Context</span>
-                  <span>{selectedCard.handoff_context}</span>
-                </div>
-              )}
-              {cardReports.length > 0 && (
-                <div className="card-detail-row" style={{ flexDirection: 'column', gap: 6 }}>
-                  <span className="card-detail-label">Reports ({cardReports.length})</span>
-                  <div className="card-reports-list">
-                    {cardReports.map((r) => (
-                      <button
-                        key={`${r.folder}/${r.file}`}
-                        className="card-report-link"
-                        onClick={() => {
-                          window.location.assign('/reports')
-                        }}
-                      >
-                        <span className="card-report-title">{r.title}</span>
-                        <span className="card-report-date">
-                          {r.date?.split('T')[0] ?? r.folder}
-                        </span>
-                      </button>
-                    ))}
-                  </div>
-                </div>
-              )}
-            </div>
-            <div className="card-detail-actions">
-              {(selectedCard.worker_session_id || selectedCard.last_worker_session_id) &&
-                normalizeStep(selectedCard.step) !== 'backlog' && (
-                  <button
-                    className="btn-secondary"
-                    onClick={() =>
-                      handleViewSession(
-                        (selectedCard.worker_session_id || selectedCard.last_worker_session_id)!,
-                      )
-                    }
-                  >
-                    View Session
-                  </button>
-                )}
-              <button className="btn-secondary" onClick={() => setSelectedCard(null)}>
-                Close
-              </button>
-            </div>
+              </div>
+            )}
           </div>
-        </div>
+          <div className="card-detail-actions">
+            {(selectedCard.worker_session_id || selectedCard.last_worker_session_id) &&
+              normalizeStep(selectedCard.step) !== 'backlog' && (
+                <button
+                  className="btn-secondary"
+                  onClick={() =>
+                    handleViewSession(
+                      (selectedCard.worker_session_id || selectedCard.last_worker_session_id)!,
+                    )
+                  }
+                >
+                  View Session
+                </button>
+              )}
+            <button className="btn-secondary" onClick={() => setSelectedCard(null)}>
+              Close
+            </button>
+          </div>
+        </Modal>
       )}
 
       {editingCard && (

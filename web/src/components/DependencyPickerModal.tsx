@@ -1,5 +1,6 @@
 import { useMemo, useState } from 'react'
 import type { Card } from '../types/api'
+import Modal from './Modal'
 
 interface DependencyPickerModalProps {
   candidates: Card[]
@@ -101,65 +102,50 @@ export default function DependencyPickerModal({
   }
 
   return (
-    <div
-      className="modal-backdrop dependency-picker-backdrop"
-      onClick={(e) => {
-        // CardFormModal renders this picker as a child of its own
-        // `.modal-backdrop`, which closes the outer modal on backdrop
-        // click. Stop the event here so dismissing the picker doesn't
-        // also dismiss the form behind it.
-        e.stopPropagation()
-        onCancel()
-      }}
+    <Modal
+      onClose={onCancel}
+      maxWidth={520}
+      className="dependency-picker-modal"
+      backdropClassName="dependency-picker-backdrop"
     >
-      <div
-        className="modal dependency-picker-modal"
-        onClick={(e) => e.stopPropagation()}
-        style={{ maxWidth: 520 }}
-      >
-        <h2>Select Dependencies</h2>
-        <p className="form-hint" style={{ marginTop: 0, marginBottom: 10 }}>
-          A worker only starts this card once every selected card is done.
-        </p>
-        <input
-          className="form-input dependency-picker-search"
-          placeholder="Search cards..."
-          value={search}
-          onChange={(e) => setSearch(e.target.value)}
-          autoFocus
-        />
-        <div className="dependency-picker-list">
-          {visible.length === 0 ? (
-            <p className="form-hint dependency-picker-empty">
-              {search.trim()
-                ? 'No cards match your search.'
-                : 'No backlog or running cards to depend on.'}
-            </p>
-          ) : (
-            visible.map((c) => (
-              <label key={c.id} className="dependency-picker-option">
-                <input
-                  type="checkbox"
-                  checked={draft.includes(c.id)}
-                  onChange={() => toggle(c.id)}
-                />
-                <span className="dependency-picker-option-title">{c.title}</span>
-                <span className={`dependency-picker-step step-${normalizeStep(c.step)}`}>
-                  {stepLabel(c.step)}
-                </span>
-              </label>
-            ))
-          )}
-        </div>
-        <div className="form-actions">
-          <button type="button" className="btn-secondary" onClick={onCancel}>
-            Cancel
-          </button>
-          <button type="button" className="btn-primary" onClick={() => onConfirm(draft)}>
-            {draft.length === 0 ? 'Clear Dependencies' : `Save (${draft.length})`}
-          </button>
-        </div>
+      <h2>Select Dependencies</h2>
+      <p className="form-hint" style={{ marginTop: 0, marginBottom: 10 }}>
+        A worker only starts this card once every selected card is done.
+      </p>
+      <input
+        className="form-input dependency-picker-search"
+        placeholder="Search cards..."
+        value={search}
+        onChange={(e) => setSearch(e.target.value)}
+        autoFocus
+      />
+      <div className="dependency-picker-list">
+        {visible.length === 0 ? (
+          <p className="form-hint dependency-picker-empty">
+            {search.trim()
+              ? 'No cards match your search.'
+              : 'No backlog or running cards to depend on.'}
+          </p>
+        ) : (
+          visible.map((c) => (
+            <label key={c.id} className="dependency-picker-option">
+              <input type="checkbox" checked={draft.includes(c.id)} onChange={() => toggle(c.id)} />
+              <span className="dependency-picker-option-title">{c.title}</span>
+              <span className={`dependency-picker-step step-${normalizeStep(c.step)}`}>
+                {stepLabel(c.step)}
+              </span>
+            </label>
+          ))
+        )}
       </div>
-    </div>
+      <div className="form-actions">
+        <button type="button" className="btn-secondary" onClick={onCancel}>
+          Cancel
+        </button>
+        <button type="button" className="btn-primary" onClick={() => onConfirm(draft)}>
+          {draft.length === 0 ? 'Clear Dependencies' : `Save (${draft.length})`}
+        </button>
+      </div>
+    </Modal>
   )
 }

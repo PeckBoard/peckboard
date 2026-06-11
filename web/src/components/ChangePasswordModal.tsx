@@ -1,6 +1,7 @@
 import { useState, type FormEvent } from 'react'
 import { useAuthStore } from '../store/auth'
 import { useUsersStore } from '../store/users'
+import Modal from './Modal'
 
 const MIN_PASSWORD_LEN = 12
 
@@ -62,93 +63,87 @@ export default function ChangePasswordModal({ mode, onClose }: Props) {
   }
 
   return (
-    <div className="modal-backdrop" onClick={onClose}>
-      <div className="modal" onClick={(e) => e.stopPropagation()}>
-        <h2>{title}</h2>
-        {done ? (
-          <>
-            <p style={{ color: 'var(--text2)', fontSize: 'var(--text-sm)' }}>
-              Password updated. Any existing sessions for{' '}
-              {mode.kind === 'admin' ? mode.targetUsername : 'this user'} have been revoked.
-            </p>
-            <div className="form-actions">
-              <button type="button" className="btn-primary" onClick={onClose}>
-                Done
-              </button>
-            </div>
-          </>
-        ) : (
-          <form onSubmit={handleSubmit}>
-            {mode.kind === 'self' && (
-              <div className="form-field">
-                <label className="form-label" htmlFor="cp-current">
-                  Current password
-                </label>
-                <input
-                  id="cp-current"
-                  className="form-input"
-                  type="password"
-                  value={currentPassword}
-                  onChange={(e) => setCurrentPassword(e.target.value)}
-                  autoFocus
-                  required
-                />
-              </div>
-            )}
+    <Modal onClose={onClose}>
+      <h2>{title}</h2>
+      {done ? (
+        <>
+          <p style={{ color: 'var(--text2)', fontSize: 'var(--text-sm)' }}>
+            Password updated. Any existing sessions for{' '}
+            {mode.kind === 'admin' ? mode.targetUsername : 'this user'} have been revoked.
+          </p>
+          <div className="form-actions">
+            <button type="button" className="btn-primary" onClick={onClose}>
+              Done
+            </button>
+          </div>
+        </>
+      ) : (
+        <form onSubmit={handleSubmit}>
+          {mode.kind === 'self' && (
             <div className="form-field">
-              <label className="form-label" htmlFor="cp-new">
-                New password
+              <label className="form-label" htmlFor="cp-current">
+                Current password
               </label>
               <input
-                id="cp-new"
+                id="cp-current"
                 className="form-input"
                 type="password"
-                value={newPassword}
-                onChange={(e) => setNewPassword(e.target.value)}
-                autoFocus={mode.kind === 'admin'}
-                minLength={MIN_PASSWORD_LEN}
-                required
-              />
-              <span className="form-hint">At least {MIN_PASSWORD_LEN} characters</span>
-            </div>
-            <div className="form-field">
-              <label className="form-label" htmlFor="cp-confirm">
-                Confirm new password
-              </label>
-              <input
-                id="cp-confirm"
-                className="form-input"
-                type="password"
-                value={confirmPassword}
-                onChange={(e) => setConfirmPassword(e.target.value)}
+                value={currentPassword}
+                onChange={(e) => setCurrentPassword(e.target.value)}
+                autoFocus
                 required
               />
             </div>
-            {error && <p className="form-error">{error}</p>}
-            <div className="form-actions">
-              <button type="button" className="btn-secondary" onClick={onClose}>
-                Cancel
-              </button>
-              <button
-                className="btn-primary"
-                type="submit"
-                disabled={
-                  loading ||
-                  newPassword.length < MIN_PASSWORD_LEN ||
-                  newPassword !== confirmPassword ||
-                  (mode.kind === 'self' && !currentPassword)
-                }
-              >
-                {loading
-                  ? 'Saving...'
-                  : mode.kind === 'self'
-                    ? 'Change Password'
-                    : 'Reset Password'}
-              </button>
-            </div>
-          </form>
-        )}
-      </div>
-    </div>
+          )}
+          <div className="form-field">
+            <label className="form-label" htmlFor="cp-new">
+              New password
+            </label>
+            <input
+              id="cp-new"
+              className="form-input"
+              type="password"
+              value={newPassword}
+              onChange={(e) => setNewPassword(e.target.value)}
+              autoFocus={mode.kind === 'admin'}
+              minLength={MIN_PASSWORD_LEN}
+              required
+            />
+            <span className="form-hint">At least {MIN_PASSWORD_LEN} characters</span>
+          </div>
+          <div className="form-field">
+            <label className="form-label" htmlFor="cp-confirm">
+              Confirm new password
+            </label>
+            <input
+              id="cp-confirm"
+              className="form-input"
+              type="password"
+              value={confirmPassword}
+              onChange={(e) => setConfirmPassword(e.target.value)}
+              required
+            />
+          </div>
+          {error && <p className="form-error">{error}</p>}
+          <div className="form-actions">
+            <button type="button" className="btn-secondary" onClick={onClose}>
+              Cancel
+            </button>
+            <button
+              className="btn-primary"
+              type="submit"
+              disabled={
+                loading ||
+                newPassword.length < MIN_PASSWORD_LEN ||
+                newPassword !== confirmPassword ||
+                (mode.kind === 'self' && !currentPassword)
+              }
+            >
+              {loading ? 'Saving...' : mode.kind === 'self' ? 'Change Password' : 'Reset Password'}
+            </button>
+          </div>
+        </form>
+      )}
+    </Modal>
   )
 }
