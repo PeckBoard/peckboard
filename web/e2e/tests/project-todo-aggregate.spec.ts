@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os'
 import path from 'node:path'
 
 /**
- * UI e2e test for the project-page todo/task aggregate view.
+ * UI e2e test for the project-page in-board todo aggregate panel.
  *
  * Drives the real React app end-to-end: creates a project + card whose worker
  * is dispatched by the orchestrator with the deterministic `mock:todo`
@@ -15,8 +15,9 @@ import path from 'node:path'
  * paused (so the orchestrator can't re-dispatch and churn the snapshot), the
  * board is loaded, and we assert:
  *   - the kanban card shows a "1/3" progress badge,
- *   - the aggregate panel groups the work items by Pending / In Progress / Done
- *     with the right counts.
+ *   - the in-board panel is grouped per card (one section per card with active
+ *     work) and hides done items — the standalone /projects/:id/todos page is
+ *     where the full picture (including done) lives.
  * Then a fresh `todo` snapshot is POSTed over the same WS broadcast path the
  * real provider uses, and we assert the aggregate re-buckets live (latest wins).
  */
@@ -166,16 +167,21 @@ test('project page aggregates worker todos and updates live', async ({
   // The aggregate panel renders the rolled-up snapshot.
   const panel = page.getByTestId('project-todo-summary')
   await expect(panel).toBeVisible({ timeout: 15_000 })
-  await expect(page.getByTestId('todo-panel-count')).toHaveText('1/3 done')
+  // In-board panel hides done; with 1 in_progress + 1 pending, count is "2 active".
+  await expect(page.getByTestId('todo-panel-count')).toHaveText('2 active')
 
-  // Per-card progress badge on the kanban card.
+  // Per-card progress badge on the kanban card (still tracks done/total).
+  // The kanban card is collapsed by default — tap its header to reveal the
+  // body where the badge lives.
+  await page.locator('.kanban-card-title', { hasText: 'Ship the parser' }).click()
   await expect(page.getByTestId('card-todo-badge')).toHaveText('1/3')
 
-  // Items grouped by status with the right counts.
-  await expect(page.locator('[data-testid="todo-item"][data-status="done"]')).toHaveCount(1)
-  await expect(page.locator('[data-testid="todo-item"][data-status="done"]')).toContainText(
-    'Write the parser',
-  )
+  // Grouped by card — one section per card with active work, titled with the
+  // card title. The done item is hidden in this view.
+  const cardSection = page.getByTestId('project-todo-summary-card')
+  await expect(cardSection).toHaveCount(1)
+  await expect(cardSection).toContainText('Ship the parser')
+  await expect(page.locator('[data-testid="todo-item"][data-status="done"]')).toHaveCount(0)
   await expect(page.locator('[data-testid="todo-item"][data-status="in_progress"]')).toContainText(
     'Wiring up the route',
   )
@@ -201,11 +207,11 @@ test('project page aggregates worker todos and updates live', async ({
   })
   expect(updateRes.ok(), `update event failed: ${await updateRes.text()}`).toBeTruthy()
 
-  // The aggregate re-buckets live: 2/3 done, pending group gone, in-progress now
-  // shows "Adding tests"; the card badge tracks it too.
-  await expect(page.getByTestId('todo-panel-count')).toHaveText('2/3 done')
+  // The aggregate re-buckets live: only the 1 in_progress item remains visible
+  // (done items hidden, no pending left); the card badge tracks 2/3 done.
+  await expect(page.getByTestId('todo-panel-count')).toHaveText('1 active')
   await expect(page.getByTestId('card-todo-badge')).toHaveText('2/3')
-  await expect(page.locator('[data-testid="todo-item"][data-status="done"]')).toHaveCount(2)
+  await expect(page.locator('[data-testid="todo-item"][data-status="done"]')).toHaveCount(0)
   await expect(page.locator('[data-testid="todo-item"][data-status="pending"]')).toHaveCount(0)
   await expect(page.locator('[data-testid="todo-item"][data-status="in_progress"]')).toContainText(
     'Adding tests',

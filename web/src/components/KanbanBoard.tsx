@@ -1212,7 +1212,7 @@ export default function KanbanBoard({ projectId, onOpenTodos }: KanbanBoardProps
       {/* Project-level todo roll-up across every card's worker session.
           Docked at the bottom of the board, outside the scroll area —
           same pattern as the chat-side TodoPanel. */}
-      <ProjectTodoSummary todosByCard={todosByCard} />
+      <ProjectTodoSummary cards={cards} todosByCard={todosByCard} />
 
       {confirmDeleteId && (
         <div className="modal-backdrop" onClick={() => setConfirmDeleteId(null)}>
