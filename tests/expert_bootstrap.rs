@@ -30,6 +30,7 @@ fn ctx(db: &Arc<Db>, session_id: &str) -> ToolCallContext {
         provider_registry: None,
         expert_dispatcher: None,
         data_dir: None,
+        folder_id: "f1".into(),
         pm_authorizations: Default::default(),
     }
 }

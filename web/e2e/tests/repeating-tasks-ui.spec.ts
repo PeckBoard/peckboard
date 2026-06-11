@@ -179,14 +179,20 @@ test('editing preserves model/effort and round-trips changes', async ({
   await expect(page.getByText('mock:happy-path')).toBeVisible()
   await expect(page.getByText('low', { exact: true })).toBeVisible()
 
-  // Open edit modal. The Model select should be pre-populated.
+  // Open edit modal. The Model select should be pre-populated. Use
+  // exact label matches so the lookup doesn't also grab the "Close
+  // ${task-name}" aria-labels on tab-strip close buttons — task names
+  // in this test contain "model"/"effort" by design (they verify those
+  // form fields), and the tab strip now opens a chip for whichever
+  // task is active. `{ exact: true }` keeps the locator scoped to the
+  // form selects.
   await page.getByRole('button', { name: /^edit$/i }).click()
   await expect(page.getByRole('heading', { name: /edit repeating task/i })).toBeVisible()
-  await expect(page.getByLabel('Model')).toHaveValue('mock:happy-path')
-  await expect(page.getByLabel('Effort')).toHaveValue('low')
+  await expect(page.getByLabel('Model', { exact: true })).toHaveValue('mock:happy-path')
+  await expect(page.getByLabel('Effort', { exact: true })).toHaveValue('low')
 
   // Change effort and save.
-  await page.getByLabel('Effort').selectOption({ value: 'max' })
+  await page.getByLabel('Effort', { exact: true }).selectOption({ value: 'max' })
   await page.getByRole('button', { name: /^save$/i }).click()
   // Detail panel should reflect the new effort.
   await expect(page.getByText('max', { exact: true })).toBeVisible()

@@ -21,6 +21,7 @@ mod usage;
 mod users;
 mod workflow_instructions;
 
+pub use folders::{MoveFolderOutcome, ProjectMoveReport, RepeatingTaskMoveReport};
 pub use todos::ProjectCardTodos;
 pub use usage::UsageRollupRow;
 

@@ -219,7 +219,7 @@ async fn download_report(
 /// vulnerable to inputs like `"."` (trims to `""`) and other edge
 /// cases that the attachments module already addresses via its
 /// stricter `is_safe_id`.
-fn safe_segment(name: &str, allow_md: bool) -> Option<String> {
+pub(crate) fn safe_segment(name: &str, allow_md: bool) -> Option<String> {
     if name.is_empty() || name.len() > 128 {
         return None;
     }
@@ -274,6 +274,25 @@ fn parse_frontmatter(content: &str, folder: &str, file: &str) -> ReportMeta {
         session_id,
         project_name,
     }
+}
+
+/// Public helper: extract just the report's display title from its
+/// markdown content. Falls back to the file stem when the frontmatter
+/// is missing or has no `title:` line. Used by the tabs endpoint
+/// (`src/routes/me.rs`) to label report tabs without duplicating the
+/// frontmatter parser.
+pub(crate) fn report_title(content: &str, file: &str) -> String {
+    if let Some(fm) = extract_frontmatter(content) {
+        for line in fm.lines() {
+            if let Some(val) = line.strip_prefix("title:") {
+                let t = val.trim().trim_matches('"').trim().to_string();
+                if !t.is_empty() {
+                    return t;
+                }
+            }
+        }
+    }
+    file.trim_end_matches(".md").to_string()
 }
 
 fn extract_frontmatter(content: &str) -> Option<String> {

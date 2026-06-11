@@ -71,6 +71,7 @@ async fn spin_up_experts_creates_persistent_hidden_experts() {
         provider_registry: None,
         expert_dispatcher: None,
         data_dir: None,
+        folder_id: "f1".into(),
         pm_authorizations: Default::default(),
     };
 
@@ -153,6 +154,7 @@ async fn spin_up_experts_rejects_out_of_scope_project() {
         provider_registry: None,
         expert_dispatcher: None,
         data_dir: None,
+        folder_id: "f1".into(),
         pm_authorizations: Default::default(),
     };
     let err = registry

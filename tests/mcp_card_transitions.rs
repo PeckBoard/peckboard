@@ -66,6 +66,7 @@ async fn build_state() -> Arc<AppState> {
         provider_registry: registry,
         session_manager,
         repeating_task_manager: peckboard::repeating::RepeatingTaskManager::new(),
+        run_auditor: peckboard::repeating::RunAuditor::new(),
         mcp_tokens: McpTokenRegistry::new(),
         push_service: PushService::new(&data_dir),
         pm_authorizations: Default::default(),
@@ -186,6 +187,7 @@ fn ctx_for_card(state: &Arc<AppState>, session_id: &str, card_id: &str) -> ToolC
         provider_registry: None,
         expert_dispatcher: None,
         data_dir: None,
+        folder_id: "f1".into(),
         pm_authorizations: Default::default(),
     }
 }
@@ -878,6 +880,7 @@ fn ctx_for_project(state: &Arc<AppState>, session_id: &str) -> ToolCallContext {
         provider_registry: None,
         expert_dispatcher: None,
         data_dir: None,
+        folder_id: "f1".into(),
         pm_authorizations: Default::default(),
     }
 }
@@ -1052,6 +1055,7 @@ fn ctx_with_registry(
         provider_registry: Some(registry),
         expert_dispatcher: None,
         data_dir: None,
+        folder_id: "f1".into(),
         pm_authorizations: Default::default(),
     }
 }
@@ -1249,6 +1253,7 @@ fn unscoped_ctx(state: &Arc<AppState>) -> ToolCallContext {
         provider_registry: None,
         expert_dispatcher: None,
         data_dir: None,
+        folder_id: "f1".into(),
         pm_authorizations: Default::default(),
     }
 }

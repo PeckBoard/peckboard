@@ -182,19 +182,33 @@ async fn mcp_handler(
             // `send_worker_message`, etc. bypass scope by passing a
             // different project/card/session id in the arguments.
 
-            // Look up the session to get card_id context
-            let card_id = state
-                .db
-                .get_session(&session_id)
-                .await
-                .ok()
-                .flatten()
-                .and_then(|s| s.card_id);
+            // Look up the session row once to derive both `card_id` and
+            // `folder_id` for the tool-call context. The folder is the
+            // load-bearing boundary every scope check enforces, so a
+            // missing session row is fatal here — without a folder we'd
+            // have to pick "deny everything" or "allow everything" by
+            // default, and either way the call is broken.
+            let session_row = match state.db.get_session(&session_id).await {
+                Ok(Some(s)) => s,
+                _ => {
+                    return (
+                        StatusCode::UNAUTHORIZED,
+                        rpc_json(JsonRpcResponse::error(
+                            body.id,
+                            -32000,
+                            "session not found for token".into(),
+                        )),
+                    );
+                }
+            };
+            let card_id = session_row.card_id.clone();
+            let folder_id = session_row.folder_id.clone();
 
             let ctx = ToolCallContext {
                 session_id,
                 project_id: token_project_id,
                 card_id,
+                folder_id,
                 db: Arc::new(state.db.clone()),
                 broadcaster: state.broadcaster.clone(),
                 provider_registry: Some(state.provider_registry.clone()),

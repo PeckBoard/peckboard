@@ -61,6 +61,7 @@ async fn build_state() -> Arc<AppState> {
         provider_registry: registry,
         session_manager,
         repeating_task_manager: peckboard::repeating::RepeatingTaskManager::new(),
+        run_auditor: peckboard::repeating::RunAuditor::new(),
         mcp_tokens: McpTokenRegistry::new(),
         push_service: PushService::new(&data_dir),
         pm_authorizations: Default::default(),

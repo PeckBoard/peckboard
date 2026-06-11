@@ -229,7 +229,7 @@ impl McpToolRegistry {
         &self,
         ctx: &ToolCallContext,
     ) -> anyhow::Result<Value> {
-        tracing::info!(session_id = %ctx.session_id, "MCP tool: list_project_reports");
+        tracing::info!(session_id = %ctx.session_id, folder_id = %ctx.folder_id, "MCP tool: list_project_reports");
 
         let project_id = self.resolve_project_id(ctx).await;
         let project_name = if let Some(ref pid) = project_id {
@@ -237,6 +237,19 @@ impl McpToolRegistry {
         } else {
             None
         };
+
+        // Build the set of project NAMES that live in the caller's
+        // folder. Reports tag themselves with `projectName` (not id),
+        // so we filter against names. Sibling-folder reports become
+        // invisible.
+        let in_folder_project_names: std::collections::HashSet<String> = ctx
+            .db
+            .list_projects_by_folder(&ctx.folder_id)
+            .await
+            .unwrap_or_default()
+            .into_iter()
+            .map(|p| p.name)
+            .collect();
 
         // Scan reports directory for reports matching this project
         let data_dir = reports_base_dir(ctx);
@@ -277,13 +290,26 @@ impl McpToolRegistry {
                                     }
                                 }
 
-                                // Include if project matches or no filter
-                                let matches = match (&project_name, &report_project) {
+                                // Folder boundary:
+                                // - A report tagged with a project name is
+                                //   visible iff that project lives in the
+                                //   caller's folder.
+                                // - An untagged report (no projectName) is
+                                //   ambient — included only when the caller
+                                //   itself has no project context. A worker
+                                //   token shouldn't see ambient reports it
+                                //   doesn't own; a chat session can.
+                                // Within a project, also keep the
+                                //   exact-project-name preference so the
+                                //   payload stays narrow when the caller has
+                                //   a project.
+                                let included = match (&project_name, &report_project) {
                                     (Some(pn), Some(rp)) => pn == rp,
-                                    (None, _) => true,
-                                    _ => true,
+                                    (Some(_), None) => false,
+                                    (None, Some(rp)) => in_folder_project_names.contains(rp),
+                                    (None, None) => true,
                                 };
-                                if matches {
+                                if included {
                                     reports.push(serde_json::json!({
                                         "folder": folder_name,
                                         "file": file_name,
@@ -333,6 +359,53 @@ impl McpToolRegistry {
         let content = tokio::fs::read_to_string(&path)
             .await
             .map_err(|_| anyhow::anyhow!("report not found: {folder}/{file}"))?;
+
+        // Folder boundary: parse the report's `projectName` from
+        // frontmatter and require it (when present) to belong to a
+        // project in the caller's folder. An untagged report is
+        // readable only by a caller without a project context (chat
+        // sessions). The "not found" framing mirrors the path-not-found
+        // case so the caller can't distinguish "doesn't exist" from
+        // "exists but in a sibling folder".
+        let mut report_project: Option<String> = None;
+        if content.starts_with("---") {
+            if let Some(fm) = content.splitn(3, "---").nth(1) {
+                for line in fm.lines() {
+                    if let Some(v) = line.strip_prefix("projectName: ") {
+                        report_project = Some(v.trim_matches('"').to_string());
+                    }
+                }
+            }
+        }
+        let caller_project_name = match self.resolve_project_id(ctx).await {
+            Some(pid) => ctx
+                .db
+                .get_project(&pid)
+                .await
+                .ok()
+                .flatten()
+                .map(|p| p.name),
+            None => None,
+        };
+        let allowed = match (&caller_project_name, &report_project) {
+            (Some(pn), Some(rp)) => pn == rp,
+            (Some(_), None) => false,
+            (None, Some(rp)) => {
+                let in_folder: std::collections::HashSet<String> = ctx
+                    .db
+                    .list_projects_by_folder(&ctx.folder_id)
+                    .await
+                    .unwrap_or_default()
+                    .into_iter()
+                    .map(|p| p.name)
+                    .collect();
+                in_folder.contains(rp)
+            }
+            (None, None) => true,
+        };
+        if !allowed {
+            anyhow::bail!("report not found: {folder}/{file}");
+        }
 
         // Strip frontmatter for the body
         let body = if content.starts_with("---") {

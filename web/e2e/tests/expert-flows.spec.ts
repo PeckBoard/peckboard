@@ -109,27 +109,36 @@ function makeSourceTree(): string {
   return root
 }
 
-/** Create a folder on a real temp source tree + a mock-model project. */
+/** Create a folder on a real temp source tree + a mock-model project.
+ *  If `folderId` is supplied, the project is created in that folder
+ *  (skipping the folder-creation step) — used by tests that need the
+ *  caller's session and the project to share a folder, which the MCP
+ *  folder-isolation boundary now requires. */
 async function seedProject(
   request: APIRequestContext,
   authHeader: { Authorization: string },
   name: string,
+  folderId?: string,
 ): Promise<{ projectId: string; folderId: string }> {
-  const srcDir = makeSourceTree()
-  const folderRes = await request.post('/api/folders', {
-    headers: authHeader,
-    data: { name: `${name}-folder`, path: srcDir },
-  })
-  expect(folderRes.ok(), `create folder failed: ${await folderRes.text()}`).toBeTruthy()
-  const folder = (await folderRes.json()) as { id: string }
+  let resolvedFolderId = folderId
+  if (!resolvedFolderId) {
+    const srcDir = makeSourceTree()
+    const folderRes = await request.post('/api/folders', {
+      headers: authHeader,
+      data: { name: `${name}-folder`, path: srcDir },
+    })
+    expect(folderRes.ok(), `create folder failed: ${await folderRes.text()}`).toBeTruthy()
+    const folder = (await folderRes.json()) as { id: string }
+    resolvedFolderId = folder.id
+  }
 
   const projectRes = await request.post('/api/projects', {
     headers: authHeader,
-    data: { name, folder_id: folder.id, model: 'mock:echo', workflow: 'task' },
+    data: { name, folder_id: resolvedFolderId, model: 'mock:echo', workflow: 'task' },
   })
   expect(projectRes.ok(), `create project failed: ${await projectRes.text()}`).toBeTruthy()
   const project = (await projectRes.json()) as { id: string }
-  return { projectId: project.id, folderId: folder.id }
+  return { projectId: project.id, folderId: resolvedFolderId }
 }
 
 test('bootstrap: global question-expert exists on boot; per-project one after project creation', async ({
@@ -163,12 +172,12 @@ test('ask_expert delivers the question to the expert and no placeholder answer t
   const { authHeader } = await authenticate(request)
 
   // A plain session whose first message mints an (unscoped) MCP token.
+  // The caller and the demo project later share THIS folder (folder is
+  // the hard MCP isolation boundary), so the folder needs an actual
+  // source tree for `spin_up_experts` to find files to partition.
   const folderRes = await request.post('/api/folders', {
     headers: authHeader,
-    data: {
-      name: 'ask-caller-folder',
-      path: mkdtempSync(path.join(tmpdir(), 'peckboard-e2e-ask-')),
-    },
+    data: { name: 'ask-caller-folder', path: makeSourceTree() },
   })
   expect(folderRes.ok()).toBeTruthy()
   const folder = (await folderRes.json()) as { id: string }
@@ -219,8 +228,11 @@ test('ask_expert delivers the question to the expert and no placeholder answer t
   ).toBeTruthy()
 
   // Scope: a project-scoped KNOWLEDGE expert only answers within its codebase
-  // boundary, so an unscoped chat session MAY consult it cross-project.
-  const { projectId } = await seedProject(request, authHeader, 'Scope Demo')
+  // boundary, so an unscoped chat session MAY consult it cross-project — but
+  // only WITHIN THE SAME FOLDER (folder is the hard isolation boundary). Seed
+  // the demo project in the caller's folder so the cross-project carve-out
+  // stays exercised here; a separate spec covers the cross-folder rejection.
+  const { projectId } = await seedProject(request, authHeader, 'Scope Demo', folder.id)
   const spin = await mcpCall(request, callerToken, 'spin_up_experts', {
     project_id: projectId,
     max_experts: 2,
@@ -264,7 +276,9 @@ test('ask_expert delivers the question to the expert and no placeholder answer t
     denied.error,
     'unscoped caller must be rejected from a project question-expert',
   ).toBeTruthy()
-  expect(denied.error!.message.toLowerCase()).toContain('scope')
+  // Folder isolation uses "not found" framing so cross-scope probes
+  // can't be used to learn whether the expert exists.
+  expect(denied.error!.message.toLowerCase()).toContain('not found')
 })
 
 test('Q&A export: a resolved user answer is persisted to a rehydration report readable via the reports API', async ({

@@ -23,6 +23,7 @@ import NewProjectModal from './components/NewProjectModal'
 import FoldersPage from './components/ManageFoldersModal'
 import ConfirmDialog from './components/ConfirmDialog'
 import ReportBrowser from './components/ReportBrowser'
+import ReportView from './components/ReportView'
 import ExpertsView from './components/ExpertsView'
 import PmExpertView from './components/PmExpertView'
 import RepeatingTasksView from './components/RepeatingTasksView'
@@ -30,6 +31,14 @@ import UsageDashboard from './components/UsageDashboard'
 import UserManagement from './components/UserManagement'
 import ChangePasswordModal from './components/ChangePasswordModal'
 import TabBar from './components/TabBar'
+import {
+  parseReportTabId,
+  reportTabId,
+  tabIcons,
+  type TabKindHandler,
+  type TabKindRegistry,
+} from './components/tabKinds'
+import { useRepeatingTasksStore } from './store/repeatingTasks'
 import ErrorBoundary from './components/ErrorBoundary'
 import ConnectionBanner from './components/ConnectionBanner'
 import { startTabsAutoSync, useTabsStore, type TabType } from './store/tabs'
@@ -58,7 +67,11 @@ type SessionSub = 'chat' | 'todos'
 /** Parse the current URL pathname into a view, optional active ID, an
  *  optional sub-view (only meaningful when `view` is 'sessions' or
  *  'projects'), and an optional dropdown-modal hint for the few routes
- *  that map straight to a modal (`/settings`, `/plugins`). */
+ *  that map straight to a modal (`/settings`, `/plugins`).
+ *
+ *  For the reports view, `activeId` is the encoded `<folder>/<file>`
+ *  pair the user is reading (the same id used as the report tab's
+ *  `item_id`). It's `null` on `/reports` (browser/index). */
 function parseRoute(): {
   view: View
   activeId: string | null
@@ -98,8 +111,15 @@ function parseRoute(): {
       return { view: 'sessions', activeId: null, sub: 'chat', modal: 'settings' }
     case 'plugins':
       return { view: 'sessions', activeId: null, sub: 'chat', modal: 'plugins' }
-    case 'reports':
-      return { view: 'reports', activeId: null, sub: 'chat', modal: null }
+    case 'reports': {
+      // `/reports` — index; `/reports/<folder>/<file>` — single report
+      // viewer. We compose the same `<folder>/<file>` id the tab strip
+      // uses so both surfaces share one identifier.
+      const folder = segments[1]
+      const file = segments[2]
+      const activeId = folder && file ? `${folder}/${file}` : null
+      return { view: 'reports', activeId, sub: 'chat', modal: null }
+    }
     case 'users':
       return { view: 'users', activeId: null, sub: 'chat', modal: null }
     default:
@@ -114,6 +134,12 @@ function buildPath(view: View, activeId?: string | null, sub?: SessionSub): stri
   }
   if (view === 'repeatingTasks') {
     return activeId ? `/repeating-tasks/${activeId}` : '/repeating-tasks'
+  }
+  if (view === 'reports') {
+    // activeId is the `<folder>/<file>` pair; do NOT encode the slash
+    // (it's the path separator). Each segment is already restricted to
+    // the safe charset by the reports route, so passing through is OK.
+    return activeId ? `/reports/${activeId}` : '/reports'
   }
   if (activeId) return `/${view}/${activeId}`
   if (view === 'sessions') return '/'
@@ -184,6 +210,14 @@ function App() {
     return m
   }, [folders])
 
+  // Lookup tables used by the tab strip to resolve a tab's live name
+  // (a rename mid-session shows up on the chip instantly, without
+  // waiting on the next /api/me/tabs refetch). Kept up here so the
+  // TabBar's registry handlers can close over them without paying
+  // for a fresh `new Map(...)` per row.
+  const sessionMap = useMemo(() => new Map(sessions.map((s) => [s.id, s])), [sessions])
+  const projectMap = useMemo(() => new Map(projects.map((p) => [p.id, p])), [projects])
+
   // Defense-in-depth: experts must never appear in the chat session
   // list. The API (GET /api/sessions) already excludes them, but filter
   // again client-side so a backend regression can't leak them here.
@@ -198,6 +232,15 @@ function App() {
   const [activeRepeatingTaskId, setActiveRepeatingTaskId] = useState<string | null>(
     initialRoute.view === 'repeatingTasks' ? initialRoute.activeId : null,
   )
+  // Active report — encoded `<folder>/<file>` pair when the route is
+  // `/reports/:folder/:file`, null on the `/reports` index. Kept as a
+  // single string (not split into two `useState`s) so the registry can
+  // pass it straight to the tab strip as `item_id` and so the storage
+  // shape matches what the backend persists in `user_tabs.item_id`.
+  const initialReportId =
+    initialRoute.view === 'reports' && initialRoute.activeId ? initialRoute.activeId : null
+  const [activeReportId, setActiveReportId] = useState<string | null>(initialReportId)
+  const repeatingTasks = useRepeatingTasksStore((s) => s.tasks)
   // The expert whose transcript is open (route `/experts/:id`). Tracked
   // locally rather than in a store: experts are deliberately kept out of the
   // session list / tab system, so this never feeds the MRU tab logic.
@@ -217,6 +260,9 @@ function App() {
   const [confirmDeleteProjectId, setConfirmDeleteProjectId] = useState<string | null>(null)
   const [confirmClearSessionId, setConfirmClearSessionId] = useState<string | null>(null)
   const [confirmTerminateSessionId, setConfirmTerminateSessionId] = useState<string | null>(null)
+  const [confirmDeleteRepeatingTaskId, setConfirmDeleteRepeatingTaskId] = useState<string | null>(
+    null,
+  )
   const [announcement, setAnnouncement] = useState<Announcement | null>(null)
   const [userMenuOpen, setUserMenuOpen] = useState(false)
   const [showChangePassword, setShowChangePassword] = useState(false)
@@ -300,6 +346,8 @@ function App() {
         setActiveRepeatingTaskId(route.activeId)
       } else if (route.view === 'experts') {
         setActiveExpertId(route.activeId)
+      } else if (route.view === 'reports') {
+        setActiveReportId(route.activeId)
       }
     }
     window.addEventListener('popstate', onPopState)
@@ -331,6 +379,28 @@ function App() {
       }
     }
   }, [view, activeProjectId, sessionSub, dropdownModal])
+
+  // When the active repeating task changes, update URL.
+  useEffect(() => {
+    if (dropdownModal) return
+    if (view === 'repeatingTasks') {
+      const path = buildPath('repeatingTasks', activeRepeatingTaskId)
+      if (window.location.pathname !== path) {
+        history.pushState(null, '', path)
+      }
+    }
+  }, [view, activeRepeatingTaskId, dropdownModal])
+
+  // When the active report changes, update URL.
+  useEffect(() => {
+    if (dropdownModal) return
+    if (view === 'reports') {
+      const path = buildPath('reports', activeReportId)
+      if (window.location.pathname !== path) {
+        history.pushState(null, '', path)
+      }
+    }
+  }, [view, activeReportId, dropdownModal])
 
   useEffect(() => {
     const saved = localStorage.getItem('peckboard_theme')
@@ -551,6 +621,31 @@ function App() {
     }
   }, [authenticated, activeProjectId, projectsLoaded, projects, setActiveProject])
 
+  // Open / promote a tab for an active repeating task. The store
+  // refuses to upsert a tab for a non-existent task (server-side 404
+  // rolls back the optimistic insert), so even a stale URL can't write
+  // a phantom row — we just open the tab and let the GET filter clean
+  // up if something raced.
+  useEffect(() => {
+    if (!authenticated || !activeRepeatingTaskId) return
+    useTabsStore.getState().openTab('repeating_task', activeRepeatingTaskId)
+  }, [authenticated, activeRepeatingTaskId])
+
+  // Open / promote a tab for an active report. Reports are file-backed
+  // and the backend validates existence at upsert time; a stale URL
+  // results in a 404 here, which closes the optimistic insert
+  // gracefully without leaving a phantom chip.
+  useEffect(() => {
+    if (!authenticated || !activeReportId) return
+    useTabsStore.getState().openTab('report', activeReportId)
+  }, [authenticated, activeReportId])
+
+  // When a repeating task is deleted (locally or cross-device), the
+  // store cascade pulls the chip from the strip; the RepeatingTasksView
+  // itself renders a "Task not found" empty-state on a stale id, so
+  // there's no setState-in-effect cleanup to do here. The activeId
+  // clears when the user clicks "Back to list".
+
   if (!initialized) {
     return (
       <div className="loading-screen">
@@ -640,7 +735,7 @@ function App() {
           /* ignore */
         }
       }
-    } else {
+    } else if (type === 'project') {
       const current = projects.find((p) => p.id === id)?.name ?? ''
       const next = window.prompt('Rename project:', current)
       if (next && next !== current) {
@@ -650,6 +745,124 @@ function App() {
           /* ignore */
         }
       }
+    } else if (type === 'repeating_task') {
+      const current = repeatingTasks.find((t) => t.id === id)?.name ?? ''
+      const next = window.prompt('Rename task:', current)
+      if (next && next !== current) {
+        try {
+          await useRepeatingTasksStore.getState().updateTask(id, { name: next })
+        } catch {
+          /* ignore */
+        }
+      }
+    }
+    // Reports are file-backed and named at write time; no rename path.
+  }
+
+  // Assemble the per-kind glue the TabBar uses. Adding a new tab kind
+  // = adding a new entry here; the TabBar is purely presentational and
+  // doesn't know what a "session" or "report" is. The registry shape
+  // (`Record<TabType, TabKindHandler>`) means the compiler refuses to
+  // build if a new kind is added to `TabType` but missed here.
+  //
+  // Not memoized: the contents close over store snapshots that change
+  // every render anyway (sessionMap, processing, unreadSessions, …),
+  // so re-building the registry each render is cheaper than tracking
+  // every dep. The TabBar takes the registry as a plain prop and the
+  // OpenedTab rows aren't memoized either.
+  const sessionKind: TabKindHandler = {
+    isActive: (tab) => view === 'sessions' && activeSessionId === tab.itemId,
+    getLiveName: (tab) => sessionMap.get(tab.itemId)?.name ?? null,
+    getBadges: (tab, active) => ({
+      running: processing.has(tab.itemId),
+      unread: !active && unreadSessions.has(tab.itemId),
+    }),
+    getIcon: () => null,
+    onActivate: (tab) => {
+      setActiveSession(tab.itemId)
+      navigate('sessions', tab.itemId)
+    },
+    getMenuItems: (tab) => [
+      { label: 'Rename', onSelect: () => handleRenameItem('session', tab.itemId) },
+      { label: 'Clear session', onSelect: () => setConfirmClearSessionId(tab.itemId) },
+      { label: 'Terminate agent', onSelect: () => setConfirmTerminateSessionId(tab.itemId) },
+      // Worker sessions are owned by their card — the backend refuses
+      // DELETE /api/sessions/:id for them. Hide rather than render a
+      // button that always 409s.
+      {
+        label: 'Delete session',
+        danger: true,
+        onSelect: () => setConfirmDeleteId(tab.itemId),
+        hidden: tab.isWorker,
+      },
+    ],
+  }
+  const projectKind: TabKindHandler = {
+    isActive: (tab) => view === 'projects' && activeProjectId === tab.itemId,
+    getLiveName: (tab) => projectMap.get(tab.itemId)?.name ?? null,
+    getBadges: () => ({ running: false, unread: false }),
+    getIcon: () => tabIcons.project,
+    onActivate: (tab) => {
+      setActiveProject(tab.itemId)
+      navigate('projects', tab.itemId)
+    },
+    getMenuItems: (tab) => [
+      { label: 'Rename', onSelect: () => handleRenameItem('project', tab.itemId) },
+      {
+        label: 'Delete project',
+        danger: true,
+        onSelect: () => setConfirmDeleteProjectId(tab.itemId),
+      },
+    ],
+  }
+  const repeatingTaskKind: TabKindHandler = {
+    isActive: (tab) => view === 'repeatingTasks' && activeRepeatingTaskId === tab.itemId,
+    getLiveName: (tab) => repeatingTasks.find((t) => t.id === tab.itemId)?.name ?? null,
+    getBadges: () => ({ running: false, unread: false }),
+    getIcon: () => tabIcons.repeating_task,
+    onActivate: (tab) => {
+      setActiveRepeatingTaskId(tab.itemId)
+      navigate('repeatingTasks', tab.itemId)
+    },
+    getMenuItems: (tab) => [
+      { label: 'Rename', onSelect: () => handleRenameItem('repeating_task', tab.itemId) },
+      {
+        label: 'Delete task',
+        danger: true,
+        onSelect: () => setConfirmDeleteRepeatingTaskId(tab.itemId),
+      },
+    ],
+  }
+  const reportKind: TabKindHandler = {
+    isActive: (tab) => view === 'reports' && activeReportId === tab.itemId,
+    getLiveName: () => null, // reports never rename — t.name from the server is authoritative.
+    getBadges: () => ({ running: false, unread: false }),
+    getIcon: () => tabIcons.report,
+    onActivate: (tab) => {
+      setActiveReportId(tab.itemId)
+      navigate('reports', tab.itemId)
+    },
+    // Reports have no delete endpoint and no rename, so the kind-
+    // specific menu is empty. The TabBar still layers in "Close tab"
+    // at the top, which is enough for the strip.
+    getMenuItems: () => [],
+  }
+  const tabKindRegistry: TabKindRegistry = {
+    session: sessionKind,
+    project: projectKind,
+    repeating_task: repeatingTaskKind,
+    report: reportKind,
+  }
+
+  const confirmDeleteRepeatingTask = async () => {
+    if (!confirmDeleteRepeatingTaskId) return
+    const id = confirmDeleteRepeatingTaskId
+    setConfirmDeleteRepeatingTaskId(null)
+    try {
+      await useRepeatingTasksStore.getState().deleteTask(id)
+      if (activeRepeatingTaskId === id) setActiveRepeatingTaskId(null)
+    } catch {
+      /* ignore */
     }
   }
 
@@ -923,32 +1136,7 @@ function App() {
 
       {/* Main Content */}
       <main className="content">
-        <TabBar
-          view={view}
-          activeSessionId={activeSessionId}
-          activeProjectId={activeProjectId}
-          onOpenItem={(type, id) => {
-            if (type === 'session') {
-              setActiveSession(id)
-              navigate('sessions', id)
-            } else {
-              setActiveProject(id)
-              navigate('projects', id)
-            }
-          }}
-          onRenameItem={handleRenameItem}
-          onClearItem={(type, id) => {
-            if (type === 'session') setConfirmClearSessionId(id)
-          }}
-          onTerminateItem={(type, id) => {
-            if (type === 'session') setConfirmTerminateSessionId(id)
-          }}
-          onDeleteItem={(type, id) => {
-            if (type === 'session') setConfirmDeleteId(id)
-            else setConfirmDeleteProjectId(id)
-          }}
-          onNewSession={() => setShowNewSession(true)}
-        />
+        <TabBar kinds={tabKindRegistry} onNewSession={() => setShowNewSession(true)} />
         {announcement && (
           <div className="announcement-banner">
             <div className="announcement-content">
@@ -1115,7 +1303,39 @@ function App() {
           )}
           {view === 'usage' && <UsageDashboard />}
           {view === 'folders' && <FoldersPage />}
-          {view === 'reports' && <ReportBrowser />}
+          {view === 'reports' &&
+            (activeReportId ? (
+              (() => {
+                const parsed = parseReportTabId(activeReportId)
+                if (!parsed) {
+                  // Malformed id: drop back to the index.
+                  setActiveReportId(null)
+                  return null
+                }
+                return (
+                  <ReportView
+                    folder={parsed.folder}
+                    file={parsed.file}
+                    onBack={() => {
+                      setActiveReportId(null)
+                      navigate('reports', null)
+                    }}
+                    onOpenSession={(id) => {
+                      setActiveSession(id)
+                      navigate('sessions', id)
+                    }}
+                  />
+                )
+              })()
+            ) : (
+              <ReportBrowser
+                onOpenReport={(folder, file) => {
+                  const id = reportTabId(folder, file)
+                  setActiveReportId(id)
+                  navigate('reports', id)
+                }}
+              />
+            ))}
           {view === 'users' && <UserManagement />}
         </ErrorBoundary>
       </main>
@@ -1169,6 +1389,17 @@ function App() {
           danger
           onConfirm={confirmTerminateSession}
           onCancel={() => setConfirmTerminateSessionId(null)}
+        />
+      )}
+      {confirmDeleteRepeatingTaskId && (
+        <ConfirmDialog
+          title="Delete repeating task"
+          message="Delete this task? Previously spawned sessions are kept but the schedule will stop."
+          confirmLabel="Delete"
+          cancelLabel="Cancel"
+          danger
+          onConfirm={confirmDeleteRepeatingTask}
+          onCancel={() => setConfirmDeleteRepeatingTaskId(null)}
         />
       )}
     </div>

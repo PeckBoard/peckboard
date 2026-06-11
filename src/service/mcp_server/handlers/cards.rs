@@ -363,7 +363,9 @@ impl McpToolRegistry {
         args: Value,
         ctx: &ToolCallContext,
     ) -> anyhow::Result<Value> {
-        let scope = ctx.scope_project(args.get("project_id").and_then(|v| v.as_str()))?;
+        let scope = ctx
+            .scope_project(args.get("project_id").and_then(|v| v.as_str()))
+            .await?;
         let project_id = scope.as_str();
 
         tracing::info!(session_id = %ctx.session_id, project_id = %project_id, "MCP tool: create_card");
@@ -521,7 +523,7 @@ impl McpToolRegistry {
             }));
         }
 
-        let scope = ctx.scope_project(target)?;
+        let scope = ctx.scope_project(target).await?;
         let project_id = scope.as_str();
         let status_filter = args.get("status").and_then(|v| v.as_str());
 

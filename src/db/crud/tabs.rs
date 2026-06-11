@@ -21,13 +21,19 @@ impl Db {
 
     /// Insert a tab, or bump its `last_active` if it already exists.
     /// This is what powers MRU ordering: every time the user opens a
-    /// session/project, the corresponding tab moves to the front.
+    /// session/project/report/repeating_task, the corresponding tab
+    /// moves to the front.
     ///
-    /// Returns `Ok(None)` if the referenced session/project does not
-    /// exist. `user_tabs` is polymorphic so there's no FK to lean on,
-    /// and without this check a stale URL like `/sessions/<deleted-id>`
-    /// (or a cross-device delete race) would write an orphan row that
-    /// then renders as a phantom "Session" chip in the tab strip.
+    /// Returns `Ok(None)` if the referenced item does not exist (or
+    /// `item_type` is unknown). `user_tabs` is polymorphic so there's
+    /// no FK to lean on; without this check a stale URL like
+    /// `/sessions/<deleted-id>` (or a cross-device delete race) would
+    /// write an orphan row that then renders as a phantom chip.
+    ///
+    /// For DB-backed kinds (session/project/repeating_task) the
+    /// existence check is a `SELECT id` against the owning table. The
+    /// file-backed `report` kind has no DB row to check; callers must
+    /// pre-validate the report file exists before calling.
     pub async fn upsert_user_tab(
         &self,
         user_id: &str,
@@ -55,6 +61,15 @@ impl Db {
                     .first::<String>(conn)
                     .optional()?
                     .is_some(),
+                "repeating_task" => repeating_tasks::table
+                    .find(&tab.item_id)
+                    .select(repeating_tasks::id)
+                    .first::<String>(conn)
+                    .optional()?
+                    .is_some(),
+                // Reports live on disk, not in the DB. The caller validates
+                // existence; the DB layer trusts the route to have done so.
+                "report" => true,
                 _ => false,
             };
             if !exists {
@@ -90,6 +105,30 @@ impl Db {
             )
             .execute(conn)?;
             Ok(count > 0)
+        })
+        .await
+    }
+
+    /// Drop every user_tabs row pointing at the given (item_type, item_id),
+    /// across all users. Used by cascade deletes for polymorphic tab
+    /// kinds (session/project/repeating_task) so the strip doesn't
+    /// render orphan chips after a delete. Reports are file-backed and
+    /// have no delete path, so they don't go through this helper.
+    pub async fn delete_user_tabs_for_item(
+        &self,
+        item_type: &str,
+        item_id: &str,
+    ) -> anyhow::Result<usize> {
+        let item_type = item_type.to_string();
+        let item_id = item_id.to_string();
+        self.with_conn(move |conn| {
+            let count = diesel::delete(
+                user_tabs::table
+                    .filter(user_tabs::item_type.eq(&item_type))
+                    .filter(user_tabs::item_id.eq(&item_id)),
+            )
+            .execute(conn)?;
+            Ok(count)
         })
         .await
     }

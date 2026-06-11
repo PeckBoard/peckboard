@@ -70,6 +70,21 @@ impl Db {
         .await
     }
 
+    /// Every session bound to a project — workers AND experts, in
+    /// undefined order. Used by the change-folder route to drag a
+    /// project's entire session set into the new folder in one shot.
+    pub async fn list_sessions_by_project(&self, project_id: &str) -> anyhow::Result<Vec<Session>> {
+        let project_id = project_id.to_string();
+        self.with_conn(move |conn| {
+            sessions::table
+                .filter(sessions::project_id.eq(&project_id))
+                .select(Session::as_select())
+                .load(conn)
+                .map_err(Into::into)
+        })
+        .await
+    }
+
     /// List worker sessions for a specific project.
     pub async fn list_worker_sessions_by_project(
         &self,

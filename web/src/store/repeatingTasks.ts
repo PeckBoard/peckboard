@@ -1,6 +1,7 @@
 import { create } from 'zustand'
 import type { RepeatingScheduleKind, RepeatingTask, Session } from '../types/api'
 import { authedFetch } from './auth'
+import { useTabsStore } from './tabs'
 
 export type ScheduleValue =
   | { kind: 'interval'; minutes: number }
@@ -123,6 +124,11 @@ export const useRepeatingTasksStore = create<RepeatingTasksState>((set, get) => 
         sessionsByTask: sessions,
       }
     })
+    // Drop the strip chip immediately. The server-side cascade in
+    // delete_repeating_task removed the row already; this is the
+    // local-mirror cleanup + the in-flight `openTab` tombstone guard
+    // that stops a racing POST from resurrecting a phantom chip.
+    useTabsStore.getState().removeTabsForItem('repeating_task', id)
   },
 
   runNow: async (id: string) => {

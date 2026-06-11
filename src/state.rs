@@ -7,7 +7,7 @@ use crate::plugin::builtin::BuiltinPluginRegistry;
 use crate::plugin::manager::PluginManager;
 use crate::provider::manager::SessionManager;
 use crate::provider::registry::ProviderRegistry;
-use crate::repeating::RepeatingTaskManager;
+use crate::repeating::{RepeatingTaskManager, RunAuditor};
 use crate::service::mcp_server::McpTokenRegistry;
 use crate::service::push::PushService;
 use crate::ws::broadcaster::Broadcaster;
@@ -29,6 +29,10 @@ pub struct AppState {
     pub provider_registry: Arc<ProviderRegistry>,
     pub session_manager: SessionManager,
     pub repeating_task_manager: RepeatingTaskManager,
+    /// Independent watchdog that observes scheduler-initiated repeating-
+    /// task runs and refuses dispatch / kill-switches the task if the
+    /// schedule's minimum-gap invariant is violated. Cheap to clone.
+    pub run_auditor: RunAuditor,
     pub mcp_tokens: McpTokenRegistry,
     pub push_service: PushService,
     /// App-wide store of outstanding user authorizations to change recorded

@@ -77,6 +77,7 @@ fn ctx(
         session_id: session_id.into(),
         project_id: project_id.map(|s| s.to_string()),
         card_id: None,
+        folder_id: "f1".into(),
         db: db.clone(),
         broadcaster: Broadcaster::new(),
         provider_registry: None,

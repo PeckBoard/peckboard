@@ -47,6 +47,14 @@ pub struct ToolCallContext {
     pub session_id: String,
     pub project_id: Option<String>,
     pub card_id: Option<String>,
+    /// Folder the caller's session belongs to. Every session has a folder,
+    /// so this is non-optional. Resolved at the `mcp` route layer from the
+    /// session row tied to the bearer token; in unit tests it is whatever
+    /// folder the test put the session in. Used by `scope_project` /
+    /// `scope_card` / `scope_session` to enforce the folder boundary, and
+    /// by every listing tool that needs to filter to "things in MY folder
+    /// or globally visible".
+    pub folder_id: String,
     pub db: Arc<Db>,
     pub broadcaster: Arc<crate::ws::broadcaster::Broadcaster>,
     pub provider_registry: Option<Arc<crate::provider::registry::ProviderRegistry>>,
@@ -111,46 +119,104 @@ impl ScopedFolderId {
     }
 }
 
+/// Proof token: bearer has verified that some target folder id equals the
+/// caller's own folder (`ctx.folder_id`). The only way to obtain one is
+/// [`ToolCallContext::scope_folder_target`], which compares the supplied
+/// folder id against the caller's folder and returns Err on mismatch.
+/// Used by MCP tools that take an explicit `folder_id` argument
+/// (`create_project`, the folder-change endpoints) so the type system
+/// enforces "the folder you're acting on is the one you're allowed to act
+/// in" — no caller can pass an arbitrary folder id and have downstream
+/// code trust it.
+#[derive(Debug, Clone)]
+pub struct ScopedFolderTarget(String);
+
+impl ScopedFolderTarget {
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
 impl ToolCallContext {
     /// Verify the given target project_id is allowed by the current MCP
-    /// token's scope. Resolution:
-    /// * token scoped, target provided → must match;
-    /// * token scoped, target absent → returns the token's project;
-    /// * token unscoped, target provided → accepted as-is;
+    /// token's scope AND lives in the caller's folder. Two independent
+    /// boundaries are enforced:
+    ///
+    /// 1. Project-scope: a worker token (`project_id` set) refuses any
+    ///    target project that doesn't match the token's project.
+    /// 2. Folder-scope: every resolved target project must live in
+    ///    `self.folder_id`. This blocks a chat session (unscoped token)
+    ///    from reaching projects in sibling folders, and is defence-in-
+    ///    depth for worker tokens (a token whose project moved to another
+    ///    folder mid-call rejects rather than acts on stale state).
+    ///
+    /// Resolution:
+    /// * token scoped, target provided → must match the token's project,
+    ///   then folder-checked;
+    /// * token scoped, target absent → returns the token's project,
+    ///   folder-checked;
+    /// * token unscoped, target provided → folder-checked;
     /// * token unscoped, target absent → error ("project_id required").
-    pub fn scope_project(&self, target: Option<&str>) -> anyhow::Result<ScopedProjectId> {
-        match (target, self.project_id.as_deref()) {
+    pub async fn scope_project(&self, target: Option<&str>) -> anyhow::Result<ScopedProjectId> {
+        let project_id = match (target, self.project_id.as_deref()) {
             (Some(t), Some(scoped)) if t != scoped => {
-                anyhow::bail!("token scoped to project {scoped}, cannot target {t}")
+                // Use "not found" framing so a worker on project A can't
+                // probe for project B's existence by id-guessing — the
+                // 404-vs-403 distinction the PM expert flagged.
+                anyhow::bail!("project not found: {t}")
             }
-            (Some(t), _) => Ok(ScopedProjectId(t.to_string())),
-            (None, Some(scoped)) => Ok(ScopedProjectId(scoped.to_string())),
+            (Some(t), _) => t.to_string(),
+            (None, Some(scoped)) => scoped.to_string(),
             (None, None) => anyhow::bail!("project_id required"),
+        };
+
+        // Confirm the target project lives in the caller's folder. The
+        // lookup also doubles as an existence check so a bogus id returns
+        // the same "not found" the cross-folder branch does — no
+        // existence leak.
+        let project = self
+            .db
+            .get_project(&project_id)
+            .await?
+            .ok_or_else(|| anyhow::anyhow!("project not found: {project_id}"))?;
+        if project.folder_id != self.folder_id {
+            anyhow::bail!("project not found: {project_id}");
         }
+
+        Ok(ScopedProjectId(project_id))
     }
 
-    /// Resolve the card's project_id, then scope-check it.
+    /// Resolve the card's project_id, then scope-check it. The card's
+    /// folder is inherited from its project; `scope_project` enforces the
+    /// folder boundary there.
     pub async fn scope_card(&self, card_id: &str) -> anyhow::Result<ScopedProjectId> {
         let card = self
             .db
             .get_card(card_id)
             .await?
             .ok_or_else(|| anyhow::anyhow!("card not found: {card_id}"))?;
-        self.scope_project(Some(&card.project_id))
+        self.scope_project(Some(&card.project_id)).await
     }
 
     /// Resolve the session's project_id, then scope-check it. Used by
     /// tools like `send_worker_message` that target a peer worker session.
+    /// The target session must also be in the caller's folder — a worker
+    /// in folder A can't message a session in folder B even if the bare
+    /// session_id is guessed.
     pub async fn scope_session(&self, session_id: &str) -> anyhow::Result<ScopedProjectId> {
         let session = self
             .db
             .get_session(session_id)
             .await?
             .ok_or_else(|| anyhow::anyhow!("session not found: {session_id}"))?;
+        // Folder-check first: leak nothing about a foreign-folder session.
+        if session.folder_id != self.folder_id {
+            anyhow::bail!("session not found: {session_id}");
+        }
         let project_id = session
             .project_id
             .ok_or_else(|| anyhow::anyhow!("session is not part of any project: {session_id}"))?;
-        self.scope_project(Some(&project_id))
+        self.scope_project(Some(&project_id)).await
     }
 
     /// Resolve the current session's folder for the repeating-task MCP
@@ -174,6 +240,27 @@ impl ToolCallContext {
             anyhow::bail!("repeating-task tools are not available in worker sessions");
         }
         Ok(ScopedFolderId(session.folder_id))
+    }
+
+    /// Verify that an explicit target folder id matches the caller's own
+    /// folder. Used by tools that take a `folder_id` argument
+    /// (`create_project`, the folder-change endpoints) so passing a
+    /// foreign folder id fails at the boundary instead of silently
+    /// creating cross-folder rows. Same "not found" framing as the
+    /// project / session scope checks: a caller can't use this to probe
+    /// for the existence of sibling folders.
+    pub fn scope_folder_target(&self, target: &str) -> anyhow::Result<ScopedFolderTarget> {
+        if target != self.folder_id {
+            anyhow::bail!("folder not found: {target}");
+        }
+        Ok(ScopedFolderTarget(target.to_string()))
+    }
+
+    /// The caller's own folder, wrapped in the proof token. Convenience
+    /// for tools that default to "act in my folder" when no explicit
+    /// folder is supplied.
+    pub fn caller_folder(&self) -> ScopedFolderTarget {
+        ScopedFolderTarget(self.folder_id.clone())
     }
 }
 
@@ -227,12 +314,46 @@ impl CommRateLimiter {
 mod tests {
     use super::*;
 
-    fn ctx_for_scope(project_id: Option<&str>) -> ToolCallContext {
+    async fn seed_folder_and_project(db: &crate::db::Db, folder_id: &str, project_id: &str) {
+        use crate::db::models::{NewFolder, NewProject};
+        let ts = chrono::Utc::now().to_rfc3339();
+        let _ = db
+            .create_folder(NewFolder {
+                id: folder_id.into(),
+                name: folder_id.into(),
+                path: format!("/tmp/{folder_id}"),
+                created_at: ts.clone(),
+            })
+            .await;
+        let _ = db
+            .create_project(NewProject {
+                id: project_id.into(),
+                name: project_id.into(),
+                context: "".into(),
+                folder_id: folder_id.into(),
+                worker_count: 1,
+                status: "active".into(),
+                workflow: "task".into(),
+                model: None,
+                effort: None,
+                parallel_instructions: false,
+                auto_notify_changes: true,
+                worker_communication: false,
+                created_at: ts.clone(),
+                last_accessed_at: ts.clone(),
+            })
+            .await;
+    }
+
+    async fn ctx_for_scope(project_id: Option<&str>) -> ToolCallContext {
+        let db = Arc::new(crate::db::Db::in_memory().unwrap());
+        seed_folder_and_project(&db, "f-1", "p-1").await;
         ToolCallContext {
             session_id: "s1".into(),
             project_id: project_id.map(|s| s.to_string()),
             card_id: None,
-            db: Arc::new(crate::db::Db::in_memory().unwrap()),
+            folder_id: "f-1".into(),
+            db,
             broadcaster: crate::ws::broadcaster::Broadcaster::new(),
             provider_registry: None,
             expert_dispatcher: None,
@@ -241,43 +362,79 @@ mod tests {
         }
     }
 
-    #[test]
-    fn scope_project_unscoped_token_passes_target_through() {
-        let ctx = ctx_for_scope(None);
-        let s = ctx.scope_project(Some("p-1")).unwrap();
+    #[tokio::test]
+    async fn scope_project_unscoped_token_passes_target_through() {
+        let ctx = ctx_for_scope(None).await;
+        let s = ctx.scope_project(Some("p-1")).await.unwrap();
         assert_eq!(s.as_str(), "p-1");
     }
 
-    #[test]
-    fn scope_project_scoped_token_accepts_matching_target() {
-        let ctx = ctx_for_scope(Some("p-1"));
-        let s = ctx.scope_project(Some("p-1")).unwrap();
+    #[tokio::test]
+    async fn scope_project_scoped_token_accepts_matching_target() {
+        let ctx = ctx_for_scope(Some("p-1")).await;
+        let s = ctx.scope_project(Some("p-1")).await.unwrap();
         assert_eq!(s.as_str(), "p-1");
     }
 
-    #[test]
-    fn scope_project_scoped_token_rejects_mismatched_target() {
-        let ctx = ctx_for_scope(Some("p-1"));
-        let err = ctx.scope_project(Some("p-2")).unwrap_err();
+    #[tokio::test]
+    async fn scope_project_scoped_token_rejects_mismatched_target() {
+        let ctx = ctx_for_scope(Some("p-1")).await;
+        let err = ctx.scope_project(Some("p-2")).await.unwrap_err();
         let msg = err.to_string();
-        assert!(
-            msg.contains("p-1") && msg.contains("p-2"),
-            "expected scope-mismatch error to mention both project ids, got: {msg}"
-        );
+        // "not found" framing avoids existence leaks across projects.
+        assert!(msg.contains("not found"), "got: {msg}");
+        assert!(msg.contains("p-2"), "got: {msg}");
     }
 
-    #[test]
-    fn scope_project_scoped_token_no_target_returns_token_scope() {
-        let ctx = ctx_for_scope(Some("p-1"));
-        let s = ctx.scope_project(None).unwrap();
+    #[tokio::test]
+    async fn scope_project_scoped_token_no_target_returns_token_scope() {
+        let ctx = ctx_for_scope(Some("p-1")).await;
+        let s = ctx.scope_project(None).await.unwrap();
         assert_eq!(s.as_str(), "p-1");
     }
 
-    #[test]
-    fn scope_project_unscoped_token_no_target_errors() {
-        let ctx = ctx_for_scope(None);
-        let err = ctx.scope_project(None).unwrap_err();
+    #[tokio::test]
+    async fn scope_project_unscoped_token_no_target_errors() {
+        let ctx = ctx_for_scope(None).await;
+        let err = ctx.scope_project(None).await.unwrap_err();
         assert!(err.to_string().contains("project_id required"));
+    }
+
+    #[tokio::test]
+    async fn scope_project_rejects_project_in_a_different_folder() {
+        // Caller is in folder f-1. Target project p-2 exists but lives in f-2.
+        let db = Arc::new(crate::db::Db::in_memory().unwrap());
+        seed_folder_and_project(&db, "f-1", "p-1").await;
+        seed_folder_and_project(&db, "f-2", "p-2").await;
+        let ctx = ToolCallContext {
+            session_id: "s1".into(),
+            project_id: None, // chat session
+            card_id: None,
+            folder_id: "f-1".into(),
+            db,
+            broadcaster: crate::ws::broadcaster::Broadcaster::new(),
+            provider_registry: None,
+            expert_dispatcher: None,
+            data_dir: None,
+            pm_authorizations: Default::default(),
+        };
+        let err = ctx.scope_project(Some("p-2")).await.unwrap_err();
+        // "not found", not "forbidden" — don't leak the project's existence.
+        assert!(err.to_string().contains("not found"), "got: {err}");
+    }
+
+    #[tokio::test]
+    async fn scope_folder_target_accepts_caller_folder() {
+        let ctx = ctx_for_scope(None).await;
+        let scope = ctx.scope_folder_target("f-1").unwrap();
+        assert_eq!(scope.as_str(), "f-1");
+    }
+
+    #[tokio::test]
+    async fn scope_folder_target_rejects_foreign_folder() {
+        let ctx = ctx_for_scope(None).await;
+        let err = ctx.scope_folder_target("f-2").unwrap_err();
+        assert!(err.to_string().contains("not found"), "got: {err}");
     }
 
     // ── ScopedFolderId: repeating-task scope guard ───────────────────────
@@ -326,6 +483,7 @@ mod tests {
             session_id: session_id.to_string(),
             project_id: project_id.map(String::from),
             card_id: None,
+            folder_id: "f1".into(),
             db,
             expert_dispatcher: None,
             broadcaster: crate::ws::broadcaster::Broadcaster::new(),

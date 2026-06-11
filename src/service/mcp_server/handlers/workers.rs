@@ -352,16 +352,21 @@ impl McpToolRegistry {
 
         tracing::info!(session_id = %ctx.session_id, target = %target_session_id, "MCP tool: read_worker_session");
 
-        // Verify target is in the same project
-        let my_project = self.resolve_project_id(ctx).await;
+        // Folder boundary first: a foreign-folder session must look
+        // exactly like a non-existent id — no 403 leak. We also enforce
+        // the project boundary for worker tokens (token has a project,
+        // target must match) to keep the prior semantics, but the folder
+        // check is the primary guard.
         let target_session = ctx
             .db
             .get_session(target_session_id)
             .await?
-            .ok_or_else(|| anyhow::anyhow!("session not found"))?;
+            .filter(|s| s.folder_id == ctx.folder_id)
+            .ok_or_else(|| anyhow::anyhow!("session not found: {target_session_id}"))?;
 
+        let my_project = self.resolve_project_id(ctx).await;
         if my_project.is_some() && target_session.project_id != my_project {
-            anyhow::bail!("cannot read sessions from other projects");
+            anyhow::bail!("session not found: {target_session_id}");
         }
 
         let card_title = if let Some(ref cid) = target_session.card_id {

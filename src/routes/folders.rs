@@ -10,6 +10,7 @@ use serde::Deserialize;
 use std::sync::Arc;
 
 use crate::auth::middleware::require_auth;
+use crate::db::crud::MoveFolderOutcome;
 use crate::db::models::NewFolder;
 use crate::state::AppState;
 
@@ -26,6 +27,12 @@ struct MoveSessionsRequest {
     target_folder_id: String,
 }
 
+/// Body shared by the per-entity move-folder routes.
+#[derive(Deserialize)]
+struct ChangeFolderRequest {
+    target_folder_id: String,
+}
+
 pub fn router(state: Arc<AppState>) -> Router<Arc<AppState>> {
     Router::new()
         .route("/api/folders", post(create_folder).get(list_folders))
@@ -37,6 +44,17 @@ pub fn router(state: Arc<AppState>) -> Router<Arc<AppState>> {
         .route(
             "/api/folders/{id}/move-sessions",
             post(move_sessions_then_delete),
+        )
+        // Per-entity folder change: each route cancels any agent the
+        // move affects BEFORE the DB write, so the move is durable
+        // within the running process. Process restart kills child
+        // agents independently, so there's no need for a separate
+        // DB-marker / replay step.
+        .route("/api/sessions/{id}/folder", post(change_session_folder))
+        .route("/api/projects/{id}/folder", post(change_project_folder))
+        .route(
+            "/api/repeating-tasks/{id}/folder",
+            post(change_repeating_task_folder),
         )
         .route_layer(middleware::from_fn_with_state(state, require_auth))
 }
@@ -212,4 +230,234 @@ async fn move_sessions_then_delete(
     Ok::<_, (StatusCode, Json<serde_json::Value>)>(Json(serde_json::json!({
         "moved_sessions": moved
     })))
+}
+
+// ── Per-entity folder change ─────────────────────────────────────────
+//
+// Policy notes (also captured in the PM expert escalation):
+// * Only sessions belonging to the entity being moved are cancelled.
+//   We do NOT touch unrelated sessions in the destination folder.
+// * Durability: we cancel running agents BEFORE the DB write and wait
+//   for the cancel to land (`cancel_and_wait`), then update the rows
+//   inside a single DB transaction. A mid-flight process crash leaves
+//   the entity in its OLD folder (the DB write hadn't happened), and
+//   process restart kills any still-attached agents anyway, so there
+//   is no replay step to design around.
+// * On success we revoke MCP tokens for every session whose folder
+//   moved. The token already encodes the session id; downstream MCP
+//   calls then re-derive the (now updated) folder_id at the route
+//   layer, so a stale token can't be used to act in the old folder.
+
+/// Cancel every session listed, wait for the cancel to fully wind
+/// down, drop any queued message, and revoke its MCP tokens. Used by
+/// the three change-folder routes. We block on the cancel so the DB
+/// row that follows can be written atomically with no in-flight agent
+/// holding a stale folder.
+async fn cancel_sessions_and_revoke_tokens(state: &AppState, session_ids: &[String]) {
+    for sid in session_ids {
+        if state.session_manager.is_running(sid).await {
+            state.session_manager.cancel_and_wait(sid).await;
+        }
+        // Drop any queued message so a deferred resume can't pop into
+        // the agent process after the DB row was rewritten to a new
+        // folder. The move helpers also clear the queued_messages row;
+        // doing both is safe and inexpensive.
+        let _ = state.db.delete_queued_message(sid).await;
+        state.mcp_tokens.revoke_by_session(sid).await;
+    }
+}
+
+/// POST /api/sessions/:id/folder — move a single plain (non-worker,
+/// non-expert) session into a different folder. Worker / expert
+/// sessions are owned by their project and must be moved via the
+/// project endpoint; trying to move one here returns 409.
+async fn change_session_folder(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+    Json(body): Json<ChangeFolderRequest>,
+) -> impl IntoResponse {
+    tracing::info!(session_id = %id, target = %body.target_folder_id, "Changing session folder");
+
+    // Cancel the agent for this session first if anything is running.
+    // We cancel BEFORE the DB write so the agent never sees the new
+    // folder in mid-turn — if the cancel hangs we'd rather fail loud
+    // than silently change folder under a live agent.
+    cancel_sessions_and_revoke_tokens(&state, std::slice::from_ref(&id)).await;
+
+    let outcome = state
+        .db
+        .move_session_to_folder(&id, &body.target_folder_id)
+        .await
+        .map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({ "error": e.to_string() })),
+            )
+        })?;
+
+    match outcome {
+        MoveFolderOutcome::Moved(session) => {
+            state
+                .broadcaster
+                .broadcast(crate::ws::broadcaster::WsEvent {
+                    event_type: "session-folder-changed".into(),
+                    session_id: id.clone(),
+                    data: serde_json::json!({ "session": &session }),
+                });
+            Ok::<_, (StatusCode, Json<serde_json::Value>)>(Json(serde_json::json!(session)))
+        }
+        MoveFolderOutcome::NotFound => Err((
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({ "error": "session not found" })),
+        )),
+        MoveFolderOutcome::TargetMissing => Err((
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({ "error": "target folder not found" })),
+        )),
+        MoveFolderOutcome::RefusedOwnedSession => Err((
+            StatusCode::CONFLICT,
+            Json(serde_json::json!({
+                "error": "worker / expert sessions are owned by their project; \
+                         move the project instead",
+            })),
+        )),
+    }
+}
+
+/// POST /api/projects/:id/folder — move a project (and every session it
+/// owns: workers + experts) into a different folder.
+async fn change_project_folder(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+    Json(body): Json<ChangeFolderRequest>,
+) -> impl IntoResponse {
+    tracing::info!(project_id = %id, target = %body.target_folder_id, "Changing project folder");
+
+    // Gather every owned session up-front so we know exactly who to
+    // cancel. We do this BEFORE the cancel so a session that drops
+    // mid-cancel doesn't get missed.
+    let owned: Vec<String> = match state.db.list_sessions_by_project(&id).await {
+        Ok(rows) => rows.into_iter().map(|s| s.id).collect(),
+        Err(_) => Vec::new(),
+    };
+    cancel_sessions_and_revoke_tokens(&state, &owned).await;
+
+    let outcome = state
+        .db
+        .move_project_to_folder(&id, &body.target_folder_id)
+        .await
+        .map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({ "error": e.to_string() })),
+            )
+        })?;
+
+    match outcome {
+        MoveFolderOutcome::Moved(report) => {
+            // Also cancel any sessions the cascade scooped up that
+            // weren't in the initial gather (a session created between
+            // the gather and the cancel — race window is tiny but real).
+            let extra: Vec<String> = report
+                .owned_session_ids
+                .iter()
+                .filter(|sid| !owned.contains(sid))
+                .cloned()
+                .collect();
+            if !extra.is_empty() {
+                cancel_sessions_and_revoke_tokens(&state, &extra).await;
+            }
+            state
+                .broadcaster
+                .broadcast(crate::ws::broadcaster::WsEvent {
+                    event_type: "project-folder-changed".into(),
+                    session_id: id.clone(),
+                    data: serde_json::json!({
+                        "project": &report.project,
+                        "previous_folder_id": report.previous_folder_id,
+                        "sessions_moved": report.sessions_moved,
+                    }),
+                });
+            Ok::<_, (StatusCode, Json<serde_json::Value>)>(Json(serde_json::json!({
+                "project": report.project,
+                "previous_folder_id": report.previous_folder_id,
+                "sessions_moved": report.sessions_moved,
+            })))
+        }
+        MoveFolderOutcome::NotFound => Err((
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({ "error": "project not found" })),
+        )),
+        MoveFolderOutcome::TargetMissing => Err((
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({ "error": "target folder not found" })),
+        )),
+        MoveFolderOutcome::RefusedOwnedSession => unreachable!(),
+    }
+}
+
+/// POST /api/repeating-tasks/:id/folder — move a repeating task to a
+/// different folder, dragging any sessions it spawned along with it.
+async fn change_repeating_task_folder(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+    Json(body): Json<ChangeFolderRequest>,
+) -> impl IntoResponse {
+    tracing::info!(task_id = %id, target = %body.target_folder_id, "Changing repeating task folder");
+
+    let owned: Vec<String> = match state.db.list_sessions_by_repeating_task(&id).await {
+        Ok(rows) => rows.into_iter().map(|s| s.id).collect(),
+        Err(_) => Vec::new(),
+    };
+    cancel_sessions_and_revoke_tokens(&state, &owned).await;
+
+    let outcome = state
+        .db
+        .move_repeating_task_to_folder(&id, &body.target_folder_id)
+        .await
+        .map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({ "error": e.to_string() })),
+            )
+        })?;
+
+    match outcome {
+        MoveFolderOutcome::Moved(report) => {
+            let extra: Vec<String> = report
+                .owned_session_ids
+                .iter()
+                .filter(|sid| !owned.contains(sid))
+                .cloned()
+                .collect();
+            if !extra.is_empty() {
+                cancel_sessions_and_revoke_tokens(&state, &extra).await;
+            }
+            state
+                .broadcaster
+                .broadcast(crate::ws::broadcaster::WsEvent {
+                    event_type: "repeating-task-folder-changed".into(),
+                    session_id: id.clone(),
+                    data: serde_json::json!({
+                        "task": &report.task,
+                        "previous_folder_id": report.previous_folder_id,
+                        "sessions_moved": report.sessions_moved,
+                    }),
+                });
+            Ok::<_, (StatusCode, Json<serde_json::Value>)>(Json(serde_json::json!({
+                "task": report.task,
+                "previous_folder_id": report.previous_folder_id,
+                "sessions_moved": report.sessions_moved,
+            })))
+        }
+        MoveFolderOutcome::NotFound => Err((
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({ "error": "repeating task not found" })),
+        )),
+        MoveFolderOutcome::TargetMissing => Err((
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({ "error": "target folder not found" })),
+        )),
+        MoveFolderOutcome::RefusedOwnedSession => unreachable!(),
+    }
 }

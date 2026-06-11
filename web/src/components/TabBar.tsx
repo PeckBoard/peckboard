@@ -1,79 +1,43 @@
-import { useMemo } from 'react'
-import { useSessionsStore } from '../store/sessions'
-import { useProjectsStore } from '../store/projects'
-import { useTabsStore, type TabType } from '../store/tabs'
-import { useContextMenu, type ContextMenuItem } from '../hooks/useContextMenu'
+import { useTabsStore } from '../store/tabs'
+import { useContextMenu } from '../hooks/useContextMenu'
+import { type MenuItem } from './Dropdown'
+import { tabDefaultLabel, type TabKindRegistry } from './tabKinds'
 
 interface TabBarProps {
-  view:
-    | 'sessions'
-    | 'repeatingTasks'
-    | 'projects'
-    | 'experts'
-    | 'usage'
-    | 'folders'
-    | 'reports'
-    | 'users'
-  activeSessionId: string | null
-  activeProjectId: string | null
-  onOpenItem: (type: TabType, id: string) => void
-  onRenameItem: (type: TabType, id: string) => void
-  /** Clear all messages in a session. Only invoked for `type === 'session'`. */
-  onClearItem: (type: TabType, id: string) => void
-  /** Terminate the agent for a session. Only invoked for `type === 'session'`. */
-  onTerminateItem: (type: TabType, id: string) => void
-  onDeleteItem: (type: TabType, id: string) => void
+  /** Per-tab-kind glue. The TabBar is kind-agnostic; everything it
+   *  needs to render and dispatch a tab comes from this registry,
+   *  which the parent (App.tsx) builds from its stores. Adding a new
+   *  tab kind = adding a new entry here — no TabBar changes needed. */
+  kinds: TabKindRegistry
   /** Open the New Session modal. Renders as a trailing `+` button. */
   onNewSession: () => void
 }
 
 /**
- * Top tab strip showing the user's opened sessions and projects mixed
- * together in MRU order, persisted server-side via `useTabsStore` so
- * the same set shows up on every device. The Sessions / Projects list
- * entries live in the navigation rail — keeping them out of here means
- * the strip can use all of its horizontal space for tabs, which matters
- * on mobile where the rail is the bottom toolbar.
+ * Top tab strip. Persists server-side via `useTabsStore` so the same
+ * set shows up on every device. The Sessions / Projects list entries
+ * live in the navigation rail — keeping them out of here means the
+ * strip can use all of its horizontal space for tabs, which matters on
+ * mobile where the rail is the bottom toolbar.
+ *
+ * Kind-agnostic: every per-kind decision (label, badges, icon, menu,
+ * navigation) is delegated to the [[TabKindRegistry]] passed in by the
+ * parent. The TabBar's only job is layout, the long-press / right-click
+ * context menu glue, and the close affordance.
  *
  * Close UX:
- *   Desktop: an X button on each tab (visible on hover/active);
- *     also right-click → context menu with Close, Rename, Clear (sessions
- *     only), and Delete.
- *   Mobile:  long-press → the same context menu. The X is hidden under
+ *   Desktop: an X button on each tab (visible on hover/active); also
+ *     right-click → context menu with Close tab + the kind's items.
+ *   Mobile: long-press → the same context menu. The X is hidden under
  *     the 768px breakpoint to keep tab chips compact.
  */
-export default function TabBar({
-  view,
-  activeSessionId,
-  activeProjectId,
-  onOpenItem,
-  onRenameItem,
-  onClearItem,
-  onTerminateItem,
-  onDeleteItem,
-  onNewSession,
-}: TabBarProps) {
+export default function TabBar({ kinds, onNewSession }: TabBarProps) {
   const tabs = useTabsStore((s) => s.tabs)
   const closeTab = useTabsStore((s) => s.closeTab)
-  const sessions = useSessionsStore((s) => s.sessions)
-  const projects = useProjectsStore((s) => s.projects)
-  const unreadSessions = useSessionsStore((s) => s.unreadSessions)
-  const processing = useSessionsStore((s) => s.processing)
-
-  // Map by id for the live-state lookups (running/unread on session
-  // tabs, project icon, etc.). Names themselves come from `t.name`
-  // which the server denormalizes into the tab payload — that's what
-  // lets us label worker-session tabs even though they're not in the
-  // regular sessions list.
-  const sessionMap = useMemo(() => new Map(sessions.map((s) => [s.id, s])), [sessions])
-  const projectMap = useMemo(() => new Map(projects.map((p) => [p.id, p])), [projects])
 
   // No frontend cleanup loop: the server-side `list_tabs` handler in
   // src/routes/me.rs filters out tabs whose underlying item is gone,
-  // and explicit deletes call `removeTabsForItem` directly. Closing on
-  // "not in the sessions list" was overzealous — worker sessions
-  // (`is_worker=true`) are intentionally not in `GET /api/sessions`, so
-  // their tabs were disappearing the moment the page loaded.
+  // and explicit deletes call `removeTabsForItem` directly.
 
   // Always render the strip — even with zero tabs — so the trailing `+`
   // button stays reachable as the user's entry point to creating a new
@@ -81,41 +45,29 @@ export default function TabBar({
   return (
     <div className="tabbar" role="tablist" aria-label="Open tabs">
       {tabs.map((t) => {
-        const isActive =
-          (t.itemType === 'session' && view === 'sessions' && activeSessionId === t.itemId) ||
-          (t.itemType === 'project' && view === 'projects' && activeProjectId === t.itemId)
-        // Prefer the live name from the sessions/projects stores so
-        // an in-page rename reflects on the tab immediately. Fall back
-        // to the denormalized `t.name` (the server's tab response
-        // carries it) — that's what lets a worker session tab render
-        // a real label even though `is_worker=true` excludes the
-        // session from the plain sessions list.
+        const kind = kinds[t.itemType]
+        if (!kind) return null
+        const live = kind.getLiveName(t)
         // `||` (not `??`) is intentional: openTab's optimistic insert
         // stores `name: ''` for the brief window between local insert
         // and the upsert response landing, and the empty string must
         // fall through to the placeholder rather than render as a
-        // label-less chip.
-        const live =
-          t.itemType === 'session' ? sessionMap.get(t.itemId)?.name : projectMap.get(t.itemId)?.name
-        const label = live || t.name || (t.itemType === 'session' ? 'Session' : 'Project')
-        const isRunning = t.itemType === 'session' && processing.has(t.itemId)
-        const isUnread = t.itemType === 'session' && !isActive && unreadSessions.has(t.itemId)
+        // label-less chip. Same reason `live` falls back to `t.name`.
+        const label = live || t.name || tabDefaultLabel[t.itemType]
+        const active = kind.isActive(t)
+        const badges = kind.getBadges(t, active)
         return (
           <OpenedTab
             key={`${t.itemType}:${t.itemId}`}
-            type={t.itemType}
-            id={t.itemId}
             label={label}
-            active={isActive}
-            running={isRunning}
-            unread={isUnread}
-            isWorker={t.isWorker}
-            onClick={() => onOpenItem(t.itemType, t.itemId)}
+            active={active}
+            running={badges.running}
+            unread={badges.unread}
+            icon={kind.getIcon(t)}
+            menuItems={kind.getMenuItems(t)}
+            tabKey={`${t.itemType}:${t.itemId}`}
+            onClick={() => kind.onActivate(t)}
             onClose={() => closeTab(t.itemType, t.itemId)}
-            onRename={() => onRenameItem(t.itemType, t.itemId)}
-            onClear={() => onClearItem(t.itemType, t.itemId)}
-            onTerminate={() => onTerminateItem(t.itemType, t.itemId)}
-            onDelete={() => onDeleteItem(t.itemType, t.itemId)}
           />
         )
       })}
@@ -132,67 +84,47 @@ export default function TabBar({
   )
 }
 
-function OpenedTab({
-  type,
-  id,
-  label,
-  active,
-  running,
-  unread,
-  isWorker,
-  onClick,
-  onClose,
-  onRename,
-  onClear,
-  onTerminate,
-  onDelete,
-}: {
-  type: TabType
-  id: string
+interface OpenedTabProps {
   label: string
   active: boolean
   running: boolean
   unread: boolean
-  isWorker: boolean
+  icon: React.ReactNode
+  menuItems: MenuItem[]
+  tabKey: string
   onClick: () => void
   onClose: () => void
-  onRename: () => void
-  onClear: () => void
-  onTerminate: () => void
-  onDelete: () => void
-}) {
-  // Same item shape and order as ChatView's 3-dot menu so a session's
-  // controls read identically wherever they surface. See CLAUDE.md
-  // "Component Reuse".
-  //   rename, clear session, terminate agent, delete
-  // "Close tab" is tab-specific — the tab is the surface, not a session
-  // attribute — so it sits at the top, divided off from the
-  // session-mutating actions below.
-  const { triggerProps, menu, consumeLongPressClick } = useContextMenu((): ContextMenuItem[] => [
-    { label: 'Close tab', onSelect: onClose },
-    { label: 'Rename', onSelect: onRename },
-    // Clear-session, terminate-agent are session-specific — there's no
-    // project equivalent, so they're hidden for project tabs to avoid
-    // menu noise.
-    { label: 'Clear session', onSelect: onClear, hidden: type !== 'session' },
-    {
-      label: 'Terminate agent',
-      onSelect: onTerminate,
-      hidden: type !== 'session',
-    },
-    {
-      label: type === 'session' ? 'Delete session' : 'Delete project',
-      onSelect: onDelete,
-      danger: true,
-      // Worker sessions are owned by their card — the backend refuses
-      // DELETE /api/sessions/:id for them, so hide rather than render a
-      // button that always 409s.
-      hidden: type === 'session' && isWorker,
-    },
-  ])
+}
+
+function OpenedTab({
+  label,
+  active,
+  running,
+  unread,
+  icon,
+  menuItems,
+  tabKey,
+  onClick,
+  onClose,
+}: OpenedTabProps) {
+  // The right-click / long-press menu always starts with "Close tab" —
+  // it's tab-strip chrome, not a property of the underlying item.
+  // Per CLAUDE.md "Component Reuse", the per-kind items below mirror
+  // the closest 3-dot menu surface (sessions match ChatView, etc.).
+  const items: MenuItem[] = [{ label: 'Close tab', onSelect: onClose }, ...menuItems]
+  const { triggerProps, menu, consumeLongPressClick } = useContextMenu(() =>
+    items
+      .filter((m) => !m.divider && !m.hidden)
+      .map((m) => ({
+        label: m.label ?? '',
+        onSelect: () => m.onSelect?.(),
+        danger: m.danger,
+        disabled: m.disabled,
+      })),
+  )
 
   return (
-    <div className="tab-wrap" data-tab-id={`${type}:${id}`}>
+    <div className="tab-wrap" data-tab-id={tabKey}>
       <button
         role="tab"
         aria-selected={active}
@@ -203,11 +135,7 @@ function OpenedTab({
         }}
         {...triggerProps}
       >
-        {type === 'project' && (
-          <span className={`tab-icon tab-icon-${type}`} aria-hidden="true">
-            ◧
-          </span>
-        )}
+        {icon}
         {running ? (
           <span className="tab-dot tab-dot-running" aria-label="running" />
         ) : unread ? (

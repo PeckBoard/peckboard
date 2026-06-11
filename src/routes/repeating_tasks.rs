@@ -407,18 +407,28 @@ async fn run_repeating_task(
                 mcp_tokens: &state.mcp_tokens,
                 data_dir: &state.config.data_dir,
                 http_port: state.config.port,
+                auditor: &state.run_auditor,
             },
             false, // force-run ignores the `enabled` flag
         )
         .await
         .map_err(internal_error)?;
 
-    let status = match outcome {
-        StartOutcome::Spawned => "spawned",
-        StartOutcome::AlreadyRunning => "already_running",
-        StartOutcome::Disabled => "disabled",
+    let (status, reason): (&str, Option<String>) = match outcome {
+        StartOutcome::Spawned => ("spawned", None),
+        StartOutcome::AlreadyRunning => ("already_running", None),
+        StartOutcome::Disabled => ("disabled", None),
+        // The force-run route never throttles (Manual trigger always
+        // passes the policy check), so this branch is unreachable in
+        // practice. We still spell it out so any future code that
+        // wires force-run to Scheduler can't silently drop the reason.
+        StartOutcome::Throttled(r) => ("throttled", Some(r)),
     };
-    Ok::<_, (StatusCode, Json<serde_json::Value>)>(Json(serde_json::json!({ "status": status })))
+    let body = match reason {
+        Some(r) => serde_json::json!({ "status": status, "reason": r }),
+        None => serde_json::json!({ "status": status }),
+    };
+    Ok::<_, (StatusCode, Json<serde_json::Value>)>(Json(body))
 }
 
 async fn list_repeating_task_sessions(

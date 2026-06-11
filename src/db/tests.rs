@@ -1191,6 +1191,187 @@ mod tests {
         );
     }
 
+    // ── repeating-task tabs are a first-class kind ──────────────────
+
+    #[tokio::test]
+    async fn test_upsert_user_tab_accepts_repeating_task() {
+        // Regression: extending TabType to include repeating_task means
+        // the DB-layer existence check has to recognise the new item_type
+        // and look the id up in the right table. Without that branch,
+        // every repeating-task tab POST would 404 even for a real task.
+        let db = test_db();
+        let ts = now();
+
+        db.create_folder(NewFolder {
+            id: "f".into(),
+            name: "F".into(),
+            path: "/tmp/f".into(),
+            created_at: ts.clone(),
+        })
+        .await
+        .unwrap();
+        db.create_user(NewUser {
+            id: "u".into(),
+            username: "u".into(),
+            email: None,
+            password_hash: "h".into(),
+            role: "user".into(),
+            created_at: ts.clone(),
+            updated_at: ts.clone(),
+        })
+        .await
+        .unwrap();
+        db.create_repeating_task(NewRepeatingTask {
+            id: "rt".into(),
+            name: "Nightly sweep".into(),
+            description: "".into(),
+            folder_id: "f".into(),
+            prompt: "do the thing".into(),
+            schedule_kind: "interval".into(),
+            schedule_value: "{\"minutes\":60}".into(),
+            model: None,
+            effort: None,
+            enabled: true,
+            next_run_at: None,
+            last_run_at: None,
+            created_at: ts.clone(),
+            updated_at: ts.clone(),
+        })
+        .await
+        .unwrap();
+
+        let tab = db
+            .upsert_user_tab("u", "repeating_task", "rt")
+            .await
+            .unwrap();
+        assert!(
+            tab.is_some(),
+            "repeating-task tab should be accepted for a real task id"
+        );
+
+        // Wrong id → existence check fails → no tab written. The frontend
+        // treats this as 404 and rolls back the optimistic insert.
+        let missing = db
+            .upsert_user_tab("u", "repeating_task", "nope")
+            .await
+            .unwrap();
+        assert!(
+            missing.is_none(),
+            "repeating-task tab for a missing task must be refused"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_delete_repeating_task_clears_user_tabs() {
+        // Mirrors test_delete_session_clears_user_tabs: tabs are
+        // polymorphic so there's no FK cascade. delete_repeating_task
+        // has to remove every user_tabs row pointing at the deleted
+        // task or the strip leaves orphan chips behind.
+        let db = test_db();
+        let ts = now();
+
+        db.create_folder(NewFolder {
+            id: "f".into(),
+            name: "F".into(),
+            path: "/tmp/f".into(),
+            created_at: ts.clone(),
+        })
+        .await
+        .unwrap();
+        db.create_user(NewUser {
+            id: "u".into(),
+            username: "u".into(),
+            email: None,
+            password_hash: "h".into(),
+            role: "user".into(),
+            created_at: ts.clone(),
+            updated_at: ts.clone(),
+        })
+        .await
+        .unwrap();
+        db.create_repeating_task(NewRepeatingTask {
+            id: "rt".into(),
+            name: "Nightly sweep".into(),
+            description: "".into(),
+            folder_id: "f".into(),
+            prompt: "do the thing".into(),
+            schedule_kind: "interval".into(),
+            schedule_value: "{\"minutes\":60}".into(),
+            model: None,
+            effort: None,
+            enabled: true,
+            next_run_at: None,
+            last_run_at: None,
+            created_at: ts.clone(),
+            updated_at: ts.clone(),
+        })
+        .await
+        .unwrap();
+        db.upsert_user_tab("u", "repeating_task", "rt")
+            .await
+            .unwrap();
+        assert_eq!(db.list_user_tabs("u").await.unwrap().len(), 1);
+
+        assert!(db.delete_repeating_task("rt").await.unwrap());
+        assert!(
+            db.list_user_tabs("u").await.unwrap().is_empty(),
+            "user_tabs row for the deleted task should be gone"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_upsert_user_tab_accepts_report_kind() {
+        // Reports are file-backed; the DB layer trusts the route to
+        // have validated the on-disk path. From the DB's perspective
+        // the kind is just another allowed item_type.
+        let db = test_db();
+        let ts = now();
+        db.create_user(NewUser {
+            id: "u".into(),
+            username: "u".into(),
+            email: None,
+            password_hash: "h".into(),
+            role: "user".into(),
+            created_at: ts.clone(),
+            updated_at: ts.clone(),
+        })
+        .await
+        .unwrap();
+        let tab = db
+            .upsert_user_tab("u", "report", "2026-06-11/sample.md")
+            .await
+            .unwrap();
+        assert!(tab.is_some(), "report tab should be accepted");
+        assert_eq!(db.list_user_tabs("u").await.unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn test_upsert_user_tab_rejects_unknown_kind() {
+        // The DB-side existence-check switch is the last line of
+        // defense if the route layer's validate_item_type ever
+        // regresses. Anything not in the allowed set must be refused.
+        let db = test_db();
+        let ts = now();
+        db.create_user(NewUser {
+            id: "u".into(),
+            username: "u".into(),
+            email: None,
+            password_hash: "h".into(),
+            role: "user".into(),
+            created_at: ts.clone(),
+            updated_at: ts.clone(),
+        })
+        .await
+        .unwrap();
+        // The DB layer returns Ok(None) (treated as 404) for unknown
+        // kinds rather than letting them be written. Whether the
+        // CHECK constraint would also catch it is a defence-in-depth
+        // detail; we want the explicit refusal at the existence-check
+        // step so the error is consistent with the "missing item" path.
+        let res = db.upsert_user_tab("u", "doodad", "anything").await.unwrap();
+        assert!(res.is_none(), "unknown item_type must be refused");
+    }
+
     #[tokio::test]
     async fn test_delete_project_clears_user_tabs() {
         let db = test_db();

@@ -64,12 +64,42 @@ fn auth_user(req: &Request<Body>) -> &AuthUser {
 
 fn validate_item_type(s: &str) -> Result<(), (StatusCode, Json<serde_json::Value>)> {
     match s {
-        "session" | "project" => Ok(()),
+        "session" | "project" | "report" | "repeating_task" => Ok(()),
         _ => Err((
             StatusCode::BAD_REQUEST,
-            Json(serde_json::json!({ "error": "item_type must be 'session' or 'project'" })),
+            Json(serde_json::json!({
+                "error": "item_type must be 'session', 'project', 'report', or 'repeating_task'"
+            })),
         )),
     }
+}
+
+/// Reports are file-backed, identified by `<folder>/<file>` (the same
+/// pair the `/api/reports/:folder/:file` route uses). The tab strip
+/// stores that pair in `item_id` as `<folder>/<file>`; this helper
+/// splits and validates the segments against the same charset the
+/// reports route uses, then resolves the on-disk path so we can read
+/// the report's title for the tab label.
+fn split_report_id(item_id: &str) -> Option<(String, String)> {
+    let (folder, file) = item_id.split_once('/')?;
+    let folder = crate::routes::reports::safe_segment(folder, false)?;
+    let file = crate::routes::reports::safe_segment(file, true)?;
+    Some((folder, file))
+}
+
+/// Resolve a report tab's label. Reads the file's frontmatter for a
+/// `title:` line; falls back to the file name (sans `.md`) when there
+/// is no frontmatter. Returns `None` when the file is missing, which
+/// causes the tab to be filtered out of GET /api/me/tabs.
+fn report_label(state: &AppState, folder: &str, file: &str) -> Option<String> {
+    let path = state
+        .config
+        .data_dir
+        .join("reports")
+        .join(folder)
+        .join(file);
+    let content = std::fs::read_to_string(&path).ok()?;
+    Some(crate::routes::reports::report_title(&content, file))
 }
 
 /// GET /api/me/tabs — list this user's tabs, MRU first.
@@ -112,6 +142,21 @@ async fn list_tabs(State(state): State<Arc<AppState>>, req: Request<Body>) -> im
                     .ok()
                     .flatten()
                     .map(|p| p.name),
+                false,
+            ),
+            "repeating_task" => (
+                state
+                    .db
+                    .get_repeating_task(&t.item_id)
+                    .await
+                    .ok()
+                    .flatten()
+                    .map(|task| task.name),
+                false,
+            ),
+            "report" => (
+                split_report_id(&t.item_id)
+                    .and_then(|(folder, file)| report_label(&state, &folder, &file)),
                 false,
             ),
             _ => (None, false),
@@ -160,6 +205,22 @@ async fn upsert_tab(State(state): State<Arc<AppState>>, req: Request<Body>) -> i
     };
     validate_item_type(&req_body.item_type)?;
 
+    // Reports are file-backed, so the DB-layer existence check trusts
+    // the route. Validate the on-disk path here before we write a tab
+    // row — otherwise a stale URL would create an orphan tab no GET
+    // can ever resolve.
+    if req_body.item_type == "report" {
+        let exists = split_report_id(&req_body.item_id)
+            .and_then(|(folder, file)| report_label(&state, &folder, &file).map(|_| (folder, file)))
+            .is_some();
+        if !exists {
+            return Err((
+                StatusCode::NOT_FOUND,
+                Json(serde_json::json!({ "error": "referenced item does not exist" })),
+            ));
+        }
+    }
+
     match state
         .db
         .upsert_user_tab(&user_id, &req_body.item_type, &req_body.item_id)
@@ -184,6 +245,23 @@ async fn upsert_tab(State(state): State<Arc<AppState>>, req: Request<Body>) -> i
                         .ok()
                         .flatten()
                         .map(|p| p.name)
+                        .unwrap_or_default(),
+                    false,
+                ),
+                "repeating_task" => (
+                    state
+                        .db
+                        .get_repeating_task(&tab.item_id)
+                        .await
+                        .ok()
+                        .flatten()
+                        .map(|task| task.name)
+                        .unwrap_or_default(),
+                    false,
+                ),
+                "report" => (
+                    split_report_id(&tab.item_id)
+                        .and_then(|(folder, file)| report_label(&state, &folder, &file))
                         .unwrap_or_default(),
                     false,
                 ),

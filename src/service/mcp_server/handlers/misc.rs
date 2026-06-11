@@ -187,7 +187,12 @@ impl McpToolRegistry {
         // built-in text AND the project extension side by side.
         let project_id_arg = args.get("project_id").and_then(|v| v.as_str());
         let scoped_project_id = if project_id_arg.is_some() {
-            Some(ctx.scope_project(project_id_arg)?.as_str().to_string())
+            Some(
+                ctx.scope_project(project_id_arg)
+                    .await?
+                    .as_str()
+                    .to_string(),
+            )
         } else {
             None
         };
@@ -248,7 +253,9 @@ impl McpToolRegistry {
         args: Value,
         ctx: &ToolCallContext,
     ) -> anyhow::Result<Value> {
-        let scope = ctx.scope_project(args.get("project_id").and_then(|v| v.as_str()))?;
+        let scope = ctx
+            .scope_project(args.get("project_id").and_then(|v| v.as_str()))
+            .await?;
         let project_id = scope.as_str();
 
         let workflow_id = args

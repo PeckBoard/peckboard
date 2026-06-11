@@ -94,6 +94,7 @@ fn ctx(db: &Arc<Db>, session_id: &str, project_id: Option<&str>) -> ToolCallCont
         provider_registry: None,
         expert_dispatcher: None,
         data_dir: None,
+        folder_id: "f1".into(),
         pm_authorizations: Default::default(),
     }
 }
@@ -403,9 +404,11 @@ async fn pm_tools_reject_explicit_project_id_conflicting_with_token_scope() {
         )
         .await;
     let msg = err.unwrap_err().to_string();
+    // Conflict rejection uses "not found" framing for the foreign target
+    // (no existence leak), but must still identify which id was bad.
     assert!(
-        msg.contains("p1") && msg.contains("p2"),
-        "conflict rejection must name both project ids, got: {msg}"
+        msg.contains("p2") && msg.contains("not found"),
+        "conflict rejection must mark p2 as not found, got: {msg}"
     );
 
     let err = registry

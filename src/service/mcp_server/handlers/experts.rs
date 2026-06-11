@@ -67,7 +67,9 @@ impl McpToolRegistry {
         ctx: &ToolCallContext,
     ) -> anyhow::Result<Value> {
         // Scope-check the target project against the caller's token.
-        let scoped = ctx.scope_project(args.get("project_id").and_then(|v| v.as_str()))?;
+        let scoped = ctx
+            .scope_project(args.get("project_id").and_then(|v| v.as_str()))
+            .await?;
         let project_id = scoped.into_string();
 
         let max_experts = args
@@ -209,26 +211,46 @@ impl McpToolRegistry {
     }
 
     /// `list_experts` — the expert sessions the caller may consult: experts
-    /// scoped to the caller's project plus globally-scoped experts
-    /// (`project_id IS NULL`). Compact summaries only — callers use this to
-    /// choose a target for `ask_expert`.
+    /// scoped to the caller's project (or an explicitly-named in-folder
+    /// project) plus globally-scoped experts (`project_id IS NULL`).
+    /// Cross-folder experts are never listed, even when the caller passes a
+    /// foreign project id — `scope_project` rejects that before we get here.
+    /// Compact summaries only — callers use this to choose a target for
+    /// `ask_expert`.
     pub(crate) async fn handle_list_experts(
         &self,
         args: Value,
         ctx: &ToolCallContext,
     ) -> anyhow::Result<Value> {
-        // Scope-check the target project against the caller's token. With no
-        // explicit arg this resolves to the token's own project.
-        let scoped = ctx.scope_project(args.get("project_id").and_then(|v| v.as_str()))?;
-        let project_id = scoped.into_string();
+        let explicit = args.get("project_id").and_then(|v| v.as_str());
+
+        // Two distinct shapes:
+        // - explicit project_id or scoped token: list project + globals
+        //   for that one project (folder-checked by `scope_project`).
+        // - unscoped chat session, no explicit arg: list every expert
+        //   that's in-scope under the folder isolation rule (i.e. every
+        //   project-scoped expert in the caller's folder, plus globals).
+        let (project_id_for_payload, experts) = match (explicit, ctx.project_id.as_deref()) {
+            (None, None) => {
+                // Chat session with no project hint — list folder-visible
+                // experts. `in_scope_experts` does the folder bound.
+                let exps = self.in_scope_experts(ctx, None).await?;
+                (None::<String>, exps)
+            }
+            _ => {
+                let scoped = ctx.scope_project(explicit).await?;
+                let pid = scoped.into_string();
+                let exps = ctx.db.list_expert_sessions_by_scope(&pid).await?;
+                (Some(pid), exps)
+            }
+        };
 
         tracing::info!(
             session_id = %ctx.session_id,
-            project_id = %project_id,
+            folder_id = %ctx.folder_id,
+            project_id = ?project_id_for_payload,
             "MCP tool: list_experts"
         );
-
-        let experts = ctx.db.list_expert_sessions_by_scope(&project_id).await?;
 
         let items: Vec<Value> = experts
             .iter()
@@ -249,7 +271,7 @@ impl McpToolRegistry {
 
         Ok(json!({
             "status": "ok",
-            "project_id": project_id,
+            "project_id": project_id_for_payload,
             "experts": items,
             "count": items.len(),
         }))

@@ -48,14 +48,17 @@ impl ExpertDispatcher for RecordingDispatcher {
 
 async fn seed_project(db: &Db, project_id: &str, folder_id: &str) {
     let ts = chrono::Utc::now().to_rfc3339();
-    db.create_folder(NewFolder {
-        id: folder_id.into(),
-        name: "F".into(),
-        path: format!("/tmp/ask-expert/{folder_id}"),
-        created_at: ts.clone(),
-    })
-    .await
-    .unwrap();
+    // Idempotent on the folder so the same folder can host multiple
+    // projects across calls — the new folder-isolation tests need two
+    // projects in one folder.
+    let _ = db
+        .create_folder(NewFolder {
+            id: folder_id.into(),
+            name: "F".into(),
+            path: format!("/tmp/ask-expert/{folder_id}"),
+            created_at: ts.clone(),
+        })
+        .await;
     db.create_project(NewProject {
         id: project_id.into(),
         name: "Project".into(),
@@ -150,6 +153,7 @@ fn ctx(db: &Arc<Db>, session_id: &str, project_id: Option<&str>) -> ToolCallCont
         provider_registry: None,
         expert_dispatcher: None,
         data_dir: None,
+        folder_id: "f1".into(),
         pm_authorizations: Default::default(),
     }
 }
@@ -397,11 +401,15 @@ async fn ask_expert_rejects_cross_project_question_expert() {
 #[tokio::test]
 async fn ask_expert_cross_project_knowledge_expert_chat_only() {
     // A *knowledge* expert only answers within its codebase boundary. A chat
-    // session (unscoped token) may consult it cross-project; a worker (a
+    // session (unscoped token) may consult it cross-project IN THE SAME
+    // FOLDER (folder is the hard isolation boundary); a worker (a
     // project-scoped token) may not — workers stay confined to their project.
     let db = Arc::new(Db::in_memory().unwrap());
     seed_project(&db, "p1", "f1").await;
-    seed_project(&db, "p2", "f2").await;
+    // p2 in the SAME folder so the cross-project carve-out for chat
+    // sessions stays exercisable. A separate test below covers the
+    // cross-folder rejection.
+    seed_project(&db, "p2", "f1").await;
     // A worker in p1 and a plain chat session (no project).
     seed_session(
         &db,
@@ -420,7 +428,7 @@ async fn ask_expert_cross_project_knowledge_expert_chat_only() {
     seed_session(
         &db,
         "expert-p2-web",
-        "f2",
+        "f1",
         Some("p2"),
         false,
         true,

@@ -64,7 +64,7 @@ async fn resolve_pm_project(
             .await?
             .ok_or_else(|| anyhow::anyhow!("project not found: {p}"))?;
     }
-    ctx.scope_project(explicit)
+    ctx.scope_project(explicit).await
 }
 
 /// The shape both tools return per decision: `title` is the stored question,
@@ -293,7 +293,7 @@ impl McpToolRegistry {
             .filter(|s| !s.is_empty());
 
         // Project scope comes from the MCP token only — never from input.
-        let project = ctx.scope_project(None)?;
+        let project = ctx.scope_project(None).await?;
 
         // Callable ONLY by this project's PM expert: the caller must be the
         // project's stable PM-expert session AND its row must carry

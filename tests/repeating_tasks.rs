@@ -10,7 +10,9 @@ use peckboard::db::models::{NewFolder, NewRepeatingTask, NewSession};
 use peckboard::provider::manager::SessionManager;
 use peckboard::provider::mock::register_mock_provider;
 use peckboard::provider::registry::ProviderRegistry;
-use peckboard::repeating::{RepeatingTaskManager, RunContext, StartOutcome, initial_next_run_at};
+use peckboard::repeating::{
+    RepeatingTaskManager, RunAuditor, RunContext, StartOutcome, initial_next_run_at,
+};
 use peckboard::service::mcp_server::McpTokenRegistry;
 use peckboard::ws::broadcaster::Broadcaster;
 use std::path::PathBuf;
@@ -21,6 +23,7 @@ struct TestEnv {
     broadcaster: Arc<Broadcaster>,
     session_manager: SessionManager,
     rtm: RepeatingTaskManager,
+    auditor: RunAuditor,
     mcp_tokens: McpTokenRegistry,
     data_dir: tempfile::TempDir,
 }
@@ -34,6 +37,7 @@ impl TestEnv {
             mcp_tokens: &self.mcp_tokens,
             data_dir: self.data_dir.path(),
             http_port: 0,
+            auditor: &self.auditor,
         }
     }
     fn data_dir_path(&self) -> PathBuf {
@@ -48,6 +52,7 @@ async fn fresh_state() -> TestEnv {
     let session_manager = SessionManager::new(registry);
     let broadcaster = Broadcaster::new();
     let rtm = RepeatingTaskManager::new();
+    let auditor = RunAuditor::new();
     let mcp_tokens = McpTokenRegistry::new();
     let data_dir = tempfile::tempdir().unwrap();
     TestEnv {
@@ -55,6 +60,7 @@ async fn fresh_state() -> TestEnv {
         broadcaster,
         session_manager,
         rtm,
+        auditor,
         mcp_tokens,
         data_dir,
     }
@@ -109,6 +115,168 @@ async fn seed_task(db: &Db, id: &str, folder_id: &str, prompt: &str, model: Opti
     })
     .await
     .unwrap();
+}
+
+#[tokio::test]
+async fn scheduler_throttles_runs_below_min_gap_via_inline_guard() {
+    // Pin last_run_at to 30 seconds ago and the next_run_at to "now" so
+    // the scheduler's due-task query picks the task up. The inline
+    // run-policy guard should refuse the dispatch, leaving no session
+    // behind.
+    let env = fresh_state().await;
+    let tmp = tempfile::tempdir().unwrap();
+    seed_folder(&env.db, "f1", tmp.path().to_str().unwrap()).await;
+    seed_task(&env.db, "t1", "f1", "go", Some("mock:happy-path")).await;
+
+    let now = chrono::Utc::now();
+    let recent = (now - chrono::Duration::seconds(30)).to_rfc3339();
+    env.db
+        .update_repeating_task(
+            "t1",
+            peckboard::db::models::UpdateRepeatingTask {
+                last_run_at: Some(Some(recent)),
+                next_run_at: Some(Some("2020-01-01T00:00:00Z".into())),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+
+    env.rtm.run_due_tasks(env.run_ctx()).await;
+
+    let sessions = env.db.list_sessions_by_repeating_task("t1").await.unwrap();
+    assert!(
+        sessions.is_empty(),
+        "throttled scheduler tick must not spawn a session; got {:?}",
+        sessions.iter().map(|s| &s.id).collect::<Vec<_>>(),
+    );
+}
+
+#[tokio::test]
+async fn manual_run_bypasses_throttle_even_immediately_after_prior_run() {
+    let env = fresh_state().await;
+    let tmp = tempfile::tempdir().unwrap();
+    seed_folder(&env.db, "f1", tmp.path().to_str().unwrap()).await;
+    seed_task(&env.db, "t1", "f1", "go", Some("mock:happy-path")).await;
+
+    // Pin last_run_at to 5 seconds ago — well below the 60s hard floor.
+    let now = chrono::Utc::now();
+    let recent = (now - chrono::Duration::seconds(5)).to_rfc3339();
+    env.db
+        .update_repeating_task(
+            "t1",
+            peckboard::db::models::UpdateRepeatingTask {
+                last_run_at: Some(Some(recent)),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+
+    let outcome = env
+        .rtm
+        .try_run_now("t1", env.run_ctx(), false)
+        .await
+        .unwrap();
+    assert_eq!(
+        outcome,
+        StartOutcome::Spawned,
+        "manual force-run must bypass the throttle",
+    );
+    let sessions = env.db.list_sessions_by_repeating_task("t1").await.unwrap();
+    assert_eq!(sessions.len(), 1);
+    env.session_manager.cancel_and_wait(&sessions[0].id).await;
+}
+
+#[tokio::test]
+async fn watchdog_disables_task_when_persisted_runs_violate_invariant() {
+    // Seed two scheduler-spawned sessions 10 seconds apart for a
+    // 5-minute task — the inline guard would have blocked them, but
+    // we're simulating "future bug bypassed the inline guard" by
+    // writing the rows directly. The watchdog's persisted-sessions
+    // pass must catch the violation and disable the task.
+    let env = fresh_state().await;
+    let tmp = tempfile::tempdir().unwrap();
+    seed_folder(&env.db, "f1", tmp.path().to_str().unwrap()).await;
+    seed_task(&env.db, "t1", "f1", "go", None).await;
+
+    let now = chrono::Utc::now();
+    for (id, offset) in [("s_a", 0i64), ("s_b", 10)] {
+        let ts = (now + chrono::Duration::seconds(offset)).to_rfc3339();
+        env.db
+            .create_session(NewSession {
+                id: id.into(),
+                name: id.into(),
+                folder_id: "f1".into(),
+                model: None,
+                effort: None,
+                is_worker: false,
+                project_id: None,
+                card_id: None,
+                conversation_id: None,
+                created_at: ts.clone(),
+                last_activity: ts,
+                repeating_task_id: Some("t1".into()),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+    }
+
+    let n = env.auditor.audit_pass(&env.db, &env.broadcaster).await;
+    assert!(n >= 1);
+    let after = env.db.get_repeating_task("t1").await.unwrap().unwrap();
+    assert!(
+        !after.enabled,
+        "watchdog must disable the task after a violation",
+    );
+    assert!(
+        after.next_run_at.is_none(),
+        "watchdog must clear next_run_at"
+    );
+}
+
+#[tokio::test]
+async fn watchdog_ignores_pair_when_one_session_is_marked_manual() {
+    // Same setup as the violation test, but the second session is
+    // flagged as manual via try_run_now's path. The watchdog must
+    // suppress the alarm because manual runs are explicitly exempt.
+    let env = fresh_state().await;
+    let tmp = tempfile::tempdir().unwrap();
+    seed_folder(&env.db, "f1", tmp.path().to_str().unwrap()).await;
+    seed_task(&env.db, "t1", "f1", "go", None).await;
+
+    let now = chrono::Utc::now();
+    for (id, offset) in [("s_a", 0i64), ("s_b", 10)] {
+        let ts = (now + chrono::Duration::seconds(offset)).to_rfc3339();
+        env.db
+            .create_session(NewSession {
+                id: id.into(),
+                name: id.into(),
+                folder_id: "f1".into(),
+                model: None,
+                effort: None,
+                is_worker: false,
+                project_id: None,
+                card_id: None,
+                conversation_id: None,
+                created_at: ts.clone(),
+                last_activity: ts,
+                repeating_task_id: Some("t1".into()),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+    }
+    env.auditor.mark_manual_session("s_b").await;
+
+    let n = env.auditor.audit_pass(&env.db, &env.broadcaster).await;
+    assert_eq!(n, 0);
+    let after = env.db.get_repeating_task("t1").await.unwrap().unwrap();
+    assert!(
+        after.enabled,
+        "task must remain enabled when only one of the pair is auto"
+    );
 }
 
 #[tokio::test]

@@ -18,7 +18,7 @@
 //! - `weekly`    → `{ "weekday": 0..=6, "hour": H, "minute": M }` — fire weekly,
 //!                  weekday is 0=Mon … 6=Sun (matches `chrono::Weekday::num_days_from_monday`)
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -44,14 +44,54 @@ pub struct RunContext<'a> {
     pub mcp_tokens: &'a McpTokenRegistry,
     pub data_dir: &'a std::path::Path,
     pub http_port: u16,
+    /// Watchdog that observes runs and refuses dispatch (or, on its own
+    /// audit loop, retroactively disables the task) if a scheduler-run
+    /// would violate the "never run quicker than the schedule, never
+    /// more than once per minute" invariant. See [`RunAuditor`].
+    pub auditor: &'a RunAuditor,
 }
 
 /// Smallest practical interval. Stops the scheduler from chewing CPU and
 /// blocks a stuck task from spawning a thousand sessions per second.
 pub const MIN_INTERVAL_MINUTES: i64 = 1;
 
-/// Outcome of an attempted run dispatch.
+/// Absolute floor on the gap between two consecutive *scheduler*-initiated
+/// runs of the same task, regardless of what the schedule says. Even an
+/// `interval=1` task should never produce two scheduler runs in the same
+/// minute — that pattern is the canonical "scheduler is wedged in a
+/// bug loop" symptom and worth refusing on principle.
+///
+/// Manual ("Run now") runs are exempt: an operator clicking the button
+/// twice is intentional and not a bug.
+pub const MIN_SCHEDULER_GAP_SECONDS: i64 = 60;
+
+/// Slack subtracted from the schedule-prescribed gap when deciding
+/// whether a scheduler tick is "too early". The scheduler ticks every
+/// 30 seconds, so a run scheduled for `T` may fire as late as `T + 30s`;
+/// the next run scheduled for `T + interval` could be evaluated at
+/// `T + interval - ε` if the *next* tick lands a hair early. Giving a
+/// 30s tolerance avoids flagging this normal jitter as a violation.
+pub const SCHEDULER_GAP_SLOP_SECONDS: i64 = 30;
+
+/// Did this dispatch come from the scheduler tick (subject to throttle)
+/// or from a human clicking "Run now" (always allowed)?
+///
+/// Carried explicitly through the dispatch path rather than overloading
+/// `respect_enabled` so a future reader can't mistakenly conflate the
+/// two — they happened to coincide today, but "Run now ignores
+/// `enabled`" and "Run now ignores throttle" are independent product
+/// decisions.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RunTrigger {
+    /// Operator clicked "Run now" (POST /api/repeating-tasks/:id/run).
+    /// Bypasses the run-policy throttle entirely.
+    Manual,
+    /// Periodic scheduler tick (`run_due_tasks`). Subject to the throttle.
+    Scheduler,
+}
+
+/// Outcome of an attempted run dispatch.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum StartOutcome {
     /// Spawned a fresh session and dispatched the prompt.
     Spawned,
@@ -60,6 +100,11 @@ pub enum StartOutcome {
     /// Task is disabled. (Force-run with `respect_enabled = false`
     /// bypasses this.)
     Disabled,
+    /// The run-policy guard refused the dispatch because the gap since
+    /// `last_run_at` is below the schedule's minimum. Carries a human-
+    /// readable reason for log/UI surfacing. Only Scheduler-triggered
+    /// runs can be throttled.
+    Throttled(String),
 }
 
 /// Proof token: the bearer holds the per-task lock for `task_id`.
@@ -171,6 +216,8 @@ impl RepeatingTaskManager {
     ///
     /// `respect_enabled = true` skips disabled tasks; the force-run route
     /// passes `false` so the operator can always trigger a one-off.
+    ///
+    /// Manual runs always bypass the run-policy throttle — see [`RunTrigger`].
     pub async fn try_run_now(
         &self,
         task_id: &str,
@@ -178,7 +225,8 @@ impl RepeatingTaskManager {
         respect_enabled: bool,
     ) -> anyhow::Result<StartOutcome> {
         let lock = self.lock_task(task_id).await;
-        self.start_run_locked(&lock, &ctx, respect_enabled).await
+        self.start_run_locked(&lock, &ctx, respect_enabled, RunTrigger::Manual)
+            .await
     }
 
     /// One scheduler tick. Loads every due task and tries to start a run
@@ -204,7 +252,10 @@ impl RepeatingTaskManager {
                     continue;
                 }
             };
-            match self.start_run_locked(&lock, &ctx, true).await {
+            match self
+                .start_run_locked(&lock, &ctx, true, RunTrigger::Scheduler)
+                .await
+            {
                 Ok(StartOutcome::Spawned) => {}
                 Ok(other) => {
                     tracing::debug!(task_id = %task.id, ?other, "Scheduler tick: nothing to do");
@@ -228,6 +279,7 @@ impl RepeatingTaskManager {
         lock: &TaskLock,
         ctx: &RunContext<'_>,
         respect_enabled: bool,
+        trigger: RunTrigger,
     ) -> anyhow::Result<StartOutcome> {
         let task_id = lock.task_id();
         let db = ctx.db;
@@ -246,6 +298,41 @@ impl RepeatingTaskManager {
 
         if respect_enabled && !task.enabled {
             return Ok(StartOutcome::Disabled);
+        }
+
+        // Inline run-policy guard. Manual triggers (operator clicked
+        // "Run now") are explicitly exempt — the user asked for that
+        // run, and refusing it would be confusing. Scheduler triggers
+        // are gated so that a corrupted next_run_at, a wedged tick
+        // loop, or any future bug that flips a task into "fire on
+        // every tick" mode can't actually fire faster than the
+        // schedule allows.
+        let now_dt = Utc::now();
+        if let PolicyDecision::Throttle(reason) =
+            check_run_policy(&task, task.last_run_at.as_deref(), now_dt, trigger)
+        {
+            tracing::warn!(
+                task_id = %task_id,
+                ?trigger,
+                "Repeating-task run policy refused dispatch: {reason}",
+            );
+            // Bump next_run_at past the schedule floor so the scheduler
+            // tick doesn't keep picking the same row up every 30s and
+            // re-throttling it. Without this, a corrupted next_run_at
+            // pointing into the past would loop the scheduler through
+            // the guard every tick.
+            let next = next_run_at_after(&task, now_dt);
+            let _ = db
+                .update_repeating_task(
+                    task_id,
+                    UpdateRepeatingTask {
+                        next_run_at: Some(next),
+                        updated_at: Some(now_dt.to_rfc3339()),
+                        ..Default::default()
+                    },
+                )
+                .await;
+            return Ok(StartOutcome::Throttled(reason));
         }
 
         // Existence check: any session previously spawned by this task
@@ -282,6 +369,10 @@ impl RepeatingTaskManager {
             .await?
             .ok_or_else(|| anyhow::anyhow!("folder not found: {}", task.folder_id))?;
 
+        // Recompute now() in case the policy check above took non-trivial
+        // time (it shouldn't, but `now` is also the `last_activity` /
+        // `created_at` we'll persist, and re-reading it keeps those
+        // fields close to wall-clock).
         let now_dt = Utc::now();
         let now = now_dt.to_rfc3339();
         let session_id = uuid::Uuid::new_v4().to_string();
@@ -423,6 +514,22 @@ impl RepeatingTaskManager {
                 "startedAt": now,
             }),
         });
+
+        // Feed the auditor. For scheduler-initiated dispatches we record
+        // the timestamp into the per-task history; the audit loop later
+        // walks that history (and, independently, the session rows in
+        // the DB) to detect any pair of scheduler runs that are closer
+        // together than the schedule allows. Manual dispatches mark the
+        // session id so the audit pass can skip it — a human clicking
+        // "Run now" twice in 10 seconds is intentional and not a bug.
+        match trigger {
+            RunTrigger::Scheduler => {
+                ctx.auditor
+                    .record_scheduler_dispatch(&task.id, now_dt)
+                    .await
+            }
+            RunTrigger::Manual => ctx.auditor.mark_manual_session(&session.id).await,
+        }
 
         Ok(StartOutcome::Spawned)
     }
@@ -616,6 +723,403 @@ Treat it as long-term memory, NOT an event log:\n\
     )
 }
 
+// ── Run-policy guard ──────────────────────────────────────────────────
+//
+// Two parallel-but-independent checks enforce the invariant "a scheduler-
+// triggered repeating-task run must not fire faster than its schedule
+// allows, and never more than once per minute":
+//
+// 1. [`check_run_policy`] — synchronous pre-dispatch guard called from
+//    [`RepeatingTaskManager::start_run_locked`]. Decides on the spot,
+//    using `task.last_run_at` from the row reloaded inside the lock.
+//
+// 2. [`RunAuditor`] — independent post-dispatch watchdog. Periodically
+//    audits the actual session rows persisted in the DB for each task,
+//    looking at consecutive scheduler-spawned `created_at` timestamps,
+//    and surfaces / kill-switches any violations the inline guard
+//    failed to prevent.
+//
+// The two layers intentionally observe DIFFERENT ground truths:
+//
+// - Inline guard reads `repeating_tasks.last_run_at` (set by the
+//   dispatch path).
+// - Watchdog reads `sessions.created_at` filtered by
+//   `repeating_task_id` (set when the session row is inserted).
+//
+// If a future refactor breaks one of those side effects, the other
+// layer keeps catching the violation.
+
+/// Result of the inline policy check. Throttle messages are surfaced
+/// in logs and the API response, so they should be human-actionable.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PolicyDecision {
+    Allow,
+    Throttle(String),
+}
+
+/// Minimum gap (in seconds) the policy will allow between two
+/// *scheduler*-initiated runs of `task`. Combines the absolute floor
+/// ([`MIN_SCHEDULER_GAP_SECONDS`]) with the schedule's own minimum
+/// cadence; the larger of the two wins.
+///
+/// For `interval` tasks this is `max(minutes * 60, 60)`. For
+/// `daily`/`weekly` tasks the natural cadence is huge, but we still
+/// apply the 60-second floor so a corrupted schedule that yields
+/// "fire every tick" can't slip through.
+pub fn min_run_gap_seconds(task: &RepeatingTask) -> i64 {
+    let schedule_floor = Schedule::parse(&task.schedule_kind, &task.schedule_value)
+        .ok()
+        .map(|s| match s {
+            Schedule::Interval { minutes } => minutes.saturating_mul(60),
+            Schedule::Daily { .. } => 86_400,
+            Schedule::Weekly { .. } => 7 * 86_400,
+        })
+        .unwrap_or(MIN_SCHEDULER_GAP_SECONDS);
+    schedule_floor.max(MIN_SCHEDULER_GAP_SECONDS)
+}
+
+/// Decide whether `task` may dispatch a fresh run *right now*.
+///
+/// Manual triggers always return [`PolicyDecision::Allow`] — see the
+/// note on [`RunTrigger::Manual`]. Scheduler triggers require either:
+///   - no previous run on record, or
+///   - `now - last_run_at >= min_run_gap_seconds(task) - SCHEDULER_GAP_SLOP_SECONDS`,
+///     AND `now - last_run_at >= MIN_SCHEDULER_GAP_SECONDS` (the slop
+///     never lets the hard floor be breached).
+///
+/// `last_run_at_rfc3339` is taken from `task.last_run_at` by the
+/// caller; passed in explicitly so tests can pin a known value.
+pub fn check_run_policy(
+    task: &RepeatingTask,
+    last_run_at_rfc3339: Option<&str>,
+    now: DateTime<Utc>,
+    trigger: RunTrigger,
+) -> PolicyDecision {
+    if matches!(trigger, RunTrigger::Manual) {
+        return PolicyDecision::Allow;
+    }
+    let last_run_at: Option<DateTime<Utc>> = last_run_at_rfc3339
+        .and_then(|s| DateTime::parse_from_rfc3339(s).ok())
+        .map(|d| d.with_timezone(&Utc));
+    let Some(last) = last_run_at else {
+        return PolicyDecision::Allow;
+    };
+    let gap = (now - last).num_seconds();
+    if gap < MIN_SCHEDULER_GAP_SECONDS {
+        return PolicyDecision::Throttle(format!(
+            "scheduler run blocked: only {gap}s since last run (hard floor is \
+             {MIN_SCHEDULER_GAP_SECONDS}s)",
+        ));
+    }
+    let schedule_floor = min_run_gap_seconds(task);
+    let allowed = (schedule_floor - SCHEDULER_GAP_SLOP_SECONDS).max(MIN_SCHEDULER_GAP_SECONDS);
+    if gap < allowed {
+        return PolicyDecision::Throttle(format!(
+            "scheduler run blocked: only {gap}s since last run for task with \
+             schedule_kind={} (allowed minimum is {allowed}s)",
+            task.schedule_kind,
+        ));
+    }
+    PolicyDecision::Allow
+}
+
+// ── Watchdog ─────────────────────────────────────────────────────────
+
+/// Cap on the per-task in-memory history. Twenty entries is enough to
+/// notice a runaway loop within seconds (each pair of timestamps is
+/// checked) without growing without bound.
+const AUDITOR_HISTORY_CAP: usize = 20;
+
+/// Per-task list of recent scheduler-spawn timestamps. A `VecDeque` so
+/// we can drop the oldest entry in `O(1)` when the cap is reached.
+type DispatchHistory = VecDeque<DateTime<Utc>>;
+
+/// Inner state of the auditor. Hidden behind a `Mutex` so the manager
+/// can record dispatches from any task path without callers caring
+/// about locking.
+#[derive(Default)]
+struct AuditorState {
+    /// `task_id -> [ts1, ts2, ...]` for scheduler-triggered runs only.
+    scheduler_history: HashMap<String, DispatchHistory>,
+    /// Session ids the auditor knows came from a manual force-run —
+    /// excluded from the DB-side audit.
+    manual_session_ids: HashSet<String>,
+}
+
+/// Description of a single watchdog violation for log + WS surfacing.
+#[derive(Debug, Clone)]
+pub struct WatchdogViolation {
+    pub task_id: String,
+    pub gap_seconds: i64,
+    pub min_gap_seconds: i64,
+    pub source: ViolationSource,
+}
+
+/// Which observation path caught the violation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ViolationSource {
+    /// Detected in the auditor's own in-memory dispatch log.
+    InMemoryHistory,
+    /// Detected by scanning persisted `sessions` rows for the task.
+    PersistedSessions,
+}
+
+/// Independent observer of repeating-task runs. The auditor doesn't
+/// participate in dispatch decisions itself — its job is to scream when
+/// the dispatch path produces an outcome that violates the invariant.
+///
+/// Cheap to clone; everything inside is `Arc`-wrapped.
+#[derive(Clone)]
+pub struct RunAuditor {
+    state: Arc<Mutex<AuditorState>>,
+    /// Sessions older than `audit_start` are ignored. Set when the
+    /// auditor is constructed (typically at process start) so a
+    /// restart doesn't false-positive on historical sessions whose
+    /// manual-vs-scheduler classification is no longer in memory.
+    audit_start: DateTime<Utc>,
+}
+
+impl Default for RunAuditor {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl RunAuditor {
+    pub fn new() -> Self {
+        Self {
+            state: Arc::new(Mutex::new(AuditorState::default())),
+            audit_start: Utc::now(),
+        }
+    }
+
+    /// Construct an auditor pinned to a specific start time. Used by
+    /// tests that want to control which seeded sessions fall inside
+    /// the audit window.
+    pub fn with_start(audit_start: DateTime<Utc>) -> Self {
+        Self {
+            state: Arc::new(Mutex::new(AuditorState::default())),
+            audit_start,
+        }
+    }
+
+    /// Record a successful scheduler dispatch. Bounded ring buffer.
+    pub async fn record_scheduler_dispatch(&self, task_id: &str, at: DateTime<Utc>) {
+        let mut state = self.state.lock().await;
+        let hist = state
+            .scheduler_history
+            .entry(task_id.to_string())
+            .or_default();
+        hist.push_back(at);
+        while hist.len() > AUDITOR_HISTORY_CAP {
+            hist.pop_front();
+        }
+    }
+
+    /// Mark a session as a manual force-run so the DB audit pass skips
+    /// it. Capped at a generous-but-bounded size so a malicious caller
+    /// can't grow the set forever.
+    pub async fn mark_manual_session(&self, session_id: &str) {
+        const MAX_MANUAL_IDS: usize = 10_000;
+        let mut state = self.state.lock().await;
+        // Best-effort eviction: when the cap is hit we drop an arbitrary
+        // entry. Any "real" manual session that gets evicted will, at
+        // worst, be classified as scheduler in the DB audit — which is
+        // the conservative (i.e. complaint-prone) direction.
+        if state.manual_session_ids.len() >= MAX_MANUAL_IDS {
+            if let Some(first) = state.manual_session_ids.iter().next().cloned() {
+                state.manual_session_ids.remove(&first);
+            }
+        }
+        state.manual_session_ids.insert(session_id.to_string());
+    }
+
+    /// Forget a session id. Used when a session is deleted so the set
+    /// doesn't accumulate dead pointers.
+    pub async fn forget_session(&self, session_id: &str) {
+        let mut state = self.state.lock().await;
+        state.manual_session_ids.remove(session_id);
+    }
+
+    /// In-memory check: walks the per-task scheduler history and flags
+    /// any pair of consecutive timestamps closer than the schedule's
+    /// minimum gap. Returns one violation per offending task (the
+    /// tightest gap observed).
+    pub async fn audit_in_memory(&self, tasks: &[RepeatingTask]) -> Vec<WatchdogViolation> {
+        let state = self.state.lock().await;
+        let mut out = Vec::new();
+        for task in tasks {
+            let Some(hist) = state.scheduler_history.get(&task.id) else {
+                continue;
+            };
+            if hist.len() < 2 {
+                continue;
+            }
+            let min_gap = min_run_gap_seconds(task);
+            // Walk the history once, record the tightest gap.
+            let mut tightest: Option<i64> = None;
+            let mut prev = hist[0];
+            for &ts in hist.iter().skip(1) {
+                let gap = (ts - prev).num_seconds();
+                if gap < min_gap && tightest.is_none_or(|t| gap < t) {
+                    tightest = Some(gap);
+                }
+                prev = ts;
+            }
+            if let Some(gap) = tightest {
+                out.push(WatchdogViolation {
+                    task_id: task.id.clone(),
+                    gap_seconds: gap,
+                    min_gap_seconds: min_gap,
+                    source: ViolationSource::InMemoryHistory,
+                });
+            }
+        }
+        out
+    }
+
+    /// DB-side check: queries persisted `sessions` rows tied to each
+    /// task, drops anything the auditor knows is manual, drops anything
+    /// older than `audit_start`, and flags consecutive scheduler-spawn
+    /// `created_at` timestamps that are too close together.
+    ///
+    /// Independent from `audit_in_memory`: a refactor that breaks
+    /// `record_scheduler_dispatch` (so `audit_in_memory` sees nothing)
+    /// is still caught here, because session rows are produced by an
+    /// entirely different code path.
+    pub async fn audit_persisted(
+        &self,
+        db: &Db,
+        tasks: &[RepeatingTask],
+    ) -> Vec<WatchdogViolation> {
+        let manual = {
+            let state = self.state.lock().await;
+            state.manual_session_ids.clone()
+        };
+        let audit_start = self.audit_start;
+        let mut out = Vec::new();
+        for task in tasks {
+            let sessions = match db.list_sessions_by_repeating_task(&task.id).await {
+                Ok(s) => s,
+                Err(e) => {
+                    tracing::warn!(
+                        task_id = %task.id,
+                        "Auditor: list_sessions_by_repeating_task failed: {e}",
+                    );
+                    continue;
+                }
+            };
+            // list_sessions_by_repeating_task returns newest-first; the
+            // gap check needs chronological order.
+            let mut scheduled: Vec<DateTime<Utc>> = sessions
+                .into_iter()
+                .filter(|s| !manual.contains(&s.id))
+                .filter_map(|s| DateTime::parse_from_rfc3339(&s.created_at).ok())
+                .map(|d| d.with_timezone(&Utc))
+                .filter(|ts| *ts >= audit_start)
+                .collect();
+            if scheduled.len() < 2 {
+                continue;
+            }
+            scheduled.sort();
+            let min_gap = min_run_gap_seconds(task);
+            let mut tightest: Option<i64> = None;
+            let mut prev = scheduled[0];
+            for ts in scheduled.iter().skip(1) {
+                let gap = (*ts - prev).num_seconds();
+                if gap < min_gap && tightest.is_none_or(|t| gap < t) {
+                    tightest = Some(gap);
+                }
+                prev = *ts;
+            }
+            if let Some(gap) = tightest {
+                out.push(WatchdogViolation {
+                    task_id: task.id.clone(),
+                    gap_seconds: gap,
+                    min_gap_seconds: min_gap,
+                    source: ViolationSource::PersistedSessions,
+                });
+            }
+        }
+        out
+    }
+
+    /// One audit pass: run both checks, broadcast each violation, and
+    /// kill-switch the offending task (disable + clear `next_run_at`)
+    /// so the bug can't keep firing while a human investigates. The
+    /// kill switch is idempotent — disabling an already-disabled task
+    /// is a no-op for the scheduler.
+    pub async fn audit_pass(&self, db: &Db, broadcaster: &Arc<Broadcaster>) -> usize {
+        let tasks = match db.list_repeating_tasks().await {
+            Ok(t) => t,
+            Err(e) => {
+                tracing::error!("Auditor: list_repeating_tasks failed: {e}");
+                return 0;
+            }
+        };
+        let mut violations = self.audit_in_memory(&tasks).await;
+        violations.extend(self.audit_persisted(db, &tasks).await);
+        let count = violations.len();
+        for v in violations {
+            tracing::error!(
+                task_id = %v.task_id,
+                gap_seconds = v.gap_seconds,
+                min_gap_seconds = v.min_gap_seconds,
+                ?v.source,
+                "Repeating-task watchdog: invariant violated; disabling task",
+            );
+            let now = Utc::now().to_rfc3339();
+            let _ = db
+                .update_repeating_task(
+                    &v.task_id,
+                    UpdateRepeatingTask {
+                        enabled: Some(false),
+                        next_run_at: Some(None),
+                        updated_at: Some(now.clone()),
+                        ..Default::default()
+                    },
+                )
+                .await;
+            broadcaster.broadcast(WsEvent {
+                event_type: "repeating-task-watchdog".into(),
+                session_id: v.task_id.clone(),
+                data: serde_json::json!({
+                    "taskId": v.task_id,
+                    "gapSeconds": v.gap_seconds,
+                    "minGapSeconds": v.min_gap_seconds,
+                    "source": match v.source {
+                        ViolationSource::InMemoryHistory => "in_memory_history",
+                        ViolationSource::PersistedSessions => "persisted_sessions",
+                    },
+                    "action": "disabled",
+                    "at": now,
+                }),
+            });
+        }
+        count
+    }
+
+    /// Background loop: tick `audit_pass` every `interval`. Returns the
+    /// `JoinHandle` so `main` can hold it for the process lifetime.
+    pub fn spawn_audit_loop(
+        &self,
+        db: Db,
+        broadcaster: Arc<Broadcaster>,
+        interval: std::time::Duration,
+    ) -> tokio::task::JoinHandle<()> {
+        let auditor = self.clone();
+        tokio::spawn(async move {
+            let mut t = tokio::time::interval(interval);
+            t.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+            t.tick().await; // skip the immediate first tick
+            loop {
+                t.tick().await;
+                let _ = auditor.audit_pass(&db, &broadcaster).await;
+            }
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -747,6 +1251,383 @@ mod tests {
         assert!(remaining.contains_key("active"));
         assert!(!remaining.contains_key("idle"));
         drop(live);
+    }
+
+    // ── Run-policy guard tests ────────────────────────────────────
+
+    fn task_with_last_run(
+        kind: &str,
+        value: &str,
+        last_run: Option<DateTime<Utc>>,
+    ) -> RepeatingTask {
+        let mut t = make_task(kind, value);
+        t.last_run_at = last_run.map(|d| d.to_rfc3339());
+        t
+    }
+
+    #[test]
+    fn policy_allows_first_scheduler_run_when_no_history() {
+        let task = make_task("interval", r#"{"minutes":5}"#);
+        let now = Utc.with_ymd_and_hms(2026, 6, 9, 10, 0, 0).unwrap();
+        assert_eq!(
+            check_run_policy(&task, None, now, RunTrigger::Scheduler),
+            PolicyDecision::Allow,
+        );
+    }
+
+    #[test]
+    fn policy_blocks_scheduler_run_below_hard_floor() {
+        let now = Utc.with_ymd_and_hms(2026, 6, 9, 10, 0, 0).unwrap();
+        // interval=1min schedule, but only 30s since last run — must
+        // refuse on the 60s hard floor.
+        let task = task_with_last_run(
+            "interval",
+            r#"{"minutes":1}"#,
+            Some(now - Duration::seconds(30)),
+        );
+        let decision = check_run_policy(
+            &task,
+            task.last_run_at.as_deref(),
+            now,
+            RunTrigger::Scheduler,
+        );
+        match decision {
+            PolicyDecision::Throttle(reason) => {
+                assert!(reason.contains("hard floor"), "got: {reason}");
+            }
+            PolicyDecision::Allow => panic!("expected throttle, got Allow"),
+        }
+    }
+
+    #[test]
+    fn policy_blocks_scheduler_run_below_schedule_floor() {
+        let now = Utc.with_ymd_and_hms(2026, 6, 9, 10, 0, 0).unwrap();
+        // interval=5min schedule. Last run 100s ago — past the 60s
+        // hard floor, but well below the 5min schedule (allowing 30s
+        // tick slop, the floor is 270s).
+        let task = task_with_last_run(
+            "interval",
+            r#"{"minutes":5}"#,
+            Some(now - Duration::seconds(100)),
+        );
+        let decision = check_run_policy(
+            &task,
+            task.last_run_at.as_deref(),
+            now,
+            RunTrigger::Scheduler,
+        );
+        assert!(
+            matches!(decision, PolicyDecision::Throttle(_)),
+            "expected throttle, got {decision:?}",
+        );
+    }
+
+    #[test]
+    fn policy_allows_scheduler_run_after_schedule_floor() {
+        let now = Utc.with_ymd_and_hms(2026, 6, 9, 10, 0, 0).unwrap();
+        let task = task_with_last_run(
+            "interval",
+            r#"{"minutes":5}"#,
+            Some(now - Duration::seconds(300)),
+        );
+        assert_eq!(
+            check_run_policy(
+                &task,
+                task.last_run_at.as_deref(),
+                now,
+                RunTrigger::Scheduler
+            ),
+            PolicyDecision::Allow,
+        );
+    }
+
+    #[test]
+    fn policy_allows_manual_runs_regardless_of_gap() {
+        let now = Utc.with_ymd_and_hms(2026, 6, 9, 10, 0, 0).unwrap();
+        // Last run 1 second ago — manual must still be allowed.
+        let task = task_with_last_run(
+            "interval",
+            r#"{"minutes":60}"#,
+            Some(now - Duration::seconds(1)),
+        );
+        assert_eq!(
+            check_run_policy(&task, task.last_run_at.as_deref(), now, RunTrigger::Manual),
+            PolicyDecision::Allow,
+        );
+    }
+
+    #[test]
+    fn policy_applies_60s_floor_to_daily_and_weekly_tasks() {
+        let now = Utc.with_ymd_and_hms(2026, 6, 9, 10, 0, 0).unwrap();
+        for (kind, value) in [
+            ("daily", r#"{"hour":10,"minute":0}"#),
+            ("weekly", r#"{"weekday":1,"hour":10,"minute":0}"#),
+        ] {
+            let task = task_with_last_run(kind, value, Some(now - Duration::seconds(30)));
+            let decision = check_run_policy(
+                &task,
+                task.last_run_at.as_deref(),
+                now,
+                RunTrigger::Scheduler,
+            );
+            assert!(
+                matches!(decision, PolicyDecision::Throttle(_)),
+                "expected throttle for {kind}, got {decision:?}",
+            );
+        }
+    }
+
+    #[test]
+    fn min_run_gap_seconds_picks_max_of_hard_floor_and_schedule() {
+        let one_min = make_task("interval", r#"{"minutes":1}"#);
+        assert_eq!(min_run_gap_seconds(&one_min), 60);
+        let five_min = make_task("interval", r#"{"minutes":5}"#);
+        assert_eq!(min_run_gap_seconds(&five_min), 300);
+        let daily = make_task("daily", r#"{"hour":10,"minute":0}"#);
+        assert_eq!(min_run_gap_seconds(&daily), 86_400);
+    }
+
+    // ── Watchdog tests ────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn auditor_in_memory_flags_pair_below_min_gap() {
+        let now = Utc.with_ymd_and_hms(2026, 6, 9, 10, 0, 0).unwrap();
+        let auditor = RunAuditor::with_start(now - Duration::hours(1));
+        let task = make_task("interval", r#"{"minutes":5}"#);
+        // Two scheduler dispatches 60 seconds apart for a 5-minute task.
+        auditor.record_scheduler_dispatch(&task.id, now).await;
+        auditor
+            .record_scheduler_dispatch(&task.id, now + Duration::seconds(60))
+            .await;
+        let violations = auditor.audit_in_memory(std::slice::from_ref(&task)).await;
+        assert_eq!(violations.len(), 1);
+        let v = &violations[0];
+        assert_eq!(v.task_id, task.id);
+        assert_eq!(v.gap_seconds, 60);
+        assert_eq!(v.min_gap_seconds, 300);
+        assert_eq!(v.source, ViolationSource::InMemoryHistory);
+    }
+
+    #[tokio::test]
+    async fn auditor_in_memory_clean_when_gap_respected() {
+        let now = Utc.with_ymd_and_hms(2026, 6, 9, 10, 0, 0).unwrap();
+        let auditor = RunAuditor::with_start(now - Duration::hours(1));
+        let task = make_task("interval", r#"{"minutes":5}"#);
+        auditor.record_scheduler_dispatch(&task.id, now).await;
+        auditor
+            .record_scheduler_dispatch(&task.id, now + Duration::seconds(310))
+            .await;
+        assert!(
+            auditor
+                .audit_in_memory(std::slice::from_ref(&task))
+                .await
+                .is_empty()
+        );
+    }
+
+    #[tokio::test]
+    async fn auditor_history_cap_drops_oldest_entries() {
+        let auditor = RunAuditor::new();
+        let base = Utc::now();
+        for i in 0..(AUDITOR_HISTORY_CAP as i64 + 5) {
+            auditor
+                .record_scheduler_dispatch("t1", base + Duration::seconds(i * 1000))
+                .await;
+        }
+        let state = auditor.state.lock().await;
+        let hist = state.scheduler_history.get("t1").unwrap();
+        assert_eq!(hist.len(), AUDITOR_HISTORY_CAP);
+    }
+
+    #[tokio::test]
+    async fn auditor_persisted_skips_manual_sessions() {
+        let db = Db::in_memory().unwrap();
+        let now = Utc::now();
+        let auditor = RunAuditor::with_start(now - Duration::hours(1));
+
+        // Seed a task + two sessions 30 seconds apart. With both
+        // classified scheduler, this would be a violation. Marking the
+        // second one manual must suppress the alarm.
+        let ts = now.to_rfc3339();
+        db.create_folder(crate::db::models::NewFolder {
+            id: "f1".into(),
+            name: "f1".into(),
+            path: "/tmp".into(),
+            created_at: ts.clone(),
+        })
+        .await
+        .unwrap();
+        db.create_repeating_task(crate::db::models::NewRepeatingTask {
+            id: "t1".into(),
+            name: "t1".into(),
+            description: "".into(),
+            folder_id: "f1".into(),
+            prompt: "x".into(),
+            schedule_kind: "interval".into(),
+            schedule_value: r#"{"minutes":5}"#.into(),
+            model: None,
+            effort: None,
+            enabled: true,
+            next_run_at: None,
+            last_run_at: None,
+            created_at: ts.clone(),
+            updated_at: ts.clone(),
+        })
+        .await
+        .unwrap();
+        for (id, offset) in [("s_a", 0), ("s_b", 30)] {
+            let created = (now + Duration::seconds(offset)).to_rfc3339();
+            db.create_session(NewSession {
+                id: id.into(),
+                name: id.into(),
+                folder_id: "f1".into(),
+                model: None,
+                effort: None,
+                is_worker: false,
+                project_id: None,
+                card_id: None,
+                conversation_id: None,
+                created_at: created.clone(),
+                last_activity: created,
+                repeating_task_id: Some("t1".into()),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        }
+
+        let tasks = db.list_repeating_tasks().await.unwrap();
+        let violations = auditor.audit_persisted(&db, &tasks).await;
+        assert_eq!(violations.len(), 1, "should flag without manual marker");
+
+        auditor.mark_manual_session("s_b").await;
+        let violations = auditor.audit_persisted(&db, &tasks).await;
+        assert!(
+            violations.is_empty(),
+            "marking s_b as manual must suppress the alarm",
+        );
+    }
+
+    #[tokio::test]
+    async fn auditor_persisted_ignores_sessions_before_audit_start() {
+        let db = Db::in_memory().unwrap();
+        let now = Utc::now();
+        // Audit window opens NOW; the seeded sessions are well in the
+        // past and must be skipped to avoid false positives.
+        let auditor = RunAuditor::with_start(now);
+        let old = now - Duration::hours(2);
+
+        let ts = now.to_rfc3339();
+        db.create_folder(crate::db::models::NewFolder {
+            id: "f1".into(),
+            name: "f1".into(),
+            path: "/tmp".into(),
+            created_at: ts.clone(),
+        })
+        .await
+        .unwrap();
+        db.create_repeating_task(crate::db::models::NewRepeatingTask {
+            id: "t1".into(),
+            name: "t1".into(),
+            description: "".into(),
+            folder_id: "f1".into(),
+            prompt: "x".into(),
+            schedule_kind: "interval".into(),
+            schedule_value: r#"{"minutes":5}"#.into(),
+            model: None,
+            effort: None,
+            enabled: true,
+            next_run_at: None,
+            last_run_at: None,
+            created_at: ts.clone(),
+            updated_at: ts.clone(),
+        })
+        .await
+        .unwrap();
+        for (id, offset) in [("s_a", 0i64), ("s_b", 30)] {
+            let created = (old + Duration::seconds(offset)).to_rfc3339();
+            db.create_session(NewSession {
+                id: id.into(),
+                name: id.into(),
+                folder_id: "f1".into(),
+                model: None,
+                effort: None,
+                is_worker: false,
+                project_id: None,
+                card_id: None,
+                conversation_id: None,
+                created_at: created.clone(),
+                last_activity: created,
+                repeating_task_id: Some("t1".into()),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        }
+        let tasks = db.list_repeating_tasks().await.unwrap();
+        let violations = auditor.audit_persisted(&db, &tasks).await;
+        assert!(violations.is_empty());
+    }
+
+    #[tokio::test]
+    async fn audit_pass_disables_task_and_broadcasts_when_violation_found() {
+        let db = Db::in_memory().unwrap();
+        let broadcaster = Broadcaster::new();
+        let mut rx = broadcaster.subscribe_all();
+        let now = Utc::now();
+        let auditor = RunAuditor::with_start(now - Duration::hours(1));
+
+        let ts = now.to_rfc3339();
+        db.create_folder(crate::db::models::NewFolder {
+            id: "f1".into(),
+            name: "f1".into(),
+            path: "/tmp".into(),
+            created_at: ts.clone(),
+        })
+        .await
+        .unwrap();
+        db.create_repeating_task(crate::db::models::NewRepeatingTask {
+            id: "t1".into(),
+            name: "t1".into(),
+            description: "".into(),
+            folder_id: "f1".into(),
+            prompt: "x".into(),
+            schedule_kind: "interval".into(),
+            schedule_value: r#"{"minutes":5}"#.into(),
+            model: None,
+            effort: None,
+            enabled: true,
+            next_run_at: Some(ts.clone()),
+            last_run_at: None,
+            created_at: ts.clone(),
+            updated_at: ts.clone(),
+        })
+        .await
+        .unwrap();
+
+        // Two in-memory dispatches 10 seconds apart for an interval=5min task.
+        auditor.record_scheduler_dispatch("t1", now).await;
+        auditor
+            .record_scheduler_dispatch("t1", now + Duration::seconds(10))
+            .await;
+
+        let count = auditor.audit_pass(&db, &broadcaster).await;
+        assert!(count >= 1, "expected at least one violation; got {count}");
+
+        let after = db.get_repeating_task("t1").await.unwrap().unwrap();
+        assert!(!after.enabled, "watchdog should disable the task");
+        assert!(
+            after.next_run_at.is_none(),
+            "watchdog should clear next_run_at",
+        );
+
+        let event = tokio::time::timeout(std::time::Duration::from_secs(1), rx.recv())
+            .await
+            .expect("broadcast must fire")
+            .expect("rx not closed");
+        assert_eq!(event.event_type, "repeating-task-watchdog");
+        assert_eq!(event.data["taskId"], "t1");
+        assert_eq!(event.data["action"], "disabled");
     }
 
     #[test]

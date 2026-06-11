@@ -80,6 +80,7 @@ fn ctx(db: &Arc<Db>, session_id: &str, project_id: Option<&str>) -> ToolCallCont
         provider_registry: None,
         expert_dispatcher: None,
         data_dir: None,
+        folder_id: "f1".into(),
         pm_authorizations: Default::default(),
     }
 }

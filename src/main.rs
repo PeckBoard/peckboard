@@ -10,7 +10,7 @@ use peckboard::plugin::builtins::register_all as register_builtin_plugins;
 use peckboard::plugin::manager::PluginManager;
 use peckboard::provider::manager::SessionManager;
 use peckboard::provider::registry::ProviderRegistry;
-use peckboard::repeating::RepeatingTaskManager;
+use peckboard::repeating::{RepeatingTaskManager, RunAuditor};
 use peckboard::routes::api_router;
 use peckboard::security::{origin_check, repair_dangling_sessions, security_headers};
 use peckboard::service::mcp_server::McpTokenRegistry;
@@ -226,6 +226,7 @@ async fn main() -> anyhow::Result<()> {
     let session_manager =
         SessionManager::new(provider_registry.clone()).with_plugins(plugins.clone());
     let repeating_task_manager = RepeatingTaskManager::new();
+    let run_auditor = RunAuditor::new();
 
     let mcp_tokens = McpTokenRegistry::new();
     let push_service = PushService::new(&config.data_dir);
@@ -242,6 +243,7 @@ async fn main() -> anyhow::Result<()> {
         provider_registry,
         session_manager,
         repeating_task_manager,
+        run_auditor,
         mcp_tokens,
         push_service,
         pm_authorizations: Default::default(),
@@ -292,11 +294,26 @@ async fn main() -> anyhow::Result<()> {
                     mcp_tokens: &sched_state.mcp_tokens,
                     data_dir: &sched_state.config.data_dir,
                     http_port: sched_state.config.port,
+                    auditor: &sched_state.run_auditor,
                 };
                 sched_state.repeating_task_manager.run_due_tasks(ctx).await;
             }
         });
         tracing::info!("Repeating-task scheduler started (30s interval)");
+    }
+
+    // Repeating-task watchdog: independent observer that audits both the
+    // auditor's own dispatch log and the persisted session rows every
+    // 60s. Catches any scheduler-initiated runs that fired closer
+    // together than the schedule allows; on a hit, it disables the
+    // task (kill switch) and broadcasts a `repeating-task-watchdog`
+    // event so the UI can surface the failure. See [`RunAuditor`].
+    {
+        let auditor = state.run_auditor.clone();
+        let db_clone = state.db.clone();
+        let bc_clone = state.broadcaster.clone();
+        auditor.spawn_audit_loop(db_clone, bc_clone, std::time::Duration::from_secs(60));
+        tracing::info!("Repeating-task watchdog started (60s interval)");
     }
 
     // Idle lock-map sweepers for SessionManager + RepeatingTaskManager.

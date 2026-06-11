@@ -324,6 +324,7 @@ mod tests {
             provider_registry: None,
             expert_dispatcher: None,
             data_dir: None,
+            folder_id: "f1".into(),
             pm_authorizations: Default::default(),
         };
 
@@ -376,6 +377,7 @@ mod tests {
             provider_registry: None,
             expert_dispatcher: None,
             data_dir: Some(tmp.path().to_path_buf()),
+            folder_id: "f1".into(),
             pm_authorizations: Default::default(),
         };
 
@@ -450,6 +452,7 @@ mod tests {
             provider_registry: None,
             expert_dispatcher: None,
             data_dir: None,
+            folder_id: "f1".into(),
             pm_authorizations: Default::default(),
         };
 
@@ -574,6 +577,7 @@ mod tests {
             provider_registry: None,
             expert_dispatcher: None,
             data_dir: None,
+            folder_id: "f1".into(),
             pm_authorizations: Default::default(),
         };
 
@@ -682,6 +686,7 @@ mod tests {
             provider_registry: None,
             expert_dispatcher: None,
             data_dir: None,
+            folder_id: "f1".into(),
             pm_authorizations: Default::default(),
         };
 

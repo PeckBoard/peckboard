@@ -108,6 +108,16 @@ impl Db {
             diesel::update(sessions::table.filter(sessions::repeating_task_id.eq(&id)))
                 .set(sessions::repeating_task_id.eq::<Option<String>>(None))
                 .execute(conn)?;
+            // Drop any user_tabs entries pointing at this task — mirrors
+            // delete_session/delete_project. user_tabs is polymorphic
+            // (no FK cascade), so this is the only path that prevents
+            // orphan chips from rendering after a delete.
+            diesel::delete(
+                user_tabs::table
+                    .filter(user_tabs::item_type.eq("repeating_task"))
+                    .filter(user_tabs::item_id.eq(&id)),
+            )
+            .execute(conn)?;
             let count = diesel::delete(repeating_tasks::table.find(&id)).execute(conn)?;
             Ok(count > 0)
         })

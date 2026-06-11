@@ -9,9 +9,11 @@ impl McpToolRegistry {
         &self,
         ctx: &ToolCallContext,
     ) -> anyhow::Result<Value> {
-        tracing::info!(session_id = %ctx.session_id, "MCP tool: list_projects");
+        tracing::info!(session_id = %ctx.session_id, folder_id = %ctx.folder_id, "MCP tool: list_projects");
 
-        let projects = ctx.db.list_projects().await?;
+        // Folder-scoped: a caller in folder F sees only F's projects.
+        // Sibling folders never appear, even by id.
+        let projects = ctx.db.list_projects_by_folder(&ctx.folder_id).await?;
 
         let items: Vec<Value> = projects
             .iter()
@@ -45,31 +47,33 @@ impl McpToolRegistry {
             .and_then(|v| v.as_str())
             .ok_or_else(|| anyhow::anyhow!("create_project requires 'name'"))?;
 
-        // Resolve folder: prefer folder_id; else look up / create by folder_path.
+        // Resolve folder: prefer folder_id; else look up / create by
+        // folder_path. Both paths funnel through the caller's folder
+        // boundary — `scope_folder_target` rejects an explicit foreign
+        // folder_id, and the folder_path branch must resolve to the
+        // caller's own folder path. Without these checks, a worker in
+        // folder A could materialise a project in folder B by passing a
+        // different `folder_id` or `folder_path` in the arguments.
+        let caller = ctx
+            .db
+            .get_folder(&ctx.folder_id)
+            .await?
+            .ok_or_else(|| anyhow::anyhow!("caller folder vanished"))?;
         let folder_id = if let Some(fid) = args.get("folder_id").and_then(|v| v.as_str()) {
-            fid.to_string()
+            ctx.scope_folder_target(fid)?.as_str().to_string()
         } else if let Some(fp) = args.get("folder_path").and_then(|v| v.as_str()) {
-            let folder_name = args
-                .get("folder_name")
-                .and_then(|v| v.as_str())
-                .map(|s| s.to_string())
-                .unwrap_or_else(|| {
-                    std::path::Path::new(fp)
-                        .file_name()
-                        .and_then(|n| n.to_str())
-                        .unwrap_or(fp)
-                        .to_string()
-                });
-            let create_if_missing = args
-                .get("create_folder_if_missing")
-                .and_then(|v| v.as_bool())
-                .unwrap_or(false);
-            let folder = self
-                .upsert_folder(ctx, &folder_name, fp, create_if_missing)
-                .await?;
-            folder.id
+            if fp != caller.path {
+                anyhow::bail!(
+                    "create_project is restricted to the caller's own folder \
+                     (path: {})",
+                    caller.path
+                );
+            }
+            caller.id.clone()
         } else {
-            anyhow::bail!("create_project requires 'folder_id' or 'folder_path'");
+            // Default to the caller's own folder rather than failing —
+            // omitting both args is the common, safe case.
+            caller.id.clone()
         };
 
         let context = args
@@ -152,7 +156,9 @@ impl McpToolRegistry {
         args: Value,
         ctx: &ToolCallContext,
     ) -> anyhow::Result<Value> {
-        let scope = ctx.scope_project(args.get("project_id").and_then(|v| v.as_str()))?;
+        let scope = ctx
+            .scope_project(args.get("project_id").and_then(|v| v.as_str()))
+            .await?;
         let project_id = scope.as_str();
 
         tracing::info!(session_id = %ctx.session_id, project_id = %project_id, "MCP tool: update_project");
@@ -200,7 +206,9 @@ impl McpToolRegistry {
         args: Value,
         ctx: &ToolCallContext,
     ) -> anyhow::Result<Value> {
-        let scope = ctx.scope_project(args.get("project_id").and_then(|v| v.as_str()))?;
+        let scope = ctx
+            .scope_project(args.get("project_id").and_then(|v| v.as_str()))
+            .await?;
         let project_id = scope.as_str();
 
         tracing::info!(session_id = %ctx.session_id, project_id = %project_id, "MCP tool: pause_project");
@@ -255,7 +263,9 @@ impl McpToolRegistry {
         args: Value,
         ctx: &ToolCallContext,
     ) -> anyhow::Result<Value> {
-        let scope = ctx.scope_project(args.get("project_id").and_then(|v| v.as_str()))?;
+        let scope = ctx
+            .scope_project(args.get("project_id").and_then(|v| v.as_str()))
+            .await?;
         let project_id = scope.as_str();
 
         tracing::info!(session_id = %ctx.session_id, project_id = %project_id, "MCP tool: resume_project");
@@ -297,7 +307,9 @@ impl McpToolRegistry {
         args: Value,
         ctx: &ToolCallContext,
     ) -> anyhow::Result<Value> {
-        let scope = ctx.scope_project(args.get("project_id").and_then(|v| v.as_str()))?;
+        let scope = ctx
+            .scope_project(args.get("project_id").and_then(|v| v.as_str()))
+            .await?;
         let project_id = scope.as_str();
 
         tracing::info!(session_id = %ctx.session_id, project_id = %project_id, "MCP tool: delete_project");

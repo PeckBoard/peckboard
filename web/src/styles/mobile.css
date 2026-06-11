@@ -441,6 +441,14 @@
 .tab-icon-project {
   color: var(--warning);
 }
+.tab-icon-report,
+.tab-icon-repeating-task {
+  /* SVG icons inherit `currentColor`; sit them on the muted text colour
+     so the kind glyph reads as chrome, not a status indicator. */
+  display: inline-flex;
+  align-items: center;
+  color: var(--text3);
+}
 /* Trailing `+` button — entry point for creating a new session. Lives at
    the far right of the strip via `margin-left: auto`; sticks at the end
    of the row when there are too many tabs to fit. */

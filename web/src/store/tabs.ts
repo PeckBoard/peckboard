@@ -1,7 +1,7 @@
 import { create } from 'zustand'
 import { authedFetch } from './auth'
 
-export type TabType = 'session' | 'project'
+export type TabType = 'session' | 'project' | 'report' | 'repeating_task'
 
 export interface Tab {
   itemType: TabType
@@ -10,17 +10,19 @@ export interface Tab {
    *  Frontend computes the unread badge by comparing this against the
    *  source's own activity timestamp (session.last_activity, etc.). */
   lastActive: string
-  /** Denormalized name of the underlying session/project. The server
-   *  resolves this on the way out — see /api/me/tabs in src/routes/me.rs.
-   *  Worker sessions (`is_worker=true`) are not in the regular sessions
-   *  list, so the strip relied on this field to label them; without it
-   *  the chip rendered as a generic "Session" and the cleanup loop
-   *  closed the tab as soon as the sessions list loaded. */
+  /** Denormalized name of the underlying item (session/project name,
+   *  repeating task name, or report title). The server resolves this
+   *  on the way out — see /api/me/tabs in src/routes/me.rs. Worker
+   *  sessions (`is_worker=true`) are not in the regular sessions list,
+   *  so the strip relied on this field to label them; without it the
+   *  chip rendered as a generic "Session" and the cleanup loop closed
+   *  the tab as soon as the sessions list loaded. */
   name: string
   /** Denormalized `sessions.is_worker` for session tabs (always false
-   *  for project tabs). Tabs for worker sessions hide the "Delete
-   *  session" context-menu entry — worker sessions are owned by their
-   *  card and the backend refuses DELETE /api/sessions/:id for them. */
+   *  for project / report / repeating-task tabs). Tabs for worker
+   *  sessions hide the "Delete session" context-menu entry — worker
+   *  sessions are owned by their card and the backend refuses
+   *  DELETE /api/sessions/:id for them. */
   isWorker: boolean
 }
 

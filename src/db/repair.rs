@@ -34,6 +34,7 @@ pub fn ensure_schema(conn: &mut SqliteConnection) -> anyhow::Result<()> {
     ensure_plugin_settings_table(conn)?;
     ensure_pm_decisions_table(conn)?;
     ensure_usage_events_table(conn)?;
+    ensure_user_tabs_check_constraint(conn)?;
     Ok(())
 }
 
@@ -682,6 +683,61 @@ fn log_if_healing_table(conn: &mut SqliteConnection, table: &str) -> anyhow::Res
     Ok(())
 }
 
+/// Heal DBs that predate `1781202566_user_tabs_more_kinds`. That
+/// migration relaxes the `user_tabs.item_type` CHECK constraint to
+/// allow `'report'` and `'repeating_task'` in addition to `'session'`
+/// and `'project'`. CHECK constraints can only be changed by recreating
+/// the table, and SQLite has no IF-CHECK-IS-RELAXED guard, so this
+/// detect-then-recreate path heals data dirs that somehow skipped the
+/// migration — or where the table-recreate half failed midway and left
+/// the old CHECK in place.
+fn ensure_user_tabs_check_constraint(conn: &mut SqliteConnection) -> anyhow::Result<()> {
+    #[derive(QueryableByName)]
+    struct MasterRow {
+        #[diesel(sql_type = diesel::sql_types::Text)]
+        sql: String,
+    }
+    let row: Option<MasterRow> =
+        sql_query("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'user_tabs'")
+            .get_result(conn)
+            .optional()?;
+    let sql = match row {
+        Some(r) => r.sql,
+        // No user_tabs table at all — base migration hasn't run; let the
+        // caller surface that rather than try to create one here.
+        None => return Ok(()),
+    };
+    // Already relaxed (or never had the CHECK) — nothing to do.
+    if sql.contains("'report'") || sql.contains("'repeating_task'") {
+        return Ok(());
+    }
+    // CHECK still names only session/project. Recreate the table with
+    // the wider CHECK, preserving every existing row.
+    tracing::info!("Repairing schema: relaxing user_tabs.item_type CHECK constraint");
+    sql_query(
+        "CREATE TABLE IF NOT EXISTS user_tabs_new (
+            user_id     TEXT    NOT NULL REFERENCES users(id),
+            item_type   TEXT    NOT NULL CHECK (item_type IN ('session', 'project', 'report', 'repeating_task')),
+            item_id     TEXT    NOT NULL,
+            last_active TEXT    NOT NULL,
+            PRIMARY KEY (user_id, item_type, item_id)
+        )",
+    )
+    .execute(conn)?;
+    sql_query(
+        "INSERT INTO user_tabs_new (user_id, item_type, item_id, last_active)
+            SELECT user_id, item_type, item_id, last_active FROM user_tabs",
+    )
+    .execute(conn)?;
+    sql_query("DROP TABLE user_tabs").execute(conn)?;
+    sql_query("ALTER TABLE user_tabs_new RENAME TO user_tabs").execute(conn)?;
+    sql_query(
+        "CREATE INDEX IF NOT EXISTS idx_user_tabs_user_active ON user_tabs (user_id, last_active DESC)",
+    )
+    .execute(conn)?;
+    Ok(())
+}
+
 /// Backfill for the `model` / `effort` columns added to `queued_messages`
 /// in migration `1780879129_queued_message_model`. Migration is additive
 /// (NULL-able columns), but ALTER ADD COLUMN is not idempotent in SQLite,
@@ -825,6 +881,95 @@ mod tests {
         .load(&mut conn)
         .unwrap();
         assert_eq!(rows2.len(), 2);
+    }
+
+    /// A DB created before `1781202566_user_tabs_more_kinds` has the
+    /// old CHECK that only allows 'session' / 'project'. ensure_schema
+    /// must recreate the table with the relaxed CHECK while preserving
+    /// every existing row, AND the recreated table must accept a
+    /// 'report' / 'repeating_task' insert.
+    #[test]
+    fn ensure_schema_relaxes_user_tabs_check_constraint() {
+        let mut conn = SqliteConnection::establish(":memory:").unwrap();
+
+        // Other ensure_schema steps stub minimal projects + queued_messages
+        // so this test stays scoped to the user_tabs path.
+        sql_query(
+            "CREATE TABLE projects (
+                id TEXT PRIMARY KEY NOT NULL,
+                auto_notify_changes BOOLEAN NOT NULL DEFAULT 1,
+                worker_communication BOOLEAN NOT NULL DEFAULT 1
+            )",
+        )
+        .execute(&mut conn)
+        .unwrap();
+        sql_query(
+            "CREATE TABLE queued_messages (
+                session_id TEXT PRIMARY KEY NOT NULL,
+                text TEXT NOT NULL,
+                queued_at TEXT NOT NULL,
+                model TEXT,
+                effort TEXT
+            )",
+        )
+        .execute(&mut conn)
+        .unwrap();
+        sql_query("CREATE TABLE users (id TEXT PRIMARY KEY NOT NULL)")
+            .execute(&mut conn)
+            .unwrap();
+
+        // The pre-relaxation user_tabs, byte-for-byte the original CHECK.
+        sql_query(
+            "CREATE TABLE user_tabs (
+                user_id     TEXT NOT NULL REFERENCES users(id),
+                item_type   TEXT NOT NULL CHECK (item_type IN ('session', 'project')),
+                item_id     TEXT NOT NULL,
+                last_active TEXT NOT NULL,
+                PRIMARY KEY (user_id, item_type, item_id)
+            )",
+        )
+        .execute(&mut conn)
+        .unwrap();
+        sql_query("INSERT INTO users (id) VALUES ('u1')")
+            .execute(&mut conn)
+            .unwrap();
+        sql_query(
+            "INSERT INTO user_tabs (user_id, item_type, item_id, last_active) \
+             VALUES ('u1', 'session', 's1', '2026-06-11T00:00:00Z')",
+        )
+        .execute(&mut conn)
+        .unwrap();
+
+        ensure_schema(&mut conn).unwrap();
+
+        // Existing row preserved.
+        let count: CountRow = sql_query(
+            "SELECT count(*) AS n FROM user_tabs WHERE user_id = 'u1' AND item_id = 's1'",
+        )
+        .get_result(&mut conn)
+        .unwrap();
+        assert_eq!(count.n, 1, "pre-heal session tab row must survive");
+
+        // New kinds now accepted.
+        sql_query(
+            "INSERT INTO user_tabs (user_id, item_type, item_id, last_active) \
+             VALUES ('u1', 'report', '2026-06-11/foo.md', '2026-06-11T00:00:00Z')",
+        )
+        .execute(&mut conn)
+        .expect("report-kind insert should succeed after heal");
+        sql_query(
+            "INSERT INTO user_tabs (user_id, item_type, item_id, last_active) \
+             VALUES ('u1', 'repeating_task', 'rt1', '2026-06-11T00:00:00Z')",
+        )
+        .execute(&mut conn)
+        .expect("repeating_task-kind insert should succeed after heal");
+
+        // Idempotent: second run is a no-op on the relaxed schema.
+        ensure_schema(&mut conn).unwrap();
+        let count2: CountRow = sql_query("SELECT count(*) AS n FROM user_tabs")
+            .get_result(&mut conn)
+            .unwrap();
+        assert_eq!(count2.n, 3);
     }
 
     /// Running on a healthy schema must be a no-op (no double-add).

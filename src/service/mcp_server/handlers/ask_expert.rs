@@ -105,7 +105,9 @@ impl McpToolRegistry {
                         .get_expert_session(id)
                         .await?
                         .ok_or_else(|| anyhow::anyhow!("expert not found: {id}"))?;
-                    ensure_expert_in_scope(&e, caller_project.as_deref())?;
+                    // Scope check BEFORE any side effect (no delivery,
+                    // no event log) — PM expert audit point.
+                    ensure_expert_in_scope(&e, caller_project.as_deref(), &ctx.folder_id)?;
                     e
                 }
                 None => {
@@ -196,6 +198,17 @@ impl McpToolRegistry {
         // Identify the replying expert for context.
         let me = ctx.db.get_session(&ctx.session_id).await.ok().flatten();
 
+        // Folder boundary is the hard one: an expert may only reply to a
+        // session in its own folder. This blocks an out-of-folder
+        // knowledge-expert reply from leaking back into a sibling folder
+        // even if its `reply_to_session_id` arg is forged. Globals
+        // (no folder of their own to compare against) defer to the
+        // project / chat carve-outs below.
+        let me_is_global = me.as_ref().map(|s| s.project_id.is_none()).unwrap_or(false);
+        if !me_is_global && target.folder_id != ctx.folder_id {
+            anyhow::bail!("target session not found: {reply_to}");
+        }
+
         // Scope: a project-scoped *question* expert may only answer sessions
         // in its own project; a global expert (unscoped token) may answer any
         // in-scope caller. A *knowledge* expert may answer cross-project, but
@@ -266,9 +279,12 @@ impl McpToolRegistry {
 
     /// Experts the caller may consult: those scoped to its project, plus
     /// globally-scoped experts, plus any knowledge expert in another project
-    /// (which only answers within its own boundary). An unscoped caller sees
-    /// globals plus every knowledge expert.
-    async fn in_scope_experts(
+    /// in the SAME folder (which only answers within its own boundary). An
+    /// unscoped caller sees globals plus every knowledge expert in its folder.
+    /// Cross-folder knowledge experts are never reachable — the folder is the
+    /// hard isolation boundary; knowledge-experts are a within-folder
+    /// convenience for chat sessions.
+    pub(super) async fn in_scope_experts(
         &self,
         ctx: &ToolCallContext,
         caller_project: Option<&str>,
@@ -276,7 +292,7 @@ impl McpToolRegistry {
         let all = ctx.db.list_expert_sessions().await?;
         Ok(all
             .into_iter()
-            .filter(|e| expert_in_scope(e, caller_project))
+            .filter(|e| expert_in_scope(e, caller_project, &ctx.folder_id))
             .collect())
     }
 
@@ -347,12 +363,20 @@ fn is_knowledge_expert(expert: &Session) -> bool {
 /// An expert is in scope for a caller if it is global (`project_id IS NULL`)
 /// or owned by the caller's own project. Additionally, a **chat session** (an
 /// unscoped token — `caller_project` is `None`) may reach any **knowledge**
-/// expert, since it only answers within its own boundary. Workers (a
-/// project-scoped token) stay confined to their own project plus globals, and
-/// cross-project access to a *question* expert is always rejected.
-fn expert_in_scope(expert: &Session, caller_project: Option<&str>) -> bool {
+/// expert in the SAME folder, since it only answers within its own boundary.
+/// Workers (a project-scoped token) stay confined to their own project plus
+/// globals, and cross-project access to a *question* expert is always
+/// rejected. Cross-folder access is always rejected — folder is the hard
+/// isolation boundary, even for knowledge experts.
+fn expert_in_scope(expert: &Session, caller_project: Option<&str>, caller_folder: &str) -> bool {
     if expert.project_id.is_none() {
+        // Globals are intentionally cross-folder visible (e.g. the global
+        // question-expert): they hold no folder-specific state.
         return true;
+    }
+    // Project-scoped experts: folder is the hard boundary.
+    if expert.folder_id != caller_folder {
+        return false;
     }
     if caller_project.is_some() && expert.project_id.as_deref() == caller_project {
         return true;
@@ -360,15 +384,17 @@ fn expert_in_scope(expert: &Session, caller_project: Option<&str>) -> bool {
     caller_project.is_none() && is_knowledge_expert(expert)
 }
 
-fn ensure_expert_in_scope(expert: &Session, caller_project: Option<&str>) -> anyhow::Result<()> {
-    if expert_in_scope(expert, caller_project) {
+fn ensure_expert_in_scope(
+    expert: &Session,
+    caller_project: Option<&str>,
+    caller_folder: &str,
+) -> anyhow::Result<()> {
+    if expert_in_scope(expert, caller_project, caller_folder) {
         Ok(())
     } else {
-        anyhow::bail!(
-            "expert {} is out of scope for this caller (question-expert for project {})",
-            expert.id,
-            expert.project_id.as_deref().unwrap_or("?"),
-        )
+        // "Not found" framing avoids leaking the existence of an expert
+        // in a sibling folder (the PM-expert audit flagged this).
+        anyhow::bail!("expert not found: {}", expert.id)
     }
 }
 

@@ -3,9 +3,22 @@ import { authedFetch } from '../store/auth'
 import { useReportsStore, type ReportEntry } from '../store/reports'
 import List from './List'
 import ListViewHeader from './ListViewHeader'
-import SafeMarkdown from './SafeMarkdown'
 
-export default function ReportBrowser() {
+interface ReportBrowserProps {
+  /** Open a single report by its (folder, file) pair. Drives the
+   *  URL navigation in App.tsx, which in turn renders [[ReportView]]
+   *  and opens a tab via the cross-device tab strip. */
+  onOpenReport: (folder: string, file: string) => void
+}
+
+/**
+ * List / index of report markdown files. Clicking a row hands off to
+ * [[App]] via `onOpenReport`, which navigates to `/reports/:folder/:file`
+ * (opens a tab and mounts [[ReportView]]). The browser itself never
+ * holds the active-report state — that lives in the URL so the report
+ * can be deep-linked and persists in the tab strip across devices.
+ */
+export default function ReportBrowser({ onOpenReport }: ReportBrowserProps) {
   const reports = useReportsStore((s) => s.reports)
   const loading = useReportsStore((s) => s.loading)
   const error = useReportsStore((s) => s.error)
@@ -16,16 +29,6 @@ export default function ReportBrowser() {
   const [collapsedFolders, setCollapsedFolders] = useState<Set<string>>(new Set())
   const allFolders = new Set(reports.map((r) => r.folder))
   const expandedFolders = new Set([...allFolders].filter((f) => !collapsedFolders.has(f)))
-
-  const [activeReport, setActiveReport] = useState<{
-    folder: string
-    file: string
-    title?: string
-    sessionId?: string
-    projectName?: string
-  } | null>(null)
-  const [reportContent, setReportContent] = useState('')
-  const [loadingContent, setLoadingContent] = useState(false)
 
   useEffect(() => {
     fetchReports()
@@ -38,30 +41,6 @@ export default function ReportBrowser() {
       else next.add(folder)
       return next
     })
-  }
-
-  const viewReport = async (report: ReportEntry) => {
-    setActiveReport({
-      folder: report.folder,
-      file: report.file,
-      title: report.title,
-      sessionId: report.sessionId,
-      projectName: report.projectName,
-    })
-    setLoadingContent(true)
-    setReportContent('')
-    try {
-      const res = await authedFetch(
-        `/api/reports/${encodeURIComponent(report.folder)}/${encodeURIComponent(report.file)}`,
-      )
-      if (!res.ok) throw new Error('Failed to load report')
-      const data = await res.json()
-      setReportContent(data.body ?? data.content ?? JSON.stringify(data, null, 2))
-    } catch {
-      setReportContent('Failed to load report content.')
-    } finally {
-      setLoadingContent(false)
-    }
   }
 
   const downloadReport = async (folder: string, file: string) => {
@@ -82,50 +61,6 @@ export default function ReportBrowser() {
   for (const r of reports) {
     if (!grouped[r.folder]) grouped[r.folder] = []
     grouped[r.folder].push(r)
-  }
-
-  if (activeReport) {
-    return (
-      <div className="report-viewer">
-        <div className="report-viewer-header">
-          <button className="btn-secondary" onClick={() => setActiveReport(null)}>
-            &larr; Back
-          </button>
-          <div className="report-viewer-meta">
-            <h2 className="report-viewer-title">{activeReport.title || activeReport.file}</h2>
-            <div className="report-viewer-info">
-              <span>{activeReport.folder}</span>
-              {activeReport.projectName && (
-                <span className="report-viewer-project">{activeReport.projectName}</span>
-              )}
-              {activeReport.sessionId && (
-                <button
-                  className="report-viewer-session-link"
-                  onClick={() => {
-                    window.location.href = `/sessions/${activeReport.sessionId}`
-                  }}
-                >
-                  View Session
-                </button>
-              )}
-            </div>
-          </div>
-          <button
-            className="btn-secondary"
-            onClick={() => downloadReport(activeReport.folder, activeReport.file)}
-          >
-            Download
-          </button>
-        </div>
-        {loadingContent ? (
-          <div className="chat-loading">
-            <div className="loading-spinner" />
-          </div>
-        ) : (
-          <SafeMarkdown className="report-content">{reportContent}</SafeMarkdown>
-        )}
-      </div>
-    )
   }
 
   return (
@@ -163,7 +98,7 @@ export default function ReportBrowser() {
               <List
                 items={grouped[folder]}
                 getKey={(r) => `${r.folder}/${r.file}`}
-                onActivate={viewReport}
+                onActivate={(r) => onOpenReport(r.folder, r.file)}
                 bodyClassName="list-view-rows"
                 getMenuItems={(r) => [
                   {

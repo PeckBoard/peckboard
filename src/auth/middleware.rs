@@ -151,6 +151,7 @@ mod tests {
             provider_registry: provider_registry.clone(),
             session_manager: crate::provider::manager::SessionManager::new(provider_registry),
             repeating_task_manager: crate::repeating::RepeatingTaskManager::new(),
+            run_auditor: crate::repeating::RunAuditor::new(),
             mcp_tokens: crate::service::mcp_server::McpTokenRegistry::new(),
             push_service: crate::service::push::PushService::new(dir),
             pm_authorizations: Default::default(),
