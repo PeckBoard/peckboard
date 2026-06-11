@@ -560,7 +560,16 @@ export default function ChatView({ sessionId, onOpenTodos }: ChatViewProps) {
       })),
     },
     { divider: true },
-    { label: 'Clear session', onSelect: handleClear, testId: 'chat-menu-clear' },
+    {
+      label: 'Clear session',
+      onSelect: handleClear,
+      testId: 'chat-menu-clear',
+      // Worker sessions are owned by their card; repeating-task
+      // sessions are a schedule's run history. Both have their
+      // transcript guarded server-side (POST /clear → 409). Hide
+      // rather than render an always-erroring control.
+      hidden: !!sessionDetail?.is_worker || !!sessionDetail?.repeating_task_id,
+    },
     {
       label: 'Terminate agent',
       onSelect: handleTerminateAgent,
@@ -571,7 +580,9 @@ export default function ChatView({ sessionId, onOpenTodos }: ChatViewProps) {
       danger: true,
       // Worker sessions are owned by their card; the backend refuses
       // DELETE /api/sessions/:id for them. Hide rather than render an
-      // always-409 control.
+      // always-409 control. Repeating-task sessions delete fine — the
+      // run is removed from the task's history, the schedule keeps
+      // firing — so the entry stays for them.
       hidden: !!sessionDetail?.is_worker,
       onSelect: handleDelete,
       testId: 'chat-menu-delete',

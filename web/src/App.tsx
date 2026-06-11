@@ -784,11 +784,20 @@ function App() {
     },
     getMenuItems: (tab) => [
       { label: 'Rename', onSelect: () => handleRenameItem('session', tab.itemId) },
-      { label: 'Clear session', onSelect: () => setConfirmClearSessionId(tab.itemId) },
+      // Worker sessions are owned by their card and repeating-task
+      // sessions are a schedule's run history. Both have their
+      // transcript guarded server-side (POST /clear → 409); hide the
+      // menu entry rather than render a button that always errors.
+      {
+        label: 'Clear session',
+        onSelect: () => setConfirmClearSessionId(tab.itemId),
+        hidden: tab.isWorker || tab.isRepeatingTaskSession,
+      },
       { label: 'Terminate agent', onSelect: () => setConfirmTerminateSessionId(tab.itemId) },
-      // Worker sessions are owned by their card — the backend refuses
-      // DELETE /api/sessions/:id for them. Hide rather than render a
-      // button that always 409s.
+      // Same reasoning for delete on worker sessions: backend refuses
+      // DELETE /api/sessions/:id with 409. Repeating-task sessions
+      // delete fine (just removes the run from the task's history),
+      // so the entry stays for them.
       {
         label: 'Delete session',
         danger: true,

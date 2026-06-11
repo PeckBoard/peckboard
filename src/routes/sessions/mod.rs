@@ -445,10 +445,43 @@ async fn clear_session(
         )
     })?;
 
-    if session.is_none() {
+    let session = match session {
+        Some(s) => s,
+        None => {
+            return Err((
+                StatusCode::NOT_FOUND,
+                Json(serde_json::json!({ "error": "session not found" })),
+            ));
+        }
+    };
+
+    // Worker sessions are owned by their card. Wiping their events would
+    // strand the orchestrator (no transcript to resume against) and let a
+    // user destroy the card's audit trail behind the worker's back.
+    // Refuse — mirrors the DELETE guard above.
+    if session.is_worker {
         return Err((
-            StatusCode::NOT_FOUND,
-            Json(serde_json::json!({ "error": "session not found" })),
+            StatusCode::CONFLICT,
+            Json(serde_json::json!({
+                "error": "worker sessions are owned by their card; their transcript cannot be cleared",
+            })),
+        ));
+    }
+
+    // Sessions kicked off by a repeating task are the task's run history.
+    // Clearing one wipes the audit trail of that scheduled run without
+    // removing the run itself, which is never what the user wants — the
+    // schedule keeps firing and the cleared row becomes a confusing
+    // empty stub. The card-owner asked that Clear simply not be offered
+    // for these sessions ([[deleting-sessions]]); the route enforces it
+    // so the UI menu hiding is defence-in-depth, not the load-bearing
+    // guard.
+    if session.repeating_task_id.is_some() {
+        return Err((
+            StatusCode::CONFLICT,
+            Json(serde_json::json!({
+                "error": "this session is a repeating task run; delete it instead of clearing",
+            })),
         ));
     }
 

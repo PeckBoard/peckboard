@@ -24,6 +24,13 @@ export interface Tab {
    *  sessions are owned by their card and the backend refuses
    *  DELETE /api/sessions/:id for them. */
   isWorker: boolean
+  /** True iff the underlying session has a `repeating_task_id` set
+   *  (i.e. it's a scheduled run). Tabs for these sessions hide the
+   *  "Clear session" context-menu entry — clearing would wipe the run's
+   *  audit trail and leave a confusing empty stub for the schedule to
+   *  keep firing past. Backend enforces via POST /clear → 409. Always
+   *  false for non-session tabs. */
+  isRepeatingTaskSession: boolean
 }
 
 interface TabsState {
@@ -50,6 +57,7 @@ interface ApiTab {
   last_active: string
   name?: string
   is_worker?: boolean
+  is_repeating_task_session?: boolean
 }
 
 function fromApi(t: ApiTab): Tab {
@@ -59,6 +67,7 @@ function fromApi(t: ApiTab): Tab {
     lastActive: t.last_active,
     name: t.name ?? '',
     isWorker: t.is_worker ?? false,
+    isRepeatingTaskSession: t.is_repeating_task_session ?? false,
   }
 }
 
@@ -134,7 +143,17 @@ export const useTabsStore = create<TabsState>((set, get) => ({
     // backfills it, and TabBar falls back to a sensible default.
     const now = new Date().toISOString()
     set((s) => ({
-      tabs: [{ itemType, itemId, lastActive: now, name: '', isWorker: false }, ...s.tabs],
+      tabs: [
+        {
+          itemType,
+          itemId,
+          lastActive: now,
+          name: '',
+          isWorker: false,
+          isRepeatingTaskSession: false,
+        },
+        ...s.tabs,
+      ],
     }))
 
     try {

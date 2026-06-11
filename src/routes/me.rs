@@ -41,6 +41,13 @@ pub struct TabView {
     /// DELETE /api/sessions/:id for worker sessions. Always false for
     /// project tabs.
     pub is_worker: bool,
+    /// True iff this tab refers to a session kicked off by a repeating
+    /// task. The tab strip hides the "Clear session" affordance for
+    /// these — clearing one would wipe the run's audit trail without
+    /// removing the row, leaving a confusing empty stub. Backend
+    /// enforces the policy via POST /clear → 409. Always false for
+    /// project / report / repeating-task tabs.
+    pub is_repeating_task_session: bool,
 }
 
 #[derive(Deserialize)]
@@ -129,10 +136,10 @@ async fn list_tabs(State(state): State<Arc<AppState>>, req: Request<Body>) -> im
 
     let mut out: Vec<TabView> = Vec::with_capacity(tabs.len());
     for t in tabs {
-        let (name, is_worker) = match t.item_type.as_str() {
+        let (name, is_worker, is_repeating_task_session) = match t.item_type.as_str() {
             "session" => match state.db.get_session(&t.item_id).await.ok().flatten() {
-                Some(s) => (Some(s.name), s.is_worker),
-                None => (None, false),
+                Some(s) => (Some(s.name), s.is_worker, s.repeating_task_id.is_some()),
+                None => (None, false, false),
             },
             "project" => (
                 state
@@ -142,6 +149,7 @@ async fn list_tabs(State(state): State<Arc<AppState>>, req: Request<Body>) -> im
                     .ok()
                     .flatten()
                     .map(|p| p.name),
+                false,
                 false,
             ),
             "repeating_task" => (
@@ -153,13 +161,15 @@ async fn list_tabs(State(state): State<Arc<AppState>>, req: Request<Body>) -> im
                     .flatten()
                     .map(|task| task.name),
                 false,
+                false,
             ),
             "report" => (
                 split_report_id(&t.item_id)
                     .and_then(|(folder, file)| report_label(&state, &folder, &file)),
                 false,
+                false,
             ),
-            _ => (None, false),
+            _ => (None, false, false),
         };
         if let Some(name) = name {
             out.push(TabView {
@@ -168,6 +178,7 @@ async fn list_tabs(State(state): State<Arc<AppState>>, req: Request<Body>) -> im
                 last_active: t.last_active,
                 name,
                 is_worker,
+                is_repeating_task_session,
             });
         }
     }
@@ -232,10 +243,10 @@ async fn upsert_tab(State(state): State<Arc<AppState>>, req: Request<Body>) -> i
             // upsert path has already verified the item exists, so a
             // missing name here would be a TOCTOU race — fall back to
             // empty rather than 500ing.
-            let (name, is_worker) = match tab.item_type.as_str() {
+            let (name, is_worker, is_repeating_task_session) = match tab.item_type.as_str() {
                 "session" => match state.db.get_session(&tab.item_id).await.ok().flatten() {
-                    Some(s) => (s.name, s.is_worker),
-                    None => (String::new(), false),
+                    Some(s) => (s.name, s.is_worker, s.repeating_task_id.is_some()),
+                    None => (String::new(), false, false),
                 },
                 "project" => (
                     state
@@ -246,6 +257,7 @@ async fn upsert_tab(State(state): State<Arc<AppState>>, req: Request<Body>) -> i
                         .flatten()
                         .map(|p| p.name)
                         .unwrap_or_default(),
+                    false,
                     false,
                 ),
                 "repeating_task" => (
@@ -258,14 +270,16 @@ async fn upsert_tab(State(state): State<Arc<AppState>>, req: Request<Body>) -> i
                         .map(|task| task.name)
                         .unwrap_or_default(),
                     false,
+                    false,
                 ),
                 "report" => (
                     split_report_id(&tab.item_id)
                         .and_then(|(folder, file)| report_label(&state, &folder, &file))
                         .unwrap_or_default(),
                     false,
+                    false,
                 ),
-                _ => (String::new(), false),
+                _ => (String::new(), false, false),
             };
             Ok(Json(TabView {
                 item_type: tab.item_type,
@@ -273,6 +287,7 @@ async fn upsert_tab(State(state): State<Arc<AppState>>, req: Request<Body>) -> i
                 last_active: tab.last_active,
                 name,
                 is_worker,
+                is_repeating_task_session,
             }))
         }
         // Item doesn't exist — refuse to create the tab. Stops phantom
