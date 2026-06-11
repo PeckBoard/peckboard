@@ -181,16 +181,16 @@
   }
 
   /* Tool blocks full width */
-  /* Drop the desktop board's side padding so each step row spans
-     edge-to-edge against the viewport. Padding now lives INSIDE the
-     row (on `.kanban-column-header` and `.kanban-cards`), which
-     keeps the heading + card strip readable while letting the row
-     background — and its top divider — touch the window sides. */
-  .kanban-board {
+  /* Drop the desktop scroll area's side padding so each step row
+     spans edge-to-edge against the viewport. Padding now lives
+     INSIDE the row (on `.kanban-column-header` and `.kanban-cards`),
+     which keeps the heading + card strip readable while letting the
+     row background — and its top divider — touch the window sides. */
+  .kanban-board-scroll {
     padding-left: 0;
     padding-right: 0;
   }
-  /* The board itself owns vertical scrolling; per-column overflow
+  /* The scroll area owns vertical scrolling; per-column overflow
      would create a new sticky containing block and break the
      section-locked header. */
   .kanban-column {
@@ -230,10 +230,10 @@
     -webkit-overflow-scrolling: touch;
     overscroll-behavior-x: contain;
     padding: 8px 12px 12px;
-    /* `align-items: stretch` lets every card in the strip take the same
-       height, so the strip reads as a single uniform row instead of a
-       ragged-bottom line. */
-    align-items: stretch;
+    /* Cards in the horizontal strip own their own height — collapsed
+       cards stay short, expanded ones grow taller without stretching
+       their neighbours. */
+    align-items: flex-start;
     /* Pad the strip's right edge so the trailing card isn't flush against
        the viewport (and the user can tell more cards exist when scrolled
        to the very end). */
@@ -241,11 +241,11 @@
   }
   /* Card width is slightly narrower than the desktop 320px so a small
      part of the next card peeks past the viewport's right edge,
-     advertising the horizontal scroll. Height also bumps up so the
-     description block is genuinely usable rather than a one-liner. */
+     advertising the horizontal scroll. Height auto so a collapsed
+     card stays short (header only) and an expanded one grows tall
+     enough to fit its description / action buttons. */
   .kanban-card {
-    width: 280px;
-    height: 240px;
+    width: 240px;
   }
   /* Empty row placeholder reads inline on a horizontal strip. */
   .kanban-cards-empty {

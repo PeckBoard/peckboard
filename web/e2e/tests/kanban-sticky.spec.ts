@@ -172,13 +172,15 @@ test('step header pins under the toolbar while scrolling its section, then yield
   baseURL,
 }) => {
   expect(baseURL, 'baseURL configured').toBeTruthy()
-  // Narrow + very short viewport so each row wraps into multiple lines
-  // and the board genuinely needs to scroll vertically between adjacent
-  // step sections. Width is below the `md` breakpoint (768px) so the
-  // board renders the mobile horizontal-rows layout where steps stack
-  // vertically — that's the layout the section-locked sticky header
-  // behaviour applies to.
-  await page.setViewportSize({ width: 700, height: 480 })
+  // Narrow + very short viewport so the board genuinely needs to
+  // scroll vertically between adjacent step sections. Width is below
+  // the `md` breakpoint (768px) so the board renders the mobile
+  // horizontal-rows layout where steps stack vertically — that's the
+  // layout the section-locked sticky header behaviour applies to.
+  // The height drops to 280px because the new card design defaults to
+  // collapsed (header-only) rows; the old 480px viewport left too
+  // much room and the rows fit without scrolling.
+  await page.setViewportSize({ width: 700, height: 280 })
 
   const { token, auth } = await authenticate(request)
 
@@ -222,11 +224,12 @@ test('step header pins under the toolbar while scrolling its section, then yield
 
   await loadAt(page, token, `/projects/${project.id}`)
 
-  // The step header pins flush beneath the tabbar — the board's own
-  // `.kanban-board-header` is deliberately NOT sticky and scrolls away
-  // (see kanban.css), so the tabbar is the fixed reference the pinned
-  // header docks under.
-  const toolbar = page.locator('.tabbar')
+  // The step header pins flush beneath the project header — the board's
+  // own `.kanban-board-header` is a non-scrolling sibling above the
+  // `.kanban-board-scroll` scroll container (see kanban.css), so the
+  // project header is the fixed reference the pinned column header
+  // docks under.
+  const toolbar = page.locator('.kanban-board-header')
   // Match rows by their header heading exactly so the locator can't
   // catch a priority-badge "Backlog" inside a card.
   const rowByLabel = (label: string) =>
@@ -256,7 +259,7 @@ test('step header pins under the toolbar while scrolling its section, then yield
   // Measure row positions inside the board's scroll container by
   // offsetTop, which is independent of current scrollTop.
   const geom = await page.evaluate(() => {
-    const boardEl = document.querySelector('.kanban-board') as HTMLElement
+    const boardEl = document.querySelector('.kanban-board-scroll') as HTMLElement
     const rows = Array.from(boardEl.querySelectorAll('.kanban-column')) as HTMLElement[]
     const labelOf = (r: HTMLElement) =>
       r.querySelector('.kanban-column-header h3')?.textContent?.trim() ?? ''
@@ -282,7 +285,7 @@ test('step header pins under the toolbar while scrolling its section, then yield
     Math.round((geom.backlogTop + geom.backlogBottom) / 2),
   )
   await page.evaluate(async (y) => {
-    const el = document.querySelector('.kanban-board') as HTMLElement
+    const el = document.querySelector('.kanban-board-scroll') as HTMLElement
     el.scrollTo(0, y)
     await new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r)))
   }, midBacklog)
@@ -305,7 +308,7 @@ test('step header pins under the toolbar while scrolling its section, then yield
     'mid-in_progress scroll position must be past the backlog section',
   ).toBeGreaterThan(geom.backlogBottom - 1)
   await page.evaluate(async (y) => {
-    const el = document.querySelector('.kanban-board') as HTMLElement
+    const el = document.querySelector('.kanban-board-scroll') as HTMLElement
     el.scrollTo(0, y)
     await new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r)))
   }, midInProgress)

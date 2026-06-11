@@ -23,6 +23,7 @@ import {
   priorityBadge,
   summarizeEvent,
 } from './kanban/utils'
+import PriorityChevron from './kanban/PriorityChevron'
 
 interface KanbanBoardProps {
   projectId: string
@@ -83,6 +84,18 @@ export default function KanbanBoard({ projectId, onOpenTodos }: KanbanBoardProps
   }
   const [editingCard, setEditingCard] = useState<Card | null>(null)
   const [showComms, setShowComms] = useState(false)
+  // Cards are collapsed by default — header only. Tapping the card toggles
+  // its entry in this set. Independent per card so opening one doesn't
+  // collapse the others.
+  const [expandedCardIds, setExpandedCardIds] = useState<Set<string>>(new Set())
+  const toggleCardExpanded = (cardId: string) => {
+    setExpandedCardIds((prev) => {
+      const next = new Set(prev)
+      if (next.has(cardId)) next.delete(cardId)
+      else next.add(cardId)
+      return next
+    })
+  }
   // One transient thought bubble per card, keyed by card id.
   const [bubbles, setBubbles] = useState<Record<string, ThoughtBubble>>({})
   const bubbleTimers = useRef<Record<string, ReturnType<typeof setTimeout>>>({})
@@ -705,458 +718,511 @@ export default function KanbanBoard({ projectId, onOpenTodos }: KanbanBoardProps
         </div>
       </div>
 
-      {project?.pause_reason && (
-        <div className="project-pause-banner" role="status" data-testid="project-pause-banner">
-          <strong>Project paused.</strong> {project.pause_reason}
-        </div>
-      )}
+      <div className="kanban-board-scroll">
+        {project?.pause_reason && (
+          <div className="project-pause-banner" role="status" data-testid="project-pause-banner">
+            <strong>Project paused.</strong> {project.pause_reason}
+          </div>
+        )}
 
-      {/* Project-level todo roll-up across every card's worker session. */}
-      <ProjectTodoSummary todosByCard={todosByCard} />
+        {/* Project-level todo roll-up across every card's worker session. */}
+        <ProjectTodoSummary todosByCard={todosByCard} />
 
-      {/* Pending worker questions — trigger button */}
-      {pendingQuestions.length > 0 && !questionDialogOpen && (
-        <button className="worker-questions-trigger" onClick={() => setQuestionDialogOpen(true)}>
-          <span className="worker-questions-icon">&#x2753;</span>
-          <span>
-            {pendingQuestions.length} worker question{pendingQuestions.length > 1 ? 's' : ''} need
-            your answer
-          </span>
-        </button>
-      )}
+        {/* Pending worker questions — trigger button */}
+        {pendingQuestions.length > 0 && !questionDialogOpen && (
+          <button className="worker-questions-trigger" onClick={() => setQuestionDialogOpen(true)}>
+            <span className="worker-questions-icon">&#x2753;</span>
+            <span>
+              {pendingQuestions.length} worker question{pendingQuestions.length > 1 ? 's' : ''} need
+              your answer
+            </span>
+          </button>
+        )}
 
-      {/* Question dialog — shows first pending question */}
-      {questionDialogOpen &&
-        pendingQuestions.length > 0 &&
-        (() => {
-          const pq = pendingQuestions[0]
-          const answers = questionAnswers[pq.eventId] ?? {}
-          const isSubmitting = submittingQuestion === pq.eventId
-          const hasAnswers = pq.questions.some((_, idx) => (answers[idx] ?? '').trim().length > 0)
-          const remaining = pendingQuestions.length - 1
+        {/* Question dialog — shows first pending question */}
+        {questionDialogOpen &&
+          pendingQuestions.length > 0 &&
+          (() => {
+            const pq = pendingQuestions[0]
+            const answers = questionAnswers[pq.eventId] ?? {}
+            const isSubmitting = submittingQuestion === pq.eventId
+            const hasAnswers = pq.questions.some((_, idx) => (answers[idx] ?? '').trim().length > 0)
+            const remaining = pendingQuestions.length - 1
 
-          return (
-            <div className="modal-backdrop" onClick={() => setQuestionDialogOpen(false)}>
-              <div
-                className="modal question-dialog"
-                onClick={(e) => e.stopPropagation()}
-                style={{ maxWidth: 520 }}
-              >
-                {/* Header with context */}
-                <div className="question-dialog-header">
-                  <div className="question-dialog-counter">
-                    {remaining > 0
-                      ? `${pendingQuestions.length} questions remaining`
-                      : 'Last question'}
+            return (
+              <div className="modal-backdrop" onClick={() => setQuestionDialogOpen(false)}>
+                <div
+                  className="modal question-dialog"
+                  onClick={(e) => e.stopPropagation()}
+                  style={{ maxWidth: 520 }}
+                >
+                  {/* Header with context */}
+                  <div className="question-dialog-header">
+                    <div className="question-dialog-counter">
+                      {remaining > 0
+                        ? `${pendingQuestions.length} questions remaining`
+                        : 'Last question'}
+                    </div>
+                    {pq.cardTitle && (
+                      <div className="question-dialog-context">
+                        <span className="question-dialog-card-label">Card:</span>
+                        <span className="question-dialog-card-title">{pq.cardTitle}</span>
+                      </div>
+                    )}
+                    {pq.cardDescription && (
+                      <div className="question-dialog-card-desc">{pq.cardDescription}</div>
+                    )}
                   </div>
-                  {pq.cardTitle && (
-                    <div className="question-dialog-context">
-                      <span className="question-dialog-card-label">Card:</span>
-                      <span className="question-dialog-card-title">{pq.cardTitle}</span>
-                    </div>
-                  )}
-                  {pq.cardDescription && (
-                    <div className="question-dialog-card-desc">{pq.cardDescription}</div>
-                  )}
-                </div>
 
-                {/* Question content */}
-                <div className="question-dialog-body">
-                  {pq.questions.map((q, idx) => (
-                    <div key={idx} className="question-item">
-                      {q.header && <div className="question-header">{q.header}</div>}
-                      <div className="question-card-text">{q.question}</div>
-                      {q.options && q.options.length > 0 ? (
-                        <div className="question-options">
-                          {q.options.map((opt, optIdx) => {
-                            const optObj = q.optionObjects?.[optIdx]
-                            return (
-                              <label key={opt} className="question-option-label">
-                                {q.multiSelect ? (
-                                  <input
-                                    type="checkbox"
-                                    checked={(answers[idx] ?? '').split(',').includes(opt)}
-                                    onChange={() => toggleQuestionMulti(pq.eventId, idx, opt)}
-                                    disabled={isSubmitting}
-                                  />
-                                ) : (
-                                  <input
-                                    type="radio"
-                                    name={`wq-${pq.eventId}-${idx}`}
-                                    checked={answers[idx] === opt}
-                                    onChange={() => setQuestionAnswer(pq.eventId, idx, opt)}
-                                    disabled={isSubmitting}
-                                  />
-                                )}
-                                <span className="question-option-text">
-                                  <span>{opt}</span>
-                                  {optObj?.description && (
-                                    <span className="question-option-desc">
-                                      {optObj.description}
-                                    </span>
+                  {/* Question content */}
+                  <div className="question-dialog-body">
+                    {pq.questions.map((q, idx) => (
+                      <div key={idx} className="question-item">
+                        {q.header && <div className="question-header">{q.header}</div>}
+                        <div className="question-card-text">{q.question}</div>
+                        {q.options && q.options.length > 0 ? (
+                          <div className="question-options">
+                            {q.options.map((opt, optIdx) => {
+                              const optObj = q.optionObjects?.[optIdx]
+                              return (
+                                <label key={opt} className="question-option-label">
+                                  {q.multiSelect ? (
+                                    <input
+                                      type="checkbox"
+                                      checked={(answers[idx] ?? '').split(',').includes(opt)}
+                                      onChange={() => toggleQuestionMulti(pq.eventId, idx, opt)}
+                                      disabled={isSubmitting}
+                                    />
+                                  ) : (
+                                    <input
+                                      type="radio"
+                                      name={`wq-${pq.eventId}-${idx}`}
+                                      checked={answers[idx] === opt}
+                                      onChange={() => setQuestionAnswer(pq.eventId, idx, opt)}
+                                      disabled={isSubmitting}
+                                    />
                                   )}
-                                </span>
-                              </label>
-                            )
-                          })}
-                        </div>
-                      ) : (
-                        <div className="question-input-wrapper">
-                          <input
-                            className="question-input"
-                            type="text"
-                            placeholder="Type your answer... (@ to reference a report)"
-                            value={answers[idx] ?? ''}
-                            onChange={(e) => setQuestionAnswer(pq.eventId, idx, e.target.value)}
-                            onKeyDown={(e) => {
-                              if (
-                                e.key === 'Enter' &&
-                                pq.questions.length === 1 &&
-                                hasAnswers &&
-                                !mentionAutocomplete
-                              )
-                                handleAnswerQuestion(pq)
-                            }}
-                            onBlur={() => setTimeout(() => setMentionAutocomplete(null), 200)}
-                            disabled={isSubmitting}
-                            autoFocus
-                          />
-                          {mentionAutocomplete &&
-                            mentionAutocomplete.eventId === pq.eventId &&
-                            mentionAutocomplete.idx === idx && (
-                              <div className="autocomplete-dropdown autocomplete-inline">
-                                <div className="autocomplete-header">
-                                  @ — reports &amp; sessions
-                                </div>
-                                {mentionAutocomplete.suggestions.map((m, i) => (
-                                  <button
-                                    key={`${m.type}-${m.detail}-${i}`}
-                                    className="autocomplete-item"
-                                    onMouseDown={(e) => {
-                                      e.preventDefault()
-                                      insertMentionInAnswer(pq.eventId, idx, m)
-                                    }}
-                                  >
-                                    <span className="autocomplete-item-title">
-                                      <span
-                                        className={`autocomplete-type-badge autocomplete-type-${m.type}`}
-                                      >
-                                        {m.type}
+                                  <span className="question-option-text">
+                                    <span>{opt}</span>
+                                    {optObj?.description && (
+                                      <span className="question-option-desc">
+                                        {optObj.description}
                                       </span>
-                                      {m.label}
-                                    </span>
-                                    <span className="autocomplete-item-path">{m.detail}</span>
-                                  </button>
-                                ))}
-                              </div>
-                            )}
-                        </div>
-                      )}
-                    </div>
-                  ))}
-                </div>
+                                    )}
+                                  </span>
+                                </label>
+                              )
+                            })}
+                          </div>
+                        ) : (
+                          <div className="question-input-wrapper">
+                            <input
+                              className="question-input"
+                              type="text"
+                              placeholder="Type your answer... (@ to reference a report)"
+                              value={answers[idx] ?? ''}
+                              onChange={(e) => setQuestionAnswer(pq.eventId, idx, e.target.value)}
+                              onKeyDown={(e) => {
+                                if (
+                                  e.key === 'Enter' &&
+                                  pq.questions.length === 1 &&
+                                  hasAnswers &&
+                                  !mentionAutocomplete
+                                )
+                                  handleAnswerQuestion(pq)
+                              }}
+                              onBlur={() => setTimeout(() => setMentionAutocomplete(null), 200)}
+                              disabled={isSubmitting}
+                              autoFocus
+                            />
+                            {mentionAutocomplete &&
+                              mentionAutocomplete.eventId === pq.eventId &&
+                              mentionAutocomplete.idx === idx && (
+                                <div className="autocomplete-dropdown autocomplete-inline">
+                                  <div className="autocomplete-header">
+                                    @ — reports &amp; sessions
+                                  </div>
+                                  {mentionAutocomplete.suggestions.map((m, i) => (
+                                    <button
+                                      key={`${m.type}-${m.detail}-${i}`}
+                                      className="autocomplete-item"
+                                      onMouseDown={(e) => {
+                                        e.preventDefault()
+                                        insertMentionInAnswer(pq.eventId, idx, m)
+                                      }}
+                                    >
+                                      <span className="autocomplete-item-title">
+                                        <span
+                                          className={`autocomplete-type-badge autocomplete-type-${m.type}`}
+                                        >
+                                          {m.type}
+                                        </span>
+                                        {m.label}
+                                      </span>
+                                      <span className="autocomplete-item-path">{m.detail}</span>
+                                    </button>
+                                  ))}
+                                </div>
+                              )}
+                          </div>
+                        )}
+                      </div>
+                    ))}
+                  </div>
 
-                {/* Footer */}
-                <div className="question-dialog-footer">
-                  <div className="question-dialog-left-actions">
-                    <button className="btn-secondary" onClick={() => setQuestionDialogOpen(false)}>
-                      Answer Later
-                    </button>
+                  {/* Footer */}
+                  <div className="question-dialog-footer">
+                    <div className="question-dialog-left-actions">
+                      <button
+                        className="btn-secondary"
+                        onClick={() => setQuestionDialogOpen(false)}
+                      >
+                        Answer Later
+                      </button>
+                      <button
+                        className="btn-secondary btn-danger-text"
+                        onClick={async () => {
+                          await handleDismissQuestion(pq)
+                          if (pendingQuestions.length <= 1) setQuestionDialogOpen(false)
+                        }}
+                        disabled={isSubmitting}
+                      >
+                        Dismiss
+                      </button>
+                    </div>
                     <button
-                      className="btn-secondary btn-danger-text"
+                      className="btn-primary"
                       onClick={async () => {
-                        await handleDismissQuestion(pq)
+                        await handleAnswerQuestion(pq)
                         if (pendingQuestions.length <= 1) setQuestionDialogOpen(false)
                       }}
-                      disabled={isSubmitting}
+                      disabled={!hasAnswers || isSubmitting}
                     >
-                      Dismiss
+                      {isSubmitting ? 'Submitting...' : 'Submit'}
                     </button>
                   </div>
-                  <button
-                    className="btn-primary"
-                    onClick={async () => {
-                      await handleAnswerQuestion(pq)
-                      if (pendingQuestions.length <= 1) setQuestionDialogOpen(false)
-                    }}
-                    disabled={!hasAnswers || isSubmitting}
-                  >
-                    {isSubmitting ? 'Submitting...' : 'Submit'}
-                  </button>
                 </div>
               </div>
-            </div>
-          )
-        })()}
+            )
+          })()}
 
-      {showAddForm && (
-        <CardFormModal mode="create" projectId={projectId} onClose={() => setShowAddForm(false)} />
-      )}
+        {showAddForm && (
+          <CardFormModal
+            mode="create"
+            projectId={projectId}
+            onClose={() => setShowAddForm(false)}
+          />
+        )}
 
-      <div className="kanban-columns">
-        {visibleSteps.map((step) => {
-          const rowCards = cardsByStep(step.key)
-          const dragOverRow = dragOver?.step === step.key
-          const showInsertIndicator = dragOverRow && dragOver?.insertIdx != null
-          const showAcceptBand = dragOverRow && dragOver?.insertIdx == null
-          return (
-            <div
-              key={step.key}
-              className={`kanban-column${showAcceptBand ? ' drag-over' : ''}`}
-              onDragOver={(e) => handleColumnDragOver(e, step.key, rowCards.length)}
-              onDragLeave={(e) => handleDragLeave(e, step.key)}
-              onDrop={(e) => handleDrop(e, step.key)}
-            >
-              <header className="kanban-column-header">
-                <h3>{step.label}</h3>
-                <span className="kanban-count" aria-label={`${rowCards.length} cards`}>
-                  {rowCards.length}
-                </span>
-              </header>
-              <div className="kanban-cards">
-                {rowCards.length === 0 && (
-                  <span className="kanban-cards-empty">No cards in {step.label}</span>
-                )}
-                {rowCards.map((card, cardIndex) => {
-                  const todos = todosByCard[card.id]
-                  const todoDone = todos ? todos.filter((t) => t.status === 'done').length : 0
-                  const pendingDeps =
-                    !card.worker_session_id && card.step !== 'done' && card.step !== 'wont_do'
-                      ? unmetDeps(card)
-                      : []
-                  const description = (card.description ?? '').trim()
-                  const sessionForCard = card.worker_session_id || card.last_worker_session_id
-                  const sessionVisible = !!sessionForCard && normalizeStep(card.step) !== 'backlog'
-                  const dropBefore =
-                    showInsertIndicator &&
-                    dragOver?.insertIdx === cardIndex &&
-                    draggingCardId !== card.id
-                  // Last card carries the trailing indicator when the drop
-                  // would land at the end of the row.
-                  const dropAfter =
-                    showInsertIndicator &&
-                    cardIndex === rowCards.length - 1 &&
-                    dragOver?.insertIdx === rowCards.length &&
-                    draggingCardId !== card.id
-                  return (
-                    <div
-                      key={`${card.id}-${card.step}`}
-                      className={`kanban-card ${card.blocked ? 'blocked' : ''}${draggingCardId === card.id ? ' dragging' : ''}`}
-                      data-drop-before={dropBefore ? 'true' : undefined}
-                      data-drop-after={dropAfter ? 'true' : undefined}
-                      draggable={true}
-                      onDragStart={(e) => handleDragStart(e, card)}
-                      onDragEnd={handleDragEnd}
-                      onDragOver={(e) =>
-                        handleCardDragOver(e, step.key, cardIndex, e.currentTarget as HTMLElement)
-                      }
-                    >
-                      {bubbles[card.id] && (
-                        <div
-                          key={bubbles[card.id].key}
-                          className="card-thought-bubble"
-                          title={bubbles[card.id].text}
-                        >
-                          {bubbles[card.id].text}
-                        </div>
-                      )}
-                      <div className="kanban-card-header">
-                        <div
-                          className="kanban-card-title-row"
-                          onClick={() => setSelectedCard(card)}
-                          title={card.title}
-                        >
-                          <span className="kanban-card-title">{card.title}</span>
-                          {priorityBadge(card.priority, priorities)}
-                        </div>
-                        <div className="kanban-card-actions">
-                          {sessionVisible && (
+        <div className="kanban-columns">
+          {visibleSteps.map((step) => {
+            const rowCards = cardsByStep(step.key)
+            const dragOverRow = dragOver?.step === step.key
+            const showInsertIndicator = dragOverRow && dragOver?.insertIdx != null
+            const showAcceptBand = dragOverRow && dragOver?.insertIdx == null
+            return (
+              <div
+                key={step.key}
+                className={`kanban-column${showAcceptBand ? ' drag-over' : ''}`}
+                onDragOver={(e) => handleColumnDragOver(e, step.key, rowCards.length)}
+                onDragLeave={(e) => handleDragLeave(e, step.key)}
+                onDrop={(e) => handleDrop(e, step.key)}
+              >
+                <header className="kanban-column-header">
+                  <h3>{step.label}</h3>
+                  <span className="kanban-count" aria-label={`${rowCards.length} cards`}>
+                    {rowCards.length}
+                  </span>
+                </header>
+                <div className="kanban-cards">
+                  {rowCards.length === 0 && (
+                    <span className="kanban-cards-empty">No cards in {step.label}</span>
+                  )}
+                  {rowCards.map((card, cardIndex) => {
+                    const todos = todosByCard[card.id]
+                    const todoDone = todos ? todos.filter((t) => t.status === 'done').length : 0
+                    const pendingDeps =
+                      !card.worker_session_id && card.step !== 'done' && card.step !== 'wont_do'
+                        ? unmetDeps(card)
+                        : []
+                    const description = (card.description ?? '').trim()
+                    const sessionForCard = card.worker_session_id || card.last_worker_session_id
+                    const sessionVisible =
+                      !!sessionForCard && normalizeStep(card.step) !== 'backlog'
+                    const dropBefore =
+                      showInsertIndicator &&
+                      dragOver?.insertIdx === cardIndex &&
+                      draggingCardId !== card.id
+                    // Last card carries the trailing indicator when the drop
+                    // would land at the end of the row.
+                    const dropAfter =
+                      showInsertIndicator &&
+                      cardIndex === rowCards.length - 1 &&
+                      dragOver?.insertIdx === rowCards.length &&
+                      draggingCardId !== card.id
+                    const cardStep = normalizeStep(card.step)
+                    const priorityLocked = cardStep === 'done' || cardStep === 'wont_do'
+                    const expanded = expandedCardIds.has(card.id)
+                    return (
+                      <div
+                        key={`${card.id}-${card.step}`}
+                        className={`kanban-card ${card.blocked ? 'blocked' : ''}${
+                          draggingCardId === card.id ? ' dragging' : ''
+                        }${expanded ? ' expanded' : ''}`}
+                        data-drop-before={dropBefore ? 'true' : undefined}
+                        data-drop-after={dropAfter ? 'true' : undefined}
+                        data-expanded={expanded ? 'true' : 'false'}
+                        draggable={true}
+                        onDragStart={(e) => handleDragStart(e, card)}
+                        onDragEnd={handleDragEnd}
+                        onDragOver={(e) =>
+                          handleCardDragOver(e, step.key, cardIndex, e.currentTarget as HTMLElement)
+                        }
+                        onClick={(e) => {
+                          // Clicks bubbling up from interactive descendants
+                          // (priority picker, action buttons, 3-dot menu)
+                          // already call `stopPropagation`. Anything that
+                          // reaches the card root is a "tap the card body"
+                          // intent — toggle the expand state.
+                          if ((e.target as HTMLElement).closest('[data-no-toggle]')) return
+                          toggleCardExpanded(card.id)
+                        }}
+                      >
+                        {bubbles[card.id] && (
+                          <div
+                            key={bubbles[card.id].key}
+                            className="card-thought-bubble"
+                            title={bubbles[card.id].text}
+                          >
+                            {bubbles[card.id].text}
+                          </div>
+                        )}
+                        <div className="kanban-card-header">
+                          <PriorityChevron
+                            value={card.priority}
+                            disabled={priorityLocked}
+                            priorities={priorities}
+                            onChange={(next) => updateCard(projectId, card.id, { priority: next })}
+                          />
+                          <span className="kanban-card-title" title={card.title}>
+                            {card.title}
+                          </span>
+                          <div className="kanban-card-actions" data-no-toggle>
                             <button
-                              type="button"
-                              className="kanban-card-quick-btn"
-                              data-testid="card-quick-session"
-                              title="View session"
-                              aria-label="View session"
+                              className="kanban-card-menu-btn"
+                              aria-label="Card menu"
                               onClick={(e) => {
                                 e.stopPropagation()
-                                handleViewSession(sessionForCard!)
+                                openCardMenu(card.id, e.currentTarget as HTMLElement)
                               }}
                             >
-                              <svg
-                                width="14"
-                                height="14"
-                                viewBox="0 0 24 24"
-                                fill="none"
-                                stroke="currentColor"
-                                strokeWidth="2"
-                                strokeLinecap="round"
-                                strokeLinejoin="round"
-                                aria-hidden="true"
-                              >
-                                <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z" />
-                              </svg>
+                              ...
                             </button>
-                          )}
-                          <button
-                            type="button"
-                            className="kanban-card-quick-btn"
-                            data-testid="card-quick-edit"
-                            title="Edit card"
-                            aria-label="Edit card"
-                            onClick={(e) => {
-                              e.stopPropagation()
-                              setEditingCard(card)
-                            }}
-                          >
-                            <svg
-                              width="14"
-                              height="14"
-                              viewBox="0 0 24 24"
-                              fill="none"
-                              stroke="currentColor"
-                              strokeWidth="2"
-                              strokeLinecap="round"
-                              strokeLinejoin="round"
-                              aria-hidden="true"
-                            >
-                              <path d="M12 20h9" />
-                              <path d="M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4 12.5-12.5z" />
-                            </svg>
-                          </button>
-                          <button
-                            className="kanban-card-menu-btn"
-                            aria-label="Card menu"
-                            onClick={(e) => {
-                              e.stopPropagation()
-                              openCardMenu(card.id, e.currentTarget as HTMLElement)
-                            }}
-                          >
-                            ...
-                          </button>
-                          {cardMenuId === card.id && cardMenuRect && (
-                            <div
-                              className="kanban-card-menu"
-                              style={{
-                                top: cardMenuRect.bottom + 4,
-                                right: Math.max(8, window.innerWidth - cardMenuRect.right),
-                              }}
-                            >
-                              {/* Worker affordances (View/Stop/Restart) are
-                                  hidden on backlog: cards in backlog haven't
-                                  been picked up yet and the orchestrator will
-                                  auto-spawn — "Restart Worker" there is
-                                  misleading. Done/wont_do keep View Session
-                                  so the user can review the worker's run. */}
+                            {cardMenuId === card.id && cardMenuRect && (
+                              <div
+                                className="kanban-card-menu"
+                                data-no-toggle
+                                style={{
+                                  top: cardMenuRect.bottom + 4,
+                                  right: Math.max(8, window.innerWidth - cardMenuRect.right),
+                                }}
+                              >
+                                <button
+                                  onClick={() => {
+                                    closeCardMenu()
+                                    setSelectedCard(card)
+                                  }}
+                                >
+                                  View
+                                </button>
+                                {sessionVisible && (
+                                  <button onClick={() => handleViewSession(sessionForCard!)}>
+                                    View Session
+                                  </button>
+                                )}
+                                <button
+                                  onClick={() => {
+                                    closeCardMenu()
+                                    setEditingCard(card)
+                                  }}
+                                >
+                                  Edit
+                                </button>
+                                {card.worker_session_id && cardStep !== 'backlog' && (
+                                  <button onClick={() => handleStopWorker(card)}>
+                                    Stop Worker
+                                  </button>
+                                )}
+                                {!card.worker_session_id &&
+                                  cardStep !== 'backlog' &&
+                                  cardStep !== 'done' &&
+                                  cardStep !== 'wont_do' && (
+                                    <button onClick={() => handleRestartWorker(card)}>
+                                      Restart Worker
+                                    </button>
+                                  )}
+                                {card.step !== 'done' && card.step !== 'wont_do' && (
+                                  <button
+                                    className="danger"
+                                    onClick={() => handleCancelWontDo(card)}
+                                  >
+                                    Cancel as Won't Do
+                                  </button>
+                                )}
+                                <button
+                                  className="danger"
+                                  onClick={() => {
+                                    closeCardMenu()
+                                    setConfirmDeleteId(card.id)
+                                  }}
+                                >
+                                  Delete
+                                </button>
+                              </div>
+                            )}
+                          </div>
+                        </div>
+                        {expanded && (
+                          <div className="kanban-card-body">
+                            {description ? (
+                              <div className="kanban-card-desc" data-testid="card-description">
+                                <SafeMarkdown className="kanban-card-desc-markdown">
+                                  {description}
+                                </SafeMarkdown>
+                              </div>
+                            ) : (
+                              <div className="kanban-card-desc kanban-card-desc-empty">
+                                No description
+                              </div>
+                            )}
+                            {card.blocked && (
+                              <div className="kanban-card-blocked">
+                                <strong>Blocked</strong>
+                                {card.block_reason ? `: ${card.block_reason}` : ''}
+                              </div>
+                            )}
+                            <div className="kanban-card-meta">
+                              {todos && todos.length > 0 && (
+                                <span
+                                  className="card-todo-badge"
+                                  data-testid="card-todo-badge"
+                                  title={`${todoDone} of ${todos.length} tasks done`}
+                                >
+                                  {todoDone}/{todos.length}
+                                </span>
+                              )}
+                              {card.worker_session_id && cardStep !== 'backlog' && (
+                                <span className="kanban-card-worker" title="Worker active">
+                                  <span className="kanban-card-worker-dot" />
+                                  Worker
+                                </span>
+                              )}
+                              {pendingDeps.length > 0 && (
+                                <span
+                                  className="waiting-indicator"
+                                  title={`Waiting on: ${pendingDeps
+                                    .map((c) => c.title)
+                                    .join(', ')}`}
+                                >
+                                  Waiting on {pendingDeps.length}{' '}
+                                  {pendingDeps.length === 1 ? 'dep' : 'deps'}
+                                </span>
+                              )}
+                            </div>
+                            <div className="kanban-card-buttons" data-no-toggle>
                               {sessionVisible && (
-                                <button onClick={() => handleViewSession(sessionForCard!)}>
-                                  View Session
+                                <button
+                                  type="button"
+                                  className="kanban-card-action-btn"
+                                  data-testid="card-quick-session"
+                                  title="Open session"
+                                  aria-label="Open session"
+                                  onClick={(e) => {
+                                    e.stopPropagation()
+                                    handleViewSession(sessionForCard!)
+                                  }}
+                                >
+                                  <svg
+                                    width="14"
+                                    height="14"
+                                    viewBox="0 0 24 24"
+                                    fill="none"
+                                    stroke="currentColor"
+                                    strokeWidth="2"
+                                    strokeLinecap="round"
+                                    strokeLinejoin="round"
+                                    aria-hidden="true"
+                                  >
+                                    <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z" />
+                                  </svg>
+                                  <span>Open</span>
                                 </button>
                               )}
                               <button
-                                onClick={() => {
-                                  closeCardMenu()
-                                  setEditingCard(card)
-                                }}
-                              >
-                                Edit
-                              </button>
-                              <button
-                                onClick={() => {
-                                  closeCardMenu()
+                                type="button"
+                                className="kanban-card-action-btn"
+                                data-testid="card-quick-view"
+                                title="View details"
+                                aria-label="View details"
+                                onClick={(e) => {
+                                  e.stopPropagation()
                                   setSelectedCard(card)
                                 }}
                               >
-                                Details
+                                <svg
+                                  width="14"
+                                  height="14"
+                                  viewBox="0 0 24 24"
+                                  fill="none"
+                                  stroke="currentColor"
+                                  strokeWidth="2"
+                                  strokeLinecap="round"
+                                  strokeLinejoin="round"
+                                  aria-hidden="true"
+                                >
+                                  <path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z" />
+                                  <circle cx="12" cy="12" r="3" />
+                                </svg>
+                                <span>View</span>
                               </button>
-                              {card.worker_session_id && normalizeStep(card.step) !== 'backlog' && (
-                                <button onClick={() => handleStopWorker(card)}>Stop Worker</button>
-                              )}
-                              {!card.worker_session_id &&
-                                normalizeStep(card.step) !== 'backlog' &&
-                                normalizeStep(card.step) !== 'done' &&
-                                normalizeStep(card.step) !== 'wont_do' && (
-                                  <button onClick={() => handleRestartWorker(card)}>
-                                    Restart Worker
-                                  </button>
-                                )}
-                              {card.step !== 'done' && card.step !== 'wont_do' && (
-                                <button className="danger" onClick={() => handleCancelWontDo(card)}>
-                                  Cancel as Won't Do
-                                </button>
-                              )}
                               <button
-                                className="danger"
-                                onClick={() => {
-                                  closeCardMenu()
-                                  setConfirmDeleteId(card.id)
+                                type="button"
+                                className="kanban-card-action-btn"
+                                data-testid="card-quick-edit"
+                                title="Edit card"
+                                aria-label="Edit card"
+                                onClick={(e) => {
+                                  e.stopPropagation()
+                                  setEditingCard(card)
                                 }}
                               >
-                                Delete
+                                <svg
+                                  width="14"
+                                  height="14"
+                                  viewBox="0 0 24 24"
+                                  fill="none"
+                                  stroke="currentColor"
+                                  strokeWidth="2"
+                                  strokeLinecap="round"
+                                  strokeLinejoin="round"
+                                  aria-hidden="true"
+                                >
+                                  <path d="M12 20h9" />
+                                  <path d="M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4 12.5-12.5z" />
+                                </svg>
+                                <span>Edit</span>
                               </button>
                             </div>
-                          )}
-                        </div>
-                      </div>
-                      {description ? (
-                        <div
-                          className="kanban-card-desc"
-                          data-testid="card-description"
-                          onClick={() => setSelectedCard(card)}
-                        >
-                          <SafeMarkdown className="kanban-card-desc-markdown">
-                            {description}
-                          </SafeMarkdown>
-                        </div>
-                      ) : (
-                        <div
-                          className="kanban-card-desc kanban-card-desc-empty"
-                          onClick={() => setSelectedCard(card)}
-                        >
-                          No description
-                        </div>
-                      )}
-                      <div className="kanban-card-footer" onClick={() => setSelectedCard(card)}>
-                        {todos && todos.length > 0 && (
-                          <span
-                            className="card-todo-badge"
-                            data-testid="card-todo-badge"
-                            title={`${todoDone} of ${todos.length} tasks done`}
-                          >
-                            {todoDone}/{todos.length}
-                          </span>
-                        )}
-                        {card.worker_session_id && normalizeStep(card.step) !== 'backlog' && (
-                          <span className="kanban-card-worker" title="Worker active">
-                            <span className="kanban-card-worker-dot" />
-                            Worker
-                          </span>
-                        )}
-                        {card.blocked && (
-                          <span
-                            className="blocked-indicator"
-                            title={card.block_reason ? `Blocked: ${card.block_reason}` : 'Blocked'}
-                          >
-                            Blocked
-                            {card.block_reason ? `: ${card.block_reason}` : ''}
-                          </span>
-                        )}
-                        {pendingDeps.length > 0 && (
-                          <span
-                            className="waiting-indicator"
-                            title={`Waiting on: ${pendingDeps.map((c) => c.title).join(', ')}`}
-                          >
-                            Waiting on {pendingDeps.length}{' '}
-                            {pendingDeps.length === 1 ? 'dep' : 'deps'}
-                          </span>
+                          </div>
                         )}
                       </div>
-                    </div>
-                  )
-                })}
+                    )
+                  })}
+                </div>
               </div>
-            </div>
-          )
-        })}
+            )
+          })}
+        </div>
       </div>
 
       {confirmDeleteId && (

@@ -9,7 +9,7 @@ import path from 'node:path'
  * confusing no-op offer. View Session / Stop Worker / the worker dot
  * are likewise irrelevant for a card that hasn't been picked up.
  *
- * The card menu still shows Edit / Details / Delete on backlog. This
+ * The card menu still shows View / Edit / Delete on backlog. This
  * test pins the boundary so a future refactor that re-introduces the
  * worker affordances will fail loudly.
  */
@@ -74,13 +74,13 @@ test('backlog card menu omits Restart/Stop/View Session', async ({ request, page
   await expect(card).toBeVisible({ timeout: 10_000 })
 
   // Open the per-card menu via the "..." trigger and assert the
-  // entries: only Edit / Details / Cancel as Won't Do / Delete should
+  // entries: only View / Edit / Cancel as Won't Do / Delete should
   // appear. Restart Worker, Stop Worker, and View Session must not.
   await card.locator('.kanban-card-menu-btn').click()
   const menu = page.locator('.kanban-card-menu')
   await expect(menu).toBeVisible({ timeout: 5_000 })
+  await expect(menu.locator('button', { hasText: /^View$/ })).toBeVisible()
   await expect(menu.locator('button', { hasText: /^Edit$/ })).toBeVisible()
-  await expect(menu.locator('button', { hasText: /^Details$/ })).toBeVisible()
   await expect(menu.locator('button', { hasText: /Restart Worker/ })).toHaveCount(0)
   await expect(menu.locator('button', { hasText: /Stop Worker/ })).toHaveCount(0)
   await expect(menu.locator('button', { hasText: /View Session/ })).toHaveCount(0)
