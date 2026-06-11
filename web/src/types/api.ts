@@ -198,7 +198,7 @@ export interface HealthResponse {
 export type UsageEntityKind = 'session' | 'project' | 'card' | 'expert'
 
 /** What kind of operation an `OperationCost` attributes spend to. */
-export type UsageOperationKind = 'file_update' | 'ask_expert' | 'qa'
+export type UsageOperationKind = 'file_update' | 'file_read' | 'ask_expert' | 'qa'
 
 /** USD-per-million-token rates for one model, by token kind, as advertised
  *  by the running binary's cost table. */
@@ -241,10 +241,40 @@ export interface EntityUsage {
   project_id?: string | null
 }
 
-/** A session row: `EntityUsage` plus its explicit lifetime totals. */
+/** A session row: `EntityUsage` plus its explicit lifetime totals and role
+ *  flags (so the dashboard can split chats / workers / experts and route to
+ *  the right detail page). For session rows `project_id` is the owning
+ *  project, when any. */
 export interface SessionUsage extends EntityUsage {
   total_tokens_used: number
   total_context_tokens: number
+  is_worker: boolean
+  is_expert: boolean
+}
+
+/** One turn ("prompt") of a session, from
+ *  `GET /api/usage/sessions/{id}/turns`. Mirrors `TurnUsage` in
+ *  `src/routes/usage/turns.rs`. */
+export interface TurnUsage {
+  turn_seq: number | null
+  /** End-of-turn timestamp (epoch ms). */
+  ts: number
+  model: string | null
+  input_tokens: number
+  output_tokens: number
+  cache_read_tokens: number
+  cache_creation_tokens: number
+  total_tokens: number
+  /** Context-window occupancy at the end of this turn. */
+  context_tokens: number
+  est_cost: number
+  /** Snippet of the user prompt that started the turn, when one exists. */
+  prompt: string | null
+  /** Distinct files `Read` during the turn — what its cache-read tokens were
+   *  spent re-loading. */
+  files_read: string[]
+  /** Distinct files edited during the turn. */
+  files_edited: string[]
 }
 
 /** Cost attributed to a single operation — one file update, one

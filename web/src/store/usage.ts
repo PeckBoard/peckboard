@@ -5,6 +5,7 @@ import type {
   OperationCost,
   SessionUsage,
   TrendSeries,
+  TurnUsage,
   UsageDashboard,
   UsageOperationKind,
   UsageTotals,
@@ -36,10 +37,10 @@ export const EMPTY_DASHBOARD: UsageDashboard = {
 
 const EMPTY_COST_TABLE: CostTable = { rates: {} }
 
-/** The three operation kinds the cost-breakdown panel aggregates. `GET
+/** The operation kinds the cost-breakdown panel aggregates. `GET
  *  /api/usage/operations` takes one `kind` per call, so the store fans out a
  *  request per kind and concatenates. */
-const OPERATION_KINDS: UsageOperationKind[] = ['file_update', 'ask_expert', 'qa']
+const OPERATION_KINDS: UsageOperationKind[] = ['file_update', 'file_read', 'ask_expert', 'qa']
 
 /** GET a usage endpoint, falling back to `fallback` on any non-2xx or network
  *  error. The usage dashboard ships ahead of (and in parallel with) the
@@ -162,6 +163,29 @@ export interface TrendQuery {
   from?: number
   /** Exclusive window end, epoch ms. Omit for "now". */
   to?: number
+}
+
+/** Per-turn ("per-prompt") breakdown for one session, oldest first. Degrades
+ *  to `[]` on error like every other usage read. */
+export async function fetchSessionTurns(sessionId: string): Promise<TurnUsage[]> {
+  return getJson<TurnUsage[]>(`/api/usage/sessions/${encodeURIComponent(sessionId)}/turns`, [])
+}
+
+/** Single-session rollup, or null when unavailable. */
+export async function fetchSessionUsage(sessionId: string): Promise<SessionUsage | null> {
+  return getJson<SessionUsage | null>(`/api/usage/sessions/${encodeURIComponent(sessionId)}`, null)
+}
+
+/** Operation costs of one kind, scoped to a session or project (or the whole
+ *  install when no scope is given). */
+export async function fetchOperationCosts(
+  kind: UsageOperationKind,
+  scope?: { sessionId?: string; projectId?: string },
+): Promise<OperationCost[]> {
+  const params = new URLSearchParams({ kind })
+  if (scope?.sessionId) params.set('session_id', scope.sessionId)
+  else if (scope?.projectId) params.set('project_id', scope.projectId)
+  return getJson<OperationCost[]>(`/api/usage/operations?${params.toString()}`, [])
 }
 
 /** Parameterized fetch of `GET /api/usage/trends`, for the trend-chart widgets

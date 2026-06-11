@@ -545,7 +545,12 @@ pub(super) async fn stop_card_worker(
                 },
             )
             .await
-            .ok();
+            .map_err(|e| {
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(serde_json::json!({ "error": e.to_string() })),
+                )
+            })?;
     }
 
     Ok::<_, (StatusCode, Json<serde_json::Value>)>(Json(serde_json::json!({ "ok": true })))
@@ -582,7 +587,12 @@ pub(super) async fn restart_card_worker(
                 },
             )
             .await
-            .ok();
+            .map_err(|e| {
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(serde_json::json!({ "error": e.to_string() })),
+                )
+            })?;
     }
 
     // Unblock if blocked
@@ -598,7 +608,12 @@ pub(super) async fn restart_card_worker(
                 },
             )
             .await
-            .ok();
+            .map_err(|e| {
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(serde_json::json!({ "error": e.to_string() })),
+                )
+            })?;
     }
 
     // The watchdog/orchestrator will pick up the unassigned card on next cycle
@@ -667,13 +682,10 @@ pub(super) async fn cancel_card_wont_do(
 
 /// GET /api/projects/:id/cards/:card_id/reports -- list reports written by this card's worker
 pub(super) async fn list_card_reports(
-    State(_state): State<Arc<AppState>>,
+    State(state): State<Arc<AppState>>,
     Path((_project_id, card_id)): Path<(String, String)>,
 ) -> impl IntoResponse {
-    let data_dir = dirs::home_dir()
-        .unwrap_or_else(|| std::path::PathBuf::from("."))
-        .join(".peckboard");
-    let reports_dir = data_dir.join("reports");
+    let reports_dir = state.config.data_dir.join("reports");
 
     let mut reports = Vec::new();
     if reports_dir.exists() {

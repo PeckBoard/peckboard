@@ -320,16 +320,43 @@ async fn run_scenario(
         }
         "usage" => {
             // A turn that exercises everything the usage dashboard reads:
-            // a file-editing tool call (drives the file_update breakdown), an
-            // ask_expert consultation (the ask_expert breakdown), and a
-            // per-turn Usage event (the source of every token/cost rollup and
-            // trend). Deterministic token counts so e2e assertions are stable.
+            // a Read tool call (drives the file_read / cache-read breakdown
+            // and the per-turn files_read list), a file-editing tool call
+            // (the file_update breakdown), an ask_expert consultation (the
+            // ask_expert breakdown), and a per-turn Usage event (the source
+            // of every token/cost rollup and trend). Deterministic token
+            // counts so e2e assertions are stable.
             emit_event(
                 db,
                 broadcaster,
                 session_id,
                 ProviderEvent::Text {
                     text: "Editing a file and consulting an expert...".into(),
+                },
+            )
+            .await;
+            tick().await;
+            let read_id = format!("tool-{}", uuid::Uuid::new_v4());
+            emit_event(
+                db,
+                broadcaster,
+                session_id,
+                ProviderEvent::ToolStart {
+                    tool_use_id: read_id.clone(),
+                    name: "Read".into(),
+                    input: serde_json::json!({ "file_path": "/workspace/src/lib.rs" }),
+                },
+            )
+            .await;
+            tick().await;
+            emit_event(
+                db,
+                broadcaster,
+                session_id,
+                ProviderEvent::ToolEnd {
+                    tool_use_id: read_id,
+                    output: Some("contents".into()),
+                    error: None,
                 },
             )
             .await;

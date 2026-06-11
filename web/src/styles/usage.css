@@ -568,3 +568,176 @@
   font-size: var(--text-sm);
   color: var(--text3);
 }
+
+/* ── Detail pages (per-session / per-project drill-down) ───────────── */
+
+.usage-detail {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-4);
+  min-width: 0;
+}
+
+.usage-detail-header {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  min-width: 0;
+}
+
+.usage-detail-header .usage-title {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.usage-back-btn {
+  flex-shrink: 0;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--surface);
+  color: var(--text2);
+  font-family: inherit;
+  font-size: var(--text-xs);
+  font-weight: 600;
+  padding: 4px 12px;
+  cursor: pointer;
+  transition: all var(--transition);
+}
+
+.usage-back-btn:hover {
+  background: var(--surface-hover);
+  color: var(--text);
+}
+
+.usage-kind-badge {
+  flex-shrink: 0;
+  border-radius: var(--radius);
+  padding: 2px 8px;
+  font-size: var(--text-xs);
+  font-weight: 600;
+  background: var(--accent-subtle);
+  color: var(--accent);
+}
+
+.usage-detail-context {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  padding: var(--space-3) var(--space-4);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  background: var(--surface);
+}
+
+/* Per-turn list — one expandable <details> per prompt/turn. */
+.usage-turn-list {
+  display: flex;
+  flex-direction: column;
+}
+
+.usage-turn {
+  border-bottom: 1px solid var(--border);
+}
+
+.usage-turn:last-child {
+  border-bottom: none;
+}
+
+.usage-turn-summary {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  padding: var(--space-2) var(--space-4);
+  cursor: pointer;
+  list-style: none;
+  min-width: 0;
+}
+
+.usage-turn-summary::-webkit-details-marker {
+  display: none;
+}
+
+.usage-turn-summary:hover {
+  background: var(--surface-hover);
+}
+
+.usage-turn-seq {
+  flex-shrink: 0;
+  font-size: var(--text-xs);
+  font-weight: 600;
+  color: var(--text3);
+  min-width: 28px;
+}
+
+.usage-turn-prompt {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: var(--text-sm);
+  color: var(--text);
+}
+
+.usage-turn-prompt em {
+  color: var(--text3);
+  font-style: italic;
+}
+
+.usage-turn-figs {
+  flex-shrink: 0;
+  display: flex;
+  gap: var(--space-3);
+  font-size: var(--text-xs);
+  color: var(--text2);
+  font-variant-numeric: tabular-nums;
+}
+
+.usage-turn-cache {
+  color: var(--text3);
+}
+
+.usage-turn-body {
+  padding: var(--space-2) var(--space-4) var(--space-3) calc(var(--space-4) + 28px);
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+
+.usage-turn-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-3);
+  font-size: var(--text-xs);
+  color: var(--text3);
+  font-variant-numeric: tabular-nums;
+}
+
+.usage-turn-files {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  font-size: var(--text-xs);
+}
+
+.usage-turn-files-title {
+  font-weight: 600;
+  color: var(--text2);
+  margin-bottom: 2px;
+}
+
+.usage-turn-files ul {
+  margin: 0;
+  padding-left: var(--space-4);
+  color: var(--text2);
+}
+
+.usage-turn-files li {
+  font-family: var(--font-mono, monospace);
+  direction: rtl;
+  text-align: left;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}

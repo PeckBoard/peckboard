@@ -73,6 +73,9 @@ export default function LineChart({
   return (
     <svg
       role="img"
+      aria-label={`Trend chart of ${withPoints.map((s) => s.label).join(', ')} from ${formatX(
+        xMin,
+      )} to ${formatX(xMax)}, peak ${formatValue(yMax)}`}
       className="usage-chart"
       viewBox={`0 0 ${VB_W} ${height}`}
       width="100%"

@@ -68,16 +68,14 @@ function byTokensDesc(a: EntityUsage, b: EntityUsage): number {
   return b.total_tokens - a.total_tokens
 }
 
-/** Projects panel body. Clicking a project selects it (click again to clear);
- *  the selection drives the cards panel's filter. */
+/** Projects panel body. Clicking a project opens its per-project usage page
+ *  (sessions, workers, cards, file spend, trend). */
 export function ProjectsPanelBody({
   projects,
-  selectedId,
-  onSelect,
+  onOpen,
 }: {
   projects: EntityUsage[]
-  selectedId: string | null
-  onSelect: (id: string | null) => void
+  onOpen?: (id: string) => void
 }) {
   const sorted = useMemo(() => [...projects].sort(byTokensDesc), [projects])
   const max = maxTokens(sorted)
@@ -91,53 +89,23 @@ export function ProjectsPanelBody({
           tokens={p.total_tokens}
           cost={p.est_cost}
           share={p.total_tokens / max}
-          selected={p.id === selectedId}
-          onClick={() => onSelect(p.id === selectedId ? null : p.id)}
+          onClick={onOpen ? () => onOpen(p.id) : undefined}
         />
       ))}
     </div>
   )
 }
 
-/** Cards panel body. When a project is selected upstream, the list filters to
- *  that project's cards (via each card's `project_id`) and shows a clearable
- *  filter bar. */
-export function CardsPanelBody({
-  cards,
-  projects,
-  selectedProjectId,
-  onClearFilter,
-}: {
-  cards: EntityUsage[]
-  projects: EntityUsage[]
-  selectedProjectId: string | null
-  onClearFilter: () => void
-}) {
-  const sorted = useMemo(() => {
-    const visible = selectedProjectId
-      ? cards.filter((c) => c.project_id === selectedProjectId)
-      : cards
-    return [...visible].sort(byTokensDesc)
-  }, [cards, selectedProjectId])
+/** Cards panel body. Project-scoped card views live on the per-project usage
+ *  page; this overview list shows every card's spend, largest first. */
+export function CardsPanelBody({ cards }: { cards: EntityUsage[] }) {
+  const sorted = useMemo(() => [...cards].sort(byTokensDesc), [cards])
   const max = maxTokens(sorted)
-  const projectName = selectedProjectId
-    ? (projects.find((p) => p.id === selectedProjectId)?.name ?? 'selected project')
-    : null
 
   return (
     <div className="usage-list" data-testid="usage-cards-list">
-      {selectedProjectId && (
-        <div className="usage-filter-bar" data-testid="usage-cards-filter">
-          <span className="usage-filter-label">
-            Filtered to <strong>{projectName}</strong>
-          </span>
-          <button type="button" className="usage-clear-btn" onClick={onClearFilter}>
-            Clear
-          </button>
-        </div>
-      )}
       {sorted.length === 0 ? (
-        <div className="usage-empty-sub">No card usage in this project yet</div>
+        <div className="usage-empty-sub">No card usage yet</div>
       ) : (
         sorted.map((c) => (
           <EntityRow
@@ -155,8 +123,15 @@ export function CardsPanelBody({
 }
 
 /** Experts panel body: tokens used by each expert session (knowledge /
- *  question / pm), largest first. */
-export function ExpertsPanelBody({ experts }: { experts: EntityUsage[] }) {
+ *  question / pm), largest first. Experts are sessions, so `onOpen` routes to
+ *  the same per-session detail page. */
+export function ExpertsPanelBody({
+  experts,
+  onOpen,
+}: {
+  experts: EntityUsage[]
+  onOpen?: (id: string) => void
+}) {
   const sorted = useMemo(() => [...experts].sort(byTokensDesc), [experts])
   const max = maxTokens(sorted)
   return (
@@ -169,6 +144,7 @@ export function ExpertsPanelBody({ experts }: { experts: EntityUsage[] }) {
           tokens={e.total_tokens}
           cost={e.est_cost}
           share={e.total_tokens / max}
+          onClick={onOpen ? () => onOpen(e.id) : undefined}
         />
       ))}
     </div>

@@ -207,6 +207,7 @@ interface ModelInfo {
 export default function ChatView({ sessionId, onOpenTodos }: ChatViewProps) {
   const events = useSessionsStore((s) => s.eventsBySession[sessionId] ?? EMPTY_EVENTS)
   const loading = useSessionsStore((s) => s.loadingEventsBySession[sessionId] ?? true)
+  const eventsError = useSessionsStore((s) => s.eventsErrorBySession[sessionId] ?? false)
   const fetchEvents = useSessionsStore((s) => s.fetchEvents)
   const fetchOlderEvents = useSessionsStore((s) => s.fetchOlderEvents)
   const loadingOlderEvents = useSessionsStore(
@@ -227,7 +228,17 @@ export default function ChatView({ sessionId, onOpenTodos }: ChatViewProps) {
     onConfirm: () => void
   } | null>(null)
   const [availableModels, setAvailableModels] = useState<ModelInfo[]>([])
+  const [modelsError, setModelsError] = useState(false)
   const [loadedTodos, setLoadedTodos] = useState<TodoItem[]>([])
+  // Session id whose session-detail / todo-snapshot fetch failed. The
+  // chat itself still works, so this only drives a retry banner rather
+  // than blocking the view. Stored as the failing session id (not a
+  // boolean) so an error from a previous session never bleeds into the
+  // current one. Bumping `metaRetryNonce` re-runs both fetch effects.
+  const [detailErrorFor, setDetailErrorFor] = useState<string | null>(null)
+  const [todosErrorFor, setTodosErrorFor] = useState<string | null>(null)
+  const [metaRetryNonce, setMetaRetryNonce] = useState(0)
+  const metaError = detailErrorFor === sessionId || todosErrorFor === sessionId
   const scrollRef = useRef<HTMLDivElement>(null)
   const userScrolledUp = useRef(false)
   /** Saved scroll-height immediately before a "Load older" fetch so
@@ -251,32 +262,48 @@ export default function ChatView({ sessionId, onOpenTodos }: ChatViewProps) {
   useEffect(() => {
     let cancelled = false
     authedFetch(`/api/sessions/${sessionId}`)
-      .then((res) => (res.ok ? res.json() : null))
-      .then((data: Session | null) => {
-        if (!cancelled && data) setSessionDetail(data)
+      .then((res) => {
+        if (!res.ok) throw new Error(`session fetch failed: ${res.status}`)
+        return res.json()
       })
-      .catch(() => {})
+      .then((data: Session) => {
+        if (!cancelled) {
+          setSessionDetail(data)
+          setDetailErrorFor(null)
+        }
+      })
+      .catch(() => {
+        if (!cancelled) setDetailErrorFor(sessionId)
+      })
     return () => {
       cancelled = true
     }
-  }, [sessionId])
+  }, [sessionId, metaRetryNonce])
 
   // Fetch the current todo snapshot on load so a freshly opened session shows
   // existing todos before any live `todo` event arrives over the WS.
   useEffect(() => {
     let cancelled = false
     authedFetch(`/api/sessions/${sessionId}/todos`)
-      .then((res) => (res.ok ? res.json() : null))
+      .then((res) => {
+        if (!res.ok) throw new Error(`todos fetch failed: ${res.status}`)
+        return res.json()
+      })
       .then((data) => {
         // Always set (the endpoint returns `{ todos: [] }` for a fresh
         // session), so switching sessions clears any prior snapshot.
-        if (!cancelled) setLoadedTodos(parseTodoItems(data?.todos))
+        if (!cancelled) {
+          setLoadedTodos(parseTodoItems(data?.todos))
+          setTodosErrorFor(null)
+        }
       })
-      .catch(() => {})
+      .catch(() => {
+        if (!cancelled) setTodosErrorFor(sessionId)
+      })
     return () => {
       cancelled = true
     }
-  }, [sessionId])
+  }, [sessionId, metaRetryNonce])
 
   // Listen for the server's `session-cleared` broadcast and drop the
   // cached snapshot. Without this the panel keeps rendering pre-clear
@@ -295,16 +322,21 @@ export default function ChatView({ sessionId, onOpenTodos }: ChatViewProps) {
   // Load the model catalogue once per session mount so the 3-dot menu's
   // "Model" submenu has options ready the first time the user opens it.
   useEffect(() => {
-    if (availableModels.length > 0) return
+    if (availableModels.length > 0 || modelsError) return
     authedFetch('/api/models')
-      .then((res) => (res.ok ? res.json() : null))
+      .then((res) => {
+        if (!res.ok) throw new Error(`models fetch failed: ${res.status}`)
+        return res.json()
+      })
       .then((data) => {
         if (data && Array.isArray(data.models)) {
           setAvailableModels(data.models as ModelInfo[])
+        } else {
+          setModelsError(true)
         }
       })
-      .catch(() => {})
-  }, [availableModels.length])
+      .catch(() => setModelsError(true))
+  }, [availableModels.length, modelsError])
 
   // Fetch initial events
   useEffect(() => {
@@ -554,6 +586,19 @@ export default function ChatView({ sessionId, onOpenTodos }: ChatViewProps) {
     )
   }
 
+  if (eventsError) {
+    return (
+      <div className="chat-container">
+        <div className="fetch-error-pane" role="alert" data-testid="chat-events-error">
+          <p>Couldn’t load this conversation.</p>
+          <button type="button" onClick={() => fetchEvents(sessionId)}>
+            Retry
+          </button>
+        </div>
+      </div>
+    )
+  }
+
   return (
     <div className="chat-container">
       {/* Toolbar */}
@@ -565,13 +610,20 @@ export default function ChatView({ sessionId, onOpenTodos }: ChatViewProps) {
           triggerClassName="chat-toolbar-model"
           align="left"
           items={
-            availableModels.length > 0
-              ? availableModels.map((m) => ({
-                  label: m.display_name,
-                  active: m.id === sessionDetail?.model,
-                  onSelect: () => patchSession({ model: m.id }),
-                }))
-              : [{ label: 'Loading models…', disabled: true }]
+            modelsError
+              ? [
+                  {
+                    label: 'Failed to load models — retry',
+                    onSelect: () => setModelsError(false),
+                  },
+                ]
+              : availableModels.length > 0
+                ? availableModels.map((m) => ({
+                    label: m.display_name,
+                    active: m.id === sessionDetail?.model,
+                    onSelect: () => patchSession({ model: m.id }),
+                  }))
+                : [{ label: 'Loading models…', disabled: true }]
           }
         >
           <span>{modelDisplayName(sessionDetail?.model)}</span>
@@ -617,6 +669,15 @@ export default function ChatView({ sessionId, onOpenTodos }: ChatViewProps) {
           testId="chat-toolbar-menu"
         />
       </div>
+
+      {metaError && (
+        <div className="fetch-error-banner" role="alert" data-testid="chat-meta-error">
+          <span>Some session details failed to load.</span>
+          <button type="button" onClick={() => setMetaRetryNonce((n) => n + 1)}>
+            Retry
+          </button>
+        </div>
+      )}
 
       <TodoPanel todos={todos} />
 

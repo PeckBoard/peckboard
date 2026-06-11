@@ -146,7 +146,16 @@ pub async fn clear_session_todos(
 /// 2. If active workers < project.worker_count, find unassigned, unblocked
 ///    cards not in terminal states.
 /// 3. Spawn a worker for each available slot.
+/// Serializes orchestrator passes. The 5s interval loop and the
+/// worker-completion listener both call `check_and_spawn_workers`; two
+/// concurrent passes would read the same card/slot snapshot and spawn
+/// past the project's worker_count. The per-card `claim_card_for_worker`
+/// guard below prevents double-assigning a single card, but only this
+/// gate keeps the slot arithmetic itself accurate.
+static SPAWN_GATE: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
 pub async fn check_and_spawn_workers(state: &Arc<AppState>) {
+    let _gate = SPAWN_GATE.lock().await;
     let projects = state.db.list_projects().await.unwrap_or_default();
     for project in &projects {
         if project.status != "active" {
@@ -398,6 +407,52 @@ async fn spawn_worker_for_card(
         card.title
     );
 
+    // Claim the card BEFORE dispatching the agent. The conditional claim
+    // (WHERE worker_session_id IS NULL) is what makes concurrent spawn
+    // paths safe: whoever loses the claim must not start an agent. If it's
+    // the card's intake step, advance it to the workflow's second step (the
+    // first one a worker actually performs).
+    let workflow_steps = crate::workflow::steps_for(Some(&card.workflow));
+    let new_step = if card.step == "backlog" || card.step == "todo" {
+        workflow_steps.get(1).cloned()
+    } else {
+        None
+    };
+    let claimed = state
+        .db
+        .claim_card_for_worker(&card.id, &session_id, new_step, &now)
+        .await?;
+    if !claimed {
+        tracing::info!(
+            card_id = %card.id,
+            session_id = %session_id,
+            "Card already claimed by another worker; skipping spawn"
+        );
+        let _ = state.db.delete_session(&session_id).await;
+        return Ok(());
+    }
+    // Any exit between here and a successful dispatch must release the
+    // claim, or the card points at a session that never ran an agent and
+    // is skipped by every future tick.
+    let release_claim = |reason: &'static str| {
+        let db = state.db.clone();
+        let card_id = card.id.to_string();
+        async move {
+            let released = db
+                .update_card(
+                    &card_id,
+                    UpdateCard {
+                        worker_session_id: Some(None),
+                        ..Default::default()
+                    },
+                )
+                .await;
+            if let Err(e) = released {
+                tracing::error!(card_id = %card_id, "Failed to release claim after {reason}: {e}");
+            }
+        }
+    };
+
     // Repeated worker crashes are caught at completion time, not here:
     // `maybe_auto_pause_after_crash` in main.rs's completion listener
     // pauses the owning project once a card's lifecycle events show
@@ -412,6 +467,7 @@ async fn spawn_worker_for_card(
     ).await;
     if token_hook.is_cancelled() {
         tracing::info!(session_id = %session_id, "mcp.token.issue.before cancelled by plugin");
+        release_claim("token hook cancel").await;
         return Ok(());
     }
 
@@ -439,15 +495,22 @@ async fn spawn_worker_for_card(
         .await;
     if config_hook.is_cancelled() {
         tracing::info!(session_id = %session_id, "mcp.config.write.before cancelled by plugin");
+        release_claim("config hook cancel").await;
         return Ok(());
     }
 
-    let mcp_config_path = mcp_server::write_mcp_config(
+    let mcp_config_path = match mcp_server::write_mcp_config(
         &state.config.data_dir,
         &session_id,
         state.config.port,
         &mcp_token,
-    )?;
+    ) {
+        Ok(path) => path,
+        Err(e) => {
+            release_claim("mcp config write failure").await;
+            return Err(e);
+        }
+    };
 
     // Hook: mcp.config.write.after
     state
@@ -460,8 +523,8 @@ async fn spawn_worker_for_card(
 
     // 5. Build worker prompt. The card's workflow is baked in at create
     // time, so it always carries a concrete id and the per-step prompt
-    // doesn't need to consult the project as a fallback.
-    let workflow_steps = crate::workflow::steps_for(Some(&card.workflow));
+    // doesn't need to consult the project as a fallback. `workflow_steps`
+    // was computed above, before the claim.
     // In-scope experts (project + global) so the worker can consult them.
     // A lookup failure here must not block the spawn — degrade to none.
     let experts = match state.db.list_expert_sessions_by_scope(&project.id).await {
@@ -513,7 +576,7 @@ async fn spawn_worker_for_card(
     // The lock is uncontested for a brand-new uuid; we acquire it anyway
     // so `send_message_locked` is the single dispatch entry point.
     let lock = state.session_manager.lock_session(&session_id).await;
-    state
+    let dispatched = state
         .session_manager
         .send_message_locked(
             &lock,
@@ -522,31 +585,14 @@ async fn spawn_worker_for_card(
             &state.broadcaster,
             config,
         )
-        .await?;
+        .await;
     drop(lock);
-
-    // 7. Update card: assign worker and, if it's still in the intake step,
-    // advance it to the workflow's second step (the first one a worker
-    // actually performs). Hardcoding `in_progress` here was wrong for any
-    // non-default workflow (e.g. research's second step is `research`).
-    let new_step = if card.step == "backlog" || card.step == "todo" {
-        workflow_steps.get(1).cloned()
-    } else {
-        None
-    };
-    state
-        .db
-        .update_card(
-            &card.id,
-            UpdateCard {
-                worker_session_id: Some(Some(session_id.clone())),
-                last_worker_session_id: Some(Some(session_id.clone())),
-                step: new_step.clone(),
-                updated_at: Some(now),
-                ..Default::default()
-            },
-        )
-        .await?;
+    if let Err(e) = dispatched {
+        // No agent is running — release the claim so the next tick can
+        // retry the card instead of treating it as actively worked.
+        release_claim("dispatch failure").await;
+        return Err(e);
+    }
 
     tracing::info!(
         session_id = %session_id,

@@ -90,6 +90,10 @@ interface SessionsState {
   unreadSessions: Set<string>
   eventsBySession: Record<string, Event[]>
   loadingEventsBySession: Record<string, boolean>
+  /** True when the initial event fetch failed (network error or
+   *  non-2xx). ChatView renders a retry pane instead of silently
+   *  showing an empty conversation. */
+  eventsErrorBySession: Record<string, boolean>
   /** True while a "Load older" request is in flight for `sessionId`.
    *  ChatView disables the button while this is set so repeated
    *  clicks can't pile up duplicate requests for the same page. */
@@ -174,6 +178,7 @@ export const useSessionsStore = create<SessionsState>((set, get) => ({
   unreadSessions: new Set<string>(),
   eventsBySession: {},
   loadingEventsBySession: {},
+  eventsErrorBySession: {},
   loadingOlderEventsBySession: {},
   hasMoreOlderEventsBySession: {},
   experts: [],
@@ -237,6 +242,7 @@ export const useSessionsStore = create<SessionsState>((set, get) => ({
   fetchEvents: async (sessionId: string) => {
     set((s) => ({
       loadingEventsBySession: { ...s.loadingEventsBySession, [sessionId]: true },
+      eventsErrorBySession: { ...s.eventsErrorBySession, [sessionId]: false },
       eventsBySession: { ...s.eventsBySession, [sessionId]: [] },
       // Reset older-page bookkeeping for a fresh session open. We
       // assume "more history exists" until a short page proves
@@ -249,20 +255,31 @@ export const useSessionsStore = create<SessionsState>((set, get) => ({
     }))
     try {
       const res = await authedFetch(`/api/sessions/${sessionId}/events?limit=${EVENTS_PAGE_SIZE}`)
-      const events: Event[] = res.ok ? await res.json() : []
-      set((s) => ({
-        eventsBySession: { ...s.eventsBySession, [sessionId]: events },
-        loadingEventsBySession: { ...s.loadingEventsBySession, [sessionId]: false },
-        // If the first page came back short, there are no older
-        // events to load — hide the button up-front.
-        hasMoreOlderEventsBySession: {
-          ...s.hasMoreOlderEventsBySession,
-          [sessionId]: events.length >= EVENTS_PAGE_SIZE,
-        },
-      }))
+      if (!res.ok) throw new Error(`events fetch failed: ${res.status}`)
+      const events: Event[] = await res.json()
+      set((s) => {
+        // Merge rather than replace: events broadcast over the WS while
+        // this fetch was in flight have already been appended to the
+        // store but may post-date the HTTP snapshot — a wholesale
+        // replace would silently drop them.
+        const fetchedIds = new Set(events.map((e) => e.id))
+        const liveExtras = (s.eventsBySession[sessionId] ?? []).filter((e) => !fetchedIds.has(e.id))
+        const merged = [...events, ...liveExtras].sort((a, b) => a.seq - b.seq)
+        return {
+          eventsBySession: { ...s.eventsBySession, [sessionId]: merged },
+          loadingEventsBySession: { ...s.loadingEventsBySession, [sessionId]: false },
+          // If the first page came back short, there are no older
+          // events to load — hide the button up-front.
+          hasMoreOlderEventsBySession: {
+            ...s.hasMoreOlderEventsBySession,
+            [sessionId]: events.length >= EVENTS_PAGE_SIZE,
+          },
+        }
+      })
     } catch {
       set((s) => ({
         loadingEventsBySession: { ...s.loadingEventsBySession, [sessionId]: false },
+        eventsErrorBySession: { ...s.eventsErrorBySession, [sessionId]: true },
       }))
     }
   },

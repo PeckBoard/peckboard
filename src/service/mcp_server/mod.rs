@@ -334,6 +334,78 @@ mod tests {
         assert!(result.unwrap_err().to_string().contains("unknown tool"));
     }
 
+    /// write_report / read_report must use the configured data dir from
+    /// the tool-call context — not `~/.peckboard`. A report written via
+    /// MCP with `--data-dir X` has to be readable by the HTTP reports API
+    /// (which serves from X) and by read_report itself.
+    #[tokio::test]
+    async fn test_write_report_uses_ctx_data_dir() {
+        use crate::db::models::{NewFolder, NewSession};
+
+        let registry = McpToolRegistry::new();
+        let db = Arc::new(crate::db::Db::in_memory().unwrap());
+        let ts = chrono::Utc::now().to_rfc3339();
+        let tmp = tempfile::tempdir().unwrap();
+
+        db.create_folder(NewFolder {
+            id: "f1".into(),
+            name: "Folder".into(),
+            path: "/tmp/f".into(),
+            created_at: ts.clone(),
+        })
+        .await
+        .unwrap();
+        db.create_session(NewSession {
+            id: "s1".into(),
+            name: "worker".into(),
+            folder_id: "f1".into(),
+            is_worker: true,
+            created_at: ts.clone(),
+            last_activity: ts.clone(),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+
+        let ctx = ToolCallContext {
+            session_id: "s1".into(),
+            project_id: None,
+            card_id: None,
+            db,
+            broadcaster: crate::ws::broadcaster::Broadcaster::new(),
+            provider_registry: None,
+            expert_dispatcher: None,
+            data_dir: Some(tmp.path().to_path_buf()),
+            pm_authorizations: Default::default(),
+        };
+
+        let written = registry
+            .handle_tool_call(
+                "write_report",
+                serde_json::json!({ "title": "My Findings", "body": "hello" }),
+                &ctx,
+            )
+            .await
+            .unwrap();
+        let folder = written["folder"].as_str().unwrap().to_string();
+        let file = written["file"].as_str().unwrap().to_string();
+
+        // The file landed under the configured data dir, not ~/.peckboard.
+        let on_disk = tmp.path().join("reports").join(&folder).join(&file);
+        assert!(on_disk.exists(), "report not at {}", on_disk.display());
+
+        // read_report resolves from the same root.
+        let read = registry
+            .handle_tool_call(
+                "read_report",
+                serde_json::json!({ "folder": folder, "file": file }),
+                &ctx,
+            )
+            .await
+            .unwrap();
+        assert_eq!(read["content"].as_str(), Some("hello"));
+    }
+
     #[tokio::test]
     async fn test_card_dependency_tools() {
         use crate::db::models::{NewFolder, NewProject};

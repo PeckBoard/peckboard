@@ -1,7 +1,9 @@
-import { useEffect, useState, type ReactNode } from 'react'
+import { useEffect, useMemo, useState, type ReactNode } from 'react'
 import { useUsageStore } from '../store/usage'
 import type { UsageTotals } from '../types/api'
 import CostBreakdownSection from './usage/CostBreakdownSection'
+import ProjectDetail from './usage/ProjectDetail'
+import SessionDetail from './usage/SessionDetail'
 import TrendsSection from './usage/TrendsSection'
 import SessionsPanelBody from './usage/SessionsPanel'
 import { CardsPanelBody, ExpertsPanelBody, ProjectsPanelBody } from './usage/EntityRollups'
@@ -48,10 +50,8 @@ interface PanelProps {
   children?: ReactNode
 }
 
-/** A single dashboard panel shell. Real internals (tables, charts) are filled
- *  in by the dependent frontend panel cards; this renders the frame, the
- *  count badge, and an empty placeholder so the layout reads correctly before
- *  those land or while the backend has no data. */
+/** A single dashboard panel shell: frame, count badge, and an empty
+ *  placeholder when there is no data. */
 function UsagePanel({ title, count, testid, children }: PanelProps) {
   return (
     <section className="usage-panel" data-testid={testid}>
@@ -74,6 +74,13 @@ function UsagePanel({ title, count, testid, children }: PanelProps) {
   )
 }
 
+/** Which usage page is showing: the overview, one session (chat / worker /
+ *  expert — they share the per-prompt detail page), or one project. */
+type UsagePage =
+  | { kind: 'overview' }
+  | { kind: 'session'; id: string }
+  | { kind: 'project'; id: string }
+
 export default function UsageDashboard() {
   const dashboard = useUsageStore((s) => s.dashboard)
   const loaded = useUsageStore((s) => s.loaded)
@@ -81,14 +88,19 @@ export default function UsageDashboard() {
   const error = useUsageStore((s) => s.error)
   const fetchUsage = useUsageStore((s) => s.fetchUsage)
 
-  // Drill-down selection: clicking a project in the Projects panel filters the
-  // Cards panel to that project. Transient view state, so it lives here rather
-  // than in the store (see the usage dashboard panel conventions).
-  const [selectedProjectId, setSelectedProjectId] = useState<string | null>(null)
+  const [page, setPage] = useState<UsagePage>({ kind: 'overview' })
 
   useEffect(() => {
     fetchUsage()
   }, [fetchUsage])
+
+  const { totals, sessions, projects, cards, experts, operations } = dashboard
+
+  // Chats vs workers: both are sessions, split by the backend's role flags.
+  // Experts come from their own rollup (they may overlap `sessions`, which
+  // also carries `is_expert` — the chats list excludes them).
+  const chats = useMemo(() => sessions.filter((s) => !s.is_worker && !s.is_expert), [sessions])
+  const workers = useMemo(() => sessions.filter((s) => s.is_worker), [sessions])
 
   if (loading && !loaded) {
     return (
@@ -108,7 +120,32 @@ export default function UsageDashboard() {
     )
   }
 
-  const { totals, sessions, projects, cards, experts, operations } = dashboard
+  const backToOverview = () => setPage({ kind: 'overview' })
+  const openSession = (id: string) => setPage({ kind: 'session', id })
+  const openProject = (id: string) => setPage({ kind: 'project', id })
+
+  if (page.kind === 'session') {
+    return (
+      <div className="usage-page" data-testid="usage-view">
+        <SessionDetail id={page.id} onBack={backToOverview} />
+      </div>
+    )
+  }
+
+  if (page.kind === 'project') {
+    return (
+      <div className="usage-page" data-testid="usage-view">
+        <ProjectDetail
+          id={page.id}
+          project={projects.find((p) => p.id === page.id) ?? null}
+          sessions={sessions}
+          cards={cards}
+          onBack={backToOverview}
+          onOpenSession={openSession}
+        />
+      </div>
+    )
+  }
 
   return (
     <div className="usage-page" data-testid="usage-view">
@@ -126,26 +163,20 @@ export default function UsageDashboard() {
       </div>
 
       <div className="usage-grid">
-        <UsagePanel title="Sessions" count={sessions.length} testid="usage-panel-sessions">
-          <SessionsPanelBody sessions={sessions} />
+        <UsagePanel title="Chats" count={chats.length} testid="usage-panel-sessions">
+          <SessionsPanelBody sessions={chats} onOpen={openSession} />
+        </UsagePanel>
+        <UsagePanel title="Workers" count={workers.length} testid="usage-panel-workers">
+          <SessionsPanelBody sessions={workers} onOpen={openSession} />
         </UsagePanel>
         <UsagePanel title="Projects" count={projects.length} testid="usage-panel-projects">
-          <ProjectsPanelBody
-            projects={projects}
-            selectedId={selectedProjectId}
-            onSelect={setSelectedProjectId}
-          />
+          <ProjectsPanelBody projects={projects} onOpen={openProject} />
         </UsagePanel>
         <UsagePanel title="Cards" count={cards.length} testid="usage-panel-cards">
-          <CardsPanelBody
-            cards={cards}
-            projects={projects}
-            selectedProjectId={selectedProjectId}
-            onClearFilter={() => setSelectedProjectId(null)}
-          />
+          <CardsPanelBody cards={cards} />
         </UsagePanel>
         <UsagePanel title="Experts" count={experts.length} testid="usage-panel-experts">
-          <ExpertsPanelBody experts={experts} />
+          <ExpertsPanelBody experts={experts} onOpen={openSession} />
         </UsagePanel>
       </div>
 

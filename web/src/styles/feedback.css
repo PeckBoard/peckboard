@@ -1,0 +1,124 @@
+/* Error-recovery surfaces: render-error boundary fallback, the
+   WS connection-lost banner, and inline fetch-error banners. */
+
+.error-boundary {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  flex: 1;
+  padding: 32px;
+  text-align: center;
+}
+
+.error-boundary-title {
+  font-weight: 600;
+  color: var(--text);
+}
+
+.error-boundary-detail {
+  color: var(--text2);
+  font-size: 13px;
+  max-width: 480px;
+  word-break: break-word;
+}
+
+.error-boundary-retry {
+  margin-top: 4px;
+  padding: 6px 16px;
+  border: 1px solid var(--accent);
+  border-radius: 6px;
+  background: var(--accent-subtle);
+  color: var(--accent);
+  cursor: pointer;
+}
+
+.error-boundary-retry:hover {
+  background: var(--accent-muted);
+}
+
+.connection-banner {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 20px;
+  background: var(--warning-bg);
+  border-bottom: 1px solid var(--warning);
+  color: var(--text);
+  font-size: 13px;
+  flex-shrink: 0;
+}
+
+.connection-banner-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--warning);
+  animation: connection-banner-pulse 1.2s ease-in-out infinite;
+}
+
+@keyframes connection-banner-pulse {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.3;
+  }
+}
+
+.fetch-error-banner {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 12px;
+  padding: 8px 16px;
+  background: var(--danger-bg);
+  border-bottom: 1px solid var(--danger-border);
+  color: var(--text);
+  font-size: 13px;
+  flex-shrink: 0;
+}
+
+.fetch-error-banner button {
+  padding: 3px 12px;
+  border: 1px solid var(--danger);
+  border-radius: 6px;
+  background: transparent;
+  color: var(--danger);
+  cursor: pointer;
+  font-size: 12px;
+}
+
+.fetch-error-banner button:hover {
+  background: var(--danger);
+  color: var(--text-inverse);
+}
+
+/* Full-pane variant for when the primary content of a view failed to
+   load (e.g. the chat event log). */
+.fetch-error-pane {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  flex: 1;
+  padding: 32px;
+  color: var(--text2);
+  text-align: center;
+}
+
+.fetch-error-pane button {
+  padding: 6px 16px;
+  border: 1px solid var(--accent);
+  border-radius: 6px;
+  background: var(--accent-subtle);
+  color: var(--accent);
+  cursor: pointer;
+}
+
+.fetch-error-pane button:hover {
+  background: var(--accent-muted);
+}

@@ -208,4 +208,40 @@ test('usage dashboard reflects mock:usage activity with non-zero rollups, costs,
   // Trend series — the overall tokens chart renders with a labelled series.
   await expect(page.getByTestId('usage-trend-tokens-chart')).toBeVisible()
   await expect(page.getByTestId('usage-trend-tokens-legend')).toContainText('Overall')
+
+  // Cache-read breakdown — the Read tool call attributes the turn's
+  // cache-read spend to the file it read.
+  const fileReads = page.getByTestId('usage-cost-file_read')
+  await expect(fileReads).toContainText('lib.rs')
+
+  // ── Drill-down: per-session detail page (per-prompt granularity). ──
+  await sessionRow.click()
+  await expect(page.getByTestId('usage-session-detail')).toBeVisible()
+  await expect(page.getByTestId('usage-detail-totals')).toContainText('2.6K')
+  // Context-window gauge measures the latest turn's occupancy (1.5K of 200K).
+  await expect(page.getByTestId('usage-detail-context')).toContainText('1.5K')
+
+  // The one turn lists the prompt that started it; expanding it shows the
+  // files read during that token spend.
+  const turnRow = page.getByTestId('usage-turn-row').first()
+  await expect(turnRow).toContainText('go')
+  await turnRow.locator('summary').click()
+  await expect(page.getByTestId('usage-turn-files-read')).toContainText('lib.rs')
+  await expect(page.getByTestId('usage-turn-files-edited')).toContainText('lib.rs')
+
+  // Session-scoped cache-reads-by-file panel.
+  await expect(page.getByTestId('usage-cache-reads-panel')).toContainText('lib.rs')
+
+  // Back to the overview.
+  await page.getByRole('button', { name: '← Usage' }).click()
+  await expect(page.getByTestId('usage-totals')).toBeVisible()
+
+  // ── Drill-down: per-project detail page, then through to a session. ──
+  await page.getByTestId('usage-project-row').filter({ hasText: project.name }).click()
+  await expect(page.getByTestId('usage-project-detail')).toBeVisible()
+  await expect(page.getByTestId('usage-project-totals')).toContainText('2.6K')
+  const chatRow = page.getByTestId('usage-project-chats-row').filter({ hasText: 'usage smoke' })
+  await expect(chatRow).toBeVisible()
+  await chatRow.click()
+  await expect(page.getByTestId('usage-session-detail')).toBeVisible()
 })

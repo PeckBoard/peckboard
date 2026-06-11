@@ -70,3 +70,86 @@ impl Config {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Bare CliArgs (no env-derived fields set) for `from_args` tests.
+    /// Constructed directly so the real process environment
+    /// (PECKBOARD_DATA_DIR, PECKBOARD_MDNS) can't leak into assertions.
+    fn bare_args() -> CliArgs {
+        CliArgs {
+            port: 3344,
+            https_port: 3345,
+            host: "0.0.0.0".into(),
+            data_dir: None,
+            reset_password: false,
+            user: None,
+            mdns: false,
+        }
+    }
+
+    #[test]
+    fn cli_defaults() {
+        let args = CliArgs::try_parse_from(["peckboard"]).unwrap();
+        assert_eq!(args.port, 3344);
+        assert_eq!(args.https_port, 3345);
+        assert_eq!(args.host, "0.0.0.0");
+        assert!(!args.reset_password);
+        assert!(args.user.is_none());
+    }
+
+    #[test]
+    fn cli_explicit_flags() {
+        let args = CliArgs::try_parse_from([
+            "peckboard",
+            "--port",
+            "8080",
+            "--https-port",
+            "8443",
+            "--host",
+            "127.0.0.1",
+            "--data-dir",
+            "/tmp/pb-test",
+            "--mdns",
+        ])
+        .unwrap();
+        assert_eq!(args.port, 8080);
+        assert_eq!(args.https_port, 8443);
+        assert_eq!(args.host, "127.0.0.1");
+        assert_eq!(args.data_dir, Some(PathBuf::from("/tmp/pb-test")));
+        assert!(args.mdns);
+    }
+
+    #[test]
+    fn user_flag_requires_reset_password() {
+        assert!(CliArgs::try_parse_from(["peckboard", "--user", "alice"]).is_err());
+        assert!(
+            CliArgs::try_parse_from(["peckboard", "--reset-password", "--user", "alice"]).is_ok()
+        );
+    }
+
+    #[test]
+    fn invalid_port_rejected() {
+        assert!(CliArgs::try_parse_from(["peckboard", "--port", "70000"]).is_err());
+        assert!(CliArgs::try_parse_from(["peckboard", "--port", "not-a-port"]).is_err());
+    }
+
+    #[test]
+    fn from_args_defaults_data_dir_to_home_dot_peckboard() {
+        let config = Config::from_args(bare_args());
+        assert_eq!(
+            config.data_dir,
+            dirs::home_dir().unwrap().join(".peckboard")
+        );
+    }
+
+    #[test]
+    fn from_args_respects_explicit_data_dir() {
+        let mut args = bare_args();
+        args.data_dir = Some(PathBuf::from("/tmp/custom-dir"));
+        let config = Config::from_args(args);
+        assert_eq!(config.data_dir, PathBuf::from("/tmp/custom-dir"));
+    }
+}

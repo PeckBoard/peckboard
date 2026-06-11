@@ -206,11 +206,13 @@ async fn download_report(
 }
 
 /// Strict filename-component validator. Allows the same charset
-/// `is_safe_id` in attachments uses, plus a single optional trailing
-/// `.md` suffix on the `file` segment, plus `:` in `folder` segments
-/// (some date-like folder names use it). Anything else returns `None`
-/// so the caller can 400 the request outright rather than silently
-/// scrubbing characters and acting on the result.
+/// `is_safe_id` in attachments uses (ASCII alphanumeric, `-`, `_`),
+/// plus a single optional trailing `.md` suffix on the `file` segment.
+/// Real report folders are `%Y-%m-%d` dates and files are sanitized to
+/// this charset at write time (MCP report handlers), so nothing valid
+/// is rejected. Anything else returns `None` so the caller can 400 the
+/// request outright rather than silently scrubbing characters and
+/// acting on the result.
 ///
 /// The earlier `replace`-based scrubber accepted any input and
 /// collapsed problematic substrings to nothing; that left it

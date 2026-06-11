@@ -30,6 +30,8 @@ import UsageDashboard from './components/UsageDashboard'
 import UserManagement from './components/UserManagement'
 import ChangePasswordModal from './components/ChangePasswordModal'
 import TabBar from './components/TabBar'
+import ErrorBoundary from './components/ErrorBoundary'
+import ConnectionBanner from './components/ConnectionBanner'
 import { startTabsAutoSync, useTabsStore, type TabType } from './store/tabs'
 import './App.css'
 
@@ -668,6 +670,7 @@ function App() {
               navigate('sessions', null)
             }}
             title="Sessions"
+            aria-label="Sessions"
           >
             <svg
               width="18"
@@ -686,6 +689,7 @@ function App() {
             className={`rail-btn ${view === 'repeatingTasks' ? 'active' : ''}`}
             onClick={() => navigate('repeatingTasks', null)}
             title="Repeating Tasks"
+            aria-label="Repeating Tasks"
           >
             <svg
               width="18"
@@ -709,6 +713,7 @@ function App() {
               navigate('projects', null)
             }}
             title="Projects"
+            aria-label="Projects"
           >
             <svg
               width="18"
@@ -731,6 +736,7 @@ function App() {
               navigate('experts')
             }}
             title="Experts"
+            aria-label="Experts"
           >
             <svg
               width="18"
@@ -759,6 +765,7 @@ function App() {
             className={`rail-btn ${view === 'reports' ? 'active' : ''}`}
             onClick={() => navigate('reports')}
             title="Reports"
+            aria-label="Reports"
           >
             <svg
               width="18"
@@ -781,6 +788,7 @@ function App() {
             className={`rail-btn ${view === 'usage' ? 'active' : ''}`}
             onClick={() => navigate('usage')}
             title="Usage"
+            aria-label="Usage"
           >
             <svg
               width="18"
@@ -802,6 +810,7 @@ function App() {
             className={`rail-btn ${view === 'folders' ? 'active' : ''}`}
             onClick={() => navigate('folders')}
             title="Folders"
+            aria-label="Folders"
           >
             <svg
               width="18"
@@ -821,6 +830,7 @@ function App() {
               className={`rail-btn ${view === 'users' ? 'active' : ''}`}
               onClick={() => navigate('users')}
               title="Users"
+              aria-label="Users"
             >
               <svg
                 width="18"
@@ -844,12 +854,15 @@ function App() {
           <div
             className={`rail-status ${connected ? 'online' : ''}`}
             title={connected ? 'Connected' : 'Disconnected'}
+            role="status"
+            aria-label={connected ? 'Connected' : 'Disconnected'}
           />
           <div className="user-menu" ref={userMenuRef}>
             <button
               className="rail-btn rail-avatar"
               onClick={() => setUserMenuOpen((open) => !open)}
               title={user?.username}
+              aria-label="User menu"
               aria-haspopup="menu"
               aria-expanded={userMenuOpen}
             >
@@ -947,156 +960,164 @@ function App() {
             </button>
           </div>
         )}
-        {view === 'sessions' &&
-          (activeSessionId ? (
-            sessionSub === 'todos' ? (
-              <SessionTodosView
-                sessionId={activeSessionId}
-                onBack={() => navigate('sessions', activeSessionId, 'chat')}
-              />
+        <ConnectionBanner connected={connected} />
+        <ErrorBoundary
+          label="view"
+          resetKey={`${view}:${activeSessionId}:${activeProjectId}:${activeExpertId}:${sessionSub}`}
+        >
+          {view === 'sessions' &&
+            (activeSessionId ? (
+              sessionSub === 'todos' ? (
+                <SessionTodosView
+                  sessionId={activeSessionId}
+                  onBack={() => navigate('sessions', activeSessionId, 'chat')}
+                />
+              ) : (
+                <ChatView
+                  sessionId={activeSessionId}
+                  onOpenTodos={() => navigate('sessions', activeSessionId, 'todos')}
+                />
+              )
             ) : (
-              <ChatView
-                sessionId={activeSessionId}
-                onOpenTodos={() => navigate('sessions', activeSessionId, 'todos')}
-              />
-            )
-          ) : (
-            <div className="list-view">
-              <ListViewHeader
-                title="Sessions"
-                actionLabel="+ New session"
-                onAction={() => setShowNewSession(true)}
-              />
-              <List
-                items={chatSessions}
-                getKey={(s) => s.id}
-                activeId={activeSessionId}
-                onActivate={(s) => setActiveSession(s.id)}
-                selectedIds={selectedSessions}
-                onToggleSelected={(s) => toggleSessionSelected(s.id)}
-                onClearSelection={() => setSelectedSessions(new Set())}
-                bulkActions={[
-                  // No destructive actions in the list — delete lives on the
-                  // chat-toolbar 3-dot menu and tab right-click menu, where
-                  // the user has the session open and can act intentionally.
-                  {
-                    label: 'Mark as read',
-                    onClick: () => {
-                      for (const id of Array.from(selectedSessions)) markSessionRead(id)
-                      setSelectedSessions(new Set())
-                    },
-                    hidden: ![...selectedSessions].some((id) => unreadSessions.has(id)),
-                  },
-                ]}
-                renderItem={(s) => (
-                  <>
-                    {processing.has(s.id) && <span className="processing-dot" />}
-                    {!processing.has(s.id) && unreadSessions.has(s.id) && (
-                      <span className="unread-dot" />
-                    )}
-                    <span className="list-view-name">{s.name}</span>
-                    <span className="list-view-meta">
-                      {folderMap.get(s.folder_id) && (
-                        <span className="list-view-tag">{folderMap.get(s.folder_id)}</span>
-                      )}
-                      <span className="list-view-time">{formatRelativeTime(s.last_activity)}</span>
-                    </span>
-                  </>
-                )}
-                onScroll={(e) => {
-                  if (!sessionsNextCursor || sessionsLoadingMore) return
-                  const el = e.currentTarget
-                  if (el.scrollHeight - el.scrollTop - el.clientHeight < 200) {
-                    void fetchMoreSessions()
-                  }
-                }}
-                emptyState={
-                  <div className="list-view-empty">
-                    <p>No sessions yet</p>
-                    <button
-                      className="list-view-empty-action"
-                      onClick={() => setShowNewSession(true)}
-                    >
-                      Create your first session
-                    </button>
-                  </div>
-                }
-                footer={
-                  sessionsLoadingMore ? (
-                    <div className="list-view-loading-more" data-testid="sessions-loading-more">
-                      Loading more sessions…
-                    </div>
-                  ) : null
-                }
-              />
-            </div>
-          ))}
-        {view === 'projects' &&
-          (activeProjectId ? (
-            sessionSub === 'todos' ? (
-              <ProjectTodosView
-                projectId={activeProjectId}
-                onClose={() => navigate('projects', activeProjectId, 'chat')}
-              />
-            ) : (
-              <KanbanBoard
-                projectId={activeProjectId}
-                onOpenTodos={() => navigate('projects', activeProjectId, 'todos')}
-              />
-            )
-          ) : (
-            <div className="list-view">
-              <ProjectList onNewProject={() => setShowNewProject(true)} />
-            </div>
-          ))}
-        {view === 'experts' &&
-          (activeExpertId ? (
-            activeExpert?.expert_kind === 'pm' && activeExpert.project_id ? (
-              <PmExpertView
-                projectId={activeExpert.project_id}
-                expertName={activeExpert.name}
-                onBack={() => {
-                  setActiveExpertId(null)
-                  navigate('experts')
-                }}
-              />
-            ) : expertsLoaded || activeExpert ? (
-              <ChatView sessionId={activeExpertId} />
-            ) : (
-              // Deep link before the experts list resolves: hold off on
-              // mounting ChatView so a PM expert never flashes a chat
-              // transcript while its kind is still unknown.
               <div className="list-view">
-                <div className="list-view-empty">
-                  <p>Loading expert…</p>
-                </div>
+                <ListViewHeader
+                  title="Sessions"
+                  actionLabel="+ New session"
+                  onAction={() => setShowNewSession(true)}
+                />
+                <List
+                  items={chatSessions}
+                  getKey={(s) => s.id}
+                  activeId={activeSessionId}
+                  onActivate={(s) => setActiveSession(s.id)}
+                  selectedIds={selectedSessions}
+                  onToggleSelected={(s) => toggleSessionSelected(s.id)}
+                  onClearSelection={() => setSelectedSessions(new Set())}
+                  bulkActions={[
+                    // No destructive actions in the list — delete lives on the
+                    // chat-toolbar 3-dot menu and tab right-click menu, where
+                    // the user has the session open and can act intentionally.
+                    {
+                      label: 'Mark as read',
+                      onClick: () => {
+                        for (const id of Array.from(selectedSessions)) markSessionRead(id)
+                        setSelectedSessions(new Set())
+                      },
+                      hidden: ![...selectedSessions].some((id) => unreadSessions.has(id)),
+                    },
+                  ]}
+                  renderItem={(s) => (
+                    <>
+                      {processing.has(s.id) && <span className="processing-dot" />}
+                      {!processing.has(s.id) && unreadSessions.has(s.id) && (
+                        <span className="unread-dot" />
+                      )}
+                      <span className="list-view-name">{s.name}</span>
+                      <span className="list-view-meta">
+                        {folderMap.get(s.folder_id) && (
+                          <span className="list-view-tag">{folderMap.get(s.folder_id)}</span>
+                        )}
+                        <span className="list-view-time">
+                          {formatRelativeTime(s.last_activity)}
+                        </span>
+                      </span>
+                    </>
+                  )}
+                  onScroll={(e) => {
+                    if (!sessionsNextCursor || sessionsLoadingMore) return
+                    const el = e.currentTarget
+                    if (el.scrollHeight - el.scrollTop - el.clientHeight < 200) {
+                      void fetchMoreSessions()
+                    }
+                  }}
+                  emptyState={
+                    <div className="list-view-empty">
+                      <p>No sessions yet</p>
+                      <button
+                        className="list-view-empty-action"
+                        onClick={() => setShowNewSession(true)}
+                      >
+                        Create your first session
+                      </button>
+                    </div>
+                  }
+                  footer={
+                    sessionsLoadingMore ? (
+                      <div className="list-view-loading-more" data-testid="sessions-loading-more">
+                        Loading more sessions…
+                      </div>
+                    ) : null
+                  }
+                />
               </div>
-            )
-          ) : (
-            <ExpertsView
-              onOpenExpert={(id) => {
-                setActiveExpertId(id)
-                navigate('experts', id)
+            ))}
+          {view === 'projects' &&
+            (activeProjectId ? (
+              sessionSub === 'todos' ? (
+                <ProjectTodosView
+                  projectId={activeProjectId}
+                  onClose={() => navigate('projects', activeProjectId, 'chat')}
+                />
+              ) : (
+                <KanbanBoard
+                  projectId={activeProjectId}
+                  onOpenTodos={() => navigate('projects', activeProjectId, 'todos')}
+                />
+              )
+            ) : (
+              <div className="list-view">
+                <ProjectList onNewProject={() => setShowNewProject(true)} />
+              </div>
+            ))}
+          {view === 'experts' &&
+            (activeExpertId ? (
+              activeExpert?.expert_kind === 'pm' && activeExpert.project_id ? (
+                <PmExpertView
+                  projectId={activeExpert.project_id}
+                  expertName={activeExpert.name}
+                  onBack={() => {
+                    setActiveExpertId(null)
+                    navigate('experts')
+                  }}
+                />
+              ) : expertsLoaded || activeExpert ? (
+                <ChatView sessionId={activeExpertId} />
+              ) : (
+                // Deep link before the experts list resolves: hold off on
+                // mounting ChatView so a PM expert never flashes a chat
+                // transcript while its kind is still unknown.
+                <div className="list-view">
+                  <div className="list-view-empty">
+                    <p>Loading expert…</p>
+                  </div>
+                </div>
+              )
+            ) : (
+              <ExpertsView
+                onOpenExpert={(id) => {
+                  setActiveExpertId(id)
+                  navigate('experts', id)
+                }}
+              />
+            ))}
+          {view === 'repeatingTasks' && (
+            <RepeatingTasksView
+              activeTaskId={activeRepeatingTaskId}
+              onNavigate={(id) => {
+                setActiveRepeatingTaskId(id)
+                navigate('repeatingTasks', id)
+              }}
+              onOpenSession={(id) => {
+                setActiveSession(id)
+                navigate('sessions', id)
               }}
             />
-          ))}
-        {view === 'repeatingTasks' && (
-          <RepeatingTasksView
-            activeTaskId={activeRepeatingTaskId}
-            onNavigate={(id) => {
-              setActiveRepeatingTaskId(id)
-              navigate('repeatingTasks', id)
-            }}
-            onOpenSession={(id) => {
-              setActiveSession(id)
-              navigate('sessions', id)
-            }}
-          />
-        )}
-        {view === 'usage' && <UsageDashboard />}
-        {view === 'folders' && <FoldersPage />}
-        {view === 'reports' && <ReportBrowser />}
-        {view === 'users' && <UserManagement />}
+          )}
+          {view === 'usage' && <UsageDashboard />}
+          {view === 'folders' && <FoldersPage />}
+          {view === 'reports' && <ReportBrowser />}
+          {view === 'users' && <UserManagement />}
+        </ErrorBoundary>
       </main>
 
       {showNewSession && <NewSessionModal onClose={() => setShowNewSession(false)} />}

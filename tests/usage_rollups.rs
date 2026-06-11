@@ -338,7 +338,7 @@ async fn rollups_attribute_tokens_to_the_right_entity_and_price_them() {
 }
 
 #[tokio::test]
-async fn card_rollup_carries_project_id_other_kinds_do_not() {
+async fn card_and_session_rollups_carry_project_id_projects_do_not() {
     let (state, token) = build_state().await;
     seed(&state).await;
 
@@ -348,14 +348,18 @@ async fn card_rollup_carries_project_id_other_kinds_do_not() {
     assert_eq!(find(&cards, "c1")["project_id"], "p1");
     assert_eq!(find(&cards, "c2")["project_id"], "p2");
 
-    // The other three kinds have no owning-project meaning, so the field is
-    // null there (serialized, since the struct always carries it).
+    // Session rows carry their owning project (and role flags) so the
+    // dashboard can group sessions under per-project pages: w1 -> p1.
     let (_, sessions) = get_json(state.clone(), &token, "/api/usage/sessions").await;
-    assert!(find(&sessions, "w1")["project_id"].is_null());
+    assert_eq!(find(&sessions, "w1")["project_id"], "p1");
+    assert_eq!(find(&sessions, "w1")["is_worker"], true);
 
+    // The project rollup itself has no owning-project meaning, so the field
+    // is null there (serialized, since the struct always carries it).
     let (_, projects) = get_json(state.clone(), &token, "/api/usage/projects").await;
     assert!(find(&projects, "p1")["project_id"].is_null());
 
+    // Experts seeded without a project keep a null project_id.
     let (_, experts) = get_json(state.clone(), &token, "/api/usage/experts").await;
     assert!(find(&experts, "e1")["project_id"].is_null());
 }

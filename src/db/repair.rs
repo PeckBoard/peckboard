@@ -53,6 +53,7 @@ fn ensure_usage_events_table(conn: &mut SqliteConnection) -> anyhow::Result<()> 
     if has_sessions.is_empty() || has_events.is_empty() {
         return Ok(());
     }
+    log_if_healing_table(conn, "usage_events")?;
     sql_query(
         "CREATE TABLE IF NOT EXISTS usage_events (
             id                    TEXT    PRIMARY KEY NOT NULL,
@@ -107,6 +108,7 @@ fn ensure_usage_events_table(conn: &mut SqliteConnection) -> anyhow::Result<()> 
 /// only does work on one that lacks the table. DDL mirrors the
 /// migration byte-for-byte.
 fn ensure_pm_decisions_table(conn: &mut SqliteConnection) -> anyhow::Result<()> {
+    log_if_healing_table(conn, "pm_decisions")?;
     sql_query(
         "CREATE TABLE IF NOT EXISTS pm_decisions (
             id                   TEXT PRIMARY KEY NOT NULL,
@@ -132,6 +134,7 @@ fn ensure_pm_decisions_table(conn: &mut SqliteConnection) -> anyhow::Result<()> 
 /// Heal DBs that predate `1781075129_plugin_settings`. Idempotent —
 /// `CREATE TABLE IF NOT EXISTS` no-ops on a healthy DB.
 fn ensure_plugin_settings_table(conn: &mut SqliteConnection) -> anyhow::Result<()> {
+    log_if_healing_table(conn, "plugin_settings")?;
     sql_query(
         "CREATE TABLE IF NOT EXISTS plugin_settings (
             plugin_id   TEXT NOT NULL,
@@ -154,6 +157,7 @@ fn ensure_plugin_settings_table(conn: &mut SqliteConnection) -> anyhow::Result<(
 /// `CREATE TABLE IF NOT EXISTS` is idempotent so this is safe on a
 /// fully-migrated DB and only does work on one that lacks the table.
 fn ensure_project_workflow_instructions_table(conn: &mut SqliteConnection) -> anyhow::Result<()> {
+    log_if_healing_table(conn, "project_workflow_instructions")?;
     sql_query(
         "CREATE TABLE IF NOT EXISTS project_workflow_instructions (
             project_id   TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
@@ -274,6 +278,7 @@ fn ensure_repeating_tasks_schema(conn: &mut SqliteConnection) -> anyhow::Result<
         return Ok(());
     }
 
+    log_if_healing_table(conn, "repeating_tasks")?;
     sql_query(
         "CREATE TABLE IF NOT EXISTS repeating_tasks (
             id              TEXT    PRIMARY KEY NOT NULL,
@@ -360,6 +365,7 @@ fn ensure_cards_completed_at_column(conn: &mut SqliteConnection) -> anyhow::Resu
 /// EXISTS` is inherently idempotent, so this is safe on a fully-migrated
 /// DB and only does work on one that lacks the table.
 fn ensure_card_dependencies_table(conn: &mut SqliteConnection) -> anyhow::Result<()> {
+    log_if_healing_table(conn, "card_dependencies")?;
     sql_query(
         "CREATE TABLE IF NOT EXISTS card_dependencies (
             card_id             TEXT NOT NULL REFERENCES cards(id) ON DELETE CASCADE,
@@ -386,6 +392,7 @@ fn ensure_card_dependencies_table(conn: &mut SqliteConnection) -> anyhow::Result
 ///     pre-startup `todo` event later than the live writes, so re-runs
 ///     don't clobber newer data.
 fn ensure_todos_table(conn: &mut SqliteConnection) -> anyhow::Result<()> {
+    log_if_healing_table(conn, "todos")?;
     sql_query(
         "CREATE TABLE IF NOT EXISTS todos (
             session_id   TEXT    NOT NULL,
@@ -657,6 +664,22 @@ struct PragmaColumn {
 fn project_columns(conn: &mut SqliteConnection) -> anyhow::Result<Vec<String>> {
     let rows: Vec<PragmaColumn> = sql_query("PRAGMA table_info(projects)").load(conn)?;
     Ok(rows.into_iter().map(|r| r.name).collect())
+}
+
+fn table_exists(conn: &mut SqliteConnection, table: &str) -> anyhow::Result<bool> {
+    let rows: Vec<PragmaColumn> = sql_query(format!("PRAGMA table_info({table})")).load(conn)?;
+    Ok(!rows.is_empty())
+}
+
+/// Log when a `CREATE TABLE IF NOT EXISTS` heal is about to do real work.
+/// The ALTER-based heals already log per column; without this the
+/// table-creation heals run silently, and a botched migration on a real
+/// DB goes unnoticed until something else breaks.
+fn log_if_healing_table(conn: &mut SqliteConnection, table: &str) -> anyhow::Result<()> {
+    if !table_exists(conn, table)? {
+        tracing::info!("Repairing schema: creating missing table {table}");
+    }
+    Ok(())
 }
 
 /// Backfill for the `model` / `effort` columns added to `queued_messages`

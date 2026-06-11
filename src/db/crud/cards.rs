@@ -178,6 +178,42 @@ impl Db {
         .await
     }
 
+    /// Atomically claim an unassigned card for a worker session. The
+    /// conditional `WHERE worker_session_id IS NULL` makes the claim the
+    /// single source of truth for "who owns this card": two concurrent
+    /// spawn paths (orchestrator ticks, the completion listener, a manual
+    /// restart) can both decide to pick the card up, but only one claim
+    /// lands — the loser gets `false` and must skip its spawn.
+    pub async fn claim_card_for_worker(
+        &self,
+        id: &str,
+        session_id: &str,
+        new_step: Option<String>,
+        now: &str,
+    ) -> anyhow::Result<bool> {
+        let id = id.to_string();
+        let session_id = session_id.to_string();
+        let now = now.to_string();
+        self.with_conn(move |conn| {
+            let update = UpdateCard {
+                worker_session_id: Some(Some(session_id.clone())),
+                last_worker_session_id: Some(Some(session_id)),
+                step: new_step,
+                updated_at: Some(now),
+                ..Default::default()
+            };
+            let count = diesel::update(
+                cards::table
+                    .find(&id)
+                    .filter(cards::worker_session_id.is_null()),
+            )
+            .set(&update)
+            .execute(conn)?;
+            Ok(count > 0)
+        })
+        .await
+    }
+
     pub async fn delete_cards_by_project(&self, project_id: &str) -> anyhow::Result<usize> {
         let project_id = project_id.to_string();
         self.with_conn(move |conn| {
