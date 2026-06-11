@@ -146,6 +146,66 @@ test('chat todo panel renders the snapshot grouped by status and updates live', 
   )
 })
 
+test('incremental TaskCreate/TaskUpdate calls populate the todo panel and persist', async ({
+  request,
+  page,
+  baseURL,
+}) => {
+  // Claude Code ≥ 2.1 replaced the replace-all TodoWrite tool with
+  // incremental TaskCreate/TaskUpdate calls; `mock:tasks` scripts that exact
+  // sequence (3 creates, then task 1 → in_progress → completed, task 2 →
+  // in_progress) through the same TaskTracker seam the real provider uses.
+  // Regression for the capture gap where the new tools were silently dropped
+  // and the task pages stayed empty.
+  expect(baseURL, 'baseURL configured').toBeTruthy()
+
+  const { token, authHeader } = await authenticate(request)
+  const { sessionId } = await seedAuthedSession(request, authHeader)
+
+  await loadAppAt(page, token, `/sessions/${sessionId}`)
+  await expect(page.locator('.chat-empty').or(page.locator('.chat-bubble').first())).toBeVisible({
+    timeout: 10_000,
+  })
+
+  const sendRes = await request.post(`/api/sessions/${sessionId}/message`, {
+    headers: authHeader,
+    data: { text: 'track some work', model: 'mock:tasks' },
+  })
+  expect(sendRes.ok(), `send failed: ${await sendRes.text()}`).toBeTruthy()
+
+  // Final assembled snapshot: parser done, route in progress, tests pending.
+  const panel = page.getByTestId('todo-panel')
+  await expect(panel).toBeVisible({ timeout: 10_000 })
+  await expect(page.getByTestId('todo-panel-count')).toHaveText('1/3 done')
+  await expect(page.getByTestId('todo-item')).toHaveCount(3)
+
+  const done = page.locator('[data-testid="todo-item"][data-status="done"]')
+  await expect(done).toHaveCount(1)
+  await expect(done).toContainText('Write the parser')
+
+  // In-progress item renders its activeForm, carried over from TaskCreate.
+  const inProgress = page.locator('[data-testid="todo-item"][data-status="in_progress"]')
+  await expect(inProgress).toHaveCount(1)
+  await expect(inProgress).toContainText('Wiring up the route')
+
+  const pending = page.locator('[data-testid="todo-item"][data-status="pending"]')
+  await expect(pending).toHaveCount(1)
+  await expect(pending).toContainText('Add tests')
+
+  // The snapshot is persisted, not just broadcast: the session todos endpoint
+  // (which also feeds the project-level task page) returns the same list.
+  const todosRes = await request.get(`/api/sessions/${sessionId}/todos`, { headers: authHeader })
+  expect(todosRes.ok()).toBeTruthy()
+  const { todos } = (await todosRes.json()) as {
+    todos: Array<{ content: string; status: string }>
+  }
+  expect(todos.map((t) => [t.content, t.status])).toEqual([
+    ['Write the parser', 'done'],
+    ['Wire up the route', 'in_progress'],
+    ['Add tests', 'pending'],
+  ])
+})
+
 test('clearing the session removes the todo panel from the chat view', async ({
   request,
   page,

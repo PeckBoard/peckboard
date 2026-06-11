@@ -26,6 +26,8 @@ use crate::provider::stream::{ModelInfo, ProviderEvent};
 /// * `crash` — Started → Text → Crashed
 /// * `ask` — Started → ControlRequest, waits for stdin → Text(reply) → Completed
 /// * `todo` — Started → ToolStart/ToolEnd(TodoWrite) → Todo(snapshot) → Completed
+/// * `tasks` — Started → scripted TaskCreate/TaskUpdate ToolStart/ToolEnd
+///   sequence, each assembled into a Todo snapshot via `TaskTracker` → Completed
 pub struct MockProvider {
     runs: Arc<Mutex<HashMap<String, MockRun>>>,
 }
@@ -629,6 +631,117 @@ async fn run_scenario(
                     },
                 )
                 .await;
+            }
+        }
+        "tasks" => {
+            // Claude Code ≥ 2.1 reports work items via incremental
+            // TaskCreate/TaskUpdate calls instead of TodoWrite. Script the
+            // same tool sequence the real CLI emits and drive it through the
+            // same `TaskTracker` seam the process loop uses, so the
+            // normalized `todo` events stay byte-for-byte consistent. Final
+            // state matches `mock:todo`: parser done, route in progress,
+            // tests pending.
+            let script: Vec<(&str, serde_json::Value, &str, serde_json::Value)> = vec![
+                (
+                    "TaskCreate",
+                    serde_json::json!({
+                        "subject": "Write the parser",
+                        "description": "Parse the stream",
+                        "activeForm": "Writing the parser",
+                    }),
+                    "Task #1 created successfully: Write the parser",
+                    serde_json::json!({ "task": { "id": "1", "subject": "Write the parser" } }),
+                ),
+                (
+                    "TaskCreate",
+                    serde_json::json!({
+                        "subject": "Wire up the route",
+                        "description": "Expose it over HTTP",
+                        "activeForm": "Wiring up the route",
+                    }),
+                    "Task #2 created successfully: Wire up the route",
+                    serde_json::json!({ "task": { "id": "2", "subject": "Wire up the route" } }),
+                ),
+                (
+                    "TaskCreate",
+                    serde_json::json!({
+                        "subject": "Add tests",
+                        "description": "Lock in behaviour",
+                        "activeForm": "Adding tests",
+                    }),
+                    "Task #3 created successfully: Add tests",
+                    serde_json::json!({ "task": { "id": "3", "subject": "Add tests" } }),
+                ),
+                (
+                    "TaskUpdate",
+                    serde_json::json!({ "taskId": "1", "status": "in_progress" }),
+                    "Updated task #1 status",
+                    serde_json::json!({
+                        "success": true,
+                        "taskId": "1",
+                        "statusChange": { "from": "pending", "to": "in_progress" },
+                    }),
+                ),
+                (
+                    "TaskUpdate",
+                    serde_json::json!({ "taskId": "1", "status": "completed" }),
+                    "Updated task #1 status",
+                    serde_json::json!({
+                        "success": true,
+                        "taskId": "1",
+                        "statusChange": { "from": "in_progress", "to": "completed" },
+                    }),
+                ),
+                (
+                    "TaskUpdate",
+                    serde_json::json!({ "taskId": "2", "status": "in_progress" }),
+                    "Updated task #2 status",
+                    serde_json::json!({
+                        "success": true,
+                        "taskId": "2",
+                        "statusChange": { "from": "pending", "to": "in_progress" },
+                    }),
+                ),
+            ];
+            let mut tracker = crate::todo::TaskTracker::new();
+            for (name, input, output, result) in script {
+                let tool_id = format!("tool-{}", uuid::Uuid::new_v4());
+                emit_event(
+                    db,
+                    broadcaster,
+                    session_id,
+                    ProviderEvent::ToolStart {
+                        tool_use_id: tool_id.clone(),
+                        name: name.into(),
+                        input: input.clone(),
+                    },
+                )
+                .await;
+                tracker.on_tool_start(&tool_id, name, &input);
+                tick().await;
+                emit_event(
+                    db,
+                    broadcaster,
+                    session_id,
+                    ProviderEvent::ToolEnd {
+                        tool_use_id: tool_id.clone(),
+                        output: Some(output.into()),
+                        error: None,
+                    },
+                )
+                .await;
+                if let Some(snapshot) = tracker.on_tool_end(&tool_id, false, Some(&result)) {
+                    emit_event(
+                        db,
+                        broadcaster,
+                        session_id,
+                        ProviderEvent::Todo {
+                            todos: snapshot.todos,
+                        },
+                    )
+                    .await;
+                }
+                tick().await;
             }
         }
         other => {

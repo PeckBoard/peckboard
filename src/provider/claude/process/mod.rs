@@ -284,6 +284,14 @@ pub async fn stream_events(
     let mut pending_tool_names: std::collections::HashMap<String, (String, Option<String>)> =
         std::collections::HashMap::new();
 
+    // Assembles the CLI's task tools (TaskCreate/TaskUpdate, plus legacy
+    // TodoWrite) into replace-all `todo` snapshots. Seeded from the
+    // persisted list so a process respawn mid-conversation keeps task ids
+    // aligned with the CLI's sequential counter.
+    let mut task_tracker = crate::todo::TaskTracker::seed(
+        db.list_session_todos(&session_id).await.unwrap_or_default(),
+    );
+
     loop {
         let event_source = tokio::select! {
             _ = cancel.notified() => {
@@ -526,7 +534,7 @@ pub async fn stream_events(
                     name,
                     input,
                 } => {
-                    if let Some(snapshot) = crate::todo::snapshot_from_tool_call(name, input) {
+                    if let Some(snapshot) = task_tracker.on_tool_start(tool_use_id, name, input) {
                         todo_events.push(ProviderEvent::Todo {
                             todos: snapshot.todos,
                         });
@@ -543,6 +551,18 @@ pub async fn stream_events(
                 ProviderEvent::ToolEnd {
                     tool_use_id, error, ..
                 } => {
+                    // The structured result (where TaskCreate's assigned id
+                    // lives) is a sibling of `message` on the raw line, not
+                    // part of the tool_result block the parser consumes.
+                    if let Some(snapshot) = task_tracker.on_tool_end(
+                        tool_use_id,
+                        error.is_some(),
+                        json.get("tool_use_result"),
+                    ) {
+                        todo_events.push(ProviderEvent::Todo {
+                            todos: snapshot.todos,
+                        });
+                    }
                     if let Some((name, file_path)) = pending_tool_names.remove(tool_use_id) {
                         if error.is_none() {
                             if let Some(path) = file_path {
@@ -1138,5 +1158,82 @@ mod tests {
             data.get("status").and_then(|v| v.as_str()) == Some("crashed")
         });
         assert!(crashed.is_some(), "user cancel must emit a Crashed event");
+    }
+
+    #[tokio::test]
+    async fn task_tool_calls_assemble_into_persisted_todo_snapshots() {
+        // Claude Code ≥ 2.1 reports work items via incremental
+        // TaskCreate/TaskUpdate calls instead of the replace-all TodoWrite.
+        // Feed the CLI's exact line shapes (captured from a real 2.1.153
+        // stream-json session) through the loop and assert they assemble
+        // into `todo` events mirrored to the session's todos table.
+        let session = "loop-task-tools";
+        let (db, tx, _cancel, _turn_active, handle) = spawn_cat_loop(session).await;
+
+        let lines = [
+            serde_json::json!({
+                "type": "assistant",
+                "message": { "role": "assistant", "content": [
+                    { "type": "tool_use", "id": "toolu_1", "name": "TaskCreate",
+                      "input": { "subject": "Write code", "description": "details",
+                                 "activeForm": "Writing code" } }
+                ]},
+            }),
+            serde_json::json!({
+                "type": "user",
+                "message": { "role": "user", "content": [
+                    { "type": "tool_result", "tool_use_id": "toolu_1",
+                      "content": "Task #1 created successfully: Write code" }
+                ]},
+                "tool_use_result": { "task": { "id": "1", "subject": "Write code" } },
+            }),
+            serde_json::json!({
+                "type": "assistant",
+                "message": { "role": "assistant", "content": [
+                    { "type": "tool_use", "id": "toolu_2", "name": "TaskUpdate",
+                      "input": { "taskId": "1", "status": "in_progress" } }
+                ]},
+            }),
+            serde_json::json!({
+                "type": "user",
+                "message": { "role": "user", "content": [
+                    { "type": "tool_result", "tool_use_id": "toolu_2",
+                      "content": "Updated task #1 status" }
+                ]},
+                "tool_use_result": { "success": true, "taskId": "1",
+                    "updatedFields": ["status"],
+                    "statusChange": { "from": "pending", "to": "in_progress" } },
+            }),
+        ];
+        for line in lines {
+            tx.send(StdinMsg::RawLine(line.to_string())).await.unwrap();
+        }
+
+        // Poll until both snapshots landed (cat's echo is asynchronous).
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        loop {
+            let todos = db.list_session_todos(session).await.unwrap();
+            if todos.len() == 1 && todos[0].status == crate::todo::TodoStatus::InProgress {
+                break;
+            }
+            if std::time::Instant::now() >= deadline {
+                panic!("task tools never assembled into todos, got {todos:?}");
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+
+        let todos = db.list_session_todos(session).await.unwrap();
+        assert_eq!(todos[0].content, "Write code");
+        assert_eq!(todos[0].active_form.as_deref(), Some("Writing code"));
+
+        // One `todo` event per effective change: create, then status update.
+        let events = db.list_events_by_session(session, None).await.unwrap();
+        let todo_count = events.iter().filter(|e| e.kind == "todo").count();
+        assert_eq!(todo_count, 2, "expected create + update snapshots");
+
+        tx.send(StdinMsg::ShutdownAfterTurn).await.unwrap();
+        let _ = timeout(std::time::Duration::from_secs(5), handle)
+            .await
+            .expect("stream loop must exit within 5s");
     }
 }
