@@ -1,5 +1,5 @@
 use diesel::prelude::*;
-use diesel::sql_types::{BigInt, Nullable, Text};
+use diesel::sql_types::{BigInt, Bool, Nullable, Text};
 
 use crate::db::Db;
 use crate::db::models::{NewUsageEvent, UsageEvent};
@@ -23,12 +23,20 @@ pub struct UsageRollupRow {
     pub entity_name: String,
     #[diesel(sql_type = Nullable<Text>)]
     pub model: Option<String>,
-    /// Owning project, set only for the per-card rollup (the card's session
-    /// `project_id`); `NULL` for session/project/expert rollups, where it has
-    /// no meaning. Lets the frontend cards panel filter by a selected project
-    /// without a second round-trip.
+    /// Owning project: the card's `project_id` for the per-card rollup, the
+    /// session's `project_id` for the per-session rollups; `NULL` for the
+    /// project rollup itself, where it has no meaning. Lets the frontend
+    /// filter cards/sessions by project without a second round-trip.
     #[diesel(sql_type = Nullable<Text>)]
     pub project_id: Option<String>,
+    /// Session flags, meaningful only for session-grained rollups (session /
+    /// expert / single-session); always `false` for project/card rollups.
+    /// Lets the frontend split chats vs workers vs experts without joining
+    /// against the sessions list client-side.
+    #[diesel(sql_type = Bool)]
+    pub is_worker: bool,
+    #[diesel(sql_type = Bool)]
+    pub is_expert: bool,
     #[diesel(sql_type = BigInt)]
     pub input_tokens: i64,
     #[diesel(sql_type = BigInt)]
@@ -124,7 +132,8 @@ impl Db {
     pub async fn usage_rollup_by_session(&self) -> anyhow::Result<Vec<UsageRollupRow>> {
         let sql = format!(
             "SELECT u.session_id AS entity_id, s.name AS entity_name, u.model AS model, \
-             CAST(NULL AS TEXT) AS project_id, {ROLLUP_AGG_COLS} \
+             s.project_id AS project_id, s.is_worker AS is_worker, s.is_expert AS is_expert, \
+             {ROLLUP_AGG_COLS} \
              FROM usage_events u \
              JOIN sessions s ON s.id = u.session_id \
              GROUP BY u.session_id, u.model"
@@ -143,7 +152,8 @@ impl Db {
     pub async fn usage_rollup_by_project(&self) -> anyhow::Result<Vec<UsageRollupRow>> {
         let sql = format!(
             "SELECT s.project_id AS entity_id, p.name AS entity_name, u.model AS model, \
-             CAST(NULL AS TEXT) AS project_id, {ROLLUP_AGG_COLS} \
+             CAST(NULL AS TEXT) AS project_id, 0 AS is_worker, 0 AS is_expert, \
+             {ROLLUP_AGG_COLS} \
              FROM usage_events u \
              JOIN sessions s ON s.id = u.session_id \
              JOIN projects p ON p.id = s.project_id \
@@ -162,7 +172,8 @@ impl Db {
     pub async fn usage_rollup_by_card(&self) -> anyhow::Result<Vec<UsageRollupRow>> {
         let sql = format!(
             "SELECT s.card_id AS entity_id, c.title AS entity_name, u.model AS model, \
-             c.project_id AS project_id, {ROLLUP_AGG_COLS} \
+             c.project_id AS project_id, 0 AS is_worker, 0 AS is_expert, \
+             {ROLLUP_AGG_COLS} \
              FROM usage_events u \
              JOIN sessions s ON s.id = u.session_id \
              JOIN cards c ON c.id = s.card_id \
@@ -183,7 +194,8 @@ impl Db {
     pub async fn usage_rollup_by_expert(&self) -> anyhow::Result<Vec<UsageRollupRow>> {
         let sql = format!(
             "SELECT u.session_id AS entity_id, s.name AS entity_name, u.model AS model, \
-             CAST(NULL AS TEXT) AS project_id, {ROLLUP_AGG_COLS} \
+             s.project_id AS project_id, s.is_worker AS is_worker, s.is_expert AS is_expert, \
+             {ROLLUP_AGG_COLS} \
              FROM usage_events u \
              JOIN sessions s ON s.id = u.session_id \
              WHERE s.is_expert = 1 \
@@ -207,7 +219,8 @@ impl Db {
         let session_id = session_id.to_string();
         let sql = format!(
             "SELECT u.session_id AS entity_id, s.name AS entity_name, u.model AS model, \
-             CAST(NULL AS TEXT) AS project_id, {ROLLUP_AGG_COLS} \
+             s.project_id AS project_id, s.is_worker AS is_worker, s.is_expert AS is_expert, \
+             {ROLLUP_AGG_COLS} \
              FROM usage_events u \
              JOIN sessions s ON s.id = u.session_id \
              WHERE u.session_id = ? \

@@ -112,6 +112,20 @@ async fn ev(db: &Db, id: &str, sid: &str, seq: i32, ts: i64, kind: &str, data: V
 }
 
 async fn usage(db: &Db, id: &str, sid: &str, ts: i64, input: i64, output: i64, total: i64) {
+    usage_with_cache(db, id, sid, ts, input, output, 0, total).await;
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn usage_with_cache(
+    db: &Db,
+    id: &str,
+    sid: &str,
+    ts: i64,
+    input: i64,
+    output: i64,
+    cache_read: i64,
+    total: i64,
+) {
     db.record_usage_event(NewUsageEvent {
         id: id.into(),
         session_id: sid.into(),
@@ -119,7 +133,9 @@ async fn usage(db: &Db, id: &str, sid: &str, ts: i64, input: i64, output: i64, t
         ts,
         input_tokens: input,
         output_tokens: output,
+        cache_read_tokens: cache_read,
         total_tokens: total,
+        context_tokens: input + cache_read,
         ..Default::default()
     })
     .await
@@ -209,13 +225,45 @@ async fn seed(db: &Db) {
     .await
     .unwrap();
 
-    // ── s1, turn 1: an Edit + a Write, then the turn's usage row. ──────────
+    // ── s1, turn 1: the user's prompt, two Reads, an Edit + a Write, then
+    //    the turn's usage row (with a cache-read slice the file_read
+    //    attribution splits across the two read files). ──────────────────────
+    ev(
+        db,
+        "s1-0",
+        "s1",
+        1,
+        998,
+        "user",
+        json!({ "text": "fix auth" }),
+    )
+    .await;
+    ev(
+        db,
+        "s1-r1",
+        "s1",
+        2,
+        999,
+        "agent-tool-start",
+        json!({ "toolUseId": "tu_r1", "name": "Read", "input": { "file_path": "src/auth.rs" } }),
+    )
+    .await;
+    ev(
+        db,
+        "s1-r2",
+        "s1",
+        3,
+        1000,
+        "agent-tool-start",
+        json!({ "toolUseId": "tu_r2", "name": "Read", "input": { "file_path": "docs/README.md" } }),
+    )
+    .await;
     ev(
         db,
         "s1-1",
         "s1",
-        1,
-        1000,
+        4,
+        1001,
         "agent-tool-start",
         json!({ "toolUseId": "tu_1", "name": "Edit", "input": { "file_path": "src/auth.rs" } }),
     )
@@ -224,20 +272,20 @@ async fn seed(db: &Db) {
         db,
         "s1-2",
         "s1",
-        2,
+        5,
         1002,
         "agent-tool-start",
         json!({ "toolUseId": "tu_2", "name": "Write", "input": { "file_path": "tests/new.rs" } }),
     )
     .await;
-    usage(db, "u1", "s1", 1010, 1000, 400, 1400).await;
+    usage_with_cache(db, "u1", "s1", 1010, 1000, 400, 800, 2200).await;
 
     // ── s1, turn 2: an ask_expert consultation (ask mode). ────────────────
     ev(
         db,
         "s1-3",
         "s1",
-        3,
+        6,
         1100,
         "agent-tool-start",
         json!({
@@ -271,7 +319,7 @@ async fn seed(db: &Db) {
         db,
         "q1",
         "s1",
-        4,
+        7,
         1300,
         "question",
         json!({ "questions": [{ "question": "Which port?", "header": "Setup" }], "source": "mcp" }),
@@ -282,7 +330,7 @@ async fn seed(db: &Db) {
         db,
         "s1-5",
         "s1",
-        5,
+        8,
         1400,
         "question-resolved",
         json!({ "question_id": "q1", "answers": { "0": "8080" } }),
@@ -427,6 +475,102 @@ async fn scope_filters_do_not_leak_across_sessions_or_projects() {
     )
     .await;
     assert!(!labels(&p1).contains(&"src/leak.rs".to_string()));
+}
+
+#[tokio::test]
+async fn file_read_attributes_cache_read_spend_per_file() {
+    let (state, token) = build_state().await;
+    seed(&state.db).await;
+
+    let (status, reads) = get(
+        state.clone(),
+        &token,
+        "/api/usage/operations?kind=file_read",
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let read_labels = labels(&reads);
+    assert!(
+        read_labels.contains(&"src/auth.rs".to_string()),
+        "{read_labels:?}"
+    );
+    assert!(
+        read_labels.contains(&"docs/README.md".to_string()),
+        "{read_labels:?}"
+    );
+    // Turn 1's 800 cache-read tokens split evenly across the two files read.
+    for op in reads.as_array().unwrap() {
+        assert_eq!(op["kind"], "file_read");
+        assert_eq!(op["tokens"], 400, "{op}");
+        assert!(op["est_cost"].as_f64().unwrap() > 0.0, "{op}");
+    }
+
+    // Scoped to s2 (which never Read anything): empty.
+    let (_, s2) = get(
+        state.clone(),
+        &token,
+        "/api/usage/operations?kind=file_read&session_id=s2",
+    )
+    .await;
+    assert_eq!(s2.as_array().unwrap().len(), 0, "{s2:?}");
+}
+
+#[tokio::test]
+async fn session_turns_break_down_per_prompt_with_files_read() {
+    let (state, token) = build_state().await;
+    seed(&state.db).await;
+
+    let (status, turns) = get(state.clone(), &token, "/api/usage/sessions/s1/turns").await;
+    assert_eq!(status, StatusCode::OK);
+    let turns = turns.as_array().unwrap();
+    assert_eq!(turns.len(), 4, "{turns:?}");
+
+    // Turn 1: prompt + the files it read/edited + its cache-read slice.
+    let t1 = &turns[0];
+    assert_eq!(t1["prompt"], "fix auth");
+    assert_eq!(t1["cache_read_tokens"], 800);
+    assert_eq!(t1["context_tokens"], 1800);
+    assert!(t1["est_cost"].as_f64().unwrap() > 0.0, "{t1}");
+    let read: Vec<&str> = t1["files_read"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_str().unwrap())
+        .collect();
+    assert_eq!(read, vec!["src/auth.rs", "docs/README.md"]);
+    let edited: Vec<&str> = t1["files_edited"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_str().unwrap())
+        .collect();
+    assert_eq!(edited, vec!["src/auth.rs", "tests/new.rs"]);
+
+    // Later turns had no prompt or file activity.
+    let t2 = &turns[1];
+    assert_eq!(t2["prompt"], Value::Null);
+    assert_eq!(t2["files_read"].as_array().unwrap().len(), 0);
+
+    // Unknown session is a 404.
+    let (status, _) = get(state.clone(), &token, "/api/usage/sessions/nope/turns").await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn session_rollups_carry_role_flags_and_project() {
+    let (state, token) = build_state().await;
+    seed(&state.db).await;
+
+    let (status, sessions) = get(state.clone(), &token, "/api/usage/sessions").await;
+    assert_eq!(status, StatusCode::OK);
+    let arr = sessions.as_array().unwrap();
+    let s1 = arr.iter().find(|s| s["id"] == "s1").expect("s1 present");
+    assert_eq!(s1["is_worker"], true);
+    assert_eq!(s1["is_expert"], false);
+    assert_eq!(s1["project_id"], "p1");
+    let ek = arr.iter().find(|s| s["id"] == "eK").expect("eK present");
+    assert_eq!(ek["is_worker"], false);
+    assert_eq!(ek["is_expert"], true);
 }
 
 #[tokio::test]

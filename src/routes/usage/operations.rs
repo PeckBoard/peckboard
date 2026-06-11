@@ -54,13 +54,16 @@ pub enum OperationScope {
     Global,
 }
 
-/// One priced turn — a single `usage_events` row reduced to the two numbers
-/// the operation attribution needs: a representative token count and the USD
-/// cost (computed once, via the shared cost model).
+/// One priced turn — a single `usage_events` row reduced to the numbers the
+/// operation attribution needs: a representative token count, the USD cost
+/// (computed once, via the shared cost model), and the cache-read slice on
+/// its own (what the file_read attribution prices).
 struct Turn {
     ts: i64,
     tokens: i64,
     cost: f64,
+    cache_read_tokens: i64,
+    cache_read_cost: f64,
 }
 
 fn build_turns(usage: &[UsageEvent]) -> Vec<Turn> {
@@ -85,6 +88,8 @@ fn build_turns(usage: &[UsageEvent]) -> Vec<Turn> {
                     u.cache_read_tokens,
                     u.cache_creation_tokens,
                 ),
+                cache_read_tokens: u.cache_read_tokens,
+                cache_read_cost: cost::usage_cost(u.model.as_deref(), 0, 0, u.cache_read_tokens, 0),
             }
         })
         .collect();
@@ -115,9 +120,24 @@ fn event_data(ev: &Event) -> Value {
 
 type SessionData = (Session, Vec<Event>, Vec<Turn>);
 
-/// file_update: attribute each turn that contained an `Edit`/`Write`/`MultiEdit`
-/// to the file(s) it touched, splitting evenly when a turn edits several files.
-fn file_update_costs(sessions: &[SessionData]) -> Vec<OperationCost> {
+/// The file path a read/edit tool call targets. Edits use `file_path`; Read
+/// variants may use `path`, and notebook tools `notebook_path`.
+fn tool_file_path(input: &Value) -> Option<&str> {
+    ["file_path", "path", "notebook_path"]
+        .iter()
+        .find_map(|k| input.get(k).and_then(|v| v.as_str()))
+}
+
+/// Shared per-file turn-cost attribution: each turn that contained a matching
+/// tool call is attributed to the file(s) it touched, splitting the turn's
+/// value evenly across distinct files so one turn is never counted twice.
+/// `turn_value` selects which (tokens, cost) slice of the turn to attribute.
+fn file_costs(
+    sessions: &[SessionData],
+    kind: OperationKind,
+    matches_tool: fn(&str) -> bool,
+    turn_value: fn(&Turn) -> (i64, f64),
+) -> Vec<OperationCost> {
     #[derive(Default)]
     struct Acc {
         tokens: f64,
@@ -127,7 +147,7 @@ fn file_update_costs(sessions: &[SessionData]) -> Vec<OperationCost> {
     let mut acc: BTreeMap<String, Acc> = BTreeMap::new();
 
     for (_s, events, turns) in sessions {
-        // turn index -> distinct file paths edited in that turn.
+        // turn index -> distinct file paths touched in that turn.
         let mut turn_files: BTreeMap<usize, BTreeSet<String>> = BTreeMap::new();
         let mut path_ts: HashMap<String, i64> = HashMap::new();
 
@@ -137,14 +157,10 @@ fn file_update_costs(sessions: &[SessionData]) -> Vec<OperationCost> {
             }
             let data = event_data(ev);
             let name = data.get("name").and_then(|v| v.as_str()).unwrap_or("");
-            if !matches!(tool_base_name(name), "Edit" | "Write" | "MultiEdit") {
+            if !matches_tool(tool_base_name(name)) {
                 continue;
             }
-            let Some(path) = data
-                .get("input")
-                .and_then(|i| i.get("file_path"))
-                .and_then(|v| v.as_str())
-            else {
+            let Some(path) = data.get("input").and_then(tool_file_path) else {
                 continue;
             };
             let Some(idx) = turns.iter().position(|t| t.ts >= ev.ts) else {
@@ -159,12 +175,13 @@ fn file_update_costs(sessions: &[SessionData]) -> Vec<OperationCost> {
 
         for (idx, files) in turn_files {
             let turn = &turns[idx];
+            let (turn_tokens, turn_cost) = turn_value(turn);
             let n = files.len() as f64;
             for f in files {
                 let ts = path_ts.get(&f).copied().unwrap_or(turn.ts);
                 let entry = acc.entry(f).or_default();
-                entry.tokens += turn.tokens as f64 / n;
-                entry.cost += turn.cost / n;
+                entry.tokens += turn_tokens as f64 / n;
+                entry.cost += turn_cost / n;
                 if ts > entry.ts {
                     entry.ts = ts;
                 }
@@ -174,7 +191,7 @@ fn file_update_costs(sessions: &[SessionData]) -> Vec<OperationCost> {
 
     acc.into_iter()
         .map(|(path, a)| OperationCost {
-            kind: OperationKind::FileUpdate,
+            kind,
             ref_id: path.clone(),
             label: path,
             tokens: a.tokens.round() as i64,
@@ -182,6 +199,29 @@ fn file_update_costs(sessions: &[SessionData]) -> Vec<OperationCost> {
             ts: a.ts,
         })
         .collect()
+}
+
+/// file_update: attribute each turn that contained an `Edit`/`Write`/`MultiEdit`
+/// to the file(s) it touched, splitting evenly when a turn edits several files.
+fn file_update_costs(sessions: &[SessionData]) -> Vec<OperationCost> {
+    file_costs(
+        sessions,
+        OperationKind::FileUpdate,
+        |name| matches!(name, "Edit" | "Write" | "MultiEdit" | "NotebookEdit"),
+        |t| (t.tokens, t.cost),
+    )
+}
+
+/// file_read: attribute each turn's *cache-read* slice to the file(s) the
+/// agent `Read` in that turn — the cost of re-loading previously-cached
+/// context, broken down by what was actually read.
+fn file_read_costs(sessions: &[SessionData]) -> Vec<OperationCost> {
+    file_costs(
+        sessions,
+        OperationKind::FileRead,
+        |name| matches!(name, "Read" | "NotebookRead"),
+        |t| (t.cache_read_tokens, t.cache_read_cost),
+    )
 }
 
 /// ask_expert: one OperationCost per consultation. The asking turn (the turn
@@ -412,6 +452,7 @@ pub async fn operation_costs(
     let data = load_session_data(db, load_scope(db, scope).await?).await?;
     let mut ops = match kind {
         OperationKind::FileUpdate => file_update_costs(&data),
+        OperationKind::FileRead => file_read_costs(&data),
         OperationKind::AskExpert => ask_expert_costs(&data),
         OperationKind::Qa => qa_costs(&data),
     };
@@ -427,6 +468,7 @@ pub async fn all_operation_costs(
 ) -> anyhow::Result<Vec<OperationCost>> {
     let data = load_session_data(db, load_scope(db, scope).await?).await?;
     let mut ops = file_update_costs(&data);
+    ops.extend(file_read_costs(&data));
     ops.extend(ask_expert_costs(&data));
     ops.extend(qa_costs(&data));
     sort_ops(&mut ops);
@@ -451,12 +493,15 @@ pub async fn get_operations(
 ) -> Response {
     let kind = match q.kind.as_str() {
         "file_update" => OperationKind::FileUpdate,
+        "file_read" => OperationKind::FileRead,
         "ask_expert" => OperationKind::AskExpert,
         "qa" => OperationKind::Qa,
         other => {
             return (
                 StatusCode::BAD_REQUEST,
-                format!("unknown operation kind: {other} (expected file_update|ask_expert|qa)"),
+                format!(
+                    "unknown operation kind: {other} (expected file_update|file_read|ask_expert|qa)"
+                ),
             )
                 .into_response();
         }

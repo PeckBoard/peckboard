@@ -21,8 +21,15 @@ function sortValue(s: SessionUsage, key: SessionSort): number {
 /** Body of the Sessions panel: a sortable list of sessions, each showing its
  *  lifetime tokens, est. cost, and a gauge of how full its context window is.
  *  Context has no model on the row, so the gauge measures against the shared
- *  default window from the cost module. */
-export default function SessionsPanelBody({ sessions }: { sessions: SessionUsage[] }) {
+ *  default window from the cost module. Rows open the per-session detail
+ *  page via `onOpen`. */
+export default function SessionsPanelBody({
+  sessions,
+  onOpen,
+}: {
+  sessions: SessionUsage[]
+  onOpen?: (id: string) => void
+}) {
   const [sort, setSort] = useState<SessionSort>('tokens')
   const sorted = useMemo(
     () => [...sessions].sort((a, b) => sortValue(b, sort) - sortValue(a, sort)),
@@ -53,7 +60,24 @@ export default function SessionsPanelBody({ sessions }: { sessions: SessionUsage
         const pctLabel = Math.round(pct * 100)
         const level = pct >= 0.9 ? 'is-danger' : pct >= 0.7 ? 'is-warn' : ''
         return (
-          <div className="usage-row" key={s.id} data-testid="usage-session-row">
+          <div
+            className={`usage-row ${onOpen ? 'usage-row-clickable' : ''}`}
+            key={s.id}
+            data-testid="usage-session-row"
+            role={onOpen ? 'button' : undefined}
+            tabIndex={onOpen ? 0 : undefined}
+            onClick={onOpen ? () => onOpen(s.id) : undefined}
+            onKeyDown={
+              onOpen
+                ? (e) => {
+                    if (e.key === 'Enter' || e.key === ' ') {
+                      e.preventDefault()
+                      onOpen(s.id)
+                    }
+                  }
+                : undefined
+            }
+          >
             <div className="usage-row-head">
               <span className="usage-row-name" title={s.name}>
                 {s.name || 'Untitled'}

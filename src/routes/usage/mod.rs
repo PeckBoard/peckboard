@@ -33,6 +33,7 @@ use crate::state::AppState;
 pub mod cost;
 pub mod operations;
 pub mod trends;
+pub mod turns;
 
 pub use cost::{CostTable, ModelRates, TokenKind};
 
@@ -87,14 +88,22 @@ pub struct SessionUsage {
     pub total_tokens_used: i64,
     /// Most recent context-window occupancy for the session.
     pub total_context_tokens: i64,
+    /// Session role flags, so the dashboard can split chats / workers /
+    /// experts and route each to the right detail page.
+    pub is_worker: bool,
+    pub is_expert: bool,
 }
 
 /// What kind of operation an [`OperationCost`] attributes spend to.
-/// Serialized snake_case (`file_update` | `ask_expert` | `qa`).
+/// Serialized snake_case (`file_update` | `file_read` | `ask_expert` | `qa`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum OperationKind {
     FileUpdate,
+    /// Cache-read spend attributed to the files `Read` during each turn —
+    /// only the turn's cache-read slice, since that is the cost of
+    /// re-loading previously-seen file content into context.
+    FileRead,
     AskExpert,
     Qa,
 }
@@ -164,6 +173,10 @@ pub fn router(state: Arc<AppState>) -> Router<Arc<AppState>> {
         .route("/api/usage/costs", get(get_costs))
         .route("/api/usage/sessions", get(list_session_usage))
         .route("/api/usage/sessions/{id}", get(get_session_usage))
+        .route(
+            "/api/usage/sessions/{id}/turns",
+            get(turns::get_session_turns),
+        )
         .route("/api/usage/projects", get(list_project_usage))
         .route("/api/usage/cards", get(list_card_usage))
         .route("/api/usage/experts", get(list_expert_usage))
@@ -269,7 +282,12 @@ fn fold_entities(rows: Vec<UsageRollupRow>, kind: EntityKind) -> Vec<EntityUsage
 /// is the sum of the four billed slices (distinct from the provider-reported
 /// `total_tokens` roll-up); `total_context_tokens` mirrors the peak context
 /// snapshot.
-fn session_usage(id: String, name: String, rows: Vec<UsageRollupRow>) -> SessionUsage {
+fn session_usage(
+    id: String,
+    name: String,
+    flags: (bool, bool),
+    rows: Vec<UsageRollupRow>,
+) -> SessionUsage {
     let mut acc = UsageAccumulator {
         name,
         ..Default::default()
@@ -284,6 +302,8 @@ fn session_usage(id: String, name: String, rows: Vec<UsageRollupRow>) -> Session
         usage: acc.into_entity(id, EntityKind::Session),
         total_tokens_used,
         total_context_tokens: context,
+        is_worker: flags.0,
+        is_expert: flags.1,
     }
 }
 
@@ -305,20 +325,26 @@ async fn list_session_usage(State(state): State<Arc<AppState>>) -> impl IntoResp
 /// Group the flat per-(session, model) rows into one [`SessionUsage`] per
 /// session, cost-sorted like the entity rollups.
 fn fold_session_rows(rows: Vec<UsageRollupRow>) -> Vec<SessionUsage> {
+    /// Per-session grouping slot: name, (is_worker, is_expert), rows.
+    type Slot = (String, (bool, bool), Vec<UsageRollupRow>);
     let mut order: Vec<String> = Vec::new();
-    let mut grouped: HashMap<String, (String, Vec<UsageRollupRow>)> = HashMap::new();
+    let mut grouped: HashMap<String, Slot> = HashMap::new();
     for row in rows {
         let entry = grouped.entry(row.entity_id.clone()).or_insert_with(|| {
             order.push(row.entity_id.clone());
-            (row.entity_name.clone(), Vec::new())
+            (
+                row.entity_name.clone(),
+                (row.is_worker, row.is_expert),
+                Vec::new(),
+            )
         });
-        entry.1.push(row);
+        entry.2.push(row);
     }
     let mut out: Vec<SessionUsage> = order
         .into_iter()
         .map(|id| {
-            let (name, rows) = grouped.remove(&id).expect("id was inserted into order");
-            session_usage(id, name, rows)
+            let (name, flags, rows) = grouped.remove(&id).expect("id was inserted into order");
+            session_usage(id, name, flags, rows)
         })
         .collect();
     out.sort_by(|a, b| {
@@ -343,12 +369,20 @@ async fn get_session_usage(
         .usage_rollup_for_session(&id)
         .await
         .map_err(db_error)?;
-    if let Some(name) = rows.first().map(|r| r.entity_name.clone()) {
-        return Ok(Json(session_usage(id, name, rows)));
+    if let Some((name, flags)) = rows
+        .first()
+        .map(|r| (r.entity_name.clone(), (r.is_worker, r.is_expert)))
+    {
+        return Ok(Json(session_usage(id, name, flags, rows)));
     }
     // No usage rows: fall back to the session record for its name, or 404.
     match state.db.get_session(&id).await.map_err(db_error)? {
-        Some(session) => Ok(Json(session_usage(id, session.name, Vec::new()))),
+        Some(session) => Ok(Json(session_usage(
+            id,
+            session.name,
+            (session.is_worker, session.is_expert),
+            Vec::new(),
+        ))),
         None => Err((
             StatusCode::NOT_FOUND,
             Json(serde_json::json!({ "error": "session not found" })),

@@ -33,6 +33,7 @@ const ENTITY_OPTIONS: { value: TrendEntity; label: string }[] = [
 
 const OPERATION_LABELS: Record<string, string> = {
   file_update: 'File Updates',
+  file_read: 'Cache Reads by File',
   ask_expert: 'Expert Consults',
   qa: 'Questions & Answers',
 }

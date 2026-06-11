@@ -317,11 +317,12 @@ async fn operation_trends(
     let only_kind = match id {
         None => None,
         Some("file_update") => Some(OperationKind::FileUpdate),
+        Some("file_read") => Some(OperationKind::FileRead),
         Some("ask_expert") => Some(OperationKind::AskExpert),
         Some("qa") => Some(OperationKind::Qa),
         Some(other) => {
             return Err(anyhow::anyhow!(
-                "operation id must be file_update|ask_expert|qa, got '{other}'"
+                "operation id must be file_update|file_read|ask_expert|qa, got '{other}'"
             ));
         }
     };
@@ -371,6 +372,7 @@ async fn operation_trends(
 fn operation_kind_str(kind: OperationKind) -> &'static str {
     match kind {
         OperationKind::FileUpdate => "file_update",
+        OperationKind::FileRead => "file_read",
         OperationKind::AskExpert => "ask_expert",
         OperationKind::Qa => "qa",
     }

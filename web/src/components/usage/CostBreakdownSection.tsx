@@ -23,6 +23,12 @@ const KINDS: KindMeta[] = [
     empty: 'No file edits recorded',
   },
   {
+    kind: 'file_read',
+    title: 'Cache Reads by File',
+    mono: true,
+    empty: 'No file reads recorded',
+  },
+  {
     kind: 'ask_expert',
     title: 'Expert Consults',
     mono: false,
