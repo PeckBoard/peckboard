@@ -171,19 +171,34 @@
   text-decoration: line-through;
 }
 
-/* Project-page todo roll-up: the shared TodoPanel sits inside this wrapper,
-   styled as a board-level card rather than a flush chat-panel section. */
+/* Project-page todo roll-up: docked at the bottom of the kanban
+   board, outside its scroll area. Same shape as the chat-side
+   `.todo-panel` (top border instead of card border, flush against
+   the bottom chrome) so the two views feel consistent. The hard
+   25% cap keeps the panel from eating more than a quarter of the
+   board height; the panel's own body still scrolls when the todo
+   list is long. The `--app-height` chain (App.tsx's visualViewport
+   sync) shrinks the kanban board above an open soft keyboard, so
+   the 25% follows the visible area instead of stretching past it. */
 .project-todo-summary {
-  margin: 0 0 12px;
-  border: 1px solid var(--border);
-  border-radius: 8px;
+  flex-shrink: 0;
   background: var(--surface);
+  border-top: 1px solid var(--border);
+  max-height: min(25%, 240px);
   overflow: hidden;
+  display: flex;
+  flex-direction: column;
 }
 
 .project-todo-summary .todo-panel {
   border-bottom: none;
-  max-height: 40vh;
+  background: transparent;
+  /* The wrapper above owns the height cap; the panel itself fills
+     it and scrolls inside. */
+  max-height: none;
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
 }
 
 /* Dedicated session-todos view: same chat-container shell, but the body is

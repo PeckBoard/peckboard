@@ -32,12 +32,39 @@
    forward instead of blending into the column. */
 .kanban-board-scroll {
   flex: 1;
-  overflow-y: auto;
-  overflow-x: hidden;
+  /* The board itself only scrolls horizontally — vertical scroll
+     lives in each column's `.kanban-cards` so the column heading
+     stays put while the cards underneath scroll. */
+  overflow-y: hidden;
+  overflow-x: auto;
   padding: 0 20px 20px;
   min-height: 0;
   position: relative;
   background: var(--kanban-board-bg);
+  /* Layout the in-scroll content as a vertical stack: pause banner +
+     question trigger sit above the columns, and the columns flex to
+     fill the remaining height (so per-column scroll has a tall
+     enough box to be useful). */
+  display: flex;
+  flex-direction: column;
+  /* Subtle scrollbar so the desktop board doesn't show the chunky
+     OS default at the bottom. */
+  scrollbar-width: thin;
+  scrollbar-color: color-mix(in srgb, var(--text3) 60%, transparent) transparent;
+}
+.kanban-board-scroll::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+.kanban-board-scroll::-webkit-scrollbar-thumb {
+  background: color-mix(in srgb, var(--text3) 50%, transparent);
+  border-radius: 4px;
+}
+.kanban-board-scroll::-webkit-scrollbar-thumb:hover {
+  background: color-mix(in srgb, var(--text3) 80%, transparent);
+}
+.kanban-board-scroll::-webkit-scrollbar-track {
+  background: transparent;
 }
 
 /* Auto-pause banner: sits between the toolbar and the kanban columns.
@@ -59,9 +86,19 @@
 }
 .kanban-columns {
   display: flex;
-  flex-direction: column;
+  flex-direction: row;
   gap: 12px;
+  /* Take the remaining vertical space inside `.kanban-board-scroll`
+     so each column has a meaningful height to scroll within. */
+  flex: 1;
+  min-height: 0;
+  /* On viewports too narrow for all columns at their min-width, the
+     `.kanban-board-scroll` parent shows a horizontal scrollbar and
+     the row extends past the viewport. `min-width: min-content`
+     forces the row to honour every column's `min-width: 240px`
+     floor instead of squashing them. */
   width: 100%;
+  min-width: min-content;
 }
 /* Each row is a step section: a header on TOP spanning the full width,
    with a wrapping card strip beneath. The strip wraps onto additional
@@ -73,15 +110,25 @@
    `overflow` of its own — that would create a new sticky containing
    block per column, defeating the section-locked sticky header. */
 .kanban-column {
-  background: var(--surface);
-  border: 1px solid var(--border);
-  border-radius: var(--radius-lg);
+  /* Columns are bare: just the step heading sitting above the card
+     stack against the board bg, no card-shaped wrapper around them
+     (the cards themselves are the only filled chips). */
+  background: transparent;
+  border: 0;
+  border-radius: 0;
   padding: 0;
   display: flex;
   flex-direction: column;
   gap: 0;
   align-items: stretch;
   min-height: 88px;
+  /* Columns can shrink when the board has room (desktop), but never
+     below this minimum — that's the width below which the cards
+     stop being readable. On a narrow phone the 4 columns will exceed
+     the viewport at this width, which is the cue for the board to
+     scroll horizontally (see `.kanban-board-scroll`). 240px sized
+     for ~1.6 columns to fit a typical phone viewport (~390px). */
+  min-width: 240px;
 }
 /* Section-locked sticky header. Pins to the top of the board's scroll
    container (offset by the toolbar above), then un-sticks and scrolls
@@ -94,19 +141,13 @@
   align-items: center;
   gap: 8px;
   padding: 8px 12px;
-  background: var(--surface);
-  border-bottom: 1px solid var(--border);
-  border-top-left-radius: var(--radius-lg);
-  border-top-right-radius: var(--radius-lg);
-  position: sticky;
-  /* Pins to the top of `.kanban-board-scroll` — the board header is
-     a sibling above the scroll container, so the scroll viewport
-     already starts below it. */
-  top: 0;
-  /* Above cards in the same column so cards scroll under the pinned
-     header. Thought bubbles bump z-index higher so they never get
-     clipped by the header when a card sits near the section top. */
-  z-index: 3;
+  background: transparent;
+  border: 0;
+  border-radius: 0;
+  /* Stays at the top of its column; the cards stack underneath it
+     in their own scroll container so the heading never disappears
+     when the user scrolls a long column. */
+  flex-shrink: 0;
 }
 .kanban-column-header h3 {
   margin: 0;
@@ -641,24 +682,46 @@
   flex-wrap: nowrap;
 }
 .kanban-column {
-  /* Equal-width columns that can shrink below their basis on tight
-     viewports so all four steps stay on screen without forcing a
-     horizontal scrollbar. `min-width: 0` is required for flex items
-     containing wrapped text to honour their share. */
+  /* Equal-width columns that fill the board when there's room
+     (desktop), but every column respects the 240px min-width set on
+     `.kanban-column` above. On a narrow phone that floor forces the
+     row past the viewport and `.kanban-board-scroll` takes over with
+     a horizontal scrollbar. */
   flex: 1 1 0;
-  min-width: 0;
   /* Let each column take the height of its content rather than
      stretching to the tallest column (the board's vertical scroll
      handles the overall height). */
   align-self: stretch;
 }
 .kanban-cards {
-  /* Stack cards vertically inside each column. No wrapping; the
-     column grows tall and the board scrolls. */
+  /* Stack cards vertically inside the column and let the cards area
+     own the vertical scroll — the column header sits above this
+     element and stays put. */
   flex-direction: column;
   flex-wrap: nowrap;
   align-items: stretch;
   align-content: stretch;
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  -webkit-overflow-scrolling: touch;
+  /* Match the board's subtle scrollbar so the per-column scroll
+     reads as part of the same chrome. */
+  scrollbar-width: thin;
+  scrollbar-color: color-mix(in srgb, var(--text3) 60%, transparent) transparent;
+}
+.kanban-cards::-webkit-scrollbar {
+  width: 6px;
+}
+.kanban-cards::-webkit-scrollbar-thumb {
+  background: color-mix(in srgb, var(--text3) 50%, transparent);
+  border-radius: 3px;
+}
+.kanban-cards::-webkit-scrollbar-thumb:hover {
+  background: color-mix(in srgb, var(--text3) 80%, transparent);
+}
+.kanban-cards::-webkit-scrollbar-track {
+  background: transparent;
 }
 .kanban-card {
   /* Cards fill the column width up to a sensible cap so a wide
