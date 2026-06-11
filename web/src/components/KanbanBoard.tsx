@@ -4,7 +4,6 @@ import { useResourcesStore } from '../store/resources'
 import { useWsStore } from '../store/ws'
 import { authedFetch } from '../store/auth'
 import { useMentions, filterMentions } from '../hooks/useMentions'
-import { useMediaQuery } from '../hooks/useMediaQuery'
 import type { Card, Event, Project } from '../types/api'
 import CardFormModal from './CardFormModal'
 import EditProjectModal from './EditProjectModal'
@@ -32,17 +31,11 @@ interface KanbanBoardProps {
 }
 
 export default function KanbanBoard({ projectId, onOpenTodos }: KanbanBoardProps) {
-  // Desktop (≥ md) flips the board to classic vertical-columns kanban:
-  // columns side by side, cards stacked top-to-bottom inside each column.
-  // CSS handles the layout; the JS only needs to know the orientation to
-  // pick the correct DnD insertion axis (horizontal midpoint test on
-  // mobile rows, vertical midpoint test on desktop columns). Reading
-  // through `matchMedia` instead of a resize listener means no
-  // orientation flash on first render.
-  const isDesktop = useMediaQuery('(min-width: 768px)')
-
-  // Step headers pin at `top: 0` against the board's scroll container,
-  // which sits flush below the tabbar — no measured offset needed.
+  // The board renders the same classic vertical-columns kanban on every
+  // viewport: columns side by side, cards stacked top-to-bottom inside
+  // each column. On a narrow phone the columns get narrow but the
+  // shape stays consistent. DnD reorder uses a vertical midpoint test
+  // against the dragged-over card.
 
   const projects = useProjectsStore((s) => s.projects)
   const updateProject = useProjectsStore((s) => s.updateProject)
@@ -555,13 +548,7 @@ export default function KanbanBoard({ projectId, onOpenTodos }: KanbanBoardProps
       return
     }
     const rect = cardEl.getBoundingClientRect()
-    const insertIdx = isDesktop
-      ? e.clientY < rect.top + rect.height / 2
-        ? cardIndex
-        : cardIndex + 1
-      : e.clientX < rect.left + rect.width / 2
-        ? cardIndex
-        : cardIndex + 1
+    const insertIdx = e.clientY < rect.top + rect.height / 2 ? cardIndex : cardIndex + 1
     setDragOver({ step: stepKey, insertIdx })
   }
 

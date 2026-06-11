@@ -154,9 +154,8 @@
      instead of a sharp seam against the board. */
   border: 1px solid color-mix(in srgb, var(--kanban-card-bg) 88%, black);
   border-radius: var(--radius-md);
-  padding: 10px 12px;
+  padding: 6px 10px;
   text-align: left;
-  width: 320px;
   flex-shrink: 0;
   font-family: inherit;
   transition:
@@ -166,7 +165,7 @@
   display: flex;
   flex-direction: column;
   align-items: stretch;
-  gap: 10px;
+  gap: 8px;
   position: relative;
   cursor: pointer;
   animation: cardGrowIn 0.35s cubic-bezier(0.34, 1.56, 0.64, 1);
@@ -186,7 +185,7 @@
   100% {
     opacity: 1;
     transform: scale(1);
-    max-width: 320px;
+    max-width: 290px;
   }
 }
 
@@ -627,81 +626,72 @@
   color: var(--warning);
 }
 
-/* ─── Desktop layout (≥ md) ────────────────────────────────────────────
-   On viewports ≥ 768px the board flips from the mobile horizontal-rows
-   layout to classic vertical-columns kanban: steps sit side by side,
-   cards stack top-to-bottom inside each column. The board still owns
-   the vertical scroll so the section-locked sticky headers keep working
-   the same way as on mobile. CSS handles the layout flip; KanbanBoard
-   switches the drag-axis test via the `useMediaQuery` hook. */
-@media (min-width: 768px) {
-  .kanban-columns {
-    flex-direction: row;
-    align-items: stretch;
-    /* Stretch the row to fit the board width — each column flexes to an
-       equal share so the row never overflows horizontally. */
-    flex-wrap: nowrap;
-  }
-  .kanban-column {
-    /* Equal-width columns that can shrink below their basis on tight
-       desktop widths so all four steps stay on screen without forcing
-       a horizontal page scrollbar. `min-width: 0` is required for flex
-       items containing wrapped text to honour their share. */
-    flex: 1 1 0;
-    min-width: 0;
-    /* Cards inside the column have variable height; let the column take
-       the height of its content rather than stretching to the tallest
-       column (the board's vertical scroll handles the overall height). */
-    align-self: stretch;
-  }
-  .kanban-cards {
-    /* Stack cards vertically inside each column. No wrapping; the column
-       grows tall and the board scrolls. */
-    flex-direction: column;
-    flex-wrap: nowrap;
-    align-items: stretch;
-    align-content: stretch;
-  }
-  .kanban-card {
-    /* Cards fill the column width instead of the fixed 320px used in
-       the horizontal-rows layout. Cap at 360px so a wide desktop column
-       doesn't stretch a card into an unreadable strip. `cardGrowIn`
-       still clamps `max-width: 320px` on its final frame, but the
-       animation completes in 0.35s and then the property reverts to
-       this 360px ceiling. */
-    width: auto;
-    max-width: 360px;
-    align-self: stretch;
-    /* Cards in the vertical-columns layout grow to fit their content.
-       Collapsed cards stay short (header-only); expanded ones grow to
-       fit the description + action buttons. No max-height — the
-       column scrolls inside the board if a single card gets long. */
-  }
-  /* In-row reorder indicator flips axis for the vertical column flow:
-     a 3px horizontal bar drawn above/below the dragged-over card
-     instead of left/right. */
-  .kanban-card[data-drop-before='true']::before,
-  .kanban-card[data-drop-after='true']::after {
-    top: auto;
-    bottom: auto;
-    left: 4px;
-    right: 4px;
-    width: auto;
-    height: 3px;
-  }
-  .kanban-card[data-drop-before='true']::before {
-    top: -6px;
-  }
-  .kanban-card[data-drop-after='true']::after {
-    bottom: -6px;
-  }
-  /* Empty column placeholder reads better as a thin centered note than
-     as a tight inline strip when the section is a tall empty column. */
-  .kanban-cards-empty {
-    align-self: center;
-    margin-top: 12px;
-    white-space: normal;
-  }
+/* ─── Vertical-columns layout (all viewports) ──────────────────────────
+   The board renders classic vertical-columns kanban at every width:
+   steps sit side by side, cards stack top-to-bottom inside each
+   column. On a narrow phone the columns become correspondingly
+   narrow, but the shape stays consistent with the desktop view.
+   The board owns the vertical scroll so the per-column sticky
+   headers keep working the same way everywhere. */
+.kanban-columns {
+  flex-direction: row;
+  align-items: stretch;
+  /* Stretch the row to fit the board width — each column flexes to an
+     equal share so the row never overflows horizontally. */
+  flex-wrap: nowrap;
+}
+.kanban-column {
+  /* Equal-width columns that can shrink below their basis on tight
+     viewports so all four steps stay on screen without forcing a
+     horizontal scrollbar. `min-width: 0` is required for flex items
+     containing wrapped text to honour their share. */
+  flex: 1 1 0;
+  min-width: 0;
+  /* Let each column take the height of its content rather than
+     stretching to the tallest column (the board's vertical scroll
+     handles the overall height). */
+  align-self: stretch;
+}
+.kanban-cards {
+  /* Stack cards vertically inside each column. No wrapping; the
+     column grows tall and the board scrolls. */
+  flex-direction: column;
+  flex-wrap: nowrap;
+  align-items: stretch;
+  align-content: stretch;
+}
+.kanban-card {
+  /* Cards fill the column width up to a sensible cap so a wide
+     viewport doesn't stretch a card into an unreadable strip. The
+     entry animation still clamps `max-width: 320px` on its final
+     frame, then the property reverts to this 290px ceiling. */
+  width: auto;
+  max-width: 290px;
+  align-self: stretch;
+}
+/* In-column reorder indicator: a 3px horizontal bar drawn
+   above/below the dragged-over card. */
+.kanban-card[data-drop-before='true']::before,
+.kanban-card[data-drop-after='true']::after {
+  top: auto;
+  bottom: auto;
+  left: 4px;
+  right: 4px;
+  width: auto;
+  height: 3px;
+}
+.kanban-card[data-drop-before='true']::before {
+  top: -6px;
+}
+.kanban-card[data-drop-after='true']::after {
+  bottom: -6px;
+}
+/* Empty column placeholder reads as a thin centered note inside the
+   empty column. */
+.kanban-cards-empty {
+  align-self: center;
+  margin-top: 12px;
+  white-space: normal;
 }
 
 .card-detail-grid {

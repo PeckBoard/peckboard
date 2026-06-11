@@ -180,77 +180,16 @@
     line-height: 1.35;
   }
 
-  /* Tool blocks full width */
-  /* Drop the desktop scroll area's side padding so each step row
-     spans edge-to-edge against the viewport. Padding now lives
-     INSIDE the row (on `.kanban-column-header` and `.kanban-cards`),
-     which keeps the heading + card strip readable while letting the
-     row background — and its top divider — touch the window sides. */
+  /* The board uses the same vertical-columns layout on every viewport
+     (see kanban.css). The only mobile-specific tweak is dropping the
+     scroll area's side padding so the columns sit edge-to-edge
+     against the viewport — the columns themselves still own their
+     internal header/card padding. iOS momentum scroll on the scroll
+     container. */
   .kanban-board-scroll {
     padding-left: 0;
     padding-right: 0;
-  }
-  /* The scroll area owns vertical scrolling; per-column overflow
-     would create a new sticky containing block and break the
-     section-locked header. */
-  .kanban-column {
     -webkit-overflow-scrolling: touch;
-  }
-
-  /* On mobile the per-step section is bare: no card box, just a
-     horizontal divider between rows. The desktop layout (≥ 768px)
-     keeps the rounded surface look; on a phone the boxes-within-a-box
-     nesting reads as visual clutter. */
-  .kanban-columns {
-    gap: 0;
-  }
-  .kanban-column {
-    background: transparent;
-    border: 0;
-    border-radius: 0;
-  }
-  .kanban-column + .kanban-column {
-    border-top: 1px solid var(--border);
-  }
-  .kanban-column-header {
-    background: transparent;
-    border-bottom: 0;
-    border-radius: 0;
-  }
-  /* On mobile each step row carries a horizontal-scroll card strip:
-     `flex-wrap: nowrap` keeps the cards on one line, `overflow-x: auto`
-     gives the strip its own horizontal scroll so the page doesn't
-     overflow horizontally. The board itself still scrolls vertically.
-     `overscroll-behavior-x: contain` stops a horizontal swipe from
-     turning into a browser back-gesture. */
-  .kanban-cards {
-    flex-wrap: nowrap;
-    overflow-x: auto;
-    overflow-y: visible;
-    -webkit-overflow-scrolling: touch;
-    overscroll-behavior-x: contain;
-    padding: 8px 12px 12px;
-    /* Cards in the horizontal strip own their own height — collapsed
-       cards stay short, expanded ones grow taller without stretching
-       their neighbours. */
-    align-items: flex-start;
-    /* Pad the strip's right edge so the trailing card isn't flush against
-       the viewport (and the user can tell more cards exist when scrolled
-       to the very end). */
-    scroll-padding: 12px;
-  }
-  /* Card width is slightly narrower than the desktop 320px so a small
-     part of the next card peeks past the viewport's right edge,
-     advertising the horizontal scroll. Height auto so a collapsed
-     card stays short (header only) and an expanded one grows tall
-     enough to fit its description / action buttons. */
-  .kanban-card {
-    width: 240px;
-  }
-  /* Empty row placeholder reads inline on a horizontal strip. */
-  .kanban-cards-empty {
-    align-self: center;
-    margin: 8px 12px;
   }
 
   /* Kanban header stack */
