@@ -78,19 +78,34 @@ impl McpToolRegistry {
             .map(|n| (n as usize).max(1))
             .unwrap_or(DEFAULT_MAX_EXPERTS);
 
-        // Optional explicit scopes: each string is a folder-relative path that
-        // becomes exactly one expert. When given, this overrides the automatic
-        // size-balanced partition — the caller gets one expert per scope, in
-        // order, with no grouping. This is the only way to put N experts on N
-        // hand-picked parts of a single-directory project (the auto-partition
-        // only sees the folder's immediate children, so a repo nested one level
-        // down collapses to a single expert).
-        let scopes: Vec<String> = args
+        // Optional explicit scopes. Each entry maps to exactly one expert and
+        // may be EITHER:
+        //   * a string  — one folder-relative path (`"src/db"`), or
+        //   * an array of strings — several paths the expert covers together
+        //     (`["src/auth", "src/ws"]`), whose source files are unioned.
+        // When `scopes` is present it overrides the automatic size-balanced
+        // partition. Grouping lets a caller bin-pack a lopsided tree into
+        // evenly-sized experts: split a big directory across several scopes and
+        // fold many tiny directories into one — neither of which the automatic
+        // partition (which only sees the folder's immediate children, never
+        // splits a dir, and never groups across the boundary) can do.
+        let scopes_present = args.get("scopes").is_some();
+        let groups: Vec<Vec<String>> = args
             .get("scopes")
             .and_then(|v| v.as_array())
             .map(|a| {
                 a.iter()
-                    .filter_map(|s| s.as_str().map(|s| s.to_string()))
+                    .filter_map(|item| match item {
+                        Value::String(s) => Some(vec![s.clone()]),
+                        Value::Array(arr) => {
+                            let paths: Vec<String> = arr
+                                .iter()
+                                .filter_map(|x| x.as_str().map(|x| x.to_string()))
+                                .collect();
+                            (!paths.is_empty()).then_some(paths)
+                        }
+                        _ => None,
+                    })
                     .collect()
             })
             .unwrap_or_default();
@@ -99,7 +114,7 @@ impl McpToolRegistry {
             session_id = %ctx.session_id,
             project_id = %project_id,
             max_experts,
-            scopes = scopes.len(),
+            scopes = groups.len(),
             "MCP tool: spin_up_experts"
         );
 
@@ -130,17 +145,22 @@ impl McpToolRegistry {
             tracing::warn!(project_id = %project_id, "failed to ensure project PM expert: {e}");
         }
 
-        let (partitions, skipped) = if scopes.is_empty() {
-            (partition_codebase(&root, max_experts), Vec::new())
+        // When `scopes` is supplied we NEVER fall back to the automatic
+        // partition, even if every entry turns out invalid — falling back
+        // would silently spin up one whole-codebase expert instead of the
+        // hand-picked set the caller asked for. They get an empty result with
+        // a `skipped` report instead.
+        let (partitions, skipped) = if scopes_present {
+            partition_explicit(&root, &groups)
         } else {
-            partition_explicit(&root, &scopes)
+            (partition_codebase(&root, max_experts), Vec::new())
         };
         if partitions.is_empty() {
-            let message = if scopes.is_empty() {
-                "no source files found under the project folder to partition".to_string()
-            } else {
+            let message = if scopes_present {
                 "none of the requested scopes resolved to a readable path under the project folder"
                     .to_string()
+            } else {
+                "no source files found under the project folder to partition".to_string()
             };
             return Ok(json!({
                 "status": "ok",
@@ -374,87 +394,109 @@ fn partition_codebase(root: &Path, max_experts: usize) -> Vec<Partition> {
         .collect()
 }
 
-/// Build exactly one partition per caller-supplied scope, in order, with no
-/// grouping or size-balancing. Each scope is a path relative to the project
-/// folder (`src/plugin`, `web/src/components`, …) and maps to its own expert.
+/// Build exactly one partition per caller-supplied scope group, in order, with
+/// no auto-grouping or size-balancing. Each group is one or more paths relative
+/// to the project folder (`src/plugin`, or `["src/auth", "src/ws"]`) and maps
+/// to a single expert whose files are the union of all paths in the group.
 ///
 /// This is the escape hatch from [`partition_codebase`]'s "immediate children
-/// only" view: when the real code lives one or more levels below the project
-/// folder, the automatic partition sees a single top-level directory and makes
-/// a single expert. Explicit scopes let the caller place N experts on N
-/// hand-picked parts.
+/// only, never split, never group across the boundary" view. Single-path groups
+/// place N experts on N hand-picked parts; multi-path groups let a caller
+/// bin-pack a lopsided tree into evenly-sized experts (fold tiny dirs together,
+/// spread a big dir across several experts).
 ///
-/// Returns `(partitions, skipped)`. A scope is skipped (never created) when it
-/// is empty, tries to escape the folder (absolute or `..`), or doesn't resolve
-/// to an existing path — each skip carries a machine-readable reason so the
-/// caller can see exactly which inputs were dropped and why.
-fn partition_explicit(root: &Path, scopes: &[String]) -> (Vec<Partition>, Vec<Value>) {
+/// Returns `(partitions, skipped)`. Within a group, each invalid path (empty,
+/// escaping the folder via absolute/`..`, or non-existent) is reported in
+/// `skipped` with a machine-readable reason but does NOT sink the whole group —
+/// the expert is still created from the group's valid paths. A group is dropped
+/// entirely only when it has no valid path at all.
+fn partition_explicit(root: &Path, groups: &[Vec<String>]) -> (Vec<Partition>, Vec<Value>) {
     let mut partitions = Vec::new();
     let mut skipped = Vec::new();
 
-    for scope in scopes {
-        let rel = scope.trim().trim_start_matches("./").trim_matches('/');
-        if rel.is_empty() {
-            skipped.push(json!({ "scope": scope, "reason": "empty path" }));
-            continue;
-        }
-
-        // Stay inside the project folder: no absolute paths, no `..`, no
-        // drive/root prefixes. This mirrors the sandboxing the rest of the
-        // server relies on — an expert scope must never read outside its repo.
-        let candidate = Path::new(rel);
-        let escapes = candidate.is_absolute()
-            || candidate.components().any(|c| {
-                matches!(
-                    c,
-                    std::path::Component::ParentDir
-                        | std::path::Component::RootDir
-                        | std::path::Component::Prefix(_)
-                )
-            });
-        if escapes {
-            skipped.push(json!({
-                "scope": scope,
-                "reason": "path must be relative and stay within the project folder",
-            }));
-            continue;
-        }
-
-        let abs = root.join(candidate);
-        let mut files = Vec::new();
+    for group in groups {
+        let mut dirs: Vec<String> = Vec::new();
+        let mut files: Vec<FileInfo> = Vec::new();
         let mut bytes = 0u64;
-        if abs.is_dir() {
-            scan_dir(&abs, root, 1, &mut files, &mut bytes);
-        } else if abs.is_file() {
-            if let Some(lang) = lang_for_path(&abs) {
-                let b = std::fs::metadata(&abs).map(|m| m.len()).unwrap_or(0);
-                files.push(FileInfo {
-                    rel: name_rel(&abs, root),
-                    bytes: b,
-                    lang,
-                });
-                bytes += b;
+
+        for scope in group {
+            let rel = scope.trim().trim_start_matches("./").trim_matches('/');
+            if rel.is_empty() {
+                skipped.push(json!({ "scope": scope, "reason": "empty path" }));
+                continue;
             }
-        } else {
-            skipped.push(json!({
-                "scope": scope,
-                "reason": "path does not exist under the project folder",
-            }));
+
+            // Stay inside the project folder: no absolute paths, no `..`, no
+            // drive/root prefixes. This mirrors the sandboxing the rest of the
+            // server relies on — a scope must never read outside its repo.
+            let candidate = Path::new(rel);
+            let escapes = candidate.is_absolute()
+                || candidate.components().any(|c| {
+                    matches!(
+                        c,
+                        std::path::Component::ParentDir
+                            | std::path::Component::RootDir
+                            | std::path::Component::Prefix(_)
+                    )
+                });
+            if escapes {
+                skipped.push(json!({
+                    "scope": scope,
+                    "reason": "path must be relative and stay within the project folder",
+                }));
+                continue;
+            }
+
+            let abs = root.join(candidate);
+            if abs.is_dir() {
+                scan_dir(&abs, root, 1, &mut files, &mut bytes);
+                dirs.push(rel.to_string());
+            } else if abs.is_file() {
+                if let Some(lang) = lang_for_path(&abs) {
+                    let b = std::fs::metadata(&abs).map(|m| m.len()).unwrap_or(0);
+                    files.push(FileInfo {
+                        rel: name_rel(&abs, root),
+                        bytes: b,
+                        lang,
+                    });
+                    bytes += b;
+                }
+                dirs.push(rel.to_string());
+            } else {
+                skipped.push(json!({
+                    "scope": scope,
+                    "reason": "path does not exist under the project folder",
+                }));
+            }
+        }
+
+        // A group with no resolvable path produces no expert.
+        if dirs.is_empty() {
             continue;
         }
 
-        // Unlike the auto-partition we keep scopes with zero source files: the
+        // Unlike the auto-partition we keep groups with zero source files: the
         // caller asked for this exact part, so honour it rather than silently
         // dropping it. The empty summary makes the situation obvious.
         partitions.push(Partition {
-            area: rel.to_string(),
-            dirs: vec![rel.to_string()],
+            area: group_area(&dirs),
+            dirs,
             files,
             est_bytes: bytes,
         });
     }
 
     (partitions, skipped)
+}
+
+/// Human label for an explicit scope group: the sole path when there's one,
+/// else the first path plus a count of the rest.
+fn group_area(dirs: &[String]) -> String {
+    match dirs.len() {
+        0 => "(empty)".to_string(),
+        1 => dirs[0].clone(),
+        n => format!("{} (+{} more)", dirs[0], n - 1),
+    }
 }
 
 /// Split `topics` (already ordered) into `k` contiguous, size-balanced
@@ -793,11 +835,11 @@ mod tests {
         // Auto-partition sees only the single top-level `repo` dir → 1 expert.
         assert_eq!(partition_codebase(root, 15).len(), 1);
 
-        // Explicit scopes give exactly one expert per requested part, in order.
+        // Explicit single-path scopes give one expert per part, in order.
         let scopes = vec![
-            "repo/src/plugin".to_string(),
-            "repo/src/routes".to_string(),
-            "repo/web".to_string(),
+            vec!["repo/src/plugin".to_string()],
+            vec!["repo/src/routes".to_string()],
+            vec!["repo/web".to_string()],
         ];
         let (parts, skipped) = partition_explicit(root, &scopes);
         assert_eq!(parts.len(), 3);
@@ -811,23 +853,51 @@ mod tests {
     }
 
     #[test]
-    fn partition_explicit_skips_missing_and_escaping_scopes() {
+    fn partition_explicit_groups_multiple_paths_into_one_expert() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        write_file(&root.join("repo/src/auth/mod.rs"), 1_000);
+        write_file(&root.join("repo/src/ws/mod.rs"), 1_000);
+        write_file(&root.join("repo/src/db/mod.rs"), 4_000);
+
+        // One group folds two small dirs together; a second group is one dir.
+        let scopes = vec![
+            vec!["repo/src/auth".to_string(), "repo/src/ws".to_string()],
+            vec!["repo/src/db".to_string()],
+        ];
+        let (parts, skipped) = partition_explicit(root, &scopes);
+        assert!(skipped.is_empty());
+        assert_eq!(parts.len(), 2, "two groups → two experts");
+        // The folded group is one expert covering both dirs' files.
+        assert_eq!(parts[0].files.len(), 2);
+        assert_eq!(parts[0].dirs.len(), 2);
+        assert_eq!(parts[0].area, "repo/src/auth (+1 more)");
+        assert_eq!(parts[1].area, "repo/src/db");
+    }
+
+    #[test]
+    fn partition_explicit_skips_bad_paths_but_keeps_valid_group_members() {
         let tmp = tempfile::tempdir().unwrap();
         let root = tmp.path();
         write_file(&root.join("repo/src/plugin/mod.rs"), 1_000);
 
         let scopes = vec![
-            "repo/src/plugin".to_string(), // ok
-            "repo/does/not/exist".to_string(),
-            "../escape".to_string(),
-            "/etc".to_string(),
-            "  ".to_string(),
+            // One good + several bad members → one expert from the good path;
+            // the bad ones are reported in `skipped`.
+            vec![
+                "repo/src/plugin".to_string(),
+                "repo/does/not/exist".to_string(),
+                "../escape".to_string(),
+                "/etc".to_string(),
+                "  ".to_string(),
+            ],
+            // A group with only bad members → no expert at all.
+            vec!["nope/x".to_string()],
         ];
         let (parts, skipped) = partition_explicit(root, &scopes);
-        assert_eq!(parts.len(), 1, "only the valid scope becomes an expert");
+        assert_eq!(parts.len(), 1, "only the group with a valid path survives");
         assert_eq!(parts[0].area, "repo/src/plugin");
-        assert_eq!(skipped.len(), 4, "the four bad scopes are reported");
-        // No escaping scope ever produced a partition.
+        assert_eq!(skipped.len(), 5, "every bad path is reported");
         assert!(
             !parts
                 .iter()

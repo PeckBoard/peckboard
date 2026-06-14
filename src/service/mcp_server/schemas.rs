@@ -652,8 +652,8 @@ pub(super) fn tool_definitions() -> Vec<McpToolDef> {
                     },
                     "scopes": {
                         "type": "array",
-                        "items": { "type": "string" },
-                        "description": "Explicit folder-relative paths (e.g. ['peckboard/src/plugin', 'peckboard/src/routes']). Creates exactly one expert per path, in order, overriding the automatic partition. Paths must stay within the project folder; non-existent or escaping paths are skipped and reported in the `skipped` field of the result."
+                        "items": { "type": ["string", "array"], "items": { "type": "string" } },
+                        "description": "Explicit scope entries; each entry becomes exactly one expert, in order, overriding the automatic partition. An entry is either a single folder-relative path ('peckboard/src/plugin') or an array of paths the expert covers together (['peckboard/src/auth','peckboard/src/ws']) — grouping lets you bin-pack a lopsided tree into evenly-sized experts. Paths must stay within the project folder; non-existent or escaping paths are skipped and reported in the `skipped` field of the result."
                     }
                 },
                 "additionalProperties": false
