@@ -638,7 +638,7 @@ pub(super) fn tool_definitions() -> Vec<McpToolDef> {
         },
         McpToolDef {
             name: "spin_up_experts".into(),
-            description: "Partition a project's codebase across several long-lived KNOWLEDGE-EXPERT sessions and have each eagerly read and summarize its slice. The split is size-balanced with small per-expert windows, grouping adjacent (related) top-level directories together. Capture is throttled to 3 experts reading at once to limit token burn. Returns the created experts (session id, area, scope_path). Experts are hidden from the chat list and consulted later via ask_expert.".into(),
+            description: "Partition a project's codebase across several long-lived KNOWLEDGE-EXPERT sessions and have each eagerly read and summarize its slice. The split is size-balanced with small per-expert windows, grouping adjacent (related) top-level directories together. Capture is throttled to 3 experts reading at once to limit token burn. Returns the created experts (session id, area, scope_path). Experts are hidden from the chat list and consulted later via ask_expert. Pass `scopes` to create one expert per explicit path instead of the automatic split — required when the code lives below the project folder (the auto-split only sees the folder's immediate children).".into(),
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
@@ -648,7 +648,12 @@ pub(super) fn tool_definitions() -> Vec<McpToolDef> {
                     },
                     "max_experts": {
                         "type": "integer",
-                        "description": "Upper bound on how many experts to create (default 4). Fewer may be created for small codebases."
+                        "description": "Upper bound on how many experts to create (default 4). Fewer may be created for small codebases. Ignored when `scopes` is given."
+                    },
+                    "scopes": {
+                        "type": "array",
+                        "items": { "type": "string" },
+                        "description": "Explicit folder-relative paths (e.g. ['peckboard/src/plugin', 'peckboard/src/routes']). Creates exactly one expert per path, in order, overriding the automatic partition. Paths must stay within the project folder; non-existent or escaping paths are skipped and reported in the `skipped` field of the result."
                     }
                 },
                 "additionalProperties": false
