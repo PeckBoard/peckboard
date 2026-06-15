@@ -36,7 +36,7 @@ async fn build_state() -> Arc<AppState> {
     register_mock_provider(&registry).await;
 
     let db = Db::in_memory().unwrap();
-    let plugins = Arc::new(PluginManager::new(&data_dir));
+    let plugins = Arc::new(PluginManager::new(&data_dir, db.clone()));
     let session_manager = SessionManager::new(registry.clone()).with_plugins(plugins.clone());
 
     Arc::new(AppState {

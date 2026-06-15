@@ -1,8 +1,45 @@
 use diesel::prelude::*;
+use diesel::sqlite::SqliteConnection;
 
 use crate::db::Db;
 use crate::db::models::*;
 use crate::db::schema::*;
+
+// The card list/create query bodies are free functions over a raw connection
+// so they can be shared by the async `Db` methods and their synchronous twins
+// (`*_blocking`) used by the WASM plugin host functions in `src/plugin/host.rs`.
+// `priority ASC, created_at ASC` is the canonical pickup order.
+
+pub(crate) fn list_cards_by_project_query(
+    conn: &mut SqliteConnection,
+    project_id: &str,
+) -> anyhow::Result<Vec<Card>> {
+    cards::table
+        .filter(cards::project_id.eq(project_id))
+        .select(Card::as_select())
+        .order((cards::priority.asc(), cards::created_at.asc()))
+        .load(conn)
+        .map_err(Into::into)
+}
+
+pub(crate) fn list_all_cards_query(conn: &mut SqliteConnection) -> anyhow::Result<Vec<Card>> {
+    cards::table
+        .select(Card::as_select())
+        .order((cards::priority.asc(), cards::created_at.asc()))
+        .load(conn)
+        .map_err(Into::into)
+}
+
+pub(crate) fn create_card_query(
+    conn: &mut SqliteConnection,
+    new: &NewCard,
+) -> anyhow::Result<Card> {
+    diesel::insert_into(cards::table)
+        .values(new)
+        .returning(Card::as_returning())
+        .get_result(conn)
+        .map_err(Into::into)
+}
 
 /// Mutate `update.completed_at` so it reflects the step transition
 /// implied by `update.step` relative to `prev_step`. Called from both
@@ -23,14 +60,13 @@ fn stamp_completed_at(prev_step: &str, update: &mut UpdateCard) {
 
 impl Db {
     pub async fn create_card(&self, new: NewCard) -> anyhow::Result<Card> {
-        self.with_conn(move |conn| {
-            diesel::insert_into(cards::table)
-                .values(&new)
-                .returning(Card::as_returning())
-                .get_result(conn)
-                .map_err(Into::into)
-        })
-        .await
+        self.with_conn(move |conn| create_card_query(conn, &new))
+            .await
+    }
+
+    /// Synchronous twin of [`Db::create_card`] for plugin host functions.
+    pub(crate) fn create_card_blocking(&self, new: &NewCard) -> anyhow::Result<Card> {
+        self.with_conn_blocking(|conn| create_card_query(conn, new))
     }
 
     pub async fn get_card(&self, id: &str) -> anyhow::Result<Option<Card>> {
@@ -48,18 +84,20 @@ impl Db {
 
     pub async fn list_cards_by_project(&self, project_id: &str) -> anyhow::Result<Vec<Card>> {
         let project_id = project_id.to_string();
-        self.with_conn(move |conn| {
-            cards::table
-                .filter(cards::project_id.eq(&project_id))
-                .select(Card::as_select())
-                // priority ASC is the pickup order; created_at ASC as
-                // tiebreaker means a brand-new card at the same priority
-                // queues behind existing ones rather than jumping ahead.
-                .order((cards::priority.asc(), cards::created_at.asc()))
-                .load(conn)
-                .map_err(Into::into)
-        })
-        .await
+        self.with_conn(move |conn| list_cards_by_project_query(conn, &project_id))
+            .await
+    }
+
+    /// Synchronous twins of the card listers for plugin host functions.
+    /// `project_id = None` lists cards across all projects.
+    pub(crate) fn list_cards_blocking(
+        &self,
+        project_id: Option<&str>,
+    ) -> anyhow::Result<Vec<Card>> {
+        match project_id {
+            Some(pid) => self.with_conn_blocking(|conn| list_cards_by_project_query(conn, pid)),
+            None => self.with_conn_blocking(list_all_cards_query),
+        }
     }
 
     pub async fn update_card(&self, id: &str, update: UpdateCard) -> anyhow::Result<Option<Card>> {

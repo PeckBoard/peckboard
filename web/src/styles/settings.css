@@ -76,6 +76,68 @@
   box-shadow: var(--shadow-sm);
 }
 
+/* ─── Plugin pages (UI panels) ────────────────────── */
+.plugin-panels {
+  margin-bottom: 18px;
+  padding-bottom: 18px;
+  border-bottom: 1px dashed var(--border);
+}
+.plugin-panels-title {
+  font-size: var(--text-sm);
+  font-weight: 600;
+  color: var(--text2);
+  margin-bottom: 8px;
+}
+.plugin-panels-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.plugin-panel-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 8px 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--surface);
+}
+.plugin-panel-row-title {
+  font-weight: 600;
+  color: var(--text);
+}
+.plugin-panel-open {
+  font-size: var(--text-sm);
+  padding: 6px 14px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--surface);
+  color: var(--text);
+  cursor: pointer;
+  font-weight: 600;
+}
+.plugin-panel-open:hover {
+  background: var(--surface-hover, rgba(0, 0, 0, 0.04));
+}
+.plugin-panel-modal {
+  max-height: calc(var(--app-height) - 64px);
+  overflow-y: auto;
+}
+.plugin-panel-title {
+  margin-top: 0;
+}
+.plugin-panel-frame {
+  width: 100%;
+  height: min(60vh, 640px);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--surface);
+}
+
 /* ─── Plugins list ────────────────────────────────── */
 .plugins-list {
   display: flex;

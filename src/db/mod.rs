@@ -93,4 +93,29 @@ impl Db {
         })
         .await?
     }
+
+    /// Synchronous twin of [`Db::with_conn`]: locks the connection and runs
+    /// `f` on the calling thread, with no `spawn_blocking` and no `.await`.
+    ///
+    /// This is the bridge for synchronous callers that cannot enter the async
+    /// runtime — notably the WASM plugin host functions (`src/plugin/host.rs`),
+    /// which run inside a synchronous extism `Plugin::call` on a tokio worker
+    /// thread. Calling `with_conn` (or `Handle::block_on`) from there would
+    /// panic ("cannot block the current thread from within a runtime"); locking
+    /// the inner `std::sync::Mutex` directly does not touch the runtime at all.
+    ///
+    /// The closure shares the same connection mutex as every `with_conn` call,
+    /// so a long query here serializes other DB users for its duration — the
+    /// same cost as any normal DB access. It never reenters the runtime and
+    /// never holds a plugin lock, so there is no deadlock path.
+    pub fn with_conn_blocking<F, T>(&self, f: F) -> anyhow::Result<T>
+    where
+        F: FnOnce(&mut SqliteConnection) -> anyhow::Result<T>,
+    {
+        let mut guard = self
+            .conn
+            .lock()
+            .map_err(|e| anyhow::anyhow!("db lock poisoned: {e}"))?;
+        f(&mut *guard)
+    }
 }

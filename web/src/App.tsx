@@ -18,6 +18,7 @@ import ProjectTodosView from './components/ProjectTodosView'
 import SettingsModal from './components/SettingsModal'
 import { applyThemeColor } from './util/themeColor'
 import PluginsModal from './components/PluginsModal'
+import PluginPanelModal from './components/PluginPanelModal'
 import NewSessionModal from './components/NewSessionModal'
 import NewProjectModal from './components/NewProjectModal'
 import FoldersPage from './components/ManageFoldersModal'
@@ -58,6 +59,17 @@ type View =
  *  paths (`/settings`, `/plugins`) to opening one of these on mount so
  *  bookmarks and the existing e2e routes still land somewhere useful. */
 type DropdownModal = 'settings' | 'plugins' | null
+
+/** A UI page a loaded plugin contributes, surfaced as a user-menu link.
+ * Generic: the host renders whatever panels a plugin declares (from the
+ * `/api/plugins` catalog) and embeds the plugin-served page in an iframe;
+ * it knows nothing plugin-specific. Mirrors the backend `UiPanel`. */
+interface UiPanel {
+  plugin: string
+  id: string
+  title: string
+  path: string
+}
 
 /** Sub-view for an active session or project — 'chat' (the default
  *  ChatView / KanbanBoard) or 'todos' (the dedicated *TodosView reachable at
@@ -267,7 +279,30 @@ function App() {
   const [userMenuOpen, setUserMenuOpen] = useState(false)
   const [showChangePassword, setShowChangePassword] = useState(false)
   const [dropdownModal, setDropdownModal] = useState<DropdownModal>(initialRoute.modal)
+  // Plugin-contributed user-menu links (generic; populated from /api/plugins).
+  const [uiPanels, setUiPanels] = useState<UiPanel[]>([])
+  const [openPanel, setOpenPanel] = useState<UiPanel | null>(null)
   const userMenuRef = useRef<HTMLDivElement | null>(null)
+
+  // Load the plugin UI-panel catalog once authenticated so each declared
+  // panel can appear as a link in the user dropdown menu.
+  useEffect(() => {
+    // Only fetch when authenticated. When logged out the user menu isn't
+    // rendered, so stale panels can't show; the next login refetches.
+    if (!authenticated) return
+    let cancelled = false
+    authedFetch('/api/plugins')
+      .then((res) => (res.ok ? res.json() : Promise.reject(new Error(`HTTP ${res.status}`))))
+      .then((data: { ui_panels?: UiPanel[] }) => {
+        if (!cancelled) setUiPanels(data.ui_panels ?? [])
+      })
+      .catch(() => {
+        if (!cancelled) setUiPanels([])
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [authenticated])
 
   useEffect(() => {
     if (!userMenuOpen) return
@@ -1116,6 +1151,20 @@ function App() {
                 >
                   Plugins
                 </button>
+                {uiPanels.map((panel) => (
+                  <button
+                    key={`${panel.plugin}:${panel.id}`}
+                    type="button"
+                    role="menuitem"
+                    data-testid={`user-menu-plugin-${panel.plugin}-${panel.id}`}
+                    onClick={() => {
+                      setUserMenuOpen(false)
+                      setOpenPanel(panel)
+                    }}
+                  >
+                    {panel.title}
+                  </button>
+                ))}
                 <button
                   type="button"
                   role="menuitem"
@@ -1356,6 +1405,14 @@ function App() {
       )}
       {dropdownModal === 'settings' && <SettingsModal onClose={closeDropdownModal} />}
       {dropdownModal === 'plugins' && <PluginsModal onClose={closeDropdownModal} />}
+      {openPanel && (
+        <PluginPanelModal
+          title={openPanel.title}
+          plugin={openPanel.plugin}
+          path={openPanel.path}
+          onClose={() => setOpenPanel(null)}
+        />
+      )}
       {confirmDeleteId && (
         <ConfirmDialog
           title="Delete session"

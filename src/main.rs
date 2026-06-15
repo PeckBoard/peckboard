@@ -100,7 +100,7 @@ async fn main() -> anyhow::Result<()> {
         tracing::info!("Purged {purged} expired auth session(s)");
     }
 
-    let plugins = Arc::new(PluginManager::new(&config.data_dir));
+    let plugins = Arc::new(PluginManager::new(&config.data_dir, db.clone()));
     plugins.load_all().await?;
 
     let jwt_secret = load_or_create_jwt_secret(&config.data_dir)?;

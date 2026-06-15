@@ -42,11 +42,19 @@ pub fn router(state: Arc<AppState>) -> Router<Arc<AppState>> {
 }
 
 /// GET /api/plugins — list installed plugins with their requested
-/// permissions, status, and settings schemas. Shape mirrors what the
-/// UI consumes directly; see `web/src/components/PluginsSection.tsx`.
+/// permissions, status, and settings schemas, plus the UI panels any
+/// loaded WASM plugin contributes. Shape mirrors what the UI consumes
+/// directly; see `web/src/components/PluginsSection.tsx`.
+///
+/// `plugins` is the built-in (statically linked) catalog. `ui_panels` is
+/// a flat, validated list of panels declared by loaded WASM plugins —
+/// each `{ plugin, id, title, path }` — surfaced alongside the catalog so
+/// the Settings UI gets them in the one request it already makes. Panels
+/// with an unsafe `path` are dropped by `PluginManager::ui_panels`.
 async fn list_plugins(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     let entries = state.builtin_plugins.list().await;
-    Json(serde_json::json!({ "plugins": entries }))
+    let ui_panels = state.plugins.ui_panels().await;
+    Json(serde_json::json!({ "plugins": entries, "ui_panels": ui_panels }))
 }
 
 /// GET /api/plugins/:plugin_id/settings — current values, redacted for

@@ -45,7 +45,7 @@ async fn build_state() -> (Arc<AppState>, String) {
         mdns: false,
     };
     let db = Db::in_memory().unwrap();
-    let plugins = Arc::new(PluginManager::new(&config.data_dir));
+    let plugins = Arc::new(PluginManager::new(&config.data_dir, db.clone()));
     let jwt_secret = generate_jwt_secret();
     let provider_registry = Arc::new(ProviderRegistry::new());
     let session_manager = SessionManager::new(provider_registry.clone());

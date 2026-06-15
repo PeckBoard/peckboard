@@ -38,7 +38,7 @@ async fn build_state() -> (Arc<AppState>, String) {
     };
 
     let db = Db::in_memory().unwrap();
-    let plugins = Arc::new(PluginManager::new(&config.data_dir));
+    let plugins = Arc::new(PluginManager::new(&config.data_dir, db.clone()));
     let jwt_secret = generate_jwt_secret();
     let provider_registry = Arc::new(ProviderRegistry::new());
     let builtin_plugins = Arc::new(BuiltinPluginRegistry::new());
@@ -114,6 +114,14 @@ async fn list_plugins_returns_builtin_catalog() {
         3,
         "expected built-in claude-code + mock + ollama; got {plugins:?}",
     );
+
+    // The catalog also carries the plugin-contributed UI panels (from
+    // loaded WASM plugins). None are loaded here, so the field is present
+    // and empty — the UI relies on it always being an array.
+    let panels = json["ui_panels"]
+        .as_array()
+        .expect("ui_panels array present in catalog");
+    assert!(panels.is_empty(), "no WASM plugins loaded; got {panels:?}");
 
     let claude = plugins
         .iter()

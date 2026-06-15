@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react'
 import { authedFetch } from '../store/auth'
 import PluginSettingsModal from './PluginSettingsModal'
+import PluginPanelModal from './PluginPanelModal'
 
 interface Permission {
   id: string
@@ -31,6 +32,18 @@ interface PluginEntry {
 }
 
 /**
+ * A UI panel a loaded WASM plugin contributes, surfaced in the
+ * `/api/plugins` catalog. Opening one embeds the plugin-served page
+ * (`path`, always a `/plugin-api/*` route) in a sandboxed iframe.
+ */
+interface UiPanel {
+  plugin: string
+  id: string
+  title: string
+  path: string
+}
+
+/**
  * Lists every plugin compiled into Peckboard, with the permissions it
  * was granted and its current status.
  *
@@ -41,14 +54,18 @@ interface PluginEntry {
  */
 export default function PluginsSection() {
   const [plugins, setPlugins] = useState<PluginEntry[] | null>(null)
+  const [panels, setPanels] = useState<UiPanel[]>([])
   const [error, setError] = useState<string | null>(null)
 
   useEffect(() => {
     let cancelled = false
     authedFetch('/api/plugins')
       .then((res) => (res.ok ? res.json() : Promise.reject(new Error(`HTTP ${res.status}`))))
-      .then((data: { plugins: PluginEntry[] }) => {
-        if (!cancelled) setPlugins(data.plugins)
+      .then((data: { plugins: PluginEntry[]; ui_panels?: UiPanel[] }) => {
+        if (!cancelled) {
+          setPlugins(data.plugins)
+          setPanels(data.ui_panels ?? [])
+        }
       })
       .catch((e: Error) => {
         if (!cancelled) setError(e.message)
@@ -62,6 +79,7 @@ export default function PluginsSection() {
     <section className="plugins-section" data-testid="plugins-section">
       {error && <p className="settings-loading">Failed to load plugins: {error}</p>}
       {!error && plugins === null && <p className="settings-loading">Loading plugins…</p>}
+      {panels.length > 0 && <PluginPanels panels={panels} />}
       {plugins && plugins.length === 0 && <p className="settings-loading">No plugins installed.</p>}
       {plugins && plugins.length > 0 && (
         <div className="plugins-list">
@@ -71,6 +89,43 @@ export default function PluginsSection() {
         </div>
       )}
     </section>
+  )
+}
+
+/**
+ * Lists the UI panels any loaded plugin contributes. Generic: the host
+ * renders whatever panels a plugin declares and embeds the plugin-served
+ * page in a sandboxed iframe — it knows nothing about a panel's contents.
+ */
+function PluginPanels({ panels }: { panels: UiPanel[] }) {
+  const [open, setOpen] = useState<UiPanel | null>(null)
+  return (
+    <div className="plugin-panels" data-testid="plugin-panels">
+      <div className="plugin-panels-title">Plugin Pages</div>
+      <ul className="plugin-panels-list">
+        {panels.map((panel) => (
+          <li key={`${panel.plugin}:${panel.id}`} className="plugin-panel-row">
+            <span className="plugin-panel-row-title">{panel.title}</span>
+            <button
+              type="button"
+              className="plugin-panel-open"
+              data-testid={`plugin-panel-open-${panel.plugin}-${panel.id}`}
+              onClick={() => setOpen(panel)}
+            >
+              Open
+            </button>
+          </li>
+        ))}
+      </ul>
+      {open && (
+        <PluginPanelModal
+          title={open.title}
+          plugin={open.plugin}
+          path={open.path}
+          onClose={() => setOpen(null)}
+        />
+      )}
+    </div>
   )
 }
 

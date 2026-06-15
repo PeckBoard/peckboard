@@ -6,8 +6,23 @@ use axum::{
 };
 
 /// Security headers middleware — adds CSP, X-Content-Type-Options, X-Frame-Options.
+///
+/// On `/plugin-api/*` core defers to **plugin-defined security headers**: a
+/// plugin returns the headers for its response in its `http.request.before`
+/// verdict, and the dispatch handler
+/// ([`serve`](crate::routes::plugin_api)) applies them verbatim — that is the
+/// generic hook by which a plugin owns its own CSP and framing (e.g. an
+/// embedded panel page declares `frame-ancestors 'self'` so Peckboard can
+/// frame it same-origin). Core therefore stamps NONE of its global headers
+/// here — `default-src 'self'` would clobber the plugin page's policy and the
+/// global `frame-ancestors 'none'` would forbid embedding it at all. `/api/*`
+/// is untouched and keeps core's global policy.
 pub async fn security_headers(request: Request, next: Next) -> Response {
+    let exempt = is_plugin_api(request.uri().path());
     let mut response = next.run(request).await;
+    if exempt {
+        return response;
+    }
     let headers = response.headers_mut();
 
     // No `style-src-attr 'unsafe-inline'`: inline `style=""` attributes
@@ -42,10 +57,29 @@ pub async fn security_headers(request: Request, next: Next) -> Response {
     response
 }
 
+/// True for paths under the plugin-owned public surface `/plugin-api/`.
+///
+/// This prefix is exempt from both [`security_headers`] and [`origin_check`]:
+/// it authenticates with an explicit bearer API key and carries no ambient
+/// cookie credentials, so Origin-based CSRF defense is both ineffective and
+/// actively wrong there (it would block legitimate cross-origin API clients
+/// and the opaque-origin panel iframe), and the embedded plugin page owns its
+/// own CSP/framing. `/api/*` is deliberately NOT covered.
+fn is_plugin_api(path: &str) -> bool {
+    path.starts_with("/plugin-api/")
+}
+
 /// Origin/CSRF protection middleware.
 /// Compares Origin header against Host header.
 /// Absent Origin is treated as same-origin.
 pub async fn origin_check(request: Request, next: Next) -> Response {
+    // The plugin-owned `/plugin-api/*` surface is bearer-authenticated with no
+    // ambient cookie credentials, so Origin-based CSRF defense does not apply;
+    // its embedded iframe sends `Origin: null`, which this check would 403.
+    if is_plugin_api(request.uri().path()) {
+        return next.run(request).await;
+    }
+
     let origin = request.headers().get(header::ORIGIN).cloned();
     let host = request.headers().get(header::HOST).cloned();
 
@@ -216,10 +250,51 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn security_headers_exempt_plugin_api() {
+        // /plugin-api/* is a plugin-owned surface: core imposes no CSP/framing
+        // so the plugin's own headers (and same-origin iframe embedding) stand.
+        let app = Router::new()
+            .route("/plugin-api/v1/admin", get(|| async { "ok" }))
+            .layer(middleware::from_fn(security_headers));
+
+        let response = send(
+            app,
+            Request::builder()
+                .uri("/plugin-api/v1/admin")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+        let headers = response.headers();
+        assert!(
+            headers.get("Content-Security-Policy").is_none(),
+            "core must not set CSP on /plugin-api"
+        );
+        assert!(
+            headers.get("X-Frame-Options").is_none(),
+            "core must not set X-Frame-Options on /plugin-api"
+        );
+    }
+
     fn origin_app() -> Router {
         Router::new()
             .route("/", get(|| async { "ok" }))
+            .route("/plugin-api/v1/keys", get(|| async { "ok" }))
             .layer(middleware::from_fn(origin_check))
+    }
+
+    #[tokio::test]
+    async fn origin_check_exempts_plugin_api() {
+        // A foreign Origin (and the iframe's `Origin: null`) is allowed through
+        // on /plugin-api — bearer auth, no ambient cookies, so no CSRF surface.
+        for origin in ["http://evil.example.com", "null"] {
+            let mut builder = Request::builder().uri("/plugin-api/v1/keys");
+            builder = builder.header(header::ORIGIN, origin);
+            builder = builder.header(header::HOST, "localhost:3344");
+            let response = send(origin_app(), builder.body(Body::empty()).unwrap()).await;
+            assert_eq!(response.status(), StatusCode::OK, "origin {origin}");
+        }
     }
 
     fn origin_request(origin: Option<&str>, host: Option<&str>) -> Request<Body> {
