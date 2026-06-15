@@ -1,5 +1,5 @@
 import { useCallback, useRef, useState, useEffect } from 'react'
-import type { KeyboardEvent, ChangeEvent } from 'react'
+import type { KeyboardEvent, ChangeEvent, ClipboardEvent } from 'react'
 import { authedFetch } from '../store/auth'
 import { useSessionsStore } from '../store/sessions'
 import { useMentions, filterMentions, type MentionItem } from '../hooks/useMentions'
@@ -96,14 +96,20 @@ export default function InputBar({ sessionId }: InputBarProps) {
     textareaRef.current?.focus()
   }
 
-  const handleFileSelect = useCallback(
-    async (e: ChangeEvent<HTMLInputElement>) => {
-      const files = e.target.files
-      if (!files || files.length === 0) return
+  // Shared upload path for both the file picker and clipboard paste. A
+  // pasted image often has a generic/empty `file.name` (e.g. "image.png"
+  // or ""), so fall back to a stable name derived from the mime type.
+  const uploadFiles = useCallback(
+    async (files: File[]) => {
+      if (files.length === 0) return
       setUploading(true)
       setUploadErrors([])
       try {
-        for (const file of Array.from(files)) {
+        for (const file of files) {
+          const name =
+            file.name && file.name.trim().length > 0
+              ? file.name
+              : `pasted-${Date.now()}.${(file.type.split('/')[1] || 'bin').replace(/[^a-z0-9]/gi, '')}`
           // Per-file try/catch: one failed upload must not abort the rest
           // of the batch, and the user has to see WHICH file failed —
           // silently dropping it looks like the app ignored the pick.
@@ -112,26 +118,61 @@ export default function InputBar({ sessionId }: InputBarProps) {
             const res = await authedFetch(`/api/sessions/${sessionId}/attachments`, {
               method: 'POST',
               headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({ name: file.name, data: base64, mime_type: file.type }),
+              body: JSON.stringify({ name, data: base64, mime_type: file.type }),
             })
             if (!res.ok) {
               const detail = (await res.json().catch(() => null))?.error
               throw new Error(typeof detail === 'string' ? detail : `upload failed (${res.status})`)
             }
             const result = await res.json()
-            setAttachments((prev) => [...prev, { id: result.id, name: file.name }])
+            setAttachments((prev) => [...prev, { id: result.id, name }])
           } catch (err) {
             const reason = err instanceof Error ? err.message : 'upload failed'
-            setUploadErrors((prev) => [...prev, `${file.name}: ${reason}`])
+            setUploadErrors((prev) => [...prev, `${name}: ${reason}`])
           }
         }
       } finally {
         setUploading(false)
+      }
+    },
+    [sessionId],
+  )
+
+  const handleFileSelect = useCallback(
+    async (e: ChangeEvent<HTMLInputElement>) => {
+      const files = e.target.files
+      if (!files || files.length === 0) return
+      try {
+        await uploadFiles(Array.from(files))
+      } finally {
         // Reset input so the same file can be re-selected
         if (fileInputRef.current) fileInputRef.current.value = ''
       }
     },
-    [sessionId],
+    [uploadFiles],
+  )
+
+  // Paste an image (or any file) straight from the clipboard into the
+  // composer — same upload path as the attach button. Screenshots come
+  // through `clipboardData.items` as `kind: 'file'`; we pull those and
+  // leave normal text paste alone (don't preventDefault unless we took a
+  // file, or we'd swallow pasted text).
+  const handlePaste = useCallback(
+    (e: ClipboardEvent<HTMLTextAreaElement>) => {
+      const items = e.clipboardData?.items
+      if (!items) return
+      const files: File[] = []
+      for (const item of Array.from(items)) {
+        if (item.kind === 'file') {
+          const file = item.getAsFile()
+          if (file) files.push(file)
+        }
+      }
+      if (files.length === 0) return
+      e.preventDefault()
+      void uploadFiles(files)
+    },
+    [uploadFiles],
   )
 
   const removeAttachment = useCallback((id: string) => {
@@ -269,6 +310,7 @@ export default function InputBar({ sessionId }: InputBarProps) {
           value={text}
           onChange={handleChange}
           onKeyDown={handleKeyDown}
+          onPaste={handlePaste}
           // Intentionally not disabled while sending: on mobile, disabling
           // a focused textarea blurs it, which closes the soft keyboard
           // and shifts the layout. handleSend already guards re-entry.
