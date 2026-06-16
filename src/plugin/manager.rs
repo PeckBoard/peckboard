@@ -7,11 +7,14 @@ use extism::{Manifest as ExtismManifest, Plugin, Wasm};
 use tokio::sync::Mutex;
 use tracing::{error, info, warn};
 
+use serde::Serialize;
+
 use super::hooks::{
     HTTP_REQUEST_HOOK, HookResult, PluginHttpOutcome, PluginHttpResponse, PluginManifest,
     UiPanelEntry, Verdict,
 };
 use crate::db::Db;
+use crate::db::crud::{APPROVAL_APPROVED, APPROVAL_DENIED};
 
 const MEMORY_LIMIT_PAGES: u32 = 2048; // 128 MB (64 KB per page)
 const CALL_TIMEOUT: Duration = Duration::from_secs(2);
@@ -48,6 +51,27 @@ pub const ALLOWED_HOOKS: &[&str] = &[
     "todo",
 ];
 
+/// Whether an operator has approved the set of hooks a loaded plugin
+/// declares. A plugin is **inert** — no hook fires, no `/plugin-api`
+/// route dispatches, no ui_panel surfaces, and its `init` is not even
+/// run — unless it is [`ApprovalState::Approved`].
+///
+/// The grant is recorded against the plugin's *exact* declared hook set
+/// (see [`canonical_hooks`]), so a plugin whose hooks change since it was
+/// last decided on drops back to `Pending` rather than inheriting an old
+/// approval — an attacker can't swap the `.wasm` for one that claims more
+/// hooks and ride a stale grant.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum ApprovalState {
+    /// No stored decision matches the plugin's current hook set — awaiting
+    /// the operator. The default for a newly-installed plugin.
+    Pending,
+    /// Operator denied this hook set. Inert until explicitly re-approved.
+    Denied,
+    /// Operator approved this hook set and `init` has been run. Active.
+    Approved,
+}
+
 /// A loaded plugin instance.
 ///
 /// `plugin` is wrapped in its own `Mutex` so concurrent dispatches of
@@ -61,6 +85,95 @@ struct LoadedPlugin {
     name: String,
     manifest: PluginManifest,
     plugin: Arc<Mutex<Plugin>>,
+    /// Canonical (sorted, newline-joined) form of `manifest.hooks` — the
+    /// exact string an approval decision is stored and compared against.
+    hooks_canonical: String,
+    /// Whether the operator has approved this plugin's hook set.
+    approval: ApprovalState,
+    /// `Some(error)` if `init` was run (on approval) but failed; the plugin
+    /// is then treated as inactive even though the hook set was approved.
+    init_error: Option<String>,
+}
+
+impl LoadedPlugin {
+    /// A plugin is active — eligible for hook dispatch, route serving, and
+    /// ui_panel surfacing — only once its hook set is approved AND its
+    /// deferred `init` succeeded.
+    fn is_active(&self) -> bool {
+        self.approval == ApprovalState::Approved && self.init_error.is_none()
+    }
+
+    /// The wire status label the `/api/plugins` catalog reports.
+    fn status_label(&self) -> &'static str {
+        status_label(&self.approval, &self.init_error)
+    }
+}
+
+/// The wire status label for an approval state: `pending`, `denied`,
+/// `approved`, or `init_failed` (approved but its deferred `init` failed).
+fn status_label(approval: &ApprovalState, init_error: &Option<String>) -> &'static str {
+    match approval {
+        ApprovalState::Pending => "pending",
+        ApprovalState::Denied => "denied",
+        ApprovalState::Approved if init_error.is_some() => "init_failed",
+        ApprovalState::Approved => "approved",
+    }
+}
+
+/// Resolve the approval state a plugin loads in, given the operator's
+/// stored decision (if any) and the hook set the plugin *currently*
+/// declares. A decision only counts when it was made against the same
+/// canonical hook set; otherwise the plugin is `Pending` — this is what
+/// stops a swapped `.wasm` that declares new hooks from inheriting an old
+/// approval.
+fn resolve_approval(
+    stored: Option<&crate::db::models::PluginApprovalRow>,
+    hooks_canonical: &str,
+) -> ApprovalState {
+    match stored {
+        Some(row) if row.hooks == hooks_canonical && row.status == APPROVAL_APPROVED => {
+            ApprovalState::Approved
+        }
+        Some(row) if row.hooks == hooks_canonical && row.status == APPROVAL_DENIED => {
+            ApprovalState::Denied
+        }
+        _ => ApprovalState::Pending,
+    }
+}
+
+/// One loaded WASM plugin's approval state, for the `/api/plugins`
+/// catalog and the approval prompt. `status` is one of `pending`,
+/// `approved`, `denied`, or `init_failed`.
+#[derive(Debug, Clone, Serialize)]
+pub struct WasmPluginInfo {
+    /// The plugin's id (its `.wasm` file stem).
+    pub name: String,
+    /// Every hook the plugin declares — what the operator is approving.
+    pub hooks: Vec<String>,
+    pub status: &'static str,
+    /// Present only when `status` is `init_failed`.
+    pub error: Option<String>,
+}
+
+/// Canonical form of a hook set for approval storage and comparison:
+/// sorted, de-duplicated, and newline-joined, so two set-equal hook lists
+/// in any order produce the same string. Binding an approval to this
+/// string means re-ordering hooks doesn't force a re-prompt, but adding or
+/// removing one does.
+fn canonical_hooks(hooks: &[String]) -> String {
+    let mut sorted: Vec<&str> = hooks.iter().map(|h| h.as_str()).collect();
+    sorted.sort_unstable();
+    sorted.dedup();
+    sorted.join("\n")
+}
+
+/// Run a plugin's `init` export with its per-plugin config block. Returns
+/// the error string (for surfacing as `init_failed`) on failure.
+fn run_init(plugin: &mut Plugin, config: String) -> Result<(), String> {
+    plugin
+        .call::<String, String>("init", config)
+        .map(|_| ())
+        .map_err(|e| e.to_string())
 }
 
 /// Manages all loaded plugins and dispatches hook calls.
@@ -179,21 +292,47 @@ impl PluginManager {
             ));
         }
 
-        // Call init export with this plugin's per-plugin config (the
-        // `plugins.<stem>.config` block of `<dataDir>/config.json`), or
-        // `{}` when there is none. Core stays generic — it forwards the
-        // opaque config object and has no knowledge of any plugin's shape.
-        let init_config = read_plugin_config(&self.plugins_dir, &name);
-        let init_result = plugin.call::<String, String>("init", init_config);
-        if let Err(e) = init_result {
-            warn!("Plugin '{name}' init failed: {e}");
-            return Err(anyhow::anyhow!("plugin init failed: {e}"));
+        // Resolve the operator's stored approval for this exact hook set.
+        // A plugin is inert until approved (the user requires permission
+        // for every hook), so a missing decision — or one made against a
+        // different hook set — leaves it `Pending`, not active.
+        let hooks_canonical = canonical_hooks(&plugin_manifest.hooks);
+        let stored = self
+            .db
+            .as_ref()
+            .and_then(|db| match db.get_plugin_approval_blocking(&name) {
+                Ok(row) => row,
+                Err(e) => {
+                    warn!("Plugin '{name}' approval lookup failed: {e}");
+                    None
+                }
+            });
+        let approval = resolve_approval(stored.as_ref(), &hooks_canonical);
+
+        // Run `init` only for an already-approved plugin. Deferring it for
+        // pending/denied plugins is what makes them truly inert: an
+        // unapproved plugin never executes code that could touch host
+        // functions. (Approval later runs `init` via `decide`.) `init`
+        // gets this plugin's `plugins.<stem>.config` block, or `{}` when
+        // there is none; core forwards it opaquely.
+        let mut init_error = None;
+        if approval == ApprovalState::Approved {
+            let init_config = read_plugin_config(&self.plugins_dir, &name);
+            if let Err(e) = run_init(&mut plugin, init_config) {
+                warn!("Plugin '{name}' init failed: {e}");
+                init_error = Some(e);
+            }
+        } else {
+            info!("Plugin '{name}' loaded but inert — awaiting hook approval");
         }
 
         Ok(LoadedPlugin {
             name,
             manifest: plugin_manifest,
             plugin: Arc::new(Mutex::new(plugin)),
+            hooks_canonical,
+            approval,
+            init_error,
         })
     }
 
@@ -214,7 +353,7 @@ impl PluginManager {
             let plugins = self.plugins.lock().await;
             plugins
                 .iter()
-                .filter(|p| p.manifest.hooks.contains(&hook.to_string()))
+                .filter(|p| p.is_active() && p.manifest.hooks.contains(&hook.to_string()))
                 .map(|p| (p.name.clone(), p.plugin.clone()))
                 .collect()
         };
@@ -307,7 +446,9 @@ impl PluginManager {
             let plugins = self.plugins.lock().await;
             plugins
                 .iter()
-                .filter(|p| p.manifest.hooks.iter().any(|h| h == HTTP_REQUEST_HOOK))
+                .filter(|p| {
+                    p.is_active() && p.manifest.hooks.iter().any(|h| h == HTTP_REQUEST_HOOK)
+                })
                 .filter_map(|p| {
                     p.manifest
                         .http_routes
@@ -373,12 +514,102 @@ impl PluginManager {
         error_outcome(500, "plugin did not produce a response")
     }
 
-    /// Check if any plugins are registered for a given hook.
+    /// Check if any *active* (approved) plugins are registered for a given
+    /// hook. A pending/denied plugin is inert, so it must not count as a
+    /// listener — otherwise callers would dispatch a hook to nobody.
     pub async fn has_listeners(&self, hook: &str) -> bool {
         let plugins = self.plugins.lock().await;
         plugins
             .iter()
-            .any(|p| p.manifest.hooks.contains(&hook.to_string()))
+            .any(|p| p.is_active() && p.manifest.hooks.contains(&hook.to_string()))
+    }
+
+    /// The approval state of every loaded WASM plugin, for the
+    /// `/api/plugins` catalog and the approval prompt.
+    pub async fn wasm_plugins(&self) -> Vec<WasmPluginInfo> {
+        let plugins = self.plugins.lock().await;
+        plugins
+            .iter()
+            .map(|p| WasmPluginInfo {
+                name: p.name.clone(),
+                hooks: p.manifest.hooks.clone(),
+                status: p.status_label(),
+                error: p.init_error.clone(),
+            })
+            .collect()
+    }
+
+    /// Record an operator's approve/deny decision for a plugin's declared
+    /// hook set, persist it (so it survives restarts), and flip the loaded
+    /// plugin's state. Approving runs the deferred `init`. Returns the
+    /// updated info, or `None` if no plugin with that id is loaded.
+    ///
+    /// The decision is stored against the plugin's *current* canonical hook
+    /// set, so it only re-applies on the next load while the plugin keeps
+    /// asking for the same hooks.
+    pub async fn decide(
+        &self,
+        plugin_id: &str,
+        approve: bool,
+    ) -> anyhow::Result<Option<WasmPluginInfo>> {
+        // Snapshot what we need without holding the outer lock across the
+        // (up to 2s) `init` call.
+        let target = {
+            let plugins = self.plugins.lock().await;
+            plugins.iter().find(|p| p.name == plugin_id).map(|p| {
+                (
+                    p.plugin.clone(),
+                    p.hooks_canonical.clone(),
+                    p.manifest.hooks.clone(),
+                )
+            })
+        };
+        let Some((plugin, hooks_canonical, hooks)) = target else {
+            return Ok(None);
+        };
+
+        let status = if approve {
+            APPROVAL_APPROVED
+        } else {
+            APPROVAL_DENIED
+        };
+        if let Some(db) = &self.db {
+            db.set_plugin_approval(plugin_id, &hooks_canonical, status)
+                .await?;
+        }
+
+        // Approving runs the deferred `init`; denying leaves the plugin
+        // inert with `init` never run.
+        let mut init_error = None;
+        let new_state = if approve {
+            let init_config = read_plugin_config(&self.plugins_dir, plugin_id);
+            let mut guard = plugin.lock().await;
+            if let Err(e) = run_init(&mut guard, init_config) {
+                warn!("Plugin '{plugin_id}' init failed on approval: {e}");
+                init_error = Some(e);
+            }
+            ApprovalState::Approved
+        } else {
+            ApprovalState::Denied
+        };
+
+        let status = status_label(&new_state, &init_error);
+
+        // Apply the new state to the loaded entry.
+        {
+            let mut plugins = self.plugins.lock().await;
+            if let Some(p) = plugins.iter_mut().find(|p| p.name == plugin_id) {
+                p.approval = new_state;
+                p.init_error = init_error.clone();
+            }
+        }
+
+        Ok(Some(WasmPluginInfo {
+            name: plugin_id.to_string(),
+            hooks,
+            status,
+            error: init_error,
+        }))
     }
 
     /// Shut down all loaded plugins.
@@ -405,6 +636,9 @@ impl PluginManager {
         let plugins = self.plugins.lock().await;
         let mut map: HashMap<String, Vec<String>> = HashMap::new();
         for loaded in plugins.iter() {
+            if !loaded.is_active() {
+                continue;
+            }
             for hook in &loaded.manifest.hooks {
                 map.entry(hook.clone())
                     .or_default()
@@ -428,6 +662,12 @@ impl PluginManager {
         let plugins = self.plugins.lock().await;
         let mut out = Vec::new();
         for loaded in plugins.iter() {
+            // An unapproved plugin is inert: its panels must not surface
+            // in the catalog (and its page wouldn't serve anyway, since
+            // `serve_http` skips it too).
+            if !loaded.is_active() {
+                continue;
+            }
             for panel in &loaded.manifest.ui_panels {
                 if panel.id.trim().is_empty() || panel.title.trim().is_empty() {
                     warn!(
@@ -652,6 +892,76 @@ mod tests {
         }
         // The HTTP serving hook constant and the allowlist agree.
         assert!(ALLOWED_HOOKS.contains(&HTTP_REQUEST_HOOK));
+    }
+
+    #[test]
+    fn canonical_hooks_is_order_and_dup_independent() {
+        let a = canonical_hooks(&["http.request.before".into(), "todo".into()]);
+        let b = canonical_hooks(&["todo".into(), "http.request.before".into()]);
+        assert_eq!(a, b, "hook order must not change the canonical form");
+        // Duplicates collapse, so an approval can't be dodged by listing a
+        // hook twice.
+        let c = canonical_hooks(&["todo".into(), "todo".into(), "http.request.before".into()]);
+        assert_eq!(a, c);
+        assert_eq!(a, "http.request.before\ntodo");
+    }
+
+    fn approval_row(hooks: &str, status: &str) -> crate::db::models::PluginApprovalRow {
+        crate::db::models::PluginApprovalRow {
+            plugin_id: "api".into(),
+            hooks: hooks.into(),
+            status: status.into(),
+            decided_at: "2026-01-01T00:00:00Z".into(),
+        }
+    }
+
+    #[test]
+    fn resolve_approval_requires_matching_hook_set() {
+        let canonical = canonical_hooks(&["http.request.before".into(), "todo".into()]);
+
+        // No stored decision → pending.
+        assert_eq!(resolve_approval(None, &canonical), ApprovalState::Pending);
+
+        // Stored approval against the SAME hook set → approved.
+        let approved = approval_row(&canonical, APPROVAL_APPROVED);
+        assert_eq!(
+            resolve_approval(Some(&approved), &canonical),
+            ApprovalState::Approved
+        );
+
+        // Stored denial against the same hook set → denied.
+        let denied = approval_row(&canonical, APPROVAL_DENIED);
+        assert_eq!(
+            resolve_approval(Some(&denied), &canonical),
+            ApprovalState::Denied
+        );
+
+        // An approval made against a DIFFERENT (here: larger) hook set must
+        // NOT carry over — the plugin drops back to pending. This is the
+        // anti-escalation guarantee: a swapped `.wasm` that now also wants
+        // `mcp.token.issue.before` can't ride the old grant.
+        let escalated = canonical_hooks(&[
+            "http.request.before".into(),
+            "todo".into(),
+            "mcp.token.issue.before".into(),
+        ]);
+        assert_eq!(
+            resolve_approval(Some(&approved), &escalated),
+            ApprovalState::Pending,
+            "an approval for a different hook set must not apply"
+        );
+    }
+
+    #[test]
+    fn status_label_maps_state_and_init_error() {
+        assert_eq!(status_label(&ApprovalState::Pending, &None), "pending");
+        assert_eq!(status_label(&ApprovalState::Denied, &None), "denied");
+        assert_eq!(status_label(&ApprovalState::Approved, &None), "approved");
+        // Approved but the deferred init failed → init_failed, not approved.
+        assert_eq!(
+            status_label(&ApprovalState::Approved, &Some("boom".into())),
+            "init_failed"
+        );
     }
 
     #[test]

@@ -8,6 +8,7 @@ mod cascades;
 mod dependencies;
 mod events;
 mod folders;
+mod plugin_approvals;
 mod plugin_settings;
 mod pm_decisions;
 mod projects;
@@ -22,6 +23,7 @@ mod users;
 mod workflow_instructions;
 
 pub use folders::{MoveFolderOutcome, ProjectMoveReport, RepeatingTaskMoveReport};
+pub use plugin_approvals::{APPROVAL_APPROVED, APPROVAL_DENIED};
 pub use todos::ProjectCardTodos;
 pub use usage::UsageRollupRow;
 

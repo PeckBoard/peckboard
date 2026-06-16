@@ -525,6 +525,22 @@ pub struct PluginSettingRow {
     pub updated_at: String,
 }
 
+// ── Plugin approvals ─────────────────────────────────────────────────
+
+/// One operator decision on a WASM plugin's declared hook set. `hooks`
+/// is the canonical (sorted, newline-joined) hook list the decision was
+/// made against; `status` is `"approved"` or `"denied"`. A plugin whose
+/// currently-declared hooks no longer match `hooks` is treated as having
+/// no decision (pending) — see `PluginManager::load_plugin`.
+#[derive(Queryable, Selectable, Insertable, Serialize, Debug, Clone)]
+#[diesel(table_name = plugin_approvals)]
+pub struct PluginApprovalRow {
+    pub plugin_id: String,
+    pub hooks: String,
+    pub status: String,
+    pub decided_at: String,
+}
+
 // ── Usage events ─────────────────────────────────────────────────────
 
 #[derive(Queryable, Selectable, Serialize, Debug, Clone)]

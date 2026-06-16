@@ -145,6 +145,11 @@ export const useWsStore = create<WsState>((set, get) => ({
         return
       }
 
+      if (msg.type === 'plugin-approval') {
+        window.dispatchEvent(new CustomEvent('peckboard:plugin-approval', { detail: msg }))
+        return
+      }
+
       if (msg.type === 'repeating-task-changed') {
         window.dispatchEvent(new CustomEvent('peckboard:repeating-task-changed', { detail: msg }))
         return

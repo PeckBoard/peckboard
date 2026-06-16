@@ -248,6 +248,10 @@ async fn handle_connection(socket: WebSocket, state: Arc<AppState>) {
                             // session) still need to drop the tab + clear
                             // an orphaned activeSessionId.
                             | "session-deleted"
+                            // plugin-approval must reach every client so an
+                            // open approval prompt updates the moment any
+                            // operator (in any tab) decides.
+                            | "plugin-approval"
                     );
 
                     let should_send = if is_global {

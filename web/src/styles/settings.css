@@ -367,3 +367,150 @@
   font-size: var(--text-xs);
   color: rgb(0, 130, 65);
 }
+
+/* ── Plugin hook-approval status badges ───────────────────────────── */
+.plugin-badge--approved {
+  background: rgba(0, 160, 80, 0.12);
+  color: rgb(0, 130, 65);
+}
+.plugin-badge--pending {
+  background: rgba(210, 150, 0, 0.14);
+  color: rgb(160, 110, 0);
+}
+.plugin-badge--denied {
+  background: rgba(120, 120, 120, 0.14);
+  color: var(--text2);
+}
+.plugin-badge--init_failed {
+  background: rgba(200, 40, 40, 0.12);
+  color: rgb(170, 30, 30);
+}
+
+/* ── Installed (WASM) plugin list in Settings → Plugins ───────────── */
+.wasm-plugins {
+  margin-bottom: 20px;
+}
+.wasm-plugins-list {
+  list-style: none;
+  margin: 8px 0 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.wasm-plugin-row {
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 12px 14px;
+  background: var(--surface);
+}
+.wasm-plugin-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+.wasm-plugin-name {
+  font-weight: 600;
+  font-size: var(--text-sm);
+}
+.wasm-plugin-hooks {
+  list-style: none;
+  margin: 10px 0 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.wasm-plugin-hook {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 8px;
+  font-size: var(--text-xs);
+}
+.wasm-plugin-hook-desc {
+  color: var(--text3);
+}
+.wasm-plugin-actions {
+  display: flex;
+  gap: 8px;
+  margin-top: 12px;
+}
+
+/* ── Startup approval prompt modal ────────────────────────────────── */
+.plugin-approval {
+  padding: 4px 2px;
+}
+.plugin-approval-title {
+  margin: 0 0 8px;
+  font-size: var(--text-lg, 18px);
+}
+.plugin-approval-intro {
+  font-size: var(--text-sm);
+  color: var(--text2);
+  margin: 0 0 14px;
+  line-height: 1.45;
+}
+.plugin-approval-hooks {
+  list-style: none;
+  margin: 0 0 14px;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.plugin-approval-hook {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 8px;
+  font-size: var(--text-sm);
+}
+.plugin-approval-hook-desc {
+  color: var(--text3);
+}
+.plugin-approval-error {
+  font-size: var(--text-sm);
+  color: var(--danger, #c00);
+  margin: 0 0 10px;
+}
+.plugin-approval-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 10px;
+}
+.plugin-approval-more {
+  font-size: var(--text-xs);
+  color: var(--text3);
+  margin: 12px 0 0;
+  text-align: right;
+}
+.plugin-approval-approve {
+  font-size: var(--text-sm);
+  padding: 7px 16px;
+  border: 1px solid transparent;
+  border-radius: var(--radius);
+  background: rgb(0, 130, 65);
+  color: #fff;
+  cursor: pointer;
+  font-weight: 600;
+}
+.plugin-approval-approve:disabled {
+  opacity: 0.6;
+  cursor: default;
+}
+.plugin-approval-deny {
+  font-size: var(--text-sm);
+  padding: 7px 16px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--surface);
+  color: var(--text);
+  cursor: pointer;
+  font-weight: 600;
+}
+.plugin-approval-deny:disabled {
+  opacity: 0.6;
+  cursor: default;
+}

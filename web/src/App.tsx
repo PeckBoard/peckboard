@@ -19,6 +19,7 @@ import SettingsModal from './components/SettingsModal'
 import { applyThemeColor } from './util/themeColor'
 import PluginsModal from './components/PluginsModal'
 import PluginPanelModal from './components/PluginPanelModal'
+import PluginApprovalPrompt from './components/PluginApprovalPrompt'
 import NewSessionModal from './components/NewSessionModal'
 import NewProjectModal from './components/NewProjectModal'
 import FoldersPage from './components/ManageFoldersModal'
@@ -912,6 +913,9 @@ function App() {
 
   return (
     <div className="shell">
+      {/* Prompts (one at a time) for any WASM plugin still awaiting hook
+          approval. Renders nothing when there are none. */}
+      <PluginApprovalPrompt />
       {/* Navigation Rail. Sessions / Projects live here so the top tab
           strip can use all of its horizontal space for opened tabs —
           critical on mobile, where the rail becomes a bottom toolbar. */}

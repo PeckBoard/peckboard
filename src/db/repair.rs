@@ -32,6 +32,7 @@ pub fn ensure_schema(conn: &mut SqliteConnection) -> anyhow::Result<()> {
     ensure_projects_pause_reason_column(conn)?;
     ensure_project_workflow_instructions_table(conn)?;
     ensure_plugin_settings_table(conn)?;
+    ensure_plugin_approvals_table(conn)?;
     ensure_pm_decisions_table(conn)?;
     ensure_usage_events_table(conn)?;
     ensure_user_tabs_check_constraint(conn)?;
@@ -149,6 +150,22 @@ fn ensure_plugin_settings_table(conn: &mut SqliteConnection) -> anyhow::Result<(
     sql_query(
         "CREATE INDEX IF NOT EXISTS idx_plugin_settings_plugin \
          ON plugin_settings (plugin_id)",
+    )
+    .execute(conn)?;
+    Ok(())
+}
+
+/// Heal DBs that predate `1781586748_plugin_approvals`. `CREATE TABLE IF
+/// NOT EXISTS` no-ops on a healthy DB.
+fn ensure_plugin_approvals_table(conn: &mut SqliteConnection) -> anyhow::Result<()> {
+    log_if_healing_table(conn, "plugin_approvals")?;
+    sql_query(
+        "CREATE TABLE IF NOT EXISTS plugin_approvals (
+            plugin_id   TEXT NOT NULL PRIMARY KEY,
+            hooks       TEXT NOT NULL,
+            status      TEXT NOT NULL,
+            decided_at  TEXT NOT NULL
+        )",
     )
     .execute(conn)?;
     Ok(())

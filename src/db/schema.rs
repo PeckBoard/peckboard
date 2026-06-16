@@ -223,6 +223,15 @@ diesel::table! {
 }
 
 diesel::table! {
+    plugin_approvals (plugin_id) {
+        plugin_id -> Text,
+        hooks -> Text,
+        status -> Text,
+        decided_at -> Text,
+    }
+}
+
+diesel::table! {
     usage_events (id) {
         id -> Text,
         session_id -> Text,

@@ -1,7 +1,8 @@
-import { useEffect, useState } from 'react'
+import { useCallback, useEffect, useState } from 'react'
 import { authedFetch } from '../store/auth'
 import PluginSettingsModal from './PluginSettingsModal'
 import PluginPanelModal from './PluginPanelModal'
+import { decidePluginApproval, HOOK_DESCRIPTIONS, type WasmPlugin } from '../utils/pluginApproval'
 
 interface Permission {
   id: string
@@ -55,30 +56,42 @@ interface UiPanel {
 export default function PluginsSection() {
   const [plugins, setPlugins] = useState<PluginEntry[] | null>(null)
   const [panels, setPanels] = useState<UiPanel[]>([])
+  const [wasmPlugins, setWasmPlugins] = useState<WasmPlugin[]>([])
   const [error, setError] = useState<string | null>(null)
 
-  useEffect(() => {
-    let cancelled = false
+  const load = useCallback((signal?: { cancelled: boolean }) => {
     authedFetch('/api/plugins')
       .then((res) => (res.ok ? res.json() : Promise.reject(new Error(`HTTP ${res.status}`))))
-      .then((data: { plugins: PluginEntry[]; ui_panels?: UiPanel[] }) => {
-        if (!cancelled) {
+      .then(
+        (data: { plugins: PluginEntry[]; ui_panels?: UiPanel[]; wasm_plugins?: WasmPlugin[] }) => {
+          if (signal?.cancelled) return
           setPlugins(data.plugins)
           setPanels(data.ui_panels ?? [])
-        }
-      })
+          setWasmPlugins(data.wasm_plugins ?? [])
+        },
+      )
       .catch((e: Error) => {
-        if (!cancelled) setError(e.message)
+        if (!signal?.cancelled) setError(e.message)
       })
-    return () => {
-      cancelled = true
-    }
   }, [])
+
+  useEffect(() => {
+    const signal = { cancelled: false }
+    load(signal)
+    // A decision anywhere re-broadcasts; refresh so status badges stay live.
+    const onApproval = () => load()
+    window.addEventListener('peckboard:plugin-approval', onApproval)
+    return () => {
+      signal.cancelled = true
+      window.removeEventListener('peckboard:plugin-approval', onApproval)
+    }
+  }, [load])
 
   return (
     <section className="plugins-section" data-testid="plugins-section">
       {error && <p className="settings-loading">Failed to load plugins: {error}</p>}
       {!error && plugins === null && <p className="settings-loading">Loading plugins…</p>}
+      {wasmPlugins.length > 0 && <WasmPluginList plugins={wasmPlugins} onDecided={() => load()} />}
       {panels.length > 0 && <PluginPanels panels={panels} />}
       {plugins && plugins.length === 0 && <p className="settings-loading">No plugins installed.</p>}
       {plugins && plugins.length > 0 && (
@@ -89,6 +102,92 @@ export default function PluginsSection() {
         </div>
       )}
     </section>
+  )
+}
+
+/**
+ * Lists every loaded WASM plugin and its approval status, with the hooks
+ * it declares and an Approve/Deny control. A plugin is inert until its
+ * hook set is approved here (or via the startup prompt).
+ */
+function WasmPluginList({ plugins, onDecided }: { plugins: WasmPlugin[]; onDecided: () => void }) {
+  const [busy, setBusy] = useState<string | null>(null)
+
+  const decide = (pluginId: string, decision: 'approve' | 'deny') => {
+    setBusy(pluginId)
+    decidePluginApproval(pluginId, decision)
+      .then(() => onDecided())
+      .finally(() => setBusy(null))
+  }
+
+  const badgeFor = (status: WasmPlugin['status']) => {
+    const label =
+      status === 'approved'
+        ? 'Approved'
+        : status === 'pending'
+          ? 'Awaiting approval'
+          : status === 'denied'
+            ? 'Denied'
+            : 'Init failed'
+    return <span className={`plugin-badge plugin-badge--${status}`}>{label}</span>
+  }
+
+  return (
+    <div className="wasm-plugins" data-testid="wasm-plugins">
+      <div className="plugin-panels-title">Installed Plugins</div>
+      <ul className="wasm-plugins-list">
+        {plugins.map((p) => (
+          <li
+            key={p.name}
+            className="wasm-plugin-row"
+            data-testid={`wasm-plugin-${p.name}`}
+            data-status={p.status}
+          >
+            <div className="wasm-plugin-head">
+              <span className="wasm-plugin-name">{p.name}</span>
+              {badgeFor(p.status)}
+            </div>
+            <ul className="wasm-plugin-hooks">
+              {p.hooks.map((h) => (
+                <li key={h} className="wasm-plugin-hook">
+                  <code>{h}</code>
+                  <span className="wasm-plugin-hook-desc">
+                    {HOOK_DESCRIPTIONS[h] ?? 'Custom hook'}
+                  </span>
+                </li>
+              ))}
+            </ul>
+            {p.status === 'init_failed' && p.error && (
+              <p className="plugin-card-error">{p.error}</p>
+            )}
+            <div className="wasm-plugin-actions">
+              {p.status !== 'approved' && (
+                <button
+                  type="button"
+                  className="plugin-approval-approve"
+                  data-testid={`wasm-plugin-approve-${p.name}`}
+                  disabled={busy === p.name}
+                  onClick={() => decide(p.name, 'approve')}
+                >
+                  Approve
+                </button>
+              )}
+              {p.status !== 'denied' && (
+                <button
+                  type="button"
+                  className="plugin-approval-deny"
+                  data-testid={`wasm-plugin-deny-${p.name}`}
+                  disabled={busy === p.name}
+                  onClick={() => decide(p.name, 'deny')}
+                >
+                  {p.status === 'approved' ? 'Revoke' : 'Deny'}
+                </button>
+              )}
+            </div>
+          </li>
+        ))}
+      </ul>
+    </div>
   )
 }
 

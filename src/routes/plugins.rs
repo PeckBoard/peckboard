@@ -24,7 +24,7 @@ use axum::{
     http::StatusCode,
     middleware,
     response::IntoResponse,
-    routing::get,
+    routing::{get, post},
 };
 
 use crate::auth::middleware::require_auth;
@@ -38,6 +38,7 @@ pub fn router(state: Arc<AppState>) -> Router<Arc<AppState>> {
             "/api/plugins/{plugin_id}/settings",
             get(get_settings).put(update_settings),
         )
+        .route("/api/plugins/{plugin_id}/approval", post(decide_approval))
         .route_layer(middleware::from_fn_with_state(state, require_auth))
 }
 
@@ -54,7 +55,62 @@ pub fn router(state: Arc<AppState>) -> Router<Arc<AppState>> {
 async fn list_plugins(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     let entries = state.builtin_plugins.list().await;
     let ui_panels = state.plugins.ui_panels().await;
-    Json(serde_json::json!({ "plugins": entries, "ui_panels": ui_panels }))
+    // Loaded WASM plugins and their approval status. The UI uses any with
+    // status `pending` to drive the approval prompt; `ui_panels` already
+    // excludes panels from unapproved plugins.
+    let wasm_plugins = state.plugins.wasm_plugins().await;
+    Json(serde_json::json!({
+        "plugins": entries,
+        "ui_panels": ui_panels,
+        "wasm_plugins": wasm_plugins,
+    }))
+}
+
+/// POST /api/plugins/:plugin_id/approval — record an operator's approve or
+/// deny decision on a WASM plugin's declared hook set. Body:
+/// `{"decision": "approve" | "deny"}`. Approving runs the plugin's
+/// deferred `init` and activates its hooks/routes/panels; denying (or any
+/// plugin that has never been approved) leaves it inert. The decision is
+/// persisted, so it survives restarts as long as the plugin keeps
+/// declaring the same hooks.
+async fn decide_approval(
+    State(state): State<Arc<AppState>>,
+    Path(plugin_id): Path<String>,
+    Json(body): Json<serde_json::Value>,
+) -> impl IntoResponse {
+    let approve = match body.get("decision").and_then(|v| v.as_str()) {
+        Some("approve") => true,
+        Some("deny") => false,
+        _ => {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({ "error": "decision must be \"approve\" or \"deny\"" })),
+            ));
+        }
+    };
+
+    match state.plugins.decide(&plugin_id, approve).await {
+        Ok(Some(info)) => {
+            // Tell every connected client the decision so any open approval
+            // prompt updates (and other tabs drop the plugin from theirs).
+            state
+                .broadcaster
+                .broadcast(crate::ws::broadcaster::WsEvent {
+                    event_type: "plugin-approval".into(),
+                    session_id: String::new(),
+                    data: serde_json::json!({ "plugin": info.name, "status": info.status }),
+                });
+            Ok(Json(serde_json::json!({ "plugin": info })))
+        }
+        Ok(None) => Err((
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({ "error": "unknown plugin" })),
+        )),
+        Err(e) => Err((
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({ "error": e.to_string() })),
+        )),
+    }
 }
 
 /// GET /api/plugins/:plugin_id/settings — current values, redacted for
