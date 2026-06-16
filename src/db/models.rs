@@ -541,6 +541,16 @@ pub struct PluginApprovalRow {
     pub decided_at: String,
 }
 
+/// One plugin registry source. `url` is the resolved registry.json URL;
+/// `label` is what the operator entered (an `owner/repo` slug or a URL).
+#[derive(Queryable, Selectable, Insertable, Serialize, Debug, Clone)]
+#[diesel(table_name = plugin_repositories)]
+pub struct PluginRepositoryRow {
+    pub url: String,
+    pub label: String,
+    pub added_at: String,
+}
+
 // ── Usage events ─────────────────────────────────────────────────────
 
 #[derive(Queryable, Selectable, Serialize, Debug, Clone)]

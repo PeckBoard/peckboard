@@ -69,6 +69,35 @@ match on the `--data-dir` path you launched it with — and kill only
 that one. Do not run `pkill peckboard` / `killall peckboard` /
 `fuser -k <port>`; those will take down the user's session.
 
+## Persistent Dev Instance
+
+Separate from the throwaway scratch runs above, there is a **named,
+persistent dev instance** for clicking through changes by hand. Unlike
+scratch runs it uses **fixed ports** and a **persistent data dir**, so
+its admin user / sessions / cards survive restarts. It is still NOT the
+user's real install (default `3344`/`3345`).
+
+```bash
+scripts/dev-instance.sh [start|stop|status|restart]   # default: start
+```
+
+| What     | Value                                                                                                                                      |
+| -------- | ------------------------------------------------------------------------------------------------------------------------------------------ |
+| HTTP     | `http://localhost:3399`                                                                                                                    |
+| HTTPS    | `https://localhost:4499`                                                                                                                   |
+| Data dir | `<repo>/../.peckboard-dev` (i.e. `/home/firestar/peckboard/.peckboard-dev`) — persists, outside the git repo                               |
+| Admin    | `admin` / `DRiU66enaR2BcyiM6wRi` — **local dev only**; reset with `peckboard --reset-password`                                             |
+| Registry | served locally at `http://127.0.0.1:3398/registry.json` from the sibling `PeckBoard/plugins` checkout, via `PECKBOARD_PLUGIN_REGISTRY_URL` |
+| Logs     | `<data dir>/dev-instance.log`                                                                                                              |
+
+The script runs everything with `nohup` (survives the shell closing,
+**not** a reboot — re-run `start` after boot). It tracks its own PIDs in
+the data dir and only ever kills those — it never blanket-kills
+`peckboard` (see the rule above), so it's safe to run alongside the
+user's real instance. `start` is idempotent (stops the prior dev
+instance first). The admin password above is the bootstrap account
+generated on the data dir's first run; it stays valid until reset.
+
 ## Definition of Done
 
 **After making code changes, run the full verification cycle and fix

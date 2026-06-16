@@ -43,3 +43,78 @@ export function decidePluginApproval(
     body: JSON.stringify({ decision }),
   })
 }
+
+/** A plugin available in the registry, aggregated across repositories. */
+export interface RegistryPlugin {
+  id: string
+  name: string
+  description: string
+  author: string
+  homepage?: string | null
+  version: string
+  hooks: string[]
+  /** Resolved URL of the repository this entry came from. */
+  repository: string
+  /** Operator-facing label of that repository (slug or URL). */
+  repository_label: string
+  /** Whether a plugin with this id is already loaded in this instance. */
+  installed: boolean
+}
+
+/** One configured registry repository plus its reachability this fetch. */
+export interface RegistryRepo {
+  url: string
+  label: string
+  /** Whether this repository can be removed (the env override can't). */
+  removable: boolean
+  /** Whether its registry.json fetched successfully. */
+  ok: boolean
+  error?: string
+}
+
+/** The aggregate registry response powering both tabs. */
+export interface RegistryData {
+  repositories: RegistryRepo[]
+  plugins: RegistryPlugin[]
+}
+
+/** Fetch the aggregated registry across all repositories. */
+export async function fetchRegistry(): Promise<RegistryData> {
+  const res = await authedFetch('/api/plugins/registry')
+  if (!res.ok) {
+    const body = (await res.json().catch(() => null)) as { error?: string } | null
+    throw new Error(body?.error ?? `HTTP ${res.status}`)
+  }
+  const data = (await res.json()) as Partial<RegistryData>
+  return { repositories: data.repositories ?? [], plugins: data.plugins ?? [] }
+}
+
+/** Add a registry repository (an `owner/repo` slug or an https URL). */
+export function addRepository(repository: string): Promise<Response> {
+  return authedFetch('/api/plugins/repositories', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ repository }),
+  })
+}
+
+/** Remove a registry repository by its resolved URL. */
+export function removeRepository(url: string): Promise<Response> {
+  return authedFetch('/api/plugins/repositories', {
+    method: 'DELETE',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ url }),
+  })
+}
+
+/**
+ * Install a registry plugin by id from a specific repository (downloads +
+ * SHA-256-verifies server-side, then loads it inert).
+ */
+export function installRegistryPlugin(id: string, repository: string): Promise<Response> {
+  return authedFetch('/api/plugins/registry/install', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ id, repository }),
+  })
+}

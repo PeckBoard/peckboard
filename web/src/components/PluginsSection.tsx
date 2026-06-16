@@ -53,7 +53,7 @@ interface UiPanel {
  * so a future enable/disable + grant flow can hook in without another
  * round of design work.
  */
-export default function PluginsSection() {
+export default function PluginsSection({ onBrowseRegistry }: { onBrowseRegistry?: () => void }) {
   const [plugins, setPlugins] = useState<PluginEntry[] | null>(null)
   const [panels, setPanels] = useState<UiPanel[]>([])
   const [wasmPlugins, setWasmPlugins] = useState<WasmPlugin[]>([])
@@ -89,6 +89,18 @@ export default function PluginsSection() {
 
   return (
     <section className="plugins-section" data-testid="plugins-section">
+      {onBrowseRegistry && (
+        <div className="plugins-toolbar">
+          <button
+            type="button"
+            className="plugin-panel-open"
+            data-testid="browse-plugins"
+            onClick={onBrowseRegistry}
+          >
+            Browse plugins…
+          </button>
+        </div>
+      )}
       {error && <p className="settings-loading">Failed to load plugins: {error}</p>}
       {!error && plugins === null && <p className="settings-loading">Loading plugins…</p>}
       {wasmPlugins.length > 0 && <WasmPluginList plugins={wasmPlugins} onDecided={() => load()} />}

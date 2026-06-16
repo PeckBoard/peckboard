@@ -167,6 +167,18 @@ fn canonical_hooks(hooks: &[String]) -> String {
     sorted.join("\n")
 }
 
+/// Whether `id` is a safe bare plugin id — usable verbatim as a `.wasm`
+/// filename with no path traversal or separators. Matches the registry's
+/// `^[a-z0-9_-]+$`, so an install can't write outside the plugins dir or
+/// clobber an arbitrary file via a crafted id.
+fn is_safe_plugin_id(id: &str) -> bool {
+    !id.is_empty()
+        && id.len() <= 64
+        && id
+            .bytes()
+            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-' || b == b'_')
+}
+
 /// Run a plugin's `init` export with its per-plugin config block. Returns
 /// the error string (for surfacing as `init_failed`) on failure.
 fn run_init(plugin: &mut Plugin, config: String) -> Result<(), String> {
@@ -255,8 +267,14 @@ impl PluginManager {
             .and_then(|s| s.to_str())
             .unwrap_or("unknown")
             .to_string();
+        self.load_plugin_from(name, Wasm::file(path))
+    }
 
-        let wasm = Wasm::file(path);
+    /// Load a plugin from any [`Wasm`] source (a file at startup, or
+    /// freshly-downloaded bytes at install time). `name` is the plugin id
+    /// (its `.wasm` file stem) — host-function namespacing, config lookup,
+    /// and approval are all keyed by it.
+    fn load_plugin_from(&self, name: String, wasm: Wasm) -> anyhow::Result<LoadedPlugin> {
         let manifest = ExtismManifest::new([wasm])
             .with_timeout(CALL_TIMEOUT)
             .with_memory_max(MEMORY_LIMIT_PAGES);
@@ -612,6 +630,62 @@ impl PluginManager {
         }))
     }
 
+    /// Install an already-integrity-checked plugin `.wasm` (verified by the
+    /// caller against the registry's SHA-256): load it into the running
+    /// manager and, on success, persist it as `<plugins_dir>/<id>.wasm` so
+    /// it returns on the next start. The plugin loads **inert** — it goes
+    /// through the same approval gate as any other, so installing it grants
+    /// it nothing until the operator approves its hooks.
+    ///
+    /// The bytes are loaded BEFORE the file is written, so a broken or
+    /// malicious upgrade can't clobber a working install: if it doesn't
+    /// load, nothing on disk changes. A successful install of a plugin id
+    /// that's already loaded replaces (upgrades) it, shutting the old
+    /// instance down first.
+    pub async fn install(&self, id: &str, wasm: &[u8]) -> anyhow::Result<WasmPluginInfo> {
+        if !is_safe_plugin_id(id) {
+            anyhow::bail!("invalid plugin id '{id}' (expected ^[a-z0-9_-]+$)");
+        }
+        if self.db.is_none() {
+            anyhow::bail!("this plugin manager cannot install plugins");
+        }
+
+        // Load from memory first — this validates the module, runs its
+        // manifest, and enforces the hook allowlist before anything touches
+        // disk.
+        let loaded = self.load_plugin_from(id.to_string(), Wasm::data(wasm.to_vec()))?;
+        let info = WasmPluginInfo {
+            name: loaded.name.clone(),
+            hooks: loaded.manifest.hooks.clone(),
+            status: loaded.status_label(),
+            error: loaded.init_error.clone(),
+        };
+
+        // Persist it (temp + rename, so a crash mid-write can't leave a
+        // truncated .wasm that fails to load next start).
+        std::fs::create_dir_all(&self.plugins_dir)?;
+        let dest = self.plugins_dir.join(format!("{id}.wasm"));
+        let tmp = self.plugins_dir.join(format!(".{id}.wasm.tmp"));
+        std::fs::write(&tmp, wasm)?;
+        std::fs::rename(&tmp, &dest)?;
+
+        // Swap it into the live set, replacing (upgrading) any same-id
+        // plugin already loaded.
+        {
+            let mut plugins = self.plugins.lock().await;
+            if let Some(pos) = plugins.iter().position(|p| p.name == loaded.name) {
+                let old = plugins.remove(pos);
+                let mut guard = old.plugin.lock().await;
+                if let Err(e) = guard.call::<&str, String>("shutdown", "") {
+                    warn!("Plugin '{}' shutdown on upgrade failed: {e}", loaded.name);
+                }
+            }
+            plugins.push(loaded);
+        }
+        info!("Installed plugin '{id}' ({} hooks)", info.hooks.len());
+        Ok(info)
+    }
+
     /// Shut down all loaded plugins.
     pub async fn shutdown(&self) {
         let mut plugins = self.plugins.lock().await;
@@ -950,6 +1024,48 @@ mod tests {
             ApprovalState::Pending,
             "an approval for a different hook set must not apply"
         );
+    }
+
+    #[test]
+    fn is_safe_plugin_id_accepts_only_bare_lowercase_ids() {
+        assert!(is_safe_plugin_id("api"));
+        assert!(is_safe_plugin_id("my-plugin_2"));
+        // Rejected: empty, traversal, separators, uppercase, dots, spaces.
+        assert!(!is_safe_plugin_id(""));
+        assert!(!is_safe_plugin_id(".."));
+        assert!(!is_safe_plugin_id("../evil"));
+        assert!(!is_safe_plugin_id("a/b"));
+        assert!(!is_safe_plugin_id("a.wasm"));
+        assert!(!is_safe_plugin_id("API"));
+        assert!(!is_safe_plugin_id("a b"));
+        assert!(!is_safe_plugin_id(&"x".repeat(65)));
+    }
+
+    #[tokio::test]
+    async fn install_rejects_unsafe_id_without_writing() {
+        let tmp = tempfile::tempdir().unwrap();
+        let db = crate::db::Db::in_memory().unwrap();
+        let mgr = PluginManager::new(tmp.path(), db);
+        let err = mgr.install("../evil", b"\0asm").await.unwrap_err();
+        assert!(err.to_string().contains("invalid plugin id"));
+        // Nothing was written anywhere under the plugins dir.
+        let plugins_dir = tmp.path().join("plugins");
+        if plugins_dir.exists() {
+            assert_eq!(std::fs::read_dir(&plugins_dir).unwrap().count(), 0);
+        }
+    }
+
+    #[tokio::test]
+    async fn install_rejects_invalid_wasm_without_persisting() {
+        let tmp = tempfile::tempdir().unwrap();
+        let db = crate::db::Db::in_memory().unwrap();
+        let mgr = PluginManager::new(tmp.path(), db);
+        // Bytes that aren't a loadable module: load fails BEFORE the file is
+        // written, so no demo.wasm is left behind and nothing is loaded.
+        let err = mgr.install("demo", b"not a wasm module").await.unwrap_err();
+        assert!(!err.to_string().is_empty());
+        assert!(!tmp.path().join("plugins").join("demo.wasm").exists());
+        assert!(mgr.wasm_plugins().await.is_empty());
     }
 
     #[test]

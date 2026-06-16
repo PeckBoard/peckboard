@@ -232,6 +232,14 @@ diesel::table! {
 }
 
 diesel::table! {
+    plugin_repositories (url) {
+        url -> Text,
+        label -> Text,
+        added_at -> Text,
+    }
+}
+
+diesel::table! {
     usage_events (id) {
         id -> Text,
         session_id -> Text,

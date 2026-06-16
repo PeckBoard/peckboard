@@ -28,6 +28,7 @@ use axum::{
 };
 
 use crate::auth::middleware::require_auth;
+use crate::plugin::registry;
 use crate::plugin::settings::{apply_updates, redact_for_wire};
 use crate::state::AppState;
 
@@ -39,7 +40,33 @@ pub fn router(state: Arc<AppState>) -> Router<Arc<AppState>> {
             get(get_settings).put(update_settings),
         )
         .route("/api/plugins/{plugin_id}/approval", post(decide_approval))
+        .route(
+            "/api/plugins/repositories",
+            get(list_repositories)
+                .post(add_repository)
+                .delete(remove_repository),
+        )
+        .route("/api/plugins/registry", get(list_registry))
+        .route("/api/plugins/registry/install", post(install_registry))
         .route_layer(middleware::from_fn_with_state(state, require_auth))
+}
+
+/// The full set of registry repositories to aggregate: the operator's
+/// configured rows plus the optional environment override (which is not
+/// removable). Each is `(label, url, removable)`.
+async fn all_repositories(state: &AppState) -> anyhow::Result<Vec<(String, String, bool)>> {
+    let mut repos: Vec<(String, String, bool)> = Vec::new();
+    if let Some((label, url)) = registry::env_repository() {
+        repos.push((label, url, false));
+    }
+    for row in state.db.list_plugin_repositories().await? {
+        // De-dupe against the env override by url.
+        if repos.iter().any(|(_, u, _)| u == &row.url) {
+            continue;
+        }
+        repos.push((row.label, row.url, true));
+    }
+    Ok(repos)
 }
 
 /// GET /api/plugins — list installed plugins with their requested
@@ -189,4 +216,244 @@ async fn update_settings(
         "schema": schema,
         "settings": wire,
     })))
+}
+
+/// GET /api/plugins/repositories — list configured registry repositories
+/// (the environment override, if any, plus the operator's rows).
+async fn list_repositories(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+    match all_repositories(&state).await {
+        Ok(repos) => Ok(Json(serde_json::json!({
+            "repositories": repos
+                .into_iter()
+                .map(|(label, url, removable)| serde_json::json!({
+                    "label": label, "url": url, "removable": removable,
+                }))
+                .collect::<Vec<_>>(),
+        }))),
+        Err(e) => Err((
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({ "error": e.to_string() })),
+        )),
+    }
+}
+
+/// POST /api/plugins/repositories — add a registry repository. Body:
+/// `{"repository": "owner/repo" | "https://…/registry.json"}`. The input
+/// is resolved to a registry.json URL (a slug → GitHub raw) before storage.
+async fn add_repository(
+    State(state): State<Arc<AppState>>,
+    Json(body): Json<serde_json::Value>,
+) -> impl IntoResponse {
+    let input = body
+        .get("repository")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+    let (label, url) = match registry::resolve_repo_input(&input) {
+        Ok(pair) => pair,
+        Err(e) => {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({ "error": e.to_string() })),
+            ));
+        }
+    };
+    match state.db.add_plugin_repository(&url, &label).await {
+        Ok(()) => Ok(Json(
+            serde_json::json!({ "repository": { "label": label, "url": url, "removable": true } }),
+        )),
+        Err(e) => Err((
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({ "error": e.to_string() })),
+        )),
+    }
+}
+
+/// DELETE /api/plugins/repositories — remove a repository by its resolved
+/// URL. Body: `{"url": "…"}`. The environment override can't be removed.
+async fn remove_repository(
+    State(state): State<Arc<AppState>>,
+    Json(body): Json<serde_json::Value>,
+) -> impl IntoResponse {
+    let url = body.get("url").and_then(|v| v.as_str()).unwrap_or("");
+    if url.is_empty() {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({ "error": "missing `url`" })),
+        ));
+    }
+    if registry::env_repository().is_some_and(|(_, u)| u == url) {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({ "error": "the environment registry can't be removed" })),
+        ));
+    }
+    match state.db.remove_plugin_repository(url).await {
+        Ok(true) => Ok(Json(serde_json::json!({ "removed": url }))),
+        Ok(false) => Err((
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({ "error": "no such repository" })),
+        )),
+        Err(e) => Err((
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({ "error": e.to_string() })),
+        )),
+    }
+}
+
+/// GET /api/plugins/registry — aggregate the plugins across every
+/// configured repository. Core proxies the fetches (no browser CORS, URLs
+/// resolved server-side). Returns each repository with a reachability
+/// status and the merged plugin list, every entry tagged with its source
+/// repository and whether it's already installed. A single repository
+/// being down doesn't fail the whole response — it's reported per-repo.
+async fn list_registry(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+    let repos = match all_repositories(&state).await {
+        Ok(r) => r,
+        Err(e) => {
+            return Err((
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({ "error": e.to_string() })),
+            ));
+        }
+    };
+
+    let installed: std::collections::HashSet<String> = state
+        .plugins
+        .wasm_plugins()
+        .await
+        .into_iter()
+        .map(|p| p.name)
+        .collect();
+
+    let client = reqwest::Client::new();
+    let mut repo_statuses = Vec::new();
+    let mut plugins = Vec::new();
+    for (label, url, removable) in repos {
+        match registry::fetch_index(&client, &url).await {
+            Ok(index) => {
+                repo_statuses.push(serde_json::json!({
+                    "label": label, "url": url, "removable": removable, "ok": true,
+                }));
+                for e in index.plugins {
+                    plugins.push(serde_json::json!({
+                        "id": e.id,
+                        "name": e.name,
+                        "description": e.description,
+                        "author": e.author,
+                        "homepage": e.homepage,
+                        "version": e.version,
+                        "hooks": e.hooks,
+                        "repository": url,
+                        "repository_label": label,
+                        "installed": installed.contains(&e.id),
+                    }));
+                }
+            }
+            Err(e) => {
+                repo_statuses.push(serde_json::json!({
+                    "label": label, "url": url, "removable": removable,
+                    "ok": false, "error": e.to_string(),
+                }));
+            }
+        }
+    }
+
+    Ok(Json(serde_json::json!({
+        "repositories": repo_statuses,
+        "plugins": plugins,
+    })))
+}
+
+/// POST /api/plugins/registry/install — install a registry plugin. Body:
+/// `{"id": "api", "repository": "<resolved url>"}`. Core fetches that
+/// repository's index (or searches all repositories when `repository` is
+/// omitted), looks the id up there (never trusting a client-supplied
+/// download URL), downloads the `.wasm`, verifies its SHA-256, then loads
+/// it **inert** — it surfaces in the approval prompt and runs nothing
+/// until the operator approves its hooks.
+async fn install_registry(
+    State(state): State<Arc<AppState>>,
+    Json(body): Json<serde_json::Value>,
+) -> impl IntoResponse {
+    let id = match body.get("id").and_then(|v| v.as_str()) {
+        Some(id) if !id.is_empty() => id.to_string(),
+        _ => {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({ "error": "missing or empty `id`" })),
+            ));
+        }
+    };
+    let repository = body
+        .get("repository")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string());
+
+    let all = match all_repositories(&state).await {
+        Ok(r) => r,
+        Err(e) => {
+            return Err((
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({ "error": e.to_string() })),
+            ));
+        }
+    };
+    // Restrict to the named repository when given; otherwise search all.
+    let candidates: Vec<(String, String, bool)> = match &repository {
+        Some(url) => all.into_iter().filter(|(_, u, _)| u == url).collect(),
+        None => all,
+    };
+    if candidates.is_empty() {
+        return Err((
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({ "error": "unknown repository" })),
+        ));
+    }
+
+    let client = reqwest::Client::new();
+    // Find the entry for `id` in the candidate repositories.
+    let mut found: Option<registry::RegistryEntry> = None;
+    for (_, url, _) in &candidates {
+        if let Ok(index) = registry::fetch_index(&client, url).await
+            && let Some(entry) = index.plugins.into_iter().find(|e| e.id == id)
+        {
+            found = Some(entry);
+            break;
+        }
+    }
+    let Some(entry) = found else {
+        return Err((
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({ "error": format!("no plugin '{id}' in the registry") })),
+        ));
+    };
+
+    // Download + integrity-check against the index's sha256.
+    let bytes = match registry::download_and_verify(&client, &entry.url, &entry.sha256).await {
+        Ok(bytes) => bytes,
+        Err(e) => {
+            return Err((
+                StatusCode::BAD_GATEWAY,
+                Json(serde_json::json!({ "error": format!("download failed: {e}") })),
+            ));
+        }
+    };
+
+    match state.plugins.install(&entry.id, &bytes).await {
+        Ok(info) => {
+            state
+                .broadcaster
+                .broadcast(crate::ws::broadcaster::WsEvent {
+                    event_type: "plugin-approval".into(),
+                    session_id: String::new(),
+                    data: serde_json::json!({ "plugin": info.name, "status": info.status }),
+                });
+            Ok(Json(serde_json::json!({ "plugin": info })))
+        }
+        Err(e) => Err((
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({ "error": e.to_string() })),
+        )),
+    }
 }

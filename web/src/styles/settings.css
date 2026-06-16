@@ -414,6 +414,66 @@
   font-weight: 600;
   font-size: var(--text-sm);
 }
+.wasm-plugin-version {
+  font-weight: 400;
+  color: var(--text3);
+  font-size: var(--text-xs);
+}
+
+/* ── Plugin registry page (tabs + search) ─────────────────────────── */
+.plugins-toolbar {
+  display: flex;
+  justify-content: flex-end;
+  margin-bottom: 12px;
+}
+.registry-tabs {
+  display: flex;
+  gap: 4px;
+  border-bottom: 1px solid var(--border);
+  margin-bottom: 14px;
+}
+.registry-tab {
+  appearance: none;
+  background: none;
+  border: none;
+  border-bottom: 2px solid transparent;
+  padding: 8px 14px;
+  font-size: var(--text-sm);
+  font-weight: 600;
+  color: var(--text2);
+  cursor: pointer;
+}
+.registry-tab--active {
+  color: var(--text);
+  border-bottom-color: var(--accent, rgb(0, 130, 65));
+}
+.registry-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.registry-search {
+  width: 100%;
+  box-sizing: border-box;
+  font-size: var(--text-sm);
+  padding: 8px 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--surface);
+  color: var(--text);
+}
+.registry-repo-add {
+  display: flex;
+  gap: 8px;
+  align-items: stretch;
+}
+.registry-repo-add .registry-search {
+  flex: 1;
+}
+.registry-plugin-source {
+  font-size: var(--text-xs);
+  color: var(--text3);
+}
 .wasm-plugin-hooks {
   list-style: none;
   margin: 10px 0 0;

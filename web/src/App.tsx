@@ -20,6 +20,7 @@ import { applyThemeColor } from './util/themeColor'
 import PluginsModal from './components/PluginsModal'
 import PluginPanelModal from './components/PluginPanelModal'
 import PluginApprovalPrompt from './components/PluginApprovalPrompt'
+import PluginRegistryModal from './components/PluginRegistryModal'
 import NewSessionModal from './components/NewSessionModal'
 import NewProjectModal from './components/NewProjectModal'
 import FoldersPage from './components/ManageFoldersModal'
@@ -59,7 +60,7 @@ type View =
 /** Modals reachable from the user-icon dropdown. The URL maps a couple of
  *  paths (`/settings`, `/plugins`) to opening one of these on mount so
  *  bookmarks and the existing e2e routes still land somewhere useful. */
-type DropdownModal = 'settings' | 'plugins' | null
+type DropdownModal = 'settings' | 'plugins' | 'plugin-registry' | null
 
 /** A UI page a loaded plugin contributes, surfaced as a user-menu link.
  * Generic: the host renders whatever panels a plugin declares (from the
@@ -124,6 +125,8 @@ function parseRoute(): {
       return { view: 'sessions', activeId: null, sub: 'chat', modal: 'settings' }
     case 'plugins':
       return { view: 'sessions', activeId: null, sub: 'chat', modal: 'plugins' }
+    case 'plugin-registry':
+      return { view: 'sessions', activeId: null, sub: 'chat', modal: 'plugin-registry' }
     case 'reports': {
       // `/reports` — index; `/reports/<folder>/<file>` — single report
       // viewer. We compose the same `<folder>/<file>` id the tab strip
@@ -1408,7 +1411,13 @@ function App() {
         <ChangePasswordModal mode={{ kind: 'self' }} onClose={() => setShowChangePassword(false)} />
       )}
       {dropdownModal === 'settings' && <SettingsModal onClose={closeDropdownModal} />}
-      {dropdownModal === 'plugins' && <PluginsModal onClose={closeDropdownModal} />}
+      {dropdownModal === 'plugins' && (
+        <PluginsModal
+          onClose={closeDropdownModal}
+          onBrowseRegistry={() => openDropdownModal('plugin-registry')}
+        />
+      )}
+      {dropdownModal === 'plugin-registry' && <PluginRegistryModal onClose={closeDropdownModal} />}
       {openPanel && (
         <PluginPanelModal
           title={openPanel.title}

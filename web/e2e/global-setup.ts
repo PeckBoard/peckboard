@@ -17,6 +17,13 @@ export default async function globalSetup() {
   console.log('[e2e] Building frontend...')
   execSync('npm run build', { cwd: webDir, stdio: 'inherit' })
 
+  // rust-embed bakes web/dist into the binary at compile time, but cargo
+  // keys recompilation on Rust source — a dist-only change doesn't
+  // invalidate the embedding module, so the binary would serve STALE
+  // assets (the e2e then fails against UI that "isn't there"). Touch the
+  // module that derives RustEmbed so the fresh dist is always re-embedded.
+  execSync('touch src/frontend.rs', { cwd: repoRoot, stdio: 'inherit' })
+
   console.log('[e2e] Building release binary (this is slow on first run)...')
   execSync('cargo build --release', { cwd: repoRoot, stdio: 'inherit' })
 }

@@ -9,6 +9,7 @@ mod dependencies;
 mod events;
 mod folders;
 mod plugin_approvals;
+mod plugin_repositories;
 mod plugin_settings;
 mod pm_decisions;
 mod projects;

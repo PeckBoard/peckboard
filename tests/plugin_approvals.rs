@@ -156,6 +156,159 @@ async fn approval_404s_for_unknown_plugin() {
 }
 
 #[tokio::test]
+async fn registry_install_rejects_missing_id() {
+    let (state, token) = build_state().await;
+    let app = router(state.clone()).with_state(state.clone());
+
+    // `id` is validated before any registry fetch, so this is deterministic
+    // and needs no network.
+    let req = Request::builder()
+        .method("POST")
+        .uri("/api/plugins/registry/install")
+        .header(header::AUTHORIZATION, format!("Bearer {token}"))
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(Body::from(json!({}).to_string()))
+        .unwrap();
+    let res = app.oneshot(req).await.unwrap();
+    assert_eq!(res.status(), StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn repositories_add_list_remove() {
+    let (state, token) = build_state().await;
+    let app = router(state.clone());
+
+    // Default seed is present.
+    let req = Request::builder()
+        .uri("/api/plugins/repositories")
+        .header(header::AUTHORIZATION, format!("Bearer {token}"))
+        .body(Body::empty())
+        .unwrap();
+    let res = app
+        .clone()
+        .with_state(state.clone())
+        .oneshot(req)
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(res.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let json: Value = serde_json::from_slice(&body).unwrap();
+    let repos = json["repositories"].as_array().unwrap();
+    assert!(repos.iter().any(|r| r["label"] == "PeckBoard/plugins"));
+
+    // Add by slug → resolves to the GitHub raw URL.
+    let req = Request::builder()
+        .method("POST")
+        .uri("/api/plugins/repositories")
+        .header(header::AUTHORIZATION, format!("Bearer {token}"))
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(Body::from(json!({ "repository": "octo/cat" }).to_string()))
+        .unwrap();
+    let res = app
+        .clone()
+        .with_state(state.clone())
+        .oneshot(req)
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(res.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let json: Value = serde_json::from_slice(&body).unwrap();
+    let url = json["repository"]["url"].as_str().unwrap().to_string();
+    assert_eq!(
+        url,
+        "https://raw.githubusercontent.com/octo/cat/main/registry.json"
+    );
+
+    // Invalid input → 400.
+    let req = Request::builder()
+        .method("POST")
+        .uri("/api/plugins/repositories")
+        .header(header::AUTHORIZATION, format!("Bearer {token}"))
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(Body::from(
+            json!({ "repository": "not a repo" }).to_string(),
+        ))
+        .unwrap();
+    let res = app
+        .clone()
+        .with_state(state.clone())
+        .oneshot(req)
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::BAD_REQUEST);
+
+    // Remove the added repo.
+    let req = Request::builder()
+        .method("DELETE")
+        .uri("/api/plugins/repositories")
+        .header(header::AUTHORIZATION, format!("Bearer {token}"))
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(Body::from(json!({ "url": url }).to_string()))
+        .unwrap();
+    let res = app
+        .clone()
+        .with_state(state.clone())
+        .oneshot(req)
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+
+    // Removing an unknown url → 404.
+    let req = Request::builder()
+        .method("DELETE")
+        .uri("/api/plugins/repositories")
+        .header(header::AUTHORIZATION, format!("Bearer {token}"))
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(Body::from(
+            json!({ "url": "https://nope.example/r.json" }).to_string(),
+        ))
+        .unwrap();
+    let res = app
+        .clone()
+        .with_state(state.clone())
+        .oneshot(req)
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn install_unknown_repository_is_404() {
+    let (state, token) = build_state().await;
+    let app = router(state.clone()).with_state(state.clone());
+
+    // A repository url that isn't configured → 404 before any network.
+    let req = Request::builder()
+        .method("POST")
+        .uri("/api/plugins/registry/install")
+        .header(header::AUTHORIZATION, format!("Bearer {token}"))
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(Body::from(
+            json!({ "id": "api", "repository": "https://nope.example/r.json" }).to_string(),
+        ))
+        .unwrap();
+    let res = app.oneshot(req).await.unwrap();
+    assert_eq!(res.status(), StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn registry_endpoints_require_auth() {
+    let (state, _token) = build_state().await;
+    let app = router(state.clone()).with_state(state.clone());
+
+    let req = Request::builder()
+        .uri("/api/plugins/registry")
+        .body(Body::empty())
+        .unwrap();
+    let res = app.oneshot(req).await.unwrap();
+    assert_eq!(res.status(), StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
 async fn approval_requires_auth() {
     let (state, _token) = build_state().await;
     let app = router(state.clone()).with_state(state.clone());

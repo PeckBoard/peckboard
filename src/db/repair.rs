@@ -33,6 +33,7 @@ pub fn ensure_schema(conn: &mut SqliteConnection) -> anyhow::Result<()> {
     ensure_project_workflow_instructions_table(conn)?;
     ensure_plugin_settings_table(conn)?;
     ensure_plugin_approvals_table(conn)?;
+    ensure_plugin_repositories_table(conn)?;
     ensure_pm_decisions_table(conn)?;
     ensure_usage_events_table(conn)?;
     ensure_user_tabs_check_constraint(conn)?;
@@ -165,6 +166,23 @@ fn ensure_plugin_approvals_table(conn: &mut SqliteConnection) -> anyhow::Result<
             hooks       TEXT NOT NULL,
             status      TEXT NOT NULL,
             decided_at  TEXT NOT NULL
+        )",
+    )
+    .execute(conn)?;
+    Ok(())
+}
+
+/// Heal DBs that predate `1781592551_plugin_repositories`. Creates the
+/// table only — the default-repo seed lives in the migration so it runs
+/// exactly once (a removed default must stay removed); re-seeding here
+/// every startup would resurrect it.
+fn ensure_plugin_repositories_table(conn: &mut SqliteConnection) -> anyhow::Result<()> {
+    log_if_healing_table(conn, "plugin_repositories")?;
+    sql_query(
+        "CREATE TABLE IF NOT EXISTS plugin_repositories (
+            url        TEXT NOT NULL PRIMARY KEY,
+            label      TEXT NOT NULL,
+            added_at   TEXT NOT NULL
         )",
     )
     .execute(conn)?;
