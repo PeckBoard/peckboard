@@ -1,7 +1,8 @@
 import { useCallback, useEffect, useState } from 'react'
 import { authedFetch } from '../store/auth'
 import Modal from './Modal'
-import { decidePluginApproval, HOOK_DESCRIPTIONS, type WasmPlugin } from '../utils/pluginApproval'
+import HookList from './HookList'
+import { decidePluginApproval, type WasmPlugin } from '../utils/pluginApproval'
 
 /**
  * Startup approval prompt. A freshly-installed WASM plugin loads **inert**
@@ -64,16 +65,7 @@ export default function PluginApprovalPrompt() {
           This plugin is installed but inert. It is requesting permission to use the hooks below —
           nothing it declares runs until you approve.
         </p>
-        <ul className="plugin-approval-hooks" data-testid="plugin-approval-hooks">
-          {plugin.hooks.map((h) => (
-            <li key={h} className="plugin-approval-hook">
-              <code className="plugin-approval-hook-id">{h}</code>
-              <span className="plugin-approval-hook-desc">
-                {HOOK_DESCRIPTIONS[h] ?? 'Custom hook'}
-              </span>
-            </li>
-          ))}
-        </ul>
+        <HookList hooks={plugin.hooks} testId="plugin-approval-hooks" title="Hooks" />
         {error && <p className="plugin-approval-error">{error}</p>}
         <div className="plugin-approval-actions">
           <button

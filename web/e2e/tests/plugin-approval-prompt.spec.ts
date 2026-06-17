@@ -57,6 +57,9 @@ test('approval prompt lists a pending plugin and approves it', async ({
         wasm_plugins: [
           {
             name: 'demo',
+            description: 'Demo plugin',
+            version: '1.0.0',
+            repository: 'https://github.com/acme/demo',
             hooks: ['http.request.before', 'todo'],
             status: 'pending',
             error: null,
@@ -84,9 +87,13 @@ test('approval prompt lists a pending plugin and approves it', async ({
   const prompt = page.getByTestId('plugin-approval-prompt')
   await expect(prompt).toBeVisible({ timeout: 10_000 })
   await expect(page.getByTestId('plugin-approval-name')).toHaveText('demo')
+  // Hooks render as human-readable title + description rows (the raw id
+  // is kept on data-hook), the same presentation used everywhere else.
   const hooks = page.getByTestId('plugin-approval-hooks')
-  await expect(hooks).toContainText('http.request.before')
-  await expect(hooks).toContainText('todo')
+  await expect(hooks.locator('[data-hook="http.request.before"]')).toBeVisible()
+  await expect(hooks.locator('[data-hook="todo"]')).toBeVisible()
+  await expect(hooks).toContainText('Serve HTTP requests')
+  await expect(hooks).toContainText('Receive todo updates')
 
   // Approving posts the decision and dismisses the prompt.
   await page.getByTestId('plugin-approval-approve').click()
@@ -106,7 +113,15 @@ test('approval prompt can deny a pending plugin', async ({ request, page, baseUR
         plugins: [],
         ui_panels: [],
         wasm_plugins: [
-          { name: 'demo', hooks: ['mcp.token.issue.before'], status: 'pending', error: null },
+          {
+            name: 'demo',
+            description: 'Demo plugin',
+            version: '1.0.0',
+            repository: 'https://github.com/acme/demo',
+            hooks: ['mcp.token.issue.before'],
+            status: 'pending',
+            error: null,
+          },
         ],
       }),
     })

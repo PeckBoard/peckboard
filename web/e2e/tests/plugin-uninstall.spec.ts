@@ -48,7 +48,17 @@ test('removes an installed plugin from the Plugins modal', async ({ request, pag
         plugins: [],
         ui_panels: [],
         wasm_plugins: state.installed
-          ? [{ name: 'demo', hooks: ['http.request.before'], status: 'approved', error: null }]
+          ? [
+              {
+                name: 'demo',
+                description: 'Demo plugin',
+                version: '1.0.0',
+                repository: 'https://github.com/acme/demo',
+                hooks: ['http.request.before'],
+                status: 'approved',
+                error: null,
+              },
+            ]
           : [],
       }),
     })

@@ -309,10 +309,13 @@ A plugin can **own and fully serve** a public HTTP route. This is distinct from 
 
 **Mounting.** Core mounts a dedicated public prefix `/plugin-api/*` (see `src/routes/plugin_api.rs`) that is **not** behind the `/api/*` auth middleware. Every request under it is dispatched to `PluginManager::serve_http`, which finds the first loaded plugin whose `http_routes` match and asks it to serve the request. If no plugin claims the path, the request returns **404**.
 
-**Manifest declaration.** A plugin declares the hook plus the routes it owns. Routes are `"<METHOD> <PATH>"`; `METHOD` may be `*` for any method; paths use `:param` segments (and an optional trailing `*name` catch-all) like the router:
+**Manifest declaration.** A plugin declares the hook plus the routes it owns. Routes are `"<METHOD> <PATH>"`; `METHOD` may be `*` for any method; paths use `:param` segments (and an optional trailing `*name` catch-all) like the router. The manifest also carries the plugin's **required identity metadata** — `description`, `version`, and `repository` — shown on the plugin's card in Settings:
 
 ```json
 {
+  "description": "Public, API-key-authenticated HTTP surface for Peckboard.",
+  "version": "0.2.0",
+  "repository": "https://github.com/PeckBoard/api-plugin",
   "hooks": ["http.request.before"],
   "http_routes": [
     "GET /plugin-api/v1/cards",
@@ -321,6 +324,8 @@ A plugin can **own and fully serve** a public HTTP route. This is distinct from 
   ]
 }
 ```
+
+`description`, `version`, and `repository` are **required and must be non-empty** — a manifest missing any of them fails to load. They come from the plugin itself (not the registry), so the operator sees what a plugin is, which release is running, and where it came from, even for a plugin installed outside any registry.
 
 **Request payload** (the hook `payload`, a `PluginHttpRequest`):
 
@@ -377,6 +382,9 @@ A plugin can contribute a **UI panel** — a page the Peckboard web app surfaces
 
 ```json
 {
+  "description": "Public, API-key-authenticated HTTP surface for Peckboard.",
+  "version": "0.2.0",
+  "repository": "https://github.com/PeckBoard/api-plugin",
   "hooks": ["http.request.before"],
   "http_routes": ["GET /plugin-api/v1/admin"],
   "ui_panels": [
@@ -518,12 +526,12 @@ Per-plugin config is passed to the plugin's `init` function as a JSON string.
 
 Every plugin must export these functions:
 
-| Export     | Description                                                                                          |
-| ---------- | ---------------------------------------------------------------------------------------------------- |
-| `manifest` | Returns JSON declaring which hooks the plugin handles                                                |
-| `init`     | Called once on load with plugin config. Returns ok/error                                             |
-| `handle`   | Called for each hook. Receives hook name + JSON payload. Returns verdict + optional modified payload |
-| `shutdown` | Called on teardown. Cleanup opportunity                                                              |
+| Export     | Description                                                                                                               |
+| ---------- | ------------------------------------------------------------------------------------------------------------------------- |
+| `manifest` | Returns JSON declaring the plugin's required metadata (`description`, `version`, `repository`) and which hooks it handles |
+| `init`     | Called once on load with plugin config. Returns ok/error                                                                  |
+| `handle`   | Called for each hook. Receives hook name + JSON payload. Returns verdict + optional modified payload                      |
+| `shutdown` | Called on teardown. Cleanup opportunity                                                                                   |
 
 ## Prompt Injection
 

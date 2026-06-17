@@ -1,9 +1,9 @@
 import { useCallback, useEffect, useState } from 'react'
 import Modal from './Modal'
+import HookList from './HookList'
 import {
   addRepository,
   fetchRegistry,
-  HOOK_DESCRIPTIONS,
   installRegistryPlugin,
   removeRepository,
   type RegistryData,
@@ -181,16 +181,7 @@ function PluginsTab({
               </div>
               <div className="registry-plugin-source">{p.repository_label}</div>
               <p className="plugin-card-description">{p.description}</p>
-              <ul className="wasm-plugin-hooks">
-                {p.hooks.map((h) => (
-                  <li key={h} className="wasm-plugin-hook">
-                    <code>{h}</code>
-                    <span className="wasm-plugin-hook-desc">
-                      {HOOK_DESCRIPTIONS[h] ?? 'Custom hook'}
-                    </span>
-                  </li>
-                ))}
-              </ul>
+              <HookList hooks={p.hooks} title="Hooks" />
               <div className="wasm-plugin-actions">
                 <button
                   type="button"

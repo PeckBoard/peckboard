@@ -107,6 +107,21 @@ impl LoadedPlugin {
     fn status_label(&self) -> &'static str {
         status_label(&self.approval, &self.init_error)
     }
+
+    /// Build the `/api/plugins` catalog entry for this plugin. One place so
+    /// every construction site (`wasm_plugins`, `install`, `decide`) carries
+    /// the same manifest-sourced metadata.
+    fn to_info(&self) -> WasmPluginInfo {
+        WasmPluginInfo {
+            name: self.name.clone(),
+            description: self.manifest.description.clone(),
+            version: self.manifest.version.clone(),
+            repository: self.manifest.repository.clone(),
+            hooks: self.manifest.hooks.clone(),
+            status: self.status_label(),
+            error: self.init_error.clone(),
+        }
+    }
 }
 
 /// The wire status label for an approval state: `pending`, `denied`,
@@ -148,6 +163,11 @@ fn resolve_approval(
 pub struct WasmPluginInfo {
     /// The plugin's id (its `.wasm` file stem).
     pub name: String,
+    /// Self-reported summary, version, and source repository from the
+    /// plugin's manifest (all required there) — shown on the plugin's card.
+    pub description: String,
+    pub version: String,
+    pub repository: String,
     /// Every hook the plugin declares — what the operator is approving.
     pub hooks: Vec<String>,
     pub status: &'static str,
@@ -294,6 +314,21 @@ impl PluginManager {
         // Call manifest export to get hook declarations.
         let manifest_json = plugin.call::<&str, String>("manifest", "")?;
         let plugin_manifest: PluginManifest = serde_json::from_str(&manifest_json)?;
+
+        // Required identity metadata must be present AND non-empty: serde
+        // already rejects a missing field, but a blank string would slip
+        // through and render an anonymous plugin card, so reject those too.
+        for (field, value) in [
+            ("description", &plugin_manifest.description),
+            ("version", &plugin_manifest.version),
+            ("repository", &plugin_manifest.repository),
+        ] {
+            if value.trim().is_empty() {
+                return Err(anyhow::anyhow!(
+                    "plugin '{name}' manifest is missing required field '{field}'",
+                ));
+            }
+        }
 
         // Reject plugins that try to hook anything outside the
         // allowlist. Otherwise an attacker who can drop a `.wasm` file
@@ -546,15 +581,7 @@ impl PluginManager {
     /// `/api/plugins` catalog and the approval prompt.
     pub async fn wasm_plugins(&self) -> Vec<WasmPluginInfo> {
         let plugins = self.plugins.lock().await;
-        plugins
-            .iter()
-            .map(|p| WasmPluginInfo {
-                name: p.name.clone(),
-                hooks: p.manifest.hooks.clone(),
-                status: p.status_label(),
-                error: p.init_error.clone(),
-            })
-            .collect()
+        plugins.iter().map(|p| p.to_info()).collect()
     }
 
     /// Record an operator's approve/deny decision for a plugin's declared
@@ -574,15 +601,12 @@ impl PluginManager {
         // (up to 2s) `init` call.
         let target = {
             let plugins = self.plugins.lock().await;
-            plugins.iter().find(|p| p.name == plugin_id).map(|p| {
-                (
-                    p.plugin.clone(),
-                    p.hooks_canonical.clone(),
-                    p.manifest.hooks.clone(),
-                )
-            })
+            plugins
+                .iter()
+                .find(|p| p.name == plugin_id)
+                .map(|p| (p.plugin.clone(), p.hooks_canonical.clone()))
         };
-        let Some((plugin, hooks_canonical, hooks)) = target else {
+        let Some((plugin, hooks_canonical)) = target else {
             return Ok(None);
         };
 
@@ -611,23 +635,15 @@ impl PluginManager {
             ApprovalState::Denied
         };
 
-        let status = status_label(&new_state, &init_error);
-
-        // Apply the new state to the loaded entry.
-        {
-            let mut plugins = self.plugins.lock().await;
-            if let Some(p) = plugins.iter_mut().find(|p| p.name == plugin_id) {
-                p.approval = new_state;
-                p.init_error = init_error.clone();
-            }
-        }
-
-        Ok(Some(WasmPluginInfo {
-            name: plugin_id.to_string(),
-            hooks,
-            status,
-            error: init_error,
-        }))
+        // Apply the new state to the loaded entry, then report it back
+        // (manifest metadata and all) from the single `to_info` source.
+        let mut plugins = self.plugins.lock().await;
+        let Some(p) = plugins.iter_mut().find(|p| p.name == plugin_id) else {
+            return Ok(None);
+        };
+        p.approval = new_state;
+        p.init_error = init_error;
+        Ok(Some(p.to_info()))
     }
 
     /// Install an already-integrity-checked plugin `.wasm` (verified by the
@@ -654,12 +670,7 @@ impl PluginManager {
         // manifest, and enforces the hook allowlist before anything touches
         // disk.
         let loaded = self.load_plugin_from(id.to_string(), Wasm::data(wasm.to_vec()))?;
-        let info = WasmPluginInfo {
-            name: loaded.name.clone(),
-            hooks: loaded.manifest.hooks.clone(),
-            status: loaded.status_label(),
-            error: loaded.init_error.clone(),
-        };
+        let info = loaded.to_info();
 
         // Persist it (temp + rename, so a crash mid-write can't leave a
         // truncated .wasm that fails to load next start).

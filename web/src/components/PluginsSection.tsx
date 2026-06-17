@@ -3,12 +3,8 @@ import { authedFetch } from '../store/auth'
 import PluginSettingsModal from './PluginSettingsModal'
 import PluginPanelModal from './PluginPanelModal'
 import ConfirmDialog from './ConfirmDialog'
-import {
-  decidePluginApproval,
-  uninstallPlugin,
-  HOOK_DESCRIPTIONS,
-  type WasmPlugin,
-} from '../utils/pluginApproval'
+import HookList from './HookList'
+import { decidePluginApproval, uninstallPlugin, type WasmPlugin } from '../utils/pluginApproval'
 
 interface Permission {
   id: string
@@ -109,8 +105,9 @@ export default function PluginsSection({ onBrowseRegistry }: { onBrowseRegistry?
       )}
       {error && <p className="settings-loading">Failed to load plugins: {error}</p>}
       {!error && plugins === null && <p className="settings-loading">Loading plugins…</p>}
-      {wasmPlugins.length > 0 && <WasmPluginList plugins={wasmPlugins} onDecided={() => load()} />}
-      {panels.length > 0 && <PluginPanels panels={panels} />}
+      {wasmPlugins.length > 0 && (
+        <WasmPluginList plugins={wasmPlugins} panels={panels} onDecided={() => load()} />
+      )}
       {plugins && plugins.length === 0 && <p className="settings-loading">No plugins installed.</p>}
       {plugins && plugins.length > 0 && (
         <div className="plugins-list">
@@ -128,7 +125,15 @@ export default function PluginsSection({ onBrowseRegistry }: { onBrowseRegistry?
  * it declares and an Approve/Deny control. A plugin is inert until its
  * hook set is approved here (or via the startup prompt).
  */
-function WasmPluginList({ plugins, onDecided }: { plugins: WasmPlugin[]; onDecided: () => void }) {
+function WasmPluginList({
+  plugins,
+  panels,
+  onDecided,
+}: {
+  plugins: WasmPlugin[]
+  panels: UiPanel[]
+  onDecided: () => void
+}) {
   const [busy, setBusy] = useState<string | null>(null)
   const [confirmRemove, setConfirmRemove] = useState<string | null>(null)
 
@@ -171,19 +176,19 @@ function WasmPluginList({ plugins, onDecided }: { plugins: WasmPlugin[]; onDecid
             data-status={p.status}
           >
             <div className="wasm-plugin-head">
-              <span className="wasm-plugin-name">{p.name}</span>
+              <div className="wasm-plugin-heading">
+                <span className="wasm-plugin-name">{p.name}</span>
+                <div className="plugin-card-meta">
+                  <span>v{p.version}</span>
+                  <span>·</span>
+                  <SourceRepo repository={p.repository} />
+                </div>
+              </div>
               {badgeFor(p.status)}
             </div>
-            <ul className="wasm-plugin-hooks">
-              {p.hooks.map((h) => (
-                <li key={h} className="wasm-plugin-hook">
-                  <code>{h}</code>
-                  <span className="wasm-plugin-hook-desc">
-                    {HOOK_DESCRIPTIONS[h] ?? 'Custom hook'}
-                  </span>
-                </li>
-              ))}
-            </ul>
+            <p className="plugin-card-description">{p.description}</p>
+            <HookList hooks={p.hooks} title="Hooks" />
+            <PluginPanelList panels={panels.filter((panel) => panel.plugin === p.name)} />
             {p.status === 'init_failed' && p.error && (
               <p className="plugin-card-error">{p.error}</p>
             )}
@@ -238,15 +243,33 @@ function WasmPluginList({ plugins, onDecided }: { plugins: WasmPlugin[]; onDecid
 }
 
 /**
- * Lists the UI panels any loaded plugin contributes. Generic: the host
- * renders whatever panels a plugin declares and embeds the plugin-served
- * page in a sandboxed iframe — it knows nothing about a panel's contents.
+ * A plugin's source repository (a required manifest field), rendered as a
+ * link to the repo when it's an http(s) URL, or plain text otherwise. The
+ * label drops the scheme so it reads as `host/owner/repo`.
  */
-function PluginPanels({ panels }: { panels: UiPanel[] }) {
+function SourceRepo({ repository }: { repository: string }) {
+  const label = repository.replace(/^https?:\/\//, '').replace(/\/+$/, '')
+  if (!/^https?:\/\//.test(repository)) {
+    return <span className="wasm-plugin-repo">{label}</span>
+  }
+  return (
+    <a className="wasm-plugin-repo" href={repository} target="_blank" rel="noreferrer noopener">
+      {label}
+    </a>
+  )
+}
+
+/**
+ * The UI pages a single plugin contributes, rendered inside that plugin's
+ * row: one titled "Open" button per page, each embedding the plugin-served
+ * page in a sandboxed iframe. Generic — the host knows nothing about a
+ * page's contents. Renders nothing when the plugin contributes no pages.
+ */
+function PluginPanelList({ panels }: { panels: UiPanel[] }) {
   const [open, setOpen] = useState<UiPanel | null>(null)
+  if (panels.length === 0) return null
   return (
     <div className="plugin-panels" data-testid="plugin-panels">
-      <div className="plugin-panels-title">Plugin Pages</div>
       <ul className="plugin-panels-list">
         {panels.map((panel) => (
           <li key={`${panel.plugin}:${panel.id}`} className="plugin-panel-row">
@@ -313,7 +336,7 @@ function PluginCard({ plugin }: { plugin: PluginEntry }) {
         <p className="plugin-card-error">{plugin.status.message}</p>
       )}
       <div className="plugin-permissions">
-        <div className="plugin-permissions-title">Permissions</div>
+        <div className="plugin-section-title">Permissions</div>
         {plugin.permissions.length === 0 ? (
           <p className="plugin-permissions-empty">No permissions requested.</p>
         ) : (

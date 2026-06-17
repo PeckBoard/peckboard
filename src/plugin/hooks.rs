@@ -59,9 +59,23 @@ impl HookResult {
     }
 }
 
-/// Plugin manifest declaring which hooks a plugin handles.
+/// Plugin manifest declaring a plugin's identity and which hooks it
+/// handles. `description`, `version`, and `repository` are **required**
+/// metadata: every plugin must describe itself, state its version, and
+/// point at its source repository so the operator can see — on the plugin's
+/// own card — what a plugin is, what release is running, and where it came
+/// from. A manifest missing any of them (or leaving it blank) fails to load
+/// with a clear error rather than surfacing a blank, anonymous plugin.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PluginManifest {
+    /// Human-readable summary of what the plugin does. Required, non-empty.
+    pub description: String,
+    /// The plugin's own version string (e.g. `"0.2.0"`). Required,
+    /// non-empty. This is the plugin's self-reported version — distinct
+    /// from any version the registry advertises for it.
+    pub version: String,
+    /// URL of the plugin's source repository. Required, non-empty.
+    pub repository: String,
     pub hooks: Vec<String>,
     #[serde(default)]
     pub http_routes: Vec<String>,
@@ -174,4 +188,40 @@ pub enum PluginHttpOutcome {
     },
     /// No loaded plugin claims a route matching this request.
     NoRoute,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn manifest_parses_with_required_metadata() {
+        let m: PluginManifest = serde_json::from_str(
+            r#"{
+                "description": "Does a thing",
+                "version": "1.2.3",
+                "repository": "https://github.com/acme/plugin",
+                "hooks": ["http.request.before"]
+            }"#,
+        )
+        .expect("manifest with all required fields should parse");
+        assert_eq!(m.description, "Does a thing");
+        assert_eq!(m.version, "1.2.3");
+        assert_eq!(m.repository, "https://github.com/acme/plugin");
+        // Optional fields default when omitted.
+        assert!(m.http_routes.is_empty());
+        assert!(m.ui_panels.is_empty());
+    }
+
+    #[test]
+    fn manifest_rejects_missing_required_field() {
+        // No `description`/`version`/`repository` — required, so it must fail
+        // to deserialize rather than yield a blank, anonymous plugin.
+        let err = serde_json::from_str::<PluginManifest>(r#"{ "hooks": [] }"#)
+            .expect_err("manifest without required metadata must not parse");
+        assert!(
+            err.to_string().contains("description"),
+            "error should name the first missing field, got: {err}"
+        );
+    }
 }

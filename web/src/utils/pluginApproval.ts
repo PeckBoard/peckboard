@@ -3,33 +3,101 @@ import { authedFetch } from '../store/auth'
 /** A loaded WASM plugin and its approval status, from `/api/plugins`. */
 export interface WasmPlugin {
   name: string
+  /** Required identity metadata the plugin declares in its manifest. */
+  description: string
+  version: string
+  repository: string
   hooks: string[]
   status: 'pending' | 'approved' | 'denied' | 'init_failed'
   error?: string | null
 }
 
+/** Operator-facing title + description for one hook a plugin can request. */
+export interface HookMeta {
+  /** Short, human-readable name shown as the row's bold title. */
+  title: string
+  /** One-line gloss shown beneath the title. */
+  description: string
+}
+
 /**
- * Short, operator-facing gloss for each hook a plugin can request. Falls
- * back to a generic label for any hook not listed here, so a newly-added
- * hook is still shown to the operator (never silently hidden) before it
- * earns a description.
+ * Operator-facing title + description for each hook a plugin can request,
+ * presented the same way as permissions (a bold title over a muted
+ * description). Use {@link hookMeta} rather than indexing this directly:
+ * it falls back to the raw hook id as the title for any hook not listed
+ * here, so a newly-added hook is still shown to the operator (never
+ * silently hidden) before it earns a description.
  */
-export const HOOK_DESCRIPTIONS: Record<string, string> = {
-  'http.request.before': 'Serve public HTTP requests under /plugin-api/*',
-  'card.create.before': 'Inspect or veto cards as they are created',
-  'card.update.before': 'Inspect or veto card updates',
-  'card.priorities.list': 'Provide the list of card priorities',
-  'session.reference.resolve': 'Resolve @-references in session messages',
-  'mcp.tool.call.before': 'Inspect or veto MCP tool calls',
-  'mcp.tool.call.after': 'Observe MCP tool-call results',
-  'mcp.tool.call.failed': 'Observe failed MCP tool calls',
-  'mcp.token.issue.before': 'Inspect or veto MCP token issuance',
-  'mcp.token.issue.after': 'Observe issued MCP tokens',
-  'mcp.token.revoke.after': 'Observe revoked MCP tokens',
-  'mcp.config.write.before': 'Inspect or veto MCP config writes',
-  'mcp.config.write.after': 'Observe MCP config writes',
-  'mcp.config.delete.after': 'Observe MCP config deletions',
-  todo: 'Receive todo-list updates',
+export const HOOK_META: Record<string, HookMeta> = {
+  'http.request.before': {
+    title: 'Serve HTTP requests',
+    description: 'Serves public HTTP requests under /plugin-api/*',
+  },
+  'card.create.before': {
+    title: 'Inspect new cards',
+    description: 'Inspects or vetoes cards as they are created',
+  },
+  'card.update.before': {
+    title: 'Inspect card updates',
+    description: 'Inspects or vetoes card updates',
+  },
+  'card.priorities.list': {
+    title: 'Provide card priorities',
+    description: 'Provides the list of card priorities',
+  },
+  'session.reference.resolve': {
+    title: 'Resolve references',
+    description: 'Resolves @-references in session messages',
+  },
+  'mcp.tool.call.before': {
+    title: 'Gate MCP tool calls',
+    description: 'Inspects or vetoes MCP tool calls',
+  },
+  'mcp.tool.call.after': {
+    title: 'Observe MCP tool results',
+    description: 'Observes MCP tool-call results',
+  },
+  'mcp.tool.call.failed': {
+    title: 'Observe MCP tool failures',
+    description: 'Observes failed MCP tool calls',
+  },
+  'mcp.token.issue.before': {
+    title: 'Gate MCP token issuance',
+    description: 'Inspects or vetoes MCP token issuance',
+  },
+  'mcp.token.issue.after': {
+    title: 'Observe issued MCP tokens',
+    description: 'Observes issued MCP tokens',
+  },
+  'mcp.token.revoke.after': {
+    title: 'Observe MCP token revocations',
+    description: 'Observes revoked MCP tokens',
+  },
+  'mcp.config.write.before': {
+    title: 'Gate MCP config writes',
+    description: 'Inspects or vetoes MCP config writes',
+  },
+  'mcp.config.write.after': {
+    title: 'Observe MCP config writes',
+    description: 'Observes MCP config writes',
+  },
+  'mcp.config.delete.after': {
+    title: 'Observe MCP config deletions',
+    description: 'Observes MCP config deletions',
+  },
+  todo: {
+    title: 'Receive todo updates',
+    description: 'Receives todo-list updates',
+  },
+}
+
+/**
+ * Resolve a hook id to its operator-facing {@link HookMeta}. Unknown hooks
+ * fall back to the raw id as the title with a generic description, so they
+ * are still surfaced rather than hidden.
+ */
+export function hookMeta(hook: string): HookMeta {
+  return HOOK_META[hook] ?? { title: hook, description: 'Custom hook' }
 }
 
 /** POST an approve/deny decision for one plugin's declared hook set. */

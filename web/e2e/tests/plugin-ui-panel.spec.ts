@@ -39,13 +39,25 @@ test('plugin UI panel opens its plugin-served page in a sandboxed iframe', async
   expect(baseURL, 'baseURL configured').toBeTruthy()
   const token = await authenticate(request)
 
-  // Mock the catalog so it declares one plugin UI panel. The host renders
-  // whatever panels the catalog reports — it's generic.
+  // Mock the catalog so an approved plugin declares one UI panel. Panels
+  // render inside the row of the plugin that registered them, so the
+  // catalog must report that plugin too.
   await page.route('**/api/plugins', async (route) => {
     await route.fulfill({
       contentType: 'application/json',
       body: JSON.stringify({
         plugins: [],
+        wasm_plugins: [
+          {
+            name: 'demo',
+            description: 'Demo plugin',
+            version: '1.0.0',
+            repository: 'https://github.com/acme/demo',
+            hooks: ['http.request.before'],
+            status: 'approved',
+            error: null,
+          },
+        ],
         ui_panels: [{ plugin: 'demo', id: 'admin', title: 'Demo Admin', path: PANEL_PATH }],
       }),
     })
@@ -68,14 +80,23 @@ test('plugin UI panel opens its plugin-served page in a sandboxed iframe', async
 
   await expect(page.getByTestId('plugins-modal')).toBeVisible({ timeout: 10_000 })
 
-  // The declared panel is listed under "Plugin Pages".
-  const panels = page.getByTestId('plugin-panels')
-  await expect(panels).toBeVisible()
-  await expect(panels).toContainText('Plugin Pages')
-  await expect(panels).toContainText('Demo Admin')
+  // The declared panel is listed inside the registering plugin's own row,
+  // not a separate "Plugin Pages" section.
+  const row = page.getByTestId('wasm-plugin-demo')
+  await expect(row).toBeVisible()
+  // The card shows the plugin's manifest metadata: version, source repo
+  // (as a link), and description.
+  await expect(row).toContainText('v1.0.0')
+  await expect(row).toContainText('Demo plugin')
+  await expect(row.getByRole('link', { name: 'github.com/acme/demo' })).toHaveAttribute(
+    'href',
+    'https://github.com/acme/demo',
+  )
+  await expect(row.getByTestId('plugin-panels')).toContainText('Demo Admin')
+  await expect(page.getByText('Plugin Pages')).toHaveCount(0)
 
   // Opening it renders a sandboxed iframe pointed at the panel path.
-  await page.getByTestId('plugin-panel-open-demo-admin').click()
+  await row.getByTestId('plugin-panel-open-demo-admin').click()
   await expect(page.getByTestId('plugin-panel-modal')).toBeVisible()
 
   const frameEl = page.getByTestId('plugin-panel-frame')
