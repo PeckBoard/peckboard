@@ -162,4 +162,47 @@ impl Db {
         self.with_conn(move |conn| apply_plugin_settings_batch(conn, &plugin_id, &now, updates))
             .await
     }
+
+    /// Delete every stored setting for `plugin_id`. Used when a plugin is
+    /// uninstalled so a later reinstall of the same id starts from the
+    /// schema defaults instead of its old, possibly stale, values.
+    pub async fn delete_plugin_settings(&self, plugin_id: &str) -> anyhow::Result<()> {
+        let plugin_id = plugin_id.to_string();
+        self.with_conn(move |conn| {
+            diesel::delete(
+                plugin_settings::table.filter(plugin_settings::plugin_id.eq(&plugin_id)),
+            )
+            .execute(conn)?;
+            Ok(())
+        })
+        .await
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::db::Db;
+
+    #[tokio::test]
+    async fn delete_plugin_settings_clears_only_that_plugin() {
+        let db = Db::in_memory().unwrap();
+        db.set_plugin_setting("a", "k1", &serde_json::json!("v1"))
+            .await
+            .unwrap();
+        db.set_plugin_setting("a", "k2", &serde_json::json!("v2"))
+            .await
+            .unwrap();
+        db.set_plugin_setting("b", "k", &serde_json::json!("keep"))
+            .await
+            .unwrap();
+
+        // Removing plugin `a`'s settings drops both its rows...
+        db.delete_plugin_settings("a").await.unwrap();
+        assert!(db.list_plugin_settings("a").await.unwrap().is_empty());
+        // ...but leaves an unrelated plugin's settings untouched.
+        assert_eq!(db.list_plugin_settings("b").await.unwrap().len(), 1);
+
+        // Deleting again (no rows) is a no-op.
+        db.delete_plugin_settings("a").await.unwrap();
+    }
 }

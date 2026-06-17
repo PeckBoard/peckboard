@@ -44,6 +44,17 @@ export function decidePluginApproval(
   })
 }
 
+/**
+ * Uninstall an installed WASM plugin by id: shuts it down, deletes its
+ * `.wasm`, and clears its stored approval + settings server-side. Only
+ * installed plugins can be removed — built-in plugins have no such route.
+ */
+export function uninstallPlugin(pluginId: string): Promise<Response> {
+  return authedFetch(`/api/plugins/${encodeURIComponent(pluginId)}`, {
+    method: 'DELETE',
+  })
+}
+
 /** A plugin available in the registry, aggregated across repositories. */
 export interface RegistryPlugin {
   id: string

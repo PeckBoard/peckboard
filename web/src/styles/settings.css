@@ -574,3 +574,18 @@
   opacity: 0.6;
   cursor: default;
 }
+.plugin-approval-remove {
+  font-size: var(--text-sm);
+  padding: 7px 16px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--surface);
+  color: var(--danger, #c00);
+  cursor: pointer;
+  font-weight: 600;
+  margin-left: auto;
+}
+.plugin-approval-remove:disabled {
+  opacity: 0.6;
+  cursor: default;
+}

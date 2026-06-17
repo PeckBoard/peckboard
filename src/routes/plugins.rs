@@ -24,7 +24,7 @@ use axum::{
     http::StatusCode,
     middleware,
     response::IntoResponse,
-    routing::{get, post},
+    routing::{delete, get, post},
 };
 
 use crate::auth::middleware::require_auth;
@@ -39,6 +39,7 @@ pub fn router(state: Arc<AppState>) -> Router<Arc<AppState>> {
             "/api/plugins/{plugin_id}/settings",
             get(get_settings).put(update_settings),
         )
+        .route("/api/plugins/{plugin_id}", delete(uninstall_plugin))
         .route("/api/plugins/{plugin_id}/approval", post(decide_approval))
         .route(
             "/api/plugins/repositories",
@@ -135,6 +136,40 @@ async fn decide_approval(
         )),
         Err(e) => Err((
             StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({ "error": e.to_string() })),
+        )),
+    }
+}
+
+/// DELETE /api/plugins/:plugin_id — uninstall an installed WASM plugin.
+/// Shuts the plugin down, removes it from the live set, deletes its
+/// `.wasm` from disk, and clears its stored approval + settings so a later
+/// reinstall starts clean. Built-in plugins live in a separate registry and
+/// are never in the WASM set, so this only ever targets installed plugins —
+/// an id that doesn't match a loaded WASM plugin returns 404.
+async fn uninstall_plugin(
+    State(state): State<Arc<AppState>>,
+    Path(plugin_id): Path<String>,
+) -> impl IntoResponse {
+    match state.plugins.uninstall(&plugin_id).await {
+        Ok(true) => {
+            // Tell every connected client so any open Plugins view drops the
+            // plugin (reusing the generic "plugin state changed" signal).
+            state
+                .broadcaster
+                .broadcast(crate::ws::broadcaster::WsEvent {
+                    event_type: "plugin-approval".into(),
+                    session_id: String::new(),
+                    data: serde_json::json!({ "plugin": plugin_id, "status": "removed" }),
+                });
+            Ok(Json(serde_json::json!({ "removed": plugin_id })))
+        }
+        Ok(false) => Err((
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({ "error": "unknown plugin" })),
+        )),
+        Err(e) => Err((
+            StatusCode::BAD_REQUEST,
             Json(serde_json::json!({ "error": e.to_string() })),
         )),
     }

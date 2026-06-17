@@ -2,7 +2,13 @@ import { useCallback, useEffect, useState } from 'react'
 import { authedFetch } from '../store/auth'
 import PluginSettingsModal from './PluginSettingsModal'
 import PluginPanelModal from './PluginPanelModal'
-import { decidePluginApproval, HOOK_DESCRIPTIONS, type WasmPlugin } from '../utils/pluginApproval'
+import ConfirmDialog from './ConfirmDialog'
+import {
+  decidePluginApproval,
+  uninstallPlugin,
+  HOOK_DESCRIPTIONS,
+  type WasmPlugin,
+} from '../utils/pluginApproval'
 
 interface Permission {
   id: string
@@ -124,10 +130,19 @@ export default function PluginsSection({ onBrowseRegistry }: { onBrowseRegistry?
  */
 function WasmPluginList({ plugins, onDecided }: { plugins: WasmPlugin[]; onDecided: () => void }) {
   const [busy, setBusy] = useState<string | null>(null)
+  const [confirmRemove, setConfirmRemove] = useState<string | null>(null)
 
   const decide = (pluginId: string, decision: 'approve' | 'deny') => {
     setBusy(pluginId)
     decidePluginApproval(pluginId, decision)
+      .then(() => onDecided())
+      .finally(() => setBusy(null))
+  }
+
+  const remove = (pluginId: string) => {
+    setConfirmRemove(null)
+    setBusy(pluginId)
+    uninstallPlugin(pluginId)
       .then(() => onDecided())
       .finally(() => setBusy(null))
   }
@@ -195,10 +210,29 @@ function WasmPluginList({ plugins, onDecided }: { plugins: WasmPlugin[]; onDecid
                   {p.status === 'approved' ? 'Revoke' : 'Deny'}
                 </button>
               )}
+              <button
+                type="button"
+                className="plugin-approval-remove"
+                data-testid={`wasm-plugin-remove-${p.name}`}
+                disabled={busy === p.name}
+                onClick={() => setConfirmRemove(p.name)}
+              >
+                Remove
+              </button>
             </div>
           </li>
         ))}
       </ul>
+      {confirmRemove && (
+        <ConfirmDialog
+          title="Remove plugin"
+          message={`Remove the “${confirmRemove}” plugin? This shuts it down, deletes it from disk, and clears its approval and settings. You can reinstall it later from the registry.`}
+          confirmLabel="Remove"
+          danger
+          onConfirm={() => remove(confirmRemove)}
+          onCancel={() => setConfirmRemove(null)}
+        />
+      )}
     </div>
   )
 }

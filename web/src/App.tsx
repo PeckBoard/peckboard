@@ -1417,7 +1417,12 @@ function App() {
           onBrowseRegistry={() => openDropdownModal('plugin-registry')}
         />
       )}
-      {dropdownModal === 'plugin-registry' && <PluginRegistryModal onClose={closeDropdownModal} />}
+      {dropdownModal === 'plugin-registry' && (
+        <PluginRegistryModal
+          onClose={closeDropdownModal}
+          onBack={() => openDropdownModal('plugins')}
+        />
+      )}
       {openPanel && (
         <PluginPanelModal
           title={openPanel.title}

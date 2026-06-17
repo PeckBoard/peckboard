@@ -21,7 +21,14 @@ type Tab = 'plugins' | 'repositories'
  * One `/api/plugins/registry` call powers both tabs (it returns the
  * repositories with reachability AND the merged plugin list).
  */
-export default function PluginRegistryModal({ onClose }: { onClose: () => void }) {
+export default function PluginRegistryModal({
+  onClose,
+  onBack,
+}: {
+  onClose: () => void
+  /** Navigate back to the Plugins modal this page was opened from. */
+  onBack: () => void
+}) {
   const [tab, setTab] = useState<Tab>('plugins')
   const [data, setData] = useState<RegistryData | null>(null)
   const [error, setError] = useState<string | null>(null)
@@ -83,6 +90,14 @@ export default function PluginRegistryModal({ onClose }: { onClose: () => void }
       {data && tab === 'repositories' && <RepositoriesTab data={data} onChanged={load} />}
 
       <div className="form-actions">
+        <button
+          type="button"
+          className="btn-secondary"
+          data-testid="registry-back-to-plugins"
+          onClick={onBack}
+        >
+          ← Back to plugins
+        </button>
         <button type="button" className="btn-secondary" onClick={onClose}>
           Close
         </button>

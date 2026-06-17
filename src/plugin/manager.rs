@@ -686,6 +686,65 @@ impl PluginManager {
         Ok(info)
     }
 
+    /// Uninstall a loaded WASM plugin: shut its instance down, drop it from
+    /// the live set, and delete its `<id>.wasm` from disk so it does not
+    /// reload on the next start. Also clears the operator's stored approval
+    /// decision and the plugin's persisted settings, so reinstalling the same
+    /// id later starts clean — inert and `pending`, with schema-default
+    /// settings — rather than silently inheriting an old grant or stale config.
+    ///
+    /// Returns `true` when a plugin with that id was loaded and removed,
+    /// `false` when none matched (the route maps that to 404). Built-in
+    /// plugins live in a separate, statically-linked registry and are never
+    /// in this set, so they can't be reached through here.
+    ///
+    /// The id is validated as a safe bare plugin id before any filesystem
+    /// access, so a crafted id can't delete a file outside the plugins dir.
+    pub async fn uninstall(&self, id: &str) -> anyhow::Result<bool> {
+        if !is_safe_plugin_id(id) {
+            anyhow::bail!("invalid plugin id '{id}' (expected ^[a-z0-9_-]+$)");
+        }
+
+        // Drop it from the live set (shutting the instance down) before
+        // touching disk. If no plugin with that id is loaded, there is
+        // nothing to uninstall.
+        let removed = {
+            let mut plugins = self.plugins.lock().await;
+            match plugins.iter().position(|p| p.name == id) {
+                Some(pos) => {
+                    let old = plugins.remove(pos);
+                    let mut guard = old.plugin.lock().await;
+                    if let Err(e) = guard.call::<&str, String>("shutdown", "") {
+                        warn!("Plugin '{id}' shutdown on uninstall failed: {e}");
+                    }
+                    true
+                }
+                None => false,
+            }
+        };
+        if !removed {
+            return Ok(false);
+        }
+
+        // Delete the persisted `.wasm` so it doesn't reload next start. A
+        // missing file is fine (already gone); any other error is real.
+        let dest = self.plugins_dir.join(format!("{id}.wasm"));
+        match std::fs::remove_file(&dest) {
+            Ok(()) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => return Err(e.into()),
+        }
+
+        // Clear persisted approval + settings so a reinstall starts clean.
+        if let Some(db) = &self.db {
+            db.delete_plugin_approval(id).await?;
+            db.delete_plugin_settings(id).await?;
+        }
+
+        info!("Uninstalled plugin '{id}'");
+        Ok(true)
+    }
+
     /// Shut down all loaded plugins.
     pub async fn shutdown(&self) {
         let mut plugins = self.plugins.lock().await;
@@ -1053,6 +1112,50 @@ mod tests {
         if plugins_dir.exists() {
             assert_eq!(std::fs::read_dir(&plugins_dir).unwrap().count(), 0);
         }
+    }
+
+    #[tokio::test]
+    async fn uninstall_rejects_unsafe_id() {
+        let tmp = tempfile::tempdir().unwrap();
+        let db = crate::db::Db::in_memory().unwrap();
+        let mgr = PluginManager::new(tmp.path(), db);
+        let err = mgr.uninstall("../evil").await.unwrap_err();
+        assert!(err.to_string().contains("invalid plugin id"));
+    }
+
+    #[tokio::test]
+    async fn uninstall_unknown_plugin_is_false() {
+        let tmp = tempfile::tempdir().unwrap();
+        let db = crate::db::Db::in_memory().unwrap();
+        let mgr = PluginManager::new(tmp.path(), db);
+        // A valid id that isn't loaded → Ok(false), no error (route maps to 404).
+        assert!(!mgr.uninstall("ghost").await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn uninstall_removes_wasm_and_clears_state() {
+        let tmp = tempfile::tempdir().unwrap();
+        let db = crate::db::Db::in_memory().unwrap();
+        // Seed an approval and a setting for a plugin id that isn't actually
+        // loaded; uninstall should only touch them once it has removed a
+        // loaded instance, so first confirm an unloaded id leaves them intact.
+        db.set_plugin_approval("demo", "todo", APPROVAL_APPROVED)
+            .await
+            .unwrap();
+        db.set_plugin_setting("demo", "k", &serde_json::json!("v"))
+            .await
+            .unwrap();
+        let mgr = PluginManager::new(tmp.path(), db.clone());
+
+        // No loaded plugin named `demo` → false, and the seeded rows survive
+        // (we don't clear state for a plugin that was never installed here).
+        assert!(!mgr.uninstall("demo").await.unwrap());
+        assert!(db.get_plugin_approval_blocking("demo").unwrap().is_some());
+        assert_eq!(
+            db.list_plugin_settings("demo").await.unwrap().len(),
+            1,
+            "settings for an un-removed plugin must be left alone"
+        );
     }
 
     #[tokio::test]

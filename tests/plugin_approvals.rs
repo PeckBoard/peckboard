@@ -296,6 +296,55 @@ async fn install_unknown_repository_is_404() {
 }
 
 #[tokio::test]
+async fn uninstall_unknown_plugin_is_404() {
+    let (state, token) = build_state().await;
+    let app = router(state.clone()).with_state(state.clone());
+
+    // No WASM plugin named `ghost` is loaded, so DELETE 404s. (The full
+    // load → uninstall round trip needs a real `.wasm` and is covered by the
+    // Playwright e2e and the sibling plugin crate.)
+    let req = Request::builder()
+        .method("DELETE")
+        .uri("/api/plugins/ghost")
+        .header(header::AUTHORIZATION, format!("Bearer {token}"))
+        .body(Body::empty())
+        .unwrap();
+    let res = app.oneshot(req).await.unwrap();
+    assert_eq!(res.status(), StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn uninstall_rejects_unsafe_id() {
+    let (state, token) = build_state().await;
+    let app = router(state.clone()).with_state(state.clone());
+
+    // An id outside `^[a-z0-9_-]+$` (here: a dot) is rejected before any
+    // filesystem access → 400, not 404.
+    let req = Request::builder()
+        .method("DELETE")
+        .uri("/api/plugins/a.b")
+        .header(header::AUTHORIZATION, format!("Bearer {token}"))
+        .body(Body::empty())
+        .unwrap();
+    let res = app.oneshot(req).await.unwrap();
+    assert_eq!(res.status(), StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn uninstall_requires_auth() {
+    let (state, _token) = build_state().await;
+    let app = router(state.clone()).with_state(state.clone());
+
+    let req = Request::builder()
+        .method("DELETE")
+        .uri("/api/plugins/api")
+        .body(Body::empty())
+        .unwrap();
+    let res = app.oneshot(req).await.unwrap();
+    assert_eq!(res.status(), StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
 async fn registry_endpoints_require_auth() {
     let (state, _token) = build_state().await;
     let app = router(state.clone()).with_state(state.clone());

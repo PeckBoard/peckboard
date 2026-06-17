@@ -71,6 +71,19 @@ impl Db {
         })
         .await
     }
+
+    /// Drop the stored approval decision for `plugin_id`, if any. Used when a
+    /// plugin is uninstalled so a later reinstall of the same id starts
+    /// `pending` rather than inheriting the old grant. A no-op when there is
+    /// no row.
+    pub async fn delete_plugin_approval(&self, plugin_id: &str) -> anyhow::Result<()> {
+        let plugin_id = plugin_id.to_string();
+        self.with_conn(move |conn| {
+            diesel::delete(plugin_approvals::table.find(&plugin_id)).execute(conn)?;
+            Ok(())
+        })
+        .await
+    }
 }
 
 #[cfg(test)]
@@ -100,5 +113,21 @@ mod tests {
         let row = db.get_plugin_approval_blocking("api").unwrap().unwrap();
         assert_eq!(row.status, APPROVAL_DENIED);
         assert_eq!(row.hooks, "http.request.before");
+    }
+
+    #[tokio::test]
+    async fn delete_clears_the_row_and_is_idempotent() {
+        let db = Db::in_memory().unwrap();
+        db.set_plugin_approval("api", "todo", APPROVAL_APPROVED)
+            .await
+            .unwrap();
+        assert!(db.get_plugin_approval_blocking("api").unwrap().is_some());
+
+        // Deleting drops the stored decision so a reinstall starts pending.
+        db.delete_plugin_approval("api").await.unwrap();
+        assert!(db.get_plugin_approval_blocking("api").unwrap().is_none());
+
+        // Deleting again (no row) is a no-op, not an error.
+        db.delete_plugin_approval("api").await.unwrap();
     }
 }
