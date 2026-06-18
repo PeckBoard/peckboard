@@ -22,8 +22,8 @@ use serde_json::{Value, json};
 
 /// Path to the out-of-tree compiled plugin, or `None` if it hasn't been built.
 fn experts_wasm() -> Option<PathBuf> {
-    let p = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../peck-plugins/experts/target/wasm32-unknown-unknown/release/peckboard_experts_plugin.wasm");
+    let p =
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../peck-plugins/experts/dist/plugin.wasm");
     p.exists().then_some(p)
 }
 
