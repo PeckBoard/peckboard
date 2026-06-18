@@ -83,6 +83,9 @@ async fn all_repositories(state: &AppState) -> anyhow::Result<Vec<(String, Strin
 async fn list_plugins(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     let entries = state.builtin_plugins.list().await;
     let ui_panels = state.plugins.ui_panels().await;
+    // Left-rail entries declared by active WASM plugins (same validation +
+    // inert-plugin exclusion as ui_panels).
+    let sidebar_items = state.plugins.sidebar_items().await;
     // Loaded WASM plugins and their approval status. The UI uses any with
     // status `pending` to drive the approval prompt; `ui_panels` already
     // excludes panels from unapproved plugins.
@@ -90,6 +93,7 @@ async fn list_plugins(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     Json(serde_json::json!({
         "plugins": entries,
         "ui_panels": ui_panels,
+        "sidebar_items": sidebar_items,
         "wasm_plugins": wasm_plugins,
     }))
 }

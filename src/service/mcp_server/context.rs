@@ -29,10 +29,9 @@ pub trait ExpertDispatcher: Send + Sync {
     /// hand off to `SessionManager::send_or_queue`, which spawns a fresh agent
     /// run when the session is idle, or queues / injects mid-stream when it is
     /// already running. The caller is responsible for having already persisted
-    /// the matching `user` event (see
-    /// [`crate::service::delivery::persist_user_message`]); this only drives
-    /// the agent. A no-op seam in headless/test contexts (there is no
-    /// dispatcher to call), which is why persistence is kept separate.
+    /// the matching `user` event; this only drives the agent. A no-op seam in
+    /// headless/test contexts (there is no dispatcher to call), which is why
+    /// persistence is kept separate.
     fn resume_session<'a>(
         &'a self,
         session_id: &'a str,
@@ -58,20 +57,9 @@ pub struct ToolCallContext {
     pub db: Arc<Db>,
     pub broadcaster: Arc<crate::ws::broadcaster::Broadcaster>,
     pub provider_registry: Option<Arc<crate::provider::registry::ProviderRegistry>>,
-    /// Present only on real tool calls from the `mcp` route; `None` in unit
-    /// tests and contexts without a running app. When `None`, expert tools
-    /// still create + persist experts and their captured knowledge but skip
-    /// the live agent dispatch.
-    pub expert_dispatcher: Option<Arc<dyn ExpertDispatcher>>,
-    /// Data dir for durable exports (e.g. the PM decision log). `Some` on
-    /// real tool calls from the `mcp` route; when `None`, handlers skip the
-    /// export hook (the boot-time backfill regenerates it instead).
+    /// Data dir for durable exports. `Some` on real tool calls from the `mcp`
+    /// route; when `None`, handlers skip the export hook.
     pub data_dir: Option<std::path::PathBuf>,
-    /// Shared store of outstanding user authorizations to change recorded PM
-    /// decisions. MUST be the app-wide instance (`AppState`), not a fresh
-    /// one, or grants issued by the answer route would never reach the
-    /// `pm_record_decision` supersession check.
-    pub pm_authorizations: crate::service::pm_expert::PmUserAuthorizations,
 }
 
 /// Proof token: a project id verified against the current MCP token's
@@ -356,9 +344,7 @@ mod tests {
             db,
             broadcaster: crate::ws::broadcaster::Broadcaster::new(),
             provider_registry: None,
-            expert_dispatcher: None,
             data_dir: None,
-            pm_authorizations: Default::default(),
         }
     }
 
@@ -414,9 +400,7 @@ mod tests {
             db,
             broadcaster: crate::ws::broadcaster::Broadcaster::new(),
             provider_registry: None,
-            expert_dispatcher: None,
             data_dir: None,
-            pm_authorizations: Default::default(),
         };
         let err = ctx.scope_project(Some("p-2")).await.unwrap_err();
         // "not found", not "forbidden" — don't leak the project's existence.
@@ -485,11 +469,9 @@ mod tests {
             card_id: None,
             folder_id: "f1".into(),
             db,
-            expert_dispatcher: None,
             broadcaster: crate::ws::broadcaster::Broadcaster::new(),
             provider_registry: None,
             data_dir: None,
-            pm_authorizations: Default::default(),
         }
     }
 

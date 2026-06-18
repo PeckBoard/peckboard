@@ -64,7 +64,6 @@ async fn build_state() -> Arc<AppState> {
         run_auditor: peckboard::repeating::RunAuditor::new(),
         mcp_tokens: McpTokenRegistry::new(),
         push_service: PushService::new(&data_dir),
-        pm_authorizations: Default::default(),
     })
 }
 

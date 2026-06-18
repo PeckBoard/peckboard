@@ -10,8 +10,9 @@ use tracing::{error, info, warn};
 use serde::Serialize;
 
 use super::hooks::{
-    HTTP_REQUEST_HOOK, HookResult, PluginHttpOutcome, PluginHttpResponse, PluginManifest,
-    UiPanelEntry, Verdict,
+    HTTP_AUTHED_HOOK, HTTP_REQUEST_HOOK, HookResult, MCP_TOOL_INVOKE_HOOK, PluginHttpOutcome,
+    PluginHttpResponse, PluginManifest, PluginMcpToolEntry, SidebarItemEntry, UiPanelEntry,
+    Verdict,
 };
 use crate::db::Db;
 use crate::db::crud::{APPROVAL_APPROVED, APPROVAL_DENIED};
@@ -37,6 +38,7 @@ pub const ALLOWED_HOOKS: &[&str] = &[
     "card.create.before",
     "card.update.before",
     "card.priorities.list",
+    "http.request.authed",
     "http.request.before",
     "mcp.config.delete.after",
     "mcp.config.write.after",
@@ -47,8 +49,29 @@ pub const ALLOWED_HOOKS: &[&str] = &[
     "mcp.tool.call.after",
     "mcp.tool.call.before",
     "mcp.tool.call.failed",
+    "mcp.tool.invoke",
     "session.reference.resolve",
+    "session.user.answer",
     "todo",
+];
+
+/// The complete set of host capabilities a WASM plugin may request in its
+/// manifest `permissions`. Like [`ALLOWED_HOOKS`] this is pinned in code:
+/// a plugin declaring anything outside it fails to load, so only
+/// capabilities we've designed a host-function gate for can ever be granted.
+/// Each maps to one or more host functions in `src/plugin/host.rs` (or a
+/// manifest capability) that refuse unless the permission was granted.
+pub const ALLOWED_PERMISSIONS: &[&str] = &[
+    "broadcast",          // peckboard_broadcast — push a namespaced ws event
+    "contribute_sidebar", // declare sidebar_items
+    "data_store",         // peckboard_store_* — plugin-owned document store
+    "event_append",       // peckboard_append_event
+    "project_files_read", // peckboard_list_project_files / read_file
+    "provide_mcp_tools",  // declare mcp_tools (mcp.tool.invoke)
+    "session_dispatch",   // peckboard_dispatch_capture / resume_session
+    "session_read",       // peckboard_get_session / list_sessions
+    "session_write",      // peckboard_create_session / update_session
+    "user_authority",     // serve authenticated UI + act under the user (ui_routes)
 ];
 
 /// Whether an operator has approved the set of hooks a loaded plugin
@@ -93,6 +116,17 @@ struct LoadedPlugin {
     /// `Some(error)` if `init` was run (on approval) but failed; the plugin
     /// is then treated as inactive even though the hook set was approved.
     init_error: Option<String>,
+    /// Shared with this plugin's scoped host functions: the trusted context of
+    /// the `mcp.tool.invoke` currently running (or `None`). `invoke_mcp_tool`
+    /// sets it from the verified caller context right before calling `handle`
+    /// and clears it after, so the host functions re-derive scope server-side
+    /// rather than from plugin-supplied ids (see [`host::InvocationContext`]).
+    invocation: Arc<std::sync::RwLock<Option<super::host::InvocationContext>>>,
+    /// Shared with this plugin's scoped host functions: the trusted
+    /// authenticated-user context of an in-flight `http.request.authed` request
+    /// (or `None`). `serve_http_authed` sets it from the `require_auth`-verified
+    /// user around the dispatch and clears it after.
+    user: Arc<std::sync::RwLock<Option<super::host::UserContext>>>,
 }
 
 impl LoadedPlugin {
@@ -118,6 +152,7 @@ impl LoadedPlugin {
             version: self.manifest.version.clone(),
             repository: self.manifest.repository.clone(),
             hooks: self.manifest.hooks.clone(),
+            permissions: self.manifest.permissions.clone(),
             status: self.status_label(),
             error: self.init_error.clone(),
         }
@@ -170,6 +205,8 @@ pub struct WasmPluginInfo {
     pub repository: String,
     /// Every hook the plugin declares — what the operator is approving.
     pub hooks: Vec<String>,
+    /// Host permissions the plugin requests — also part of the approval.
+    pub permissions: Vec<String>,
     pub status: &'static str,
     /// Present only when `status` is `init_failed`.
     pub error: Option<String>,
@@ -187,6 +224,22 @@ fn canonical_hooks(hooks: &[String]) -> String {
     sorted.join("\n")
 }
 
+/// Canonical fingerprint of the full grant an operator approves: the hook set
+/// (see [`canonical_hooks`]) plus the requested permission set. Changing
+/// either re-prompts. **Backward compatible:** a plugin that requests no
+/// permissions produces exactly the old hooks-only string, so approvals made
+/// before permissions existed still match and don't force a re-prompt.
+fn canonical_grant(hooks: &[String], permissions: &[String]) -> String {
+    let h = canonical_hooks(hooks);
+    if permissions.is_empty() {
+        return h;
+    }
+    let mut perms: Vec<&str> = permissions.iter().map(|p| p.as_str()).collect();
+    perms.sort_unstable();
+    perms.dedup();
+    format!("{h}\u{1f}perm:{}", perms.join("\n"))
+}
+
 /// Whether `id` is a safe bare plugin id — usable verbatim as a `.wasm`
 /// filename with no path traversal or separators. Matches the registry's
 /// `^[a-z0-9_-]+$`, so an install can't write outside the plugins dir or
@@ -197,6 +250,68 @@ fn is_safe_plugin_id(id: &str) -> bool {
         && id
             .bytes()
             .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-' || b == b'_')
+}
+
+/// Whether `name` is a safe MCP tool name a plugin may declare: lowercase
+/// ascii, digits, and underscore, non-empty and bounded. Keeps plugin tool
+/// names in the same shape as core's (`spin_up_experts`, `list_cards`) so the
+/// merged `tools/list` is uniform and a crafted name can't inject odd
+/// characters into the protocol surface.
+fn is_safe_mcp_tool_name(name: &str) -> bool {
+    !name.is_empty()
+        && name.len() <= 64
+        && name
+            .bytes()
+            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_')
+}
+
+/// Validate a plugin's declared `mcp_tools` at load time. A plugin that
+/// declares any MCP tool MUST also declare the terminal `mcp.tool.invoke`
+/// hook (else core merges its tools into the worker `tools/list` but has no
+/// way to dispatch a call to them), and every tool needs a safe name, a
+/// non-empty description, and an object (or absent) input schema. Returns an
+/// error naming the first problem; `Ok(())` when there are no tools.
+fn validate_mcp_tools(name: &str, manifest: &PluginManifest) -> anyhow::Result<()> {
+    if manifest.mcp_tools.is_empty() {
+        return Ok(());
+    }
+    if !manifest.hooks.iter().any(|h| h == MCP_TOOL_INVOKE_HOOK) {
+        anyhow::bail!(
+            "plugin '{name}' declares mcp_tools but not the '{MCP_TOOL_INVOKE_HOOK}' \
+             hook needed to dispatch them",
+        );
+    }
+    if !manifest
+        .permissions
+        .iter()
+        .any(|p| p == "provide_mcp_tools")
+    {
+        anyhow::bail!(
+            "plugin '{name}' declares mcp_tools but not the 'provide_mcp_tools' permission",
+        );
+    }
+    for tool in &manifest.mcp_tools {
+        if !is_safe_mcp_tool_name(&tool.name) {
+            anyhow::bail!(
+                "plugin '{name}' declares mcp_tool with invalid name '{}' \
+                 (expected ^[a-z0-9_]+$)",
+                tool.name,
+            );
+        }
+        if tool.description.trim().is_empty() {
+            anyhow::bail!(
+                "plugin '{name}' mcp_tool '{}' has an empty description",
+                tool.name,
+            );
+        }
+        if !tool.input_schema.is_null() && !tool.input_schema.is_object() {
+            anyhow::bail!(
+                "plugin '{name}' mcp_tool '{}' input_schema must be a JSON object",
+                tool.name,
+            );
+        }
+    }
+    Ok(())
 }
 
 /// Run a plugin's `init` export with its per-plugin config block. Returns
@@ -216,6 +331,12 @@ pub struct PluginManager {
     /// functions (`src/plugin/host.rs`). `None` for `empty()` managers, which
     /// never load plugins and so never need it.
     db: Option<Db>,
+    /// Late-bound bridge to live-application capabilities (agent dispatch),
+    /// shared into every plugin's host functions and set once by `main.rs`
+    /// after `AppState` exists (see [`PluginManager::set_live_host`]). `None`
+    /// until then, so the live host functions refuse rather than act — and
+    /// always `None` for `empty()`/headless managers.
+    live: Arc<std::sync::RwLock<Option<Arc<dyn super::host::LiveHost>>>>,
 }
 
 impl PluginManager {
@@ -226,6 +347,17 @@ impl PluginManager {
             plugins: Arc::new(Mutex::new(Vec::new())),
             plugins_dir: data_dir.join("plugins"),
             db: Some(db),
+            live: Arc::new(std::sync::RwLock::new(None)),
+        }
+    }
+
+    /// Bind the live-application bridge used by the agent-dispatch host
+    /// functions. Called once from `main.rs` after `AppState` is built; every
+    /// already-loaded and future plugin sees it (the slot is shared). Idempotent
+    /// — a later call replaces the binding.
+    pub fn set_live_host(&self, live: Arc<dyn super::host::LiveHost>) {
+        if let Ok(mut guard) = self.live.write() {
+            *guard = Some(live);
         }
     }
 
@@ -239,6 +371,7 @@ impl PluginManager {
             plugins: Arc::new(Mutex::new(Vec::new())),
             plugins_dir: PathBuf::new(),
             db: None,
+            live: Arc::new(std::sync::RwLock::new(None)),
         }
     }
 
@@ -302,11 +435,36 @@ impl PluginManager {
         // Wire the data-access host functions into the plugin so it can read
         // and write Peckboard data through the sandbox. `empty()` managers have
         // no `Db` and never reach here, so they register nothing.
+        //
+        // The granted-permission set is shared with the host functions (which
+        // gate on it) but populated only after we parse the manifest below —
+        // host functions are wired before the manifest is known. It stays
+        // empty (so gated functions deny) until then; since a plugin can't run
+        // any code before `init`/`handle`, and those run only after approval,
+        // the set always reflects the declared permissions when a host
+        // function actually executes.
+        let granted_permissions: Arc<std::sync::RwLock<std::collections::HashSet<String>>> =
+            Arc::new(std::sync::RwLock::new(std::collections::HashSet::new()));
+        // Shared with the plugin's scoped host functions; `invoke_mcp_tool`
+        // populates it per-call (see `LoadedPlugin::invocation`).
+        let invocation: Arc<std::sync::RwLock<Option<super::host::InvocationContext>>> =
+            Arc::new(std::sync::RwLock::new(None));
+        // Shared with the scoped host functions; `serve_http_authed` populates it
+        // per authenticated request (see `LoadedPlugin::user`).
+        let user: Arc<std::sync::RwLock<Option<super::host::UserContext>>> =
+            Arc::new(std::sync::RwLock::new(None));
         let functions = match &self.db {
             // `name` is the plugin's id (its `.wasm` file stem), the same id
             // its `plugin_settings` rows are keyed by — so the self-storage
             // host functions stay scoped to this plugin's own namespace.
-            Some(db) => super::host::host_functions(db, &name),
+            Some(db) => super::host::host_functions(
+                db,
+                &name,
+                granted_permissions.clone(),
+                invocation.clone(),
+                self.live.clone(),
+                user.clone(),
+            ),
             None => Vec::new(),
         };
         let mut plugin = Plugin::new(manifest, functions, true)?;
@@ -345,11 +503,72 @@ impl PluginManager {
             ));
         }
 
+        // Reject permissions outside the pinned allowlist — same rationale as
+        // the hook allowlist: only capabilities core has a designed gate for
+        // can ever be requested, let alone granted.
+        if let Some(bad) = plugin_manifest
+            .permissions
+            .iter()
+            .find(|p| !ALLOWED_PERMISSIONS.contains(&p.as_str()))
+        {
+            return Err(anyhow::anyhow!(
+                "plugin '{name}' requests unknown permission '{bad}'; \
+                 see ALLOWED_PERMISSIONS in src/plugin/manager.rs",
+            ));
+        }
+
+        // Now that the (validated) permission set is known, hand it to the
+        // host functions, which gate on it. Safe to populate before approval:
+        // gated functions only run during `init`/`handle`, which run only once
+        // approved — and approval grants exactly this set.
+        if let Ok(mut guard) = granted_permissions.write() {
+            *guard = plugin_manifest.permissions.iter().cloned().collect();
+        }
+
+        validate_mcp_tools(&name, &plugin_manifest)?;
+
+        // A plugin contributing sidebar items must hold `contribute_sidebar`;
+        // per-item path validity is enforced when the catalog is built
+        // (`sidebar_items()`), mirroring `ui_panels()`.
+        if !plugin_manifest.sidebar_items.is_empty()
+            && !plugin_manifest
+                .permissions
+                .iter()
+                .any(|p| p == "contribute_sidebar")
+        {
+            return Err(anyhow::anyhow!(
+                "plugin '{name}' declares sidebar_items but not the \
+                 'contribute_sidebar' permission",
+            ));
+        }
+
+        // Authenticated UI routes act under the logged-in user's authority, so
+        // they require both the `user_authority` permission AND the
+        // `http.request.authed` hook (the dispatch path that serves them).
+        if !plugin_manifest.ui_routes.is_empty() {
+            if !plugin_manifest
+                .permissions
+                .iter()
+                .any(|p| p == "user_authority")
+            {
+                return Err(anyhow::anyhow!(
+                    "plugin '{name}' declares ui_routes but not the \
+                     'user_authority' permission",
+                ));
+            }
+            if !plugin_manifest.hooks.iter().any(|h| h == HTTP_AUTHED_HOOK) {
+                return Err(anyhow::anyhow!(
+                    "plugin '{name}' declares ui_routes but not the \
+                     '{HTTP_AUTHED_HOOK}' hook",
+                ));
+            }
+        }
+
         // Resolve the operator's stored approval for this exact hook set.
         // A plugin is inert until approved (the user requires permission
         // for every hook), so a missing decision — or one made against a
         // different hook set — leaves it `Pending`, not active.
-        let hooks_canonical = canonical_hooks(&plugin_manifest.hooks);
+        let hooks_canonical = canonical_grant(&plugin_manifest.hooks, &plugin_manifest.permissions);
         let stored = self
             .db
             .as_ref()
@@ -386,6 +605,8 @@ impl PluginManager {
             hooks_canonical,
             approval,
             init_error,
+            invocation,
+            user,
         })
     }
 
@@ -453,6 +674,53 @@ impl PluginManager {
         }
 
         HookResult::Allowed(current_payload)
+    }
+
+    /// Fire a **notification** hook under the authority of an authenticated
+    /// user. Unlike [`dispatch`], this lands a trusted [`super::host::UserContext`]
+    /// for the duration of each plugin's `handle` call (exactly as
+    /// [`serve_http_authed`] does), so the handler may call the scoped host
+    /// functions on the user's behalf — gated by the `user_authority`
+    /// permission. The verdict is ignored: the triggering operation has already
+    /// happened, so a plugin cannot cancel it; it can only react (e.g. feed a
+    /// Q&A to its question expert on [`super::hooks::USER_ANSWER_HOOK`]). Plugin
+    /// failures are logged and never propagate to the caller.
+    ///
+    /// [`serve_http_authed`]: PluginManager::serve_http_authed
+    pub async fn dispatch_authed(&self, hook: &str, user_id: &str, payload: serde_json::Value) {
+        type AuthedTarget = (
+            String,
+            Arc<Mutex<Plugin>>,
+            Arc<std::sync::RwLock<Option<super::host::UserContext>>>,
+        );
+        let targets: Vec<AuthedTarget> = {
+            let plugins = self.plugins.lock().await;
+            plugins
+                .iter()
+                .filter(|p| p.is_active() && p.manifest.hooks.iter().any(|h| h == hook))
+                .map(|p| (p.name.clone(), p.plugin.clone(), p.user.clone()))
+                .collect()
+        };
+
+        let call_input = serde_json::json!({ "hook": hook, "payload": payload }).to_string();
+        for (name, plugin, user_slot) in targets {
+            // Land the trusted user context for exactly this `handle` call.
+            if let Ok(mut slot) = user_slot.write() {
+                *slot = Some(super::host::UserContext {
+                    user_id: user_id.to_string(),
+                });
+            }
+            let result = {
+                let mut guard = plugin.lock().await;
+                guard.call::<String, String>("handle", call_input.clone())
+            };
+            if let Ok(mut slot) = user_slot.write() {
+                *slot = None;
+            }
+            if let Err(e) = result {
+                warn!("Plugin '{name}' failed on authed hook '{hook}': {e}");
+            }
+        }
     }
 
     /// Dispatch a public HTTP request to whichever loaded plugin owns
@@ -564,6 +832,103 @@ impl PluginManager {
         }
 
         // A plugin claimed the route but none produced a usable response.
+        error_outcome(500, "plugin did not produce a response")
+    }
+
+    /// Dispatch an **authenticated** HTTP request (the `require_auth`-guarded
+    /// `/api/plugin-ui/*` surface, see `src/routes/plugin_ui.rs`) to whichever
+    /// plugin owns the route via its manifest `ui_routes` + the
+    /// [`HTTP_AUTHED_HOOK`]. Unlike [`serve_http`], the request runs on behalf
+    /// of the verified `user_id`: core sets a trusted user-authority context in
+    /// the plugin's host state for exactly the span of the `handle` call (so the
+    /// plugin's scoped host functions may act under the user), and the user is
+    /// echoed in the payload. The context is cleared the instant `handle`
+    /// returns — it must never outlive its request.
+    pub async fn serve_http_authed(
+        &self,
+        user_id: &str,
+        method: &str,
+        path: &str,
+        query: &str,
+        headers: &BTreeMap<String, String>,
+        body: &str,
+    ) -> PluginHttpOutcome {
+        type AuthedTarget = (
+            String,
+            Arc<Mutex<Plugin>>,
+            BTreeMap<String, String>,
+            Arc<std::sync::RwLock<Option<super::host::UserContext>>>,
+        );
+        let targets: Vec<AuthedTarget> = {
+            let plugins = self.plugins.lock().await;
+            plugins
+                .iter()
+                .filter(|p| p.is_active() && p.manifest.hooks.iter().any(|h| h == HTTP_AUTHED_HOOK))
+                .filter_map(|p| {
+                    p.manifest
+                        .ui_routes
+                        .iter()
+                        .find_map(|route| match_http_route(route, method, path))
+                        .map(|params| (p.name.clone(), p.plugin.clone(), params, p.user.clone()))
+                })
+                .collect()
+        };
+
+        if targets.is_empty() {
+            return PluginHttpOutcome::NoRoute;
+        }
+
+        let payload = serde_json::json!({
+            "method": method,
+            "path": path,
+            "query": query,
+            "headers": headers,
+            "body": body,
+            "user": { "id": user_id },
+        });
+
+        for (name, plugin, params, user_slot) in targets {
+            let mut req_payload = payload.clone();
+            req_payload["params"] = serde_json::json!(params);
+            let call_input = serde_json::json!({
+                "hook": HTTP_AUTHED_HOOK,
+                "payload": req_payload,
+            });
+
+            // Land the trusted user context for exactly this `handle` call.
+            if let Ok(mut slot) = user_slot.write() {
+                *slot = Some(super::host::UserContext {
+                    user_id: user_id.to_string(),
+                });
+            }
+            let result = {
+                let mut guard = plugin.lock().await;
+                guard.call::<String, String>("handle", call_input.to_string())
+            };
+            if let Ok(mut slot) = user_slot.write() {
+                *slot = None;
+            }
+
+            match result {
+                Ok(output) => match serde_json::from_str::<Verdict>(&output) {
+                    Ok(Verdict::Allow { payload }) => {
+                        return verdict_to_outcome(payload.unwrap_or_default(), &name);
+                    }
+                    Ok(Verdict::Cancel { reason }) => {
+                        info!("Plugin '{name}' cancelled authed route '{method} {path}': {reason}");
+                        return error_outcome(500, &reason);
+                    }
+                    Ok(Verdict::Skip) => {}
+                    Err(e) => {
+                        warn!("Plugin '{name}' returned invalid authed verdict for '{path}': {e}");
+                    }
+                },
+                Err(e) => {
+                    warn!("Plugin '{name}' failed serving authed route '{path}': {e}");
+                }
+            }
+        }
+
         error_outcome(500, "plugin did not produce a response")
     }
 
@@ -837,6 +1202,165 @@ impl PluginManager {
             }
         }
         out
+    }
+
+    /// Every left-rail entry declared by an active plugin, for the
+    /// `/api/plugins` catalog. Inert plugins contribute nothing. An entry
+    /// with an empty id/label or a path that escapes the plugin-owned
+    /// `/plugin-api/` prefix is dropped with a warning — same safety rule as
+    /// [`Self::ui_panels`], so a plugin can't aim the rail button off-origin.
+    pub async fn sidebar_items(&self) -> Vec<SidebarItemEntry> {
+        let plugins = self.plugins.lock().await;
+        let mut out = Vec::new();
+        for loaded in plugins.iter() {
+            if !loaded.is_active() {
+                continue;
+            }
+            for item in &loaded.manifest.sidebar_items {
+                if item.id.trim().is_empty() || item.label.trim().is_empty() {
+                    warn!(
+                        "Plugin '{}' declares a sidebar_item with an empty id/label; skipping",
+                        loaded.name
+                    );
+                    continue;
+                }
+                if !is_valid_panel_path(&item.path) {
+                    warn!(
+                        "Plugin '{}' sidebar_item '{}' has invalid path '{}' (must be an \
+                         absolute /plugin-api/ path); skipping",
+                        loaded.name, item.id, item.path
+                    );
+                    continue;
+                }
+                out.push(SidebarItemEntry {
+                    plugin: loaded.name.clone(),
+                    id: item.id.clone(),
+                    label: item.label.clone(),
+                    icon: item.icon.clone(),
+                    path: item.path.clone(),
+                });
+            }
+        }
+        out
+    }
+
+    /// Every MCP tool declared by an active plugin, for merging into the
+    /// worker `tools/list`. Inert plugins contribute nothing (their tools
+    /// wouldn't dispatch anyway). De-duplicated across plugins by name —
+    /// the first active plugin to claim a name wins; a later collision is
+    /// dropped with a warning so two plugins can't both shadow one tool
+    /// name. (Collisions with *core* tool names are resolved by the caller,
+    /// which knows the core set — see `src/routes/mcp.rs`.)
+    pub async fn mcp_tools(&self) -> Vec<PluginMcpToolEntry> {
+        let plugins = self.plugins.lock().await;
+        let mut out: Vec<PluginMcpToolEntry> = Vec::new();
+        for loaded in plugins.iter() {
+            if !loaded.is_active() {
+                continue;
+            }
+            for tool in &loaded.manifest.mcp_tools {
+                if out.iter().any(|t| t.name == tool.name) {
+                    warn!(
+                        "Plugin '{}' mcp_tool '{}' collides with an already-registered \
+                         plugin tool; dropping",
+                        loaded.name, tool.name
+                    );
+                    continue;
+                }
+                out.push(PluginMcpToolEntry {
+                    plugin: loaded.name.clone(),
+                    name: tool.name.clone(),
+                    description: tool.description.clone(),
+                    input_schema: tool.input_schema.clone(),
+                });
+            }
+        }
+        out
+    }
+
+    /// Dispatch an MCP tool call to the active plugin that declared the tool,
+    /// returning the tool result. Mirrors [`Self::serve_http`]: the matched
+    /// plugin OWNS the call via the terminal [`MCP_TOOL_INVOKE_HOOK`] hook,
+    /// receiving `{tool, arguments, context}` and returning the result as the
+    /// payload of a [`Verdict::Allow`].
+    ///
+    /// Returns:
+    /// - `None` if no active plugin declares `tool_name` — the caller falls
+    ///   back to core's own tool dispatch.
+    /// - `Some(Ok(result))` on a plugin `Allow` (its payload, or `null`).
+    /// - `Some(Err(_))` on a plugin `Cancel`, an invalid verdict, or a call
+    ///   failure — the caller maps it to a tool error.
+    ///
+    /// `context` carries the *serializable* slice of the caller's
+    /// `ToolCallContext` (session/project/card/folder ids); heavy handles
+    /// stay in core and a plugin acts back through host functions.
+    pub async fn invoke_mcp_tool(
+        &self,
+        tool_name: &str,
+        arguments: serde_json::Value,
+        context: serde_json::Value,
+    ) -> Option<anyhow::Result<serde_json::Value>> {
+        // Find the single active plugin that declared this tool. Hold the
+        // outer lock only long enough to clone its handle.
+        type InvocationSlot = Arc<std::sync::RwLock<Option<super::host::InvocationContext>>>;
+        let target: Option<(String, Arc<Mutex<Plugin>>, InvocationSlot)> = {
+            let plugins = self.plugins.lock().await;
+            plugins
+                .iter()
+                .find(|p| p.is_active() && p.manifest.mcp_tools.iter().any(|t| t.name == tool_name))
+                .map(|p| (p.name.clone(), p.plugin.clone(), p.invocation.clone()))
+        };
+        let (name, plugin, invocation) = target?;
+
+        let call_input = serde_json::json!({
+            "hook": MCP_TOOL_INVOKE_HOOK,
+            "payload": {
+                "tool": tool_name,
+                "arguments": arguments,
+                "context": &context,
+            },
+        });
+
+        // Land the *trusted* caller context where this plugin's scoped host
+        // functions can read it, for exactly the span of the `handle` call.
+        // It comes from `context` — built by `routes/mcp.rs` from the verified
+        // `ToolCallContext` — so the plugin cannot forge the session/folder it
+        // is treated as calling from. A malformed context (shouldn't happen)
+        // leaves the slot `None`, so scoped functions safely refuse.
+        if let Ok(parsed) = serde_json::from_value::<super::host::InvocationContext>(context)
+            && let Ok(mut slot) = invocation.write()
+        {
+            *slot = Some(parsed);
+        }
+
+        let result = {
+            let mut guard = plugin.lock().await;
+            guard.call::<String, String>("handle", call_input.to_string())
+        };
+
+        // Clear the trusted context the moment `handle` returns — it must never
+        // outlive its dispatch (the next tool call sets its own).
+        if let Ok(mut slot) = invocation.write() {
+            *slot = None;
+        }
+
+        Some(match result {
+            Ok(output) => match serde_json::from_str::<Verdict>(&output) {
+                Ok(Verdict::Allow { payload }) => Ok(payload.unwrap_or(serde_json::Value::Null)),
+                Ok(Verdict::Cancel { reason }) => Err(anyhow::anyhow!(
+                    "plugin '{name}' cancelled tool call: {reason}"
+                )),
+                Ok(Verdict::Skip) => Err(anyhow::anyhow!(
+                    "plugin '{name}' skipped tool '{tool_name}'"
+                )),
+                Err(e) => Err(anyhow::anyhow!(
+                    "plugin '{name}' returned an invalid verdict for tool '{tool_name}': {e}"
+                )),
+            },
+            Err(e) => Err(anyhow::anyhow!(
+                "plugin '{name}' failed to handle tool '{tool_name}': {e}"
+            )),
+        })
     }
 }
 
@@ -1141,6 +1665,123 @@ mod tests {
         let mgr = PluginManager::new(tmp.path(), db);
         // A valid id that isn't loaded → Ok(false), no error (route maps to 404).
         assert!(!mgr.uninstall("ghost").await.unwrap());
+    }
+
+    // ── Plugin-provided MCP tools (Phase A) ─────────────────────────────
+
+    fn manifest_with(
+        hooks: &[&str],
+        tools: Vec<super::super::hooks::PluginMcpTool>,
+    ) -> PluginManifest {
+        // Give it the provide_mcp_tools permission whenever it declares tools,
+        // so the tool-shape tests aren't tripped by the permission check.
+        let permissions = if tools.is_empty() {
+            Vec::new()
+        } else {
+            vec!["provide_mcp_tools".to_string()]
+        };
+        PluginManifest {
+            description: "d".into(),
+            version: "1".into(),
+            repository: "https://example.test/x".into(),
+            hooks: hooks.iter().map(|s| s.to_string()).collect(),
+            http_routes: Vec::new(),
+            ui_routes: Vec::new(),
+            ui_panels: Vec::new(),
+            mcp_tools: tools,
+            sidebar_items: Vec::new(),
+            permissions,
+        }
+    }
+
+    fn tool(name: &str) -> super::super::hooks::PluginMcpTool {
+        super::super::hooks::PluginMcpTool {
+            name: name.into(),
+            description: "does a thing".into(),
+            input_schema: serde_json::json!({ "type": "object" }),
+        }
+    }
+
+    #[test]
+    fn validate_mcp_tools_ok_with_invoke_hook() {
+        let m = manifest_with(&["mcp.tool.invoke"], vec![tool("do_thing")]);
+        assert!(validate_mcp_tools("p", &m).is_ok());
+        // No tools at all is always fine, hook or not.
+        assert!(validate_mcp_tools("p", &manifest_with(&[], vec![])).is_ok());
+    }
+
+    #[test]
+    fn validate_mcp_tools_requires_invoke_hook() {
+        let m = manifest_with(&["http.request.before"], vec![tool("do_thing")]);
+        let err = validate_mcp_tools("p", &m).unwrap_err().to_string();
+        assert!(err.contains("mcp.tool.invoke"), "got: {err}");
+    }
+
+    #[test]
+    fn validate_mcp_tools_rejects_bad_name_and_empty_desc() {
+        let bad_name = manifest_with(&["mcp.tool.invoke"], vec![tool("Bad-Name")]);
+        assert!(
+            validate_mcp_tools("p", &bad_name)
+                .unwrap_err()
+                .to_string()
+                .contains("invalid name")
+        );
+        let mut blank = tool("ok_name");
+        blank.description = "  ".into();
+        let m = manifest_with(&["mcp.tool.invoke"], vec![blank]);
+        assert!(
+            validate_mcp_tools("p", &m)
+                .unwrap_err()
+                .to_string()
+                .contains("empty description")
+        );
+    }
+
+    #[test]
+    fn validate_mcp_tools_requires_provide_permission() {
+        // Tools + invoke hook but no `provide_mcp_tools` permission → reject.
+        let mut m = manifest_with(&["mcp.tool.invoke"], vec![tool("do_thing")]);
+        m.permissions.clear();
+        let err = validate_mcp_tools("p", &m).unwrap_err().to_string();
+        assert!(err.contains("provide_mcp_tools"), "got: {err}");
+    }
+
+    #[test]
+    fn canonical_grant_is_backward_compatible_and_permission_sensitive() {
+        let hooks = vec!["http.request.before".to_string()];
+        // No permissions → identical to the old hooks-only canonical, so
+        // pre-permissions approvals still match.
+        assert_eq!(canonical_grant(&hooks, &[]), canonical_hooks(&hooks));
+        // Adding a permission changes the fingerprint (forces a re-prompt)...
+        let with_perm = canonical_grant(&hooks, &["session_read".to_string()]);
+        assert_ne!(with_perm, canonical_hooks(&hooks));
+        // ...but is order/dup independent.
+        assert_eq!(
+            canonical_grant(&hooks, &["session_read".into(), "broadcast".into()]),
+            canonical_grant(
+                &hooks,
+                &[
+                    "broadcast".into(),
+                    "session_read".into(),
+                    "broadcast".into()
+                ]
+            ),
+        );
+    }
+
+    #[tokio::test]
+    async fn invoke_mcp_tool_unowned_is_none() {
+        let tmp = tempfile::tempdir().unwrap();
+        let db = crate::db::Db::in_memory().unwrap();
+        let mgr = PluginManager::new(tmp.path(), db);
+        // No plugins loaded → no plugin owns the tool → None (caller falls
+        // back to core dispatch). And the catalog of plugin tools is empty.
+        assert!(
+            mgr.invoke_mcp_tool("anything", serde_json::json!({}), serde_json::json!({}))
+                .await
+                .is_none()
+        );
+        assert!(mgr.mcp_tools().await.is_empty());
     }
 
     #[tokio::test]

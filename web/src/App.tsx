@@ -73,6 +73,19 @@ interface UiPanel {
   path: string
 }
 
+/** A left-rail entry a plugin contributes (from the `/api/plugins` catalog).
+ *  Generic: the host renders a rail button and opens the plugin-served `path`
+ *  in the same sandboxed iframe panels use. Mirrors the backend
+ *  `SidebarItemEntry`. The `icon` (optional inline SVG) is not yet rendered —
+ *  a generic icon is shown until icon sanitization is designed. */
+interface SidebarItem {
+  plugin: string
+  id: string
+  label: string
+  icon?: string | null
+  path: string
+}
+
 /** Sub-view for an active session or project — 'chat' (the default
  *  ChatView / KanbanBoard) or 'todos' (the dedicated *TodosView reachable at
  *  /{sessions,projects}/{id}/todos). */
@@ -266,7 +279,7 @@ function App() {
   // Resolve the open expert so the detail surface can branch on kind:
   // the PM expert renders a Q&A form, every other kind keeps ChatView.
   const activeExpert = useMemo(
-    () => (activeExpertId ? (experts.find((e) => e.id === activeExpertId) ?? null) : null),
+    () => (activeExpertId ? (experts.find((e) => e.session_id === activeExpertId) ?? null) : null),
     [experts, activeExpertId],
   )
   const [showNewSession, setShowNewSession] = useState(false)
@@ -285,6 +298,8 @@ function App() {
   const [dropdownModal, setDropdownModal] = useState<DropdownModal>(initialRoute.modal)
   // Plugin-contributed user-menu links (generic; populated from /api/plugins).
   const [uiPanels, setUiPanels] = useState<UiPanel[]>([])
+  // Plugin-contributed left-rail entries (generic; same /api/plugins catalog).
+  const [sidebarItems, setSidebarItems] = useState<SidebarItem[]>([])
   const [openPanel, setOpenPanel] = useState<UiPanel | null>(null)
   const userMenuRef = useRef<HTMLDivElement | null>(null)
 
@@ -297,11 +312,16 @@ function App() {
     let cancelled = false
     authedFetch('/api/plugins')
       .then((res) => (res.ok ? res.json() : Promise.reject(new Error(`HTTP ${res.status}`))))
-      .then((data: { ui_panels?: UiPanel[] }) => {
-        if (!cancelled) setUiPanels(data.ui_panels ?? [])
+      .then((data: { ui_panels?: UiPanel[]; sidebar_items?: SidebarItem[] }) => {
+        if (cancelled) return
+        setUiPanels(data.ui_panels ?? [])
+        setSidebarItems(data.sidebar_items ?? [])
       })
       .catch(() => {
-        if (!cancelled) setUiPanels([])
+        if (!cancelled) {
+          setUiPanels([])
+          setSidebarItems([])
+        }
       })
     return () => {
       cancelled = true
@@ -1069,6 +1089,40 @@ function App() {
               <rect x="13" y="7" width="3" height="10" />
             </svg>
           </button>
+          {/* Plugin-contributed rail entries (generic; from /api/plugins).
+              Each opens its plugin-served page in the same sandboxed iframe
+              panels use. A generic icon is shown until icon sanitization is
+              designed (the manifest `icon` is intentionally not injected). */}
+          {sidebarItems.map((item) => (
+            <button
+              key={`${item.plugin}:${item.id}`}
+              className="rail-btn"
+              data-testid={`plugin-sidebar-${item.plugin}-${item.id}`}
+              onClick={() =>
+                setOpenPanel({
+                  plugin: item.plugin,
+                  id: item.id,
+                  title: item.label,
+                  path: item.path,
+                })
+              }
+              title={item.label}
+              aria-label={item.label}
+            >
+              <svg
+                width="18"
+                height="18"
+                viewBox="0 0 24 24"
+                fill="none"
+                stroke="currentColor"
+                strokeWidth="2"
+                strokeLinecap="round"
+                strokeLinejoin="round"
+              >
+                <path d="M4 7h4V4a2 2 0 0 1 2-2h0a2 2 0 0 1 2 2v3h4a1 1 0 0 1 1 1v4h-3a2 2 0 0 0 0 4h3v4a1 1 0 0 1-1 1H4a1 1 0 0 1-1-1V8a1 1 0 0 1 1-1z" />
+              </svg>
+            </button>
+          ))}
           <div className="rail-separator" aria-hidden="true" />
           <button
             className={`rail-btn ${view === 'folders' ? 'active' : ''}`}

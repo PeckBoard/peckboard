@@ -525,6 +525,35 @@ pub struct PluginSettingRow {
     pub updated_at: String,
 }
 
+// ── Plugin document store + session metadata (generic plugin storage) ──
+
+/// One row in a plugin's document store (`plugin_data`). `data` is opaque
+/// per-plugin JSON keyed by `(plugin_id, collection, key)`; core never
+/// queries into it. Written via the `data_store`-gated host functions.
+#[derive(Queryable, Selectable, Insertable, Serialize, Debug, Clone)]
+#[diesel(table_name = plugin_data)]
+pub struct PluginDataRow {
+    pub plugin_id: String,
+    pub collection: String,
+    pub key: String,
+    pub data: String,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+/// Plugin-namespaced metadata attached to a core session
+/// (`plugin_session_meta`). One opaque JSON blob per `(session_id,
+/// plugin_id)`, so "what is an expert" lives in the plugin, not core
+/// columns. Written via the `session_write`-gated host functions.
+#[derive(Queryable, Selectable, Insertable, Serialize, Debug, Clone)]
+#[diesel(table_name = plugin_session_meta)]
+pub struct PluginSessionMetaRow {
+    pub session_id: String,
+    pub plugin_id: String,
+    pub data: String,
+    pub updated_at: String,
+}
+
 // ── Plugin approvals ─────────────────────────────────────────────────
 
 /// One operator decision on a WASM plugin's declared hook set. `hooks`

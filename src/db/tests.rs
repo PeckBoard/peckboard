@@ -196,62 +196,12 @@ mod tests {
         assert_eq!(plain_by_folder.len(), 1);
         assert_eq!(plain_by_folder[0].id, "plain");
 
-        // Expert lists.
-        let all_experts = db.list_expert_sessions().await.unwrap();
-        assert_eq!(all_experts.len(), 2);
-
-        let by_project = db.list_expert_sessions_by_project("p1").await.unwrap();
-        assert_eq!(by_project.len(), 1);
-        assert_eq!(by_project[0].id, "exp-p1");
-
-        // Scope = this project's experts PLUS global experts.
+        // Scope = this project's experts PLUS global experts. Used by the
+        // worker-prompt path to surface in-scope experts.
         let by_scope = db.list_expert_sessions_by_scope("p1").await.unwrap();
         let mut scope_ids: Vec<&str> = by_scope.iter().map(|s| s.id.as_str()).collect();
         scope_ids.sort();
         assert_eq!(scope_ids, vec!["exp-global", "exp-p1"]);
-
-        // get_expert_session: returns experts, rejects plain sessions.
-        assert!(db.get_expert_session("exp-p1").await.unwrap().is_some());
-        assert!(db.get_expert_session("plain").await.unwrap().is_none());
-        assert!(db.get_expert_session("missing").await.unwrap().is_none());
-
-        // Upsert is idempotent under a stable id: a second call must not
-        // clobber the accumulated row.
-        let first = db
-            .upsert_permanent_expert(NewSession {
-                id: "q-stable".into(),
-                name: "Stable Q expert".into(),
-                folder_id: "f1".into(),
-                is_expert: true,
-                expert_kind: Some("question".into()),
-                is_permanent: true,
-                knowledge_summary: Some("v1".into()),
-                created_at: ts.clone(),
-                last_activity: ts.clone(),
-                ..Default::default()
-            })
-            .await
-            .unwrap();
-        assert_eq!(first.knowledge_summary.as_deref(), Some("v1"));
-
-        let second = db
-            .upsert_permanent_expert(NewSession {
-                id: "q-stable".into(),
-                name: "Rehydrated".into(),
-                folder_id: "f1".into(),
-                is_expert: true,
-                expert_kind: Some("question".into()),
-                is_permanent: true,
-                knowledge_summary: Some("v2-should-not-win".into()),
-                created_at: ts.clone(),
-                last_activity: ts.clone(),
-                ..Default::default()
-            })
-            .await
-            .unwrap();
-        // Existing row preserved, not overwritten.
-        assert_eq!(second.name, "Stable Q expert");
-        assert_eq!(second.knowledge_summary.as_deref(), Some("v1"));
     }
 
     // ── Projects ─────────────────────────────────────────────────────

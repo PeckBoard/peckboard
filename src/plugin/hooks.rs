@@ -79,6 +79,16 @@ pub struct PluginManifest {
     pub hooks: Vec<String>,
     #[serde(default)]
     pub http_routes: Vec<String>,
+    /// **Authenticated** routes this plugin serves, dispatched via the
+    /// [`HTTP_AUTHED_HOOK`] (`http.request.authed`) under the `/api/plugin-ui/*`
+    /// surface (which core guards with `require_auth`). Unlike `http_routes`
+    /// (the public, plugin-self-authenticated `/plugin-api/*` surface), these
+    /// run on behalf of the **logged-in user**: the plugin's handler receives a
+    /// trusted user context and may act under the user's authority (gated by the
+    /// `user_authority` permission). Use these for plugin-served app UI that
+    /// reads or writes the user's own data.
+    #[serde(default)]
+    pub ui_routes: Vec<String>,
     /// UI panels this plugin contributes to Peckboard's web app. Each is
     /// surfaced in the `/api/plugins` catalog and rendered by the host as
     /// a sandboxed `<iframe>` pointed at the panel's [`UiPanel::path`].
@@ -86,6 +96,69 @@ pub struct PluginManifest {
     /// owns the page (served over its own `/plugin-api/*` surface).
     #[serde(default)]
     pub ui_panels: Vec<UiPanel>,
+    /// MCP tools this plugin contributes to the worker MCP server. Each is
+    /// merged into the `tools/list` exposed to workers, and a call to one is
+    /// dispatched back to this plugin via the terminal [`MCP_TOOL_INVOKE_HOOK`]
+    /// (`mcp.tool.invoke`) — so a plugin that declares any `mcp_tools` MUST
+    /// also list that hook. Generic: core never interprets a tool's meaning;
+    /// it routes the call (with the caller's scoped context) and returns
+    /// whatever the plugin produces.
+    #[serde(default)]
+    pub mcp_tools: Vec<PluginMcpTool>,
+    /// Left-rail entries this plugin contributes to the web app. Each opens
+    /// the plugin's own `/plugin-api/*` page (same iframe-sandbox model as
+    /// [`UiPanel`]). Surfaced in the `/api/plugins` catalog; requires the
+    /// `contribute_sidebar` permission. Generic: core renders the button and
+    /// embeds the page, nothing more.
+    #[serde(default)]
+    pub sidebar_items: Vec<SidebarItem>,
+    /// Host capabilities this plugin requests. Each must be in core's
+    /// `ALLOWED_PERMISSIONS` allowlist; the granted set gates the host
+    /// functions the plugin may call (see `src/plugin/host.rs`). Permissions
+    /// are part of what the operator approves — changing them re-prompts —
+    /// and a plugin is inert until its hook+permission grant is approved, so
+    /// whenever any plugin code runs, every declared permission is granted.
+    #[serde(default)]
+    pub permissions: Vec<String>,
+}
+
+/// One MCP tool a plugin contributes, declared in the manifest's `mcp_tools`.
+/// Mirrors core's own `McpToolDef` so the two merge into one `tools/list`.
+/// `name` must be unique across core tools and other plugins (collisions are
+/// rejected/dropped, never silently shadowed). `input_schema` is the tool's
+/// JSON Schema for arguments.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PluginMcpTool {
+    pub name: String,
+    pub description: String,
+    #[serde(default)]
+    pub input_schema: serde_json::Value,
+}
+
+/// A left-rail entry a plugin contributes, declared in the manifest's
+/// `sidebar_items`. `id` is the plugin-local stable id (React key / test id);
+/// `label` is the button text; `icon` is an optional inline SVG string the
+/// host renders sandboxed (no icon → a default placeholder); `path` is the
+/// `/plugin-api/*` page opened when clicked (same constraint as
+/// [`UiPanel::path`]).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SidebarItem {
+    pub id: String,
+    pub label: String,
+    #[serde(default)]
+    pub icon: Option<String>,
+    pub path: String,
+}
+
+/// A validated sidebar entry surfaced in the `/api/plugins` catalog: the
+/// declaring plugin plus the entry's metadata.
+#[derive(Debug, Clone, Serialize)]
+pub struct SidebarItemEntry {
+    pub plugin: String,
+    pub id: String,
+    pub label: String,
+    pub icon: Option<String>,
+    pub path: String,
 }
 
 /// A UI panel a plugin contributes to the web app, declared in the
@@ -117,6 +190,19 @@ pub struct UiPanelEntry {
     pub path: String,
 }
 
+/// A plugin-provided MCP tool merged into the worker `tools/list`, tagged
+/// with the plugin that declared it (so a call can be routed back to it via
+/// [`MCP_TOOL_INVOKE_HOOK`]). Surfaced by
+/// [`crate::plugin::manager::PluginManager::mcp_tools`].
+#[derive(Debug, Clone, Serialize)]
+pub struct PluginMcpToolEntry {
+    /// The loaded plugin that declared this tool (its `.wasm` file stem).
+    pub plugin: String,
+    pub name: String,
+    pub description: String,
+    pub input_schema: serde_json::Value,
+}
+
 /// The hook fired when a plugin is asked to fully serve a public HTTP
 /// route mounted under `/plugin-api/*`. See [`crate::plugin::manager::PluginManager::serve_http`]
 /// and the "HTTP Route Hooks" section of `docs/architecture/plugins.md`
@@ -127,6 +213,35 @@ pub struct UiPanelEntry {
 /// route end to end — it receives the request and returns the complete
 /// HTTP response. Core does no auth and has no knowledge of the route.
 pub const HTTP_REQUEST_HOOK: &str = "http.request.before";
+
+/// The hook fired to serve an **authenticated** plugin route under
+/// `/api/plugin-ui/*` (which core guards with `require_auth`). Same terminal
+/// request→response contract as [`HTTP_REQUEST_HOOK`], but the payload carries a
+/// trusted `user` block (the `require_auth`-verified user), and core sets a
+/// user-authority context so the plugin's handler may call the scoped host
+/// functions on the user's behalf. Gated by the `user_authority` permission;
+/// see [`crate::plugin::manager::PluginManager::serve_http_authed`].
+pub const HTTP_AUTHED_HOOK: &str = "http.request.authed";
+
+/// The hook fired to dispatch an MCP tool call to the plugin that declared
+/// the tool in its manifest `mcp_tools`. Like [`HTTP_REQUEST_HOOK`] this is
+/// *terminal*: the plugin OWNS the call — it receives `{tool, arguments,
+/// context}` and returns the tool result as the payload of a
+/// [`Verdict::Allow`] (or a [`Verdict::Cancel`] mapped to a tool error). Core
+/// routes the call and enforces the caller's scope; it never interprets the
+/// tool's meaning. See [`crate::plugin::manager::PluginManager::invoke_mcp_tool`].
+pub const MCP_TOOL_INVOKE_HOOK: &str = "mcp.tool.invoke";
+
+/// The hook fired when a user answers a worker's `ask_user` question. It is a
+/// *notification*, not a transform: the verdict is ignored, the operation has
+/// already happened. It exists so a plugin (the experts plugin) can feed the
+/// Q&A to its question expert without core knowing experts exist. Core fires it
+/// under a **user-authority** context (the answering user), so the handler may
+/// call the scoped host functions on the user's behalf — same gate as
+/// [`HTTP_AUTHED_HOOK`] (`user_authority` permission). Payload:
+/// `{ "asker_session_id", "project_id", "qa_text" }`. See
+/// [`crate::plugin::manager::PluginManager::dispatch_authed`].
+pub const USER_ANSWER_HOOK: &str = "session.user.answer";
 
 /// The request a plugin receives for a plugin-served HTTP route.
 ///
@@ -211,6 +326,27 @@ mod tests {
         // Optional fields default when omitted.
         assert!(m.http_routes.is_empty());
         assert!(m.ui_panels.is_empty());
+    }
+
+    #[test]
+    fn manifest_parses_mcp_tools_and_defaults_empty() {
+        // mcp_tools is optional and defaults to empty.
+        let m: PluginManifest = serde_json::from_str(
+            r#"{ "description":"d","version":"1","repository":"r","hooks":[] }"#,
+        )
+        .unwrap();
+        assert!(m.mcp_tools.is_empty());
+        // When present, name/description/input_schema parse through.
+        let m: PluginManifest = serde_json::from_str(
+            r#"{ "description":"d","version":"1","repository":"r",
+                 "hooks":["mcp.tool.invoke"],
+                 "mcp_tools":[{"name":"do_thing","description":"x",
+                               "input_schema":{"type":"object"}}] }"#,
+        )
+        .unwrap();
+        assert_eq!(m.mcp_tools.len(), 1);
+        assert_eq!(m.mcp_tools[0].name, "do_thing");
+        assert!(m.mcp_tools[0].input_schema.is_object());
     }
 
     #[test]

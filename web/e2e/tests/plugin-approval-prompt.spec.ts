@@ -61,6 +61,7 @@ test('approval prompt lists a pending plugin and approves it', async ({
             version: '1.0.0',
             repository: 'https://github.com/acme/demo',
             hooks: ['http.request.before', 'todo'],
+            permissions: ['data_store'],
             status: 'pending',
             error: null,
           },
@@ -95,6 +96,12 @@ test('approval prompt lists a pending plugin and approves it', async ({
   await expect(hooks).toContainText('Serve HTTP requests')
   await expect(hooks).toContainText('Receive todo updates')
 
+  // Requested permissions render the same way (title + description), keyed
+  // by data-permission, so the operator sees the full grant before deciding.
+  const perms = page.getByTestId('plugin-approval-permissions')
+  await expect(perms.locator('[data-permission="data_store"]')).toBeVisible()
+  await expect(perms).toContainText('Store plugin data')
+
   // Approving posts the decision and dismisses the prompt.
   await page.getByTestId('plugin-approval-approve').click()
   await expect(prompt).toBeHidden()
@@ -119,6 +126,7 @@ test('approval prompt can deny a pending plugin', async ({ request, page, baseUR
             version: '1.0.0',
             repository: 'https://github.com/acme/demo',
             hooks: ['mcp.token.issue.before'],
+            permissions: [],
             status: 'pending',
             error: null,
           },

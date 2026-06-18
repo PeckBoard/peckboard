@@ -1,9 +1,11 @@
 use axum::{
-    Json, extract::Path, extract::Query, extract::State, http::StatusCode, response::IntoResponse,
+    Extension, Json, extract::Path, extract::Query, extract::State, http::StatusCode,
+    response::IntoResponse,
 };
 use serde::Deserialize;
 use std::sync::Arc;
 
+use crate::auth::middleware::AuthUser;
 use crate::db::models::UpdateSession;
 use crate::provider::stream::SpawnConfig;
 use crate::state::AppState;
@@ -121,6 +123,7 @@ pub(super) async fn list_events(
 /// POST /api/sessions/:id/events -- append an event
 pub(super) async fn append_event(
     State(state): State<Arc<AppState>>,
+    Extension(user): Extension<AuthUser>,
     Path(id): Path<String>,
     Json(body): Json<AppendEventRequest>,
 ) -> impl IntoResponse {
@@ -195,6 +198,12 @@ pub(super) async fn append_event(
             .get("question_id")
             .and_then(|v| v.as_str())
             .unwrap_or("");
+
+        // When a user answers a worker's question, hand the Q&A to whichever
+        // plugin owns question experts (see USER_ANSWER_HOOK). Captured here as
+        // (project_id, qa_text) and fired after the conversation resumes; core
+        // itself knows nothing about experts.
+        let mut question_expert_feed: Option<(String, String)> = None;
 
         // Build a human-readable answer message to resume the conversation
         let answer_text = if rejected {
@@ -300,6 +309,16 @@ pub(super) async fn append_event(
                 false
             };
 
+            // A worker question answered by the user: feed the readable Q&A to
+            // the project's question expert(s) via the plugin hook below.
+            if !parts.is_empty()
+                && let Some(ref sess) = session_info
+                && sess.is_worker
+                && let Some(ref pid) = sess.project_id
+            {
+                question_expert_feed = Some((pid.clone(), parts.join("\n")));
+            }
+
             if has_more {
                 format!(
                     "{}\n\n**Note:** The user is still answering other worker questions. More answers may follow shortly. Continue working with what you have — do not ask the same questions again.",
@@ -313,35 +332,25 @@ pub(super) async fn append_event(
         // Resolve references in the answer text (e.g. [session:id] from autocomplete)
         let answer_text = resolve_references(&answer_text, &state).await;
 
-        // Feed the resolved Q&A back to the in-scope question-expert, coupled
-        // with the original question context, so it can answer the same thing
-        // next time without troubling the user. Skip dismissals (nothing was
-        // learned) and never loop a question-expert's own traffic back to it.
-        if !rejected {
-            let fb_state = state.clone();
-            let fb_id = id.clone();
-            let fb_qa = answer_text.clone();
+        // Notify question-expert plugins of the Q&A, under the answering user's
+        // authority. Fire-and-forget: it must not delay the conversation resume,
+        // and a plugin failure must not fail the answer.
+        if let Some((project_id, qa_text)) = question_expert_feed {
+            let plugins = state.plugins.clone();
+            let asker_session_id = id.clone();
+            let user_id = user.user_id.clone();
             tokio::spawn(async move {
-                let session = fb_state.db.get_session(&fb_id).await.ok().flatten();
-                if session.as_ref().map(|s| s.is_expert).unwrap_or(false) {
-                    return;
-                }
-                let project_id = session.and_then(|s| s.project_id);
-                let dispatcher: Arc<dyn crate::service::mcp_server::ExpertDispatcher> = Arc::new(
-                    crate::service::mcp_server::AppExpertDispatcher::new(fb_state.clone()),
-                );
-                if let Err(e) = crate::service::question_expert::record_user_answer(
-                    &fb_state.db,
-                    &fb_state.broadcaster,
-                    &fb_state.config.data_dir,
-                    Some(&dispatcher),
-                    project_id.as_deref(),
-                    &fb_qa,
-                )
-                .await
-                {
-                    tracing::warn!(session_id = %fb_id, "failed to record user answer to question-expert: {e}");
-                }
+                plugins
+                    .dispatch_authed(
+                        crate::plugin::hooks::USER_ANSWER_HOOK,
+                        &user_id,
+                        serde_json::json!({
+                            "asker_session_id": asker_session_id,
+                            "project_id": project_id,
+                            "qa_text": qa_text,
+                        }),
+                    )
+                    .await;
             });
         }
 

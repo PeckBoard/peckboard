@@ -101,9 +101,7 @@ fn ctx(
         db: db.clone(),
         broadcaster: Broadcaster::new(),
         provider_registry: None,
-        expert_dispatcher: None,
         data_dir: None,
-        pm_authorizations: Default::default(),
     }
 }
 
@@ -309,102 +307,6 @@ async fn read_worker_session_cross_folder_is_not_found() {
 }
 
 // ── list_experts / ask_expert: cross-folder rejection ───────────────
-
-#[tokio::test]
-async fn list_experts_for_chat_session_omits_cross_folder_experts() {
-    let db = Arc::new(Db::in_memory().unwrap());
-    two_folders_two_projects(&db).await;
-    seed_session(&db, "chat-f1", "f1", None, false, false, None).await;
-    // Knowledge expert in p2/f2 — out of scope for chat-f1.
-    seed_session(
-        &db,
-        "expert-p2",
-        "f2",
-        Some("p2"),
-        false,
-        true,
-        Some("knowledge"),
-    )
-    .await;
-    // Global expert — in scope regardless of folder.
-    seed_session(
-        &db,
-        "global-expert",
-        "f1",
-        None,
-        false,
-        true,
-        Some("question"),
-    )
-    .await;
-    let registry = McpToolRegistry::new();
-
-    let result = registry
-        .handle_tool_call(
-            "list_experts",
-            serde_json::json!({}),
-            &ctx(&db, "chat-f1", "f1", None),
-        )
-        .await
-        .unwrap();
-    let ids: Vec<&str> = result["experts"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .map(|e| e["session_id"].as_str().unwrap())
-        .collect();
-    assert!(
-        !ids.contains(&"expert-p2"),
-        "cross-folder expert must not be listed, got: {ids:?}",
-    );
-    assert!(
-        ids.contains(&"global-expert"),
-        "globals stay visible cross-folder, got: {ids:?}",
-    );
-}
-
-#[tokio::test]
-async fn ask_expert_rejects_cross_folder_target_before_any_side_effect() {
-    // The PM-expert audit point: a cross-folder ask must reject before
-    // any event log / delivery happens, not after.
-    let db = Arc::new(Db::in_memory().unwrap());
-    two_folders_two_projects(&db).await;
-    seed_session(&db, "chat-f1", "f1", None, false, false, None).await;
-    seed_session(
-        &db,
-        "expert-p2",
-        "f2",
-        Some("p2"),
-        false,
-        true,
-        Some("knowledge"),
-    )
-    .await;
-    let registry = McpToolRegistry::new();
-
-    let err = registry
-        .handle_tool_call(
-            "ask_expert",
-            serde_json::json!({
-                "expert_id": "expert-p2",
-                "question": "leak",
-            }),
-            &ctx(&db, "chat-f1", "f1", None),
-        )
-        .await
-        .unwrap_err();
-    assert!(err.to_string().contains("not found"), "got: {err}");
-    // No event log was created on either session.
-    let chat_events = db.events_tail("chat-f1", 100).await.unwrap();
-    let expert_events = db.events_tail("expert-p2", 100).await.unwrap();
-    assert!(chat_events.is_empty(), "no events on chat: {chat_events:?}");
-    assert!(
-        expert_events.is_empty(),
-        "no events on expert: {expert_events:?}"
-    );
-}
-
-// ── DB-level move helpers ───────────────────────────────────────────
 
 #[tokio::test]
 async fn move_session_refuses_worker_session() {

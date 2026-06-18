@@ -29,6 +29,20 @@ impl Db {
         .await
     }
 
+    /// Synchronous twin of [`Db::get_folder`] for the WASM plugin host
+    /// functions (which run on a blocking thread; see `Db::with_conn_blocking`).
+    pub(crate) fn get_folder_blocking(&self, id: &str) -> anyhow::Result<Option<Folder>> {
+        let id = id.to_string();
+        self.with_conn_blocking(move |conn| {
+            folders::table
+                .find(&id)
+                .select(Folder::as_select())
+                .first(conn)
+                .optional()
+                .map_err(Into::into)
+        })
+    }
+
     pub async fn list_folders(&self) -> anyhow::Result<Vec<Folder>> {
         self.with_conn(move |conn| {
             folders::table

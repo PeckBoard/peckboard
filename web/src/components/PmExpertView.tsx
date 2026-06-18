@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react'
 import { EMPTY_PM_DECISIONS, EMPTY_PM_QUESTIONS, usePmStore } from '../store/pmStore'
-import type { PmDecision, PmPendingQuestion } from '../types/api'
+import type { PmDecision } from '../types/api'
 import ConfirmDialog from './ConfirmDialog'
 
 /**
@@ -19,23 +19,16 @@ interface PmExpertViewProps {
   onBack: () => void
 }
 
-function formatDate(dateStr: string | null): string {
-  if (!dateStr) return ''
-  const d = new Date(dateStr)
+// The plugin reports `decided_at` as a unix-ish numeric timestamp. Treat
+// values that look like seconds (< ~1e12) as seconds and scale to ms.
+function formatDate(ts: number | null): string {
+  if (ts == null) return ''
+  const ms = ts < 1e12 ? ts * 1000 : ts
+  const d = new Date(ms)
   return Number.isNaN(d.getTime()) ? '' : d.toLocaleString()
 }
 
-function askedByLabel(askedBySessionId: string | null): string {
-  return askedBySessionId ? `worker ${askedBySessionId.slice(0, 8)}` : 'the PM expert'
-}
-
-function PendingQuestionRow({
-  projectId,
-  question,
-}: {
-  projectId: string
-  question: PmPendingQuestion
-}) {
+function PendingQuestionRow({ projectId, question }: { projectId: string; question: PmDecision }) {
   const answerQuestion = usePmStore((s) => s.answerQuestion)
   const [answer, setAnswer] = useState('')
   const [submitting, setSubmitting] = useState(false)
@@ -57,10 +50,7 @@ function PendingQuestionRow({
 
   return (
     <div className="pm-card pm-pending-question" data-testid="pm-pending-question">
-      <p className="pm-question-text">{question.question}</p>
-      <div className="pm-card-meta">
-        Asked by {askedByLabel(question.asked_by_session_id)} · {formatDate(question.asked_at)}
-      </div>
+      <p className="pm-question-text">{question.title}</p>
       <textarea
         className="form-input pm-answer-input"
         data-testid="pm-answer-input"
@@ -95,8 +85,8 @@ function DecisionRow({ projectId, decision }: { projectId: string; decision: PmD
   const [error, setError] = useState<string | null>(null)
 
   const openEdit = () => {
-    setQuestion(decision.question)
-    setAnswer(decision.answer ?? '')
+    setQuestion(decision.title)
+    setAnswer(decision.decision ?? '')
     setError(null)
     setEditing(true)
   }
@@ -106,11 +96,11 @@ function DecisionRow({ projectId, decision }: { projectId: string; decision: PmD
     setSaving(true)
     setError(null)
     try {
-      // The store replaces this decision with the superseding one; the
-      // row unmounts when the superseded id drops out of the list.
+      // The store replaces this decision with the edited one returned by
+      // the plugin.
       await editDecision(projectId, decision.id, {
-        question: question.trim(),
-        answer: answer.trim(),
+        title: question.trim(),
+        decision: answer.trim(),
       })
       setEditing(false)
     } catch (e) {
@@ -125,7 +115,7 @@ function DecisionRow({ projectId, decision }: { projectId: string; decision: PmD
       {!editing ? (
         <>
           <div className="pm-decision-head">
-            <p className="pm-question-text">{decision.question}</p>
+            <p className="pm-question-text">{decision.title}</p>
             <button
               className="btn-secondary btn-sm"
               data-testid="pm-decision-edit"
@@ -134,13 +124,8 @@ function DecisionRow({ projectId, decision }: { projectId: string; decision: PmD
               Edit
             </button>
           </div>
-          <p className="pm-decision-answer">{decision.answer}</p>
-          <div className="pm-card-meta">
-            Decided {formatDate(decision.decided_at)}
-            {decision.asked_by_session_id
-              ? ` · asked by ${askedByLabel(decision.asked_by_session_id)}`
-              : ''}
-          </div>
+          <p className="pm-decision-answer">{decision.decision}</p>
+          <div className="pm-card-meta">Decided {formatDate(decision.decided_at)}</div>
         </>
       ) : (
         <div className="pm-decision-edit-form" data-testid="pm-decision-edit-form">

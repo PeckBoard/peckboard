@@ -1,16 +1,21 @@
 import { create } from 'zustand'
-import type { PmDecision, PmPendingQuestion } from '../types/api'
+import type { PmDecision } from '../types/api'
 import { authedFetch } from './auth'
 import { useWsStore } from './ws'
 
 // Stable empty sentinels so zustand selectors over the keyed maps stay
 // referentially stable (same reason as EMPTY_EVENTS in chat/events.ts).
 export const EMPTY_PM_DECISIONS: PmDecision[] = []
-export const EMPTY_PM_QUESTIONS: PmPendingQuestion[] = []
+export const EMPTY_PM_QUESTIONS: PmDecision[] = []
 
 interface PmState {
+  /** Decided/superseded decisions per project (the experts plugin's
+   *  `decisions` list). */
   decisionsByProject: Record<string, PmDecision[]>
-  pendingQuestionsByProject: Record<string, PmPendingQuestion[]>
+  /** Pending decisions per project (the plugin's `pending` list): each is
+   *  a `PmDecision` with `status: 'pending'` and `decision: null`, whose
+   *  `title` is the question text awaiting a user answer. */
+  pendingQuestionsByProject: Record<string, PmDecision[]>
   /** Server-reported pending count per project. Kept separately from the
    *  questions list because the `pm-decisions-changed` broadcast carries
    *  only the count — it can be current even before the lists are fetched. */
@@ -21,7 +26,7 @@ interface PmState {
   editDecision: (
     projectId: string,
     decisionId: string,
-    payload: { question?: string; answer: string },
+    payload: { title?: string; decision: string },
   ) => Promise<PmDecision>
   /** Apply an incoming `pm-decisions-changed` broadcast: trust the count
    *  from the payload immediately, refetch the lists if we hold them. */
@@ -53,26 +58,20 @@ export const usePmStore = create<PmState>((set, get) => ({
     useWsStore.getState().subscribe(projectId)
     set({ loading: true })
     try {
-      const [decisionsRes, questionsRes] = await Promise.all([
-        authedFetch(`/api/projects/${projectId}/pm/decisions`),
-        authedFetch(`/api/projects/${projectId}/pm/questions`),
-      ])
-      if (decisionsRes.ok) {
-        const data = await decisionsRes.json()
+      const res = await authedFetch(
+        `/api/plugin-ui/pm/decisions?project_id=${encodeURIComponent(projectId)}`,
+      )
+      if (res.ok) {
+        const data = await res.json()
         const decisions: PmDecision[] = data?.decisions ?? []
+        const pending: PmDecision[] = data?.pending ?? []
         set((s) => ({
           decisionsByProject: { ...s.decisionsByProject, [projectId]: decisions },
+          pendingQuestionsByProject: { ...s.pendingQuestionsByProject, [projectId]: pending },
           pendingCountByProject: {
             ...s.pendingCountByProject,
-            [projectId]: data?.pending_count ?? 0,
+            [projectId]: pending.length,
           },
-        }))
-      }
-      if (questionsRes.ok) {
-        const data = await questionsRes.json()
-        const questions: PmPendingQuestion[] = data?.questions ?? []
-        set((s) => ({
-          pendingQuestionsByProject: { ...s.pendingQuestionsByProject, [projectId]: questions },
         }))
       }
     } finally {
@@ -81,10 +80,10 @@ export const usePmStore = create<PmState>((set, get) => ({
   },
 
   answerQuestion: async (projectId: string, questionId: string, answer: string) => {
-    const res = await authedFetch(`/api/projects/${projectId}/pm/questions/${questionId}/answer`, {
+    const res = await authedFetch('/api/plugin-ui/pm/answer', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ answer }),
+      body: JSON.stringify({ project_id: projectId, question_id: questionId, answer }),
     })
     if (!res.ok) {
       const err = await res.json().catch(() => ({ error: 'Failed to answer question' }))
@@ -115,9 +114,9 @@ export const usePmStore = create<PmState>((set, get) => ({
   editDecision: async (
     projectId: string,
     decisionId: string,
-    payload: { question?: string; answer: string },
+    payload: { title?: string; decision: string },
   ) => {
-    const res = await authedFetch(`/api/projects/${projectId}/pm/decisions/${decisionId}`, {
+    const res = await authedFetch(`/api/plugin-ui/pm/decisions/${decisionId}`, {
       method: 'PUT',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(payload),
@@ -128,12 +127,13 @@ export const usePmStore = create<PmState>((set, get) => ({
     }
     const data = await res.json()
     const decision: PmDecision = data.decision
-    const supersededId: string = data.superseded_decision_id ?? decisionId
     set((s) => ({
       decisionsByProject: {
         ...s.decisionsByProject,
+        // Replace the edited decision in place; the plugin returns the
+        // resulting (possibly superseding) decision under the same id.
         [projectId]: upsertDecision(
-          (s.decisionsByProject[projectId] ?? []).filter((d) => d.id !== supersededId),
+          (s.decisionsByProject[projectId] ?? []).filter((d) => d.id !== decisionId),
           decision,
         ),
       },

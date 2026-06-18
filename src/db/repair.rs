@@ -37,6 +37,43 @@ pub fn ensure_schema(conn: &mut SqliteConnection) -> anyhow::Result<()> {
     ensure_pm_decisions_table(conn)?;
     ensure_usage_events_table(conn)?;
     ensure_user_tabs_check_constraint(conn)?;
+    ensure_plugin_data_tables(conn)?;
+    Ok(())
+}
+
+/// Heal DBs that predate `1781682475_plugin_data_and_session_meta`. Both are
+/// `CREATE TABLE/INDEX IF NOT EXISTS`, idempotent on a fully-migrated DB; DDL
+/// mirrors the migration. Backs the generic plugin document store +
+/// per-session plugin metadata used by `src/plugin/host.rs`.
+fn ensure_plugin_data_tables(conn: &mut SqliteConnection) -> anyhow::Result<()> {
+    log_if_healing_table(conn, "plugin_data")?;
+    sql_query(
+        "CREATE TABLE IF NOT EXISTS plugin_data (
+            plugin_id   TEXT NOT NULL,
+            collection  TEXT NOT NULL,
+            key         TEXT NOT NULL,
+            data        TEXT NOT NULL,
+            created_at  TEXT NOT NULL DEFAULT (datetime('now')),
+            updated_at  TEXT NOT NULL DEFAULT (datetime('now')),
+            PRIMARY KEY (plugin_id, collection, key)
+        )",
+    )
+    .execute(conn)?;
+    sql_query(
+        "CREATE TABLE IF NOT EXISTS plugin_session_meta (
+            session_id  TEXT NOT NULL,
+            plugin_id   TEXT NOT NULL,
+            data        TEXT NOT NULL,
+            updated_at  TEXT NOT NULL DEFAULT (datetime('now')),
+            PRIMARY KEY (session_id, plugin_id)
+        )",
+    )
+    .execute(conn)?;
+    sql_query(
+        "CREATE INDEX IF NOT EXISTS idx_plugin_session_meta_plugin \
+         ON plugin_session_meta (plugin_id)",
+    )
+    .execute(conn)?;
     Ok(())
 }
 

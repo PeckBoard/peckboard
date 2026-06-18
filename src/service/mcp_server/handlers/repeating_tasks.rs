@@ -393,10 +393,8 @@ mod tests {
             db,
             broadcaster: crate::ws::broadcaster::Broadcaster::new(),
             provider_registry: None,
-            expert_dispatcher: None,
             data_dir: None,
             folder_id: "f1".into(),
-            pm_authorizations: Default::default(),
         }
     }
 

@@ -4,7 +4,6 @@
 //! module so both layers can call them without re-exporting.
 
 mod cards;
-mod pm;
 
 use axum::{
     Json, Router,
@@ -227,22 +226,6 @@ pub fn router(state: Arc<AppState>) -> Router<Arc<AppState>> {
             "/api/projects/{id}/pending-questions",
             get(list_pending_questions),
         )
-        .route(
-            "/api/projects/{id}/pm/decisions",
-            get(pm::list_pm_decisions),
-        )
-        .route(
-            "/api/projects/{id}/pm/decisions/{did}",
-            put(pm::update_pm_decision),
-        )
-        .route(
-            "/api/projects/{id}/pm/questions",
-            get(pm::list_pm_questions),
-        )
-        .route(
-            "/api/projects/{id}/pm/questions/{qid}/answer",
-            post(pm::answer_pm_question),
-        )
         .route("/api/projects/{id}/todos", get(list_project_todos))
         .route(
             "/api/projects/{id}/workflow-instructions",
@@ -298,20 +281,6 @@ async fn create_project(
                 Json(serde_json::json!({ "error": e.to_string() })),
             )
         })?;
-
-    // Idempotently give the new project its own question-expert. Non-fatal:
-    // a failure here must not block project creation, and unscoped callers
-    // still fall back to the global question-expert.
-    if let Err(e) =
-        crate::service::question_expert::ensure_project_question_expert(&state.db, &project).await
-    {
-        tracing::warn!(project_id = %project.id, "Failed to ensure project question-expert: {e}");
-    }
-
-    // Likewise its PM expert (durable store of project-direction decisions).
-    if let Err(e) = crate::service::pm_expert::ensure_project_pm_expert(&state.db, &project).await {
-        tracing::warn!(project_id = %project.id, "Failed to ensure project PM expert: {e}");
-    }
 
     Ok::<_, (StatusCode, Json<serde_json::Value>)>((
         StatusCode::CREATED,

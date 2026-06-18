@@ -59,11 +59,6 @@ const DEFAULT_SESSION_PAGE_SIZE: i64 = 100;
 const MAX_SESSION_PAGE_SIZE: i64 = 500;
 
 #[derive(Deserialize)]
-struct ListExpertsQuery {
-    project_id: Option<String>,
-}
-
-#[derive(Deserialize)]
 struct UpdateSessionRequest {
     name: Option<String>,
     model: Option<Option<String>>,
@@ -77,7 +72,6 @@ struct UpdateSessionRequest {
 pub fn router(state: Arc<AppState>) -> Router<Arc<AppState>> {
     Router::new()
         .route("/api/sessions", post(create_session).get(list_sessions))
-        .route("/api/experts", get(list_experts))
         .route(
             "/api/sessions/{id}",
             get(get_session)
@@ -224,37 +218,6 @@ async fn list_sessions(
         "items": sessions,
         "next_cursor": next_cursor,
     })))
-}
-
-/// GET /api/experts
-///
-/// Lists expert sessions for the new experts view. Experts are hidden
-/// from the ordinary chat list (`GET /api/sessions`), so this is the
-/// only HTTP surface that exposes them. The full `Session` row is
-/// returned for each (including `expert_kind`, `knowledge_summary`,
-/// `knowledge_area`, `scope_path`, `project_id`, `card_id`,
-/// `is_permanent`, `last_activity`); the frontend groups by
-/// `project_id` (null = global) and chat session client-side. An
-/// optional `?project_id=` narrows to a single project's experts.
-async fn list_experts(
-    State(state): State<Arc<AppState>>,
-    Query(params): Query<ListExpertsQuery>,
-) -> impl IntoResponse {
-    tracing::info!(project_id = ?params.project_id, "Listing experts");
-    let experts = if let Some(project_id) = params.project_id {
-        state.db.list_expert_sessions_by_project(&project_id).await
-    } else {
-        state.db.list_expert_sessions().await
-    };
-
-    let experts = experts.map_err(|e| {
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(serde_json::json!({ "error": e.to_string() })),
-        )
-    })?;
-
-    Ok::<_, (StatusCode, Json<serde_json::Value>)>(Json(serde_json::json!(experts)))
 }
 
 /// GET /api/sessions/:id

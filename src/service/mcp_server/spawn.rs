@@ -71,6 +71,56 @@ impl AppExpertDispatcher {
     }
 }
 
+/// Bridges the plugin layer's [`crate::plugin::host::LiveHost`] to the live
+/// app, so a WASM plugin's `peckboard_dispatch_capture` / `_resume_session`
+/// host calls schedule real agent runs. Holds a `Weak<AppState>` to avoid an
+/// `AppState → PluginManager → LiveHost → AppState` reference cycle, and a
+/// runtime `Handle` so its fire-and-forget methods (called from a synchronous
+/// WASM host function) can spawn the async dispatch without blocking.
+pub struct AppLiveHost {
+    state: std::sync::Weak<AppState>,
+    rt: tokio::runtime::Handle,
+}
+
+impl AppLiveHost {
+    pub fn new(state: &Arc<AppState>, rt: tokio::runtime::Handle) -> Self {
+        Self {
+            state: Arc::downgrade(state),
+            rt,
+        }
+    }
+}
+
+impl crate::plugin::host::LiveHost for AppLiveHost {
+    fn dispatch_capture(&self, session_id: String, prompt: String) {
+        let Some(state) = self.state.upgrade() else {
+            return; // app is shutting down — nothing to dispatch to
+        };
+        self.rt.spawn(async move {
+            if let Err(e) = AppExpertDispatcher::new(state)
+                .dispatch_capture(&session_id, &prompt)
+                .await
+            {
+                tracing::warn!("plugin dispatch_capture for {session_id} failed: {e}");
+            }
+        });
+    }
+
+    fn resume_session(&self, session_id: String, text: String) {
+        let Some(state) = self.state.upgrade() else {
+            return;
+        };
+        self.rt.spawn(async move {
+            if let Err(e) = AppExpertDispatcher::new(state)
+                .resume_session(&session_id, &text)
+                .await
+            {
+                tracing::warn!("plugin resume_session for {session_id} failed: {e}");
+            }
+        });
+    }
+}
+
 impl ExpertDispatcher for AppExpertDispatcher {
     fn dispatch_capture<'a>(
         &'a self,

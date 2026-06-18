@@ -55,6 +55,7 @@ test('removes an installed plugin from the Plugins modal', async ({ request, pag
                 version: '1.0.0',
                 repository: 'https://github.com/acme/demo',
                 hooks: ['http.request.before'],
+                permissions: [],
                 status: 'approved',
                 error: null,
               },

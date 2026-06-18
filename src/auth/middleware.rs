@@ -154,7 +154,6 @@ mod tests {
             run_auditor: crate::repeating::RunAuditor::new(),
             mcp_tokens: crate::service::mcp_server::McpTokenRegistry::new(),
             push_service: crate::service::push::PushService::new(dir),
-            pm_authorizations: Default::default(),
         })
     }
 

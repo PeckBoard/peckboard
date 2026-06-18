@@ -103,9 +103,10 @@ interface SessionsState {
    *  true on first load so the "Load older" button shows; flipped to
    *  false the first time a partial page arrives. */
   hasMoreOlderEventsBySession: Record<string, boolean>
-  /** Expert sessions (is_expert = true) from GET /api/experts. Kept
-   *  separate from `sessions` because experts are deliberately hidden
-   *  from the ordinary chat list and only surface in the Experts view. */
+  /** Experts from GET /api/plugin-ui/experts (the experts feature lives
+   *  in a WASM plugin). Kept separate from `sessions` because experts are
+   *  deliberately hidden from the ordinary chat list and only surface in
+   *  the Experts view. */
   experts: Expert[]
   expertsLoaded: boolean
   pendingUserMessages: Record<string, PendingUserMessage[]>
@@ -232,10 +233,10 @@ export const useSessionsStore = create<SessionsState>((set, get) => ({
   },
 
   fetchExperts: async () => {
-    const res = await authedFetch('/api/experts')
+    const res = await authedFetch('/api/plugin-ui/experts')
     if (res.ok) {
-      const experts: Expert[] = await res.json()
-      set({ experts, expertsLoaded: true })
+      const body: { experts: Expert[] } = await res.json()
+      set({ experts: body.experts ?? [], expertsLoaded: true })
     }
   },
 

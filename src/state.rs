@@ -35,8 +35,4 @@ pub struct AppState {
     pub run_auditor: RunAuditor,
     pub mcp_tokens: McpTokenRegistry,
     pub push_service: PushService,
-    /// App-wide store of outstanding user authorizations to change recorded
-    /// PM decisions (granted by the PM answer flow, consumed by an
-    /// authorized `pm_record_decision` supersession).
-    pub pm_authorizations: crate::service::pm_expert::PmUserAuthorizations,
 }

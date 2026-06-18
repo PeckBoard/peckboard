@@ -223,6 +223,26 @@ diesel::table! {
 }
 
 diesel::table! {
+    plugin_data (plugin_id, collection, key) {
+        plugin_id -> Text,
+        collection -> Text,
+        key -> Text,
+        data -> Text,
+        created_at -> Text,
+        updated_at -> Text,
+    }
+}
+
+diesel::table! {
+    plugin_session_meta (session_id, plugin_id) {
+        session_id -> Text,
+        plugin_id -> Text,
+        data -> Text,
+        updated_at -> Text,
+    }
+}
+
+diesel::table! {
     plugin_approvals (plugin_id) {
         plugin_id -> Text,
         hooks -> Text,
@@ -290,5 +310,7 @@ diesel::allow_tables_to_appear_in_same_query!(
     project_workflow_instructions,
     pm_decisions,
     plugin_settings,
+    plugin_data,
+    plugin_session_meta,
     usage_events,
 );

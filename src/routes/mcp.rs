@@ -144,7 +144,7 @@ async fn mcp_handler(
 
     match body.method.as_str() {
         "tools/list" => {
-            let tools: Vec<Value> = registry
+            let mut tools: Vec<Value> = registry
                 .tool_definitions()
                 .iter()
                 .map(|t| {
@@ -155,6 +155,29 @@ async fn mcp_handler(
                     })
                 })
                 .collect();
+
+            // Merge in tools contributed by active plugins. A core tool name
+            // always wins — a plugin tool colliding with one is dropped with
+            // a warning rather than shadowing core behaviour.
+            let core_names: std::collections::HashSet<&str> = registry
+                .tool_definitions()
+                .iter()
+                .map(|t| t.name.as_str())
+                .collect();
+            for t in state.plugins.mcp_tools().await {
+                if core_names.contains(t.name.as_str()) {
+                    tracing::warn!(
+                        plugin = %t.plugin, tool = %t.name,
+                        "plugin mcp_tool collides with a core tool name; dropping"
+                    );
+                    continue;
+                }
+                tools.push(serde_json::json!({
+                    "name": t.name,
+                    "description": t.description,
+                    "inputSchema": t.input_schema,
+                }));
+            }
 
             (
                 StatusCode::OK,
@@ -212,11 +235,7 @@ async fn mcp_handler(
                 db: Arc::new(state.db.clone()),
                 broadcaster: state.broadcaster.clone(),
                 provider_registry: Some(state.provider_registry.clone()),
-                expert_dispatcher: Some(Arc::new(
-                    crate::service::mcp_server::AppExpertDispatcher::new(state.clone()),
-                )),
                 data_dir: Some(state.config.data_dir.clone()),
-                pm_authorizations: state.pm_authorizations.clone(),
             };
 
             // ── Hook: mcp.tool.call.before ──
@@ -251,7 +270,28 @@ async fn mcp_handler(
                 }
             }
 
-            match registry.handle_tool_call(tool_name, final_args, &ctx).await {
+            // A plugin that declared this tool in its manifest owns the call:
+            // dispatch it via the terminal `mcp.tool.invoke` hook with the
+            // caller's *scoped* context. Core's own dispatch runs only when no
+            // active plugin claims the name. The generic
+            // `mcp.tool.call.before/after/failed` hooks still wrap both paths,
+            // so a plugin can observe/veto another plugin's tool too.
+            let plugin_ctx = serde_json::json!({
+                "sessionId": &ctx.session_id,
+                "projectId": &ctx.project_id,
+                "cardId": &ctx.card_id,
+                "folderId": &ctx.folder_id,
+            });
+            let tool_result = match state
+                .plugins
+                .invoke_mcp_tool(tool_name, final_args.clone(), plugin_ctx)
+                .await
+            {
+                Some(r) => r,
+                None => registry.handle_tool_call(tool_name, final_args, &ctx).await,
+            };
+
+            match tool_result {
                 Ok(result) => {
                     // ── Hook: mcp.tool.call.after ──
                     state

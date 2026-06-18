@@ -2,6 +2,7 @@ import { useCallback, useEffect, useState } from 'react'
 import { authedFetch } from '../store/auth'
 import Modal from './Modal'
 import HookList from './HookList'
+import PermissionList from './PermissionList'
 import { decidePluginApproval, type WasmPlugin } from '../utils/pluginApproval'
 
 /**
@@ -66,6 +67,11 @@ export default function PluginApprovalPrompt() {
           nothing it declares runs until you approve.
         </p>
         <HookList hooks={plugin.hooks} testId="plugin-approval-hooks" title="Hooks" />
+        <PermissionList
+          permissions={plugin.permissions}
+          testId="plugin-approval-permissions"
+          title="Permissions"
+        />
         {error && <p className="plugin-approval-error">{error}</p>}
         <div className="plugin-approval-actions">
           <button

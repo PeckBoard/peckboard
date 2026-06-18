@@ -8,8 +8,60 @@ export interface WasmPlugin {
   version: string
   repository: string
   hooks: string[]
+  /** Host permissions the plugin requests — approved alongside its hooks. */
+  permissions: string[]
   status: 'pending' | 'approved' | 'denied' | 'init_failed'
   error?: string | null
+}
+
+/**
+ * Operator-facing title + description for each host permission a plugin can
+ * request, mirroring the hook presentation. Use {@link permissionMeta}, which
+ * falls back to the raw id for any permission not listed here so a new one is
+ * still surfaced (never silently hidden).
+ */
+export const PERMISSION_META: Record<string, HookMeta> = {
+  provide_mcp_tools: {
+    title: 'Provide MCP tools',
+    description: 'Adds its own tools to the worker MCP server',
+  },
+  contribute_sidebar: {
+    title: 'Add sidebar items',
+    description: 'Contributes buttons to the left navigation rail',
+  },
+  session_read: {
+    title: 'Read sessions',
+    description: 'Reads sessions and their plugin metadata',
+  },
+  session_write: {
+    title: 'Write sessions',
+    description: 'Creates sessions and writes their plugin metadata',
+  },
+  session_dispatch: {
+    title: 'Dispatch sessions',
+    description: 'Resumes sessions and spawns agent runs',
+  },
+  event_append: {
+    title: 'Append events',
+    description: 'Persists events onto sessions',
+  },
+  data_store: {
+    title: 'Store plugin data',
+    description: 'Keeps its own durable documents in Peckboard',
+  },
+  broadcast: {
+    title: 'Broadcast updates',
+    description: 'Pushes live updates to connected clients',
+  },
+  project_files_read: {
+    title: 'Read project files',
+    description: 'Reads files within a project to analyze the codebase',
+  },
+}
+
+/** Resolve a permission id to its operator-facing title + description. */
+export function permissionMeta(permission: string): HookMeta {
+  return PERMISSION_META[permission] ?? { title: permission, description: 'Custom permission' }
 }
 
 /** Operator-facing title + description for one hook a plugin can request. */

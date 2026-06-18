@@ -54,11 +54,13 @@ test('plugin UI panel opens its plugin-served page in a sandboxed iframe', async
             version: '1.0.0',
             repository: 'https://github.com/acme/demo',
             hooks: ['http.request.before'],
+            permissions: [],
             status: 'approved',
             error: null,
           },
         ],
         ui_panels: [{ plugin: 'demo', id: 'admin', title: 'Demo Admin', path: PANEL_PATH }],
+        sidebar_items: [{ plugin: 'demo', id: 'admin', label: 'Demo Rail', path: PANEL_PATH }],
       }),
     })
   })
@@ -79,6 +81,10 @@ test('plugin UI panel opens its plugin-served page in a sandboxed iframe', async
   await page.goto('/plugins')
 
   await expect(page.getByTestId('plugins-modal')).toBeVisible({ timeout: 10_000 })
+
+  // The plugin's declared sidebar_item renders as a button in the left rail
+  // (generic; opens the plugin page in the same iframe panel when clicked).
+  await expect(page.getByTestId('plugin-sidebar-demo-admin')).toBeVisible()
 
   // The declared panel is listed inside the registering plugin's own row,
   // not a separate "Plugin Pages" section.

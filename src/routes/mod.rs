@@ -6,6 +6,7 @@ pub mod me;
 pub mod misc;
 pub mod notifications;
 pub mod plugin_api;
+pub mod plugin_ui;
 pub mod plugins;
 pub mod projects;
 pub mod repeating_tasks;
@@ -38,6 +39,9 @@ pub fn api_router(state: Arc<AppState>) -> Router<Arc<AppState>> {
         // Public, plugin-owned HTTP surface. Intentionally NOT behind the
         // `/api/*` auth middleware — the serving plugin owns its own auth.
         .merge(plugin_api::router(state.clone()))
+        // Authenticated plugin app-UI surface (behind `require_auth`); the
+        // plugin acts under the logged-in user's authority.
+        .merge(plugin_ui::router(state.clone()))
         .merge(usage::router(state.clone()))
         .merge(usage::trends::router(state.clone()))
         .merge(misc::router(state))

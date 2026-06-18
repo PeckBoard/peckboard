@@ -48,13 +48,24 @@ export interface RepeatingTask {
   updated_at: string
 }
 
-/** An expert session as returned by `GET /api/experts`. The endpoint
- *  serializes the full `Session` row, so an Expert is structurally a
- *  Session that is always `is_expert: true`. The fields below are the
- *  ones the Expert Sessions view reads; `expert_kind` is 'knowledge' or
- *  'question'. A null `project_id` means the expert is global (available
- *  to chat sessions across the whole install). */
-export type Expert = Session
+/** An expert as returned by `GET /api/plugin-ui/experts`. The experts
+ *  feature now lives in a WASM plugin, which serializes its own shape
+ *  (not the core `Session` row). `session_id` is the underlying chat
+ *  session id — used to open the expert's transcript in ChatView and to
+ *  route `/experts/:id`. `expert_kind` is 'knowledge', 'question', or
+ *  'pm'. A null `project_id` means the expert is global (available to
+ *  chat sessions across the whole install). */
+export interface Expert {
+  session_id: string
+  name: string
+  expert_kind: 'knowledge' | 'question' | 'pm'
+  knowledge_area: string
+  knowledge_summary: string
+  scope_path: string
+  project_id: string | null
+  is_permanent: boolean
+  last_activity: string
+}
 
 export interface Project {
   id: string
@@ -148,27 +159,20 @@ export interface Announcement {
   created_at: string
 }
 
-/** An answered PM decision as serialized by
- *  GET /api/projects/:id/pm/decisions (and the answer/edit mutation
- *  responses). `asked_by_session_id` is the provenance of the question
- *  (which worker escalated it); null when the PM expert asked directly. */
+/** A PM decision as serialized by the experts plugin
+ *  (`GET /api/plugin-ui/pm/decisions`, plus the answer/edit mutation
+ *  responses). The plugin unifies the old two-type model onto this single
+ *  shape: a "pending question" is just a decision with `status: 'pending'`
+ *  and `decision: null`, its `title` being the question text. Once
+ *  answered, `decision` holds the recorded answer and `status` becomes
+ *  'answered' (or 'superseded' when a later edit replaces it).
+ *  `decided_at` is a unix-ish numeric timestamp (not an ISO string). */
 export interface PmDecision {
   id: string
-  question: string
-  answer: string | null
-  status: string
-  decided_at: string | null
-  asked_by_session_id: string | null
-  asked_at: string
-}
-
-/** A PM question awaiting a user answer, from
- *  GET /api/projects/:id/pm/questions. */
-export interface PmPendingQuestion {
-  id: string
-  question: string
-  asked_by_session_id: string | null
-  asked_at: string
+  title: string
+  decision: string | null
+  status: 'pending' | 'answered' | 'superseded'
+  decided_at: number
 }
 
 /** Payload of the `pm-decisions-changed` WebSocket event, broadcast

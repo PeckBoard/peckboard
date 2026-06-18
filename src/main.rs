@@ -70,26 +70,6 @@ async fn main() -> anyhow::Result<()> {
     // Startup state repair: fix dangling agent-starts from previous crash
     repair_dangling_sessions(&db).await?;
 
-    // Ensure the default GLOBAL question-expert exists. Sessions consult it
-    // before asking the user; it persists under a stable id and rehydrates
-    // across restarts. Idempotent — never clobbers an existing row.
-    let global_question_expert =
-        match peckboard::service::question_expert::ensure_global_question_expert(
-            &db,
-            &config.data_dir,
-        )
-        .await
-        {
-            Ok(expert) => {
-                tracing::info!(expert_id = %expert.id, "Global question-expert ready");
-                Some(expert)
-            }
-            Err(e) => {
-                tracing::warn!("Failed to ensure global question-expert: {e}");
-                None
-            }
-        };
-
     // Purge expired auth sessions
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -116,105 +96,6 @@ async fn main() -> anyhow::Result<()> {
     let password_change_limiter = RateLimiter::<String>::new(5);
 
     let broadcaster = Broadcaster::new();
-
-    // Rehydrate the global question-expert from its durable Q&A export so a
-    // fresh boot resumes with everything users have already taught it. The
-    // helper is idempotent — re-delivering an unchanged export is a no-op, so
-    // this is safe on every startup.
-    if let Some(expert) = &global_question_expert {
-        match peckboard::service::question_expert::rehydrate_question_expert(
-            &db,
-            &broadcaster,
-            &config.data_dir,
-            expert,
-        )
-        .await
-        {
-            Ok(true) => tracing::info!("Global question-expert rehydrated from Q&A export"),
-            Ok(false) => {}
-            Err(e) => tracing::warn!("Failed to rehydrate global question-expert: {e}"),
-        }
-    }
-
-    // Backfill per-project question-experts at startup so the feature works
-    // out-of-the-box on an existing DB — projects created before this feature
-    // (or before their expert was ensured) get one now, and each is rehydrated
-    // from any accumulated Q&A export. Both calls are idempotent, so this is
-    // cheap and never duplicates on repeated boots. A per-project failure is
-    // logged and skipped rather than aborting startup.
-    match db.list_projects().await {
-        Ok(projects) => {
-            for project in &projects {
-                match peckboard::service::question_expert::ensure_project_question_expert(
-                    &db, project,
-                )
-                .await
-                {
-                    Ok(expert) => {
-                        if let Err(e) =
-                            peckboard::service::question_expert::rehydrate_question_expert(
-                                &db,
-                                &broadcaster,
-                                &config.data_dir,
-                                &expert,
-                            )
-                            .await
-                        {
-                            tracing::warn!(
-                                project_id = %project.id,
-                                "Failed to rehydrate project question-expert: {e}"
-                            );
-                        }
-                    }
-                    Err(e) => tracing::warn!(
-                        project_id = %project.id,
-                        "Failed to ensure project question-expert: {e}"
-                    ),
-                }
-
-                // Likewise backfill the project's PM expert (durable store of
-                // project-direction decisions) so projects created before the
-                // feature gain one on upgrade, then export its decision log
-                // (so the file always exists) and rehydrate the expert from
-                // it. All idempotent; per-project failure is logged and
-                // skipped.
-                match peckboard::service::pm_expert::ensure_project_pm_expert(&db, project).await {
-                    Ok(expert) => {
-                        if let Err(e) = peckboard::service::pm_expert::export_pm_decisions(
-                            &db,
-                            &config.data_dir,
-                            &project.id,
-                        )
-                        .await
-                        {
-                            tracing::warn!(
-                                project_id = %project.id,
-                                "Failed to export PM decisions: {e}"
-                            );
-                        }
-                        if let Err(e) = peckboard::service::pm_expert::rehydrate_pm_expert(
-                            &db,
-                            &broadcaster,
-                            &config.data_dir,
-                            &expert,
-                        )
-                        .await
-                        {
-                            tracing::warn!(
-                                project_id = %project.id,
-                                "Failed to rehydrate project PM expert: {e}"
-                            );
-                        }
-                    }
-                    Err(e) => tracing::warn!(
-                        project_id = %project.id,
-                        "Failed to ensure project PM expert: {e}"
-                    ),
-                }
-            }
-        }
-        Err(e) => tracing::warn!("Failed to list projects for question-expert backfill: {e}"),
-    }
 
     let provider_registry = Arc::new(ProviderRegistry::new());
     let builtin_plugins = Arc::new(BuiltinPluginRegistry::new());
@@ -246,8 +127,18 @@ async fn main() -> anyhow::Result<()> {
         run_auditor,
         mcp_tokens,
         push_service,
-        pm_authorizations: Default::default(),
     });
+
+    // Now that `AppState` exists, bind the plugin agent-dispatch bridge. A
+    // `Weak<AppState>` inside `AppLiveHost` breaks the otherwise-cyclic
+    // `state → plugins → live → state` ownership; plugins loaded earlier share
+    // the same (until now empty) slot, so they pick this up immediately.
+    state
+        .plugins
+        .set_live_host(Arc::new(peckboard::service::mcp_server::AppLiveHost::new(
+            &state,
+            tokio::runtime::Handle::current(),
+        )));
 
     // Resume any in-flight worker sessions after startup repair
     peckboard::worker::orchestrator::check_and_spawn_workers(&state).await;

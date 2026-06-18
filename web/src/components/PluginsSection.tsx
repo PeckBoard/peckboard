@@ -4,6 +4,7 @@ import PluginSettingsModal from './PluginSettingsModal'
 import PluginPanelModal from './PluginPanelModal'
 import ConfirmDialog from './ConfirmDialog'
 import HookList from './HookList'
+import PermissionList from './PermissionList'
 import { decidePluginApproval, uninstallPlugin, type WasmPlugin } from '../utils/pluginApproval'
 
 interface Permission {
@@ -188,6 +189,7 @@ function WasmPluginList({
             </div>
             <p className="plugin-card-description">{p.description}</p>
             <HookList hooks={p.hooks} title="Hooks" />
+            <PermissionList permissions={p.permissions} title="Permissions" />
             <PluginPanelList panels={panels.filter((panel) => panel.plugin === p.name)} />
             {p.status === 'init_failed' && p.error && (
               <p className="plugin-card-error">{p.error}</p>

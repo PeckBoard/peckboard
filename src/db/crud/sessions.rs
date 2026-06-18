@@ -224,37 +224,6 @@ impl Db {
         .await
     }
 
-    /// All expert sessions, newest activity first.
-    pub async fn list_expert_sessions(&self) -> anyhow::Result<Vec<Session>> {
-        self.with_conn(move |conn| {
-            sessions::table
-                .filter(sessions::is_expert.eq(true))
-                .select(Session::as_select())
-                .order(sessions::last_activity.desc())
-                .load(conn)
-                .map_err(Into::into)
-        })
-        .await
-    }
-
-    /// Expert sessions owned by a specific project.
-    pub async fn list_expert_sessions_by_project(
-        &self,
-        project_id: &str,
-    ) -> anyhow::Result<Vec<Session>> {
-        let project_id = project_id.to_string();
-        self.with_conn(move |conn| {
-            sessions::table
-                .filter(sessions::is_expert.eq(true))
-                .filter(sessions::project_id.eq(&project_id))
-                .select(Session::as_select())
-                .order(sessions::last_activity.desc())
-                .load(conn)
-                .map_err(Into::into)
-        })
-        .await
-    }
-
     /// Experts a session in `project_id` may consult: ones scoped to that
     /// project plus globally-scoped experts (`project_id IS NULL`).
     pub async fn list_expert_sessions_by_scope(
@@ -273,43 +242,6 @@ impl Db {
                 .select(Session::as_select())
                 .order(sessions::last_activity.desc())
                 .load(conn)
-                .map_err(Into::into)
-        })
-        .await
-    }
-
-    /// Fetch an expert session by its (stable) id. Returns `None` if the
-    /// id doesn't exist or the session isn't an expert.
-    pub async fn get_expert_session(&self, id: &str) -> anyhow::Result<Option<Session>> {
-        let id = id.to_string();
-        self.with_conn(move |conn| {
-            sessions::table
-                .find(&id)
-                .filter(sessions::is_expert.eq(true))
-                .select(Session::as_select())
-                .first(conn)
-                .optional()
-                .map_err(Into::into)
-        })
-        .await
-    }
-
-    /// Insert a permanent (stable-id) expert if it doesn't yet exist;
-    /// otherwise return the existing row untouched. This is how the
-    /// question- and PM-experts rehydrate under their stable ids across
-    /// restarts without clobbering the accumulated session. The caller is
-    /// expected to set `is_expert`, `is_permanent`, and `expert_kind` on
-    /// `new`.
-    pub async fn upsert_permanent_expert(&self, new: NewSession) -> anyhow::Result<Session> {
-        self.with_conn(move |conn| {
-            let id = new.id.clone();
-            diesel::insert_or_ignore_into(sessions::table)
-                .values(&new)
-                .execute(conn)?;
-            sessions::table
-                .find(&id)
-                .select(Session::as_select())
-                .first(conn)
                 .map_err(Into::into)
         })
         .await
@@ -351,5 +283,127 @@ impl Db {
             Ok(count > 0)
         })
         .await
+    }
+
+    /// Synchronous twin of [`create_session`], for WASM plugin host
+    /// functions that run inside a blocking extism call. Same insert +
+    /// return-the-row logic.
+    pub(crate) fn create_session_blocking(&self, new: NewSession) -> anyhow::Result<Session> {
+        self.with_conn_blocking(move |conn| {
+            diesel::insert_into(sessions::table)
+                .values(&new)
+                .returning(Session::as_returning())
+                .get_result(conn)
+                .map_err(Into::into)
+        })
+    }
+
+    /// Synchronous twin of [`get_session`].
+    pub(crate) fn get_session_blocking(&self, id: &str) -> anyhow::Result<Option<Session>> {
+        let id = id.to_string();
+        self.with_conn_blocking(move |conn| {
+            sessions::table
+                .find(&id)
+                .select(Session::as_select())
+                .first(conn)
+                .optional()
+                .map_err(Into::into)
+        })
+    }
+
+    /// Synchronous twin of [`update_session`].
+    pub(crate) fn update_session_blocking(
+        &self,
+        id: &str,
+        update: UpdateSession,
+    ) -> anyhow::Result<Option<Session>> {
+        let id = id.to_string();
+        self.with_conn_blocking(move |conn| {
+            diesel::update(sessions::table.find(&id))
+                .set(&update)
+                .returning(Session::as_returning())
+                .get_result(conn)
+                .optional()
+                .map_err(Into::into)
+        })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use diesel::prelude::*;
+
+    use crate::db::Db;
+    use crate::db::models::{NewFolder, NewSession, UpdateSession};
+
+    fn seed_folder(db: &Db) {
+        let ts = chrono::Utc::now().to_rfc3339();
+        db.with_conn_blocking(move |conn| {
+            use crate::db::schema::folders;
+            diesel::insert_into(folders::table)
+                .values(&NewFolder {
+                    id: "f1".into(),
+                    name: "F".into(),
+                    path: "/tmp/f".into(),
+                    created_at: ts,
+                })
+                .execute(conn)?;
+            Ok(())
+        })
+        .unwrap();
+    }
+
+    fn new_session(id: &str, project_id: Option<&str>, last_activity: &str) -> NewSession {
+        let ts = chrono::Utc::now().to_rfc3339();
+        NewSession {
+            id: id.into(),
+            name: "S".into(),
+            folder_id: "f1".into(),
+            project_id: project_id.map(|p| p.to_string()),
+            created_at: ts,
+            last_activity: last_activity.into(),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn create_then_get_then_update_roundtrip() {
+        let db = Db::in_memory().unwrap();
+        seed_folder(&db);
+
+        let created = db
+            .create_session_blocking(new_session("s1", None, "2026-01-01T00:00:00Z"))
+            .unwrap();
+        assert_eq!(created.id, "s1");
+        assert_eq!(created.name, "S");
+
+        let fetched = db.get_session_blocking("s1").unwrap();
+        assert_eq!(fetched.map(|s| s.id), Some("s1".to_string()));
+        assert!(db.get_session_blocking("nope").unwrap().is_none());
+
+        let updated = db
+            .update_session_blocking(
+                "s1",
+                UpdateSession {
+                    name: Some("renamed".into()),
+                    ..Default::default()
+                },
+            )
+            .unwrap()
+            .unwrap();
+        assert_eq!(updated.name, "renamed");
+        // Missing id returns None (use a non-empty changeset; an empty
+        // `AsChangeset` is rejected before the row lookup).
+        assert!(
+            db.update_session_blocking(
+                "nope",
+                UpdateSession {
+                    name: Some("x".into()),
+                    ..Default::default()
+                },
+            )
+            .unwrap()
+            .is_none()
+        );
     }
 }

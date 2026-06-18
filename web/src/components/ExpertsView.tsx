@@ -51,11 +51,11 @@ function ExpertRow({
       data-expert-kind={kind ?? 'expert'}
       role="button"
       tabIndex={0}
-      onClick={() => onOpen(expert.id)}
+      onClick={() => onOpen(expert.session_id)}
       onKeyDown={(e) => {
         if (e.key === 'Enter' || e.key === ' ') {
           e.preventDefault()
-          onOpen(expert.id)
+          onOpen(expert.session_id)
         }
       }}
     >
@@ -167,7 +167,7 @@ export default function ExpertsView({ onOpenExpert }: { onOpenExpert: (id: strin
             <div className="expert-group-body">
               {group.experts.map((expert) => (
                 <ExpertRow
-                  key={expert.id}
+                  key={expert.session_id}
                   expert={expert}
                   onOpen={onOpenExpert}
                   pendingCount={

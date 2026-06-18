@@ -122,23 +122,6 @@ impl McpToolRegistry {
             })
             .await?;
 
-        // Idempotently give the new project its own question-expert so workers
-        // can consult it before bothering the user. Non-fatal: a failure must
-        // not roll back the project create (callers fall back to the global
-        // question-expert). The spin_up_experts tool is the entry point for
-        // the project's knowledge-experts — we do NOT auto-spin those here.
-        if let Err(e) =
-            crate::service::question_expert::ensure_project_question_expert(&ctx.db, &project).await
-        {
-            tracing::warn!(project_id = %project.id, "Failed to ensure project question-expert: {e}");
-        }
-
-        // Likewise its PM expert (durable store of project-direction decisions).
-        if let Err(e) = crate::service::pm_expert::ensure_project_pm_expert(&ctx.db, &project).await
-        {
-            tracing::warn!(project_id = %project.id, "Failed to ensure project PM expert: {e}");
-        }
-
         Ok(serde_json::json!({
             "status": "ok",
             "project": {
