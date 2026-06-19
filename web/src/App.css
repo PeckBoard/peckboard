@@ -1,0 +1,33 @@
+/* ═══════════════════════════════════════════════════
+   PECKBOARD — App stylesheet barrel
+   ═══════════════════════════════════════════════════
+   The actual rules live in per-area files under ./styles/.
+   Order matters where cascade conflicts could surface; mobile +
+   responsive overrides come last so they win over the desktop rules
+   they tweak.
+*/
+
+@import './styles/base.css';
+@import './styles/auth.css';
+@import './styles/chat-main.css';
+@import './styles/tools.css';
+@import './styles/input.css';
+@import './styles/kanban.css';
+@import './styles/panel.css';
+@import './styles/settings.css';
+@import './styles/components-extra.css';
+@import './styles/chat-toolbar.css';
+@import './styles/question-card.css';
+@import './styles/indicators.css';
+@import './styles/attachments.css';
+@import './styles/question-options.css';
+@import './styles/confirm-dialog.css';
+@import './styles/context-menu.css';
+@import './styles/kanban-header.css';
+@import './styles/announcement.css';
+@import './styles/worker-comms.css';
+@import './styles/repeating-tasks.css';
+@import './styles/pm-expert.css';
+@import './styles/usage.css';
+@import './styles/feedback.css';
+@import './styles/mobile.css';

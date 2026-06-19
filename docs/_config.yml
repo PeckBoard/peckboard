@@ -1,0 +1,26 @@
+title: PeckBoard
+description: A remote control panel that spawns Claude Code agents and orchestrates multi-agent workflows on a kanban board.
+baseurl: "/peckboard"
+url: "https://peckboard.github.io"
+
+remote_theme: just-the-docs/just-the-docs
+plugins:
+  - jekyll-remote-theme
+
+mermaid:
+  version: "10.9.1"
+
+exclude:
+  - README.md
+  - Gemfile
+  - Gemfile.lock
+  - vendor/
+  - .bundle/
+  - .jekyll-cache/
+  - node_modules/
+  # Internal development docs, not part of the public site.
+  - EPIC.md
+  - api/
+  - architecture/
+  - frontend/
+  - tasks/

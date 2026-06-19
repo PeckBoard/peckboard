@@ -1,0 +1,158 @@
+/* ═══════════════════════════════════════════════════
+   Question Card (AskUserQuestion)
+   ═══════════════════════════════════════════════════ */
+
+.question-card {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  max-width: 500px;
+  overflow: hidden;
+}
+
+.question-card.question-active {
+  border-color: var(--accent-muted);
+  box-shadow: 0 0 0 1px var(--accent-subtle);
+}
+
+.question-card-title-bar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 16px;
+  background: var(--surface2);
+  border-bottom: 1px solid var(--border);
+  font-size: var(--text-sm);
+  font-weight: 600;
+  color: var(--text2);
+}
+
+.question-card-icon {
+  font-size: 15px;
+  line-height: 1;
+}
+
+.question-card-title-text {
+  flex: 1;
+}
+
+.question-card .question-item,
+.question-card .question-actions {
+  padding-left: 16px;
+  padding-right: 16px;
+}
+
+.question-card .question-item:first-of-type {
+  padding-top: 14px;
+}
+
+.question-card .question-actions {
+  padding-top: 4px;
+  padding-bottom: 14px;
+}
+
+.question-card-text {
+  font-size: var(--text-sm);
+  color: var(--text);
+  line-height: 1.5;
+  font-weight: 500;
+}
+
+.question-input {
+  padding: 8px 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--bg);
+  color: var(--text);
+  font-size: var(--text-sm);
+  font-family: inherit;
+  outline: none;
+  width: 100%;
+  box-sizing: border-box;
+  transition:
+    border-color var(--transition),
+    box-shadow var(--transition);
+}
+
+.question-input:focus {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 2px var(--accent-subtle);
+}
+
+.question-input::placeholder {
+  color: var(--text3);
+}
+
+.question-actions {
+  display: flex;
+  gap: 8px;
+}
+
+.question-actions .btn-primary {
+  padding: 6px 14px;
+  font-size: var(--text-sm);
+}
+
+.question-actions .btn-secondary {
+  padding: 6px 14px;
+  font-size: var(--text-sm);
+}
+
+/* ─── Panel Item Meta (time + folder) ─── */
+
+.panel-item-meta {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-shrink: 0;
+}
+
+.panel-item-time {
+  font-size: 10px;
+  color: var(--text3);
+  white-space: nowrap;
+}
+
+/* Folder delete options */
+.folder-delete-option {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 12px 14px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: var(--surface);
+  cursor: pointer;
+  text-align: left;
+  transition: all var(--transition);
+  width: 100%;
+}
+.folder-delete-option:hover {
+  border-color: var(--accent);
+  background: var(--accent-subtle);
+}
+.folder-delete-option:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+.folder-delete-option strong {
+  font-size: var(--text-sm);
+  color: var(--text);
+}
+.folder-delete-option span {
+  font-size: var(--text-xs);
+  color: var(--text3);
+}
+.folder-delete-option-group {
+  padding: 12px 14px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+}
+.folder-delete-option-move strong {
+  font-size: var(--text-sm);
+  color: var(--text);
+  display: block;
+}

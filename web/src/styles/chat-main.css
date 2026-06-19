@@ -1,0 +1,741 @@
+/* ═══════════════════════════════════════════════════
+   Chat View
+   ═══════════════════════════════════════════════════ */
+
+.chat-container {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-height: 0;
+}
+
+.chat-messages {
+  flex: 1;
+  overflow-y: auto;
+  padding: 20px 24px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.chat-loading,
+.chat-empty {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--text3);
+  font-size: var(--text-sm);
+}
+
+.chat-load-older {
+  display: flex;
+  justify-content: center;
+  padding: var(--space-3) 0 var(--space-2);
+}
+
+.chat-load-older-btn {
+  background: var(--surface2);
+  color: var(--text2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: var(--space-2) var(--space-4);
+  font-size: var(--text-sm);
+  cursor: pointer;
+  transition: background 0.12s ease;
+}
+
+.chat-load-older-btn:hover:not(:disabled) {
+  background: var(--surface3);
+}
+
+.chat-load-older-btn:disabled {
+  opacity: 0.6;
+  cursor: default;
+}
+
+/* Todo / task panel — pinned below the toolbar, above the message log. */
+.todo-panel {
+  flex: 0 0 auto;
+  border-bottom: 1px solid var(--border);
+  background: var(--surface);
+  max-height: 38%;
+  overflow-y: auto;
+}
+
+.todo-panel-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 8px 24px;
+  background: transparent;
+  border: none;
+  cursor: pointer;
+  color: var(--text2);
+  font-size: var(--text-sm);
+  font-weight: 600;
+  text-align: left;
+}
+
+.todo-panel-header:hover {
+  background: var(--surface2);
+}
+
+.todo-panel-caret {
+  font-size: 10px;
+  color: var(--text3);
+  width: 10px;
+}
+
+.todo-panel-title {
+  flex: 1;
+}
+
+.todo-panel-count {
+  font-size: var(--text-xs);
+  font-weight: 500;
+  color: var(--text3);
+}
+
+.todo-panel-body {
+  padding: 4px 24px 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.todo-group-label {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: var(--text-xs);
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--text3);
+  margin-bottom: 4px;
+}
+
+.todo-group-badge {
+  font-weight: 500;
+  color: var(--text3);
+}
+
+.todo-group-items {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.todo-item {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  font-size: var(--text-sm);
+  line-height: 1.4;
+  color: var(--text);
+}
+
+.todo-item-marker {
+  flex: 0 0 auto;
+  font-size: 12px;
+  line-height: 1.4;
+}
+
+.todo-item-pending .todo-item-marker {
+  color: var(--text3);
+}
+
+.todo-item-in_progress {
+  font-weight: 600;
+  color: var(--accent);
+}
+
+.todo-item-in_progress .todo-item-marker {
+  color: var(--accent);
+}
+
+.todo-item-done {
+  color: var(--text3);
+}
+
+.todo-item-done .todo-item-marker {
+  color: var(--success);
+}
+
+.todo-item-done .todo-item-text {
+  text-decoration: line-through;
+}
+
+/* Project-page todo roll-up: docked at the bottom of the kanban
+   board, outside its scroll area. Same shape as the chat-side
+   `.todo-panel` (top border instead of card border, flush against
+   the bottom chrome) so the two views feel consistent. The hard
+   25% cap keeps the panel from eating more than a quarter of the
+   board height; the panel's own body still scrolls when the todo
+   list is long. The `--app-height` chain (App.tsx's visualViewport
+   sync) shrinks the kanban board above an open soft keyboard, so
+   the 25% follows the visible area instead of stretching past it. */
+.project-todo-summary {
+  flex-shrink: 0;
+  background: var(--surface);
+  border-top: 1px solid var(--border);
+  max-height: min(25%, 240px);
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+}
+
+/* Body holds the per-card sections; scrolls within the 25% wrapper cap. */
+.project-todo-summary-body {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 4px 24px 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.project-todo-summary-card {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.project-todo-summary-card-title {
+  margin: 0;
+  font-size: var(--text-xs);
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--text3);
+}
+
+.project-todo-summary-items {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+
+/* Dedicated /projects/:id/todos page. Same chat-container shell, with each
+   card group rendered as its own bordered tile with a title bar — distinct
+   from the in-board summary, which is a flat docked panel. */
+.project-todos-view {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-height: 0;
+}
+
+.project-todos-header {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 12px 20px;
+  border-bottom: 1px solid var(--border);
+  background: var(--surface);
+  flex-shrink: 0;
+}
+
+.project-todos-title {
+  margin: 0;
+  font-size: var(--text-lg);
+  font-weight: 600;
+  color: var(--text);
+}
+
+.project-todos-body {
+  flex: 1;
+  overflow-y: auto;
+  padding: 20px 24px;
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.project-todos-card-group {
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: var(--surface);
+  overflow: hidden;
+}
+
+.project-todos-card-title {
+  margin: 0;
+  padding: 10px 16px;
+  background: var(--surface2);
+  border-bottom: 1px solid var(--border);
+  font-size: var(--text-sm);
+  font-weight: 600;
+  color: var(--text);
+}
+
+.project-todos-card-group .todo-panel {
+  border-bottom: none;
+  background: transparent;
+  max-height: none;
+  overflow: visible;
+}
+
+.project-todos-card-group .todo-panel-header {
+  padding: 8px 16px;
+}
+
+.project-todos-card-group .todo-panel-body {
+  padding: 4px 16px 12px;
+}
+
+.project-todos-loading,
+.project-todos-error {
+  padding: 24px;
+  color: var(--text3);
+  text-align: center;
+  font-size: var(--text-sm);
+}
+
+.project-todos-error {
+  color: var(--accent);
+}
+
+.project-todos-empty {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  padding: 60px 24px;
+  color: var(--text3);
+  text-align: center;
+}
+
+.project-todos-empty p {
+  margin: 0;
+  font-size: var(--text-base);
+  font-weight: 600;
+  color: var(--text2);
+}
+
+.project-todos-empty-hint {
+  font-size: var(--text-sm) !important;
+  font-weight: 400 !important;
+  color: var(--text3) !important;
+  max-width: 360px;
+}
+
+/* Dedicated session-todos view: same chat-container shell, but the body is
+   a centered scroll surface that hosts the shared TodoPanel as a card,
+   matching the project-todo-summary roll-up styling. */
+.session-todos-body {
+  flex: 1;
+  overflow-y: auto;
+  padding: 20px 24px;
+}
+
+.session-todos-wrapper {
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface);
+  overflow: hidden;
+}
+
+.session-todos-wrapper .todo-panel {
+  border-bottom: none;
+  max-height: none;
+}
+
+.session-todos-empty {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  padding: 60px 24px;
+  color: var(--text3);
+  text-align: center;
+}
+
+.session-todos-empty p {
+  margin: 0;
+  font-size: var(--text-base);
+  font-weight: 600;
+  color: var(--text2);
+}
+
+.session-todos-empty span {
+  font-size: var(--text-sm);
+  max-width: 360px;
+}
+
+/* Per-card "done/total" progress chip on a kanban card. */
+.card-todo-badge {
+  flex: 0 0 auto;
+  margin-left: auto;
+  padding: 1px 7px;
+  border-radius: 10px;
+  background: var(--surface2);
+  color: var(--text2);
+  font-size: var(--text-xs);
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+
+.chat-row {
+  display: flex;
+  max-width: 100%;
+}
+.chat-row-user {
+  justify-content: flex-end;
+}
+.chat-row-assistant {
+  justify-content: flex-start;
+}
+.chat-row-tool {
+  justify-content: flex-start;
+  width: 100%;
+}
+.chat-row-status {
+  justify-content: center;
+}
+.chat-row-system {
+  justify-content: center;
+}
+.chat-row-step {
+  width: 100%;
+}
+
+.chat-bubble {
+  max-width: 72%;
+  padding: 10px 14px;
+  font-size: var(--text-base);
+  line-height: 1.6;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.chat-bubble-user {
+  background: var(--accent);
+  color: var(--text-inverse);
+  border-radius: 16px 16px 4px 16px;
+}
+
+/* Optimistic bubble — same shape but slightly faded so the user can see
+   "this is on its way" while we wait for the WS confirmation. The fade
+   is small enough not to read as broken / disabled. */
+.chat-bubble-pending {
+  opacity: 0.65;
+}
+
+.chat-bubble-assistant {
+  /* Surface3 fill — one step darker than surface2 — so the bubble sits
+     clearly above the lighter chat column. The border is the same fill
+     mixed toward black so it stays on the surface3 hue/sat ramp
+     instead of drifting toward the neutral `--border` token, which
+     in dark mode is identical to the bubble background and disappears. */
+  background: var(--surface3);
+  color: var(--text);
+  border: 1px solid color-mix(in srgb, var(--surface3) 90%, black);
+  border-radius: 16px 16px 16px 4px;
+}
+
+/* Markdown content inside assistant bubbles.
+   The bubble defaults to `white-space: pre-wrap` for plain-text agents;
+   markdown handles its own whitespace via block elements, so reset it
+   here and style the elements ReactMarkdown emits. */
+.chat-markdown {
+  white-space: normal;
+}
+.chat-markdown > :first-child {
+  margin-top: 0;
+}
+.chat-markdown > :last-child {
+  margin-bottom: 0;
+}
+.chat-markdown p {
+  margin: 0.4em 0;
+}
+.chat-markdown h1,
+.chat-markdown h2,
+.chat-markdown h3,
+.chat-markdown h4,
+.chat-markdown h5,
+.chat-markdown h6 {
+  margin: 0.6em 0 0.3em;
+  line-height: 1.25;
+}
+.chat-markdown h1 {
+  font-size: 1.3em;
+}
+.chat-markdown h2 {
+  font-size: 1.2em;
+}
+.chat-markdown h3 {
+  font-size: 1.1em;
+}
+.chat-markdown ul,
+.chat-markdown ol {
+  margin: 0.4em 0;
+  padding-left: 1.5em;
+}
+.chat-markdown li {
+  margin: 0.15em 0;
+}
+.chat-markdown blockquote {
+  margin: 0.4em 0;
+  padding: 0.2em 0.8em;
+  border-left: 3px solid var(--border);
+  color: var(--text2);
+}
+.chat-markdown a {
+  color: var(--accent);
+}
+.chat-markdown :not(pre) > code {
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 0 4px;
+  font-size: 0.9em;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+}
+.chat-markdown pre {
+  margin: 0.5em 0;
+  padding: 0.7em 0.9em;
+  border-radius: 8px;
+  overflow-x: auto;
+  /* highlight.js github-dark stylesheet sets its own background; we
+     just guarantee the surrounding chrome matches the chat surface. */
+  border: 1px solid var(--border);
+}
+.chat-markdown pre code {
+  background: transparent;
+  border: 0;
+  padding: 0;
+  font-size: 0.85em;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+}
+.chat-markdown table {
+  border-collapse: collapse;
+  margin: 0.4em 0;
+}
+.chat-markdown th,
+.chat-markdown td {
+  border: 1px solid var(--border);
+  padding: 4px 8px;
+}
+
+.chat-status {
+  font-size: var(--text-xs);
+  color: var(--text3);
+  padding: 2px 0;
+}
+
+/* Timestamps on messages */
+.chat-time {
+  font-size: 10px;
+  color: var(--text3);
+  margin-top: 4px;
+  opacity: 0.7;
+}
+.chat-time-user {
+  color: rgba(255, 255, 255, 0.6);
+}
+
+/* Agent start notice */
+.chat-agent-start {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: var(--text-xs);
+  color: var(--text3);
+  padding: 6px 0;
+}
+.chat-agent-start-label {
+  font-weight: 600;
+  color: var(--text2);
+}
+.chat-agent-start-detail {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  color: var(--accent);
+  background: var(--accent-subtle);
+  padding: 1px 8px;
+  border-radius: var(--radius-full);
+}
+.chat-agent-start-time {
+  font-size: 10px;
+  color: var(--text3);
+  margin-left: auto;
+}
+
+/* Ready notice */
+.chat-ready-notice {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: var(--text-xs);
+  color: var(--success);
+  font-weight: 500;
+  padding: 6px 0;
+}
+.chat-ready-time {
+  font-size: 10px;
+  color: var(--text3);
+}
+
+/* Thinking indicator */
+.chat-thinking {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-size: var(--text-xs);
+  color: var(--text3);
+  font-style: italic;
+  padding: 8px 0;
+}
+.chat-thinking-dots {
+  display: flex;
+  gap: 4px;
+}
+.chat-thinking-dots span {
+  width: 6px;
+  height: 6px;
+  border-radius: var(--radius-full);
+  background: var(--text3);
+  animation: thinkBounce 1.4s ease-in-out infinite;
+}
+.chat-thinking-dots span:nth-child(2) {
+  animation-delay: 0.2s;
+}
+.chat-thinking-dots span:nth-child(3) {
+  animation-delay: 0.4s;
+}
+@keyframes thinkBounce {
+  0%,
+  80%,
+  100% {
+    transform: scale(0.6);
+    opacity: 0.4;
+  }
+  40% {
+    transform: scale(1);
+    opacity: 1;
+  }
+}
+
+/* Inline Interrupt — sits on the same row as the thinking indicator,
+   so the affordance to stop the agent is right next to the activity
+   it's stopping. Compact chip-style button so it doesn't dominate. */
+.chat-thinking-interrupt {
+  margin-left: 8px;
+  padding: 2px 10px;
+  border: 1px solid var(--danger-border);
+  border-radius: var(--radius-full);
+  background: var(--danger-bg);
+  color: var(--danger);
+  font-size: var(--text-xs);
+  font-weight: 600;
+  font-family: inherit;
+  line-height: 1.4;
+  cursor: pointer;
+  transition: all var(--transition);
+}
+.chat-thinking-interrupt:hover {
+  background: var(--danger);
+  color: var(--text-inverse);
+  border-color: var(--danger);
+}
+
+.chat-system-notice {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  font-size: var(--text-xs);
+  font-weight: 500;
+  color: var(--text2);
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 8px 16px;
+  max-width: 80%;
+  text-align: center;
+  line-height: 1.4;
+}
+
+.chat-system-notice-icon {
+  font-size: 14px;
+  flex-shrink: 0;
+}
+
+/* Report chip inside system notice */
+.chat-report-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 14px;
+  border-radius: 12px;
+  border: 1px solid var(--border);
+  background: var(--surface);
+  cursor: pointer;
+  color: var(--text);
+  font-size: var(--text-xs);
+  line-height: 1.3;
+  text-align: left;
+  transition: all var(--transition);
+}
+
+.chat-report-chip:hover {
+  border-color: var(--accent);
+  background: var(--accent-subtle);
+}
+
+.chat-report-chip-icon {
+  font-size: 16px;
+  flex-shrink: 0;
+}
+
+.chat-report-chip-body {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  min-width: 0;
+}
+
+.chat-report-chip-title {
+  font-weight: 600;
+  color: var(--text);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.chat-report-chip-folder {
+  font-size: 10px;
+  color: var(--text3);
+}
+
+.chat-step-divider {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 8px 0;
+  font-size: var(--text-xs);
+  font-weight: 700;
+  color: var(--accent);
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+}
+
+.chat-step-divider::before,
+.chat-step-divider::after {
+  content: '';
+  flex: 1;
+  height: 1px;
+  background: var(--border);
+}

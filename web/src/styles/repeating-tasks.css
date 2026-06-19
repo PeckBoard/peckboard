@@ -1,0 +1,71 @@
+/* Repeating tasks: list, modal, and detail view styling. */
+
+.form-help {
+  margin: 4px 0 0 0;
+  font-size: var(--text-sm, 13px);
+  color: var(--text3, #888);
+}
+
+.form-field-row {
+  display: flex;
+  gap: 12px;
+}
+.form-field-row > .form-field {
+  flex: 1;
+}
+
+.repeating-task-detail {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  padding: 8px 12px 24px;
+}
+
+.repeating-task-desc {
+  margin: 0;
+  color: var(--text2);
+  font-size: var(--text-sm);
+  white-space: pre-wrap;
+}
+
+.repeating-task-meta {
+  display: grid;
+  grid-template-columns: max-content 1fr;
+  gap: 6px 16px;
+  margin: 0;
+}
+.repeating-task-meta dt {
+  font-weight: 600;
+  color: var(--text2);
+}
+.repeating-task-meta dd {
+  margin: 0;
+  color: var(--text);
+}
+
+.repeating-task-prompt {
+  background: var(--surface2, #1a1a1a);
+  border-radius: 8px;
+  padding: 8px 12px;
+}
+.repeating-task-prompt summary {
+  cursor: pointer;
+  font-weight: 600;
+}
+.repeating-task-prompt pre {
+  margin: 12px 0 0;
+  white-space: pre-wrap;
+  word-break: break-word;
+  font-family: inherit;
+  font-size: var(--text-sm);
+  color: var(--text2);
+}
+
+.repeating-task-run-status {
+  padding: 8px 12px;
+  background: var(--surface2, #1a1a1a);
+  border-left: 3px solid var(--accent, #4a9eff);
+  border-radius: 4px;
+  color: var(--text);
+  font-size: var(--text-sm);
+}

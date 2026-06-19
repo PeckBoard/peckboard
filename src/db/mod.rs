@@ -1,0 +1,121 @@
+pub mod crud;
+pub mod docs;
+pub mod events;
+pub mod models;
+pub mod repair;
+pub mod schema;
+#[cfg(test)]
+mod tests;
+
+use diesel::prelude::*;
+use diesel::sqlite::SqliteConnection;
+use diesel_migrations::{EmbeddedMigrations, MigrationHarness, embed_migrations};
+use std::path::Path;
+use std::sync::{Arc, Mutex};
+
+pub const MIGRATIONS: EmbeddedMigrations = embed_migrations!();
+
+/// Thin wrapper around a Diesel SQLite connection.
+///
+/// All operations clone the inner `Arc` and run on `spawn_blocking` so
+/// the async runtime is never blocked by SQLite I/O.
+#[derive(Clone)]
+pub struct Db {
+    conn: Arc<Mutex<SqliteConnection>>,
+}
+
+impl Db {
+    /// Open (or create) the database at `data_dir/peckboard.db` and run
+    /// any pending migrations.
+    pub fn open(data_dir: &Path) -> anyhow::Result<Self> {
+        std::fs::create_dir_all(data_dir)?;
+        let db_path = data_dir.join("peckboard.db");
+        let db_url = db_path.to_string_lossy().to_string();
+
+        let mut conn = SqliteConnection::establish(&db_url)
+            .map_err(|e| anyhow::anyhow!("failed to open database: {e}"))?;
+
+        // Enable WAL mode for better concurrent read performance.
+        diesel::sql_query("PRAGMA journal_mode=WAL;")
+            .execute(&mut conn)
+            .ok();
+        diesel::sql_query("PRAGMA foreign_keys=ON;")
+            .execute(&mut conn)
+            .ok();
+
+        conn.run_pending_migrations(MIGRATIONS)
+            .map_err(|e| anyhow::anyhow!("migration failed: {e}"))?;
+
+        // Heal any schema drift left over from past migration mishaps
+        // (e.g. the 00000000000002_* collision that left some DBs
+        // missing project columns). Runs after diesel migrations so a
+        // freshly-created DB always lands here as a no-op.
+        repair::ensure_schema(&mut conn)?;
+
+        Ok(Db {
+            conn: Arc::new(Mutex::new(conn)),
+        })
+    }
+
+    /// Create an in-memory database for testing. Runs all migrations.
+    pub fn in_memory() -> anyhow::Result<Self> {
+        let mut conn = SqliteConnection::establish(":memory:")
+            .map_err(|e| anyhow::anyhow!("failed to open in-memory database: {e}"))?;
+
+        diesel::sql_query("PRAGMA foreign_keys=ON;")
+            .execute(&mut conn)
+            .ok();
+
+        conn.run_pending_migrations(MIGRATIONS)
+            .map_err(|e| anyhow::anyhow!("migration failed: {e}"))?;
+
+        repair::ensure_schema(&mut conn)?;
+
+        Ok(Db {
+            conn: Arc::new(Mutex::new(conn)),
+        })
+    }
+
+    /// Run a closure with access to the underlying Diesel connection.
+    ///
+    /// Moves work onto a blocking thread so it is safe to call from async code.
+    pub async fn with_conn<F, T>(&self, f: F) -> anyhow::Result<T>
+    where
+        F: FnOnce(&mut SqliteConnection) -> anyhow::Result<T> + Send + 'static,
+        T: Send + 'static,
+    {
+        let conn = self.conn.clone();
+        tokio::task::spawn_blocking(move || {
+            let mut guard = conn
+                .lock()
+                .map_err(|e| anyhow::anyhow!("db lock poisoned: {e}"))?;
+            f(&mut *guard)
+        })
+        .await?
+    }
+
+    /// Synchronous twin of [`Db::with_conn`]: locks the connection and runs
+    /// `f` on the calling thread, with no `spawn_blocking` and no `.await`.
+    ///
+    /// This is the bridge for synchronous callers that cannot enter the async
+    /// runtime — notably the WASM plugin host functions (`src/plugin/host.rs`),
+    /// which run inside a synchronous extism `Plugin::call` on a tokio worker
+    /// thread. Calling `with_conn` (or `Handle::block_on`) from there would
+    /// panic ("cannot block the current thread from within a runtime"); locking
+    /// the inner `std::sync::Mutex` directly does not touch the runtime at all.
+    ///
+    /// The closure shares the same connection mutex as every `with_conn` call,
+    /// so a long query here serializes other DB users for its duration — the
+    /// same cost as any normal DB access. It never reenters the runtime and
+    /// never holds a plugin lock, so there is no deadlock path.
+    pub fn with_conn_blocking<F, T>(&self, f: F) -> anyhow::Result<T>
+    where
+        F: FnOnce(&mut SqliteConnection) -> anyhow::Result<T>,
+    {
+        let mut guard = self
+            .conn
+            .lock()
+            .map_err(|e| anyhow::anyhow!("db lock poisoned: {e}"))?;
+        f(&mut *guard)
+    }
+}

@@ -1,0 +1,12 @@
+/target
+.DS_Store
+node_modules/
+web/dist/
+.idea/
+web/test-results/
+web/playwright-report/
+docs/_site/
+docs/.jekyll-cache/
+docs/.jekyll-metadata
+docs/.bundle/
+docs/vendor/

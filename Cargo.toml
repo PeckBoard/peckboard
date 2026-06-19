@@ -1,0 +1,79 @@
+[package]
+name = "peckboard"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+# Async runtime
+tokio = { version = "1", features = ["full"] }
+
+# HTTP framework + WebSocket
+axum = { version = "0.8", features = ["ws"] }
+axum-extra = { version = "0.10", features = ["typed-header"] }
+tower = { version = "0.5", features = ["util"] }
+tower-http = { version = "0.6", features = ["fs", "cors", "trace", "set-header"] }
+
+# Serialization
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# Database (Diesel ORM + embedded migrations)
+diesel = { version = "2", features = ["sqlite", "returning_clauses_for_sqlite_3_35"] }
+diesel_migrations = "2"
+libsqlite3-sys = { version = "0.30", features = ["bundled"] }
+
+# Auth / crypto
+argon2 = "0.5"
+rand = "0.8"
+base64 = "0.22"
+p256 = { version = "0.13", features = ["ecdsa"] }
+
+# Logging / tracing
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+
+# TLS
+rcgen = "0.13"
+tokio-rustls = "0.26"
+rustls-pemfile = "2"
+
+# mDNS
+mdns-sd = "0.12"
+
+# Plugin system (WASM)
+extism = "1"
+
+# Embedded frontend assets
+rust-embed = { version = "8", features = ["interpolate-folder-path"] }
+mime_guess = "2"
+
+# Misc
+uuid = { version = "1", features = ["v4"] }
+chrono = { version = "0.4", features = ["serde"] }
+thiserror = "2"
+anyhow = "1"
+clap = { version = "4", features = ["derive", "env"] }
+dirs = "6"
+jsonwebtoken = { version = "10.4.0", features = ["rust_crypto"] }
+sha2 = "0.11.0"
+hex = "0.4.3"
+futures-util = "0.3.32"
+hyper-util = { version = "0.1", features = ["tokio", "server-auto", "service"] }
+rustls = "0.23.40"
+time = "0.3.47"
+libc = "0.2.186"
+async-trait = "0.1"
+regex = "1.12.3"
+reqwest = { version = "0.13.4", features = ["json", "stream"] }
+
+[dev-dependencies]
+rustls = "0.23.40"
+tempfile = "3.27.0"
+time = "0.3.47"
+urlencoding = "2"
+
+# Trim debug info so `target/debug` doesn't fill the disk every few
+# builds. Backtraces still show file:line; we lose pretty struct
+# inspection inside a debugger, which we rarely use.
+[profile.dev]
+debug = "line-tables-only"
