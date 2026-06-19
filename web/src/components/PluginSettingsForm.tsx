@@ -31,6 +31,7 @@ type FieldKind =
       key_placeholder?: string
       value_placeholder?: string
     }
+  | { type: 'string_list'; item_placeholder?: string }
 
 interface SchemaField {
   key: string
@@ -47,6 +48,7 @@ interface SchemaField {
   secret_values?: boolean
   key_placeholder?: string
   value_placeholder?: string
+  item_placeholder?: string
 }
 
 interface Schema {
@@ -71,7 +73,7 @@ interface KvPair {
   value: string
 }
 
-type FormValue = string | number | boolean | KvPair[]
+type FormValue = string | number | boolean | KvPair[] | string[]
 
 interface FormState {
   values: Record<string, FormValue>
@@ -104,6 +106,11 @@ function initialValue(field: SchemaField, stored: StoredField | undefined): Form
           key: typeof entry.key === 'string' ? entry.key : '',
           value: typeof entry.value === 'string' ? entry.value : '',
         }))
+      }
+      return []
+    case 'string_list':
+      if (stored && Array.isArray(stored.value)) {
+        return (stored.value as unknown[]).filter((v): v is string => typeof v === 'string')
       }
       return []
   }
@@ -203,9 +210,14 @@ export default function PluginSettingsForm({ pluginId }: { pluginId: string }) {
           updates[field.key] = Boolean(raw)
           break
         case 'key_value_list':
-          updates[field.key] = (Array.isArray(raw) ? raw : [])
+          updates[field.key] = (Array.isArray(raw) ? (raw as KvPair[]) : [])
             .filter((p) => p.key.trim() !== '')
             .map((p) => ({ key: p.key.trim(), value: p.value }))
+          break
+        case 'string_list':
+          updates[field.key] = (Array.isArray(raw) ? (raw as string[]) : [])
+            .map((s) => s.trim())
+            .filter((s) => s !== '')
           break
       }
     }
@@ -360,7 +372,7 @@ function FieldRow({
       )
     }
     case 'key_value_list': {
-      const pairs = Array.isArray(value) ? value : []
+      const pairs = Array.isArray(value) ? (value as KvPair[]) : []
       return (
         <div className="plugin-setting-field" data-field={field.key}>
           {labelNode}
@@ -407,6 +419,43 @@ function FieldRow({
             + Add header
           </button>
           {secretHint}
+        </div>
+      )
+    }
+    case 'string_list': {
+      const items = Array.isArray(value) ? (value as string[]) : []
+      return (
+        <div className="plugin-setting-field" data-field={field.key}>
+          {labelNode}
+          {descNode}
+          {items.map((item, i) => (
+            <div key={i} className="plugin-setting-kv-row">
+              <input
+                type="text"
+                placeholder={field.item_placeholder ?? 'Value'}
+                value={item}
+                onChange={(e) => {
+                  const next = [...items]
+                  next[i] = e.target.value
+                  onChange(next)
+                }}
+              />
+              <button
+                type="button"
+                className="plugin-setting-kv-remove"
+                onClick={() => onChange(items.filter((_, idx) => idx !== i))}
+              >
+                Remove
+              </button>
+            </div>
+          ))}
+          <button
+            type="button"
+            className="plugin-setting-kv-add"
+            onClick={() => onChange([...items, ''])}
+          >
+            + Add model
+          </button>
         </div>
       )
     }

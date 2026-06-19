@@ -11,6 +11,11 @@
 //! * `request_timeout_secs` (integer, 1–3600) — per-turn timeout for
 //!   the HTTP call. Defaults to 600s; Ollama on CPU can take a while
 //!   to load a fresh model on first use.
+//! * `additional_models` (string list) — extra model names to surface in
+//!   the model picker beyond the built-in seed. Each is registered as
+//!   `ollama:<name>` and may carry a tag (`llama3.1:8b`). Reflected in
+//!   `/api/models` live, without a restart, via the provider's
+//!   `dynamic_models` override.
 //! * `additional_headers` (key-value list, secret values) — extra HTTP
 //!   headers attached to every request. Use this for a remote Ollama
 //!   behind an auth proxy (`Authorization: Bearer …`); values are
@@ -72,6 +77,21 @@ impl OllamaPlugin {
                     default: Some(600),
                     min: Some(1),
                     max: Some(3600),
+                },
+            },
+            SettingField {
+                key: "additional_models".into(),
+                title: "Additional Models".into(),
+                description: Some(
+                    "Extra model names to register in the model picker, beyond the built-in \
+                     suggestions. Use the exact name pulled on your Ollama server, including \
+                     any tag (e.g. llama3.1:8b, mistral-small, me/custom-model). Each appears \
+                     as ollama:<name>."
+                        .into(),
+                ),
+                required: false,
+                kind: FieldKind::StringList {
+                    item_placeholder: Some("llama3.1:8b".into()),
                 },
             },
             SettingField {

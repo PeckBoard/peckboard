@@ -59,19 +59,50 @@ impl ProviderRegistry {
         providers.get(id).map(|r| r.provider.clone())
     }
 
-    /// List all registered providers' metadata.
+    /// List all registered providers' metadata, with the **static** model
+    /// list captured at init. Cheap (no provider calls) — this is the form
+    /// used by the dispatch/fan-out paths that only need provider ids.
+    /// Use [`list_providers_with_models`](Self::list_providers_with_models)
+    /// for the UI catalog, where settings-derived models must be resolved.
     pub async fn list_providers(&self) -> Vec<ProviderInfo> {
         let providers = self.providers.lock().await;
         providers.values().map(|r| r.info.clone()).collect()
     }
 
-    /// List all models across all providers, with provider:model format IDs.
-    pub async fn list_all_models(&self) -> Vec<(String, ModelInfo)> {
+    /// List all providers with their **effective** model list: a
+    /// provider's [`dynamic_models`](super::agent::AgentProvider::dynamic_models)
+    /// override (settings-derived, e.g. Ollama's user-registered extras)
+    /// when it supplies one, else the static list from `ProviderInfo`.
+    ///
+    /// This is the catalog form the `/api/models` route and the MCP
+    /// `list_models` tool consume so a settings change shows up without a
+    /// restart. Calling `dynamic_models()` under the registry lock is safe
+    /// — providers read their own settings store, never the registry.
+    pub async fn list_providers_with_models(&self) -> Vec<ProviderInfo> {
         let providers = self.providers.lock().await;
-        let mut models = Vec::new();
+        let mut out = Vec::with_capacity(providers.len());
         for registered in providers.values() {
-            for model in &registered.info.models {
-                let full_id = format!("{}:{}", registered.info.id, model.id);
+            let models = match registered.provider.dynamic_models().await {
+                Some(models) => models,
+                None => registered.info.models.clone(),
+            };
+            out.push(ProviderInfo {
+                models,
+                ..registered.info.clone()
+            });
+        }
+        out
+    }
+
+    /// List all models across all providers, with provider:model format
+    /// IDs. Resolves each provider's effective (dynamic-or-static) model
+    /// list, so settings-derived models are included.
+    pub async fn list_all_models(&self) -> Vec<(String, ModelInfo)> {
+        let providers = self.list_providers_with_models().await;
+        let mut models = Vec::new();
+        for info in &providers {
+            for model in &info.models {
+                let full_id = format!("{}:{}", info.id, model.id);
                 models.push((full_id, model.clone()));
             }
         }

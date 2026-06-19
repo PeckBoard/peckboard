@@ -16,6 +16,9 @@
 //!   used for the Ollama plugin's "additional HTTP headers" setting.
 //!   Values may be marked `secret_values = true`; the API masks them
 //!   on read, mirroring how `secret` strings are handled.
+//! * `string_list` — variable-length list of plain strings with no
+//!   header-name restriction, used for the Ollama plugin's "additional
+//!   models" setting (model ids may carry `:tag` / `path/` characters).
 //!
 //! Storage is the `plugin_settings` table (one row per
 //! `(plugin_id, key)`). Values are JSON-encoded so a key-value list can
@@ -97,6 +100,14 @@ pub enum FieldKind {
         key_placeholder: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         value_placeholder: Option<String>,
+    },
+    /// Variable-length list of plain strings. Unlike `KeyValueList`,
+    /// entries are not constrained to the HTTP header-name token set —
+    /// the Ollama "additional models" setting uses this so model ids can
+    /// carry tags (`llama3.1:8b`) and registry paths (`me/model`).
+    StringList {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        item_placeholder: Option<String>,
     },
 }
 
@@ -260,6 +271,43 @@ pub fn validate_value(
                 .map(|(k, v)| serde_json::json!({ "key": k, "value": v }))
                 .collect();
             Ok(serde_json::Value::Array(array))
+        }
+        FieldKind::StringList { .. } => {
+            let arr = value
+                .as_array()
+                .ok_or_else(|| ValidationError::wrong_type(&field.key, "array of strings"))?;
+            let mut out: Vec<serde_json::Value> = Vec::with_capacity(arr.len());
+            for entry in arr {
+                let s = entry
+                    .as_str()
+                    .ok_or_else(|| ValidationError::wrong_type(&field.key, "array of strings"))?
+                    .trim();
+                // Skip blanks so a stray empty row in the form doesn't
+                // register an unusable model id.
+                if s.is_empty() {
+                    continue;
+                }
+                if s.len() > MAX_STRING_LEN {
+                    return Err(ValidationError::too_long(&field.key, MAX_STRING_LEN));
+                }
+                // Reject control characters (CR/LF/tab) — an entry flows
+                // into a `provider:model` id and the model picker; a
+                // smuggled newline has no legitimate use here.
+                if s.chars().any(|c| c.is_control()) {
+                    return Err(ValidationError::out_of_range(
+                        &field.key,
+                        "entries must not contain control characters".into(),
+                    ));
+                }
+                out.push(serde_json::Value::String(s.to_string()));
+            }
+            if out.len() > MAX_KV_ENTRIES {
+                return Err(ValidationError::out_of_range(
+                    &field.key,
+                    format!("at most {MAX_KV_ENTRIES} entries"),
+                ));
+            }
+            Ok(serde_json::Value::Array(out))
         }
     }
 }
@@ -496,6 +544,7 @@ pub fn effective_value(
             .map(serde_json::Value::String)
             .unwrap_or(serde_json::Value::Null),
         FieldKind::KeyValueList { .. } => serde_json::Value::Array(Vec::new()),
+        FieldKind::StringList { .. } => serde_json::Value::Array(Vec::new()),
     }
 }
 

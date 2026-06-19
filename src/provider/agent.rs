@@ -6,7 +6,7 @@ use tokio::sync::mpsc;
 use crate::db::Db;
 use crate::plugin::manager::PluginManager;
 use crate::provider::message::UserMessage;
-use crate::provider::stream::{ProviderEvent, SpawnConfig};
+use crate::provider::stream::{ModelInfo, ProviderEvent, SpawnConfig};
 use crate::ws::broadcaster::{Broadcaster, WsEvent};
 
 /// Notification sent when an agent run finishes streaming.
@@ -53,6 +53,20 @@ pub trait AgentProvider: Send + Sync + 'static {
     /// Stable identifier (e.g. `"claude"`, `"mock"`). Used as the prefix in
     /// fully-qualified model IDs like `"claude:claude-opus-4-7"`.
     fn id(&self) -> &str;
+
+    /// Settings-derived model catalog that overrides the static list
+    /// registered with the provider in `ProviderInfo`.
+    ///
+    /// Default `None` ⇒ the registry serves the static list captured at
+    /// init. A provider whose model set depends on runtime settings — the
+    /// Ollama provider, where the user can register extra models by name —
+    /// returns `Some(models)` so `/api/models` reflects a settings change
+    /// without a restart. Called only on the read-only catalog path (the
+    /// `/api/models` route and the MCP `list_models` tool), never on the
+    /// dispatch hot path, so a DB read here is fine.
+    async fn dynamic_models(&self) -> Option<Vec<ModelInfo>> {
+        None
+    }
 
     /// Begin an agent run for `ctx.session_id`. Returning Ok means the run
     /// has been scheduled; the actual streaming happens in a background

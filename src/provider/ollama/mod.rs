@@ -128,6 +128,23 @@ impl AgentProvider for OllamaProvider {
         "ollama"
     }
 
+    async fn dynamic_models(&self) -> Option<Vec<ModelInfo>> {
+        // Built-in suggestions plus whatever the user registered in the
+        // `additional_models` setting. Re-read on every catalog request so
+        // a settings edit shows up in the picker without a restart, exactly
+        // like the dispatch path re-reads `base_url`/`default_model`. On a
+        // settings-load error fall back to the static seed rather than
+        // dropping the provider's models entirely.
+        let extras = match self.settings.load().await {
+            Ok(settings) => setting_str_list(&settings, "additional_models"),
+            Err(e) => {
+                tracing::warn!("ollama: failed to load settings for model list: {e}");
+                Vec::new()
+            }
+        };
+        Some(merge_additional_models(default_models(), extras))
+    }
+
     async fn send_message(&self, ctx: SendMessageContext) -> anyhow::Result<()> {
         // Ollama doesn't drive plugin-todos today, so the plugin host
         // is intentionally ignored.
@@ -333,6 +350,41 @@ fn setting_headers(
             Some((k.to_string(), v.to_string()))
         })
         .collect()
+}
+
+/// Extract a `StringList` setting (a JSON array of strings) as a flat
+/// `Vec<String>`, trimming entries and dropping blanks. Returns an empty
+/// Vec when unset.
+fn setting_str_list(settings: &HashMap<String, serde_json::Value>, key: &str) -> Vec<String> {
+    let Some(arr) = settings.get(key).and_then(|v| v.as_array()) else {
+        return Vec::new();
+    };
+    arr.iter()
+        .filter_map(|v| v.as_str())
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .collect()
+}
+
+/// Build the catalog shown in the model picker: the static seed plus the
+/// user's `additional_models`, as `ModelInfo`s. Skips any extra whose id
+/// already appears in `base` (or earlier in the list) so a duplicate of a
+/// built-in suggestion doesn't show twice. The display name is derived
+/// from the bare name so the user only has to type the id.
+fn merge_additional_models(base: Vec<ModelInfo>, extras: Vec<String>) -> Vec<ModelInfo> {
+    let mut seen: std::collections::HashSet<String> = base.iter().map(|m| m.id.clone()).collect();
+    let mut models = base;
+    for name in extras {
+        if !seen.insert(name.clone()) {
+            continue;
+        }
+        models.push(ModelInfo {
+            display_name: format!("{name} (Ollama)"),
+            id: name,
+            capabilities: vec!["code".into()],
+        });
+    }
+    models
 }
 
 /// Join `base_url` with `path` so we don't end up with a `//api/chat`
@@ -643,6 +695,50 @@ mod tests {
         assert_eq!(resolve_model("ollama:"), None);
         assert_eq!(resolve_model("llama3.1"), None);
         assert_eq!(resolve_model("claude:opus"), None);
+    }
+
+    #[test]
+    fn setting_str_list_trims_and_drops_blanks() {
+        let mut settings = HashMap::new();
+        settings.insert(
+            "additional_models".into(),
+            serde_json::json!(["  llama3.1:8b ", "", "   ", "mistral-small"]),
+        );
+        assert_eq!(
+            setting_str_list(&settings, "additional_models"),
+            vec!["llama3.1:8b".to_string(), "mistral-small".to_string()]
+        );
+        // Unset key → empty, never a panic.
+        assert!(setting_str_list(&settings, "missing").is_empty());
+    }
+
+    #[test]
+    fn merge_additional_models_appends_and_dedups() {
+        let merged = merge_additional_models(
+            default_models(),
+            vec![
+                "llama3.1".into(),    // already a built-in id → skipped
+                "llama3.1:8b".into(), // tag variant → kept
+                "mistral-small".into(),
+                "mistral-small".into(), // duplicate within extras → skipped
+            ],
+        );
+        let ids: Vec<&str> = merged.iter().map(|m| m.id.as_str()).collect();
+        // The three seeds survive, plus the two distinct extras, in order.
+        assert_eq!(
+            ids,
+            vec![
+                "llama3.1",
+                "llama3.2",
+                "qwen2.5-coder",
+                "llama3.1:8b",
+                "mistral-small",
+            ]
+        );
+        // Extras carry a derived display name and the code capability.
+        let extra = merged.iter().find(|m| m.id == "llama3.1:8b").unwrap();
+        assert_eq!(extra.display_name, "llama3.1:8b (Ollama)");
+        assert_eq!(extra.capabilities, vec!["code".to_string()]);
     }
 
     #[test]

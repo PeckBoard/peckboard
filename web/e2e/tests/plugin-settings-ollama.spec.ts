@@ -67,9 +67,11 @@ test('Ollama plugin renders its settings form and round-trips saves', async ({
   const baseUrlInput = settings.locator('[data-field="base_url"] input')
   await baseUrlInput.fill('http://ollama.test.local:11434')
 
-  // Add one custom header.
-  await settings.locator('.plugin-setting-kv-add').click()
-  const kvRow = settings.locator('[data-field="additional_headers"] .plugin-setting-kv-row').first()
+  // Add one custom header. Scope to the headers field — the
+  // additional-models list reuses the same add-button class.
+  const headersField = settings.locator('[data-field="additional_headers"]')
+  await headersField.locator('.plugin-setting-kv-add').click()
+  const kvRow = headersField.locator('.plugin-setting-kv-row').first()
   await kvRow.locator('input').first().fill('X-Test-Header')
   await kvRow.locator('input').nth(1).fill('test-value-do-not-leak')
 
@@ -102,4 +104,63 @@ test('Ollama plugin renders its settings form and round-trips saves', async ({
   await expect(
     settingsAfter.locator('[data-field="additional_headers"] .plugin-setting-secret-set'),
   ).toBeVisible()
+})
+
+test('additional models registered in settings appear in the model catalog', async ({
+  request,
+  page,
+  baseURL,
+}) => {
+  expect(baseURL, 'baseURL configured').toBeTruthy()
+  const token = await authenticate(request)
+  await loadAppAt(page, token, '/plugins')
+
+  await expect(page.getByTestId('plugins-modal')).toBeVisible({ timeout: 10_000 })
+  const ollamaCard = page.getByTestId('plugin-card-ollama')
+  await expect(ollamaCard).toBeVisible({ timeout: 10_000 })
+  await ollamaCard.getByTestId('plugin-settings-open-ollama').click()
+  const settings = page
+    .getByTestId('plugin-settings-modal-ollama')
+    .getByTestId('plugin-settings-ollama')
+  await expect(settings).toBeVisible({ timeout: 5_000 })
+
+  // The additional-models list renders, distinct from the headers list.
+  const modelsField = settings.locator('[data-field="additional_models"]')
+  await expect(modelsField).toBeVisible()
+
+  // Register a model whose name carries a tag colon — the field must not
+  // reject it the way the header-name list would.
+  await modelsField.locator('.plugin-setting-kv-add').click()
+  await modelsField.locator('.plugin-setting-kv-row input').first().fill('llama3.1:8b')
+
+  await settings.locator('.plugin-settings-save').click()
+  await expect(settings.locator('.plugin-settings-success')).toBeVisible({ timeout: 5_000 })
+
+  // The new model shows up in the catalog the picker reads, registered by
+  // name under the ollama provider — live, without a server restart.
+  const res = await request.get('/api/models', {
+    headers: { Authorization: `Bearer ${token}` },
+  })
+  expect(res.ok(), `models fetch failed: ${await res.text()}`).toBeTruthy()
+  const body = (await res.json()) as {
+    models: { id: string; display_name: string }[]
+  }
+  const registered = body.models.find((m) => m.id === 'ollama:llama3.1:8b')
+  expect(registered, 'additional model registered as ollama:llama3.1:8b').toBeTruthy()
+  expect(registered?.display_name).toBe('llama3.1:8b (Ollama)')
+
+  // Reopen on a fresh load: the entry persisted and round-trips into the
+  // form (not a secret, so the value comes back verbatim).
+  await page.reload()
+  const reopened = page.getByTestId('plugin-card-ollama')
+  await expect(reopened).toBeVisible({ timeout: 10_000 })
+  await reopened.getByTestId('plugin-settings-open-ollama').click()
+  const reloadedModels = page
+    .getByTestId('plugin-settings-modal-ollama')
+    .getByTestId('plugin-settings-ollama')
+    .locator('[data-field="additional_models"]')
+  await expect(reloadedModels.locator('.plugin-setting-kv-row input').first()).toHaveValue(
+    'llama3.1:8b',
+    { timeout: 10_000 },
+  )
 })
