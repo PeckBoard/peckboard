@@ -1,0 +1,257 @@
+/* ─── Design System ─── */
+:root {
+  /* Primary hue — drives accent color */
+  --primary-hue: 220;
+
+  /* Backgrounds */
+  --bg: #f8f9fb;
+  --surface: #ffffff;
+  --surface2: #f3f4f6;
+  --surface3: #e9ebef;
+  --surface-hover: #f0f1f4;
+
+  /* Text */
+  --text: #1a1d23;
+  --text2: #4b5563;
+  --text3: #9ca3af;
+  --text-inverse: #ffffff;
+
+  /* Accent — derived from hue */
+  --accent: hsl(var(--primary-hue), 72%, 50%);
+  --accent-hover: hsl(var(--primary-hue), 72%, 44%);
+  --accent-subtle: hsl(var(--primary-hue), 60%, 95%);
+  --accent-muted: hsl(var(--primary-hue), 40%, 88%);
+
+  /* Semantic */
+  --danger: #ef4444;
+  --danger-bg: #fef2f2;
+  --danger-border: #fecaca;
+  --success: #10b981;
+  --success-bg: #ecfdf5;
+  --warning: #f59e0b;
+  --warning-bg: #fffbeb;
+
+  /* Borders */
+  --border: #e5e7eb;
+  --border-strong: #d1d5db;
+  --ring: hsl(var(--primary-hue), 60%, 80%);
+
+  /* Shadows */
+  --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.05);
+  --shadow: 0 1px 3px rgba(0, 0, 0, 0.08), 0 1px 2px rgba(0, 0, 0, 0.04);
+  --shadow-md: 0 4px 6px rgba(0, 0, 0, 0.06), 0 2px 4px rgba(0, 0, 0, 0.04);
+  --shadow-lg: 0 10px 25px rgba(0, 0, 0, 0.08), 0 4px 10px rgba(0, 0, 0, 0.04);
+  --shadow-overlay: 0 16px 48px rgba(0, 0, 0, 0.12), 0 4px 12px rgba(0, 0, 0, 0.06);
+
+  /* Radii */
+  --radius-sm: 4px;
+  --radius: 6px;
+  --radius-md: 8px;
+  --radius-lg: 12px;
+  --radius-xl: 16px;
+  --radius-full: 9999px;
+
+  /* Spacing */
+  --space-1: 0.25rem;
+  --space-2: 0.5rem;
+  --space-3: 0.75rem;
+  --space-4: 1rem;
+  --space-5: 1.25rem;
+  --space-6: 1.5rem;
+  --space-8: 2rem;
+
+  /* Typography */
+  --font: -apple-system, BlinkMacSystemFont, 'Inter', 'Segoe UI', system-ui, sans-serif;
+  --font-mono: 'SF Mono', 'Fira Code', 'JetBrains Mono', ui-monospace, monospace;
+  --text-xs: 0.75rem;
+  --text-sm: 0.8125rem;
+  --text-base: 0.875rem;
+  --text-lg: 1rem;
+  --text-xl: 1.125rem;
+  --text-2xl: 1.375rem;
+  --leading: 1.5;
+
+  /* Transitions */
+  --transition: 150ms ease;
+  --transition-slow: 250ms ease;
+
+  /* Layout */
+  --header-h: 52px;
+  --sidebar-w: 260px;
+  --safe-bottom: env(safe-area-inset-bottom, 0px);
+  /* Live app height — overridden in JS via `visualViewport` so the UI
+     shrinks above the on-screen keyboard. Defaults to `100dvh` for the
+     pre-JS paint and as a non-mobile fallback. */
+  --app-height: 100dvh;
+
+  /* Kanban — the board sits LIGHTER than the cards so the cards read as
+     filled chips floating on a near-paper field. Light mode uses the
+     base `--bg` token (a hair lighter than `--surface2`); the dark-mode
+     block below uses a value between `--surface2` and the card's
+     `--surface3` so the same "calm light field with raised cards"
+     impression carries across themes. The tonal differential is
+     deliberately subtle so the board never competes with the cards. */
+  --kanban-board-bg: var(--bg);
+  --kanban-card-bg: var(--surface);
+}
+
+/* ─── Dark mode ─── */
+:root[data-theme='dark'] {
+  --bg: #0f1117;
+  --surface: #1a1d27;
+  --surface2: #22252f;
+  --surface3: #2a2d38;
+  --surface-hover: #2f323e;
+
+  --text: #e5e7eb;
+  --text2: #9ca3af;
+  --text3: #6b7280;
+
+  --accent: hsl(var(--primary-hue), 65%, 62%);
+  --accent-hover: hsl(var(--primary-hue), 65%, 56%);
+  --accent-subtle: hsl(var(--primary-hue), 30%, 16%);
+  --accent-muted: hsl(var(--primary-hue), 25%, 22%);
+
+  --danger: #f87171;
+  --danger-bg: rgba(239, 68, 68, 0.1);
+  --danger-border: rgba(239, 68, 68, 0.25);
+  --success: #34d399;
+  --success-bg: rgba(16, 185, 129, 0.1);
+  --warning: #fbbf24;
+  --warning-bg: rgba(245, 158, 11, 0.1);
+
+  --border: #2a2d38;
+  --border-strong: #3a3d48;
+  --ring: hsl(var(--primary-hue), 40%, 40%);
+
+  --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.3);
+  --shadow: 0 1px 3px rgba(0, 0, 0, 0.4), 0 1px 2px rgba(0, 0, 0, 0.2);
+  --shadow-md: 0 4px 6px rgba(0, 0, 0, 0.3), 0 2px 4px rgba(0, 0, 0, 0.2);
+  --shadow-lg: 0 10px 25px rgba(0, 0, 0, 0.4), 0 4px 10px rgba(0, 0, 0, 0.2);
+  --shadow-overlay: 0 16px 48px rgba(0, 0, 0, 0.5), 0 4px 12px rgba(0, 0, 0, 0.3);
+
+  /* In dark mode we keep the same "lighter board, raised cards" feel by
+     setting the board a touch lighter than `--surface2` (and lighter
+     than the card so the card edges still read). The hex is hand-picked
+     between `--surface2` (#22252f) and `--surface3` (#2a2d38). */
+  --kanban-board-bg: #262932;
+  --kanban-card-bg: var(--surface3);
+}
+
+/* Auto mode */
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme='light']):not([data-theme='dark']) {
+    --bg: #0f1117;
+    --surface: #1a1d27;
+    --surface2: #22252f;
+    --surface3: #2a2d38;
+    --surface-hover: #2f323e;
+    --text: #e5e7eb;
+    --text2: #9ca3af;
+    --text3: #6b7280;
+    --accent: hsl(var(--primary-hue), 65%, 62%);
+    --accent-hover: hsl(var(--primary-hue), 65%, 56%);
+    --accent-subtle: hsl(var(--primary-hue), 30%, 16%);
+    --accent-muted: hsl(var(--primary-hue), 25%, 22%);
+    --danger: #f87171;
+    --danger-bg: rgba(239, 68, 68, 0.1);
+    --danger-border: rgba(239, 68, 68, 0.25);
+    --success: #34d399;
+    --success-bg: rgba(16, 185, 129, 0.1);
+    --warning: #fbbf24;
+    --warning-bg: rgba(245, 158, 11, 0.1);
+    --border: #2a2d38;
+    --border-strong: #3a3d48;
+    --ring: hsl(var(--primary-hue), 40%, 40%);
+    --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.3);
+    --shadow: 0 1px 3px rgba(0, 0, 0, 0.4), 0 1px 2px rgba(0, 0, 0, 0.2);
+    --shadow-md: 0 4px 6px rgba(0, 0, 0, 0.3), 0 2px 4px rgba(0, 0, 0, 0.2);
+    --shadow-lg: 0 10px 25px rgba(0, 0, 0, 0.4), 0 4px 10px rgba(0, 0, 0, 0.2);
+    --shadow-overlay: 0 16px 48px rgba(0, 0, 0, 0.5), 0 4px 12px rgba(0, 0, 0, 0.3);
+    --kanban-board-bg: #262932;
+    --kanban-card-bg: var(--surface3);
+  }
+}
+
+/* ─── Reset ─── */
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+}
+
+html {
+  /* `--app-height` is kept in sync with `visualViewport` in App.tsx —
+     this is what makes the page shrink above the on-screen keyboard
+     so the top toolbar doesn't scroll off. Falls back to `100dvh`
+     before JS runs. */
+  height: var(--app-height);
+  /* Stop the page itself from scrolling / pinch-zooming. The app
+     scrolls its own panes (chat, lists, tab strip). */
+  overflow: hidden;
+  overscroll-behavior: none;
+  /* Mobile Safari sometimes auto-inflates text on rotation; pin it. */
+  -webkit-text-size-adjust: 100%;
+  text-size-adjust: 100%;
+  /* Prevent double-tap-to-zoom. */
+  touch-action: manipulation;
+}
+
+body {
+  height: 100%;
+  width: 100%;
+  overflow: hidden;
+  font-family: var(--font);
+  font-size: var(--text-base);
+  line-height: var(--leading);
+  color: var(--text);
+  background: var(--bg);
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+#root {
+  height: 100%;
+  width: 100%;
+  overflow: hidden;
+}
+
+a {
+  color: var(--accent);
+  text-decoration: none;
+}
+
+button {
+  font-family: inherit;
+  cursor: pointer;
+}
+
+input,
+textarea,
+select {
+  font-family: inherit;
+  font-size: inherit;
+}
+
+:focus-visible {
+  outline: 2px solid var(--ring);
+  outline-offset: 2px;
+}
+
+/* Scrollbar styling */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+::-webkit-scrollbar-thumb {
+  background: var(--border-strong);
+  border-radius: var(--radius-full);
+}
+::-webkit-scrollbar-thumb:hover {
+  background: var(--text3);
+}

@@ -1,0 +1,10 @@
+DROP TABLE IF EXISTS announcements;
+DROP TABLE IF EXISTS queued_messages;
+DROP TABLE IF EXISTS push_subscriptions;
+DROP TABLE IF EXISTS auth_sessions;
+DROP TABLE IF EXISTS users;
+DROP TABLE IF EXISTS events;
+DROP TABLE IF EXISTS cards;
+DROP TABLE IF EXISTS sessions;
+DROP TABLE IF EXISTS projects;
+DROP TABLE IF EXISTS folders;

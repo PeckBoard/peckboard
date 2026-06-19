@@ -1,0 +1,871 @@
+/* ═══════════════════════════════════════════════════
+   Kanban Board
+   ═══════════════════════════════════════════════════ */
+
+/* Same shape as ChatView: a flex-column shell with a non-scrolling
+   header at top and a scrolling content area below. Putting the
+   scroll on an inner element (rather than the shell itself) keeps
+   the scrollbar in the content area, not running up behind a
+   sticky header. */
+.kanban-board {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  position: relative;
+}
+/* Top-level header is the standard chat-toolbar — surface fill,
+   symmetric padding, single bottom border — so it reads identically
+   to the session header and the list-view header on the
+   projects/sessions index pages. It's a normal flex child (not
+   sticky), so the scroll lives only in `.kanban-board-scroll` below. */
+.kanban-board .kanban-board-header {
+  flex-shrink: 0;
+}
+/* The actual scroll area: everything below the header (pause banner,
+   todo summary, question trigger, the kanban columns). Takes the
+   remaining flex space and owns the vertical scroll. Padding lives
+   here so the columns + headers inset from the chrome — the shell
+   above stays edge-to-edge so the header bar background can extend
+   the full width of the panel. The `--kanban-board-bg` token sits a
+   touch lighter than the cards in both themes so the cards read as
+   raised chips on a calm, paper-like field. */
+.kanban-board-scroll {
+  flex: 1;
+  /* The board itself only scrolls horizontally — vertical scroll
+     lives in each column's `.kanban-cards` so the column heading
+     stays put while the cards underneath scroll. */
+  overflow-y: hidden;
+  overflow-x: auto;
+  /* Top padding lifts the columns off the toolbar; the larger side and
+     bottom inset give the board real breathing room against the
+     surrounding chrome. */
+  padding: 16px 28px 24px;
+  min-height: 0;
+  position: relative;
+  background: var(--kanban-board-bg);
+  /* Layout the in-scroll content as a vertical stack: pause banner +
+     question trigger sit above the columns, and the columns flex to
+     fill the remaining height (so per-column scroll has a tall
+     enough box to be useful). */
+  display: flex;
+  flex-direction: column;
+  /* Subtle scrollbar so the desktop board doesn't show the chunky
+     OS default at the bottom. */
+  scrollbar-width: thin;
+  scrollbar-color: color-mix(in srgb, var(--text3) 60%, transparent) transparent;
+}
+.kanban-board-scroll::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+.kanban-board-scroll::-webkit-scrollbar-thumb {
+  background: color-mix(in srgb, var(--text3) 50%, transparent);
+  border-radius: 4px;
+}
+.kanban-board-scroll::-webkit-scrollbar-thumb:hover {
+  background: color-mix(in srgb, var(--text3) 80%, transparent);
+}
+.kanban-board-scroll::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+/* Auto-pause banner: sits between the toolbar and the kanban columns.
+   Uses --color-warning-* if the theme defines them, falls back to a
+   muted amber so it's visible on both light and dark themes. */
+.project-pause-banner {
+  margin: 0 0 12px;
+  padding: 10px 14px;
+  border-radius: 6px;
+  background: var(--color-warning-bg, rgba(217, 119, 6, 0.12));
+  border: 1px solid var(--color-warning-border, rgba(217, 119, 6, 0.4));
+  color: var(--color-warning-fg, #92400e);
+  line-height: 1.4;
+  font-size: 0.92rem;
+}
+.project-pause-banner strong {
+  font-weight: 600;
+  margin-right: 4px;
+}
+.kanban-columns {
+  display: flex;
+  flex-direction: row;
+  /* Tight gap so the columns read as one ribbon broken by their headers
+     rather than as four floating cards. The padding inside each
+     `.kanban-cards` container provides the visual separation. */
+  gap: 4px;
+  /* Take the remaining vertical space inside `.kanban-board-scroll`
+     so each column has a meaningful height to scroll within. */
+  flex: 1;
+  min-height: 0;
+  /* On viewports too narrow for all columns at their min-width, the
+     `.kanban-board-scroll` parent shows a horizontal scrollbar and
+     the row extends past the viewport. `min-width: min-content`
+     forces the row to honour every column's `min-width: 240px`
+     floor instead of squashing them. */
+  width: 100%;
+  min-width: min-content;
+}
+/* Each row is a step section: a header on TOP spanning the full width,
+   with a wrapping card strip beneath. The strip wraps onto additional
+   lines as needed so a step with many cards stays within the viewport
+   instead of spilling off-screen. The row grows tall to accommodate
+   the wrap; the board scrolls vertically.
+
+   The board itself owns the vertical scroll, so the column has no
+   `overflow` of its own — that would create a new sticky containing
+   block per column, defeating the section-locked sticky header. */
+.kanban-column {
+  /* Columns are bare: just the step heading sitting above the card
+     stack against the board bg, no card-shaped wrapper around them
+     (the cards themselves are the only filled chips). */
+  background: transparent;
+  border: 0;
+  border-radius: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0;
+  align-items: stretch;
+  min-height: 88px;
+  /* Columns can shrink when the board has room (desktop), but never
+     below this minimum — that's the width below which the cards
+     stop being readable. On a narrow phone the 4 columns will exceed
+     the viewport at this width, which is the cue for the board to
+     scroll horizontally (see `.kanban-board-scroll`). 240px sized
+     for ~1.6 columns to fit a typical phone viewport (~390px). */
+  min-width: 240px;
+}
+/* Section-locked sticky header. Pins to the top of the board's scroll
+   container (offset by the toolbar above), then un-sticks and scrolls
+   away when the column's bottom passes — never stacks with the next
+   step's header. Width = full row; the count badge sits inline with
+   the label. */
+.kanban-column-header {
+  display: flex;
+  flex-direction: row;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 12px;
+  background: transparent;
+  border: 0;
+  border-radius: 0;
+  /* Stays at the top of its column; the cards stack underneath it
+     in their own scroll container so the heading never disappears
+     when the user scrolls a long column. */
+  flex-shrink: 0;
+}
+.kanban-column-header h3 {
+  margin: 0;
+  font-size: var(--text-xs);
+  font-weight: 700;
+  color: var(--text2);
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+}
+.kanban-count {
+  font-size: 11px;
+  background: var(--surface2);
+  color: var(--text3);
+  padding: 1px 8px;
+  border-radius: var(--radius-full);
+  font-weight: 700;
+}
+.kanban-cards {
+  display: flex;
+  flex-direction: row;
+  flex-wrap: wrap;
+  align-content: flex-start;
+  align-items: center;
+  gap: 8px;
+  min-height: 64px;
+  padding: 12px;
+  /* Take the row's remaining width so cards wrap inside it instead of
+     forcing a horizontal scrollbar on the board. The last wrapped line
+     keeps its leftover space on the right (cards have a fixed width
+     and don't stretch). */
+  flex: 1 1 auto;
+  min-width: 0;
+}
+/* Empty row placeholder reads naturally on a horizontal strip. */
+.kanban-cards-empty {
+  font-size: var(--text-xs);
+  color: var(--text3);
+  font-style: italic;
+  padding: 0 4px;
+  white-space: nowrap;
+}
+.kanban-card {
+  background: var(--kanban-card-bg);
+  /* Border tracks the card fill so the edge reads as a soft outline
+     instead of a sharp seam against the board. */
+  border: 1px solid color-mix(in srgb, var(--kanban-card-bg) 88%, black);
+  border-radius: var(--radius-md);
+  /* Collapsed default: tight padding so a column of header-only cards
+     reads as a dense list. Expanded cards override this rule further
+     down to get a roomier inset for the description / meta / buttons. */
+  padding: 4px 10px;
+  text-align: left;
+  flex-shrink: 0;
+  font-family: inherit;
+  transition:
+    background var(--transition),
+    border-color var(--transition),
+    box-shadow 0.15s ease;
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 8px;
+  position: relative;
+  cursor: pointer;
+  animation: cardGrowIn 0.35s cubic-bezier(0.34, 1.56, 0.64, 1);
+  transform-origin: center center;
+}
+
+@keyframes cardGrowIn {
+  0% {
+    opacity: 0;
+    transform: scale(0.3);
+    max-width: 0;
+  }
+  60% {
+    opacity: 1;
+    transform: scale(1.03);
+  }
+  100% {
+    opacity: 1;
+    transform: scale(1);
+    max-width: 290px;
+  }
+}
+
+.kanban-card:hover {
+  border-color: color-mix(in srgb, var(--kanban-card-bg) 70%, black);
+  box-shadow: var(--shadow);
+}
+.kanban-card.dragging {
+  opacity: 0.5;
+}
+.kanban-card.blocked {
+  border-left: 3px solid var(--danger);
+}
+/* Expanded card — the body (description, meta row, button row) is
+   visible so the card needs more breathing room than the collapsed
+   header-only form. Targets `data-expanded="true"` (set by KanbanBoard)
+   so the rule never depends on CSS class ordering. */
+.kanban-card[data-expanded='true'] {
+  padding: 10px 12px;
+}
+/* Cross-row step-move target: the destination row gets a horizontal accept
+   band so the gesture matches the rotated layout. */
+.kanban-column.drag-over {
+  background: var(--accent-subtle);
+  box-shadow: inset 0 0 0 2px var(--accent-muted);
+  border-color: var(--accent);
+}
+/* In-row reorder indicator: a 2px vertical bar drawn in the gap between
+   the dragged-over card and its neighbour, showing where the card will
+   land. `data-drop-before` paints on the leading edge; `data-drop-after`
+   only fires on the last card when the drop lands at the row's tail. */
+.kanban-card[data-drop-before='true']::before,
+.kanban-card[data-drop-after='true']::after {
+  content: '';
+  position: absolute;
+  top: 4px;
+  bottom: 4px;
+  width: 3px;
+  background: var(--accent);
+  border-radius: 2px;
+  box-shadow: 0 0 6px var(--accent-muted);
+  pointer-events: none;
+}
+.kanban-card[data-drop-before='true']::before {
+  left: -6px;
+}
+.kanban-card[data-drop-after='true']::after {
+  right: -6px;
+}
+.card-thought-bubble {
+  position: absolute;
+  top: -9px;
+  right: 12px;
+  /* Higher than the sticky step header so the bubble stays visible when
+     a card sits near the top of its section. */
+  z-index: 6;
+  max-width: 80%;
+  padding: 3px 8px;
+  background: var(--accent-subtle);
+  color: var(--accent);
+  border: 1px solid var(--accent-muted);
+  border-radius: 11px;
+  font-size: 10px;
+  line-height: 1.3;
+  font-weight: 500;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  box-shadow: var(--shadow);
+  pointer-events: none;
+  animation: thoughtBubbleIn 0.22s ease;
+}
+/* Comic-style trailing dots so it reads as a thought bubble. */
+.card-thought-bubble::before,
+.card-thought-bubble::after {
+  content: '';
+  position: absolute;
+  right: 10px;
+  border-radius: 50%;
+  background: var(--accent-subtle);
+  border: 1px solid var(--accent-muted);
+}
+.card-thought-bubble::before {
+  width: 5px;
+  height: 5px;
+  bottom: -4px;
+}
+.card-thought-bubble::after {
+  width: 3px;
+  height: 3px;
+  right: 6px;
+  bottom: -8px;
+}
+@keyframes thoughtBubbleIn {
+  from {
+    opacity: 0;
+    transform: translateY(4px) scale(0.92);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+}
+/* Header — priority chevron, title, 3-dot menu. Always visible. The
+   card's own padding owns the inset, so this row only handles
+   horizontal spacing between its three slots. */
+.kanban-card-header {
+  display: flex;
+  flex-direction: row;
+  align-items: center;
+  gap: 8px;
+  flex-shrink: 0;
+  min-height: 24px;
+}
+.kanban-card-title {
+  flex: 1 1 auto;
+  font-size: var(--text-sm);
+  font-weight: 600;
+  color: var(--text);
+  line-height: 1.3;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  min-width: 0;
+}
+/* Expanded body — description, blocked notice, meta row, action
+   buttons. Only renders when the card is in the expanded state, so
+   collapsed cards stay header-only. */
+.kanban-card-body {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.kanban-card-desc {
+  font-size: var(--text-xs);
+  color: var(--text2);
+  line-height: 1.4;
+}
+.kanban-card-desc-empty {
+  color: var(--text3);
+  font-style: italic;
+}
+.kanban-card-blocked {
+  font-size: var(--text-xs);
+  color: var(--danger);
+  line-height: 1.4;
+}
+.kanban-card-blocked strong {
+  font-weight: 700;
+  margin-right: 2px;
+}
+.kanban-card-meta {
+  display: flex;
+  flex-direction: row;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+  font-size: var(--text-xs);
+  color: var(--text3);
+}
+.kanban-card-meta:empty {
+  display: none;
+}
+.kanban-card-buttons {
+  display: flex;
+  flex-direction: row;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 2px;
+}
+/* The wrapped <SafeMarkdown> div needs no extra margin — block elements
+   inside (p / ul / h*) carry their own spacing. */
+.kanban-card-desc-markdown > :first-child {
+  margin-top: 0;
+}
+.kanban-card-desc-markdown > :last-child {
+  margin-bottom: 0;
+}
+.kanban-card-desc-markdown p {
+  margin: 0.3em 0;
+}
+.kanban-card-desc-markdown ul,
+.kanban-card-desc-markdown ol {
+  margin: 0.3em 0;
+  padding-left: 1.4em;
+}
+.kanban-card-desc-markdown code {
+  background: var(--surface2);
+  padding: 0 4px;
+  border-radius: 3px;
+  font-size: 0.9em;
+}
+.kanban-card-desc-markdown pre {
+  background: var(--surface2);
+  padding: 6px 8px;
+  border-radius: 4px;
+  overflow-x: auto;
+  font-size: 0.9em;
+  margin: 0.3em 0;
+}
+.kanban-card-desc-markdown pre code {
+  background: transparent;
+  padding: 0;
+}
+.kanban-card-desc-markdown img {
+  max-width: 100%;
+  height: auto;
+}
+.kanban-card-worker {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 10px;
+  color: var(--accent);
+  font-weight: 600;
+  white-space: nowrap;
+}
+.kanban-card-worker-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--accent);
+  box-shadow: 0 0 4px var(--accent);
+}
+.kanban-card-actions {
+  position: relative;
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  gap: 2px;
+}
+/* Open / View / Edit row inside the expanded card body. Each button is
+   icon + label so the affordance is obvious at glance; the surface fill
+   sits one notch off the card so the buttons feel inset. */
+.kanban-card-action-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 4px 8px;
+  background: color-mix(in srgb, var(--kanban-card-bg) 90%, black);
+  border: 1px solid color-mix(in srgb, var(--kanban-card-bg) 80%, black);
+  border-radius: var(--radius-sm);
+  color: var(--text);
+  font-size: var(--text-xs);
+  font-weight: 500;
+  cursor: pointer;
+  transition:
+    background var(--transition),
+    border-color var(--transition);
+}
+.kanban-card-action-btn:hover {
+  background: color-mix(in srgb, var(--kanban-card-bg) 80%, black);
+  border-color: color-mix(in srgb, var(--kanban-card-bg) 65%, black);
+}
+.kanban-card-menu-btn {
+  background: none;
+  border: none;
+  color: var(--text3);
+  cursor: pointer;
+  font-size: 14px;
+  padding: 0 8px;
+  height: 26px;
+  border-radius: var(--radius);
+  transition:
+    background var(--transition),
+    color var(--transition);
+  font-weight: 700;
+  letter-spacing: 1px;
+}
+.kanban-card-menu-btn:hover {
+  background: var(--surface2);
+  color: var(--text);
+}
+/* Fixed-positioned so the dropdown escapes the per-row overflow box.
+   `top`/`right` are set inline from the trigger button's bounding rect. */
+.kanban-card-menu {
+  position: fixed;
+  z-index: 100;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  box-shadow: var(--shadow-md);
+  min-width: 140px;
+  overflow: hidden;
+}
+.kanban-card-menu button {
+  display: block;
+  width: 100%;
+  text-align: left;
+  padding: 8px 12px;
+  border: none;
+  background: transparent;
+  font-size: var(--text-sm);
+  color: var(--text);
+  cursor: pointer;
+}
+.kanban-card-menu button:hover {
+  background: var(--surface-hover);
+}
+.kanban-card-menu button.danger {
+  color: var(--danger);
+}
+.kanban-card-menu button.danger:hover {
+  background: var(--danger-bg);
+}
+
+/* Priority badge — kept for the detail modal, where the full label
+   still reads more clearly than a glyph. Card headers use the
+   `.priority-chevron` form below. */
+.priority-badge {
+  font-size: 10px;
+  font-weight: 700;
+  padding: 2px 7px;
+  border-radius: var(--radius-sm);
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+  flex-shrink: 0;
+}
+.priority-critical {
+  background: var(--danger);
+  color: var(--text-inverse);
+}
+.priority-high {
+  background: var(--danger-bg);
+  color: var(--danger);
+}
+.priority-medium {
+  background: var(--warning-bg);
+  color: var(--warning);
+}
+.priority-low {
+  background: var(--success-bg);
+  color: var(--success);
+}
+
+/* Priority chevron — tier-coloured glyph button on the card header.
+   Acts as both an indicator and a quick-change picker (click opens a
+   small popover). The colour is `color`, not `background`, so the
+   glyph's stroke picks it up via `currentColor`. */
+.priority-chevron-wrap {
+  position: relative;
+  flex-shrink: 0;
+}
+.priority-chevron {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  padding: 0;
+  border: 1px solid transparent;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  cursor: pointer;
+  transition:
+    background var(--transition),
+    border-color var(--transition);
+}
+.priority-chevron:hover {
+  background: color-mix(in srgb, var(--kanban-card-bg) 90%, black);
+  border-color: color-mix(in srgb, var(--kanban-card-bg) 75%, black);
+}
+.priority-chevron.is-disabled {
+  cursor: default;
+  opacity: 0.55;
+}
+.priority-chevron.is-disabled:hover {
+  background: transparent;
+  border-color: transparent;
+}
+.priority-chevron-critical {
+  color: var(--danger);
+}
+.priority-chevron-high {
+  color: var(--warning);
+}
+.priority-chevron-medium {
+  color: var(--text3);
+}
+.priority-chevron-low {
+  color: var(--accent);
+}
+.priority-chevron-menu {
+  position: absolute;
+  z-index: 50;
+  top: calc(100% + 4px);
+  left: 0;
+  min-width: 140px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  box-shadow: var(--shadow-md);
+  padding: 4px;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.priority-chevron-option {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 8px;
+  border: none;
+  background: transparent;
+  border-radius: var(--radius-sm);
+  font-size: var(--text-sm);
+  color: var(--text);
+  cursor: pointer;
+  text-align: left;
+}
+.priority-chevron-option:hover {
+  background: var(--surface-hover);
+}
+.priority-chevron-option.is-active {
+  background: var(--accent-subtle);
+  color: var(--accent);
+  font-weight: 600;
+}
+.priority-chevron-option-label {
+  flex: 1;
+}
+.blocked-indicator {
+  font-size: 10px;
+  color: var(--danger);
+  font-weight: 600;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 160px;
+}
+.waiting-indicator {
+  font-size: 10px;
+  color: var(--warning);
+  font-weight: 600;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 160px;
+}
+.dep-done {
+  color: var(--success);
+}
+.dep-pending {
+  color: var(--warning);
+}
+
+/* ─── Vertical-columns layout (all viewports) ──────────────────────────
+   The board renders classic vertical-columns kanban at every width:
+   steps sit side by side, cards stack top-to-bottom inside each
+   column. On a narrow phone the columns become correspondingly
+   narrow, but the shape stays consistent with the desktop view.
+   The board owns the vertical scroll so the per-column sticky
+   headers keep working the same way everywhere. */
+.kanban-columns {
+  flex-direction: row;
+  align-items: stretch;
+  /* Stretch the row to fit the board width — each column flexes to an
+     equal share so the row never overflows horizontally. */
+  flex-wrap: nowrap;
+}
+.kanban-column {
+  /* Equal-width columns that fill the board when there's room
+     (desktop), but every column respects the 240px min-width set on
+     `.kanban-column` above. On a narrow phone that floor forces the
+     row past the viewport and `.kanban-board-scroll` takes over with
+     a horizontal scrollbar. */
+  flex: 1 1 0;
+  /* Let each column take the height of its content rather than
+     stretching to the tallest column (the board's vertical scroll
+     handles the overall height). */
+  align-self: stretch;
+}
+.kanban-cards {
+  /* Stack cards vertically inside the column and let the cards area
+     own the vertical scroll — the column header sits above this
+     element and stays put. */
+  flex-direction: column;
+  flex-wrap: nowrap;
+  align-items: stretch;
+  align-content: stretch;
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  -webkit-overflow-scrolling: touch;
+  /* Match the board's subtle scrollbar so the per-column scroll
+     reads as part of the same chrome. */
+  scrollbar-width: thin;
+  scrollbar-color: color-mix(in srgb, var(--text3) 60%, transparent) transparent;
+}
+.kanban-cards::-webkit-scrollbar {
+  width: 6px;
+}
+.kanban-cards::-webkit-scrollbar-thumb {
+  background: color-mix(in srgb, var(--text3) 50%, transparent);
+  border-radius: 3px;
+}
+.kanban-cards::-webkit-scrollbar-thumb:hover {
+  background: color-mix(in srgb, var(--text3) 80%, transparent);
+}
+.kanban-cards::-webkit-scrollbar-track {
+  background: transparent;
+}
+.kanban-card {
+  /* Cards fill the column width up to a sensible cap so a wide
+     viewport doesn't stretch a card into an unreadable strip. The
+     entry animation still clamps `max-width: 320px` on its final
+     frame, then the property reverts to this 290px ceiling. */
+  width: auto;
+  max-width: 290px;
+  align-self: stretch;
+}
+/* In-column reorder indicator: a 3px horizontal bar drawn
+   above/below the dragged-over card. */
+.kanban-card[data-drop-before='true']::before,
+.kanban-card[data-drop-after='true']::after {
+  top: auto;
+  bottom: auto;
+  left: 4px;
+  right: 4px;
+  width: auto;
+  height: 3px;
+}
+.kanban-card[data-drop-before='true']::before {
+  top: -6px;
+}
+.kanban-card[data-drop-after='true']::after {
+  bottom: -6px;
+}
+/* Empty column placeholder reads as a thin centered note inside the
+   empty column. */
+.kanban-cards-empty {
+  align-self: center;
+  margin-top: 12px;
+  white-space: normal;
+}
+
+.card-detail-grid {
+  margin: 16px 0;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+.card-detail-row {
+  display: flex;
+  gap: 12px;
+  font-size: var(--text-sm);
+}
+.card-detail-label {
+  font-weight: 700;
+  color: var(--text3);
+  min-width: 90px;
+  font-size: var(--text-xs);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  padding-top: 2px;
+}
+/* Description gets a roomy multi-line block so longer descriptions
+   don't collapse to a one-line strip. Stacks the label above the body
+   on this row so the body can use the full row width. */
+.card-detail-row-description {
+  flex-direction: column;
+  gap: 4px;
+}
+.card-detail-description {
+  min-height: 180px;
+  padding: 10px 12px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  word-break: break-word;
+  font-size: var(--text-sm);
+  line-height: 1.5;
+  color: var(--text);
+}
+/* Markdown blocks inside the description card carry their own spacing,
+   so trim the outer gap that <SafeMarkdown> would otherwise add. */
+.card-detail-description > :first-child {
+  margin-top: 0;
+}
+.card-detail-description > :last-child {
+  margin-bottom: 0;
+}
+.card-detail-description p {
+  margin: 0.4em 0;
+}
+.card-detail-description ul,
+.card-detail-description ol {
+  margin: 0.4em 0;
+  padding-left: 1.5em;
+}
+.card-detail-description code {
+  background: var(--surface2);
+  padding: 0 4px;
+  border-radius: 3px;
+  font-size: 0.92em;
+}
+.card-detail-description pre {
+  background: var(--surface2);
+  padding: 8px 10px;
+  border-radius: 4px;
+  overflow-x: auto;
+  font-size: 0.92em;
+  margin: 0.4em 0;
+}
+.card-detail-description pre code {
+  background: transparent;
+  padding: 0;
+}
+.card-detail-description img {
+  max-width: 100%;
+  height: auto;
+}
+.card-detail-description blockquote {
+  margin: 0.4em 0;
+  padding-left: 10px;
+  border-left: 3px solid var(--border);
+  color: var(--text2);
+}
+.close-btn {
+  padding: 8px 20px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--surface);
+  color: var(--text);
+  font-size: var(--text-sm);
+  font-weight: 500;
+  cursor: pointer;
+  transition: all var(--transition);
+}
+.close-btn:hover {
+  background: var(--surface2);
+}

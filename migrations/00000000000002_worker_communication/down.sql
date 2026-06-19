@@ -1,0 +1,2 @@
+-- SQLite doesn't support DROP COLUMN, so we'd need to recreate the table.
+-- For simplicity, this is a no-op. The columns have defaults and are harmless.

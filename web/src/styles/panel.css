@@ -1,0 +1,82 @@
+/* ═══════════════════════════════════════════════════
+   Shared list/badge primitives
+   ═══════════════════════════════════════════════════ */
+
+/* `.create-btn` is used by the user-management page. Keep it general,
+   not scoped to a particular list. */
+.create-btn {
+  font-size: var(--text-xs);
+  padding: 4px 10px;
+  border: 1px solid var(--accent);
+  border-radius: var(--radius);
+  background: transparent;
+  color: var(--accent);
+  cursor: pointer;
+  font-weight: 600;
+  transition: all var(--transition);
+}
+.create-btn:hover {
+  background: var(--accent);
+  color: var(--text-inverse);
+}
+.create-form {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin: 0 12px 12px;
+  padding: 12px;
+  background: var(--surface2);
+  border-radius: var(--radius-md);
+}
+.create-form input {
+  padding: 7px 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--surface);
+  color: var(--text);
+  font-size: var(--text-sm);
+  outline: none;
+}
+.create-form input:focus {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 2px var(--accent-subtle);
+}
+.create-form button[type='submit'] {
+  padding: 7px;
+  border: none;
+  border-radius: var(--radius);
+  background: var(--accent);
+  color: var(--text-inverse);
+  font-size: var(--text-sm);
+  font-weight: 600;
+  cursor: pointer;
+}
+.create-form button[type='submit']:hover:not(:disabled) {
+  background: var(--accent-hover);
+}
+.create-form button[type='submit']:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+/* Status pills shared across the projects list, kanban header, and
+   repeating tasks list. */
+.status-badge {
+  font-size: 10px;
+  padding: 1px 6px;
+  border-radius: var(--radius-full);
+  font-weight: 600;
+  text-transform: capitalize;
+}
+.status-active {
+  background: var(--success-bg);
+  color: var(--success);
+}
+.status-paused {
+  background: var(--warning-bg);
+  color: var(--warning);
+}
+.status-archived {
+  background: var(--surface3);
+  color: var(--text3);
+}

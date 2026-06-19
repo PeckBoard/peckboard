@@ -1,0 +1,1295 @@
+//! Schema-drift repair that runs after diesel migrations.
+//!
+//! Why this exists: SQLite doesn't support `ALTER TABLE … ADD COLUMN
+//! IF NOT EXISTS`, and a botched migration can leave older data dirs
+//! missing columns the code now requires. Re-running the original
+//! migration fails on healthy dirs (column exists) and only works on
+//! broken ones. So instead we check the live schema and patch what's
+//! missing, idempotently.
+//!
+//! Every patch here MUST be safe to run on a fresh, fully-migrated DB —
+//! i.e. detect-then-skip rather than detect-then-fail. New entries
+//! should be tied to the bug that motivated them in a comment so we
+//! can prune them once enough time has passed.
+
+use diesel::prelude::*;
+use diesel::sql_query;
+use diesel::sqlite::SqliteConnection;
+
+/// Heal any known schema drift. Idempotent. Called at startup right
+/// after `run_pending_migrations`.
+pub fn ensure_schema(conn: &mut SqliteConnection) -> anyhow::Result<()> {
+    ensure_projects_worker_communication_columns(conn)?;
+    ensure_queued_messages_model_columns(conn)?;
+    ensure_card_dependencies_table(conn)?;
+    ensure_todos_table(conn)?;
+    ensure_cards_completed_at_column(conn)?;
+    ensure_sessions_expert_columns(conn)?;
+    ensure_repeating_tasks_schema(conn)?;
+    ensure_sessions_pagination_indexes(conn)?;
+    ensure_projects_workflow_column(conn)?;
+    ensure_cards_workflow_column(conn)?;
+    ensure_projects_pause_reason_column(conn)?;
+    ensure_project_workflow_instructions_table(conn)?;
+    ensure_plugin_settings_table(conn)?;
+    ensure_plugin_approvals_table(conn)?;
+    ensure_plugin_repositories_table(conn)?;
+    ensure_pm_decisions_table(conn)?;
+    ensure_usage_events_table(conn)?;
+    ensure_user_tabs_check_constraint(conn)?;
+    ensure_plugin_data_tables(conn)?;
+    Ok(())
+}
+
+/// Heal DBs that predate `1781682475_plugin_data_and_session_meta`. Both are
+/// `CREATE TABLE/INDEX IF NOT EXISTS`, idempotent on a fully-migrated DB; DDL
+/// mirrors the migration. Backs the generic plugin document store +
+/// per-session plugin metadata used by `src/plugin/host.rs`.
+fn ensure_plugin_data_tables(conn: &mut SqliteConnection) -> anyhow::Result<()> {
+    log_if_healing_table(conn, "plugin_data")?;
+    sql_query(
+        "CREATE TABLE IF NOT EXISTS plugin_data (
+            plugin_id   TEXT NOT NULL,
+            collection  TEXT NOT NULL,
+            key         TEXT NOT NULL,
+            data        TEXT NOT NULL,
+            created_at  TEXT NOT NULL DEFAULT (datetime('now')),
+            updated_at  TEXT NOT NULL DEFAULT (datetime('now')),
+            PRIMARY KEY (plugin_id, collection, key)
+        )",
+    )
+    .execute(conn)?;
+    sql_query(
+        "CREATE TABLE IF NOT EXISTS plugin_session_meta (
+            session_id  TEXT NOT NULL,
+            plugin_id   TEXT NOT NULL,
+            data        TEXT NOT NULL,
+            updated_at  TEXT NOT NULL DEFAULT (datetime('now')),
+            PRIMARY KEY (session_id, plugin_id)
+        )",
+    )
+    .execute(conn)?;
+    sql_query(
+        "CREATE INDEX IF NOT EXISTS idx_plugin_session_meta_plugin \
+         ON plugin_session_meta (plugin_id)",
+    )
+    .execute(conn)?;
+    Ok(())
+}
+
+/// Heal DBs that predate `1781120408_usage_events`. `CREATE TABLE IF NOT
+/// EXISTS` + `CREATE INDEX IF NOT EXISTS` no-op on a healthy DB; the
+/// `WHERE NOT EXISTS`-guarded backfill rebuilds any usage row whose live
+/// mirror-write was lost. DDL + backfill mirror the migration. Runs every
+/// startup, so the guard keeps the warm path cheap. (mirrors the
+/// cards_completed_at structure-then-backfill heal pattern.)
+fn ensure_usage_events_table(conn: &mut SqliteConnection) -> anyhow::Result<()> {
+    // `usage_events` FKs onto `sessions` and `events` and backfills from
+    // `events`, so it's only meaningful once the base schema exists. Skip
+    // entirely on the minimal partial schemas the repair tests build (and
+    // any conceivable pre-migration-1 DB). Real DBs always have both.
+    let has_sessions: Vec<PragmaColumn> = sql_query("PRAGMA table_info(sessions)").load(conn)?;
+    let has_events: Vec<PragmaColumn> = sql_query("PRAGMA table_info(events)").load(conn)?;
+    if has_sessions.is_empty() || has_events.is_empty() {
+        return Ok(());
+    }
+    log_if_healing_table(conn, "usage_events")?;
+    sql_query(
+        "CREATE TABLE IF NOT EXISTS usage_events (
+            id                    TEXT    PRIMARY KEY NOT NULL,
+            session_id            TEXT    NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+            event_id              TEXT    REFERENCES events(id) ON DELETE SET NULL,
+            turn_seq              INTEGER,
+            ts                    INTEGER NOT NULL,
+            input_tokens          INTEGER NOT NULL DEFAULT 0,
+            output_tokens         INTEGER NOT NULL DEFAULT 0,
+            cache_read_tokens     INTEGER NOT NULL DEFAULT 0,
+            cache_creation_tokens INTEGER NOT NULL DEFAULT 0,
+            total_tokens          INTEGER NOT NULL DEFAULT 0,
+            context_tokens        INTEGER NOT NULL DEFAULT 0,
+            model                 TEXT
+        )",
+    )
+    .execute(conn)?;
+    sql_query(
+        "CREATE INDEX IF NOT EXISTS idx_usage_events_session \
+         ON usage_events (session_id, ts)",
+    )
+    .execute(conn)?;
+    sql_query(
+        "INSERT INTO usage_events (
+            id, session_id, event_id, turn_seq, ts,
+            input_tokens, output_tokens, cache_read_tokens, cache_creation_tokens,
+            total_tokens, context_tokens, model
+        )
+        SELECT
+            lower(hex(randomblob(16))),
+            e.session_id,
+            e.id,
+            ROW_NUMBER() OVER (PARTITION BY e.session_id ORDER BY e.ts, e.seq),
+            e.ts,
+            COALESCE(json_extract(e.data, '$.inputTokens'), 0),
+            COALESCE(json_extract(e.data, '$.outputTokens'), 0),
+            COALESCE(json_extract(e.data, '$.cacheReadTokens'), 0),
+            COALESCE(json_extract(e.data, '$.cacheCreationTokens'), 0),
+            COALESCE(json_extract(e.data, '$.totalTokens'), 0),
+            COALESCE(json_extract(e.data, '$.contextTokens'), 0),
+            json_extract(e.data, '$.model')
+        FROM events e
+        WHERE e.kind = 'agent-usage'
+          AND NOT EXISTS (SELECT 1 FROM usage_events u WHERE u.event_id = e.id)",
+    )
+    .execute(conn)?;
+    Ok(())
+}
+
+/// Heal DBs that predate `1781074848_pm_decisions`. `CREATE TABLE IF
+/// NOT EXISTS` is idempotent so this is safe on a fully-migrated DB and
+/// only does work on one that lacks the table. DDL mirrors the
+/// migration byte-for-byte.
+fn ensure_pm_decisions_table(conn: &mut SqliteConnection) -> anyhow::Result<()> {
+    log_if_healing_table(conn, "pm_decisions")?;
+    sql_query(
+        "CREATE TABLE IF NOT EXISTS pm_decisions (
+            id                   TEXT PRIMARY KEY NOT NULL,
+            project_id           TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+            question             TEXT NOT NULL,
+            answer               TEXT,
+            status               TEXT NOT NULL DEFAULT 'pending',
+            asked_by_session_id  TEXT,
+            superseded_by        TEXT REFERENCES pm_decisions(id),
+            created_at           TEXT NOT NULL,
+            answered_at          TEXT
+        )",
+    )
+    .execute(conn)?;
+    sql_query(
+        "CREATE INDEX IF NOT EXISTS idx_pm_decisions_project_status \
+         ON pm_decisions (project_id, status)",
+    )
+    .execute(conn)?;
+    Ok(())
+}
+
+/// Heal DBs that predate `1781075129_plugin_settings`. Idempotent —
+/// `CREATE TABLE IF NOT EXISTS` no-ops on a healthy DB.
+fn ensure_plugin_settings_table(conn: &mut SqliteConnection) -> anyhow::Result<()> {
+    log_if_healing_table(conn, "plugin_settings")?;
+    sql_query(
+        "CREATE TABLE IF NOT EXISTS plugin_settings (
+            plugin_id   TEXT NOT NULL,
+            key         TEXT NOT NULL,
+            value       TEXT NOT NULL,
+            updated_at  TEXT NOT NULL,
+            PRIMARY KEY (plugin_id, key)
+        )",
+    )
+    .execute(conn)?;
+    sql_query(
+        "CREATE INDEX IF NOT EXISTS idx_plugin_settings_plugin \
+         ON plugin_settings (plugin_id)",
+    )
+    .execute(conn)?;
+    Ok(())
+}
+
+/// Heal DBs that predate `1781586748_plugin_approvals`. `CREATE TABLE IF
+/// NOT EXISTS` no-ops on a healthy DB.
+fn ensure_plugin_approvals_table(conn: &mut SqliteConnection) -> anyhow::Result<()> {
+    log_if_healing_table(conn, "plugin_approvals")?;
+    sql_query(
+        "CREATE TABLE IF NOT EXISTS plugin_approvals (
+            plugin_id   TEXT NOT NULL PRIMARY KEY,
+            hooks       TEXT NOT NULL,
+            status      TEXT NOT NULL,
+            decided_at  TEXT NOT NULL
+        )",
+    )
+    .execute(conn)?;
+    Ok(())
+}
+
+/// Heal DBs that predate `1781592551_plugin_repositories`. Creates the
+/// table only — the default-repo seed lives in the migration so it runs
+/// exactly once (a removed default must stay removed); re-seeding here
+/// every startup would resurrect it.
+fn ensure_plugin_repositories_table(conn: &mut SqliteConnection) -> anyhow::Result<()> {
+    log_if_healing_table(conn, "plugin_repositories")?;
+    sql_query(
+        "CREATE TABLE IF NOT EXISTS plugin_repositories (
+            url        TEXT NOT NULL PRIMARY KEY,
+            label      TEXT NOT NULL,
+            added_at   TEXT NOT NULL
+        )",
+    )
+    .execute(conn)?;
+    Ok(())
+}
+
+/// Heal DBs that predate `1781062932_project_workflow_instructions`.
+/// `CREATE TABLE IF NOT EXISTS` is idempotent so this is safe on a
+/// fully-migrated DB and only does work on one that lacks the table.
+fn ensure_project_workflow_instructions_table(conn: &mut SqliteConnection) -> anyhow::Result<()> {
+    log_if_healing_table(conn, "project_workflow_instructions")?;
+    sql_query(
+        "CREATE TABLE IF NOT EXISTS project_workflow_instructions (
+            project_id   TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+            workflow_id  TEXT NOT NULL,
+            step         TEXT NOT NULL,
+            instructions TEXT NOT NULL,
+            created_at   TEXT NOT NULL,
+            updated_at   TEXT NOT NULL,
+            PRIMARY KEY (project_id, workflow_id, step)
+        )",
+    )
+    .execute(conn)?;
+    sql_query(
+        "CREATE INDEX IF NOT EXISTS idx_pwi_project \
+         ON project_workflow_instructions (project_id)",
+    )
+    .execute(conn)?;
+    Ok(())
+}
+
+/// Heal DBs that predate `1781058245_projects_pause_reason`. The migration
+/// is a bare `ALTER TABLE … ADD COLUMN` (SQLite has no IF NOT EXISTS for
+/// that), so this detect-then-skip path is the only safe way to add the
+/// column to an older data dir. NULL-able with no backfill.
+fn ensure_projects_pause_reason_column(conn: &mut SqliteConnection) -> anyhow::Result<()> {
+    let existing = project_columns(conn)?;
+    if existing.is_empty() {
+        return Ok(());
+    }
+    if !existing.iter().any(|c| c == "pause_reason") {
+        tracing::info!("Repairing schema: adding projects.pause_reason");
+        sql_query("ALTER TABLE projects ADD COLUMN pause_reason TEXT").execute(conn)?;
+    }
+    Ok(())
+}
+
+/// Composite indexes for keyset-paginated session lists. Mirrors
+/// `migrations/1781033682_session_pagination_indexes` so a DB that
+/// somehow skipped that migration still gets the planner support the
+/// route assumes. `CREATE INDEX IF NOT EXISTS` is idempotent, so this
+/// is safe to call on a healthy schema.
+fn ensure_sessions_pagination_indexes(conn: &mut SqliteConnection) -> anyhow::Result<()> {
+    let cols: Vec<PragmaColumn> = sql_query("PRAGMA table_info(sessions)").load(conn)?;
+    if cols.is_empty() {
+        return Ok(());
+    }
+    // Both indexes reference `last_activity` and (one of them) `folder_id`.
+    // The repair-tests stub a minimal sessions table without those columns,
+    // and a real DB that pre-dates `00000000000001_initial` should never
+    // get here — but bail out cleanly rather than fail with a confusing
+    // "no such column" error if either prerequisite is missing.
+    let names: Vec<String> = cols.into_iter().map(|c| c.name).collect();
+    let has = |n: &str| names.iter().any(|c| c == n);
+    if !has("last_activity") || !has("id") {
+        return Ok(());
+    }
+    sql_query(
+        "CREATE INDEX IF NOT EXISTS idx_sessions_last_activity ON sessions (last_activity, id)",
+    )
+    .execute(conn)?;
+    if has("folder_id") {
+        sql_query(
+            "CREATE INDEX IF NOT EXISTS idx_sessions_folder_last_activity \
+             ON sessions (folder_id, last_activity, id)",
+        )
+        .execute(conn)?;
+    }
+    Ok(())
+}
+
+/// Heal DBs that predate `1780985065_expert_sessions`. That migration is
+/// a series of bare `ALTER TABLE … ADD COLUMN` statements (SQLite has no
+/// IF NOT EXISTS for ADD COLUMN), so on a DB that already has the columns
+/// it would fail — this detect-then-skip path is the only safe way to add
+/// them to an older data dir. All columns are additive with DEFAULTs or
+/// NULL-able, so existing rows need no backfill.
+fn ensure_sessions_expert_columns(conn: &mut SqliteConnection) -> anyhow::Result<()> {
+    let rows: Vec<PragmaColumn> = sql_query("PRAGMA table_info(sessions)").load(conn)?;
+    let existing: Vec<String> = rows.into_iter().map(|r| r.name).collect();
+    if existing.is_empty() {
+        // Table itself missing — migrations haven't run. Don't ALTER;
+        // let the caller surface the schema-missing error.
+        return Ok(());
+    }
+    // (column name, full type+default clause) for each additive column.
+    let columns = [
+        ("is_expert", "BOOLEAN NOT NULL DEFAULT 0"),
+        ("expert_kind", "TEXT"),
+        ("knowledge_summary", "TEXT"),
+        ("knowledge_area", "TEXT"),
+        ("scope_path", "TEXT"),
+        ("is_permanent", "BOOLEAN NOT NULL DEFAULT 0"),
+    ];
+    for (name, clause) in columns {
+        if !existing.iter().any(|c| c == name) {
+            tracing::info!("Repairing schema: adding sessions.{name}");
+            sql_query(format!("ALTER TABLE sessions ADD COLUMN {name} {clause}")).execute(conn)?;
+        }
+    }
+    Ok(())
+}
+
+/// Heal DBs that predate `1781025117_repeating_tasks`. The migration
+/// creates the table with `IF NOT EXISTS` (safe to re-run) and adds a
+/// non-idempotent `ALTER TABLE sessions ADD COLUMN repeating_task_id`,
+/// which we detect-and-add here for any DB that ran the table-creation
+/// half but not the column-add half.
+///
+/// Bails out cleanly if the prerequisite tables (`folders`, `sessions`)
+/// don't exist yet. Real DBs always have them, but test fixtures that
+/// build a minimal schema can hit this path before any migrations have
+/// created sessions/folders, and a hard failure here would mask the
+/// fixture's intent.
+fn ensure_repeating_tasks_schema(conn: &mut SqliteConnection) -> anyhow::Result<()> {
+    let folders_cols: Vec<PragmaColumn> = sql_query("PRAGMA table_info(folders)").load(conn)?;
+    let sessions_cols: Vec<PragmaColumn> = sql_query("PRAGMA table_info(sessions)").load(conn)?;
+    if folders_cols.is_empty() || sessions_cols.is_empty() {
+        return Ok(());
+    }
+
+    log_if_healing_table(conn, "repeating_tasks")?;
+    sql_query(
+        "CREATE TABLE IF NOT EXISTS repeating_tasks (
+            id              TEXT    PRIMARY KEY NOT NULL,
+            name            TEXT    NOT NULL,
+            description     TEXT    NOT NULL DEFAULT '',
+            folder_id       TEXT    NOT NULL REFERENCES folders(id),
+            prompt          TEXT    NOT NULL,
+            schedule_kind   TEXT    NOT NULL,
+            schedule_value  TEXT    NOT NULL,
+            model           TEXT,
+            effort          TEXT,
+            enabled         BOOLEAN NOT NULL DEFAULT 1,
+            next_run_at     TEXT,
+            last_run_at     TEXT,
+            created_at      TEXT    NOT NULL,
+            updated_at      TEXT    NOT NULL
+        )",
+    )
+    .execute(conn)?;
+    sql_query(
+        "CREATE INDEX IF NOT EXISTS idx_repeating_tasks_folder ON repeating_tasks (folder_id)",
+    )
+    .execute(conn)?;
+    sql_query(
+        "CREATE INDEX IF NOT EXISTS idx_repeating_tasks_next_run \
+         ON repeating_tasks (next_run_at) WHERE enabled = 1",
+    )
+    .execute(conn)?;
+
+    // ALTER TABLE sessions ADD COLUMN -- the only non-idempotent part of
+    // the migration. Skip if the column is already present.
+    let existing: Vec<String> = sessions_cols.into_iter().map(|r| r.name).collect();
+    if !existing.iter().any(|c| c == "repeating_task_id") {
+        tracing::info!("Repairing schema: adding sessions.repeating_task_id");
+        sql_query(
+            "ALTER TABLE sessions ADD COLUMN repeating_task_id TEXT REFERENCES repeating_tasks(id)",
+        )
+        .execute(conn)?;
+    }
+    sql_query(
+        "CREATE INDEX IF NOT EXISTS idx_sessions_repeating_task ON sessions (repeating_task_id)",
+    )
+    .execute(conn)?;
+    Ok(())
+}
+
+/// Heal DBs that predate `1780966657_cards_completed_at` AND backfill
+/// `completed_at` for cards already in `done`. The migration is a bare
+/// `ALTER TABLE … ADD COLUMN` (SQLite has no IF NOT EXISTS for that),
+/// so this is the only safe path on a DB that already has the column.
+///
+/// Backfill uses `updated_at` as the best available proxy for "when did
+/// this card finish" on legacy rows — the DB doesn't preserve transition
+/// timestamps. Re-running is safe: we only touch rows where
+/// `completed_at IS NULL AND step = 'done'`, so post-migration writes
+/// (which carry an accurate timestamp) are never clobbered.
+fn ensure_cards_completed_at_column(conn: &mut SqliteConnection) -> anyhow::Result<()> {
+    let rows: Vec<PragmaColumn> = sql_query("PRAGMA table_info(cards)").load(conn)?;
+    let existing: Vec<String> = rows.into_iter().map(|r| r.name).collect();
+    if existing.is_empty() {
+        return Ok(());
+    }
+    let needs_add = !existing.iter().any(|c| c == "completed_at");
+    if needs_add {
+        tracing::info!("Repairing schema: adding cards.completed_at");
+        sql_query("ALTER TABLE cards ADD COLUMN completed_at TEXT").execute(conn)?;
+    }
+    // Backfill once: if we just added the column there are no
+    // post-migration writes to protect; on healthy DBs the column is
+    // already accurate so we don't touch existing rows.
+    if needs_add {
+        sql_query(
+            "UPDATE cards
+             SET completed_at = updated_at
+             WHERE completed_at IS NULL AND step = 'done'",
+        )
+        .execute(conn)?;
+    }
+    Ok(())
+}
+
+/// Heal DBs that predate (or somehow skipped) the
+/// `1780883838_card_dependencies` migration. `CREATE TABLE IF NOT
+/// EXISTS` is inherently idempotent, so this is safe on a fully-migrated
+/// DB and only does work on one that lacks the table.
+fn ensure_card_dependencies_table(conn: &mut SqliteConnection) -> anyhow::Result<()> {
+    log_if_healing_table(conn, "card_dependencies")?;
+    sql_query(
+        "CREATE TABLE IF NOT EXISTS card_dependencies (
+            card_id             TEXT NOT NULL REFERENCES cards(id) ON DELETE CASCADE,
+            depends_on_card_id  TEXT NOT NULL REFERENCES cards(id) ON DELETE CASCADE,
+            created_at          TEXT NOT NULL,
+            PRIMARY KEY (card_id, depends_on_card_id)
+        )",
+    )
+    .execute(conn)?;
+    Ok(())
+}
+
+/// Heal DBs that predate the `1780900501_todos` migration AND backfill
+/// the new `todos` table from each session's most recent `todo` event,
+/// so an older DB doesn't lose its current snapshot when the read path
+/// switches over from `latest_event_of_kind`.
+///
+/// Idempotent in both directions:
+///   * `CREATE TABLE IF NOT EXISTS` is a no-op on healthy DBs.
+///   * Backfill replaces each session's rows with whatever the latest
+///     `todo` event says — so re-running just re-asserts the same state.
+///     Sessions that received fresh writes after startup will already
+///     hold the post-startup snapshot; those won't have a stale
+///     pre-startup `todo` event later than the live writes, so re-runs
+///     don't clobber newer data.
+fn ensure_todos_table(conn: &mut SqliteConnection) -> anyhow::Result<()> {
+    log_if_healing_table(conn, "todos")?;
+    sql_query(
+        "CREATE TABLE IF NOT EXISTS todos (
+            session_id   TEXT    NOT NULL,
+            position     INTEGER NOT NULL,
+            content      TEXT    NOT NULL,
+            status       TEXT    NOT NULL,
+            active_form  TEXT,
+            updated_at   TEXT    NOT NULL,
+            PRIMARY KEY (session_id, position)
+        )",
+    )
+    .execute(conn)?;
+    sql_query("CREATE INDEX IF NOT EXISTS idx_todos_session ON todos (session_id)")
+        .execute(conn)?;
+    backfill_todos_from_events(conn)?;
+    Ok(())
+}
+
+#[derive(QueryableByName, Debug)]
+struct SessionTodoEvent {
+    #[diesel(sql_type = diesel::sql_types::Text)]
+    session_id: String,
+    #[diesel(sql_type = diesel::sql_types::Text)]
+    data: String,
+}
+
+/// Backfill: for every session whose latest `todo` event isn't already
+/// reflected in `todos`, replace that session's rows. We skip sessions
+/// that already have rows whose `updated_at` is newer than the event's
+/// timestamp — those got a fresh write at runtime and we mustn't
+/// clobber them on a later restart.
+fn backfill_todos_from_events(conn: &mut SqliteConnection) -> anyhow::Result<()> {
+    // Skip if the `events` table doesn't exist yet (e.g. test fixtures
+    // that build a minimal schema). Real DBs always have it; this is a
+    // belt-and-braces guard for the repair-tests-only case.
+    let has_events: Vec<PragmaColumn> = sql_query("PRAGMA table_info(events)").load(conn)?;
+    if has_events.is_empty() {
+        return Ok(());
+    }
+
+    // Latest `todo` event per session.
+    let rows: Vec<SessionTodoEvent> = sql_query(
+        "SELECT e.session_id AS session_id, e.data AS data
+         FROM events e
+         JOIN (
+             SELECT session_id, MAX(seq) AS max_seq
+             FROM events
+             WHERE kind = 'todo'
+             GROUP BY session_id
+         ) latest
+           ON latest.session_id = e.session_id
+          AND latest.max_seq = e.seq
+         WHERE e.kind = 'todo'",
+    )
+    .load(conn)?;
+
+    if rows.is_empty() {
+        return Ok(());
+    }
+
+    let now = chrono::Utc::now().to_rfc3339();
+    for row in rows {
+        // Skip if this session already has todos rows — runtime writes win.
+        let existing: i64 = sql_query("SELECT COUNT(*) AS n FROM todos WHERE session_id = ?1")
+            .bind::<diesel::sql_types::Text, _>(&row.session_id)
+            .get_result::<CountRow>(conn)
+            .map(|r| r.n)
+            .unwrap_or(0);
+        if existing > 0 {
+            continue;
+        }
+
+        let Ok(data) = serde_json::from_str::<serde_json::Value>(&row.data) else {
+            continue;
+        };
+        let Some(arr) = data.get("todos").and_then(|v| v.as_array()) else {
+            continue;
+        };
+
+        tracing::info!(
+            session_id = %row.session_id,
+            count = arr.len(),
+            "Backfilling todos table from latest event"
+        );
+
+        for (position, item) in arr.iter().enumerate() {
+            let content = item
+                .get("content")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+            let status = item
+                .get("status")
+                .and_then(|v| v.as_str())
+                .unwrap_or("pending")
+                .to_string();
+            let active_form = item
+                .get("activeForm")
+                .and_then(|v| v.as_str())
+                .map(str::to_string);
+
+            sql_query(
+                "INSERT OR REPLACE INTO todos
+                   (session_id, position, content, status, active_form, updated_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            )
+            .bind::<diesel::sql_types::Text, _>(&row.session_id)
+            .bind::<diesel::sql_types::Integer, _>(position as i32)
+            .bind::<diesel::sql_types::Text, _>(&content)
+            .bind::<diesel::sql_types::Text, _>(&status)
+            .bind::<diesel::sql_types::Nullable<diesel::sql_types::Text>, _>(&active_form)
+            .bind::<diesel::sql_types::Text, _>(&now)
+            .execute(conn)?;
+        }
+    }
+
+    Ok(())
+}
+
+#[derive(QueryableByName, Debug)]
+struct CountRow {
+    #[diesel(sql_type = diesel::sql_types::BigInt)]
+    n: i64,
+}
+
+/// Original bug: `00000000000002_user_tabs` (since renamed to
+/// `00000000000003_`) collided with the upstream
+/// `00000000000002_worker_communication`. Diesel records migrations by
+/// numeric version; with the collision it marked version `2` applied
+/// after running ONE of the two SQL files. DBs created in that window
+/// are missing the two columns the worker_communication migration was
+/// supposed to add.
+fn ensure_projects_worker_communication_columns(conn: &mut SqliteConnection) -> anyhow::Result<()> {
+    let existing = project_columns(conn)?;
+    if !existing.iter().any(|c| c == "auto_notify_changes") {
+        tracing::info!("Repairing schema: adding projects.auto_notify_changes");
+        sql_query("ALTER TABLE projects ADD COLUMN auto_notify_changes BOOLEAN NOT NULL DEFAULT 1")
+            .execute(conn)?;
+    }
+    if !existing.iter().any(|c| c == "worker_communication") {
+        tracing::info!("Repairing schema: adding projects.worker_communication");
+        sql_query(
+            "ALTER TABLE projects ADD COLUMN worker_communication BOOLEAN NOT NULL DEFAULT 1",
+        )
+        .execute(conn)?;
+    }
+    Ok(())
+}
+
+/// Heal DBs that predate `1781054693_cards_workflow_required`. That
+/// migration renames the legacy nullable `cards.workflow` column to
+/// `workflow_legacy` and adds a NOT NULL `workflow` column with a
+/// per-row backfill (card legacy value → owning project's workflow →
+/// 'task'). Neither rename nor ADD COLUMN can be made idempotent in
+/// SQLite, so the detect-then-skip path is the only safe way to apply
+/// this to an older data dir.
+fn ensure_cards_workflow_column(conn: &mut SqliteConnection) -> anyhow::Result<()> {
+    let cols: Vec<(String, bool)> = sql_query(
+        "SELECT name AS name, CAST(\"notnull\" AS INTEGER) AS not_null \
+         FROM pragma_table_info('cards')",
+    )
+    .load::<NotNullColumn>(conn)?
+    .into_iter()
+    .map(|c| (c.name, c.not_null != 0))
+    .collect();
+    if cols.is_empty() {
+        return Ok(());
+    }
+    let has = |n: &str| cols.iter().any(|(name, _)| name == n);
+    let workflow_not_null = cols
+        .iter()
+        .find(|(name, _)| name == "workflow")
+        .map(|(_, nn)| *nn)
+        .unwrap_or(false);
+
+    // Healthy: the migration has run, `workflow` exists with NOT NULL,
+    // and the legacy column is preserved alongside.
+    if has("workflow") && workflow_not_null && has("workflow_legacy") {
+        return Ok(());
+    }
+
+    // Decide what to add and whether to backfill. The backfill only runs
+    // when we touch the schema — on a healthy DB we exit above without
+    // ever rewriting the live `workflow` values.
+    let mut needs_backfill = false;
+    if has("workflow_legacy") && !has("workflow") {
+        // Resumed mid-state from a crash between RENAME and ADD COLUMN.
+        sql_query("ALTER TABLE cards ADD COLUMN workflow TEXT NOT NULL DEFAULT 'task'")
+            .execute(conn)?;
+        needs_backfill = true;
+    } else if !has("workflow_legacy") && has("workflow") && !workflow_not_null {
+        // Legacy schema: nullable `workflow` only. Rename + add + backfill.
+        tracing::info!("Repairing schema: renaming cards.workflow → workflow_legacy");
+        sql_query("ALTER TABLE cards RENAME COLUMN workflow TO workflow_legacy").execute(conn)?;
+        sql_query("ALTER TABLE cards ADD COLUMN workflow TEXT NOT NULL DEFAULT 'task'")
+            .execute(conn)?;
+        needs_backfill = true;
+    } else if !has("workflow") {
+        // Cards table predates having a workflow column at all (vanishingly
+        // rare). Additive ADD is safe; no legacy values to backfill from.
+        sql_query("ALTER TABLE cards ADD COLUMN workflow TEXT NOT NULL DEFAULT 'task'")
+            .execute(conn)?;
+        needs_backfill = true;
+    }
+
+    if needs_backfill {
+        // Prefer the card's legacy value, fall back to the owning project's
+        // workflow, then 'task'. Only rows that landed on the ADD COLUMN
+        // default ('task') get re-evaluated; if a legitimate post-heal write
+        // already set the value, we wouldn't be here (healthy-path early
+        // exit catches that).
+        sql_query(
+            "UPDATE cards
+                SET workflow = COALESCE(
+                    NULLIF(workflow_legacy, ''),
+                    (SELECT workflow FROM projects WHERE projects.id = cards.project_id),
+                    'task'
+                )",
+        )
+        .execute(conn)?;
+    }
+
+    Ok(())
+}
+
+#[derive(QueryableByName, Debug)]
+struct NotNullColumn {
+    #[diesel(sql_type = diesel::sql_types::Text)]
+    name: String,
+    #[diesel(sql_type = diesel::sql_types::Integer)]
+    not_null: i32,
+}
+
+/// Heal DBs that predate `1781053574_projects_workflow_required`. That
+/// migration is a bare `ALTER TABLE … ADD COLUMN` plus a backfill UPDATE;
+/// ADD COLUMN cannot be made idempotent in SQLite, so this detect-then-skip
+/// path is the only safe way to add the column to an older data dir.
+///
+/// The new column is `NOT NULL DEFAULT 'task'`; the backfill copies the
+/// project's previously-stored `default_workflow` whenever it was set.
+fn ensure_projects_workflow_column(conn: &mut SqliteConnection) -> anyhow::Result<()> {
+    let existing = project_columns(conn)?;
+    if existing.is_empty() {
+        return Ok(());
+    }
+    if !existing.iter().any(|c| c == "workflow") {
+        tracing::info!("Repairing schema: adding projects.workflow");
+        sql_query("ALTER TABLE projects ADD COLUMN workflow TEXT NOT NULL DEFAULT 'task'")
+            .execute(conn)?;
+        if existing.iter().any(|c| c == "default_workflow") {
+            sql_query(
+                "UPDATE projects \
+                    SET workflow = default_workflow \
+                  WHERE default_workflow IS NOT NULL \
+                    AND default_workflow != ''",
+            )
+            .execute(conn)?;
+        }
+    }
+    Ok(())
+}
+
+#[derive(QueryableByName, Debug)]
+struct PragmaColumn {
+    #[diesel(sql_type = diesel::sql_types::Text)]
+    name: String,
+}
+
+fn project_columns(conn: &mut SqliteConnection) -> anyhow::Result<Vec<String>> {
+    let rows: Vec<PragmaColumn> = sql_query("PRAGMA table_info(projects)").load(conn)?;
+    Ok(rows.into_iter().map(|r| r.name).collect())
+}
+
+fn table_exists(conn: &mut SqliteConnection, table: &str) -> anyhow::Result<bool> {
+    let rows: Vec<PragmaColumn> = sql_query(format!("PRAGMA table_info({table})")).load(conn)?;
+    Ok(!rows.is_empty())
+}
+
+/// Log when a `CREATE TABLE IF NOT EXISTS` heal is about to do real work.
+/// The ALTER-based heals already log per column; without this the
+/// table-creation heals run silently, and a botched migration on a real
+/// DB goes unnoticed until something else breaks.
+fn log_if_healing_table(conn: &mut SqliteConnection, table: &str) -> anyhow::Result<()> {
+    if !table_exists(conn, table)? {
+        tracing::info!("Repairing schema: creating missing table {table}");
+    }
+    Ok(())
+}
+
+/// Heal DBs that predate `1781202566_user_tabs_more_kinds`. That
+/// migration relaxes the `user_tabs.item_type` CHECK constraint to
+/// allow `'report'` and `'repeating_task'` in addition to `'session'`
+/// and `'project'`. CHECK constraints can only be changed by recreating
+/// the table, and SQLite has no IF-CHECK-IS-RELAXED guard, so this
+/// detect-then-recreate path heals data dirs that somehow skipped the
+/// migration — or where the table-recreate half failed midway and left
+/// the old CHECK in place.
+fn ensure_user_tabs_check_constraint(conn: &mut SqliteConnection) -> anyhow::Result<()> {
+    #[derive(QueryableByName)]
+    struct MasterRow {
+        #[diesel(sql_type = diesel::sql_types::Text)]
+        sql: String,
+    }
+    let row: Option<MasterRow> =
+        sql_query("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'user_tabs'")
+            .get_result(conn)
+            .optional()?;
+    let sql = match row {
+        Some(r) => r.sql,
+        // No user_tabs table at all — base migration hasn't run; let the
+        // caller surface that rather than try to create one here.
+        None => return Ok(()),
+    };
+    // Already relaxed (or never had the CHECK) — nothing to do.
+    if sql.contains("'report'") || sql.contains("'repeating_task'") {
+        return Ok(());
+    }
+    // CHECK still names only session/project. Recreate the table with
+    // the wider CHECK, preserving every existing row.
+    tracing::info!("Repairing schema: relaxing user_tabs.item_type CHECK constraint");
+    sql_query(
+        "CREATE TABLE IF NOT EXISTS user_tabs_new (
+            user_id     TEXT    NOT NULL REFERENCES users(id),
+            item_type   TEXT    NOT NULL CHECK (item_type IN ('session', 'project', 'report', 'repeating_task')),
+            item_id     TEXT    NOT NULL,
+            last_active TEXT    NOT NULL,
+            PRIMARY KEY (user_id, item_type, item_id)
+        )",
+    )
+    .execute(conn)?;
+    sql_query(
+        "INSERT INTO user_tabs_new (user_id, item_type, item_id, last_active)
+            SELECT user_id, item_type, item_id, last_active FROM user_tabs",
+    )
+    .execute(conn)?;
+    sql_query("DROP TABLE user_tabs").execute(conn)?;
+    sql_query("ALTER TABLE user_tabs_new RENAME TO user_tabs").execute(conn)?;
+    sql_query(
+        "CREATE INDEX IF NOT EXISTS idx_user_tabs_user_active ON user_tabs (user_id, last_active DESC)",
+    )
+    .execute(conn)?;
+    Ok(())
+}
+
+/// Backfill for the `model` / `effort` columns added to `queued_messages`
+/// in migration `1780879129_queued_message_model`. Migration is additive
+/// (NULL-able columns), but ALTER ADD COLUMN is not idempotent in SQLite,
+/// so DBs that somehow skipped the migration get healed here.
+fn ensure_queued_messages_model_columns(conn: &mut SqliteConnection) -> anyhow::Result<()> {
+    let rows: Vec<PragmaColumn> = sql_query("PRAGMA table_info(queued_messages)").load(conn)?;
+    let existing: Vec<String> = rows.into_iter().map(|r| r.name).collect();
+    if existing.is_empty() {
+        // Table itself missing — migrations haven't run. Don't try to
+        // ALTER; let the caller surface the schema-missing error.
+        return Ok(());
+    }
+    if !existing.iter().any(|c| c == "model") {
+        tracing::info!("Repairing schema: adding queued_messages.model");
+        sql_query("ALTER TABLE queued_messages ADD COLUMN model TEXT").execute(conn)?;
+    }
+    if !existing.iter().any(|c| c == "effort") {
+        tracing::info!("Repairing schema: adding queued_messages.effort");
+        sql_query("ALTER TABLE queued_messages ADD COLUMN effort TEXT").execute(conn)?;
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use diesel::Connection;
+
+    /// Simulate a DB created during the collision window: same tables
+    /// as today but without the two project columns. ensure_schema
+    /// must add them.
+    #[test]
+    fn ensure_schema_adds_missing_project_columns() {
+        let mut conn = SqliteConnection::establish(":memory:").unwrap();
+
+        sql_query("CREATE TABLE projects (id TEXT PRIMARY KEY NOT NULL, name TEXT NOT NULL)")
+            .execute(&mut conn)
+            .unwrap();
+        let before = project_columns(&mut conn).unwrap();
+        assert!(!before.iter().any(|c| c == "auto_notify_changes"));
+
+        ensure_schema(&mut conn).unwrap();
+
+        let after = project_columns(&mut conn).unwrap();
+        assert!(
+            after.iter().any(|c| c == "auto_notify_changes"),
+            "got columns {:?}",
+            after,
+        );
+        assert!(after.iter().any(|c| c == "worker_communication"));
+    }
+
+    /// Pre-existing DB has no `todos` table and a session whose latest
+    /// `todo` event holds the live snapshot. ensure_schema must create
+    /// the table AND backfill rows from that event.
+    #[test]
+    fn ensure_schema_backfills_todos_from_latest_event() {
+        let mut conn = SqliteConnection::establish(":memory:").unwrap();
+
+        // Other ensure_schema steps prod `projects` and `queued_messages`;
+        // stub the bare minimum so we can isolate the todos check.
+        sql_query(
+            "CREATE TABLE projects (
+                id TEXT PRIMARY KEY NOT NULL,
+                auto_notify_changes BOOLEAN NOT NULL DEFAULT 1,
+                worker_communication BOOLEAN NOT NULL DEFAULT 1
+            )",
+        )
+        .execute(&mut conn)
+        .unwrap();
+        sql_query(
+            "CREATE TABLE queued_messages (
+                session_id TEXT PRIMARY KEY NOT NULL,
+                text TEXT NOT NULL,
+                queued_at TEXT NOT NULL,
+                model TEXT,
+                effort TEXT
+            )",
+        )
+        .execute(&mut conn)
+        .unwrap();
+
+        // Minimal `events` shape — enough for the backfill query.
+        sql_query(
+            "CREATE TABLE events (
+                id TEXT PRIMARY KEY NOT NULL,
+                session_id TEXT NOT NULL,
+                seq INTEGER NOT NULL,
+                ts BIGINT NOT NULL,
+                kind TEXT NOT NULL,
+                data TEXT NOT NULL
+            )",
+        )
+        .execute(&mut conn)
+        .unwrap();
+
+        // Two `todo` events for one session — backfill must pick the
+        // latest by seq, not seq=1's stale snapshot.
+        sql_query(
+            "INSERT INTO events (id, session_id, seq, ts, kind, data) VALUES
+             ('e1', 's1', 1, 100, 'todo',
+                '{\"todos\":[{\"content\":\"stale\",\"status\":\"pending\"}]}'),
+             ('e2', 's1', 2, 200, 'todo',
+                '{\"todos\":[{\"content\":\"latest a\",\"status\":\"in_progress\",\"activeForm\":\"Doing a\"},{\"content\":\"latest b\",\"status\":\"done\"}]}')",
+        )
+        .execute(&mut conn)
+        .unwrap();
+
+        ensure_schema(&mut conn).unwrap();
+
+        #[derive(QueryableByName, Debug)]
+        struct R {
+            #[diesel(sql_type = diesel::sql_types::Text)]
+            content: String,
+            #[diesel(sql_type = diesel::sql_types::Text)]
+            status: String,
+            #[diesel(sql_type = diesel::sql_types::Nullable<diesel::sql_types::Text>)]
+            active_form: Option<String>,
+        }
+
+        let rows: Vec<R> = sql_query(
+            "SELECT content, status, active_form
+             FROM todos WHERE session_id='s1' ORDER BY position",
+        )
+        .load(&mut conn)
+        .unwrap();
+
+        assert_eq!(rows.len(), 2, "stale event must not be picked");
+        assert_eq!(rows[0].content, "latest a");
+        assert_eq!(rows[0].status, "in_progress");
+        assert_eq!(rows[0].active_form.as_deref(), Some("Doing a"));
+        assert_eq!(rows[1].content, "latest b");
+        assert_eq!(rows[1].status, "done");
+
+        // Second call must be a no-op — existing rows win, no clobber.
+        ensure_schema(&mut conn).unwrap();
+        let rows2: Vec<R> = sql_query(
+            "SELECT content, status, active_form
+             FROM todos WHERE session_id='s1' ORDER BY position",
+        )
+        .load(&mut conn)
+        .unwrap();
+        assert_eq!(rows2.len(), 2);
+    }
+
+    /// A DB created before `1781202566_user_tabs_more_kinds` has the
+    /// old CHECK that only allows 'session' / 'project'. ensure_schema
+    /// must recreate the table with the relaxed CHECK while preserving
+    /// every existing row, AND the recreated table must accept a
+    /// 'report' / 'repeating_task' insert.
+    #[test]
+    fn ensure_schema_relaxes_user_tabs_check_constraint() {
+        let mut conn = SqliteConnection::establish(":memory:").unwrap();
+
+        // Other ensure_schema steps stub minimal projects + queued_messages
+        // so this test stays scoped to the user_tabs path.
+        sql_query(
+            "CREATE TABLE projects (
+                id TEXT PRIMARY KEY NOT NULL,
+                auto_notify_changes BOOLEAN NOT NULL DEFAULT 1,
+                worker_communication BOOLEAN NOT NULL DEFAULT 1
+            )",
+        )
+        .execute(&mut conn)
+        .unwrap();
+        sql_query(
+            "CREATE TABLE queued_messages (
+                session_id TEXT PRIMARY KEY NOT NULL,
+                text TEXT NOT NULL,
+                queued_at TEXT NOT NULL,
+                model TEXT,
+                effort TEXT
+            )",
+        )
+        .execute(&mut conn)
+        .unwrap();
+        sql_query("CREATE TABLE users (id TEXT PRIMARY KEY NOT NULL)")
+            .execute(&mut conn)
+            .unwrap();
+
+        // The pre-relaxation user_tabs, byte-for-byte the original CHECK.
+        sql_query(
+            "CREATE TABLE user_tabs (
+                user_id     TEXT NOT NULL REFERENCES users(id),
+                item_type   TEXT NOT NULL CHECK (item_type IN ('session', 'project')),
+                item_id     TEXT NOT NULL,
+                last_active TEXT NOT NULL,
+                PRIMARY KEY (user_id, item_type, item_id)
+            )",
+        )
+        .execute(&mut conn)
+        .unwrap();
+        sql_query("INSERT INTO users (id) VALUES ('u1')")
+            .execute(&mut conn)
+            .unwrap();
+        sql_query(
+            "INSERT INTO user_tabs (user_id, item_type, item_id, last_active) \
+             VALUES ('u1', 'session', 's1', '2026-06-11T00:00:00Z')",
+        )
+        .execute(&mut conn)
+        .unwrap();
+
+        ensure_schema(&mut conn).unwrap();
+
+        // Existing row preserved.
+        let count: CountRow = sql_query(
+            "SELECT count(*) AS n FROM user_tabs WHERE user_id = 'u1' AND item_id = 's1'",
+        )
+        .get_result(&mut conn)
+        .unwrap();
+        assert_eq!(count.n, 1, "pre-heal session tab row must survive");
+
+        // New kinds now accepted.
+        sql_query(
+            "INSERT INTO user_tabs (user_id, item_type, item_id, last_active) \
+             VALUES ('u1', 'report', '2026-06-11/foo.md', '2026-06-11T00:00:00Z')",
+        )
+        .execute(&mut conn)
+        .expect("report-kind insert should succeed after heal");
+        sql_query(
+            "INSERT INTO user_tabs (user_id, item_type, item_id, last_active) \
+             VALUES ('u1', 'repeating_task', 'rt1', '2026-06-11T00:00:00Z')",
+        )
+        .execute(&mut conn)
+        .expect("repeating_task-kind insert should succeed after heal");
+
+        // Idempotent: second run is a no-op on the relaxed schema.
+        ensure_schema(&mut conn).unwrap();
+        let count2: CountRow = sql_query("SELECT count(*) AS n FROM user_tabs")
+            .get_result(&mut conn)
+            .unwrap();
+        assert_eq!(count2.n, 3);
+    }
+
+    /// Running on a healthy schema must be a no-op (no double-add).
+    #[test]
+    fn ensure_schema_is_idempotent() {
+        let mut conn = SqliteConnection::establish(":memory:").unwrap();
+        sql_query(
+            "CREATE TABLE projects (
+                id TEXT PRIMARY KEY NOT NULL,
+                auto_notify_changes BOOLEAN NOT NULL DEFAULT 1,
+                worker_communication BOOLEAN NOT NULL DEFAULT 1
+            )",
+        )
+        .execute(&mut conn)
+        .unwrap();
+
+        ensure_schema(&mut conn).unwrap();
+        ensure_schema(&mut conn).unwrap(); // second call must not error
+    }
+
+    /// A DB that predates `1780985065_expert_sessions` has a `sessions`
+    /// table without the expert columns. ensure_schema must add every
+    /// column AND preserve existing rows (no data loss). Idempotent on a
+    /// second run.
+    #[test]
+    fn ensure_schema_adds_missing_session_expert_columns() {
+        let mut conn = SqliteConnection::establish(":memory:").unwrap();
+
+        // Other ensure_schema steps prod these tables; stub the minimum.
+        sql_query(
+            "CREATE TABLE projects (
+                id TEXT PRIMARY KEY NOT NULL,
+                auto_notify_changes BOOLEAN NOT NULL DEFAULT 1,
+                worker_communication BOOLEAN NOT NULL DEFAULT 1
+            )",
+        )
+        .execute(&mut conn)
+        .unwrap();
+
+        // Pre-migration sessions shape with a single existing row.
+        sql_query(
+            "CREATE TABLE sessions (
+                id TEXT PRIMARY KEY NOT NULL,
+                name TEXT NOT NULL,
+                is_worker BOOLEAN NOT NULL DEFAULT 0
+            )",
+        )
+        .execute(&mut conn)
+        .unwrap();
+        sql_query("INSERT INTO sessions (id, name, is_worker) VALUES ('s1', 'Chat', 0)")
+            .execute(&mut conn)
+            .unwrap();
+
+        ensure_schema(&mut conn).unwrap();
+
+        let cols: Vec<String> = {
+            let rows: Vec<PragmaColumn> = sql_query("PRAGMA table_info(sessions)")
+                .load(&mut conn)
+                .unwrap();
+            rows.into_iter().map(|r| r.name).collect()
+        };
+        for expected in [
+            "is_expert",
+            "expert_kind",
+            "knowledge_summary",
+            "knowledge_area",
+            "scope_path",
+            "is_permanent",
+        ] {
+            assert!(
+                cols.iter().any(|c| c == expected),
+                "missing {expected}; got {cols:?}",
+            );
+        }
+
+        // Existing row survived and defaults applied.
+        #[derive(QueryableByName)]
+        struct Row {
+            #[diesel(sql_type = diesel::sql_types::Text)]
+            name: String,
+            #[diesel(sql_type = diesel::sql_types::Bool)]
+            is_expert: bool,
+            #[diesel(sql_type = diesel::sql_types::Bool)]
+            is_permanent: bool,
+        }
+        let rows: Vec<Row> =
+            sql_query("SELECT name, is_expert, is_permanent FROM sessions WHERE id = 's1'")
+                .load(&mut conn)
+                .unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].name, "Chat");
+        assert!(!rows[0].is_expert);
+        assert!(!rows[0].is_permanent);
+
+        // Second run must be a no-op (no double-add error).
+        ensure_schema(&mut conn).unwrap();
+    }
+
+    /// A DB that predates `1781053574_projects_workflow_required` has a
+    /// `projects` table with the legacy nullable `default_workflow` column
+    /// and no `workflow` column. ensure_schema must add the new column with
+    /// the NOT NULL constraint, copy each project's `default_workflow` when
+    /// set, and fall through to the platform default ('task') otherwise.
+    /// The legacy column stays in place — per migration policy we never DROP
+    /// in a forward step.
+    #[test]
+    fn ensure_schema_adds_projects_workflow_with_backfill() {
+        let mut conn = SqliteConnection::establish(":memory:").unwrap();
+        sql_query(
+            "CREATE TABLE projects (
+                id TEXT PRIMARY KEY NOT NULL,
+                auto_notify_changes BOOLEAN NOT NULL DEFAULT 1,
+                worker_communication BOOLEAN NOT NULL DEFAULT 1,
+                default_workflow TEXT
+            )",
+        )
+        .execute(&mut conn)
+        .unwrap();
+        sql_query(
+            "INSERT INTO projects (id, default_workflow) VALUES \
+             ('p_null', NULL), \
+             ('p_empty', ''), \
+             ('p_set', 'research')",
+        )
+        .execute(&mut conn)
+        .unwrap();
+
+        ensure_schema(&mut conn).unwrap();
+
+        let cols = project_columns(&mut conn).unwrap();
+        assert!(cols.iter().any(|c| c == "workflow"));
+        assert!(
+            cols.iter().any(|c| c == "default_workflow"),
+            "legacy column must survive the heal",
+        );
+
+        #[derive(QueryableByName)]
+        struct Row {
+            #[diesel(sql_type = diesel::sql_types::Text)]
+            id: String,
+            #[diesel(sql_type = diesel::sql_types::Text)]
+            workflow: String,
+        }
+        let rows: Vec<Row> = sql_query("SELECT id, workflow FROM projects ORDER BY id")
+            .load(&mut conn)
+            .unwrap();
+        let by_id: std::collections::HashMap<_, _> = rows
+            .iter()
+            .map(|r| (r.id.as_str(), r.workflow.as_str()))
+            .collect();
+        assert_eq!(by_id["p_null"], "task");
+        assert_eq!(by_id["p_empty"], "task");
+        assert_eq!(by_id["p_set"], "research");
+
+        // Second call must be a no-op.
+        ensure_schema(&mut conn).unwrap();
+    }
+
+    /// A DB that predates `1781054693_cards_workflow_required` has a
+    /// `cards` table with a nullable `workflow` column. ensure_schema
+    /// must rename it to `workflow_legacy`, add a NOT NULL `workflow`
+    /// column, and backfill per row: card's own legacy value if set,
+    /// then the owning project's workflow, then 'task'.
+    #[test]
+    fn ensure_schema_adds_cards_workflow_with_per_card_backfill() {
+        let mut conn = SqliteConnection::establish(":memory:").unwrap();
+
+        // Minimal projects table — the heal's `(SELECT workflow FROM
+        // projects WHERE projects.id = cards.project_id)` subquery
+        // needs the table to exist with a workflow column.
+        sql_query(
+            "CREATE TABLE projects (
+                id TEXT PRIMARY KEY NOT NULL,
+                auto_notify_changes BOOLEAN NOT NULL DEFAULT 1,
+                worker_communication BOOLEAN NOT NULL DEFAULT 1,
+                workflow TEXT NOT NULL DEFAULT 'task'
+            )",
+        )
+        .execute(&mut conn)
+        .unwrap();
+        sql_query(
+            "INSERT INTO projects (id, workflow) VALUES \
+             ('p_task', 'task'), \
+             ('p_research', 'research')",
+        )
+        .execute(&mut conn)
+        .unwrap();
+
+        // Pre-migration `cards` shape with a nullable workflow. `step`,
+        // `updated_at`, and `completed_at` exist because the
+        // ensure_cards_completed_at_column heal runs first and reads
+        // them; we're not testing that path here.
+        sql_query(
+            "CREATE TABLE cards (
+                id TEXT PRIMARY KEY NOT NULL,
+                project_id TEXT NOT NULL,
+                step TEXT NOT NULL DEFAULT 'backlog',
+                workflow TEXT,
+                updated_at TEXT NOT NULL DEFAULT '',
+                completed_at TEXT
+            )",
+        )
+        .execute(&mut conn)
+        .unwrap();
+        sql_query(
+            "INSERT INTO cards (id, project_id, workflow) VALUES \
+             ('c_own', 'p_task', 'breakdown'), \
+             ('c_inherit_research', 'p_research', NULL), \
+             ('c_inherit_task', 'p_task', NULL), \
+             ('c_empty', 'p_research', '')",
+        )
+        .execute(&mut conn)
+        .unwrap();
+
+        ensure_schema(&mut conn).unwrap();
+
+        // Both columns must now exist: new NOT NULL `workflow` and the
+        // preserved `workflow_legacy`.
+        let rows: Vec<PragmaColumn> = sql_query("PRAGMA table_info(cards)")
+            .load(&mut conn)
+            .unwrap();
+        let names: Vec<String> = rows.into_iter().map(|r| r.name).collect();
+        assert!(names.iter().any(|n| n == "workflow"));
+        assert!(names.iter().any(|n| n == "workflow_legacy"));
+
+        #[derive(QueryableByName)]
+        struct Row {
+            #[diesel(sql_type = diesel::sql_types::Text)]
+            id: String,
+            #[diesel(sql_type = diesel::sql_types::Text)]
+            workflow: String,
+        }
+        let rows: Vec<Row> = sql_query("SELECT id, workflow FROM cards ORDER BY id")
+            .load(&mut conn)
+            .unwrap();
+        let by_id: std::collections::HashMap<_, _> = rows
+            .iter()
+            .map(|r| (r.id.as_str(), r.workflow.as_str()))
+            .collect();
+        // Own value wins, regardless of the project's workflow.
+        assert_eq!(by_id["c_own"], "breakdown");
+        // Null legacy inherits from the project.
+        assert_eq!(by_id["c_inherit_research"], "research");
+        assert_eq!(by_id["c_inherit_task"], "task");
+        // Empty-string legacy is treated the same as null and inherits.
+        assert_eq!(by_id["c_empty"], "research");
+
+        // Second call must be a no-op (healthy-path early exit).
+        ensure_schema(&mut conn).unwrap();
+    }
+}
