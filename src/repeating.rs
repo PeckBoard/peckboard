@@ -445,7 +445,6 @@ impl RepeatingTaskManager {
                 task.last_run_at.as_deref(),
                 &now,
             )),
-            restrict_to_qa: false,
         };
 
         // Dispatch via the regular send-or-queue path. The TaskLock is

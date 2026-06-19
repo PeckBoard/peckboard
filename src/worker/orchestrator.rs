@@ -333,7 +333,6 @@ pub async fn check_and_spawn_workers(state: &Arc<AppState>) {
                     timeout_ms: None,
                     metadata: serde_json::json!({ "worker": true, "inter_worker_followup": true }),
                     system_prompt_suffix: None,
-                    restrict_to_qa: false,
                 };
 
                 if let Err(e) = state
@@ -525,15 +524,6 @@ async fn spawn_worker_for_card(
     // time, so it always carries a concrete id and the per-step prompt
     // doesn't need to consult the project as a fallback. `workflow_steps`
     // was computed above, before the claim.
-    // In-scope experts (project + global) so the worker can consult them.
-    // A lookup failure here must not block the spawn — degrade to none.
-    let experts = match state.db.list_expert_sessions_by_scope(&project.id).await {
-        Ok(experts) => experts,
-        Err(err) => {
-            tracing::warn!(error = %err, "failed to load in-scope experts for worker prompt");
-            Vec::new()
-        }
-    };
     // Per-project additional step instructions, if the user set any in
     // the edit-project modal. A lookup failure must not block the spawn;
     // we fall back to no extras.
@@ -551,7 +541,6 @@ async fn spawn_worker_for_card(
         &card.step,
         &workflow_steps,
         card.handoff_context.as_deref(),
-        &experts,
         extra_step_instructions.as_deref(),
     );
 
@@ -570,7 +559,6 @@ async fn spawn_worker_for_card(
             "card_id": card.id,
         }),
         system_prompt_suffix: None,
-        restrict_to_qa: false,
     };
 
     // The lock is uncontested for a brand-new uuid; we acquire it anyway
@@ -1006,7 +994,6 @@ pub async fn drain_queue_for_session(
         timeout_ms: None,
         metadata: serde_json::Value::Null,
         system_prompt_suffix: None,
-        restrict_to_qa: false,
     };
 
     state

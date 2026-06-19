@@ -1,10 +1,6 @@
-use crate::db::models::{Card, Event, Project, Session};
+use crate::db::models::{Card, Event, Project};
 
 /// Build the system prompt for a worker agent given its assignment context.
-///
-/// `experts` is the list of in-scope expert sessions (project experts plus
-/// globally-scoped experts) the worker may consult; pass an empty slice when
-/// there are none and the experts section is omitted.
 ///
 /// `extra_step_instructions` is the project's per-(workflow,step) override
 /// text loaded from `project_workflow_instructions`. It's appended to the
@@ -17,7 +13,6 @@ pub fn build_worker_prompt(
     step: &str,
     workflow_steps: &[String],
     handoff_context: Option<&str>,
-    experts: &[Session],
     extra_step_instructions: Option<&str>,
 ) -> String {
     // Per-step instructions come from the workflow registry. The card's
@@ -105,26 +100,6 @@ pub fn build_worker_prompt(
         prompt.push_str("\n\n");
     }
 
-    if !experts.is_empty() {
-        // The instruction (how to consult) is ours and trusted; the expert
-        // metadata (area/boundaries/summary) is agent-generated from reading
-        // files, so it could carry injected content from those files —
-        // render it inside a fence as data, not instructions.
-        prompt.push_str("## In-Scope Experts\n\n");
-        prompt.push_str(
-            "These long-lived EXPERT sessions hold pre-loaded knowledge of parts of \
-             this codebase and are scoped to your project (or globally). Consult them \
-             via the `ask_expert` MCP tool, which is ASYNCHRONOUS: you do NOT block \
-             waiting — call it with a `question` plus either the expert's `expert_id` \
-             (the session id below) or an `area` hint, and the answer arrives as an \
-             event you read on a later turn. Prefer asking an in-scope expert over \
-             re-deriving context yourself or bothering the user — that's what they're \
-             here for.\n\n",
-        );
-        prompt.push_str(&fence("experts", &render_experts(experts)));
-        prompt.push_str("\n\n");
-    }
-
     prompt.push_str("## Available Tools\n\n");
     prompt.push_str(
         "- `complete_step` — Finish the CURRENT step and hand off to the next worker for \
@@ -209,34 +184,6 @@ pub fn build_worker_prompt(
         }
     }
     prompt.push_str(
-        "**Consult the question-expert before asking the user.** Before calling `ask_user`, \
-         you MUST first consult the in-scope QUESTION expert (the in-scope expert whose \
-         `expert_kind` is `\"question\"` — list them with `mcp__peckboard__list_experts` if \
-         you're unsure which one). Ask it via `ask_expert` with that expert's `expert_id`; it \
-         has accumulated the answers the user already gave and may already know the answer, \
-         sparing the user a repeat question. Only fall back to `ask_user` when the question \
-         expert cannot answer or the matter genuinely needs a human decision — the human is \
-         the final fallback, not the first resort. Resolved answers are fed back to the \
-         question expert automatically, so each question only bothers the user once.\n\n",
-    );
-    prompt.push_str(
-        "**Follow the PM-expert rules for project direction and business logic.** The \
-         in-scope PM expert (the in-scope expert whose `expert_kind` is `\"pm\"`) is the \
-         durable store of the user's project-direction and business-logic decisions:\n\
-         - BEFORE making any change that touches project direction or business logic, \
-         call `pm_check_decisions` with your planned change and respect every active \
-         decision it returns.\n\
-         - When a matter of direction or business logic is unknown or not covered by a \
-         recorded decision, do NOT guess and do NOT ask the user directly — consult the \
-         PM expert via `ask_expert` (use its `expert_id`, or the area \"pm\"); it answers \
-         from recorded decisions and escalates to the user itself when none applies.\n\
-         - When a new direction or business-logic decision is settled, record it with \
-         `pm_record_decision` so future workers respect it.\n\
-         - NEVER change, reverse, or reinterpret an existing decision — decisions belong \
-         to the user, and changing one happens only through the PM expert's \
-         user-authorized escalation flow.\n\n",
-    );
-    prompt.push_str(
         "## Parallel Worker Awareness\n\n\
          You are one of multiple workers running in parallel on this project. \
          Other workers are working on different tasks at the same time.\n\n\
@@ -288,32 +235,6 @@ pub fn build_worker_prompt(
     );
 
     prompt
-}
-
-/// Render the in-scope experts as a compact, line-per-field list. Kept
-/// deliberately terse — areas, boundaries, and short summaries only, never
-/// full knowledge dumps — so injecting experts doesn't bloat the prompt.
-/// The result is fenced as untrusted data by the caller.
-fn render_experts(experts: &[Session]) -> String {
-    let mut out = String::new();
-    for (i, e) in experts.iter().enumerate() {
-        if i > 0 {
-            out.push('\n');
-        }
-        let kind = e.expert_kind.as_deref().unwrap_or("knowledge");
-        let area = e.knowledge_area.as_deref().unwrap_or("(unspecified)");
-        out.push_str(&format!("Expert {}:\n", i + 1));
-        out.push_str(&format!("- session_id (expert_id): {}\n", e.id));
-        out.push_str(&format!("- kind: {kind}\n"));
-        out.push_str(&format!("- area: {area}\n"));
-        if let Some(scope) = e.scope_path.as_deref() {
-            out.push_str(&format!("- boundaries (scope_path): {scope}\n"));
-        }
-        if let Some(summary) = e.knowledge_summary.as_deref() {
-            out.push_str(&format!("- summary: {summary}\n"));
-        }
-    }
-    out
 }
 
 /// Wrap untrusted user-supplied text in a fenced block the agent is
@@ -421,30 +342,7 @@ pub const PAUSE_CLEARED_KIND: &str = "auto-pause-cleared";
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::db::models::{Card, Project, Session};
-
-    fn sample_expert(id: &str, project_id: Option<&str>) -> Session {
-        Session {
-            id: id.into(),
-            name: format!("{id} expert"),
-            folder_id: "f1".into(),
-            model: None,
-            effort: None,
-            is_worker: false,
-            project_id: project_id.map(Into::into),
-            card_id: None,
-            conversation_id: None,
-            created_at: "2025-01-01T00:00:00Z".into(),
-            last_activity: "2025-01-01T00:00:00Z".into(),
-            is_expert: true,
-            expert_kind: Some("knowledge".into()),
-            knowledge_summary: Some("Summarizes the HTTP routing layer.".into()),
-            knowledge_area: Some("HTTP routes".into()),
-            scope_path: Some("src/routes".into()),
-            is_permanent: false,
-            repeating_task_id: None,
-        }
-    }
+    use crate::db::models::{Card, Project};
 
     fn sample_project() -> Project {
         Project {
@@ -516,7 +414,6 @@ mod tests {
             "in-progress",
             &sample_steps(),
             None,
-            &[],
             None,
         );
         assert!(prompt.contains("Test Project"));
@@ -533,7 +430,6 @@ mod tests {
             "review",
             &sample_steps(),
             Some("Auth module is at src/auth/"),
-            &[],
             None,
         );
         assert!(prompt.contains("Handoff Context"));
@@ -548,7 +444,6 @@ mod tests {
             "backlog",
             &sample_steps(),
             None,
-            &[],
             None,
         );
         // The ordered steps are rendered.
@@ -579,7 +474,6 @@ mod tests {
             "in-progress",
             &sample_steps(),
             None,
-            &[],
             None,
         );
 
@@ -603,92 +497,6 @@ mod tests {
     }
 
     #[test]
-    fn test_build_worker_prompt_injects_in_scope_experts() {
-        let experts = vec![
-            sample_expert("expert-routes", Some("p1")),
-            sample_expert("expert-global", None),
-        ];
-        let prompt = build_worker_prompt(
-            &sample_project(),
-            &sample_card(),
-            "in-progress",
-            &sample_steps(),
-            None,
-            &experts,
-            None,
-        );
-        // The section and per-expert metadata are present.
-        assert!(prompt.contains("In-Scope Experts"));
-        assert!(prompt.contains("HTTP routes")); // knowledge_area
-        assert!(prompt.contains("src/routes")); // scope_path boundaries
-        assert!(prompt.contains("expert-routes")); // session_id usable as expert_id
-        assert!(prompt.contains("expert-global"));
-        // The consult-via-ask_expert guidance is present.
-        assert!(prompt.contains("ask_expert"));
-        assert!(prompt.contains("ASYNCHRONOUS"));
-        // Prefer experts over re-deriving / bothering the user.
-        assert!(prompt.contains("bothering the user"));
-    }
-
-    #[test]
-    fn test_build_worker_prompt_states_pm_rules() {
-        let prompt = build_worker_prompt(
-            &sample_project(),
-            &sample_card(),
-            "in-progress",
-            &sample_steps(),
-            None,
-            &[],
-            None,
-        );
-        // Rule (a): check decisions before direction/business-logic changes.
-        assert!(prompt.contains("pm_check_decisions"));
-        // Rule (b): unknowns go to the PM expert, not guesses or the user.
-        assert!(prompt.contains("do NOT guess and do NOT ask the user directly"));
-        // Rule (c): record new decisions.
-        assert!(prompt.contains("pm_record_decision"));
-        // Rule (d): decision changes are user-only.
-        assert!(prompt.contains("NEVER change, reverse, or reinterpret"));
-        assert!(prompt.contains("decisions belong to the user"));
-    }
-
-    #[test]
-    fn test_build_worker_prompt_renders_pm_expert() {
-        let mut pm = sample_expert("pm-expert-project-p1", Some("p1"));
-        pm.expert_kind = Some("pm".into());
-        pm.knowledge_area = Some("Project direction & decisions (PM)".into());
-        pm.scope_path = None;
-        let prompt = build_worker_prompt(
-            &sample_project(),
-            &sample_card(),
-            "in-progress",
-            &sample_steps(),
-            None,
-            &[pm],
-            None,
-        );
-        // The PM expert is addressable by its stable id and tagged with
-        // its kind, so the PM-rules instruction can be followed directly.
-        assert!(prompt.contains("pm-expert-project-p1"));
-        assert!(prompt.contains("kind: pm"));
-    }
-
-    #[test]
-    fn test_build_worker_prompt_no_experts_degrades_gracefully() {
-        let prompt = build_worker_prompt(
-            &sample_project(),
-            &sample_card(),
-            "in-progress",
-            &sample_steps(),
-            None,
-            &[],
-            None,
-        );
-        // With no in-scope experts the section is omitted entirely.
-        assert!(!prompt.contains("In-Scope Experts"));
-    }
-
-    #[test]
     fn test_build_worker_prompt_appends_project_extra_instructions() {
         let prompt = build_worker_prompt(
             &sample_project(),
@@ -696,7 +504,6 @@ mod tests {
             "in-progress",
             &sample_steps(),
             None,
-            &[],
             Some("At the end, commit to master and push."),
         );
         // The extra section header and body are present alongside the
@@ -716,7 +523,6 @@ mod tests {
             "in-progress",
             &sample_steps(),
             None,
-            &[],
             Some("   \n\t  "),
         );
         // Whitespace-only extras shouldn't add a stray section.
