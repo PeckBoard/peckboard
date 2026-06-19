@@ -48,25 +48,6 @@ export interface RepeatingTask {
   updated_at: string
 }
 
-/** An expert as returned by `GET /api/plugin-ui/experts`. The experts
- *  feature now lives in a WASM plugin, which serializes its own shape
- *  (not the core `Session` row). `session_id` is the underlying chat
- *  session id — used to open the expert's transcript in ChatView and to
- *  route `/experts/:id`. `expert_kind` is 'knowledge', 'question', or
- *  'pm'. A null `project_id` means the expert is global (available to
- *  chat sessions across the whole install). */
-export interface Expert {
-  session_id: string
-  name: string
-  expert_kind: 'knowledge' | 'question' | 'pm'
-  knowledge_area: string
-  knowledge_summary: string
-  scope_path: string
-  project_id: string | null
-  is_permanent: boolean
-  last_activity: string
-}
-
 export interface Project {
   id: string
   name: string
@@ -157,30 +138,6 @@ export interface Announcement {
   message: string
   detail: string | null
   created_at: string
-}
-
-/** A PM decision as serialized by the experts plugin
- *  (`GET /api/plugin-ui/pm/decisions`, plus the answer/edit mutation
- *  responses). The plugin unifies the old two-type model onto this single
- *  shape: a "pending question" is just a decision with `status: 'pending'`
- *  and `decision: null`, its `title` being the question text. Once
- *  answered, `decision` holds the recorded answer and `status` becomes
- *  'answered' (or 'superseded' when a later edit replaces it).
- *  `decided_at` is a unix-ish numeric timestamp (not an ISO string). */
-export interface PmDecision {
-  id: string
-  title: string
-  decision: string | null
-  status: 'pending' | 'answered' | 'superseded'
-  decided_at: number
-}
-
-/** Payload of the `pm-decisions-changed` WebSocket event, broadcast
- *  after every PM decision-log mutation. */
-export interface PmDecisionsChangedEvent {
-  projectId: string
-  action: string
-  pending_count: number
 }
 
 // Common API response types

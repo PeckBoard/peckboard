@@ -1,5 +1,5 @@
 import { create } from 'zustand'
-import type { Event, Expert, Session } from '../types/api'
+import type { Event, Session } from '../types/api'
 import { authedFetch } from './auth'
 import { useTabsStore } from './tabs'
 
@@ -103,16 +103,9 @@ interface SessionsState {
    *  true on first load so the "Load older" button shows; flipped to
    *  false the first time a partial page arrives. */
   hasMoreOlderEventsBySession: Record<string, boolean>
-  /** Experts from GET /api/plugin-ui/experts (the experts feature lives
-   *  in a WASM plugin). Kept separate from `sessions` because experts are
-   *  deliberately hidden from the ordinary chat list and only surface in
-   *  the Experts view. */
-  experts: Expert[]
-  expertsLoaded: boolean
   pendingUserMessages: Record<string, PendingUserMessage[]>
   fetchSessions: () => Promise<void>
   fetchMoreSessions: () => Promise<void>
-  fetchExperts: () => Promise<void>
   fetchEvents: (sessionId: string) => Promise<void>
   fetchOlderEvents: (sessionId: string) => Promise<void>
   appendEvent: (event: Event) => void
@@ -182,8 +175,6 @@ export const useSessionsStore = create<SessionsState>((set, get) => ({
   eventsErrorBySession: {},
   loadingOlderEventsBySession: {},
   hasMoreOlderEventsBySession: {},
-  experts: [],
-  expertsLoaded: false,
   pendingUserMessages: {},
 
   fetchSessions: async () => {
@@ -229,14 +220,6 @@ export const useSessionsStore = create<SessionsState>((set, get) => ({
       })
     } catch {
       set({ sessionsLoadingMore: false })
-    }
-  },
-
-  fetchExperts: async () => {
-    const res = await authedFetch('/api/plugin-ui/experts')
-    if (res.ok) {
-      const body: { experts: Expert[] } = await res.json()
-      set({ experts: body.experts ?? [], expertsLoaded: true })
     }
   },
 
