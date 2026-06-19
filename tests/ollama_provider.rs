@@ -235,3 +235,95 @@ async fn ollama_provider_streams_text_and_completes() {
     // the order the stub emitted them.
     assert_eq!(text_events, vec!["hel", "lo"]);
 }
+
+/// Schema with the `additional_models` field so the store can round-trip
+/// the setting the dynamic-models path reads.
+fn models_schema() -> SettingsSchema {
+    SettingsSchema::new(vec![
+        SettingField {
+            key: "base_url".into(),
+            title: "Base URL".into(),
+            description: None,
+            required: true,
+            kind: FieldKind::Url {
+                default: Some("http://localhost:11434".into()),
+                placeholder: None,
+            },
+        },
+        SettingField {
+            key: "additional_models".into(),
+            title: "Additional Models".into(),
+            description: None,
+            required: false,
+            kind: FieldKind::StringList {
+                item_placeholder: None,
+            },
+        },
+    ])
+}
+
+/// The user-registered `additional_models` setting surfaces through the
+/// provider registry's catalog path as `ollama:<name>` models, live —
+/// exactly what `/api/models` and the model picker consume. Tag variants
+/// (`llama3.1:8b`) must round-trip even though they carry a colon.
+#[tokio::test]
+async fn additional_models_setting_registers_models_by_name() {
+    use peckboard::provider::registry::{ProviderInfo, ProviderRegistry};
+
+    let db = Db::in_memory().unwrap();
+    db.set_plugin_setting(
+        "ollama",
+        "additional_models",
+        &serde_json::json!(["llama3.1:8b", "mistral-small", "llama3.1"]),
+    )
+    .await
+    .unwrap();
+
+    let store = PluginSettingsStore::new("ollama", models_schema(), db.clone());
+    let provider = Arc::new(OllamaProvider::new(store));
+
+    let registry = ProviderRegistry::new();
+    registry
+        .register(
+            provider,
+            ProviderInfo {
+                id: "ollama".into(),
+                display_name: "Ollama".into(),
+                // Static seed registered at init — the dynamic override
+                // must replace this, not append to a stale copy.
+                models: peckboard::provider::ollama::default_models(),
+            },
+        )
+        .await;
+
+    let all: Vec<String> = registry
+        .list_all_models()
+        .await
+        .into_iter()
+        .map(|(id, _)| id)
+        .collect();
+
+    // Built-in seeds still present.
+    assert!(all.contains(&"ollama:llama3.1".to_string()));
+    assert!(all.contains(&"ollama:qwen2.5-coder".to_string()));
+    // User extras registered by name, tag colon preserved.
+    assert!(all.contains(&"ollama:llama3.1:8b".to_string()));
+    assert!(all.contains(&"ollama:mistral-small".to_string()));
+    // "llama3.1" was both a seed and an extra → not duplicated.
+    assert_eq!(
+        all.iter().filter(|id| *id == "ollama:llama3.1").count(),
+        1,
+        "an extra duplicating a built-in id must not appear twice"
+    );
+
+    // The per-provider catalog view reflects the same effective list.
+    let providers = registry.list_providers_with_models().await;
+    let ollama = providers.iter().find(|p| p.id == "ollama").unwrap();
+    assert!(ollama.models.iter().any(|m| m.id == "llama3.1:8b"));
+    let extra = ollama
+        .models
+        .iter()
+        .find(|m| m.id == "mistral-small")
+        .unwrap();
+    assert_eq!(extra.display_name, "mistral-small (Ollama)");
+}

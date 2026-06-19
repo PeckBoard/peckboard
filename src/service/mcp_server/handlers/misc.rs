@@ -392,17 +392,20 @@ impl McpToolRegistry {
             .as_ref()
             .ok_or_else(|| anyhow::anyhow!("provider registry not available"))?;
 
-        let all_models = registry.list_all_models().await;
-        let providers = registry.list_providers().await;
+        // Resolve effective (settings-derived) model lists once, then
+        // derive both the flat list and per-provider counts from it.
+        let providers = registry.list_providers_with_models().await;
 
-        let models: Vec<Value> = all_models
+        let models: Vec<Value> = providers
             .iter()
-            .map(|(full_id, model)| {
-                serde_json::json!({
-                    "id": full_id,
-                    "model_id": model.id,
-                    "display_name": model.display_name,
-                    "capabilities": model.capabilities,
+            .flat_map(|p| {
+                p.models.iter().map(move |model| {
+                    serde_json::json!({
+                        "id": format!("{}:{}", p.id, model.id),
+                        "model_id": model.id,
+                        "display_name": model.display_name,
+                        "capabilities": model.capabilities,
+                    })
                 })
             })
             .collect();

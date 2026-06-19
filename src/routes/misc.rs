@@ -56,8 +56,10 @@ pub fn is_valid_priority(value: i32) -> bool {
 
 /// GET /api/models — list all available models across providers
 async fn list_models(State(state): State<Arc<AppState>>) -> impl IntoResponse {
-    let providers = state.provider_registry.list_providers().await;
-    let all_models = state.provider_registry.list_all_models().await;
+    // Resolve providers with their effective (settings-derived) model
+    // lists once, then derive the flat list from the same snapshot so a
+    // provider's `dynamic_models` is only computed a single time per call.
+    let providers = state.provider_registry.list_providers_with_models().await;
 
     Json(serde_json::json!({
         "providers": providers.iter().map(|p| serde_json::json!({
@@ -69,11 +71,11 @@ async fn list_models(State(state): State<Arc<AppState>>) -> impl IntoResponse {
                 "capabilities": m.capabilities,
             })).collect::<Vec<_>>(),
         })).collect::<Vec<_>>(),
-        "models": all_models.iter().map(|(full_id, m)| serde_json::json!({
-            "id": full_id,
+        "models": providers.iter().flat_map(|p| p.models.iter().map(move |m| serde_json::json!({
+            "id": format!("{}:{}", p.id, m.id),
             "display_name": m.display_name,
             "capabilities": m.capabilities,
-        })).collect::<Vec<_>>(),
+        }))).collect::<Vec<_>>(),
     }))
 }
 
