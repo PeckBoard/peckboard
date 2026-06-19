@@ -64,9 +64,6 @@ impl AppExpertDispatcher {
             timeout_ms: None,
             metadata,
             system_prompt_suffix: None,
-            // `send_message_locked` re-derives this from the session
-            // (question-experts run answer-only), so the value here is moot.
-            restrict_to_qa: false,
         })
     }
 }

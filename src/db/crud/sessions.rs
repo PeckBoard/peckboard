@@ -224,29 +224,6 @@ impl Db {
         .await
     }
 
-    /// Experts a session in `project_id` may consult: ones scoped to that
-    /// project plus globally-scoped experts (`project_id IS NULL`).
-    pub async fn list_expert_sessions_by_scope(
-        &self,
-        project_id: &str,
-    ) -> anyhow::Result<Vec<Session>> {
-        let project_id = project_id.to_string();
-        self.with_conn(move |conn| {
-            sessions::table
-                .filter(sessions::is_expert.eq(true))
-                .filter(
-                    sessions::project_id
-                        .eq(&project_id)
-                        .or(sessions::project_id.is_null()),
-                )
-                .select(Session::as_select())
-                .order(sessions::last_activity.desc())
-                .load(conn)
-                .map_err(Into::into)
-        })
-        .await
-    }
-
     pub async fn update_session(
         &self,
         id: &str,

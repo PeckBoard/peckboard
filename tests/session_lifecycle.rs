@@ -76,7 +76,6 @@ fn cfg(model: &str) -> SpawnConfig {
         timeout_ms: None,
         metadata: serde_json::Value::Null,
         system_prompt_suffix: None,
-        restrict_to_qa: false,
     }
 }
 
@@ -526,7 +525,6 @@ mod midstream {
             timeout_ms: None,
             metadata: serde_json::Value::Null,
             system_prompt_suffix: None,
-            restrict_to_qa: false,
         }
     }
 

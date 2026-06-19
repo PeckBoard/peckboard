@@ -195,13 +195,6 @@ mod tests {
         let plain_by_folder = db.list_plain_sessions_by_folder("f1").await.unwrap();
         assert_eq!(plain_by_folder.len(), 1);
         assert_eq!(plain_by_folder[0].id, "plain");
-
-        // Scope = this project's experts PLUS global experts. Used by the
-        // worker-prompt path to surface in-scope experts.
-        let by_scope = db.list_expert_sessions_by_scope("p1").await.unwrap();
-        let mut scope_ids: Vec<&str> = by_scope.iter().map(|s| s.id.as_str()).collect();
-        scope_ids.sort();
-        assert_eq!(scope_ids, vec!["exp-global", "exp-p1"]);
     }
 
     // ── Projects ─────────────────────────────────────────────────────

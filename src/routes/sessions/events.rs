@@ -416,7 +416,6 @@ pub(super) async fn append_event(
                 timeout_ms: None,
                 metadata: serde_json::Value::Null,
                 system_prompt_suffix: None,
-                restrict_to_qa: false,
             };
 
             if let Err(e) = state_clone
