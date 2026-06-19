@@ -236,8 +236,10 @@ async fn ollama_provider_streams_text_and_completes() {
     assert_eq!(text_events, vec!["hel", "lo"]);
 }
 
-/// Schema with the `additional_models` field so the store can round-trip
-/// the setting the dynamic-models path reads.
+/// Schema covering the fields the dynamic-models path reads: the base
+/// URL, the autodiscovery toggle, and the manual `additional_models`
+/// list. Mirrors the real plugin schema closely enough for the store to
+/// round-trip each setting.
 fn models_schema() -> SettingsSchema {
     SettingsSchema::new(vec![
         SettingField {
@@ -251,6 +253,13 @@ fn models_schema() -> SettingsSchema {
             },
         },
         SettingField {
+            key: "discover_models".into(),
+            title: "Auto-Discover Models".into(),
+            description: None,
+            required: false,
+            kind: FieldKind::Boolean { default: true },
+        },
+        SettingField {
             key: "additional_models".into(),
             title: "Additional Models".into(),
             description: None,
@@ -262,6 +271,47 @@ fn models_schema() -> SettingsSchema {
     ])
 }
 
+/// Stub server speaking Ollama's OpenAI-compatible `GET /v1/models`.
+/// Accepts connections in a loop (the provider caches, but a fresh
+/// provider per test still probes once) and replies with `body` for
+/// every request, capturing the last request line for assertions.
+async fn spawn_stub_models(body: &'static str) -> (String, Arc<Mutex<String>>) {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let captured = Arc::new(Mutex::new(String::new()));
+    let captured_ret = captured.clone();
+    tokio::spawn(async move {
+        loop {
+            let Ok((mut sock, _peer)) = listener.accept().await else {
+                break;
+            };
+            let mut buf = [0u8; 4096];
+            let mut total = Vec::new();
+            // A GET has no body, so the header terminator ends the request.
+            loop {
+                match tokio::time::timeout(Duration::from_secs(5), sock.read(&mut buf)).await {
+                    Ok(Ok(n)) if n > 0 => {
+                        total.extend_from_slice(&buf[..n]);
+                        if find_subseq(&total, b"\r\n\r\n").is_some() {
+                            break;
+                        }
+                    }
+                    _ => break,
+                }
+            }
+            *captured.lock().await = String::from_utf8_lossy(&total).to_string();
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
+                body.len(),
+                body
+            );
+            let _ = sock.write_all(response.as_bytes()).await;
+            let _ = sock.shutdown().await;
+        }
+    });
+    (format!("http://{}", addr), captured_ret)
+}
+
 /// The user-registered `additional_models` setting surfaces through the
 /// provider registry's catalog path as `ollama:<name>` models, live —
 /// exactly what `/api/models` and the model picker consume. Tag variants
@@ -271,6 +321,13 @@ async fn additional_models_setting_registers_models_by_name() {
     use peckboard::provider::registry::{ProviderInfo, ProviderRegistry};
 
     let db = Db::in_memory().unwrap();
+    // Isolate the manual-registration path: with autodiscovery off, the
+    // catalog is exactly the static seed plus `additional_models`, so the
+    // assertions don't depend on whether an Ollama happens to be running
+    // on the default port of the test host.
+    db.set_plugin_setting("ollama", "discover_models", &serde_json::Value::Bool(false))
+        .await
+        .unwrap();
     db.set_plugin_setting(
         "ollama",
         "additional_models",
@@ -326,4 +383,93 @@ async fn additional_models_setting_registers_models_by_name() {
         .find(|m| m.id == "mistral-small")
         .unwrap();
     assert_eq!(extra.display_name, "mistral-small (Ollama)");
+}
+
+/// With autodiscovery on (the default), `dynamic_models` queries the
+/// server's OpenAI-compatible `/v1/models` endpoint and surfaces exactly
+/// what's installed there, merged with any manual `additional_models`.
+/// The static seed is *replaced* by the discovered list — a model the
+/// server doesn't have shouldn't appear just because it's a built-in
+/// suggestion.
+#[tokio::test]
+async fn dynamic_models_autodiscovers_from_v1_models() {
+    let body = r#"{
+        "object": "list",
+        "data": [
+            {"id": "llama3.1:8b", "object": "model", "created": 1, "owned_by": "library"},
+            {"id": "qwen2.5-coder:7b", "object": "model", "created": 2, "owned_by": "library"}
+        ]
+    }"#;
+    let (base_url, captured) = spawn_stub_models(body).await;
+
+    let db = Db::in_memory().unwrap();
+    db.set_plugin_setting("ollama", "base_url", &serde_json::Value::String(base_url))
+        .await
+        .unwrap();
+    // A model the user registered manually that the server doesn't list —
+    // e.g. one they haven't pulled yet. It should still be merged in.
+    db.set_plugin_setting(
+        "ollama",
+        "additional_models",
+        &serde_json::json!(["me/custom-model"]),
+    )
+    .await
+    .unwrap();
+
+    let store = PluginSettingsStore::new("ollama", models_schema(), db.clone());
+    let provider = OllamaProvider::new(store);
+
+    let models = provider
+        .dynamic_models()
+        .await
+        .expect("ollama always returns Some");
+    let ids: Vec<&str> = models.iter().map(|m| m.id.as_str()).collect();
+
+    // Installed models discovered from the server, tag colons preserved.
+    assert!(ids.contains(&"llama3.1:8b"), "got: {ids:?}");
+    assert!(ids.contains(&"qwen2.5-coder:7b"), "got: {ids:?}");
+    // Manual extra merged on top.
+    assert!(ids.contains(&"me/custom-model"), "got: {ids:?}");
+    // Static seeds are NOT shown once discovery succeeds — `llama3.2` is a
+    // built-in suggestion but the stub server doesn't have it installed.
+    assert!(
+        !ids.contains(&"llama3.2"),
+        "seed leaked into catalog: {ids:?}"
+    );
+    // Discovered model carries the derived display name.
+    let m = models.iter().find(|m| m.id == "llama3.1:8b").unwrap();
+    assert_eq!(m.display_name, "llama3.1:8b (Ollama)");
+
+    // The provider actually hit the OpenAI-compatible endpoint.
+    let req = captured.lock().await.clone();
+    assert!(
+        req.contains("/v1/models"),
+        "expected GET /v1/models (got: {req})"
+    );
+}
+
+/// When the server is unreachable, discovery fails gracefully and the
+/// picker falls back to the built-in static seed (plus any manual
+/// extras) rather than going empty.
+#[tokio::test]
+async fn dynamic_models_falls_back_to_seed_when_server_unreachable() {
+    let db = Db::in_memory().unwrap();
+    // Port 1 is privileged and effectively never listening → an immediate
+    // connection refusal, so the test stays fast and deterministic.
+    db.set_plugin_setting(
+        "ollama",
+        "base_url",
+        &serde_json::Value::String("http://127.0.0.1:1".into()),
+    )
+    .await
+    .unwrap();
+
+    let store = PluginSettingsStore::new("ollama", models_schema(), db.clone());
+    let provider = OllamaProvider::new(store);
+
+    let models = provider.dynamic_models().await.unwrap();
+    let ids: Vec<&str> = models.iter().map(|m| m.id.as_str()).collect();
+    // The static seed survives as the fallback catalog.
+    assert!(ids.contains(&"llama3.1"), "got: {ids:?}");
+    assert!(ids.contains(&"qwen2.5-coder"), "got: {ids:?}");
 }

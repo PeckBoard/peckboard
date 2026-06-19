@@ -22,7 +22,7 @@
 
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
@@ -47,6 +47,20 @@ const MAX_TIMEOUT_SECS: u64 = 3600;
 /// outbound request body Ollama replays back through) without bound.
 /// 50 user/assistant pairs ≈ a long working conversation.
 const MAX_HISTORY_MESSAGES: usize = 100;
+
+/// How long a `/v1/models` discovery result (success *or* failure) is
+/// reused before the provider probes the server again. `dynamic_models`
+/// is on the read-only catalog path (`/api/models`, the model picker),
+/// which can fire several times per page; without a cache every one of
+/// those would block on a network round-trip to Ollama. Caching the
+/// failure case too means a down/remote server adds its connect cost at
+/// most once per window instead of to every catalog read.
+const MODEL_DISCOVERY_TTL: Duration = Duration::from_secs(30);
+
+/// Per-request timeout for the discovery call. Much tighter than the
+/// chat timeout — listing models is cheap, and a slow answer here
+/// shouldn't stall the whole model picker.
+const MODEL_DISCOVERY_TIMEOUT_SECS: u64 = 15;
 
 /// One in-flight `send_message` per session. The `cancel` notify is used
 /// by `cancel`/`interrupt` to wind the stream down cleanly so the
@@ -88,6 +102,31 @@ struct StreamMessage {
     content: Option<String>,
 }
 
+/// Shape of Ollama's OpenAI-compatible `GET /v1/models` response. We only
+/// need the model ids (`data[].id`, e.g. `llama3.1:8b`); the rest of the
+/// OpenAI envelope (`object`, `created`, `owned_by`) is ignored.
+#[derive(Deserialize)]
+struct OpenAiModelsResponse {
+    #[serde(default)]
+    data: Vec<OpenAiModel>,
+}
+
+#[derive(Deserialize)]
+struct OpenAiModel {
+    #[serde(default)]
+    id: String,
+}
+
+/// Cached outcome of the last `/v1/models` discovery probe. `models` is
+/// `Some` on success (possibly an empty list when the server has nothing
+/// pulled) and `None` when the last attempt failed — cached either way so
+/// a wedged server isn't re-probed on every catalog read (see
+/// [`MODEL_DISCOVERY_TTL`]).
+struct DiscoveryCache {
+    fetched_at: Instant,
+    models: Option<Vec<String>>,
+}
+
 pub struct OllamaProvider {
     settings: PluginSettingsStore,
     runs: Arc<Mutex<HashMap<String, OllamaRun>>>,
@@ -95,6 +134,9 @@ pub struct OllamaProvider {
     /// provider has to replay the whole transcript on every turn. Dropped
     /// on cancel and shutdown.
     conversations: Arc<Mutex<HashMap<String, Vec<ChatMessage>>>>,
+    /// TTL cache for the `/v1/models` autodiscovery probe so the model
+    /// picker doesn't trigger a network round-trip on every render.
+    discovery_cache: Arc<Mutex<Option<DiscoveryCache>>>,
     client: reqwest::Client,
 }
 
@@ -104,6 +146,7 @@ impl OllamaProvider {
             settings,
             runs: Arc::new(Mutex::new(HashMap::new())),
             conversations: Arc::new(Mutex::new(HashMap::new())),
+            discovery_cache: Arc::new(Mutex::new(None)),
             // `redirect(Policy::none())` is load-bearing: an attacker
             // who controls `base_url` could otherwise 302 us to e.g.
             // `http://169.254.169.254/latest/meta-data/iam/security-credentials`
@@ -120,6 +163,88 @@ impl OllamaProvider {
                 .expect("reqwest client builds with default config"),
         }
     }
+
+    /// Return the model ids installed on the server, going through the
+    /// TTL cache so the picker doesn't probe Ollama on every render.
+    /// `Some(list)` on success (possibly empty), `None` when the last
+    /// probe failed and the caller should fall back to the static seed.
+    async fn discovered_models(
+        &self,
+        settings: &HashMap<String, serde_json::Value>,
+    ) -> Option<Vec<String>> {
+        {
+            let cache = self.discovery_cache.lock().await;
+            if let Some(entry) = cache.as_ref()
+                && entry.fetched_at.elapsed() < MODEL_DISCOVERY_TTL
+            {
+                return entry.models.clone();
+            }
+        }
+        let result = self.fetch_server_models(settings).await;
+        let mut cache = self.discovery_cache.lock().await;
+        *cache = Some(DiscoveryCache {
+            fetched_at: Instant::now(),
+            models: result.clone(),
+        });
+        result
+    }
+
+    /// Hit `<base_url>/v1/models` and return the parsed model ids. Returns
+    /// `None` (so the caller falls back to the static seed) on any
+    /// failure: no `base_url`, a bad URL, a network/HTTP error, or an
+    /// unparseable body. An empty-but-valid response is `Some(vec![])`.
+    async fn fetch_server_models(
+        &self,
+        settings: &HashMap<String, serde_json::Value>,
+    ) -> Option<Vec<String>> {
+        let base_url = setting_str(settings, "base_url")?;
+        let endpoint = match build_endpoint(&base_url, "/v1/models") {
+            Ok(e) => e,
+            Err(e) => {
+                tracing::warn!("ollama: bad base_url for model discovery: {e}");
+                return None;
+            }
+        };
+
+        let mut request = self
+            .client
+            .get(&endpoint)
+            .timeout(Duration::from_secs(MODEL_DISCOVERY_TIMEOUT_SECS));
+        // Same auth-proxy headers the chat path uses (Ollama ignores the
+        // OpenAI `Authorization` itself, but a fronting proxy may not).
+        for (name, value) in setting_headers(settings, "additional_headers") {
+            match (
+                reqwest::header::HeaderName::from_bytes(name.as_bytes()),
+                reqwest::header::HeaderValue::from_str(&value),
+            ) {
+                (Ok(n), Ok(v)) => request = request.header(n, v),
+                _ => tracing::warn!(header = %name, "Dropping malformed Ollama header"),
+            }
+        }
+
+        let response = match request.send().await {
+            Ok(r) => r,
+            Err(e) => {
+                tracing::warn!("ollama: model discovery request failed: {e}");
+                return None;
+            }
+        };
+        if !response.status().is_success() {
+            tracing::warn!(
+                "ollama: model discovery returned HTTP {}",
+                response.status()
+            );
+            return None;
+        }
+        let body = match response.text().await {
+            Ok(b) => b,
+            Err(e) => {
+                tracing::warn!("ollama: failed to read model discovery body: {e}");
+                return None;
+            }
+        };
+        parse_openai_models(&body)
+    }
 }
 
 #[async_trait]
@@ -129,20 +254,39 @@ impl AgentProvider for OllamaProvider {
     }
 
     async fn dynamic_models(&self) -> Option<Vec<ModelInfo>> {
-        // Built-in suggestions plus whatever the user registered in the
-        // `additional_models` setting. Re-read on every catalog request so
-        // a settings edit shows up in the picker without a restart, exactly
-        // like the dispatch path re-reads `base_url`/`default_model`. On a
-        // settings-load error fall back to the static seed rather than
-        // dropping the provider's models entirely.
-        let extras = match self.settings.load().await {
-            Ok(settings) => setting_str_list(&settings, "additional_models"),
+        // The catalog the picker shows is, in order of preference:
+        //   1. the models actually installed on the server (autodiscovery
+        //      via the OpenAI-compatible `/v1/models` endpoint), or
+        //   2. the built-in static seed, when discovery is off or the
+        //      server is unreachable,
+        // with the user's manually-registered `additional_models` merged
+        // on top either way. Re-read on every catalog request so a
+        // settings edit shows up without a restart; on a settings-load
+        // error fall back to the static seed rather than dropping the
+        // provider's models entirely.
+        let settings = match self.settings.load().await {
+            Ok(s) => s,
             Err(e) => {
                 tracing::warn!("ollama: failed to load settings for model list: {e}");
-                Vec::new()
+                return Some(default_models());
             }
         };
-        Some(merge_additional_models(default_models(), extras))
+
+        let extras = setting_str_list(&settings, "additional_models");
+        let discover = setting_bool(&settings, "discover_models").unwrap_or(true);
+
+        let base = if discover {
+            match self.discovered_models(&settings).await {
+                Some(names) => names.into_iter().map(model_info).collect(),
+                // Discovery failed: keep the static suggestions so the
+                // picker isn't empty while the server is unreachable.
+                None => default_models(),
+            }
+        } else {
+            default_models()
+        };
+
+        Some(merge_additional_models(base, extras))
     }
 
     async fn send_message(&self, ctx: SendMessageContext) -> anyhow::Result<()> {
@@ -333,6 +477,43 @@ fn setting_int(settings: &HashMap<String, serde_json::Value>, key: &str) -> Opti
     settings.get(key).and_then(|v| v.as_i64())
 }
 
+fn setting_bool(settings: &HashMap<String, serde_json::Value>, key: &str) -> Option<bool> {
+    settings.get(key).and_then(|v| v.as_bool())
+}
+
+/// Parse Ollama's OpenAI-compatible `/v1/models` body into a list of
+/// model ids. `None` on a malformed body so the caller falls back to the
+/// static seed; `Some(vec![])` is a valid "server has no models pulled".
+/// Blank ids are dropped.
+fn parse_openai_models(body: &str) -> Option<Vec<String>> {
+    let parsed: OpenAiModelsResponse = match serde_json::from_str(body) {
+        Ok(p) => p,
+        Err(e) => {
+            tracing::warn!("ollama: failed to parse /v1/models response: {e}");
+            return None;
+        }
+    };
+    Some(
+        parsed
+            .data
+            .into_iter()
+            .map(|m| m.id.trim().to_string())
+            .filter(|id| !id.is_empty())
+            .collect(),
+    )
+}
+
+/// Build a `ModelInfo` for a bare Ollama model name. The display name is
+/// derived from the id so a discovered/registered model only needs its
+/// name; every Ollama model advertises the `code` capability.
+fn model_info(name: String) -> ModelInfo {
+    ModelInfo {
+        display_name: format!("{name} (Ollama)"),
+        id: name,
+        capabilities: vec!["code".into()],
+    }
+}
+
 /// Extract a key-value list setting (normalized array of `{key,value}`)
 /// as a flat `Vec<(name, value)>`. Returns an empty Vec when unset so
 /// the caller never has to `.unwrap_or_default()`.
@@ -366,23 +547,19 @@ fn setting_str_list(settings: &HashMap<String, serde_json::Value>, key: &str) ->
         .collect()
 }
 
-/// Build the catalog shown in the model picker: the static seed plus the
-/// user's `additional_models`, as `ModelInfo`s. Skips any extra whose id
-/// already appears in `base` (or earlier in the list) so a duplicate of a
-/// built-in suggestion doesn't show twice. The display name is derived
-/// from the bare name so the user only has to type the id.
+/// Merge the user's `additional_models` onto a base catalog (either the
+/// autodiscovered server list or the static seed), as `ModelInfo`s. Skips
+/// any extra whose id already appears in `base` (or earlier in the list)
+/// so a duplicate of a discovered/built-in model doesn't show twice. The
+/// display name is derived from the bare name so the user only has to
+/// type the id.
 fn merge_additional_models(base: Vec<ModelInfo>, extras: Vec<String>) -> Vec<ModelInfo> {
     let mut seen: std::collections::HashSet<String> = base.iter().map(|m| m.id.clone()).collect();
     let mut models = base;
     for name in extras {
-        if !seen.insert(name.clone()) {
-            continue;
+        if seen.insert(name.clone()) {
+            models.push(model_info(name));
         }
-        models.push(ModelInfo {
-            display_name: format!("{name} (Ollama)"),
-            id: name,
-            capabilities: vec!["code".into()],
-        });
     }
     models
 }
@@ -662,9 +839,10 @@ fn trim_history(history: &mut Vec<ChatMessage>, cap: usize) {
     }
 }
 
-/// Static model list shown in the UI when settings haven't been pulled
-/// from a live Ollama instance. Users can still type any model name
-/// they have pulled locally — this is just the catalog seed.
+/// Static model list shown in the UI as the fallback catalog: the seed
+/// registered at init, and what the picker shows when autodiscovery is
+/// turned off or the server can't be reached. Users can still type any
+/// model name they have pulled locally via `additional_models`.
 pub fn default_models() -> Vec<ModelInfo> {
     vec![
         ModelInfo {
@@ -739,6 +917,48 @@ mod tests {
         let extra = merged.iter().find(|m| m.id == "llama3.1:8b").unwrap();
         assert_eq!(extra.display_name, "llama3.1:8b (Ollama)");
         assert_eq!(extra.capabilities, vec!["code".to_string()]);
+    }
+
+    #[test]
+    fn parse_openai_models_extracts_ids_and_handles_garbage() {
+        let body = r#"{
+            "object": "list",
+            "data": [
+                {"id": "llama3.1:8b", "object": "model", "created": 1, "owned_by": "library"},
+                {"id": "  ", "object": "model"},
+                {"id": "qwen2.5-coder:7b", "object": "model"}
+            ]
+        }"#;
+        // Ids extracted in order; blank ids dropped; tag colons preserved.
+        assert_eq!(
+            parse_openai_models(body),
+            Some(vec![
+                "llama3.1:8b".to_string(),
+                "qwen2.5-coder:7b".to_string()
+            ])
+        );
+        // A valid-but-empty data array is a legitimate "nothing pulled".
+        assert_eq!(parse_openai_models(r#"{"data":[]}"#), Some(Vec::new()));
+        // Garbage → None so the caller falls back to the static seed.
+        assert_eq!(parse_openai_models("not json at all"), None);
+    }
+
+    #[test]
+    fn merge_additional_models_onto_discovered_base_dedups() {
+        // Discovery returned two models; the user also registered one of
+        // them plus a custom name. The duplicate is dropped, the custom
+        // one appended, and the static seed is *not* involved.
+        let base: Vec<ModelInfo> = ["llama3.1:8b", "qwen2.5-coder:7b"]
+            .into_iter()
+            .map(|s| model_info(s.to_string()))
+            .collect();
+        let merged =
+            merge_additional_models(base, vec!["llama3.1:8b".into(), "me/custom-model".into()]);
+        let ids: Vec<&str> = merged.iter().map(|m| m.id.as_str()).collect();
+        assert_eq!(
+            ids,
+            vec!["llama3.1:8b", "qwen2.5-coder:7b", "me/custom-model"]
+        );
     }
 
     #[test]

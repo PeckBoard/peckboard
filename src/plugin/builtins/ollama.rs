@@ -11,11 +11,17 @@
 //! * `request_timeout_secs` (integer, 1–3600) — per-turn timeout for
 //!   the HTTP call. Defaults to 600s; Ollama on CPU can take a while
 //!   to load a fresh model on first use.
+//! * `discover_models` (boolean, default `true`) — when on, the provider
+//!   asks the server which models it has installed (via the OpenAI-
+//!   compatible `/v1/models` endpoint) and shows them in the picker
+//!   automatically. Turn off to fall back to the built-in seed plus
+//!   `additional_models` only.
 //! * `additional_models` (string list) — extra model names to surface in
-//!   the model picker beyond the built-in seed. Each is registered as
-//!   `ollama:<name>` and may carry a tag (`llama3.1:8b`). Reflected in
-//!   `/api/models` live, without a restart, via the provider's
-//!   `dynamic_models` override.
+//!   the model picker, merged on top of the autodiscovered (or seed)
+//!   list. Each is registered as `ollama:<name>` and may carry a tag
+//!   (`llama3.1:8b`). Useful for a model you haven't pulled yet or when
+//!   discovery is off. Reflected in `/api/models` live, without a
+//!   restart, via the provider's `dynamic_models` override.
 //! * `additional_headers` (key-value list, secret values) — extra HTTP
 //!   headers attached to every request. Use this for a remote Ollama
 //!   behind an auth proxy (`Authorization: Bearer …`); values are
@@ -80,13 +86,27 @@ impl OllamaPlugin {
                 },
             },
             SettingField {
+                key: "discover_models".into(),
+                title: "Auto-Discover Models".into(),
+                description: Some(
+                    "Ask the Ollama server which models it has installed (via the \
+                     OpenAI-compatible /v1/models endpoint) and list them in the model \
+                     picker automatically. Turn this off to show only the built-in \
+                     suggestions plus any models you add below."
+                        .into(),
+                ),
+                required: false,
+                kind: FieldKind::Boolean { default: true },
+            },
+            SettingField {
                 key: "additional_models".into(),
                 title: "Additional Models".into(),
                 description: Some(
-                    "Extra model names to register in the model picker, beyond the built-in \
-                     suggestions. Use the exact name pulled on your Ollama server, including \
-                     any tag (e.g. llama3.1:8b, mistral-small, me/custom-model). Each appears \
-                     as ollama:<name>."
+                    "Extra model names to add to the picker on top of the auto-discovered \
+                     list (or the built-in suggestions when discovery is off). Use the exact \
+                     name as pulled on your Ollama server, including any tag (e.g. \
+                     llama3.1:8b, mistral-small, me/custom-model). Each appears as \
+                     ollama:<name>."
                         .into(),
                 ),
                 required: false,

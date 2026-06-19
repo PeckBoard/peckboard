@@ -61,7 +61,14 @@ test('Ollama plugin renders its settings form and round-trips saves', async ({
   await expect(settings.locator('[data-field="base_url"]')).toBeVisible()
   await expect(settings.locator('[data-field="default_model"]')).toBeVisible()
   await expect(settings.locator('[data-field="request_timeout_secs"]')).toBeVisible()
+  await expect(settings.locator('[data-field="discover_models"]')).toBeVisible()
   await expect(settings.locator('[data-field="additional_headers"]')).toBeVisible()
+
+  // Auto-discovery is a boolean that defaults to on. Turn it off so we
+  // can prove the toggle round-trips through the PUT endpoint.
+  const discoverToggle = settings.locator('[data-field="discover_models"] input[type="checkbox"]')
+  await expect(discoverToggle).toBeChecked()
+  await discoverToggle.uncheck()
 
   // Edit the base URL.
   const baseUrlInput = settings.locator('[data-field="base_url"] input')
@@ -93,6 +100,11 @@ test('Ollama plugin renders its settings form and round-trips saves', async ({
     'http://ollama.test.local:11434',
     { timeout: 10_000 },
   )
+
+  // The auto-discovery toggle we turned off stays off across a reload.
+  await expect(
+    settingsAfter.locator('[data-field="discover_models"] input[type="checkbox"]'),
+  ).not.toBeChecked()
 
   const reloadedRow = settingsAfter
     .locator('[data-field="additional_headers"] .plugin-setting-kv-row')
