@@ -1,11 +1,10 @@
 import { useEffect, useState, useMemo, useCallback, useRef } from 'react'
 import { useAuthStore, authedFetch } from './store/auth'
-import type { Announcement, PmDecisionsChangedEvent } from './types/api'
+import type { Announcement } from './types/api'
 import { useUiStore } from './store/ui'
 import { useWsStore } from './store/ws'
 import { useSessionsStore } from './store/sessions'
 import { useProjectsStore } from './store/projects'
-import { usePmStore } from './store/pmStore'
 import { useFoldersStore } from './store/folders'
 import LoginModal from './components/LoginModal'
 import ChatView from './components/ChatView'
@@ -27,8 +26,6 @@ import FoldersPage from './components/ManageFoldersModal'
 import ConfirmDialog from './components/ConfirmDialog'
 import ReportBrowser from './components/ReportBrowser'
 import ReportView from './components/ReportView'
-import ExpertsView from './components/ExpertsView'
-import PmExpertView from './components/PmExpertView'
 import RepeatingTasksView from './components/RepeatingTasksView'
 import UsageDashboard from './components/UsageDashboard'
 import UserManagement from './components/UserManagement'
@@ -47,15 +44,7 @@ import ConnectionBanner from './components/ConnectionBanner'
 import { startTabsAutoSync, useTabsStore, type TabType } from './store/tabs'
 import './App.css'
 
-type View =
-  | 'sessions'
-  | 'repeatingTasks'
-  | 'projects'
-  | 'experts'
-  | 'usage'
-  | 'folders'
-  | 'reports'
-  | 'users'
+type View = 'sessions' | 'repeatingTasks' | 'projects' | 'usage' | 'folders' | 'reports' | 'users'
 
 /** Modals reachable from the user-icon dropdown. The URL maps a couple of
  *  paths (`/settings`, `/plugins`) to opening one of these on mount so
@@ -126,8 +115,6 @@ function parseRoute(): {
         sub: third === 'todos' ? 'todos' : 'chat',
         modal: null,
       }
-    case 'experts':
-      return { view: 'experts', activeId: id, sub: 'chat', modal: null }
     case 'usage':
       return { view: 'usage', activeId: null, sub: 'chat', modal: null }
     case 'repeating-tasks':
@@ -218,9 +205,6 @@ function App() {
   const processing = useSessionsStore((s) => s.processing)
   const unreadSessions = useSessionsStore((s) => s.unreadSessions)
   const markSessionRead = useSessionsStore((s) => s.markSessionRead)
-  const experts = useSessionsStore((s) => s.experts)
-  const expertsLoaded = useSessionsStore((s) => s.expertsLoaded)
-  const fetchExperts = useSessionsStore((s) => s.fetchExperts)
   const projects = useProjectsStore((s) => s.projects)
   const projectsLoaded = useProjectsStore((s) => s.projectsLoaded)
   const activeProjectId = useProjectsStore((s) => s.activeProjectId)
@@ -229,9 +213,6 @@ function App() {
   const fetchProjects = useProjectsStore((s) => s.fetchProjects)
   const folders = useFoldersStore((s) => s.folders)
   const fetchFolders = useFoldersStore((s) => s.fetchFolders)
-  const pmPendingTotal = usePmStore((s) =>
-    Object.values(s.pendingCountByProject).reduce((sum, n) => sum + n, 0),
-  )
 
   const folderMap = useMemo(() => {
     const m = new Map<string, string>()
@@ -270,18 +251,6 @@ function App() {
     initialRoute.view === 'reports' && initialRoute.activeId ? initialRoute.activeId : null
   const [activeReportId, setActiveReportId] = useState<string | null>(initialReportId)
   const repeatingTasks = useRepeatingTasksStore((s) => s.tasks)
-  // The expert whose transcript is open (route `/experts/:id`). Tracked
-  // locally rather than in a store: experts are deliberately kept out of the
-  // session list / tab system, so this never feeds the MRU tab logic.
-  const [activeExpertId, setActiveExpertId] = useState<string | null>(
-    initialRoute.view === 'experts' ? initialRoute.activeId : null,
-  )
-  // Resolve the open expert so the detail surface can branch on kind:
-  // the PM expert renders a Q&A form, every other kind keeps ChatView.
-  const activeExpert = useMemo(
-    () => (activeExpertId ? (experts.find((e) => e.session_id === activeExpertId) ?? null) : null),
-    [experts, activeExpertId],
-  )
   const [showNewSession, setShowNewSession] = useState(false)
   const [showNewProject, setShowNewProject] = useState(false)
   const [confirmDeleteId, setConfirmDeleteId] = useState<string | null>(null)
@@ -403,8 +372,6 @@ function App() {
         setActiveProject(route.activeId)
       } else if (route.view === 'repeatingTasks') {
         setActiveRepeatingTaskId(route.activeId)
-      } else if (route.view === 'experts') {
-        setActiveExpertId(route.activeId)
       } else if (route.view === 'reports') {
         setActiveReportId(route.activeId)
       }
@@ -580,24 +547,8 @@ function App() {
       // closes a real tab.
       fetchProjects()
       fetchFolders()
-      // Experts are needed at startup (not just when ExpertsView mounts)
-      // so a deep link to /experts/:id can branch on expert_kind — the
-      // PM expert opens a Q&A form, not the chat transcript.
-      fetchExperts()
       useTabsStore.getState().fetchTabs()
       const stopTabsSync = startTabsAutoSync()
-      // PM decision-log live updates: ws.ts re-dispatches the
-      // `pm-decisions-changed` broadcast as a window event; apply it to
-      // the PM store here so pending counts stay live even when no PM
-      // component is mounted.
-      const onPmChange = (e: globalThis.Event) => {
-        const detail = (e as CustomEvent).detail as { data?: PmDecisionsChangedEvent } | undefined
-        const data = detail?.data
-        if (data?.projectId) {
-          usePmStore.getState().applyPmChange(data.projectId, data.pending_count)
-        }
-      }
-      window.addEventListener('peckboard:pm-decisions-changed', onPmChange)
       // Fetch announcements
       authedFetch('/api/announcements')
         .then((res) => (res.ok ? res.json() : []))
@@ -610,26 +561,9 @@ function App() {
       return () => {
         disconnect()
         stopTabsSync()
-        window.removeEventListener('peckboard:pm-decisions-changed', onPmChange)
       }
     }
-  }, [authenticated, connect, disconnect, fetchSessions, fetchProjects, fetchFolders, fetchExperts])
-
-  // Seed pending PM-question counts for the rail badge: fetchPmState also
-  // subscribes to the project's `pm-decisions-changed` broadcasts, so one
-  // fetch per project keeps the count live thereafter.
-  const pmSeededProjects = useRef<Set<string>>(new Set())
-  useEffect(() => {
-    if (!authenticated) return
-    for (const p of projects) {
-      if (pmSeededProjects.current.has(p.id)) continue
-      pmSeededProjects.current.add(p.id)
-      usePmStore
-        .getState()
-        .fetchPmState(p.id)
-        .catch(() => {})
-    }
-  }, [authenticated, projects])
+  }, [authenticated, connect, disconnect, fetchSessions, fetchProjects, fetchFolders])
 
   // Open / promote a tab whenever the user activates a session or
   // project — this is what makes "MRU + cross-device sync" Just Work,
@@ -1014,38 +948,6 @@ function App() {
             </svg>
           </button>
           <button
-            className={`rail-btn ${view === 'experts' ? 'active' : ''}`}
-            onClick={() => {
-              setActiveExpertId(null)
-              navigate('experts')
-            }}
-            title="Experts"
-            aria-label="Experts"
-          >
-            <svg
-              width="18"
-              height="18"
-              viewBox="0 0 24 24"
-              fill="none"
-              stroke="currentColor"
-              strokeWidth="2"
-              strokeLinecap="round"
-              strokeLinejoin="round"
-            >
-              <path d="M12 2a5 5 0 0 0-5 5c0 1.8 1 3.2 2 4.2.8.8 1 1.3 1 2.3v.5h4v-.5c0-1 .2-1.5 1-2.3 1-1 2-2.4 2-4.2a5 5 0 0 0-5-5z" />
-              <line x1="10" y1="19" x2="14" y2="19" />
-              <line x1="11" y1="22" x2="13" y2="22" />
-            </svg>
-            {pmPendingTotal > 0 && (
-              <span
-                className="unread-dot rail-btn-dot"
-                data-testid="pm-expert-waiting-badge"
-                aria-label="PM expert waiting for answers"
-                title="PM expert waiting for answers"
-              />
-            )}
-          </button>
-          <button
             className={`rail-btn ${view === 'reports' ? 'active' : ''}`}
             onClick={() => navigate('reports')}
             title="Reports"
@@ -1270,7 +1172,7 @@ function App() {
         <ConnectionBanner connected={connected} />
         <ErrorBoundary
           label="view"
-          resetKey={`${view}:${activeSessionId}:${activeProjectId}:${activeExpertId}:${sessionSub}`}
+          resetKey={`${view}:${activeSessionId}:${activeProjectId}:${sessionSub}`}
         >
           {view === 'sessions' &&
             (activeSessionId ? (
@@ -1375,37 +1277,6 @@ function App() {
               <div className="list-view">
                 <ProjectList onNewProject={() => setShowNewProject(true)} />
               </div>
-            ))}
-          {view === 'experts' &&
-            (activeExpertId ? (
-              activeExpert?.expert_kind === 'pm' && activeExpert.project_id ? (
-                <PmExpertView
-                  projectId={activeExpert.project_id}
-                  expertName={activeExpert.name}
-                  onBack={() => {
-                    setActiveExpertId(null)
-                    navigate('experts')
-                  }}
-                />
-              ) : expertsLoaded || activeExpert ? (
-                <ChatView sessionId={activeExpertId} />
-              ) : (
-                // Deep link before the experts list resolves: hold off on
-                // mounting ChatView so a PM expert never flashes a chat
-                // transcript while its kind is still unknown.
-                <div className="list-view">
-                  <div className="list-view-empty">
-                    <p>Loading expert…</p>
-                  </div>
-                </div>
-              )
-            ) : (
-              <ExpertsView
-                onOpenExpert={(id) => {
-                  setActiveExpertId(id)
-                  navigate('experts', id)
-                }}
-              />
             ))}
           {view === 'repeatingTasks' && (
             <RepeatingTasksView
