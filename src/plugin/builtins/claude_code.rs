@@ -23,7 +23,7 @@ impl BuiltinPlugin for ClaudeCodePlugin {
             id: "claude-code".into(),
             display_name: "Claude Code".into(),
             description: "Drives sessions via the Claude CLI in stream-json mode.".into(),
-            version: env!("CARGO_PKG_VERSION").into(),
+            version: env!("PECKBOARD_VERSION").into(),
             author: "Peckboard".into(),
             built_in: true,
         }

@@ -87,9 +87,13 @@ pub struct RegistryEntry {
     pub min_peckboard: Option<String>,
 }
 
-/// The running Peckboard version (the core crate's compile-time version).
+/// The running Peckboard version — the real release tag (e.g. `0.0.19`),
+/// stamped at build time by `build.rs` from `git describe`. NOT
+/// `CARGO_PKG_VERSION`: `Cargo.toml` (`0.1.0`) drifted from the git-tag
+/// release line (`0.0.x`), and the compatibility check must compare against
+/// the version users actually run. See `build.rs::stamp_version`.
 pub fn peckboard_version() -> &'static str {
-    env!("CARGO_PKG_VERSION")
+    env!("PECKBOARD_VERSION")
 }
 
 /// Whether the running Peckboard satisfies a registry entry's `min_peckboard`
@@ -183,6 +187,19 @@ mod tests {
         assert!(checksum_matches(bytes, upper)); // case-insensitive
         assert!(!checksum_matches(bytes, "deadbeef")); // wrong
         assert!(!checksum_matches(b"world", &sha256_hex(bytes))); // wrong bytes
+    }
+
+    #[test]
+    fn peckboard_version_is_stamped_not_blank() {
+        // build.rs stamps PECKBOARD_VERSION from the git tag; it must never be
+        // empty (env! would fail to compile) and, in this repo, must not be the
+        // drifted Cargo.toml value that the bug reported.
+        let v = peckboard_version();
+        assert!(!v.is_empty());
+        assert_ne!(
+            v, "0.1.0",
+            "peckboard_version must come from the git tag, not Cargo.toml"
+        );
     }
 
     #[test]

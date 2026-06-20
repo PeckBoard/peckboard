@@ -21,7 +21,7 @@ impl BuiltinPlugin for MockPlugin {
             id: "mock".into(),
             display_name: "Mock Provider".into(),
             description: "Scripted in-process provider for dev/test scenarios.".into(),
-            version: env!("CARGO_PKG_VERSION").into(),
+            version: env!("PECKBOARD_VERSION").into(),
             author: "Peckboard".into(),
             built_in: true,
         }

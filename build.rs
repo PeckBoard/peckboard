@@ -21,8 +21,64 @@
 
 use std::collections::BTreeMap;
 use std::path::Path;
+use std::process::Command;
+
+/// Stamp the crate with the real release version (the git tag) via
+/// `PECKBOARD_VERSION`, so `env!("PECKBOARD_VERSION")` reports e.g. `0.0.19`
+/// instead of the `Cargo.toml` value. The two had drifted — releases are
+/// git-tagged `0.0.x` while `Cargo.toml` reads `0.1.0` — which made the
+/// plugin-compatibility check (`registry::peckboard_version`) compare against
+/// the wrong number. Resolution order:
+///   1. `PECKBOARD_VERSION` env override (a release pipeline can pin the tag).
+///   2. `git describe --tags` — release builds check out the tag, so this is
+///      exactly the tag (`0.0.19`); dev builds get `0.0.19-N-gSHA`.
+///   3. `CARGO_PKG_VERSION` as a last resort (loud, since it's the drift).
+fn stamp_version() {
+    println!("cargo:rerun-if-env-changed=PECKBOARD_VERSION");
+    // Re-resolve when HEAD moves or tags change.
+    for p in [".git/HEAD", ".git/refs/tags", ".git/packed-refs"] {
+        println!("cargo:rerun-if-changed={p}");
+    }
+    let version = resolve_version();
+    println!("cargo:rustc-env=PECKBOARD_VERSION={version}");
+}
+
+fn resolve_version() -> String {
+    if let Ok(v) = std::env::var("PECKBOARD_VERSION") {
+        let v = v.trim().trim_start_matches('v');
+        if !v.is_empty() {
+            return v.to_string();
+        }
+    }
+    if let Some(v) = git_described_version() {
+        return v;
+    }
+    let cargo = std::env::var("CARGO_PKG_VERSION").unwrap_or_else(|_| "0.0.0".into());
+    println!(
+        "cargo:warning=PECKBOARD_VERSION: no git tag or env override found; falling back to \
+         Cargo version {cargo}. The binary will report this instead of the release tag."
+    );
+    cargo
+}
+
+/// `git describe --tags` (no `v` prefix on this repo's tags), or `None` when
+/// git/the tag isn't available (e.g. a source tarball with no `.git`).
+fn git_described_version() -> Option<String> {
+    let out = Command::new("git")
+        .args(["describe", "--tags"])
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let v = String::from_utf8(out.stdout).ok()?;
+    let v = v.trim().trim_start_matches('v');
+    (!v.is_empty()).then(|| v.to_string())
+}
 
 fn main() {
+    stamp_version();
+
     println!("cargo:rerun-if-changed=migrations");
     println!("cargo:rerun-if-changed=web/dist");
 

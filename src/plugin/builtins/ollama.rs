@@ -157,7 +157,7 @@ impl BuiltinPlugin for OllamaPlugin {
             id: "ollama".into(),
             display_name: "Ollama".into(),
             description: "Drives sessions through an Ollama server's /api/chat endpoint.".into(),
-            version: env!("CARGO_PKG_VERSION").into(),
+            version: env!("PECKBOARD_VERSION").into(),
             author: "Peckboard".into(),
             built_in: true,
         }
