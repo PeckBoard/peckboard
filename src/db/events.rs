@@ -96,6 +96,24 @@ impl Db {
         })
     }
 
+    /// Synchronous read of a session's events in `seq` order, for WASM plugin
+    /// host functions running inside a blocking extism call (e.g. resolving a
+    /// plugin-emitted question's answer). Mirrors the async listing's ordering.
+    pub(crate) fn list_events_by_session_blocking(
+        &self,
+        session_id: &str,
+    ) -> anyhow::Result<Vec<Event>> {
+        let session_id = session_id.to_string();
+        self.with_conn_blocking(move |conn| {
+            events::table
+                .filter(events::session_id.eq(&session_id))
+                .select(Event::as_select())
+                .order(events::seq.asc())
+                .load(conn)
+                .map_err(Into::into)
+        })
+    }
+
     /// Get events since a specific seq number (exclusive).
     pub async fn events_since(
         &self,

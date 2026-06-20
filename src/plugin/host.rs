@@ -38,8 +38,11 @@
 //! separate `/api/plugins/:id/settings` HTTP surface, which surfaces values to
 //! the browser. These host functions never log stored values.
 
+use std::collections::BTreeMap;
+use std::net::{IpAddr, SocketAddr, ToSocketAddrs};
 use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
+use std::time::Duration;
 
 use extism::*;
 use serde::Deserialize;
@@ -105,6 +108,20 @@ pub trait LiveHost: Send + Sync {
     /// Deliver `text` to `session_id` and resume it — spawn if idle, queue /
     /// inject if running (maps to `ExpertDispatcher::resume_session`).
     fn resume_session(&self, session_id: String, text: String);
+    /// Emit a single-question user prompt to `session_id` (same UI surface as
+    /// the worker `ask_user` MCP tool: a "question" event + broadcast). `token`
+    /// is an opaque correlation id stored on the question so the plugin can
+    /// later resolve the answer (see `get_answer_impl`). Fire-and-forget; a
+    /// no-op in headless/test contexts. The caller has already authorized the
+    /// target session (it is the caller's own, from the trusted context).
+    fn ask_user(
+        &self,
+        _session_id: String,
+        _question: String,
+        _options: Vec<String>,
+        _token: String,
+    ) {
+    }
 }
 
 /// The verified caller scope of an in-flight `mcp.tool.invoke` — the keys the
@@ -117,6 +134,12 @@ pub trait LiveHost: Send + Sync {
 /// session somehow lacks a folder (then scoped writes refuse).
 #[derive(Clone, Debug, Default, Deserialize)]
 pub(crate) struct InvocationContext {
+    /// The caller's own session id (set host-side from the verified MCP token,
+    /// never plugin-supplied), so a scoped host function can act on the calling
+    /// session — e.g. emit a question to it — without trusting a plugin
+    /// argument. `None` outside an MCP invocation (e.g. an authed UI request).
+    #[serde(rename = "sessionId", default)]
+    pub session_id: Option<String>,
     #[serde(rename = "projectId", default)]
     pub project_id: Option<String>,
     #[serde(rename = "folderId", default)]
@@ -148,6 +171,7 @@ impl UserContext {
     /// request: full authority, no folder/project floor.
     fn as_invocation(&self) -> InvocationContext {
         InvocationContext {
+            session_id: None,
             project_id: None,
             folder_id: None,
             authority: true,
@@ -1051,6 +1075,108 @@ pub(crate) fn read_file_impl(db: &Db, input: &str, inv: &InvocationContext) -> S
     .to_string()
 }
 
+/// Max bytes a single `peckboard_write_file` may write.
+const PLUGIN_FS_MAX_WRITE_BYTES: usize = 8 * 1024 * 1024; // 8 MiB
+
+#[derive(Deserialize)]
+struct WriteFileRequest {
+    path: String,
+    content: String,
+    #[serde(default)]
+    append: bool,
+    #[serde(default)]
+    create_dirs: bool,
+}
+
+/// `peckboard_write_file` — write (or append to) one UTF-8 text file under the
+/// caller's folder. The path must be relative and stay within the folder; the
+/// **parent directory** is canonicalized and re-checked for containment so a
+/// symlinked intermediate can't redirect the write outside the folder. With
+/// `create_dirs`, missing in-folder parent directories are created first.
+pub(crate) fn write_file_impl(db: &Db, input: &str, inv: &InvocationContext) -> String {
+    let req: WriteFileRequest = match serde_json::from_str(input) {
+        Ok(r) => r,
+        Err(e) => return error_json(format!("invalid request: {e}")),
+    };
+    if req.content.len() > PLUGIN_FS_MAX_WRITE_BYTES {
+        return error_json(format!(
+            "content exceeds the {PLUGIN_FS_MAX_WRITE_BYTES}-byte write limit"
+        ));
+    }
+    let root = match caller_folder_root(db, inv) {
+        Ok(r) => r,
+        Err(e) => return error_json(e),
+    };
+    let rel = Path::new(&req.path);
+    // Reject anything but plain, descending relative segments before touching
+    // the filesystem: no absolute/root/prefix, no `..`.
+    if rel.components().any(|c| {
+        matches!(
+            c,
+            Component::ParentDir | Component::RootDir | Component::Prefix(_)
+        )
+    }) {
+        return error_json("path must be relative and within the project folder");
+    }
+    if rel.file_name().is_none() {
+        return error_json("path must name a file");
+    }
+    let target = root.join(rel);
+    let parent = match target.parent() {
+        Some(p) => p.to_path_buf(),
+        None => return error_json("path has no parent directory"),
+    };
+    // Materialize the parent dir (only when asked) so we can canonicalize it.
+    if !parent.exists() {
+        if req.create_dirs {
+            if let Err(e) = std::fs::create_dir_all(&parent) {
+                return error_json(format!("could not create parent directories: {e}"));
+            }
+        } else {
+            return error_json("parent directory does not exist (pass create_dirs to make it)");
+        }
+    }
+    // Canonicalize the parent and re-check containment — defeats a symlinked
+    // intermediate directory that points outside the folder.
+    let canon_parent = match std::fs::canonicalize(&parent) {
+        Ok(p) => p,
+        Err(e) => return error_json(format!("parent path unavailable: {e}")),
+    };
+    if !canon_parent.starts_with(&root) {
+        return error_json("path escapes the project folder");
+    }
+    let final_path = canon_parent.join(rel.file_name().unwrap());
+    // Refuse to clobber a non-file (e.g. a directory) at the target.
+    if let Ok(meta) = std::fs::symlink_metadata(&final_path)
+        && !meta.is_file()
+    {
+        return error_json("target exists and is not a regular file");
+    }
+
+    use std::io::Write as _;
+    let open = std::fs::OpenOptions::new()
+        .create(true)
+        .write(true)
+        .append(req.append)
+        .truncate(!req.append)
+        .open(&final_path);
+    let mut file = match open {
+        Ok(f) => f,
+        Err(e) => return error_json(format!("could not open file for writing: {e}")),
+    };
+    if let Err(e) = file.write_all(req.content.as_bytes()) {
+        return error_json(format!("write failed: {e}"));
+    }
+
+    serde_json::json!({
+        "ok": true,
+        "path": req.path,
+        "bytes_written": req.content.len(),
+        "appended": req.append,
+    })
+    .to_string()
+}
+
 // ── Live agent dispatch (gated, scoped, fire-and-forget) ──────────────
 //
 // `dispatch_capture` / `resume_session` schedule an agent run on a session and
@@ -1118,6 +1244,473 @@ pub(crate) fn resume_session_impl(
     };
     live.resume_session(req.session_id.trim().to_string(), req.text);
     serde_json::json!({ "ok": true }).to_string()
+}
+
+// ── Outbound HTTP fetch (gated, SSRF-contained) ───────────────────────
+//
+// `peckboard_http_fetch` lets a plugin tool pull a public web page. The host
+// owns the security boundary the WASM sandbox cannot: only `http`/`https`,
+// only `GET`/`HEAD`, the resolved IP is checked against private/loopback/
+// link-local ranges and **pinned** so a later re-resolution (DNS rebinding)
+// can't swing to an internal address, redirects are NOT followed (a 3xx is
+// returned verbatim so the caller re-fetches the validated `Location`), and
+// the body is size- and time-capped. The actual request runs on a fresh
+// `std::thread` with its own current-thread runtime so it never nests inside
+// the host's tokio worker.
+
+const HTTP_FETCH_MAX_BYTES: usize = 5 * 1024 * 1024; // 5 MiB body cap
+const HTTP_FETCH_TIMEOUT_SECS: u64 = 20;
+
+#[derive(Deserialize)]
+struct HttpFetchRequest {
+    url: String,
+    #[serde(default)]
+    method: Option<String>,
+    #[serde(default)]
+    headers: Option<BTreeMap<String, String>>,
+}
+
+/// Whether `ip` is in a range a public-web fetch must never reach — loopback,
+/// private (RFC 1918 / ULA), link-local, CGNAT, unspecified, or otherwise
+/// non-globally-routable. IPv4-mapped IPv6 is unwrapped first so `::ffff:10.x`
+/// is judged as the v4 address it really is.
+fn is_blocked_fetch_ip(ip: &IpAddr) -> bool {
+    match ip {
+        IpAddr::V4(v4) => {
+            let o = v4.octets();
+            v4.is_private()
+                || v4.is_loopback()
+                || v4.is_link_local()
+                || v4.is_broadcast()
+                || v4.is_documentation()
+                || v4.is_unspecified()
+                || o[0] == 0 // "this network" 0.0.0.0/8
+                || (o[0] == 100 && (o[1] & 0xc0) == 64) // CGNAT 100.64.0.0/10
+                || o[0] >= 240 // reserved / multicast 240.0.0.0/4+
+        }
+        IpAddr::V6(v6) => {
+            if let Some(mapped) = v6.to_ipv4_mapped() {
+                return is_blocked_fetch_ip(&IpAddr::V4(mapped));
+            }
+            let seg0 = v6.segments()[0];
+            v6.is_loopback()
+                || v6.is_unspecified()
+                || (seg0 & 0xfe00) == 0xfc00 // unique-local fc00::/7
+                || (seg0 & 0xffc0) == 0xfe80 // link-local fe80::/10
+                || v6.is_multicast()
+        }
+    }
+}
+
+/// `peckboard_http_fetch` — fetch a public-web URL on the plugin's behalf.
+/// Input: `{"url", "method"?: "GET"|"HEAD", "headers"?: {..}}`. Output:
+/// `{"status", "headers": {..}, "body", "truncated", "final_url"}` or an
+/// `{"error"}` envelope. SSRF-contained: private/loopback targets, non-http
+/// schemes, and non-GET/HEAD methods are refused.
+pub(crate) fn http_fetch_impl(input: &str) -> String {
+    let req: HttpFetchRequest = match serde_json::from_str(input) {
+        Ok(r) => r,
+        Err(e) => return error_json(format!("invalid request: {e}")),
+    };
+
+    let method = req.method.as_deref().unwrap_or("GET").to_ascii_uppercase();
+    if method != "GET" && method != "HEAD" {
+        return error_json("only GET and HEAD are permitted");
+    }
+
+    let url = match reqwest::Url::parse(req.url.trim()) {
+        Ok(u) => u,
+        Err(e) => return error_json(format!("invalid url: {e}")),
+    };
+    if url.scheme() != "http" && url.scheme() != "https" {
+        return error_json("only http and https urls are permitted");
+    }
+    let host = match url.host_str() {
+        Some(h) => h.to_string(),
+        None => return error_json("url has no host"),
+    };
+    let port = url.port_or_known_default().unwrap_or(0);
+
+    // Resolve and pick the first globally-routable address; pin it so reqwest
+    // connects only to the address we validated (defeats DNS rebinding).
+    let pinned: SocketAddr = match (host.as_str(), port).to_socket_addrs() {
+        Ok(addrs) => {
+            let mut chosen = None;
+            for a in addrs {
+                if !is_blocked_fetch_ip(&a.ip()) {
+                    chosen = Some(a);
+                    break;
+                }
+            }
+            match chosen {
+                Some(a) => a,
+                None => {
+                    return error_json(
+                        "host does not resolve to a public address (private/loopback blocked)",
+                    );
+                }
+            }
+        }
+        Err(e) => return error_json(format!("dns resolution failed: {e}")),
+    };
+
+    let extra_headers = req.headers.unwrap_or_default();
+
+    // Run the request off the host's async worker thread on a dedicated
+    // current-thread runtime, so no tokio runtime is nested.
+    let handle = std::thread::spawn(move || -> Result<serde_json::Value, String> {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .map_err(|e| format!("runtime: {e}"))?;
+        rt.block_on(async move {
+            let client = reqwest::Client::builder()
+                .redirect(reqwest::redirect::Policy::none())
+                .timeout(Duration::from_secs(HTTP_FETCH_TIMEOUT_SECS))
+                .user_agent("Peckboard-common-tools/0.1")
+                .resolve(&host, pinned)
+                .build()
+                .map_err(|e| format!("client: {e}"))?;
+            let m = if method == "HEAD" {
+                reqwest::Method::HEAD
+            } else {
+                reqwest::Method::GET
+            };
+            let mut rb = client.request(m, url.clone());
+            for (k, v) in &extra_headers {
+                rb = rb.header(k.as_str(), v.as_str());
+            }
+            let mut resp = rb
+                .send()
+                .await
+                .map_err(|e| format!("request failed: {e}"))?;
+            let status = resp.status().as_u16();
+            let final_url = resp.url().to_string();
+            let mut headers = serde_json::Map::new();
+            for (k, v) in resp.headers().iter() {
+                if let Ok(s) = v.to_str() {
+                    headers.insert(
+                        k.as_str().to_string(),
+                        serde_json::Value::String(s.to_string()),
+                    );
+                }
+            }
+            // Stream the body with a hard cap via `chunk()` (no extra deps).
+            let mut body: Vec<u8> = Vec::new();
+            let mut truncated = false;
+            loop {
+                match resp.chunk().await {
+                    Ok(Some(chunk)) => {
+                        let room = HTTP_FETCH_MAX_BYTES.saturating_sub(body.len());
+                        if chunk.len() > room {
+                            body.extend_from_slice(&chunk[..room]);
+                            truncated = true;
+                            break;
+                        }
+                        body.extend_from_slice(&chunk);
+                    }
+                    Ok(None) => break,
+                    Err(e) => return Err(format!("body read failed: {e}")),
+                }
+            }
+            let body_str = String::from_utf8_lossy(&body).into_owned();
+            Ok(serde_json::json!({
+                "status": status,
+                "headers": serde_json::Value::Object(headers),
+                "body": body_str,
+                "truncated": truncated,
+                "final_url": final_url,
+            }))
+        })
+    });
+
+    match handle.join() {
+        Ok(Ok(v)) => v.to_string(),
+        Ok(Err(e)) => error_json(e),
+        Err(_) => error_json("http fetch thread panicked"),
+    }
+}
+
+// ── Allowlisted process execution (gated, scoped to the caller's folder) ──
+//
+// `peckboard_exec` runs a build/VCS/test command for a plugin tool (git, the
+// project's test runner, …). The boundaries the WASM sandbox can't enforce
+// live here: the executable must be a bare name on a fixed allowlist (no path,
+// no shell — args are passed as an argv array, never interpolated), the cwd is
+// pinned to the caller's project folder, output is byte-capped, and the child
+// is killed past a timeout.
+
+const EXEC_MAX_OUTPUT_BYTES: usize = 1024 * 1024; // 1 MiB per stream
+const EXEC_DEFAULT_TIMEOUT_SECS: u64 = 120;
+const EXEC_MAX_TIMEOUT_SECS: u64 = 600;
+
+/// Executables a plugin may run. Bare names only — resolved via `PATH` by the
+/// OS. Kept to version control, package managers, build drivers, and test
+/// runners; nothing that reads arbitrary shell input.
+const EXEC_ALLOWLIST: &[&str] = &[
+    "git", "cargo", "rustc", "npm", "npx", "node", "pnpm", "yarn", "deno", "bun", "python",
+    "python3", "pytest", "tox", "go", "make", "just", "bazel", "gradle", "mvn", "dotnet",
+    "phpunit", "composer", "bundle", "rake", "rspec", "ruby", "jest", "vitest", "mocha", "tsc",
+    "eslint", "prettier", "ruff", "mypy", "flake8", "ctest", "cmake", "ant", "swift", "dart",
+    "flutter",
+];
+
+#[derive(Deserialize)]
+struct ExecRequest {
+    command: String,
+    #[serde(default)]
+    args: Vec<String>,
+    #[serde(default)]
+    timeout_secs: Option<u64>,
+}
+
+/// Drain a child pipe into a byte-capped buffer on its own thread. Reading to
+/// EOF (even past the cap, discarding the overflow) keeps the child from
+/// blocking on a full pipe. Returns `(bytes, truncated)`.
+fn drain_capped<R: std::io::Read + Send + 'static>(
+    mut r: R,
+) -> std::thread::JoinHandle<(Vec<u8>, bool)> {
+    std::thread::spawn(move || {
+        let mut out = Vec::new();
+        let mut truncated = false;
+        let mut buf = [0u8; 8192];
+        loop {
+            match r.read(&mut buf) {
+                Ok(0) => break,
+                Ok(n) => {
+                    if out.len() < EXEC_MAX_OUTPUT_BYTES {
+                        let room = EXEC_MAX_OUTPUT_BYTES - out.len();
+                        if n > room {
+                            out.extend_from_slice(&buf[..room]);
+                            truncated = true;
+                        } else {
+                            out.extend_from_slice(&buf[..n]);
+                        }
+                    } else {
+                        truncated = true;
+                    }
+                }
+                Err(_) => break,
+            }
+        }
+        (out, truncated)
+    })
+}
+
+/// `peckboard_exec` — run an allowlisted command in the caller's project
+/// folder. Input: `{"command", "args"?: [..], "timeout_secs"?}`. Output:
+/// `{"exit_code", "stdout", "stderr", "stdout_truncated", "stderr_truncated",
+/// "timed_out"}` or an `{"error"}` envelope.
+pub(crate) fn exec_impl(
+    db: &Db,
+    input: &str,
+    inv: &InvocationContext,
+    enforce_allowlist: bool,
+) -> String {
+    let req: ExecRequest = match serde_json::from_str(input) {
+        Ok(r) => r,
+        Err(e) => return error_json(format!("invalid request: {e}")),
+    };
+    let command = req.command.trim();
+    if command.is_empty() {
+        return error_json("command is required");
+    }
+    // Bare executable name only — no path component, no shell metacharacters.
+    // This holds even for the unrestricted variant: args are an argv array, so
+    // there is never a shell to interpret metacharacters, and the program is
+    // resolved by name via PATH inside the folder-pinned cwd.
+    if command.contains('/')
+        || command.contains('\\')
+        || command.contains(|c: char| c.is_whitespace())
+    {
+        return error_json("command must be a bare executable name");
+    }
+    if enforce_allowlist && !EXEC_ALLOWLIST.contains(&command) {
+        return error_json(format!(
+            "command '{command}' is not on the allowlist; permitted: {}",
+            EXEC_ALLOWLIST.join(", ")
+        ));
+    }
+    let root = match caller_folder_root(db, inv) {
+        Ok(r) => r,
+        Err(e) => return error_json(e),
+    };
+    let timeout = Duration::from_secs(
+        req.timeout_secs
+            .unwrap_or(EXEC_DEFAULT_TIMEOUT_SECS)
+            .clamp(1, EXEC_MAX_TIMEOUT_SECS),
+    );
+
+    use std::process::{Command, Stdio};
+    let mut child = match Command::new(command)
+        .args(&req.args)
+        .current_dir(&root)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+    {
+        Ok(c) => c,
+        Err(e) => return error_json(format!("failed to start '{command}': {e}")),
+    };
+
+    let stdout_h = child.stdout.take().map(drain_capped);
+    let stderr_h = child.stderr.take().map(drain_capped);
+
+    // Poll for exit, killing the child if it overruns the timeout.
+    let start = std::time::Instant::now();
+    let mut timed_out = false;
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(s)) => break Some(s),
+            Ok(None) => {
+                if start.elapsed() >= timeout {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    timed_out = true;
+                    break None;
+                }
+                std::thread::sleep(Duration::from_millis(50));
+            }
+            Err(e) => return error_json(format!("wait failed: {e}")),
+        }
+    };
+
+    let (stdout, stdout_truncated) = stdout_h
+        .map(|h| h.join().unwrap_or_default())
+        .unwrap_or_default();
+    let (stderr, stderr_truncated) = stderr_h
+        .map(|h| h.join().unwrap_or_default())
+        .unwrap_or_default();
+
+    serde_json::json!({
+        "exit_code": status.and_then(|s| s.code()),
+        "stdout": String::from_utf8_lossy(&stdout),
+        "stderr": String::from_utf8_lossy(&stderr),
+        "stdout_truncated": stdout_truncated,
+        "stderr_truncated": stderr_truncated,
+        "timed_out": timed_out,
+    })
+    .to_string()
+}
+
+// ── Interactive user prompts (ask / read-answer) ──────────────────────
+//
+// `peckboard_ask_user` emits a single-question prompt to the caller's own
+// session (via the `LiveHost` seam, which broadcasts so the UI renders it
+// live), carrying an opaque `token`. The worker's turn then ends; when the
+// user answers, core resumes the session. On the resumed turn the plugin calls
+// `peckboard_get_answer` with the same `token` to read the user's *real* answer
+// out of the session's event log — core is the source of truth, so the agent
+// can't forge an approval. This is the substrate for the common-tools
+// `run_command` per-command approval flow.
+
+#[derive(Deserialize)]
+struct AskUserRequest {
+    question: String,
+    #[serde(default)]
+    options: Vec<String>,
+    token: String,
+}
+
+#[derive(Deserialize)]
+struct GetAnswerRequest {
+    token: String,
+}
+
+/// `peckboard_ask_user` — emit a prompt to the caller's session. Returns
+/// `{"ok": true}` (fire-and-forget) or an error if there is no caller session
+/// / no live host bound (headless).
+pub(crate) fn ask_user_impl(
+    inv: &InvocationContext,
+    input: &str,
+    live: Option<Arc<dyn LiveHost>>,
+) -> String {
+    let req: AskUserRequest = match serde_json::from_str(input) {
+        Ok(r) => r,
+        Err(e) => return error_json(format!("invalid request: {e}")),
+    };
+    let Some(session_id) = inv.session_id.clone() else {
+        return error_json("no caller session; peckboard_ask_user needs an MCP invocation context");
+    };
+    if req.question.trim().is_empty() {
+        return error_json("question is required");
+    }
+    if req.token.trim().is_empty() {
+        return error_json("token is required");
+    }
+    let Some(live) = live else {
+        return error_json("interactive prompts unavailable (no live host bound)");
+    };
+    live.ask_user(session_id, req.question, req.options, req.token);
+    serde_json::json!({ "ok": true }).to_string()
+}
+
+/// `peckboard_get_answer` — resolve the answer to a plugin-emitted question
+/// carrying `token` in the caller's session. Returns
+/// `{"status": "pending" | "answered" | "unknown", "answer"?, "rejected"?}`.
+/// `unknown` means no question with that token exists for this session.
+pub(crate) fn get_answer_impl(db: &Db, inv: &InvocationContext, input: &str) -> String {
+    let req: GetAnswerRequest = match serde_json::from_str(input) {
+        Ok(r) => r,
+        Err(e) => return error_json(format!("invalid request: {e}")),
+    };
+    let Some(session_id) = inv.session_id.as_deref() else {
+        return error_json(
+            "no caller session; peckboard_get_answer needs an MCP invocation context",
+        );
+    };
+    let events = match db.list_events_by_session_blocking(session_id) {
+        Ok(e) => e,
+        Err(e) => return error_json(e.to_string()),
+    };
+
+    // Find the question event carrying this token (our own, in this session).
+    let mut question_id: Option<String> = None;
+    for e in &events {
+        if e.kind == "question"
+            && let Ok(d) = serde_json::from_str::<serde_json::Value>(&e.data)
+            && d.get("approval_token").and_then(|v| v.as_str()) == Some(req.token.as_str())
+        {
+            question_id = Some(e.id.clone());
+            break;
+        }
+    }
+    let Some(qid) = question_id else {
+        return serde_json::json!({ "status": "unknown" }).to_string();
+    };
+
+    // Find its resolution, if the user has answered yet.
+    for e in &events {
+        if e.kind != "question-resolved" {
+            continue;
+        }
+        let Ok(d) = serde_json::from_str::<serde_json::Value>(&e.data) else {
+            continue;
+        };
+        let resolved_for = d
+            .get("question_id")
+            .or_else(|| d.get("questionId"))
+            .and_then(|v| v.as_str());
+        if resolved_for != Some(qid.as_str()) {
+            continue;
+        }
+        let rejected = d.get("rejected").and_then(|v| v.as_bool()).unwrap_or(false);
+        // Our prompt is a single question, so the chosen label is answers["0"].
+        let answer = d
+            .get("answers")
+            .and_then(|a| a.get("0"))
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+        return serde_json::json!({
+            "status": "answered",
+            "rejected": rejected,
+            "answer": answer,
+        })
+        .to_string();
+    }
+    serde_json::json!({ "status": "pending" }).to_string()
 }
 
 /// Clone the `Db` and calling plugin id out of the host-function user data
@@ -1365,6 +1958,13 @@ host_fn!(peckboard_read_file(user_data: HostState; input: String) -> String {
     Ok(read_file_impl(&db, &input, &inv))
 });
 
+host_fn!(peckboard_write_file(user_data: HostState; input: String) -> String {
+    let (db, _plugin_id, ok, inv) = state_permission_and_invocation(&user_data, "project_files_write")?;
+    if !ok { return Ok(error_json("plugin lacks the 'project_files_write' permission")); }
+    let Some(inv) = inv else { return Ok(error_json("no caller context; peckboard_write_file is only callable during a tool invocation")); };
+    Ok(write_file_impl(&db, &input, &inv))
+});
+
 host_fn!(peckboard_dispatch_capture(user_data: HostState; input: String) -> String {
     let (db, _plugin_id, ok, inv, live) = state_permission_invocation_and_live(&user_data, "session_dispatch")?;
     if !ok { return Ok(error_json("plugin lacks the 'session_dispatch' permission")); }
@@ -1377,6 +1977,40 @@ host_fn!(peckboard_resume_session(user_data: HostState; input: String) -> String
     if !ok { return Ok(error_json("plugin lacks the 'session_dispatch' permission")); }
     let Some(inv) = inv else { return Ok(error_json("no caller context; peckboard_resume_session is only callable during a tool invocation")); };
     Ok(resume_session_impl(&db, &input, &inv, live))
+});
+
+host_fn!(peckboard_http_fetch(user_data: HostState; input: String) -> String {
+    let (_db, _plugin_id, ok) = state_and_permission(&user_data, "http_fetch")?;
+    if !ok { return Ok(error_json("plugin lacks the 'http_fetch' permission")); }
+    Ok(http_fetch_impl(&input))
+});
+
+host_fn!(peckboard_exec(user_data: HostState; input: String) -> String {
+    let (db, _plugin_id, ok, inv) = state_permission_and_invocation(&user_data, "process_exec")?;
+    if !ok { return Ok(error_json("plugin lacks the 'process_exec' permission")); }
+    let Some(inv) = inv else { return Ok(error_json("no caller context; peckboard_exec is only callable during a tool invocation")); };
+    Ok(exec_impl(&db, &input, &inv, true))
+});
+
+host_fn!(peckboard_exec_any(user_data: HostState; input: String) -> String {
+    let (db, _plugin_id, ok, inv) = state_permission_and_invocation(&user_data, "process_exec_any")?;
+    if !ok { return Ok(error_json("plugin lacks the 'process_exec_any' permission")); }
+    let Some(inv) = inv else { return Ok(error_json("no caller context; peckboard_exec_any is only callable during a tool invocation")); };
+    Ok(exec_impl(&db, &input, &inv, false))
+});
+
+host_fn!(peckboard_ask_user(user_data: HostState; input: String) -> String {
+    let (_db, _plugin_id, ok, inv, live) = state_permission_invocation_and_live(&user_data, "ask_user")?;
+    if !ok { return Ok(error_json("plugin lacks the 'ask_user' permission")); }
+    let Some(inv) = inv else { return Ok(error_json("no caller context; peckboard_ask_user is only callable during a tool invocation")); };
+    Ok(ask_user_impl(&inv, &input, live))
+});
+
+host_fn!(peckboard_get_answer(user_data: HostState; input: String) -> String {
+    let (db, _plugin_id, ok, inv) = state_permission_and_invocation(&user_data, "ask_user")?;
+    if !ok { return Ok(error_json("plugin lacks the 'ask_user' permission")); }
+    let Some(inv) = inv else { return Ok(error_json("no caller context; peckboard_get_answer is only callable during a tool invocation")); };
+    Ok(get_answer_impl(&db, &inv, &input))
 });
 
 /// Build the host-function set a single loaded plugin is wired with. Every
@@ -1536,6 +2170,13 @@ pub(crate) fn host_functions(
             peckboard_read_file,
         ),
         Function::new(
+            "peckboard_write_file",
+            [PTR],
+            [PTR],
+            ud.clone(),
+            peckboard_write_file,
+        ),
+        Function::new(
             "peckboard_dispatch_capture",
             [PTR],
             [PTR],
@@ -1546,8 +2187,37 @@ pub(crate) fn host_functions(
             "peckboard_resume_session",
             [PTR],
             [PTR],
-            ud,
+            ud.clone(),
             peckboard_resume_session,
+        ),
+        Function::new(
+            "peckboard_http_fetch",
+            [PTR],
+            [PTR],
+            ud.clone(),
+            peckboard_http_fetch,
+        ),
+        Function::new("peckboard_exec", [PTR], [PTR], ud.clone(), peckboard_exec),
+        Function::new(
+            "peckboard_exec_any",
+            [PTR],
+            [PTR],
+            ud.clone(),
+            peckboard_exec_any,
+        ),
+        Function::new(
+            "peckboard_ask_user",
+            [PTR],
+            [PTR],
+            ud.clone(),
+            peckboard_ask_user,
+        ),
+        Function::new(
+            "peckboard_get_answer",
+            [PTR],
+            [PTR],
+            ud,
+            peckboard_get_answer,
         ),
     ]
 }
@@ -1600,6 +2270,7 @@ mod tests {
 
     fn inv(project: Option<&str>, folder: Option<&str>) -> InvocationContext {
         InvocationContext {
+            session_id: None,
             project_id: project.map(str::to_string),
             folder_id: folder.map(str::to_string),
             authority: false,
@@ -1609,6 +2280,7 @@ mod tests {
     /// The full-authority context an authenticated user request resolves to.
     fn inv_user() -> InvocationContext {
         InvocationContext {
+            session_id: None,
             project_id: None,
             folder_id: None,
             authority: true,
@@ -1912,6 +2584,196 @@ mod tests {
         }
     }
 
+    #[tokio::test]
+    async fn write_file_is_contained_and_roundtrips() {
+        use std::fs;
+        let db = Db::in_memory().unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let ts = chrono::Utc::now().to_rfc3339();
+        db.create_folder(NewFolder {
+            id: "fW".into(),
+            name: "Repo".into(),
+            path: root.to_string_lossy().to_string(),
+            created_at: ts,
+        })
+        .await
+        .unwrap();
+        let caller = inv(Some("pW"), Some("fW"));
+
+        // Create a new file in a new subdir, then read it back via read_file.
+        let w = write_file_impl(
+            &db,
+            r#"{"path":"src/new.txt","content":"hello","create_dirs":true}"#,
+            &caller,
+        );
+        assert!(w.contains("\"ok\":true"), "write: {w}");
+        assert_eq!(
+            fs::read_to_string(root.join("src/new.txt")).unwrap(),
+            "hello"
+        );
+
+        // Append.
+        let a = write_file_impl(
+            &db,
+            r#"{"path":"src/new.txt","content":" world","append":true}"#,
+            &caller,
+        );
+        assert!(a.contains("\"ok\":true"), "append: {a}");
+        assert_eq!(
+            fs::read_to_string(root.join("src/new.txt")).unwrap(),
+            "hello world"
+        );
+
+        // Overwrite (truncate).
+        write_file_impl(&db, r#"{"path":"src/new.txt","content":"x"}"#, &caller);
+        assert_eq!(fs::read_to_string(root.join("src/new.txt")).unwrap(), "x");
+
+        // `..` traversal is refused before touching the fs.
+        let esc = write_file_impl(&db, r#"{"path":"../escape.txt","content":"nope"}"#, &caller);
+        assert!(esc.contains("within the project folder"), "escape: {esc}");
+        assert!(!root.parent().unwrap().join("escape.txt").exists());
+
+        // Missing parent without create_dirs is a clean error, not a write.
+        let miss = write_file_impl(
+            &db,
+            r#"{"path":"deep/dir/file.txt","content":"x"}"#,
+            &caller,
+        );
+        assert!(miss.contains("parent directory"), "missing parent: {miss}");
+
+        // A symlinked intermediate dir pointing outside the folder is refused.
+        #[cfg(unix)]
+        {
+            let outside = dir.path().parent().unwrap().join("outside_dir");
+            fs::create_dir_all(&outside).unwrap();
+            std::os::unix::fs::symlink(&outside, root.join("link_dir")).unwrap();
+            let leak = write_file_impl(
+                &db,
+                r#"{"path":"link_dir/escaped.txt","content":"leak"}"#,
+                &caller,
+            );
+            assert!(
+                leak.contains("escapes the project folder"),
+                "symlink escape must be refused: {leak}"
+            );
+            assert!(!outside.join("escaped.txt").exists());
+            let _ = fs::remove_dir_all(&outside);
+        }
+    }
+
+    #[test]
+    fn blocked_fetch_ips_cover_private_and_special_ranges() {
+        use std::net::{Ipv4Addr, Ipv6Addr};
+        let blocked = [
+            IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)),       // loopback
+            IpAddr::V4(Ipv4Addr::new(10, 0, 0, 5)),        // private
+            IpAddr::V4(Ipv4Addr::new(192, 168, 1, 1)),     // private
+            IpAddr::V4(Ipv4Addr::new(172, 16, 0, 1)),      // private
+            IpAddr::V4(Ipv4Addr::new(169, 254, 0, 1)),     // link-local
+            IpAddr::V4(Ipv4Addr::new(100, 64, 0, 1)),      // CGNAT
+            IpAddr::V4(Ipv4Addr::new(0, 0, 0, 0)),         // unspecified
+            IpAddr::V4(Ipv4Addr::new(169, 254, 169, 254)), // cloud metadata
+            IpAddr::V6(Ipv6Addr::LOCALHOST),
+            IpAddr::V6("fc00::1".parse().unwrap()), // unique-local
+            IpAddr::V6("fe80::1".parse().unwrap()), // link-local
+            IpAddr::V6("::ffff:10.0.0.1".parse().unwrap()), // v4-mapped private
+        ];
+        for ip in blocked {
+            assert!(is_blocked_fetch_ip(&ip), "should block {ip}");
+        }
+        let allowed = [
+            IpAddr::V4(Ipv4Addr::new(8, 8, 8, 8)),
+            IpAddr::V4(Ipv4Addr::new(1, 1, 1, 1)),
+            IpAddr::V6("2606:4700:4700::1111".parse().unwrap()),
+        ];
+        for ip in allowed {
+            assert!(!is_blocked_fetch_ip(&ip), "should allow {ip}");
+        }
+    }
+
+    #[test]
+    fn http_fetch_rejects_bad_scheme_method_and_private_host() {
+        // Non-http scheme.
+        let r = http_fetch_impl(r#"{"url":"file:///etc/passwd"}"#);
+        assert!(r.contains("http and https"), "scheme: {r}");
+        // Disallowed method.
+        let r = http_fetch_impl(r#"{"url":"https://example.com","method":"POST"}"#);
+        assert!(r.contains("GET and HEAD"), "method: {r}");
+        // Host that resolves only to loopback is refused (no network needed).
+        let r = http_fetch_impl(r#"{"url":"http://localhost/"}"#);
+        assert!(
+            r.contains("public address") || r.contains("dns resolution"),
+            "localhost: {r}"
+        );
+    }
+
+    #[tokio::test]
+    async fn exec_enforces_allowlist_and_folder_scope() {
+        let db = Db::in_memory().unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let ts = chrono::Utc::now().to_rfc3339();
+        db.create_folder(NewFolder {
+            id: "fE".into(),
+            name: "Repo".into(),
+            path: dir.path().to_string_lossy().to_string(),
+            created_at: ts,
+        })
+        .await
+        .unwrap();
+        let caller = inv(Some("pE"), Some("fE"));
+
+        // Not on the allowlist → refused before spawning (allowlist enforced).
+        let r = exec_impl(&db, r#"{"command":"rm","args":["-rf","/"]}"#, &caller, true);
+        assert!(r.contains("not on the allowlist"), "rm: {r}");
+
+        // The unrestricted variant skips the allowlist (but still bare-name +
+        // folder-scoped): `rm` is no longer refused on allowlist grounds.
+        let r = exec_impl(
+            &db,
+            r#"{"command":"rm","args":["--version"]}"#,
+            &caller,
+            false,
+        );
+        assert!(
+            !r.contains("not on the allowlist"),
+            "exec_any allowlist: {r}"
+        );
+
+        // A path component (escape attempt) → refused as not-a-bare-name, even
+        // for the unrestricted variant.
+        let r = exec_impl(&db, r#"{"command":"../../bin/sh"}"#, &caller, false);
+        assert!(r.contains("bare executable name"), "path: {r}");
+
+        // No folder scope → refused (cwd cannot be pinned).
+        let unscoped = inv(Some("pE"), None);
+        let r = exec_impl(
+            &db,
+            r#"{"command":"git","args":["--version"]}"#,
+            &unscoped,
+            true,
+        );
+        assert!(r.contains("folder"), "unscoped: {r}");
+
+        // Allowlisted command runs in the folder when the tool is present.
+        let r = exec_impl(
+            &db,
+            r#"{"command":"git","args":["--version"]}"#,
+            &caller,
+            true,
+        );
+        let v: serde_json::Value = serde_json::from_str(&r).unwrap();
+        if v.get("error").is_none() {
+            // git is installed: it ran and exited cleanly.
+            assert_eq!(v["timed_out"], serde_json::json!(false), "exec: {r}");
+            assert!(
+                v["stdout"].as_str().unwrap_or("").contains("git")
+                    || v["exit_code"] == serde_json::json!(0),
+                "exec: {r}"
+            );
+        }
+    }
+
     /// Records the live calls it receives so tests can assert dispatch only
     /// happens after authorization.
     #[derive(Default)]
@@ -1931,6 +2793,106 @@ mod tests {
                 .unwrap()
                 .push(format!("resume:{session_id}"));
         }
+        fn ask_user(&self, session_id: String, _q: String, _o: Vec<String>, token: String) {
+            self.calls
+                .lock()
+                .unwrap()
+                .push(format!("ask:{session_id}:{token}"));
+        }
+    }
+
+    #[tokio::test]
+    async fn ask_user_and_get_answer_roundtrip() {
+        let db = Db::in_memory().unwrap();
+        let ts = chrono::Utc::now().to_rfc3339();
+        db.create_folder(NewFolder {
+            id: "fA".into(),
+            name: "Repo".into(),
+            path: ".".into(),
+            created_at: ts.clone(),
+        })
+        .await
+        .unwrap();
+        db.create_session(crate::db::models::NewSession {
+            id: "sA".into(),
+            name: "Caller".into(),
+            folder_id: "fA".into(),
+            project_id: None,
+            is_worker: true,
+            created_at: ts.clone(),
+            last_activity: ts,
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+
+        let ctx = InvocationContext {
+            session_id: Some("sA".into()),
+            project_id: None,
+            folder_id: Some("fA".into()),
+            authority: false,
+        };
+
+        // No question with this token yet → unknown.
+        let r = get_answer_impl(&db, &ctx, r#"{"token":"tok1"}"#);
+        assert!(r.contains("\"unknown\""), "unknown: {r}");
+
+        // ask_user with no live host → error; with a live host → ok + recorded.
+        let no_live = ask_user_impl(
+            &ctx,
+            r#"{"question":"run rg?","options":["yes"],"token":"tok1"}"#,
+            None,
+        );
+        assert!(no_live.contains("error"), "no live: {no_live}");
+        let rec = std::sync::Arc::new(RecordingLive::default());
+        let ok = ask_user_impl(
+            &ctx,
+            r#"{"question":"run rg?","options":["Approve once","Approve always","Deny"],"token":"tok1"}"#,
+            Some(rec.clone()),
+        );
+        assert!(ok.contains("\"ok\":true"), "ask ok: {ok}");
+        assert!(
+            rec.calls.lock().unwrap().iter().any(|c| c == "ask:sA:tok1"),
+            "ask recorded: {:?}",
+            rec.calls.lock().unwrap()
+        );
+
+        // The test live host doesn't actually emit the event, so seed the
+        // question the real AppLiveHost would write, carrying the token.
+        db.append_event_blocking(
+            "sA",
+            "question",
+            r#"{"approval_token":"tok1","questions":[{"question":"run rg?"}]}"#,
+        )
+        .unwrap();
+        // Now pending (asked, not yet answered).
+        let r = get_answer_impl(&db, &ctx, r#"{"token":"tok1"}"#);
+        assert!(r.contains("\"pending\""), "pending: {r}");
+
+        // User answers → question-resolved referencing the question event id.
+        let qid = db
+            .list_events_by_session_blocking("sA")
+            .unwrap()
+            .into_iter()
+            .find(|e| e.kind == "question")
+            .unwrap()
+            .id;
+        db.append_event_blocking(
+            "sA",
+            "question-resolved",
+            &format!(r#"{{"question_id":"{qid}","answers":{{"0":"Approve always"}}}}"#),
+        )
+        .unwrap();
+        let r = get_answer_impl(&db, &ctx, r#"{"token":"tok1"}"#);
+        let v: serde_json::Value = serde_json::from_str(&r).unwrap();
+        assert_eq!(v["status"], "answered", "answered: {r}");
+        assert_eq!(v["answer"], "Approve always", "answer: {r}");
+        assert_eq!(v["rejected"], serde_json::json!(false));
+
+        // A caller without a session context cannot read answers.
+        let no_sess = InvocationContext::default();
+        let r = get_answer_impl(&db, &no_sess, r#"{"token":"tok1"}"#);
+        assert!(r.contains("error"), "no session: {r}");
     }
 
     #[tokio::test]

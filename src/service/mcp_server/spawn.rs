@@ -116,6 +116,110 @@ impl crate::plugin::host::LiveHost for AppLiveHost {
             }
         });
     }
+
+    fn ask_user(&self, session_id: String, question: String, options: Vec<String>, token: String) {
+        let Some(state) = self.state.upgrade() else {
+            return;
+        };
+        self.rt.spawn(async move {
+            if let Err(e) =
+                emit_plugin_question(&state, &session_id, &question, &options, &token).await
+            {
+                tracing::warn!("plugin ask_user for {session_id} failed: {e}");
+            }
+        });
+    }
+}
+
+/// Emit a single-question user prompt to `session_id`, mirroring the worker
+/// `ask_user` MCP tool's event surface (`handle_ask_user`) so the existing
+/// question-card UI renders it and the existing answer → resume machinery
+/// applies. `token` is stored on the question (`approval_token`) so the
+/// emitting plugin can later resolve the user's answer via
+/// `peckboard_get_answer`. Card/project are looked up from the session for the
+/// worker-question broadcast.
+async fn emit_plugin_question(
+    state: &Arc<AppState>,
+    session_id: &str,
+    question: &str,
+    options: &[String],
+    token: &str,
+) -> anyhow::Result<()> {
+    use crate::ws::broadcaster::WsEvent;
+    use serde_json::{Value, json};
+
+    let mut entry = json!({
+        "question": question,
+        "header": "Approval",
+        "multiSelect": false,
+    });
+    if !options.is_empty() {
+        entry["options"] = Value::Array(options.iter().map(|o| Value::String(o.clone())).collect());
+        entry["optionObjects"] = Value::Array(
+            options
+                .iter()
+                .map(|o| json!({ "label": o, "description": "" }))
+                .collect(),
+        );
+    }
+
+    let session = state.db.get_session(session_id).await.ok().flatten();
+    let card_id = session.as_ref().and_then(|s| s.card_id.clone());
+    let project_id = session.as_ref().and_then(|s| s.project_id.clone());
+    let is_worker = card_id.is_some() || session.as_ref().map(|s| s.is_worker).unwrap_or(false);
+
+    let mut event_data = json!({
+        "questions": [entry],
+        // Correlation id the plugin reads back with peckboard_get_answer.
+        "approval_token": token,
+        "cardId": card_id,
+        "sessionId": session_id,
+        "source": "plugin",
+        "isWorker": is_worker,
+    });
+    if let Some(ref pid) = project_id {
+        event_data["projectId"] = Value::String(pid.clone());
+    }
+
+    let event = state
+        .db
+        .append_event(session_id, "question", event_data.clone())
+        .await?;
+
+    state.broadcaster.broadcast(WsEvent {
+        event_type: "event".into(),
+        session_id: session_id.to_string(),
+        data: json!({
+            "id": event.id,
+            "seq": event.seq,
+            "ts": event.ts,
+            "kind": "question",
+            "data": event_data,
+        }),
+    });
+
+    if is_worker && let Some(ref pid) = project_id {
+        state.broadcaster.broadcast(WsEvent {
+            event_type: "worker-question".into(),
+            session_id: pid.clone(),
+            data: json!({
+                "eventId": event.id,
+                "sessionId": session_id,
+                "projectId": pid,
+            }),
+        });
+    }
+
+    state
+        .db
+        .append_event(
+            session_id,
+            "ask-user-requested",
+            json!({ "questionEventId": event.id, "cardId": card_id }),
+        )
+        .await?;
+
+    Ok(())
 }
 
 impl ExpertDispatcher for AppExpertDispatcher {
