@@ -238,74 +238,22 @@ async fn mcp_handler(
                 data_dir: Some(state.config.data_dir.clone()),
             };
 
-            // ── Hook: mcp.tool.call.before ──
-            let mut final_args = arguments;
-            let hook_result = state
-                .plugins
-                .dispatch(
-                    "mcp.tool.call.before",
-                    serde_json::json!({
-                        "sessionId": &ctx.session_id,
-                        "toolName": tool_name,
-                        "args": &final_args,
-                    }),
-                )
-                .await;
-
-            if let crate::plugin::hooks::HookResult::Cancelled { plugin, reason } = &hook_result {
-                tracing::info!(plugin = %plugin, reason = %reason, "mcp.tool.call.before cancelled");
-                return (
-                    StatusCode::OK,
-                    rpc_json(JsonRpcResponse::error(
-                        body.id,
-                        -32000,
-                        format!("cancelled by plugin {plugin}: {reason}"),
-                    )),
-                );
-            }
-            // If a plugin modified the args, use the modified version
-            if let crate::plugin::hooks::HookResult::Allowed(modified) = hook_result {
-                if let Some(new_args) = modified.get("args") {
-                    final_args = new_args.clone();
-                }
-            }
-
-            // A plugin that declared this tool in its manifest owns the call:
-            // dispatch it via the terminal `mcp.tool.invoke` hook with the
-            // caller's *scoped* context. Core's own dispatch runs only when no
-            // active plugin claims the name. The generic
-            // `mcp.tool.call.before/after/failed` hooks still wrap both paths,
-            // so a plugin can observe/veto another plugin's tool too.
-            let plugin_ctx = serde_json::json!({
-                "sessionId": &ctx.session_id,
-                "projectId": &ctx.project_id,
-                "cardId": &ctx.card_id,
-                "folderId": &ctx.folder_id,
-            });
-            let tool_result = match state
-                .plugins
-                .invoke_mcp_tool(tool_name, final_args.clone(), plugin_ctx)
-                .await
-            {
-                Some(r) => r,
-                None => registry.handle_tool_call(tool_name, final_args, &ctx).await,
-            };
+            // Run the call through the shared dispatcher: it fires the
+            // `mcp.tool.call.before/after/failed` observer hooks and routes
+            // the call to the owning plugin or core. A plugin cancellation in
+            // the before-hook (or any handler failure) comes back as `Err`,
+            // which we surface as a JSON-RPC error below.
+            let tool_result = crate::service::mcp_server::dispatch_tool_call(
+                &state.plugins,
+                &registry,
+                tool_name,
+                arguments,
+                &ctx,
+            )
+            .await;
 
             match tool_result {
                 Ok(result) => {
-                    // ── Hook: mcp.tool.call.after ──
-                    state
-                        .plugins
-                        .dispatch(
-                            "mcp.tool.call.after",
-                            serde_json::json!({
-                                "sessionId": &ctx.session_id,
-                                "toolName": tool_name,
-                                "result": &result,
-                            }),
-                        )
-                        .await;
-
                     let content = serde_json::json!([{
                         "type": "text",
                         "text": serde_json::to_string(&result).unwrap_or_default(),
@@ -318,25 +266,10 @@ async fn mcp_handler(
                         )),
                     )
                 }
-                Err(e) => {
-                    // ── Hook: mcp.tool.call.failed ──
-                    state
-                        .plugins
-                        .dispatch(
-                            "mcp.tool.call.failed",
-                            serde_json::json!({
-                                "sessionId": &ctx.session_id,
-                                "toolName": tool_name,
-                                "reason": e.to_string(),
-                            }),
-                        )
-                        .await;
-
-                    (
-                        StatusCode::OK,
-                        rpc_json(JsonRpcResponse::error(body.id, -32000, e.to_string())),
-                    )
-                }
+                Err(e) => (
+                    StatusCode::OK,
+                    rpc_json(JsonRpcResponse::error(body.id, -32000, e.to_string())),
+                ),
             }
         }
         _ => (

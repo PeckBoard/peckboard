@@ -16,6 +16,9 @@
 //!   compatible `/v1/models` endpoint) and shows them in the picker
 //!   automatically. Turn off to fall back to the built-in seed plus
 //!   `additional_models` only.
+//! * `enable_tools` (boolean, default `true`) — offer Peckboard's MCP tools
+//!   (core + active plugins) to the model and execute the tool calls it
+//!   makes. Turn off for models that don't support tools.
 //! * `additional_models` (string list) — extra model names to surface in
 //!   the model picker, merged on top of the autodiscovered (or seed)
 //!   list. Each is registered as `ollama:<name>` and may carry a tag
@@ -93,6 +96,19 @@ impl OllamaPlugin {
                      OpenAI-compatible /v1/models endpoint) and list them in the model \
                      picker automatically. Turn this off to show only the built-in \
                      suggestions plus any models you add below."
+                        .into(),
+                ),
+                required: false,
+                kind: FieldKind::Boolean { default: true },
+            },
+            SettingField {
+                key: "enable_tools".into(),
+                title: "Enable Tools".into(),
+                description: Some(
+                    "Offer Peckboard's MCP tools (core tools plus any active plugin tools) \
+                     to the model on every turn, and run the tool calls it makes. Requires \
+                     a tool-capable model (e.g. llama3.1, qwen2.5-coder); turn this off for \
+                     models that don't support tools, or to keep sessions chat-only."
                         .into(),
                 ),
                 required: false,

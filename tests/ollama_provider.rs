@@ -236,6 +236,198 @@ async fn ollama_provider_streams_text_and_completes() {
     assert_eq!(text_events, vec!["hel", "lo"]);
 }
 
+/// Stub Ollama that drives a tool-calling turn: the first `/api/chat`
+/// request gets an assistant message asking to call a tool (`done:true`,
+/// no text); every later request gets a plain final answer. Loops
+/// accepting connections (the provider opens a fresh one per round, since
+/// the stub closes each socket) and captures the LAST request body so the
+/// test can assert the tool result was fed back.
+async fn spawn_stub_ollama_tools(
+    tool_name: &'static str,
+) -> (String, Arc<Mutex<String>>, Arc<Mutex<usize>>) {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let last_body = Arc::new(Mutex::new(String::new()));
+    let calls = Arc::new(Mutex::new(0usize));
+    let last_ret = last_body.clone();
+    let calls_ret = calls.clone();
+    tokio::spawn(async move {
+        loop {
+            let Ok((mut sock, _peer)) = listener.accept().await else {
+                break;
+            };
+            let mut buf = [0u8; 8192];
+            let mut total = Vec::new();
+            // Read the full request (headers + Content-Length body).
+            loop {
+                let n =
+                    match tokio::time::timeout(Duration::from_secs(5), sock.read(&mut buf)).await {
+                        Ok(Ok(n)) if n > 0 => n,
+                        _ => break,
+                    };
+                total.extend_from_slice(&buf[..n]);
+                if let Some(headers_end) = find_subseq(&total, b"\r\n\r\n") {
+                    let headers_text =
+                        String::from_utf8_lossy(&total[..headers_end]).to_lowercase();
+                    if let Some(cl) = headers_text
+                        .lines()
+                        .find_map(|l| l.strip_prefix("content-length: "))
+                        && let Ok(len) = cl.trim().parse::<usize>()
+                        && total.len() >= headers_end + 4 + len
+                    {
+                        break;
+                    }
+                }
+            }
+            *last_body.lock().await = String::from_utf8_lossy(&total).to_string();
+            let round = {
+                let mut c = calls.lock().await;
+                *c += 1;
+                *c
+            };
+
+            // First round → ask for a tool; afterwards → final answer.
+            let body = if round == 1 {
+                format!(
+                    "{{\"message\":{{\"role\":\"assistant\",\"content\":\"\",\
+                     \"tool_calls\":[{{\"function\":{{\"name\":\"{tool_name}\",\
+                     \"arguments\":{{}}}}}}]}},\"done\":true}}\n"
+                )
+            } else {
+                "{\"message\":{\"content\":\"all done\"},\"done\":true}\n".to_string()
+            };
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/x-ndjson\r\nContent-Length: {}\r\n\r\n",
+                body.len()
+            );
+            let _ = sock.write_all(response.as_bytes()).await;
+            let _ = sock.write_all(body.as_bytes()).await;
+            let _ = sock.shutdown().await;
+        }
+    });
+    (format!("http://{}", addr), last_ret, calls_ret)
+}
+
+/// The full tool-calling loop: the model asks for a core MCP tool, the
+/// provider runs it via the shared dispatcher, feeds the `role:"tool"`
+/// result back, and the model's next turn is the final answer. Asserts the
+/// `ToolStart`/`ToolEnd` events fire and the tool result is replayed.
+#[tokio::test]
+async fn ollama_provider_runs_tool_call_loop() {
+    // `list_projects` is a core tool that needs only the scoped context
+    // (no provider_registry / data_dir), so it succeeds against an empty DB.
+    let (base_url, last_body, calls) = spawn_stub_ollama_tools("list_projects").await;
+
+    let db = Db::in_memory().unwrap();
+    let ts = chrono::Utc::now().to_rfc3339();
+    db.create_folder(NewFolder {
+        id: "f1".into(),
+        name: "F".into(),
+        path: "/tmp".into(),
+        created_at: ts.clone(),
+    })
+    .await
+    .unwrap();
+    db.create_session(NewSession {
+        id: "s1".into(),
+        name: "S".into(),
+        folder_id: "f1".into(),
+        model: Some("ollama:llama3.1".into()),
+        effort: None,
+        is_worker: false,
+        project_id: None,
+        card_id: None,
+        conversation_id: None,
+        created_at: ts.clone(),
+        last_activity: ts,
+        ..Default::default()
+    })
+    .await
+    .unwrap();
+
+    db.set_plugin_setting("ollama", "base_url", &serde_json::Value::String(base_url))
+        .await
+        .unwrap();
+
+    let store = PluginSettingsStore::new("ollama", test_schema(), db.clone());
+    let provider = OllamaProvider::new(store);
+
+    let broadcaster = Broadcaster::new();
+    let (completion_tx, mut completion_rx) = mpsc::channel(8);
+    let plugins = Arc::new(peckboard::plugin::manager::PluginManager::empty());
+
+    let ctx = SendMessageContext {
+        session_id: "s1".into(),
+        message: "list my projects".into(),
+        db: db.clone(),
+        broadcaster: broadcaster.clone(),
+        config: SpawnConfig {
+            model: "ollama:llama3.1".into(),
+            ..Default::default()
+        },
+        conversation_id: None,
+        completion_tx,
+        plugins,
+    };
+
+    provider.send_message(ctx).await.unwrap();
+
+    let completion = tokio::time::timeout(Duration::from_secs(5), completion_rx.recv())
+        .await
+        .expect("completion delivered within timeout")
+        .expect("channel still open");
+    assert!(completion.completed, "tool loop should complete cleanly");
+
+    // Two chat rounds: the tool-call turn, then the final answer.
+    assert_eq!(
+        *calls.lock().await,
+        2,
+        "expected one tool round + final turn"
+    );
+
+    let events = db.events_tail("s1", 32).await.unwrap();
+    let kinds: Vec<&str> = events.iter().map(|e| e.kind.as_str()).collect();
+    assert!(
+        kinds.contains(&"agent-tool-start"),
+        "a ToolStart event should fire (got: {kinds:?})"
+    );
+    assert!(
+        kinds.contains(&"agent-tool-end"),
+        "a ToolEnd event should fire (got: {kinds:?})"
+    );
+
+    // The tool that ran is named in the ToolStart event.
+    let tool_start = events
+        .iter()
+        .find(|e| e.kind == "agent-tool-start")
+        .unwrap();
+    let ts_data: serde_json::Value = serde_json::from_str(&tool_start.data).unwrap();
+    assert_eq!(ts_data["name"], "list_projects");
+
+    // The final assistant text arrived.
+    let text: String = events
+        .iter()
+        .filter(|e| e.kind == "agent-text")
+        .filter_map(|e| {
+            let v: serde_json::Value = serde_json::from_str(&e.data).ok()?;
+            v["text"].as_str().map(|s| s.to_string())
+        })
+        .collect();
+    assert_eq!(text, "all done");
+
+    // The SECOND request replayed the assistant tool_call and the tool
+    // result, so the model saw the outcome it asked for.
+    let body = last_body.lock().await.clone();
+    assert!(
+        body.contains("\"tool_calls\""),
+        "round 2 must replay the assistant tool_calls (got: {body})"
+    );
+    assert!(
+        body.contains("\"tool_name\":\"list_projects\""),
+        "round 2 must include the tool result keyed by tool_name (got: {body})"
+    );
+}
+
 /// Schema covering the fields the dynamic-models path reads: the base
 /// URL, the autodiscovery toggle, and the manual `additional_models`
 /// list. Mirrors the real plugin schema closely enough for the store to

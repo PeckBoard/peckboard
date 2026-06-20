@@ -244,6 +244,100 @@ pub(super) fn collect_transitive_deps(
     }
 }
 
+/// Run one MCP tool call end to end, exactly as the `/mcp` JSON-RPC route
+/// does, so the route and any other dispatcher (e.g. the Ollama provider's
+/// tool-calling loop) can't drift:
+///
+/// 1. Fire the `mcp.tool.call.before` observer hook — a plugin may rewrite
+///    the arguments (via the returned `args`) or cancel the call outright.
+/// 2. Dispatch to the active plugin that declared the tool, falling back to
+///    core's own [`McpToolRegistry::handle_tool_call`] when no plugin claims
+///    the name (mirrors [`crate::plugin::manager::PluginManager::invoke_mcp_tool`]).
+/// 3. Fire `mcp.tool.call.after` (success) or `mcp.tool.call.failed` (error).
+///
+/// Returns the tool result, or an error (a plugin cancellation, an invalid
+/// verdict, or the handler's own failure). The caller maps it onto its own
+/// transport — a JSON-RPC error for the route, a `role: "tool"` error body
+/// for Ollama.
+pub async fn dispatch_tool_call(
+    plugins: &crate::plugin::manager::PluginManager,
+    registry: &McpToolRegistry,
+    tool_name: &str,
+    arguments: Value,
+    ctx: &ToolCallContext,
+) -> anyhow::Result<Value> {
+    use crate::plugin::hooks::HookResult;
+
+    // ── Hook: mcp.tool.call.before ── (may rewrite args or cancel)
+    let mut final_args = arguments;
+    match plugins
+        .dispatch(
+            "mcp.tool.call.before",
+            serde_json::json!({
+                "sessionId": &ctx.session_id,
+                "toolName": tool_name,
+                "args": &final_args,
+            }),
+        )
+        .await
+    {
+        HookResult::Cancelled { plugin, reason } => {
+            tracing::info!(plugin = %plugin, reason = %reason, "mcp.tool.call.before cancelled");
+            anyhow::bail!("cancelled by plugin {plugin}: {reason}");
+        }
+        HookResult::Allowed(modified) => {
+            if let Some(new_args) = modified.get("args") {
+                final_args = new_args.clone();
+            }
+        }
+    }
+
+    // A plugin that declared this tool owns the call; otherwise core handles
+    // it. The scoped `ctx` carries session/project/card/folder so plugin and
+    // core dispatch enforce the same folder boundary.
+    let plugin_ctx = serde_json::json!({
+        "sessionId": &ctx.session_id,
+        "projectId": &ctx.project_id,
+        "cardId": &ctx.card_id,
+        "folderId": &ctx.folder_id,
+    });
+    let tool_result = match plugins
+        .invoke_mcp_tool(tool_name, final_args.clone(), plugin_ctx)
+        .await
+    {
+        Some(r) => r,
+        None => registry.handle_tool_call(tool_name, final_args, ctx).await,
+    };
+
+    match &tool_result {
+        Ok(result) => {
+            plugins
+                .dispatch(
+                    "mcp.tool.call.after",
+                    serde_json::json!({
+                        "sessionId": &ctx.session_id,
+                        "toolName": tool_name,
+                        "result": result,
+                    }),
+                )
+                .await;
+        }
+        Err(e) => {
+            plugins
+                .dispatch(
+                    "mcp.tool.call.failed",
+                    serde_json::json!({
+                        "sessionId": &ctx.session_id,
+                        "toolName": tool_name,
+                        "reason": e.to_string(),
+                    }),
+                )
+                .await;
+        }
+    }
+    tool_result
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

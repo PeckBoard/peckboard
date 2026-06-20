@@ -2,9 +2,23 @@
 //!
 //! Hits Ollama's HTTP `/api/chat` endpoint in streaming mode and
 //! translates each `{"message":{"content":"…"}}` chunk into a
-//! [`ProviderEvent::Text`]. The provider is intentionally minimal —
-//! Ollama doesn't expose tools, conversation IDs, or permission prompts,
-//! so the entire stream is `Started → Text* → Completed | Crashed`.
+//! [`ProviderEvent::Text`].
+//!
+//! When the `enable_tools` setting is on (the default), every turn also
+//! offers the model Peckboard's MCP tools — core tools plus any active
+//! plugin tools, the same set the `/mcp` route serves — in the `tools`
+//! field of the chat body. If the model answers with `tool_calls`, the
+//! provider executes each via the shared
+//! [`crate::service::mcp_server::dispatch_tool_call`] (so plugin- and
+//! core-owned tools resolve identically to the `/mcp` route), feeds the
+//! results back as `role:"tool"` messages, and re-prompts — looping until
+//! the model stops calling tools or [`MAX_TOOL_ROUNDS`] is hit. Tool
+//! activity surfaces as `ToolStart`/`ToolEnd` events. With tools off (or
+//! none available) the stream is the minimal `Started → Text* →
+//! Completed | Crashed`.
+//!
+//! Ollama itself exposes no conversation IDs or permission prompts, so
+//! those parts of the event stream stay unused.
 //!
 //! Multi-turn context is held in memory per session: each turn appends
 //! the user message + assistant reply to the session's transcript and
@@ -20,7 +34,7 @@
 //! `send_message` so a UI change takes effect immediately, without
 //! requiring a restart.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -29,9 +43,11 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::{Mutex, Notify};
 use tokio::task::JoinHandle;
 
+use crate::plugin::manager::PluginManager;
 use crate::plugin::settings::PluginSettingsStore;
 use crate::provider::agent::{AgentProvider, ProcessCompletion, SendMessageContext, emit_event};
 use crate::provider::stream::{ModelInfo, ProviderEvent};
+use crate::service::mcp_server::{McpToolRegistry, ToolCallContext, dispatch_tool_call};
 
 /// Default request timeout used when the user hasn't set one. Generous
 /// because Ollama on CPU can take a while to load a fresh model.
@@ -47,6 +63,13 @@ const MAX_TIMEOUT_SECS: u64 = 3600;
 /// outbound request body Ollama replays back through) without bound.
 /// 50 user/assistant pairs ≈ a long working conversation.
 const MAX_HISTORY_MESSAGES: usize = 100;
+
+/// Hard cap on tool-call rounds within a single turn. Each round is one
+/// model response that asked for tools plus the tool results fed back. A
+/// model that keeps calling tools without ever producing a final answer
+/// (or two that ping-pong) would otherwise loop until the request
+/// timeout; this bounds it and surfaces a clear error instead.
+const MAX_TOOL_ROUNDS: usize = 16;
 
 /// How long a `/v1/models` discovery result (success *or* failure) is
 /// reused before the provider probes the server again. `dynamic_models`
@@ -74,6 +97,60 @@ struct OllamaRun {
 struct ChatMessage {
     role: String,
     content: String,
+    /// Tool calls on an `assistant` turn, replayed verbatim on the next
+    /// request so the model sees its own call alongside the `tool` result.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    tool_calls: Option<Vec<ToolCall>>,
+    /// Names the tool a `role:"tool"` result belongs to. Ollama matches the
+    /// result to the pending call by this name.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    tool_name: Option<String>,
+}
+
+impl ChatMessage {
+    fn user(content: String) -> Self {
+        ChatMessage {
+            role: "user".into(),
+            content,
+            tool_calls: None,
+            tool_name: None,
+        }
+    }
+
+    fn assistant(content: String, tool_calls: Option<Vec<ToolCall>>) -> Self {
+        ChatMessage {
+            role: "assistant".into(),
+            content,
+            tool_calls,
+            tool_name: None,
+        }
+    }
+
+    fn tool_result(tool_name: String, content: String) -> Self {
+        ChatMessage {
+            role: "tool".into(),
+            content,
+            tool_calls: None,
+            tool_name: Some(tool_name),
+        }
+    }
+}
+
+/// One tool call, matching Ollama's `/api/chat` shape in both directions:
+/// the assistant emits these in `message.tool_calls`, and we replay them
+/// unchanged on the assistant turn of the next request.
+#[derive(Clone, Serialize, Deserialize)]
+struct ToolCall {
+    function: ToolCallFunction,
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+struct ToolCallFunction {
+    name: String,
+    /// Ollama delivers arguments as a JSON object (not a string), and
+    /// accepts the same shape on replay.
+    #[serde(default)]
+    arguments: serde_json::Value,
 }
 
 #[derive(Serialize)]
@@ -81,6 +158,11 @@ struct ChatRequest<'a> {
     model: &'a str,
     messages: &'a [ChatMessage],
     stream: bool,
+    /// Tool definitions in Ollama's `{type:"function", function:{…}}` shape.
+    /// Omitted entirely when tools are disabled or none are available, so a
+    /// plain chat request is byte-for-byte what it was before tools existed.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    tools: Option<&'a [serde_json::Value]>,
 }
 
 #[derive(Deserialize)]
@@ -100,6 +182,11 @@ struct ChatStreamChunk {
 struct StreamMessage {
     #[serde(default)]
     content: Option<String>,
+    /// Tool calls the model wants run this turn. Ollama emits each as a
+    /// complete object within a streamed chunk (not split across deltas),
+    /// so we can collect them as they arrive and dispatch once `done`.
+    #[serde(default)]
+    tool_calls: Option<Vec<ToolCall>>,
 }
 
 /// Shape of Ollama's OpenAI-compatible `GET /v1/models` response. We only
@@ -290,8 +377,6 @@ impl AgentProvider for OllamaProvider {
     }
 
     async fn send_message(&self, ctx: SendMessageContext) -> anyhow::Result<()> {
-        // Ollama doesn't drive plugin-todos today, so the plugin host
-        // is intentionally ignored.
         let SendMessageContext {
             session_id,
             message,
@@ -300,7 +385,9 @@ impl AgentProvider for OllamaProvider {
             config,
             conversation_id: _,
             completion_tx,
-            plugins: _,
+            // The plugin host backs MCP tool calls (and the tool-observer
+            // hooks); see `run_chat_stream`'s tool loop.
+            plugins,
         } = ctx;
 
         // Wind down any prior run on this session before starting a new one.
@@ -320,6 +407,7 @@ impl AgentProvider for OllamaProvider {
             .unwrap_or(DEFAULT_TIMEOUT_SECS)
             .min(MAX_TIMEOUT_SECS);
         let extra_headers = setting_headers(&settings, "additional_headers");
+        let enable_tools = setting_bool(&settings, "enable_tools").unwrap_or(true);
 
         let model = resolve_model(&config.model).unwrap_or_else(|| {
             default_model
@@ -336,10 +424,7 @@ impl AgentProvider for OllamaProvider {
             // still see them in the event log via the dispatch route.
             let mut conv = self.conversations.lock().await;
             let history = conv.entry(session_id.clone()).or_default();
-            history.push(ChatMessage {
-                role: "user".into(),
-                content: message.text.clone(),
-            });
+            history.push(ChatMessage::user(message.text.clone()));
             // O(turns²) bandwidth otherwise — Ollama is stateless so
             // we'd resend the entire transcript on every turn forever.
             trim_history(history, MAX_HISTORY_MESSAGES);
@@ -354,19 +439,21 @@ impl AgentProvider for OllamaProvider {
         let model_label = config.model.clone();
 
         let handle = tokio::spawn(async move {
-            let completed = run_chat_stream(
-                &client,
-                &endpoint,
-                &model,
-                &model_label,
-                &sid,
-                &db,
-                &broadcaster,
-                &conversations,
+            let completed = run_chat_stream(ChatStreamArgs {
+                client: &client,
+                endpoint: &endpoint,
+                model: &model,
+                model_label: &model_label,
+                session_id: &sid,
+                db: &db,
+                broadcaster: &broadcaster,
+                conversations: &conversations,
+                plugins: &plugins,
+                enable_tools,
                 extra_headers,
                 timeout_secs,
-                cancel_for_task,
-            )
+                cancel: cancel_for_task,
+            })
             .await;
 
             {
@@ -579,20 +666,60 @@ fn build_endpoint(base_url: &str, path: &str) -> anyhow::Result<String> {
     Ok(endpoint)
 }
 
-#[allow(clippy::too_many_arguments)]
-async fn run_chat_stream(
-    client: &reqwest::Client,
-    endpoint: &str,
-    model: &str,
-    model_label: &str,
-    session_id: &str,
-    db: &crate::db::Db,
-    broadcaster: &crate::ws::broadcaster::Broadcaster,
-    conversations: &Arc<Mutex<HashMap<String, Vec<ChatMessage>>>>,
+/// Everything one `run_chat_stream` task needs. Bundled into a struct so the
+/// per-turn entry point stays a single argument instead of a dozen
+/// positional ones (and so adding a knob later doesn't reshuffle call sites).
+struct ChatStreamArgs<'a> {
+    client: &'a reqwest::Client,
+    endpoint: &'a str,
+    model: &'a str,
+    model_label: &'a str,
+    session_id: &'a str,
+    db: &'a crate::db::Db,
+    broadcaster: &'a Arc<crate::ws::broadcaster::Broadcaster>,
+    conversations: &'a Arc<Mutex<HashMap<String, Vec<ChatMessage>>>>,
+    plugins: &'a PluginManager,
+    enable_tools: bool,
     extra_headers: Vec<(String, String)>,
     timeout_secs: u64,
     cancel: Arc<Notify>,
-) -> bool {
+}
+
+/// Outcome of streaming one model response (one `/api/chat` call).
+enum RoundOutcome {
+    /// The response finished cleanly: any text was streamed out as it
+    /// arrived, and `tool_calls` holds whatever tools the model asked for
+    /// (empty when it just answered).
+    Message {
+        text: String,
+        tool_calls: Vec<ToolCall>,
+    },
+    /// A failure was already reported via a `Crashed` event; the caller
+    /// should stop and report the turn as not-completed.
+    Failed,
+}
+
+/// Drive one turn: offer tools (when enabled), stream the model's reply, run
+/// any tool calls it makes, and loop until it answers without calling a tool
+/// or [`MAX_TOOL_ROUNDS`] is reached. Returns `true` on a clean finish.
+async fn run_chat_stream(args: ChatStreamArgs<'_>) -> bool {
+    let ChatStreamArgs {
+        client,
+        endpoint,
+        model,
+        model_label,
+        session_id,
+        db,
+        broadcaster: broadcaster_arc,
+        conversations,
+        plugins,
+        enable_tools,
+        extra_headers,
+        timeout_secs,
+        cancel,
+    } = args;
+    let broadcaster: &crate::ws::broadcaster::Broadcaster = broadcaster_arc.as_ref();
+
     emit_event(
         db,
         broadcaster,
@@ -605,7 +732,7 @@ async fn run_chat_stream(
     )
     .await;
 
-    let messages = {
+    let mut messages = {
         let map = conversations.lock().await;
         map.get(session_id).cloned().unwrap_or_default()
     };
@@ -617,10 +744,134 @@ async fn run_chat_stream(
         return false;
     }
 
+    // Build the tool offer once for the turn. Running a tool needs a scoped
+    // `ToolCallContext` (folder/project boundary); if we can't resolve one we
+    // fall back to a plain, tool-free chat rather than failing the turn.
+    let registry = McpToolRegistry::new();
+    let (tools, tool_ctx) = if enable_tools {
+        let defs = collect_ollama_tools(&registry, plugins).await;
+        match build_tool_context(db, broadcaster_arc, session_id).await {
+            Some(ctx) if !defs.is_empty() => (Some(defs), Some(ctx)),
+            _ => (None, None),
+        }
+    } else {
+        (None, None)
+    };
+
+    // Assistant + tool turns produced this turn, appended to the persistent
+    // transcript once we finish so the next turn replays the full exchange.
+    let mut new_messages: Vec<ChatMessage> = Vec::new();
+
+    for _round in 0..MAX_TOOL_ROUNDS {
+        let outcome = stream_one_round(StreamRound {
+            client,
+            endpoint,
+            model,
+            messages: &messages,
+            tools: tools.as_deref(),
+            extra_headers: &extra_headers,
+            timeout_secs,
+            db,
+            broadcaster,
+            session_id,
+            cancel: &cancel,
+        })
+        .await;
+        let (text, tool_calls) = match outcome {
+            RoundOutcome::Message { text, tool_calls } => (text, tool_calls),
+            RoundOutcome::Failed => return false,
+        };
+
+        // Record the assistant turn (its text plus the calls it requested)
+        // so it replays alongside the tool results on the next round.
+        let calls_for_replay = (!tool_calls.is_empty()).then(|| tool_calls.clone());
+        let assistant = ChatMessage::assistant(text, calls_for_replay);
+        messages.push(assistant.clone());
+        new_messages.push(assistant);
+
+        // No tools requested (or none we can run): this turn is the answer.
+        let ctx = match tool_ctx.as_ref() {
+            Some(ctx) if !tool_calls.is_empty() => ctx,
+            _ => {
+                finalize(db, broadcaster, session_id, conversations, new_messages).await;
+                return true;
+            }
+        };
+
+        // Run each requested tool, feeding the result back as a `tool` turn.
+        for call in tool_calls {
+            let tool_msg = tokio::select! {
+                _ = cancel.notified() => {
+                    crash(db, broadcaster, session_id, "interrupted", None).await;
+                    return false;
+                }
+                m = run_one_tool(plugins, &registry, ctx, db, broadcaster, session_id, &call) => m,
+            };
+            messages.push(tool_msg.clone());
+            new_messages.push(tool_msg);
+        }
+    }
+
+    // Ran out of rounds without the model settling on a final answer. Persist
+    // what we have (so the partial exchange isn't lost) and report the cap.
+    {
+        let mut map = conversations.lock().await;
+        let history = map.entry(session_id.to_string()).or_default();
+        history.extend(new_messages);
+        trim_history(history, MAX_HISTORY_MESSAGES);
+    }
+    crash(
+        db,
+        broadcaster,
+        session_id,
+        &format!("stopped after {MAX_TOOL_ROUNDS} tool rounds without a final answer"),
+        None,
+    )
+    .await;
+    false
+}
+
+/// Inputs to [`stream_one_round`]. Same rationale as [`ChatStreamArgs`] —
+/// keeps the streaming step a single positional argument.
+struct StreamRound<'a> {
+    client: &'a reqwest::Client,
+    endpoint: &'a str,
+    model: &'a str,
+    messages: &'a [ChatMessage],
+    tools: Option<&'a [serde_json::Value]>,
+    extra_headers: &'a [(String, String)],
+    timeout_secs: u64,
+    db: &'a crate::db::Db,
+    broadcaster: &'a crate::ws::broadcaster::Broadcaster,
+    session_id: &'a str,
+    cancel: &'a Notify,
+}
+
+/// POST one `/api/chat` request and consume its streamed reply: stream text
+/// out as `Text` events as it arrives, and collect any `tool_calls`. Ollama
+/// emits each tool call as a whole object inside a chunk (not split across
+/// deltas), so they accumulate cleanly. Reports failures via `Crashed` and
+/// returns [`RoundOutcome::Failed`].
+async fn stream_one_round(round: StreamRound<'_>) -> RoundOutcome {
+    let StreamRound {
+        client,
+        endpoint,
+        model,
+        messages,
+        tools,
+        extra_headers,
+        timeout_secs,
+        db,
+        broadcaster,
+        session_id,
+        cancel,
+    } = round;
+
     let body = ChatRequest {
         model,
-        messages: &messages,
+        messages,
         stream: true,
+        tools,
     };
 
     let mut request = client
@@ -628,7 +879,7 @@ async fn run_chat_stream(
         .timeout(Duration::from_secs(timeout_secs))
         .header("Content-Type", "application/json")
         .json(&body);
-    for (name, value) in &extra_headers {
+    for (name, value) in extra_headers {
         // reqwest fails the build if the header name/value are
         // malformed — settings validation enforces RFC-safe names, but
         // we still ignore malformed ones rather than poison the run.
@@ -645,13 +896,13 @@ async fn run_chat_stream(
     let response = tokio::select! {
         _ = cancel.notified() => {
             crash(db, broadcaster, session_id, "cancelled", None).await;
-            return false;
+            return RoundOutcome::Failed;
         }
         r = response_fut => match r {
             Ok(r) => r,
             Err(e) => {
                 crash(db, broadcaster, session_id, &format!("HTTP error: {e}"), None).await;
-                return false;
+                return RoundOutcome::Failed;
             }
         }
     };
@@ -670,19 +921,21 @@ async fn run_chat_stream(
             Some(truncated),
         )
         .await;
-        return false;
+        return RoundOutcome::Failed;
     }
 
     let mut stream = response.bytes_stream();
     let mut buffer = Vec::new();
-    let mut assistant_text = String::new();
+    let mut text = String::new();
+    let mut tool_calls: Vec<ToolCall> = Vec::new();
+    let mut done = false;
     use futures_util::StreamExt;
 
-    loop {
+    while !done {
         tokio::select! {
             _ = cancel.notified() => {
                 crash(db, broadcaster, session_id, "interrupted", None).await;
-                return false;
+                return RoundOutcome::Failed;
             }
             chunk = stream.next() => {
                 let Some(chunk) = chunk else { break; };
@@ -697,7 +950,7 @@ async fn run_chat_stream(
                             None,
                         )
                         .await;
-                        return false;
+                        return RoundOutcome::Failed;
                     }
                 };
                 buffer.extend_from_slice(&chunk);
@@ -723,41 +976,36 @@ async fn run_chat_stream(
                     };
                     if let Some(err) = parsed.error {
                         crash(db, broadcaster, session_id, &err, None).await;
-                        return false;
+                        return RoundOutcome::Failed;
                     }
-                    if let Some(message) = parsed.message
-                        && let Some(content) = message.content
-                        && !content.is_empty()
-                    {
-                        assistant_text.push_str(&content);
-                        emit_event(
-                            db,
-                            broadcaster,
-                            session_id,
-                            ProviderEvent::Text { text: content },
-                        )
-                        .await;
+                    if let Some(message) = parsed.message {
+                        if let Some(content) = message.content
+                            && !content.is_empty()
+                        {
+                            text.push_str(&content);
+                            emit_event(
+                                db,
+                                broadcaster,
+                                session_id,
+                                ProviderEvent::Text { text: content },
+                            )
+                            .await;
+                        }
+                        if let Some(calls) = message.tool_calls {
+                            tool_calls.extend(calls);
+                        }
                     }
                     if parsed.done {
-                        finalize(
-                            db,
-                            broadcaster,
-                            session_id,
-                            conversations,
-                            assistant_text,
-                        )
-                        .await;
-                        return true;
+                        done = true;
                     }
                 }
             }
         }
     }
 
-    // Stream closed without an explicit `done: true`. Treat as success
-    // if we already received text (Ollama sometimes shuts the connection
-    // before the last marker arrives); otherwise surface as a crash.
-    if assistant_text.is_empty() {
+    // A stream that closed before `done` with nothing at all to show is the
+    // one genuine failure here; text-only or tool-only closes are fine.
+    if !done && text.is_empty() && tool_calls.is_empty() {
         crash(
             db,
             broadcaster,
@@ -766,10 +1014,148 @@ async fn run_chat_stream(
             None,
         )
         .await;
-        return false;
+        return RoundOutcome::Failed;
     }
-    finalize(db, broadcaster, session_id, conversations, assistant_text).await;
-    true
+
+    RoundOutcome::Message { text, tool_calls }
+}
+
+/// Every MCP tool offered to the model this turn — core tools plus active
+/// plugin tools — in Ollama's `{type:"function", function:{…}}` shape. A
+/// plugin tool whose name collides with a core tool is dropped (core wins),
+/// matching the `/mcp` route's `tools/list`.
+async fn collect_ollama_tools(
+    registry: &McpToolRegistry,
+    plugins: &PluginManager,
+) -> Vec<serde_json::Value> {
+    let core = registry.tool_definitions();
+    let core_names: HashSet<&str> = core.iter().map(|t| t.name.as_str()).collect();
+    let mut tools: Vec<serde_json::Value> = core
+        .iter()
+        .map(|t| ollama_tool_def(&t.name, &t.description, &t.input_schema))
+        .collect();
+    for t in plugins.mcp_tools().await {
+        if core_names.contains(t.name.as_str()) {
+            tracing::warn!(
+                plugin = %t.plugin, tool = %t.name,
+                "plugin mcp_tool collides with a core tool name; dropping"
+            );
+            continue;
+        }
+        tools.push(ollama_tool_def(&t.name, &t.description, &t.input_schema));
+    }
+    tools
+}
+
+/// One tool entry in Ollama's chat-request `tools` array.
+fn ollama_tool_def(
+    name: &str,
+    description: &str,
+    parameters: &serde_json::Value,
+) -> serde_json::Value {
+    serde_json::json!({
+        "type": "function",
+        "function": {
+            "name": name,
+            "description": description,
+            "parameters": parameters,
+        },
+    })
+}
+
+/// Resolve the scoped [`ToolCallContext`] for `session_id` from its session
+/// row (the folder boundary every scope check enforces). `None` — no session
+/// row — means we can't safely run tools, so the caller offers none.
+/// `provider_registry`/`data_dir` are `None`: the few core tools that need
+/// them (e.g. `list_models`, report export) degrade; plugin tools and the
+/// rest work unaffected.
+async fn build_tool_context(
+    db: &crate::db::Db,
+    broadcaster: &Arc<crate::ws::broadcaster::Broadcaster>,
+    session_id: &str,
+) -> Option<ToolCallContext> {
+    let session = match db.get_session(session_id).await {
+        Ok(Some(s)) => s,
+        _ => {
+            tracing::warn!(
+                session_id = %session_id,
+                "ollama: no session row found; running tool-free for this turn"
+            );
+            return None;
+        }
+    };
+    Some(ToolCallContext {
+        session_id: session_id.to_string(),
+        project_id: session.project_id.clone(),
+        card_id: session.card_id.clone(),
+        folder_id: session.folder_id.clone(),
+        db: Arc::new(db.clone()),
+        broadcaster: broadcaster.clone(),
+        provider_registry: None,
+        data_dir: None,
+    })
+}
+
+/// Execute one tool call and turn it into a `role:"tool"` reply. Emits
+/// `ToolStart`/`ToolEnd` around the dispatch. A tool error is fed back to the
+/// model as `{"error": …}` (not a hard failure) so it can recover or retry.
+async fn run_one_tool(
+    plugins: &PluginManager,
+    registry: &McpToolRegistry,
+    ctx: &ToolCallContext,
+    db: &crate::db::Db,
+    broadcaster: &crate::ws::broadcaster::Broadcaster,
+    session_id: &str,
+    call: &ToolCall,
+) -> ChatMessage {
+    let name = call.function.name.clone();
+    let args = call.function.arguments.clone();
+    let tool_use_id = uuid::Uuid::new_v4().to_string();
+
+    emit_event(
+        db,
+        broadcaster,
+        session_id,
+        ProviderEvent::ToolStart {
+            tool_use_id: tool_use_id.clone(),
+            name: name.clone(),
+            input: args.clone(),
+        },
+    )
+    .await;
+
+    match dispatch_tool_call(plugins, registry, &name, args, ctx).await {
+        Ok(value) => {
+            let text = serde_json::to_string(&value).unwrap_or_default();
+            emit_event(
+                db,
+                broadcaster,
+                session_id,
+                ProviderEvent::ToolEnd {
+                    tool_use_id,
+                    output: Some(text.clone()),
+                    error: None,
+                },
+            )
+            .await;
+            ChatMessage::tool_result(name, text)
+        }
+        Err(e) => {
+            let err = e.to_string();
+            emit_event(
+                db,
+                broadcaster,
+                session_id,
+                ProviderEvent::ToolEnd {
+                    tool_use_id,
+                    output: None,
+                    error: Some(err.clone()),
+                },
+            )
+            .await;
+            ChatMessage::tool_result(name, serde_json::json!({ "error": err }).to_string())
+        }
+    }
 }
 
 /// Convenience for emitting a `Crashed` event. Keeps the noisy
@@ -794,20 +1180,20 @@ async fn crash(
     .await;
 }
 
+/// Append this turn's generated messages (the final assistant turn, plus any
+/// assistant-tool-call / tool-result pairs from earlier rounds) to the
+/// persistent transcript and emit `Completed`.
 async fn finalize(
     db: &crate::db::Db,
     broadcaster: &crate::ws::broadcaster::Broadcaster,
     session_id: &str,
     conversations: &Arc<Mutex<HashMap<String, Vec<ChatMessage>>>>,
-    assistant_text: String,
+    new_messages: Vec<ChatMessage>,
 ) {
     {
         let mut map = conversations.lock().await;
         let history = map.entry(session_id.to_string()).or_default();
-        history.push(ChatMessage {
-            role: "assistant".into(),
-            content: assistant_text,
-        });
+        history.extend(new_messages);
         trim_history(history, MAX_HISTORY_MESSAGES);
     }
     emit_event(
@@ -830,11 +1216,15 @@ fn trim_history(history: &mut Vec<ChatMessage>, cap: usize) {
     }
     let drop_n = history.len() - cap;
     history.drain(0..drop_n);
-    // Align to a user-message boundary: if we ended up with an
-    // assistant turn first, drop one more so the next replay starts
-    // from a user turn (Ollama tolerates either but the canonical
-    // shape is user-first).
-    if history.first().map(|m| m.role.as_str()) == Some("assistant") {
+    // Align to a user-message boundary: drop any leading assistant/tool
+    // turns so the next replay starts from a user turn. A leading `tool`
+    // result (or an assistant turn whose `tool_calls` were trimmed off the
+    // front) would be a dangling reference Ollama can reject; user-first is
+    // the canonical, always-valid shape.
+    while matches!(
+        history.first().map(|m| m.role.as_str()),
+        Some("assistant") | Some("tool")
+    ) {
         history.remove(0);
     }
 }
@@ -987,14 +1377,8 @@ mod tests {
         // Build 6 turns (12 messages) — well past a cap of 4.
         let mut history = Vec::new();
         for i in 0..6 {
-            history.push(ChatMessage {
-                role: "user".into(),
-                content: format!("u{i}"),
-            });
-            history.push(ChatMessage {
-                role: "assistant".into(),
-                content: format!("a{i}"),
-            });
+            history.push(ChatMessage::user(format!("u{i}")));
+            history.push(ChatMessage::assistant(format!("a{i}"), None));
         }
         trim_history(&mut history, 4);
         assert_eq!(history.len(), 4);
@@ -1005,5 +1389,90 @@ mod tests {
         // The four most recent messages survive (u4, a4, u5, a5 — but
         // since trimming might align away one, just spot-check.)
         assert!(history.last().unwrap().content.starts_with('a'));
+    }
+
+    #[test]
+    fn trim_history_drops_leading_tool_and_assistant_turns() {
+        // A trim that lands on a tool-call exchange must not leave a
+        // dangling `assistant(tool_calls)` / `tool` result at the front —
+        // Ollama can reject a transcript that doesn't start on a user turn.
+        let mut history = vec![
+            ChatMessage::assistant(
+                String::new(),
+                Some(vec![ToolCall {
+                    function: ToolCallFunction {
+                        name: "math".into(),
+                        arguments: serde_json::json!({ "expression": "1+1" }),
+                    },
+                }]),
+            ),
+            ChatMessage::tool_result("math".into(), "2".into()),
+            ChatMessage::user("u1".into()),
+            ChatMessage::assistant("a1".into(), None),
+        ];
+        trim_history(&mut history, 3);
+        assert_eq!(
+            history.iter().map(|m| m.role.as_str()).collect::<Vec<_>>(),
+            vec!["user", "assistant"],
+            "leading assistant+tool turns are dropped to land on a user turn"
+        );
+    }
+
+    #[test]
+    fn ollama_tool_def_has_function_envelope() {
+        let def = ollama_tool_def(
+            "math",
+            "Evaluate an expression",
+            &serde_json::json!({ "type": "object" }),
+        );
+        assert_eq!(def["type"], "function");
+        assert_eq!(def["function"]["name"], "math");
+        assert_eq!(def["function"]["description"], "Evaluate an expression");
+        assert_eq!(def["function"]["parameters"]["type"], "object");
+    }
+
+    #[test]
+    fn chat_request_omits_tools_when_none() {
+        // A tool-free request must serialize exactly as before tools existed:
+        // no `tools` key, and plain user/assistant messages carry no
+        // `tool_calls`/`tool_name` noise.
+        let messages = vec![ChatMessage::user("hi".into())];
+        let body = ChatRequest {
+            model: "llama3.1",
+            messages: &messages,
+            stream: true,
+            tools: None,
+        };
+        let v = serde_json::to_value(&body).unwrap();
+        assert!(v.get("tools").is_none(), "no tools key when None");
+        let msg = &v["messages"][0];
+        assert_eq!(msg["role"], "user");
+        assert!(msg.get("tool_calls").is_none());
+        assert!(msg.get("tool_name").is_none());
+    }
+
+    #[test]
+    fn tool_call_round_trips_through_ollama_shape() {
+        // The assistant's streamed tool call parses, and replaying it (plus
+        // the matching tool result) serializes back into Ollama's shape.
+        let chunk = r#"{"message":{"content":"","tool_calls":[
+            {"function":{"name":"math","arguments":{"expression":"2+2"}}}
+        ]},"done":false}"#;
+        let parsed: ChatStreamChunk = serde_json::from_str(chunk).unwrap();
+        let calls = parsed.message.unwrap().tool_calls.unwrap();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].function.name, "math");
+        assert_eq!(calls[0].function.arguments["expression"], "2+2");
+
+        let assistant = ChatMessage::assistant(String::new(), Some(calls));
+        let av = serde_json::to_value(&assistant).unwrap();
+        assert_eq!(av["role"], "assistant");
+        assert_eq!(av["tool_calls"][0]["function"]["name"], "math");
+
+        let result = ChatMessage::tool_result("math".into(), "4".into());
+        let rv = serde_json::to_value(&result).unwrap();
+        assert_eq!(rv["role"], "tool");
+        assert_eq!(rv["tool_name"], "math");
+        assert_eq!(rv["content"], "4");
     }
 }
