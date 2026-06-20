@@ -112,6 +112,91 @@ function matchesQuery(p: RegistryPlugin, q: string): boolean {
   return hay.includes(q.toLowerCase())
 }
 
+/**
+ * The action control for one registry row: Install / Upgrade / Installed, or a
+ * disabled "needs a newer Peckboard" state when the entry's `min_peckboard`
+ * floor isn't met. The test id is stable across states (`registry-install-…`);
+ * `data-action` distinguishes them for assertions and styling.
+ */
+function renderAction(p: RegistryPlugin, isBusy: boolean, install: (p: RegistryPlugin) => void) {
+  const compatible = p.compatible !== false
+  const testid = `registry-install-${p.id}`
+  const needs = `Requires Peckboard ≥ ${p.min_peckboard ?? '?'}`
+
+  // Newer compatible version on offer → Upgrade.
+  if (p.installed && p.upgrade_available && compatible) {
+    return (
+      <button
+        type="button"
+        className="plugin-approval-approve"
+        data-testid={testid}
+        data-action="upgrade"
+        disabled={isBusy}
+        onClick={() => install(p)}
+      >
+        {isBusy ? 'Upgrading…' : `Upgrade to v${p.version}`}
+      </button>
+    )
+  }
+  // Newer version exists but this Peckboard is too old for it.
+  if (p.installed && p.upgrade_available && !compatible) {
+    return (
+      <button
+        type="button"
+        className="plugin-approval-deny"
+        data-testid={testid}
+        data-action="incompatible"
+        disabled
+        title={needs}
+      >
+        Update needs Peckboard ≥ {p.min_peckboard}
+      </button>
+    )
+  }
+  // Installed and current.
+  if (p.installed) {
+    return (
+      <button
+        type="button"
+        className="plugin-approval-approve"
+        data-testid={testid}
+        data-action="installed"
+        disabled
+      >
+        Installed
+      </button>
+    )
+  }
+  // Not installed and this Peckboard is too old.
+  if (!compatible) {
+    return (
+      <button
+        type="button"
+        className="plugin-approval-approve"
+        data-testid={testid}
+        data-action="incompatible"
+        disabled
+        title={needs}
+      >
+        Needs Peckboard ≥ {p.min_peckboard}
+      </button>
+    )
+  }
+  // Not installed, compatible → Install.
+  return (
+    <button
+      type="button"
+      className="plugin-approval-approve"
+      data-testid={testid}
+      data-action="install"
+      disabled={isBusy}
+      onClick={() => install(p)}
+    >
+      {isBusy ? 'Installing…' : 'Install'}
+    </button>
+  )
+}
+
 function PluginsTab({
   data,
   query,
@@ -175,24 +260,26 @@ function PluginsTab({
                 <span className="wasm-plugin-name">
                   {p.name} <span className="wasm-plugin-version">v{p.version}</span>
                 </span>
-                {p.installed && (
+                {p.upgrade_available ? (
+                  <span
+                    className="plugin-badge plugin-badge--pending"
+                    data-testid={`registry-update-badge-${p.id}`}
+                  >
+                    Update available
+                  </span>
+                ) : p.installed ? (
                   <span className="plugin-badge plugin-badge--approved">Installed</span>
+                ) : null}
+              </div>
+              <div className="registry-plugin-source">
+                {p.repository_label}
+                {p.installed && p.installed_version && p.installed_version !== p.version && (
+                  <> · installed v{p.installed_version}</>
                 )}
               </div>
-              <div className="registry-plugin-source">{p.repository_label}</div>
               <p className="plugin-card-description">{p.description}</p>
               <HookList hooks={p.hooks} title="Hooks" />
-              <div className="wasm-plugin-actions">
-                <button
-                  type="button"
-                  className="plugin-approval-approve"
-                  data-testid={`registry-install-${p.id}`}
-                  disabled={p.installed || busy === p.id}
-                  onClick={() => install(p)}
-                >
-                  {p.installed ? 'Installed' : busy === p.id ? 'Installing…' : 'Install'}
-                </button>
-              </div>
+              <div className="wasm-plugin-actions">{renderAction(p, busy === p.id, install)}</div>
             </li>
           ))}
         </ul>

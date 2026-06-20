@@ -401,3 +401,140 @@ async fn put_settings_requires_auth() {
     let res = app.oneshot(req).await.unwrap();
     assert_eq!(res.status(), StatusCode::UNAUTHORIZED);
 }
+
+// ── Plugin upgrade / compatibility ────────────────────────────────────
+
+/// A stub registry server: replies to any request with `body` and loops so a
+/// fresh connection per fetch is fine. Returns its base `registry.json` URL.
+async fn spawn_stub_registry(body: &'static str) -> String {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpListener;
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        loop {
+            let Ok((mut sock, _)) = listener.accept().await else {
+                break;
+            };
+            let mut buf = [0u8; 2048];
+            // Drain the request line/headers (a GET has no body).
+            let _ = sock.read(&mut buf).await;
+            let resp = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
+                body.len(),
+                body
+            );
+            let _ = sock.write_all(resp.as_bytes()).await;
+            let _ = sock.shutdown().await;
+        }
+    });
+    format!("http://{addr}/registry.json")
+}
+
+/// Registry index with one entry that needs a far-future Peckboard
+/// (`min_peckboard: 99.0.0` → incompatible) and one with no floor (compatible).
+const STUB_INDEX: &str = r#"{
+  "schema_version": 1,
+  "plugins": [
+    {"id":"futuristic","name":"Futuristic","description":"needs a newer host",
+     "author":"a","version":"9.9.9","hooks":["mcp.tool.invoke"],
+     "url":"https://example.invalid/futuristic.wasm","sha256":"00","min_peckboard":"99.0.0"},
+    {"id":"compatible","name":"Compatible","description":"works anywhere",
+     "author":"a","version":"1.0.0","hooks":["mcp.tool.invoke"],
+     "url":"https://example.invalid/compatible.wasm","sha256":"00"}
+  ]
+}"#;
+
+#[tokio::test]
+async fn registry_endpoint_reports_compatibility_and_version() {
+    let (state, token) = build_state().await;
+    let url = spawn_stub_registry(STUB_INDEX).await;
+    state.db.add_plugin_repository(&url, "stub").await.unwrap();
+    let app = router(state.clone()).with_state(state.clone());
+
+    let req = Request::builder()
+        .uri("/api/plugins/registry")
+        .header(header::AUTHORIZATION, format!("Bearer {token}"))
+        .body(Body::empty())
+        .unwrap();
+    let res = app.oneshot(req).await.unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(res.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let json: Value = serde_json::from_slice(&body).unwrap();
+
+    // The running Peckboard version is surfaced so the UI can show "needs …".
+    assert!(
+        json["peckboard_version"]
+            .as_str()
+            .is_some_and(|v| !v.is_empty()),
+        "peckboard_version present: {json}"
+    );
+
+    let plugins = json["plugins"].as_array().expect("plugins array");
+    let by_id = |id: &str| plugins.iter().find(|p| p["id"] == id).cloned().unwrap();
+
+    let fut = by_id("futuristic");
+    assert_eq!(fut["compatible"], false, "99.0.0 floor → incompatible");
+    assert_eq!(fut["installed"], false);
+    assert_eq!(
+        fut["upgrade_available"], false,
+        "not installed → no upgrade"
+    );
+    assert_eq!(fut["min_peckboard"], "99.0.0");
+
+    let compat = by_id("compatible");
+    assert_eq!(compat["compatible"], true, "no floor → compatible");
+    assert!(compat["min_peckboard"].is_null());
+}
+
+#[tokio::test]
+async fn install_refuses_incompatible_but_passes_compatible_gate() {
+    let (state, token) = build_state().await;
+    let url = spawn_stub_registry(STUB_INDEX).await;
+    state.db.add_plugin_repository(&url, "stub").await.unwrap();
+
+    // Incompatible (min_peckboard 99.0.0) → refused at the compatibility gate,
+    // before any download, with 409 Conflict.
+    let app = router(state.clone()).with_state(state.clone());
+    let req = Request::builder()
+        .uri("/api/plugins/registry/install")
+        .method("POST")
+        .header(header::AUTHORIZATION, format!("Bearer {token}"))
+        .header("content-type", "application/json")
+        .body(Body::from(r#"{"id":"futuristic"}"#))
+        .unwrap();
+    let res = app.oneshot(req).await.unwrap();
+    assert_eq!(res.status(), StatusCode::CONFLICT);
+    let body = axum::body::to_bytes(res.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let json: Value = serde_json::from_slice(&body).unwrap();
+    assert!(
+        json["error"]
+            .as_str()
+            .unwrap()
+            .contains("requires Peckboard"),
+        "clear incompatibility error: {json}"
+    );
+
+    // Compatible (no floor) → passes the gate and proceeds to download, which
+    // fails against the bogus example.invalid URL (502). Proves the gate did
+    // NOT block a compatible plugin.
+    let app = router(state.clone()).with_state(state.clone());
+    let req = Request::builder()
+        .uri("/api/plugins/registry/install")
+        .method("POST")
+        .header(header::AUTHORIZATION, format!("Bearer {token}"))
+        .header("content-type", "application/json")
+        .body(Body::from(r#"{"id":"compatible"}"#))
+        .unwrap();
+    let res = app.oneshot(req).await.unwrap();
+    assert_eq!(
+        res.status(),
+        StatusCode::BAD_GATEWAY,
+        "compatible plugin passes the gate and fails only at download"
+    );
+}

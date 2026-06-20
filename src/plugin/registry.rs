@@ -80,6 +80,43 @@ pub struct RegistryEntry {
     pub hooks: Vec<String>,
     pub url: String,
     pub sha256: String,
+    /// Optional minimum Peckboard version this plugin supports (semver). The
+    /// install/upgrade is refused, and the UI gates the button, when the
+    /// running Peckboard is older. Absent ⇒ no floor declared ⇒ compatible.
+    #[serde(default)]
+    pub min_peckboard: Option<String>,
+}
+
+/// The running Peckboard version (the core crate's compile-time version).
+pub fn peckboard_version() -> &'static str {
+    env!("CARGO_PKG_VERSION")
+}
+
+/// Whether the running Peckboard satisfies a registry entry's `min_peckboard`
+/// floor. No floor (or a blank one) ⇒ always compatible. Fail-open on an
+/// unparseable version on *either* side: the floor is advisory metadata, and
+/// the sha256 + hook-approval gates are the real guards — a typo in the index
+/// must not be able to brick an otherwise-valid install.
+pub fn is_compatible(running: &str, min_peckboard: Option<&str>) -> bool {
+    let Some(min) = min_peckboard.map(str::trim).filter(|s| !s.is_empty()) else {
+        return true;
+    };
+    match (semver::Version::parse(running), semver::Version::parse(min)) {
+        (Ok(run), Ok(floor)) => run >= floor,
+        _ => true,
+    }
+}
+
+/// Whether `candidate` is a strictly newer semver than `installed` — i.e. an
+/// upgrade is on offer. Unparseable on either side ⇒ no upgrade offered.
+pub fn is_newer(candidate: &str, installed: &str) -> bool {
+    match (
+        semver::Version::parse(candidate),
+        semver::Version::parse(installed),
+    ) {
+        (Ok(c), Ok(i)) => c > i,
+        _ => false,
+    }
 }
 
 /// Fetch and parse the registry index from `url`.
@@ -146,6 +183,52 @@ mod tests {
         assert!(checksum_matches(bytes, upper)); // case-insensitive
         assert!(!checksum_matches(bytes, "deadbeef")); // wrong
         assert!(!checksum_matches(b"world", &sha256_hex(bytes))); // wrong bytes
+    }
+
+    #[test]
+    fn is_compatible_respects_min_floor_and_fails_open() {
+        // No floor declared → always compatible.
+        assert!(is_compatible("0.1.0", None));
+        assert!(is_compatible("0.1.0", Some("   ")));
+        // Running meets or exceeds the floor.
+        assert!(is_compatible("0.2.0", Some("0.2.0")));
+        assert!(is_compatible("0.3.0", Some("0.2.0")));
+        // Running is below the floor → incompatible.
+        assert!(!is_compatible("0.1.0", Some("0.2.0")));
+        // Fail-open: an unparseable floor (or running version) is ignored
+        // rather than bricking an otherwise-valid install.
+        assert!(is_compatible("0.1.0", Some("not-a-version")));
+        assert!(is_compatible("dev", Some("0.2.0")));
+    }
+
+    #[test]
+    fn is_newer_only_on_strict_semver_increase() {
+        assert!(is_newer("0.2.1", "0.2.0"));
+        assert!(is_newer("1.0.0", "0.9.9"));
+        assert!(!is_newer("0.2.0", "0.2.0")); // same version → no upgrade
+        assert!(!is_newer("0.1.0", "0.2.0")); // older → no downgrade offer
+        assert!(!is_newer("garbage", "0.2.0")); // unparseable → no offer
+    }
+
+    #[test]
+    fn min_peckboard_is_optional_in_the_index() {
+        // An entry without `min_peckboard` parses (backward compatible) and
+        // reads as `None`; a present value round-trips.
+        let without: RegistryEntry = serde_json::from_value(serde_json::json!({
+            "id": "x", "name": "X", "description": "d", "author": "a",
+            "version": "1.0.0", "hooks": ["h"], "url": "https://e/x.wasm",
+            "sha256": "00",
+        }))
+        .unwrap();
+        assert_eq!(without.min_peckboard, None);
+
+        let with: RegistryEntry = serde_json::from_value(serde_json::json!({
+            "id": "x", "name": "X", "description": "d", "author": "a",
+            "version": "1.0.0", "hooks": ["h"], "url": "https://e/x.wasm",
+            "sha256": "00", "min_peckboard": "0.2.0",
+        }))
+        .unwrap();
+        assert_eq!(with.min_peckboard.as_deref(), Some("0.2.0"));
     }
 
     #[test]

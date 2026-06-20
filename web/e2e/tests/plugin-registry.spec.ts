@@ -163,6 +163,117 @@ test('back to plugins returns to the Plugins modal', async ({ request, page, bas
   await expect(page.getByTestId('plugins-modal')).toBeVisible()
 })
 
+/**
+ * Mock a registry with two already-installed plugins that each have a newer
+ * version on offer: one the running Peckboard is compatible with (upgradable),
+ * one gated behind a future Peckboard (blocked). Installing the upgradable one
+ * bumps its installed version so the row settles to "Installed".
+ */
+async function mockUpgradeRegistry(page: Page) {
+  const state = {
+    upgradableInstalled: '1.0.0',
+    upgradableLatest: '1.1.0',
+    lastInstall: null as { id?: string } | null,
+  }
+
+  await page.route('**/api/plugins', async (route) => {
+    await route.fulfill({
+      contentType: 'application/json',
+      body: JSON.stringify({ plugins: [], ui_panels: [], wasm_plugins: [] }),
+    })
+  })
+
+  await page.route('**/api/plugins/registry', async (route) => {
+    const upgradeAvailable = state.upgradableInstalled !== state.upgradableLatest
+    await route.fulfill({
+      contentType: 'application/json',
+      body: JSON.stringify({
+        peckboard_version: '0.1.0',
+        repositories: [{ url: REPO_URL, label: 'PeckBoard/plugins', removable: true, ok: true }],
+        plugins: [
+          {
+            id: 'upgradable',
+            name: 'Upgradable',
+            description: 'A newer compatible version is available.',
+            author: 'PeckBoard',
+            version: state.upgradableLatest,
+            hooks: ['mcp.tool.invoke'],
+            repository: REPO_URL,
+            repository_label: 'PeckBoard/plugins',
+            installed: true,
+            installed_version: state.upgradableInstalled,
+            min_peckboard: null,
+            compatible: true,
+            upgrade_available: upgradeAvailable,
+          },
+          {
+            id: 'blocked',
+            name: 'Blocked',
+            description: 'A newer version needs a newer Peckboard.',
+            author: 'PeckBoard',
+            version: '3.0.0',
+            hooks: ['mcp.tool.invoke'],
+            repository: REPO_URL,
+            repository_label: 'PeckBoard/plugins',
+            installed: true,
+            installed_version: '2.0.0',
+            min_peckboard: '99.0.0',
+            compatible: false,
+            upgrade_available: true,
+          },
+        ],
+      }),
+    })
+  })
+
+  await page.route('**/api/plugins/registry/install', async (route) => {
+    state.lastInstall = route.request().postDataJSON() as { id?: string }
+    if (state.lastInstall?.id === 'upgradable') {
+      state.upgradableInstalled = state.upgradableLatest
+    }
+    await route.fulfill({
+      contentType: 'application/json',
+      body: JSON.stringify({ plugin: { name: 'upgradable', hooks: [], status: 'pending' } }),
+    })
+  })
+
+  return state
+}
+
+test('upgrades a compatible plugin and blocks an incompatible one', async ({
+  request,
+  page,
+  baseURL,
+}) => {
+  expect(baseURL).toBeTruthy()
+  const token = await authenticate(request)
+  const state = await mockUpgradeRegistry(page)
+
+  await loadAppAt(page, token, '/plugin-registry')
+  await expect(page.getByTestId('plugin-registry-modal')).toBeVisible({ timeout: 10_000 })
+
+  // Compatible newer version → an enabled "Upgrade to vX" + "Update available".
+  const upgradeBtn = page.getByTestId('registry-install-upgradable')
+  await expect(upgradeBtn).toHaveText('Upgrade to v1.1.0')
+  await expect(upgradeBtn).toHaveAttribute('data-action', 'upgrade')
+  await expect(upgradeBtn).toBeEnabled()
+  await expect(page.getByTestId('registry-update-badge-upgradable')).toBeVisible()
+
+  // Incompatible newer version → disabled, and it names the required version.
+  const blockedBtn = page.getByTestId('registry-install-blocked')
+  await expect(blockedBtn).toHaveAttribute('data-action', 'incompatible')
+  await expect(blockedBtn).toBeDisabled()
+  await expect(blockedBtn).toContainText('99.0.0')
+
+  // Upgrading posts the id, re-fetches, and the row settles to Installed with
+  // the "Update available" badge gone.
+  await upgradeBtn.click()
+  await expect(page.getByTestId('registry-install-upgradable')).toHaveText('Installed')
+  await expect(page.getByTestId('registry-install-upgradable')).toBeDisabled()
+  await expect(page.getByTestId('registry-update-badge-upgradable')).toHaveCount(0)
+  expect(state.lastInstall?.id).toBe('upgradable')
+})
+
 test('repositories tab adds and removes a repository', async ({ request, page, baseURL }) => {
   expect(baseURL).toBeTruthy()
   const token = await authenticate(request)

@@ -57,6 +57,7 @@ dirs = "6"
 jsonwebtoken = { version = "10.4.0", features = ["rust_crypto"] }
 sha2 = "0.11.0"
 hex = "0.4.3"
+semver = "1"
 futures-util = "0.3.32"
 hyper-util = { version = "0.1", features = ["tokio", "server-auto", "service"] }
 rustls = "0.23.40"

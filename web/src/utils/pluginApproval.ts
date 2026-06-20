@@ -190,6 +190,14 @@ export interface RegistryPlugin {
   repository_label: string
   /** Whether a plugin with this id is already loaded in this instance. */
   installed: boolean
+  /** Version of the loaded plugin, when installed (for the upgrade delta). */
+  installed_version?: string | null
+  /** Minimum Peckboard version this entry declares, if any. */
+  min_peckboard?: string | null
+  /** Whether the running Peckboard satisfies `min_peckboard`. */
+  compatible?: boolean
+  /** Installed AND the registry version is strictly newer than what's loaded. */
+  upgrade_available?: boolean
 }
 
 /** One configured registry repository plus its reachability this fetch. */
@@ -207,6 +215,8 @@ export interface RegistryRepo {
 export interface RegistryData {
   repositories: RegistryRepo[]
   plugins: RegistryPlugin[]
+  /** The running Peckboard version, for "needs Peckboard ≥ X" messaging. */
+  peckboard_version?: string
 }
 
 /** Fetch the aggregated registry across all repositories. */
@@ -217,7 +227,11 @@ export async function fetchRegistry(): Promise<RegistryData> {
     throw new Error(body?.error ?? `HTTP ${res.status}`)
   }
   const data = (await res.json()) as Partial<RegistryData>
-  return { repositories: data.repositories ?? [], plugins: data.plugins ?? [] }
+  return {
+    repositories: data.repositories ?? [],
+    plugins: data.plugins ?? [],
+    peckboard_version: data.peckboard_version,
+  }
 }
 
 /** Add a registry repository (an `owner/repo` slug or an https URL). */

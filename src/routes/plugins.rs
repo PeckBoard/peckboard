@@ -357,13 +357,16 @@ async fn list_registry(State(state): State<Arc<AppState>>) -> impl IntoResponse 
         }
     };
 
-    let installed: std::collections::HashSet<String> = state
+    // Installed wasm plugins, keyed name → version, so each registry entry can
+    // be tagged with the installed version and whether a newer one is on offer.
+    let installed: std::collections::HashMap<String, String> = state
         .plugins
         .wasm_plugins()
         .await
         .into_iter()
-        .map(|p| p.name)
+        .map(|p| (p.name, p.version))
         .collect();
+    let running = registry::peckboard_version();
 
     let client = reqwest::Client::new();
     let mut repo_statuses = Vec::new();
@@ -375,6 +378,14 @@ async fn list_registry(State(state): State<Arc<AppState>>) -> impl IntoResponse 
                     "label": label, "url": url, "removable": removable, "ok": true,
                 }));
                 for e in index.plugins {
+                    let installed_version = installed.get(&e.id).cloned();
+                    let compatible = registry::is_compatible(running, e.min_peckboard.as_deref());
+                    // An upgrade is offered only when installed AND the index
+                    // version is strictly newer than what's loaded.
+                    let upgrade_available = installed_version
+                        .as_deref()
+                        .map(|iv| registry::is_newer(&e.version, iv))
+                        .unwrap_or(false);
                     plugins.push(serde_json::json!({
                         "id": e.id,
                         "name": e.name,
@@ -385,7 +396,11 @@ async fn list_registry(State(state): State<Arc<AppState>>) -> impl IntoResponse 
                         "hooks": e.hooks,
                         "repository": url,
                         "repository_label": label,
-                        "installed": installed.contains(&e.id),
+                        "installed": installed_version.is_some(),
+                        "installed_version": installed_version,
+                        "min_peckboard": e.min_peckboard,
+                        "compatible": compatible,
+                        "upgrade_available": upgrade_available,
                     }));
                 }
             }
@@ -401,6 +416,7 @@ async fn list_registry(State(state): State<Arc<AppState>>) -> impl IntoResponse 
     Ok(Json(serde_json::json!({
         "repositories": repo_statuses,
         "plugins": plugins,
+        "peckboard_version": running,
     })))
 }
 
@@ -467,6 +483,22 @@ async fn install_registry(
             Json(serde_json::json!({ "error": format!("no plugin '{id}' in the registry") })),
         ));
     };
+
+    // Refuse an install/upgrade the running Peckboard can't support. The UI
+    // already greys the button out; this is the matching server-side guard so
+    // a direct API call can't bypass the floor.
+    let running = registry::peckboard_version();
+    if !registry::is_compatible(running, entry.min_peckboard.as_deref()) {
+        return Err((
+            StatusCode::CONFLICT,
+            Json(serde_json::json!({
+                "error": format!(
+                    "plugin '{id}' requires Peckboard >= {} (running {running})",
+                    entry.min_peckboard.as_deref().unwrap_or("?"),
+                ),
+            })),
+        ));
+    }
 
     // Download + integrity-check against the index's sha256.
     let bytes = match registry::download_and_verify(&client, &entry.url, &entry.sha256).await {
