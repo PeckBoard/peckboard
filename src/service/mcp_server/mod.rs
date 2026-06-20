@@ -87,6 +87,8 @@ impl McpToolRegistry {
             "list_project_reports" => self.handle_list_project_reports(ctx).await,
             "read_report" => self.handle_read_report(args, ctx).await,
             "read_worker_session" => self.handle_read_worker_session(args, ctx).await,
+            "search_sessions" => self.handle_search_sessions(args, ctx).await,
+            "list_sessions" => self.handle_list_sessions(ctx).await,
             "list_worker_sessions" => self.handle_list_worker_sessions(ctx).await,
             "share_finding" => self.handle_share_finding(args, ctx).await,
             "get_finding_details" => self.handle_get_finding_details(args, ctx).await,
@@ -380,7 +382,9 @@ mod tests {
         assert!(names.contains(&"create_repeating_task"));
         assert!(names.contains(&"update_repeating_task"));
         assert!(names.contains(&"delete_repeating_task"));
-        assert_eq!(names.len(), 38);
+        assert!(names.contains(&"search_sessions"));
+        assert!(names.contains(&"list_sessions"));
+        assert_eq!(names.len(), 40);
     }
 
     #[test]

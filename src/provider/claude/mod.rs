@@ -314,6 +314,10 @@ pub fn build_cli_args(config: &SpawnConfig, conversation_id: Option<&str>) -> Ve
             "read_report",
             "read_worker_session",
             "list_worker_sessions",
+            // Cross-session debug tools — available to every session
+            // (chat included) for reading/grepping other sessions.
+            "list_sessions",
+            "search_sessions",
             "list_models",
         ];
         let allowed: Vec<String> = full_mcp_tools

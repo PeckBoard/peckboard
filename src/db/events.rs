@@ -151,6 +151,39 @@ impl Db {
         .await
     }
 
+    /// Pull the most recent `scan_limit` events (by `ts` descending) across
+    /// one or more sessions, optionally restricted to a set of event kinds.
+    /// Returned newest-first. This is the SQL coarse filter behind the
+    /// `search_worker_session` MCP tool — substring matching and
+    /// errors-only refinement are applied by the caller in Rust so the
+    /// grep semantics stay exact (case-insensitive literal `contains`)
+    /// rather than depending on SQL `LIKE` wildcard/escaping behaviour.
+    pub async fn search_session_events(
+        &self,
+        session_ids: Vec<String>,
+        kinds: Option<Vec<String>>,
+        scan_limit: i64,
+    ) -> anyhow::Result<Vec<Event>> {
+        if session_ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        self.with_conn(move |conn| {
+            let mut query = events::table
+                .filter(events::session_id.eq_any(session_ids))
+                .into_boxed();
+            if let Some(kinds) = kinds {
+                query = query.filter(events::kind.eq_any(kinds));
+            }
+            query
+                .select(Event::as_select())
+                .order(events::ts.desc())
+                .limit(scan_limit)
+                .load(conn)
+                .map_err(Into::into)
+        })
+        .await
+    }
+
     /// Get a single event by its ID.
     pub async fn get_event(&self, event_id: &str) -> anyhow::Result<Option<Event>> {
         let event_id = event_id.to_string();
