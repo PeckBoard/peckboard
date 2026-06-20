@@ -62,16 +62,21 @@ pub const ALLOWED_HOOKS: &[&str] = &[
 /// Each maps to one or more host functions in `src/plugin/host.rs` (or a
 /// manifest capability) that refuse unless the permission was granted.
 pub const ALLOWED_PERMISSIONS: &[&str] = &[
-    "broadcast",          // peckboard_broadcast — push a namespaced ws event
+    "ask_user",  // peckboard_ask_user / peckboard_get_answer — prompt the caller's user
+    "broadcast", // peckboard_broadcast — push a namespaced ws event
     "contribute_sidebar", // declare sidebar_items
-    "data_store",         // peckboard_store_* — plugin-owned document store
-    "event_append",       // peckboard_append_event
+    "data_store", // peckboard_store_* — plugin-owned document store
+    "event_append", // peckboard_append_event
+    "http_fetch", // peckboard_http_fetch — outbound public-web GET/HEAD
+    "process_exec", // peckboard_exec — run an allowlisted command in the caller's folder
+    "process_exec_any", // peckboard_exec_any — run ANY folder-contained command (after approval)
     "project_files_read", // peckboard_list_project_files / read_file
-    "provide_mcp_tools",  // declare mcp_tools (mcp.tool.invoke)
-    "session_dispatch",   // peckboard_dispatch_capture / resume_session
-    "session_read",       // peckboard_get_session / list_sessions
-    "session_write",      // peckboard_create_session / update_session
-    "user_authority",     // serve authenticated UI + act under the user (ui_routes)
+    "project_files_write", // peckboard_write_file
+    "provide_mcp_tools", // declare mcp_tools (mcp.tool.invoke)
+    "session_dispatch", // peckboard_dispatch_capture / resume_session
+    "session_read", // peckboard_get_session / list_sessions
+    "session_write", // peckboard_create_session / update_session
+    "user_authority", // serve authenticated UI + act under the user (ui_routes)
 ];
 
 /// Whether an operator has approved the set of hooks a loaded plugin
