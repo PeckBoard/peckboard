@@ -1,7 +1,65 @@
 use serde_json::Value;
 
 use super::super::McpToolRegistry;
+use crate::db::models::Event;
 use crate::service::mcp_server::context::ToolCallContext;
+
+/// Condense one stored event into the compact shape returned by
+/// `read_worker_session` / `search_worker_session`. Keeps the
+/// debug-relevant fields per kind and drops the rest so a reader doesn't
+/// have to wade through full provider payloads.
+fn summarize_event(e: &Event) -> Value {
+    let data: Value = serde_json::from_str(&e.data).unwrap_or_default();
+    let mut entry = serde_json::json!({
+        "seq": e.seq,
+        "kind": e.kind,
+        "ts": e.ts,
+    });
+    match e.kind.as_str() {
+        "user" | "agent-text" => {
+            entry["text"] = data.get("text").cloned().unwrap_or_default();
+        }
+        "agent-tool-start" => {
+            entry["tool"] = data.get("name").cloned().unwrap_or_default();
+            entry["input"] = data.get("input").cloned().unwrap_or_default();
+        }
+        "agent-tool-end" => {
+            entry["tool"] = data.get("name").cloned().unwrap_or_default();
+            entry["error"] = data.get("error").cloned().unwrap_or_default();
+        }
+        "agent-start" => {
+            entry["model"] = data.get("model").cloned().unwrap_or_default();
+        }
+        "agent-end" => {
+            entry["status"] = data.get("status").cloned().unwrap_or_default();
+            entry["reason"] = data.get("reason").cloned().unwrap_or_default();
+        }
+        _ => {
+            entry["data"] = data;
+        }
+    }
+    entry
+}
+
+/// True if an event represents an error/failure: a top-level `error`
+/// event, a tool call that returned a non-null `error`, or an agent run
+/// that ended `crashed`. Used by `search_worker_session`'s `errors_only`
+/// filter so a reader can pull just the failures out of a long session.
+fn event_is_error(e: &Event) -> bool {
+    if e.kind == "error" {
+        return true;
+    }
+    let data: Value = serde_json::from_str(&e.data).unwrap_or_default();
+    match e.kind.as_str() {
+        "agent-tool-end" => data.get("error").map(|v| !v.is_null()).unwrap_or(false),
+        "agent-end" => data
+            .get("status")
+            .and_then(|v| v.as_str())
+            .map(|s| s.eq_ignore_ascii_case("crashed") || s.eq_ignore_ascii_case("error"))
+            .unwrap_or(false),
+        _ => false,
+    }
+}
 
 impl McpToolRegistry {
     pub(crate) async fn handle_notify_workers(
@@ -352,11 +410,44 @@ impl McpToolRegistry {
 
         tracing::info!(session_id = %ctx.session_id, target = %target_session_id, "MCP tool: read_worker_session");
 
-        // Folder boundary first: a foreign-folder session must look
-        // exactly like a non-existent id — no 403 leak. We also enforce
-        // the project boundary for worker tokens (token has a project,
-        // target must match) to keep the prior semantics, but the folder
-        // check is the primary guard.
+        let target_session = self.scope_readable_session(ctx, target_session_id).await?;
+
+        let card_title = if let Some(ref cid) = target_session.card_id {
+            ctx.db.get_card(cid).await.ok().flatten().map(|c| c.title)
+        } else {
+            None
+        };
+
+        let events = ctx.db.events_tail(target_session_id, last_n).await?;
+
+        let summary: Vec<Value> = events.iter().map(summarize_event).collect();
+
+        Ok(serde_json::json!({
+            "status": "ok",
+            "session_id": target_session_id,
+            "session_name": target_session.name,
+            "card_title": card_title,
+            "is_worker": target_session.is_worker,
+            "event_count": summary.len(),
+            "events": summary,
+        }))
+    }
+
+    /// Resolve a target session the caller is allowed to read, enforcing
+    /// the same boundary `read_worker_session` has always used:
+    ///
+    /// 1. Folder boundary first — a session in another folder must look
+    ///    exactly like a non-existent id (no 403 existence leak).
+    /// 2. Project boundary for worker tokens — a token scoped to project A
+    ///    can only reach sessions in project A.
+    ///
+    /// Returns "not found" framing on every rejection so a caller can't
+    /// probe for sessions outside its scope by guessing ids.
+    async fn scope_readable_session(
+        &self,
+        ctx: &ToolCallContext,
+        target_session_id: &str,
+    ) -> anyhow::Result<crate::db::models::Session> {
         let target_session = ctx
             .db
             .get_session(target_session_id)
@@ -368,61 +459,175 @@ impl McpToolRegistry {
         if my_project.is_some() && target_session.project_id != my_project {
             anyhow::bail!("session not found: {target_session_id}");
         }
+        Ok(target_session)
+    }
 
-        let card_title = if let Some(ref cid) = target_session.card_id {
-            ctx.db.get_card(cid).await.ok().flatten().map(|c| c.title)
-        } else {
-            None
+    /// Every session the caller may read: all sessions in the caller's
+    /// folder, narrowed to the caller's project when the token is
+    /// project-scoped. Mirrors the boundary in [`Self::scope_readable_session`]
+    /// for the "search across all sessions" path of `search_worker_session`.
+    async fn readable_sessions_in_scope(
+        &self,
+        ctx: &ToolCallContext,
+    ) -> anyhow::Result<Vec<crate::db::models::Session>> {
+        let mut sessions = ctx.db.list_sessions_by_folder(&ctx.folder_id).await?;
+        let my_project = self.resolve_project_id(ctx).await;
+        if my_project.is_some() {
+            sessions.retain(|s| s.project_id == my_project);
+        }
+        Ok(sessions)
+    }
+
+    pub(crate) async fn handle_search_sessions(
+        &self,
+        args: Value,
+        ctx: &ToolCallContext,
+    ) -> anyhow::Result<Value> {
+        // How many recent events to pull from the DB before refining in
+        // Rust. Bounds the work for very long sessions; matches older than
+        // this window aren't returned (reported via `scan_truncated`).
+        const SCAN_LIMIT: i64 = 2000;
+
+        let query = args
+            .get("query")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_lowercase());
+        let errors_only = args
+            .get("errors_only")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+        let kinds: Option<Vec<String>> = args.get("kinds").and_then(|v| v.as_array()).map(|arr| {
+            arr.iter()
+                .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                .collect()
+        });
+        let limit = args
+            .get("limit")
+            .and_then(|v| v.as_i64())
+            .unwrap_or(50)
+            .clamp(1, 200) as usize;
+
+        // Require at least one filter — this tool exists to avoid reading
+        // an entire session, so an unfiltered "dump everything" is refused.
+        // Use read_worker_session for a plain tail instead.
+        if query.is_none() && !errors_only && kinds.is_none() {
+            anyhow::bail!(
+                "search_sessions requires at least one of 'query', 'errors_only', or 'kinds'. Use read_worker_session for a plain tail."
+            );
+        }
+
+        let target_session_id = args.get("session_id").and_then(|v| v.as_str());
+        tracing::info!(
+            session_id = %ctx.session_id,
+            target = %target_session_id.unwrap_or("<all>"),
+            "MCP tool: search_sessions"
+        );
+
+        // Resolve the set of sessions to search, enforcing the read boundary.
+        let targets = match target_session_id {
+            Some(id) => vec![self.scope_readable_session(ctx, id).await?],
+            None => self.readable_sessions_in_scope(ctx).await?,
         };
-
-        let events = ctx.db.events_tail(target_session_id, last_n).await?;
-
-        let summary: Vec<Value> = events
+        let names: std::collections::HashMap<String, String> = targets
             .iter()
-            .map(|e| {
-                let data: Value = serde_json::from_str(&e.data).unwrap_or_default();
-                let mut entry = serde_json::json!({
-                    "seq": e.seq,
-                    "kind": e.kind,
-                    "ts": e.ts,
-                });
-                // Include key fields based on event kind
-                match e.kind.as_str() {
-                    "user" => {
-                        entry["text"] = data.get("text").cloned().unwrap_or_default();
-                    }
-                    "agent-text" => {
-                        entry["text"] = data.get("text").cloned().unwrap_or_default();
-                    }
-                    "agent-tool-start" => {
-                        entry["tool"] = data.get("name").cloned().unwrap_or_default();
-                        entry["input"] = data.get("input").cloned().unwrap_or_default();
-                    }
-                    "agent-tool-end" => {
-                        entry["error"] = data.get("error").cloned().unwrap_or_default();
-                    }
-                    "agent-start" => {
-                        entry["model"] = data.get("model").cloned().unwrap_or_default();
-                    }
-                    "agent-end" => {
-                        entry["status"] = data.get("status").cloned().unwrap_or_default();
-                    }
-                    _ => {
-                        entry["data"] = data;
-                    }
-                }
-                entry
-            })
+            .map(|s| (s.id.clone(), s.name.clone()))
             .collect();
+        let session_ids: Vec<String> = targets.iter().map(|s| s.id.clone()).collect();
+
+        // Push the kind filter to SQL. When only `errors_only` is set,
+        // restrict to the kinds that can carry an error so the scan window
+        // covers more failures.
+        let sql_kinds = kinds.clone().or_else(|| {
+            errors_only.then(|| {
+                vec![
+                    "error".to_string(),
+                    "agent-tool-end".to_string(),
+                    "agent-end".to_string(),
+                ]
+            })
+        });
+
+        let events = ctx
+            .db
+            .search_session_events(session_ids, sql_kinds, SCAN_LIMIT)
+            .await?;
+        let scan_truncated = events.len() as i64 >= SCAN_LIMIT;
+
+        let mut matches: Vec<Value> = Vec::new();
+        for e in &events {
+            if errors_only && !event_is_error(e) {
+                continue;
+            }
+            if let Some(ref q) = query {
+                // Match against the raw event payload plus its kind so a
+                // search hits text, tool names, inputs, and error strings.
+                let hay = format!("{} {}", e.kind, e.data).to_lowercase();
+                if !hay.contains(q) {
+                    continue;
+                }
+            }
+            let mut entry = summarize_event(e);
+            entry["session_id"] = serde_json::json!(e.session_id);
+            entry["session_name"] = serde_json::json!(names.get(&e.session_id));
+            matches.push(entry);
+            if matches.len() >= limit {
+                break;
+            }
+        }
 
         Ok(serde_json::json!({
             "status": "ok",
-            "session_id": target_session_id,
-            "session_name": target_session.name,
-            "card_title": card_title,
-            "is_worker": target_session.is_worker,
-            "event_count": summary.len(),
-            "events": summary,
+            "scope": target_session_id.map(|_| "session").unwrap_or("all_readable_sessions"),
+            "sessions_searched": targets.len(),
+            "match_count": matches.len(),
+            "truncated": matches.len() >= limit,
+            "scan_truncated": scan_truncated,
+            "matches": matches,
+        }))
+    }
+
+    pub(crate) async fn handle_list_sessions(
+        &self,
+        ctx: &ToolCallContext,
+    ) -> anyhow::Result<Value> {
+        tracing::info!(session_id = %ctx.session_id, "MCP tool: list_sessions");
+
+        // Every session the caller may read — chat, worker, and expert
+        // alike. For a chat session this is its whole folder; for a worker
+        // token it's the token's project. Used to discover sessions to
+        // read/search for debugging.
+        let mut sessions = self.readable_sessions_in_scope(ctx).await?;
+        sessions.sort_by(|a, b| b.last_activity.cmp(&a.last_activity));
+
+        let mut items = Vec::new();
+        for s in &sessions {
+            let kind = if s.is_expert {
+                "expert"
+            } else if s.is_worker {
+                "worker"
+            } else {
+                "chat"
+            };
+            let card_title = if let Some(ref cid) = s.card_id {
+                ctx.db.get_card(cid).await.ok().flatten().map(|c| c.title)
+            } else {
+                None
+            };
+            items.push(serde_json::json!({
+                "session_id": s.id,
+                "session_name": s.name,
+                "kind": kind,
+                "project_id": s.project_id,
+                "card_title": card_title,
+                "is_current": s.id == ctx.session_id,
+                "last_activity": s.last_activity,
+            }));
+        }
+
+        Ok(serde_json::json!({
+            "status": "ok",
+            "sessions": items,
+            "count": items.len(),
         }))
     }
 

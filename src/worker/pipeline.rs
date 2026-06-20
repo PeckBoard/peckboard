@@ -145,6 +145,11 @@ pub fn build_worker_prompt(
          understand their work, see their tool calls, and review decisions. Requires session_id.\n",
     );
     prompt.push_str(
+        "- `mcp__peckboard__search_sessions` — Grep another session's history for a keyword or \
+         pull only its errors/failures, instead of reading the whole transcript. Omit session_id \
+         to search across every session at once (e.g. \"which session hit this error?\").\n",
+    );
+    prompt.push_str(
         "- `mcp__peckboard__list_project_reports` — List all reports written by workers in this \
          project. See what other workers have documented.\n",
     );

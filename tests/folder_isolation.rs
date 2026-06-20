@@ -306,6 +306,177 @@ async fn read_worker_session_cross_folder_is_not_found() {
     assert!(err.to_string().contains("not found"), "got: {err}");
 }
 
+// ── search_sessions / list_sessions ─────────────────────────────────
+
+#[tokio::test]
+async fn search_sessions_cross_folder_is_not_found() {
+    let db = Arc::new(Db::in_memory().unwrap());
+    two_folders_two_projects(&db).await;
+    seed_session(&db, "chat-f1", "f1", None, false, false, None).await;
+    seed_session(&db, "w-f2", "f2", Some("p2"), true, false, None).await;
+    let registry = McpToolRegistry::new();
+
+    let err = registry
+        .handle_tool_call(
+            "search_sessions",
+            serde_json::json!({ "session_id": "w-f2", "query": "boom" }),
+            &ctx(&db, "chat-f1", "f1", None),
+        )
+        .await
+        .unwrap_err();
+    assert!(err.to_string().contains("not found"), "got: {err}");
+}
+
+#[tokio::test]
+async fn search_sessions_requires_a_filter() {
+    let db = Arc::new(Db::in_memory().unwrap());
+    two_folders_two_projects(&db).await;
+    seed_session(&db, "chat-f1", "f1", None, false, false, None).await;
+    seed_session(&db, "w-f1", "f1", Some("p1"), true, false, None).await;
+    let registry = McpToolRegistry::new();
+
+    let err = registry
+        .handle_tool_call(
+            "search_sessions",
+            serde_json::json!({ "session_id": "w-f1" }),
+            &ctx(&db, "chat-f1", "f1", None),
+        )
+        .await
+        .unwrap_err();
+    assert!(err.to_string().contains("at least one"), "got: {err}");
+}
+
+#[tokio::test]
+async fn search_sessions_greps_a_chat_session_and_filters_errors() {
+    // A chat session debugging *another chat session* — the case the
+    // worker-only framing didn't serve.
+    let db = Arc::new(Db::in_memory().unwrap());
+    seed_folder(&db, "f1").await;
+    seed_session(&db, "chat-a", "f1", None, false, false, None).await;
+    seed_session(&db, "chat-b", "f1", None, false, false, None).await;
+
+    // chat-b's transcript: plain text, a failed tool call, a clean one.
+    db.append_event(
+        "chat-b",
+        "agent-text",
+        serde_json::json!({ "text": "all good here" }),
+    )
+    .await
+    .unwrap();
+    db.append_event(
+        "chat-b",
+        "agent-tool-end",
+        serde_json::json!({ "name": "Bash", "error": "boom: command failed" }),
+    )
+    .await
+    .unwrap();
+    db.append_event(
+        "chat-b",
+        "agent-tool-end",
+        serde_json::json!({ "name": "Read", "error": null }),
+    )
+    .await
+    .unwrap();
+
+    let registry = McpToolRegistry::new();
+    let caller = ctx(&db, "chat-a", "f1", None);
+
+    // Grep for a keyword — only the matching event comes back.
+    let grep = registry
+        .handle_tool_call(
+            "search_sessions",
+            serde_json::json!({ "session_id": "chat-b", "query": "boom" }),
+            &caller,
+        )
+        .await
+        .unwrap();
+    assert_eq!(grep["match_count"], 1);
+    assert_eq!(grep["matches"][0]["kind"], "agent-tool-end");
+    assert_eq!(grep["matches"][0]["session_id"], "chat-b");
+
+    // errors_only — pulls the failed tool call but not the clean one or text.
+    let errs = registry
+        .handle_tool_call(
+            "search_sessions",
+            serde_json::json!({ "session_id": "chat-b", "errors_only": true }),
+            &caller,
+        )
+        .await
+        .unwrap();
+    assert_eq!(errs["match_count"], 1);
+    assert_eq!(errs["matches"][0]["error"], "boom: command failed");
+}
+
+#[tokio::test]
+async fn search_sessions_across_all_sessions_in_a_folder() {
+    // A chat session with no project searches every session in its folder —
+    // chat and worker alike — but never crosses the folder boundary.
+    let db = Arc::new(Db::in_memory().unwrap());
+    two_folders_two_projects(&db).await;
+    seed_session(&db, "chat-f1", "f1", None, false, false, None).await;
+    seed_session(&db, "w-f1", "f1", Some("p1"), true, false, None).await;
+    seed_session(&db, "w-other", "f2", Some("p2"), true, false, None).await;
+    for sid in ["chat-f1", "w-f1", "w-other"] {
+        db.append_event(
+            sid,
+            "agent-text",
+            serde_json::json!({ "text": "needle found" }),
+        )
+        .await
+        .unwrap();
+    }
+
+    let registry = McpToolRegistry::new();
+    let res = registry
+        .handle_tool_call(
+            "search_sessions",
+            serde_json::json!({ "query": "needle" }),
+            &ctx(&db, "chat-f1", "f1", None),
+        )
+        .await
+        .unwrap();
+    let sessions: Vec<&str> = res["matches"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|m| m["session_id"].as_str().unwrap())
+        .collect();
+    assert!(sessions.contains(&"chat-f1") && sessions.contains(&"w-f1"));
+    assert!(!sessions.contains(&"w-other"), "must not cross folders");
+}
+
+#[tokio::test]
+async fn list_sessions_for_chat_caller_lists_folder_sessions_by_kind() {
+    let db = Arc::new(Db::in_memory().unwrap());
+    two_folders_two_projects(&db).await;
+    seed_session(&db, "chat-f1", "f1", None, false, false, None).await;
+    seed_session(&db, "w-f1", "f1", Some("p1"), true, false, None).await;
+    seed_session(&db, "w-f2", "f2", Some("p2"), true, false, None).await;
+    let registry = McpToolRegistry::new();
+
+    let res = registry
+        .handle_tool_call(
+            "list_sessions",
+            serde_json::json!({}),
+            &ctx(&db, "chat-f1", "f1", None),
+        )
+        .await
+        .unwrap();
+
+    let items = res["sessions"].as_array().unwrap();
+    let ids: Vec<&str> = items
+        .iter()
+        .map(|s| s["session_id"].as_str().unwrap())
+        .collect();
+    // Both f1 sessions (chat + worker), not the f2 one.
+    assert!(ids.contains(&"chat-f1") && ids.contains(&"w-f1"));
+    assert!(!ids.contains(&"w-f2"));
+    let chat = items.iter().find(|s| s["session_id"] == "chat-f1").unwrap();
+    assert_eq!(chat["kind"], "chat");
+    let worker = items.iter().find(|s| s["session_id"] == "w-f1").unwrap();
+    assert_eq!(worker["kind"], "worker");
+}
+
 // ── list_experts / ask_expert: cross-folder rejection ───────────────
 
 #[tokio::test]

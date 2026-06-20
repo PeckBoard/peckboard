@@ -616,14 +616,38 @@ pub(super) fn tool_definitions() -> Vec<McpToolDef> {
         },
         McpToolDef {
             name: "read_worker_session".into(),
-            description: "Read the event history of another worker session in the same project. Use to understand what another worker did, see their tool calls, and review their work.".into(),
+            description: "Read the recent event history (tail) of another session in the same scope. Use to understand what another worker did, see their tool calls, and review their work. To find specific events (errors, a keyword) without pulling the whole transcript, use search_worker_session instead.".into(),
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
-                    "session_id": { "type": "string", "description": "The worker session ID to read" },
+                    "session_id": { "type": "string", "description": "The session ID to read" },
                     "last_n": { "type": "integer", "description": "Number of recent events to return (default 50, max 200)" }
                 },
                 "required": ["session_id"],
+                "additionalProperties": false
+            }),
+        },
+        McpToolDef {
+            name: "list_sessions".into(),
+            description: "List every session you can read for debugging — chat, worker, and expert sessions alike. For a chat session this is all sessions in your folder; inside a project it's the project's sessions. Each entry has the session_id, name, kind (chat/worker/expert), and last activity so you can pick one to read or search.".into(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {},
+                "additionalProperties": false
+            }),
+        },
+        McpToolDef {
+            name: "search_sessions".into(),
+            description: "Search any session's event history for debugging WITHOUT reading the whole transcript — grep for a keyword, pull only error/failure events, or filter by event kind. Works for any session (chat, worker, or expert). Omit session_id to search across every session you can read at once (e.g. \"which session hit this error?\"). Returns only matching events, each tagged with its session_id and session_name. At least one of query, errors_only, or kinds is required. Use list_sessions to discover session ids, and read_worker_session for a full tail of one session.".into(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "session_id": { "type": "string", "description": "Session ID to search. Omit to search all sessions you can read (the current project, or your folder)." },
+                    "query": { "type": "string", "description": "Case-insensitive substring to grep for across event text, tool names, inputs, and error messages." },
+                    "errors_only": { "type": "boolean", "description": "Return only error/failure events: 'error' events, tool calls that returned an error, and crashed agent runs (default false)." },
+                    "kinds": { "type": "array", "items": { "type": "string" }, "description": "Restrict to these event kinds, e.g. [\"agent-tool-end\", \"agent-text\"]." },
+                    "limit": { "type": "integer", "description": "Max matching events to return (default 50, max 200)." }
+                },
                 "additionalProperties": false
             }),
         },
