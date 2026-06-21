@@ -225,6 +225,25 @@ struct DiscoveryCache {
     models: Option<Vec<String>>,
 }
 
+/// Subset of Ollama's `POST /api/show` response. We only need the
+/// `capabilities` array (e.g. `["completion","tools","vision","thinking"]`)
+/// to tell whether a model can take tool calls and/or images; the rest of
+/// the payload (modelfile, template, license, details) is ignored.
+#[derive(Deserialize)]
+struct ShowResponse {
+    #[serde(default)]
+    capabilities: Vec<String>,
+}
+
+/// Cached outcome of a per-model `/api/show` capability probe. `None`
+/// means the last probe failed (cached either way, like [`DiscoveryCache`],
+/// so a wedged/old server isn't re-probed on every turn). See
+/// [`MODEL_DISCOVERY_TTL`].
+struct CapabilityCacheEntry {
+    fetched_at: Instant,
+    capabilities: Option<Vec<String>>,
+}
+
 pub struct OllamaProvider {
     settings: PluginSettingsStore,
     runs: Arc<Mutex<HashMap<String, OllamaRun>>>,
@@ -235,6 +254,11 @@ pub struct OllamaProvider {
     /// TTL cache for the `/v1/models` autodiscovery probe so the model
     /// picker doesn't trigger a network round-trip on every render.
     discovery_cache: Arc<Mutex<Option<DiscoveryCache>>>,
+    /// TTL cache of per-model `/api/show` capability probes, keyed by the
+    /// bare model id. Lets both the model picker and the per-turn request
+    /// path know whether a model supports tools/vision without re-probing
+    /// the server every time.
+    capability_cache: Arc<Mutex<HashMap<String, CapabilityCacheEntry>>>,
     client: reqwest::Client,
 }
 
@@ -245,6 +269,7 @@ impl OllamaProvider {
             runs: Arc::new(Mutex::new(HashMap::new())),
             conversations: Arc::new(Mutex::new(HashMap::new())),
             discovery_cache: Arc::new(Mutex::new(None)),
+            capability_cache: Arc::new(Mutex::new(HashMap::new())),
             // `redirect(Policy::none())` is load-bearing: an attacker
             // who controls `base_url` could otherwise 302 us to e.g.
             // `http://169.254.169.254/latest/meta-data/iam/security-credentials`
@@ -343,6 +368,102 @@ impl OllamaProvider {
         };
         parse_openai_models(&body)
     }
+
+    /// Capabilities Ollama reports for `model` via `/api/show`, e.g.
+    /// `["completion","tools","vision"]`. Goes through a per-model TTL
+    /// cache so neither the picker nor the chat path probes on every use.
+    /// `None` when the last probe failed; callers treat that as "unknown"
+    /// and fall back to permissive defaults so an unreachable `/api/show`
+    /// never breaks an otherwise-working setup.
+    async fn model_capabilities(
+        &self,
+        settings: &HashMap<String, serde_json::Value>,
+        model: &str,
+    ) -> Option<Vec<String>> {
+        {
+            let cache = self.capability_cache.lock().await;
+            if let Some(entry) = cache.get(model)
+                && entry.fetched_at.elapsed() < MODEL_DISCOVERY_TTL
+            {
+                return entry.capabilities.clone();
+            }
+        }
+        let result = self.fetch_model_capabilities(settings, model).await;
+        let mut cache = self.capability_cache.lock().await;
+        cache.insert(
+            model.to_string(),
+            CapabilityCacheEntry {
+                fetched_at: Instant::now(),
+                capabilities: result.clone(),
+            },
+        );
+        result
+    }
+
+    /// Hit `<base_url>/api/show` for one model and return its reported
+    /// `capabilities`. Returns `None` (so the caller assumes nothing) on
+    /// any failure: no `base_url`, a bad URL, a network/HTTP error, or an
+    /// unparseable body.
+    async fn fetch_model_capabilities(
+        &self,
+        settings: &HashMap<String, serde_json::Value>,
+        model: &str,
+    ) -> Option<Vec<String>> {
+        let base_url = setting_str(settings, "base_url")?;
+        let endpoint = match build_endpoint(&base_url, "/api/show") {
+            Ok(e) => e,
+            Err(e) => {
+                tracing::warn!("ollama: bad base_url for capability probe: {e}");
+                return None;
+            }
+        };
+
+        let mut request = self
+            .client
+            .post(&endpoint)
+            .timeout(Duration::from_secs(MODEL_DISCOVERY_TIMEOUT_SECS))
+            .json(&serde_json::json!({ "model": model }));
+        // Same auth-proxy headers the chat and discovery paths use.
+        for (name, value) in setting_headers(settings, "additional_headers") {
+            match (
+                reqwest::header::HeaderName::from_bytes(name.as_bytes()),
+                reqwest::header::HeaderValue::from_str(&value),
+            ) {
+                (Ok(n), Ok(v)) => request = request.header(n, v),
+                _ => tracing::warn!(header = %name, "Dropping malformed Ollama header"),
+            }
+        }
+
+        let response = match request.send().await {
+            Ok(r) => r,
+            Err(e) => {
+                tracing::warn!(model = %model, "ollama: capability probe request failed: {e}");
+                return None;
+            }
+        };
+        if !response.status().is_success() {
+            tracing::warn!(
+                model = %model,
+                "ollama: /api/show returned HTTP {}",
+                response.status()
+            );
+            return None;
+        }
+        let body = match response.text().await {
+            Ok(b) => b,
+            Err(e) => {
+                tracing::warn!(model = %model, "ollama: failed to read /api/show body: {e}");
+                return None;
+            }
+        };
+        match serde_json::from_str::<ShowResponse>(&body) {
+            Ok(show) => Some(show.capabilities),
+            Err(e) => {
+                tracing::warn!(model = %model, "ollama: failed to parse /api/show response: {e}");
+                None
+            }
+        }
+    }
 }
 
 #[async_trait]
@@ -375,7 +496,17 @@ impl AgentProvider for OllamaProvider {
 
         let base = if discover {
             match self.discovered_models(&settings).await {
-                Some(names) => names.into_iter().map(model_info).collect(),
+                // Probe each discovered model's `/api/show` capabilities so
+                // the picker can show `tools`/`vision` tags (cached, so this
+                // only costs a round-trip per model once per TTL window).
+                Some(names) => {
+                    let mut infos = Vec::with_capacity(names.len());
+                    for name in names {
+                        let caps = self.model_capabilities(&settings, &name).await;
+                        infos.push(model_info_with_caps(name, caps));
+                    }
+                    infos
+                }
                 // Discovery failed: keep the static suggestions so the
                 // picker isn't empty while the server is unreachable.
                 None => default_models(),
@@ -426,6 +557,23 @@ impl AgentProvider for OllamaProvider {
                 .unwrap_or_else(|| "llama3.1".to_string())
         });
 
+        // Probe what this model actually supports before building the
+        // request. Ollama 400s a `/api/chat` that carries `tools` for a
+        // model whose template has no tool support (e.g. gemma-based
+        // models), and a non-vision model has nowhere to put images. When
+        // the probe itself fails we fall back to permissive defaults so an
+        // unreachable `/api/show` never breaks an otherwise-working setup.
+        let capabilities = self.model_capabilities(&settings, &model).await;
+        let supports_tools = capability_present(capabilities.as_deref(), "tools");
+        let supports_vision = capability_present(capabilities.as_deref(), "vision");
+        if enable_tools && !supports_tools {
+            tracing::info!(
+                model = %model,
+                "ollama: model does not advertise tool support; sending a tool-free request"
+            );
+        }
+        let enable_tools = enable_tools && supports_tools;
+
         let endpoint = build_endpoint(&base_url, "/api/chat")?;
 
         {
@@ -436,6 +584,19 @@ impl AgentProvider for OllamaProvider {
             // put them. Multimodal models (llava, llama3.2-vision, …) read
             // these; text-only models ignore the field.
             let images = encode_image_attachments(&message.attachments);
+            // Only forward images to a model that advertises vision; a
+            // text-only model would reject or silently mangle them.
+            let images = if supports_vision {
+                images
+            } else {
+                if images.is_some() {
+                    tracing::warn!(
+                        model = %model,
+                        "ollama: model does not advertise vision support; dropping image attachment(s)"
+                    );
+                }
+                None
+            };
             let mut conv = self.conversations.lock().await;
             let history = conv.entry(session_id.clone()).or_default();
             history.push(ChatMessage::user(message.text.clone(), images));
@@ -643,6 +804,39 @@ fn model_info(name: String) -> ModelInfo {
         display_name: format!("{name} (Ollama)"),
         id: name,
         capabilities: vec!["code".into()],
+    }
+}
+
+/// Whether `capabilities` (as reported by `/api/show`) contains `cap`.
+/// `None` means the probe failed / capabilities are unknown — treated as
+/// permissive (`true`) so an unreachable `/api/show` never strips tools or
+/// images from a model that would otherwise have worked.
+fn capability_present(capabilities: Option<&[String]>, cap: &str) -> bool {
+    match capabilities {
+        Some(caps) => caps.iter().any(|c| c == cap),
+        None => true,
+    }
+}
+
+/// Build a `ModelInfo`, folding in any capabilities Ollama reported for the
+/// model via `/api/show`. Every Ollama model keeps the baseline `code` tag;
+/// `tools` and `vision` are added only when the server says the model
+/// supports them, so the picker reflects what the model can actually do. A
+/// failed probe (`None`) falls back to the baseline tag alone.
+fn model_info_with_caps(name: String, caps: Option<Vec<String>>) -> ModelInfo {
+    let mut capabilities = vec!["code".into()];
+    if let Some(caps) = caps {
+        if caps.iter().any(|c| c == "tools") {
+            capabilities.push("tools".into());
+        }
+        if caps.iter().any(|c| c == "vision") {
+            capabilities.push("vision".into());
+        }
+    }
+    ModelInfo {
+        display_name: format!("{name} (Ollama)"),
+        id: name,
+        capabilities,
     }
 }
 
@@ -940,7 +1134,12 @@ async fn stream_one_round(round: StreamRound<'_>) -> RoundOutcome {
     let response_fut = request.send();
     let response = tokio::select! {
         _ = cancel.notified() => {
-            crash(db, broadcaster, session_id, "cancelled", None).await;
+            // Use the same reason ("interrupted") as the streaming/tool-call
+            // cancel branches: the UI only suppresses the paired "Agent
+            // crashed" banner when the agent-end reason is exactly
+            // "interrupted", so a cancel during the initial request must
+            // match or it surfaces as a spurious crash.
+            crash(db, broadcaster, session_id, "interrupted", None).await;
             return RoundOutcome::Failed;
         }
         r = response_fut => match r {

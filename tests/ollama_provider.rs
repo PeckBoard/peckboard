@@ -66,60 +66,95 @@ async fn spawn_stub_ollama() -> (String, Arc<Mutex<String>>) {
     let captured = Arc::new(Mutex::new(String::new()));
     let captured_ret = captured.clone();
     tokio::spawn(async move {
-        let (mut sock, _peer) = listener.accept().await.unwrap();
-        let mut buf = [0u8; 4096];
-        let mut total = Vec::new();
-        // Read until we see the end of the HTTP request body. The
-        // provider sends a Content-Length + complete body in one go, so
-        // this loop generally only reads once.
+        // Loop: the provider opens a fresh connection for the `/api/show`
+        // capability probe and another for `/api/chat` (the stub closes
+        // each socket), so we serve the probe then the real chat request.
         loop {
-            let n = match tokio::time::timeout(Duration::from_secs(5), sock.read(&mut buf)).await {
-                Ok(Ok(n)) if n > 0 => n,
-                _ => break,
+            let Ok((mut sock, _peer)) = listener.accept().await else {
+                return;
             };
-            total.extend_from_slice(&buf[..n]);
-            // Quick heuristic: if we've seen the headers terminator AND
-            // the body length matches Content-Length, we're done.
-            if let Some(headers_end) = find_subseq(&total, b"\r\n\r\n") {
-                let headers_text = String::from_utf8_lossy(&total[..headers_end]);
-                if let Some(cl) = headers_text
-                    .lines()
-                    .find_map(|l| l.strip_prefix("content-length: "))
-                    .or_else(|| {
-                        headers_text
-                            .lines()
-                            .find_map(|l| l.strip_prefix("Content-Length: "))
-                    })
-                    && let Ok(len) = cl.trim().parse::<usize>()
-                {
-                    let body_start = headers_end + 4;
-                    if total.len() >= body_start + len {
-                        break;
+            let mut buf = [0u8; 4096];
+            let mut total = Vec::new();
+            // Read until we see the end of the HTTP request body. The
+            // provider sends a Content-Length + complete body in one go, so
+            // this loop generally only reads once.
+            loop {
+                let n =
+                    match tokio::time::timeout(Duration::from_secs(5), sock.read(&mut buf)).await {
+                        Ok(Ok(n)) if n > 0 => n,
+                        _ => break,
+                    };
+                total.extend_from_slice(&buf[..n]);
+                // Quick heuristic: if we've seen the headers terminator AND
+                // the body length matches Content-Length, we're done.
+                if let Some(headers_end) = find_subseq(&total, b"\r\n\r\n") {
+                    let headers_text = String::from_utf8_lossy(&total[..headers_end]);
+                    if let Some(cl) = headers_text
+                        .lines()
+                        .find_map(|l| l.strip_prefix("content-length: "))
+                        .or_else(|| {
+                            headers_text
+                                .lines()
+                                .find_map(|l| l.strip_prefix("Content-Length: "))
+                        })
+                        && let Ok(len) = cl.trim().parse::<usize>()
+                    {
+                        let body_start = headers_end + 4;
+                        if total.len() >= body_start + len {
+                            break;
+                        }
                     }
                 }
             }
-        }
-        let text = String::from_utf8_lossy(&total).to_string();
-        *captured.lock().await = text;
+            let text = String::from_utf8_lossy(&total).to_string();
+            if is_show_probe(&text) {
+                answer_show(&mut sock).await;
+                continue;
+            }
+            *captured.lock().await = text;
 
-        // Stream two text chunks then a done marker. The provider
-        // joins the content fragments into a single assistant turn.
-        let body = b"{\"message\":{\"content\":\"hel\"},\"done\":false}\n\
-                     {\"message\":{\"content\":\"lo\"},\"done\":false}\n\
-                     {\"done\":true}\n";
-        let response = format!(
-            "HTTP/1.1 200 OK\r\nContent-Type: application/x-ndjson\r\nContent-Length: {}\r\n\r\n",
-            body.len()
-        );
-        sock.write_all(response.as_bytes()).await.unwrap();
-        sock.write_all(body).await.unwrap();
-        let _ = sock.shutdown().await;
+            // Stream two text chunks then a done marker. The provider
+            // joins the content fragments into a single assistant turn.
+            let body = b"{\"message\":{\"content\":\"hel\"},\"done\":false}\n\
+                         {\"message\":{\"content\":\"lo\"},\"done\":false}\n\
+                         {\"done\":true}\n";
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/x-ndjson\r\nContent-Length: {}\r\n\r\n",
+                body.len()
+            );
+            let _ = sock.write_all(response.as_bytes()).await;
+            let _ = sock.write_all(body).await;
+            let _ = sock.shutdown().await;
+            return;
+        }
     });
     (format!("http://{}", addr), captured_ret)
 }
 
 fn find_subseq(haystack: &[u8], needle: &[u8]) -> Option<usize> {
     haystack.windows(needle.len()).position(|w| w == needle)
+}
+
+/// True when `req` is the provider's `/api/show` capability probe (sent
+/// once per model before the chat request to learn tool/vision support).
+fn is_show_probe(req: &str) -> bool {
+    req.contains("/api/show")
+}
+
+/// Answer an `/api/show` probe with a fixed capability set advertising
+/// `tools` and `vision`, then close the socket. The stubs use this so the
+/// provider keeps offering tools/images exactly as it did before
+/// capability probing existed — the chat behaviour each test exercises is
+/// unchanged.
+async fn answer_show(sock: &mut tokio::net::TcpStream) {
+    let body = b"{\"capabilities\":[\"completion\",\"tools\",\"vision\"]}";
+    let response = format!(
+        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n",
+        body.len()
+    );
+    let _ = sock.write_all(response.as_bytes()).await;
+    let _ = sock.write_all(body).await;
+    let _ = sock.shutdown().await;
 }
 
 #[tokio::test]
@@ -236,6 +271,152 @@ async fn ollama_provider_streams_text_and_completes() {
     assert_eq!(text_events, vec!["hel", "lo"]);
 }
 
+/// Stub Ollama whose `/api/show` advertises `caps_json` and which captures
+/// the `/api/chat` request body so a test can assert what was (or wasn't)
+/// sent — used to verify capability gating drops `tools` for a model that
+/// doesn't support them.
+async fn spawn_stub_ollama_caps(caps_json: &'static str) -> (String, Arc<Mutex<String>>) {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let captured = Arc::new(Mutex::new(String::new()));
+    let captured_ret = captured.clone();
+    tokio::spawn(async move {
+        loop {
+            let Ok((mut sock, _peer)) = listener.accept().await else {
+                return;
+            };
+            let mut buf = [0u8; 8192];
+            let mut total = Vec::new();
+            loop {
+                let n =
+                    match tokio::time::timeout(Duration::from_secs(5), sock.read(&mut buf)).await {
+                        Ok(Ok(n)) if n > 0 => n,
+                        _ => break,
+                    };
+                total.extend_from_slice(&buf[..n]);
+                if let Some(headers_end) = find_subseq(&total, b"\r\n\r\n") {
+                    let headers_text =
+                        String::from_utf8_lossy(&total[..headers_end]).to_lowercase();
+                    if let Some(cl) = headers_text
+                        .lines()
+                        .find_map(|l| l.strip_prefix("content-length: "))
+                        && let Ok(len) = cl.trim().parse::<usize>()
+                        && total.len() >= headers_end + 4 + len
+                    {
+                        break;
+                    }
+                }
+            }
+            let text = String::from_utf8_lossy(&total).to_string();
+            // Answer the capability probe with the test's caps, but DON'T
+            // close out — keep looping for the real chat request to capture.
+            if is_show_probe(&text) {
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
+                    caps_json.len(),
+                    caps_json
+                );
+                let _ = sock.write_all(response.as_bytes()).await;
+                let _ = sock.shutdown().await;
+                continue;
+            }
+            *captured.lock().await = text;
+            let body = b"{\"message\":{\"content\":\"ok\"},\"done\":true}\n";
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/x-ndjson\r\nContent-Length: {}\r\n\r\n",
+                body.len()
+            );
+            let _ = sock.write_all(response.as_bytes()).await;
+            let _ = sock.write_all(body).await;
+            let _ = sock.shutdown().await;
+            return;
+        }
+    });
+    (format!("http://{}", addr), captured_ret)
+}
+
+/// A model whose `/api/show` capabilities omit `tools` must get a
+/// tool-free `/api/chat` request even with `enable_tools` on — otherwise
+/// Ollama 400s a request carrying `tools` for a model whose template can't
+/// take them (the gemma/medgemma crash). The turn must still complete.
+#[tokio::test]
+async fn non_tool_model_gets_tool_free_request() {
+    // Capabilities without "tools" (a gemma-style chat/vision model).
+    let (base_url, captured) =
+        spawn_stub_ollama_caps("{\"capabilities\":[\"completion\",\"vision\"]}").await;
+
+    let db = Db::in_memory().unwrap();
+    let ts = chrono::Utc::now().to_rfc3339();
+    db.create_folder(NewFolder {
+        id: "f1".into(),
+        name: "F".into(),
+        path: "/tmp".into(),
+        created_at: ts.clone(),
+    })
+    .await
+    .unwrap();
+    db.create_session(NewSession {
+        id: "s1".into(),
+        name: "S".into(),
+        folder_id: "f1".into(),
+        model: Some("ollama:gemma3".into()),
+        effort: None,
+        is_worker: false,
+        project_id: None,
+        card_id: None,
+        conversation_id: None,
+        created_at: ts.clone(),
+        last_activity: ts,
+        ..Default::default()
+    })
+    .await
+    .unwrap();
+    db.set_plugin_setting("ollama", "base_url", &serde_json::Value::String(base_url))
+        .await
+        .unwrap();
+
+    let store = PluginSettingsStore::new("ollama", test_schema(), db.clone());
+    let provider = OllamaProvider::new(store);
+
+    let broadcaster = Broadcaster::new();
+    let (completion_tx, mut completion_rx) = mpsc::channel(8);
+    let plugins = Arc::new(peckboard::plugin::manager::PluginManager::empty());
+
+    let ctx = SendMessageContext {
+        session_id: "s1".into(),
+        message: "hi".into(),
+        db: db.clone(),
+        broadcaster: broadcaster.clone(),
+        config: SpawnConfig {
+            model: "ollama:gemma3".into(),
+            ..Default::default()
+        },
+        conversation_id: None,
+        completion_tx,
+        plugins,
+    };
+
+    provider.send_message(ctx).await.unwrap();
+
+    let completion = tokio::time::timeout(Duration::from_secs(5), completion_rx.recv())
+        .await
+        .expect("completion delivered within timeout")
+        .expect("channel still open");
+    assert!(completion.completed, "turn should complete cleanly");
+
+    let req = captured.lock().await.clone();
+    assert!(
+        req.to_lowercase().contains("/api/chat"),
+        "should have hit /api/chat (got: {req})"
+    );
+    // The gating fix: no `tools` array in the request body for this model,
+    // even though core MCP tools exist and `enable_tools` defaults on.
+    assert!(
+        !req.contains("\"tools\""),
+        "tools must be gated out for a non-tool model (got: {req})"
+    );
+}
+
 /// Stub Ollama that drives a tool-calling turn: the first `/api/chat`
 /// request gets an assistant message asking to call a tool (`done:true`,
 /// no text); every later request gets a plain final answer. Loops
@@ -279,7 +460,14 @@ async fn spawn_stub_ollama_tools(
                     }
                 }
             }
-            *last_body.lock().await = String::from_utf8_lossy(&total).to_string();
+            let text = String::from_utf8_lossy(&total).to_string();
+            // The capability probe isn't a chat round — answer it and wait
+            // for the real `/api/chat` request without bumping the counter.
+            if is_show_probe(&text) {
+                answer_show(&mut sock).await;
+                continue;
+            }
+            *last_body.lock().await = text;
             let round = {
                 let mut c = calls.lock().await;
                 *c += 1;
@@ -491,7 +679,15 @@ async fn spawn_stub_models(body: &'static str) -> (String, Arc<Mutex<String>>) {
                     _ => break,
                 }
             }
-            *captured.lock().await = String::from_utf8_lossy(&total).to_string();
+            let text = String::from_utf8_lossy(&total).to_string();
+            // The provider probes each discovered model's `/api/show`
+            // capabilities; answer those without overwriting the captured
+            // `/v1/models` request the test asserts on.
+            if is_show_probe(&text) {
+                answer_show(&mut sock).await;
+                continue;
+            }
+            *captured.lock().await = text;
             let response = format!(
                 "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
                 body.len(),
@@ -664,4 +860,322 @@ async fn dynamic_models_falls_back_to_seed_when_server_unreachable() {
     // The static seed survives as the fallback catalog.
     assert!(ids.contains(&"llama3.1"), "got: {ids:?}");
     assert!(ids.contains(&"qwen2.5-coder"), "got: {ids:?}");
+}
+
+/// Stub Ollama that streams one NDJSON text chunk and then HANGS — it never
+/// sends `done` and holds the socket open. This models a long, still-running
+/// generation that a user wants to cancel mid-stream. Returns the base URL.
+async fn spawn_stub_ollama_hang() -> String {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        loop {
+            let Ok((mut sock, _peer)) = listener.accept().await else {
+                return;
+            };
+            let mut buf = [0u8; 4096];
+            // Best-effort read of the request line + body; we don't assert on
+            // it, but we do need to tell the `/api/show` probe from the chat.
+            let n = match tokio::time::timeout(Duration::from_secs(5), sock.read(&mut buf)).await {
+                Ok(Ok(n)) if n > 0 => n,
+                _ => continue,
+            };
+            if is_show_probe(&String::from_utf8_lossy(&buf[..n])) {
+                answer_show(&mut sock).await;
+                continue;
+            }
+            // Chunked streaming response: one line of content, then never finish.
+            let headers = "HTTP/1.1 200 OK\r\n\
+                           Content-Type: application/x-ndjson\r\n\
+                           Transfer-Encoding: chunked\r\n\r\n";
+            let _ = sock.write_all(headers.as_bytes()).await;
+            let line = "{\"message\":{\"content\":\"streaming\"},\"done\":false}\n";
+            let chunk = format!("{:x}\r\n{}\r\n", line.len(), line);
+            let _ = sock.write_all(chunk.as_bytes()).await;
+            let _ = sock.flush().await;
+            // Hang: hold the connection open without ever sending `done` so the
+            // provider sits in its stream-consumption loop awaiting more bytes.
+            tokio::time::sleep(Duration::from_secs(60)).await;
+            drop(sock);
+            return;
+        }
+    });
+    format!("http://{}", addr)
+}
+
+/// Stub Ollama that streams NDJSON text chunks CONTINUOUSLY and never stops —
+/// modelling a real model generating tokens steadily. Unlike `_hang` (one
+/// chunk then idle), here `stream.next()` is almost always ready, so the
+/// provider's cancel `select!` is racing a perpetually-ready stream branch.
+/// `chunks_sent` lets the test observe that the server keeps producing.
+async fn spawn_stub_ollama_firehose() -> (String, Arc<Mutex<usize>>) {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let chunks_sent = Arc::new(Mutex::new(0usize));
+    let chunks_ret = chunks_sent.clone();
+    tokio::spawn(async move {
+        loop {
+            let Ok((mut sock, _peer)) = listener.accept().await else {
+                return;
+            };
+            let mut buf = [0u8; 4096];
+            let n = match tokio::time::timeout(Duration::from_secs(5), sock.read(&mut buf)).await {
+                Ok(Ok(n)) if n > 0 => n,
+                _ => continue,
+            };
+            if is_show_probe(&String::from_utf8_lossy(&buf[..n])) {
+                answer_show(&mut sock).await;
+                continue;
+            }
+            let headers = "HTTP/1.1 200 OK\r\n\
+                           Content-Type: application/x-ndjson\r\n\
+                           Transfer-Encoding: chunked\r\n\r\n";
+            if sock.write_all(headers.as_bytes()).await.is_err() {
+                return;
+            }
+            // Fire NDJSON text lines back-to-back as fast as the socket accepts
+            // them (NO inter-chunk sleep). This keeps the client's stream branch
+            // perpetually ready — modelling a fast GPU-backed Ollama — so the
+            // provider's cancel `select!` never gets a "pending stream" freebie.
+            let line = "{\"message\":{\"content\":\"tok \"},\"done\":false}\n";
+            let chunk = format!("{:x}\r\n{}\r\n", line.len(), line);
+            loop {
+                if sock.write_all(chunk.as_bytes()).await.is_err() {
+                    return;
+                }
+                *chunks_sent.lock().await += 1;
+            }
+        }
+    });
+    (format!("http://{}", addr), chunks_ret)
+}
+
+/// The symptom users actually hit: cancelling a run whose Ollama stream is
+/// firing tokens continuously must STOP it. After cancel, no further
+/// `agent-text` may be emitted, the task must wind down, and `is_running`
+/// must flip to false.
+#[tokio::test]
+async fn ollama_provider_cancel_stops_continuous_stream() {
+    let (base_url, _chunks_sent) = spawn_stub_ollama_firehose().await;
+
+    let db = Db::in_memory().unwrap();
+    let ts = chrono::Utc::now().to_rfc3339();
+    db.create_folder(NewFolder {
+        id: "f1".into(),
+        name: "F".into(),
+        path: "/tmp".into(),
+        created_at: ts.clone(),
+    })
+    .await
+    .unwrap();
+    db.create_session(NewSession {
+        id: "s1".into(),
+        name: "S".into(),
+        folder_id: "f1".into(),
+        model: Some("ollama:llama3.1".into()),
+        effort: None,
+        is_worker: false,
+        project_id: None,
+        card_id: None,
+        conversation_id: None,
+        created_at: ts.clone(),
+        last_activity: ts,
+        ..Default::default()
+    })
+    .await
+    .unwrap();
+    db.set_plugin_setting("ollama", "base_url", &serde_json::Value::String(base_url))
+        .await
+        .unwrap();
+
+    let store = PluginSettingsStore::new("ollama", test_schema(), db.clone());
+    let provider = OllamaProvider::new(store);
+
+    let broadcaster = Broadcaster::new();
+    let (completion_tx, mut completion_rx) = mpsc::channel(8);
+    let plugins = Arc::new(peckboard::plugin::manager::PluginManager::empty());
+
+    let ctx = SendMessageContext {
+        session_id: "s1".into(),
+        message: "stream forever".into(),
+        db: db.clone(),
+        broadcaster: broadcaster.clone(),
+        config: SpawnConfig {
+            model: "ollama:llama3.1".into(),
+            ..Default::default()
+        },
+        conversation_id: None,
+        completion_tx,
+        plugins,
+    };
+
+    provider.send_message(ctx).await.unwrap();
+
+    // Let the firehose run so plenty of text has streamed in.
+    let mut seen = 0usize;
+    for _ in 0..200 {
+        seen = db
+            .events_tail("s1", 1024)
+            .await
+            .unwrap()
+            .iter()
+            .filter(|e| e.kind == "agent-text")
+            .count();
+        if seen > 5 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert!(seen > 5, "firehose should have streamed text before cancel");
+
+    // Cancel mid-firehose.
+    provider.cancel("s1").await;
+    provider.wait_for_termination("s1").await;
+
+    // Count text events right after wait_for_termination returns...
+    let count_after_cancel = db
+        .events_tail("s1", 4096)
+        .await
+        .unwrap()
+        .iter()
+        .filter(|e| e.kind == "agent-text")
+        .count();
+    // ...then give any still-running stream task time to emit more.
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    let count_later = db
+        .events_tail("s1", 4096)
+        .await
+        .unwrap()
+        .iter()
+        .filter(|e| e.kind == "agent-text")
+        .count();
+
+    assert_eq!(
+        count_later, count_after_cancel,
+        "no agent-text may be emitted after cancel (saw {count_after_cancel} then {count_later} \
+         — the stream task is still running)"
+    );
+    assert!(
+        !provider.is_running("s1").await,
+        "session must not be running after cancel"
+    );
+
+    let completion = tokio::time::timeout(Duration::from_secs(3), completion_rx.recv())
+        .await
+        .expect("completion delivered after cancel")
+        .expect("channel still open");
+    assert!(
+        !completion.completed,
+        "cancelled turn must report completed: false"
+    );
+}
+
+/// Cancelling a run whose `/api/chat` stream is still open must actually
+/// terminate it: `wait_for_termination` returns promptly, `is_running` flips
+/// to false, an `agent-end` event is emitted so the UI marks the session
+/// stopped, and the orchestrator gets a `completed: false` completion.
+#[tokio::test]
+async fn ollama_provider_cancel_terminates_in_progress_stream() {
+    let base_url = spawn_stub_ollama_hang().await;
+
+    let db = Db::in_memory().unwrap();
+    let ts = chrono::Utc::now().to_rfc3339();
+    db.create_folder(NewFolder {
+        id: "f1".into(),
+        name: "F".into(),
+        path: "/tmp".into(),
+        created_at: ts.clone(),
+    })
+    .await
+    .unwrap();
+    db.create_session(NewSession {
+        id: "s1".into(),
+        name: "S".into(),
+        folder_id: "f1".into(),
+        model: Some("ollama:llama3.1".into()),
+        effort: None,
+        is_worker: false,
+        project_id: None,
+        card_id: None,
+        conversation_id: None,
+        created_at: ts.clone(),
+        last_activity: ts,
+        ..Default::default()
+    })
+    .await
+    .unwrap();
+    db.set_plugin_setting("ollama", "base_url", &serde_json::Value::String(base_url))
+        .await
+        .unwrap();
+
+    let store = PluginSettingsStore::new("ollama", test_schema(), db.clone());
+    let provider = OllamaProvider::new(store);
+
+    let broadcaster = Broadcaster::new();
+    let (completion_tx, mut completion_rx) = mpsc::channel(8);
+    let plugins = Arc::new(peckboard::plugin::manager::PluginManager::empty());
+
+    let ctx = SendMessageContext {
+        session_id: "s1".into(),
+        message: "stream forever".into(),
+        db: db.clone(),
+        broadcaster: broadcaster.clone(),
+        config: SpawnConfig {
+            model: "ollama:llama3.1".into(),
+            ..Default::default()
+        },
+        conversation_id: None,
+        completion_tx,
+        plugins,
+    };
+
+    provider.send_message(ctx).await.unwrap();
+
+    // Wait until the run is actually in flight (first chunk streamed).
+    let mut in_flight = false;
+    for _ in 0..200 {
+        let events = db.events_tail("s1", 16).await.unwrap();
+        if events.iter().any(|e| e.kind == "agent-text") {
+            in_flight = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+    assert!(
+        in_flight,
+        "stream should have produced a chunk before cancel"
+    );
+    assert!(provider.is_running("s1").await, "run should be in flight");
+
+    // Cancel and demand prompt termination.
+    let started = std::time::Instant::now();
+    provider.cancel("s1").await;
+    provider.wait_for_termination("s1").await;
+    let elapsed = started.elapsed();
+    assert!(
+        elapsed < Duration::from_secs(3),
+        "cancel must terminate the in-flight stream promptly (took {elapsed:?})"
+    );
+    assert!(
+        !provider.is_running("s1").await,
+        "session must not be running after cancel"
+    );
+
+    // The cancel path must emit an agent-end so the session stops in the UI.
+    let events = db.events_tail("s1", 32).await.unwrap();
+    let kinds: Vec<&str> = events.iter().map(|e| e.kind.as_str()).collect();
+    assert!(
+        kinds.contains(&"agent-end"),
+        "cancel must emit an agent-end event (got: {kinds:?})"
+    );
+
+    // The orchestrator must learn the turn did not complete.
+    let completion = tokio::time::timeout(Duration::from_secs(3), completion_rx.recv())
+        .await
+        .expect("completion delivered after cancel")
+        .expect("channel still open");
+    assert!(
+        !completion.completed,
+        "a cancelled turn must report completed: false"
+    );
 }
