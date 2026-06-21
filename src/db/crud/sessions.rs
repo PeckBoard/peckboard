@@ -241,6 +241,25 @@ impl Db {
         .await
     }
 
+    /// Set (or clear, with `None`) a session's custom system prompt. Returns
+    /// the updated session, or `None` if no session has that id.
+    pub async fn set_session_system_prompt(
+        &self,
+        id: &str,
+        prompt: Option<String>,
+    ) -> anyhow::Result<Option<Session>> {
+        let id = id.to_string();
+        self.with_conn(move |conn| {
+            diesel::update(sessions::table.find(&id))
+                .set(sessions::system_prompt.eq(prompt))
+                .returning(Session::as_returning())
+                .get_result(conn)
+                .optional()
+                .map_err(Into::into)
+        })
+        .await
+    }
+
     pub async fn delete_session(&self, id: &str) -> anyhow::Result<bool> {
         let id = id.to_string();
         self.with_conn(move |conn| {

@@ -234,13 +234,25 @@ pub fn build_cli_args(config: &SpawnConfig, conversation_id: Option<&str>) -> Ve
     // Build the single --append-system-prompt value. Claude's CLI takes only
     // one such flag, so we fold two sources into it: the standing Peckboard
     // prompt and any per-spawn suffix (e.g. repeating tasks).
-    let mut combined_system_prompt = PECKBOARD_SYSTEM_PROMPT.to_string();
-    if let Some(suffix) = config.system_prompt_suffix.as_deref()
-        && !suffix.is_empty()
+    // A per-session custom prompt (set via set_session_system_prompt) FULLY
+    // replaces the standing Peckboard prompt and any suffix — the operator
+    // who set it owns the whole system prompt for this session.
+    let combined_system_prompt = if let Some(override_prompt) = config
+        .system_prompt_override
+        .as_deref()
+        .filter(|p| !p.is_empty())
     {
-        combined_system_prompt.push('\n');
-        combined_system_prompt.push_str(suffix);
-    }
+        override_prompt.to_string()
+    } else {
+        let mut prompt = PECKBOARD_SYSTEM_PROMPT.to_string();
+        if let Some(suffix) = config.system_prompt_suffix.as_deref()
+            && !suffix.is_empty()
+        {
+            prompt.push('\n');
+            prompt.push_str(suffix);
+        }
+        prompt
+    };
 
     // `--disallowedTools` is a hard denylist that overrides
     // `--dangerously-skip-permissions`, so it's the real enforcement point.
@@ -318,6 +330,8 @@ pub fn build_cli_args(config: &SpawnConfig, conversation_id: Option<&str>) -> Ve
             // (chat included) for reading/grepping other sessions.
             "list_sessions",
             "search_sessions",
+            "set_session_system_prompt",
+            "upgrade_plugin",
             "list_models",
         ];
         let allowed: Vec<String> = full_mcp_tools
@@ -432,6 +446,7 @@ mod tests {
             timeout_ms: None,
             metadata: serde_json::Value::Null,
             system_prompt_suffix: None,
+            system_prompt_override: None,
         }
     }
 
@@ -458,6 +473,42 @@ mod tests {
         assert!(append.contains("Asking the user questions"));
         assert!(append.contains("Repeating Task Context"));
         assert!(append.contains("run #42"));
+    }
+
+    #[test]
+    fn test_build_cli_args_system_prompt_override_fully_replaces() {
+        let mut config = default_spawn("claude-opus-4-8");
+        // A suffix is set too, to prove the override wins over both the base
+        // Peckboard prompt AND the suffix.
+        config.system_prompt_suffix = Some("# Repeating Task Context".to_string());
+        config.system_prompt_override = Some("You are a pirate. Only say arrr.".to_string());
+
+        let args = build_cli_args(&config, None);
+        let append = args
+            .iter()
+            .find(|a| a.starts_with("--append-system-prompt="))
+            .expect("append-system-prompt flag present");
+        // The override IS the entire value — base prompt and suffix are gone.
+        assert_eq!(
+            append,
+            "--append-system-prompt=You are a pirate. Only say arrr."
+        );
+        assert!(!append.contains("Asking the user questions"));
+        assert!(!append.contains("Repeating Task Context"));
+    }
+
+    #[test]
+    fn test_build_cli_args_empty_override_falls_back_to_base() {
+        let mut config = default_spawn("claude-opus-4-8");
+        config.system_prompt_override = Some(String::new());
+
+        let args = build_cli_args(&config, None);
+        let append = args
+            .iter()
+            .find(|a| a.starts_with("--append-system-prompt="))
+            .expect("append-system-prompt flag present");
+        // An empty override is treated as "unset" — the base prompt stands.
+        assert!(append.contains("Asking the user questions"));
     }
 
     #[test]
@@ -506,6 +557,7 @@ mod tests {
             timeout_ms: None,
             metadata: serde_json::Value::Null,
             system_prompt_suffix: None,
+            system_prompt_override: None,
         };
 
         let args = build_cli_args(&config, Some("conv-123"));

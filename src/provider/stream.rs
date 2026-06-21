@@ -185,6 +185,14 @@ pub struct SpawnConfig {
     /// and to point at the per-task notes file convention.
     #[serde(default)]
     pub system_prompt_suffix: Option<String>,
+    /// Per-session custom system prompt. When `Some(non-empty)`, it FULLY
+    /// REPLACES the standing Peckboard system prompt (and any
+    /// `system_prompt_suffix`) for this spawn — the entire
+    /// `--append-system-prompt` value becomes this text. Populated from
+    /// `Session::system_prompt` in the session manager so every dispatch
+    /// path (chat, worker, repeating task) honours it from one place.
+    #[serde(default)]
+    pub system_prompt_override: Option<String>,
 }
 
 /// Model info from a provider.

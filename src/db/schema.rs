@@ -30,6 +30,7 @@ diesel::table! {
         scope_path -> Nullable<Text>,
         is_permanent -> Bool,
         repeating_task_id -> Nullable<Text>,
+        system_prompt -> Nullable<Text>,
     }
 }
 

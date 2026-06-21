@@ -64,7 +64,31 @@ impl AppExpertDispatcher {
             timeout_ms: None,
             metadata,
             system_prompt_suffix: None,
+            // Filled from the session row in SessionManager::final_config.
+            system_prompt_override: None,
         })
+    }
+
+    /// Deliver a user message with attachments to `session_id` and resume it —
+    /// the attachment-carrying twin of `resume_session`, used by the
+    /// session-control plugin's `send_message`. Resumes via `send_or_queue`
+    /// (spawn if idle, inject/queue if running), exactly like a user message.
+    pub async fn send_message_with_attachments(
+        &self,
+        session_id: &str,
+        text: String,
+        attachments: Vec<crate::provider::message::UserAttachment>,
+    ) -> anyhow::Result<()> {
+        let state = &self.state;
+        let config = self
+            .spawn_config_for(session_id, serde_json::Value::Null)
+            .await?;
+        let message = crate::provider::message::UserMessage { text, attachments };
+        state
+            .session_manager
+            .send_or_queue(session_id, message, &state.db, &state.broadcaster, config)
+            .await?;
+        Ok(())
     }
 }
 
@@ -127,6 +151,102 @@ impl crate::plugin::host::LiveHost for AppLiveHost {
             {
                 tracing::warn!("plugin ask_user for {session_id} failed: {e}");
             }
+        });
+    }
+
+    fn send_message(
+        &self,
+        session_id: String,
+        text: String,
+        attachments: Vec<crate::plugin::host::LiveAttachment>,
+    ) {
+        let Some(state) = self.state.upgrade() else {
+            return;
+        };
+        let attachments: Vec<crate::provider::message::UserAttachment> = attachments
+            .into_iter()
+            .map(|a| crate::provider::message::UserAttachment {
+                filename: a.filename,
+                mime_type: a.mime_type,
+                data: a.data,
+            })
+            .collect();
+        self.rt.spawn(async move {
+            if let Err(e) = AppExpertDispatcher::new(state)
+                .send_message_with_attachments(&session_id, text, attachments)
+                .await
+            {
+                tracing::warn!("plugin send_message for {session_id} failed: {e}");
+            }
+        });
+    }
+
+    fn interrupt_session(&self, session_id: String) {
+        let Some(state) = self.state.upgrade() else {
+            return;
+        };
+        self.rt.spawn(async move {
+            state.session_manager.interrupt(&session_id).await;
+            broadcast_session_event(
+                &state,
+                &session_id,
+                "interrupt",
+                serde_json::json!({ "reason": "plugin-interrupt" }),
+            )
+            .await;
+        });
+    }
+
+    fn terminate_agent(&self, session_id: String) {
+        let Some(state) = self.state.upgrade() else {
+            return;
+        };
+        self.rt.spawn(async move {
+            state.session_manager.cancel_and_wait(&session_id).await;
+            broadcast_session_event(
+                &state,
+                &session_id,
+                "system",
+                serde_json::json!({
+                    "text": "Agent terminated by session-control. The next message will start a fresh process.",
+                }),
+            )
+            .await;
+        });
+    }
+
+    fn clear_session(&self, session_id: String) {
+        let Some(state) = self.state.upgrade() else {
+            return;
+        };
+        self.rt.spawn(async move {
+            if let Err(e) = crate::routes::sessions::clear_session_core(&state, &session_id).await {
+                tracing::warn!("plugin clear_session for {session_id} failed: {e}");
+            }
+        });
+    }
+}
+
+/// Append an event to `session_id` and broadcast it to live subscribers, in
+/// the same `{id,seq,ts,kind,data}` frame shape the session routes use. Shared
+/// by the session-control interrupt/terminate paths so the UI reflects them.
+async fn broadcast_session_event(
+    state: &Arc<AppState>,
+    session_id: &str,
+    kind: &str,
+    data: serde_json::Value,
+) {
+    if let Ok(event) = state.db.append_event(session_id, kind, data).await {
+        state.broadcaster.broadcast(crate::ws::broadcaster::WsEvent {
+            event_type: "event".into(),
+            session_id: session_id.to_string(),
+            data: serde_json::json!({
+                "id": event.id,
+                "seq": event.seq,
+                "ts": event.ts,
+                "kind": event.kind,
+                "data": serde_json::from_str::<serde_json::Value>(&event.data).unwrap_or_default(),
+            }),
         });
     }
 }

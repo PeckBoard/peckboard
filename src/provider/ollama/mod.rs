@@ -97,6 +97,14 @@ struct OllamaRun {
 struct ChatMessage {
     role: String,
     content: String,
+    /// Base64-encoded images attached to a `user` turn, in Ollama's
+    /// `/api/chat` shape (a bare array of base64 strings, no data-URI
+    /// prefix). Omitted entirely when the turn carries no images, so a
+    /// text-only request is byte-for-byte what it was before image
+    /// support existed. Only multimodal models actually look at this;
+    /// text models ignore it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    images: Option<Vec<String>>,
     /// Tool calls on an `assistant` turn, replayed verbatim on the next
     /// request so the model sees its own call alongside the `tool` result.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -108,10 +116,11 @@ struct ChatMessage {
 }
 
 impl ChatMessage {
-    fn user(content: String) -> Self {
+    fn user(content: String, images: Option<Vec<String>>) -> Self {
         ChatMessage {
             role: "user".into(),
             content,
+            images,
             tool_calls: None,
             tool_name: None,
         }
@@ -121,6 +130,7 @@ impl ChatMessage {
         ChatMessage {
             role: "assistant".into(),
             content,
+            images: None,
             tool_calls,
             tool_name: None,
         }
@@ -130,6 +140,7 @@ impl ChatMessage {
         ChatMessage {
             role: "tool".into(),
             content,
+            images: None,
             tool_calls: None,
             tool_name: Some(tool_name),
         }
@@ -418,13 +429,16 @@ impl AgentProvider for OllamaProvider {
         let endpoint = build_endpoint(&base_url, "/api/chat")?;
 
         {
-            // Ollama's text chat endpoint doesn't take Anthropic-style
-            // image content blocks, so we pass only the text body here.
-            // Attachments (if any) are silently dropped — the user can
-            // still see them in the event log via the dispatch route.
+            // Ollama's `/api/chat` takes images as a per-message array of
+            // bare base64 strings (no data-URI prefix). Build that array
+            // from any image attachments on this turn; non-image files are
+            // dropped with a warning since the chat endpoint has nowhere to
+            // put them. Multimodal models (llava, llama3.2-vision, …) read
+            // these; text-only models ignore the field.
+            let images = encode_image_attachments(&message.attachments);
             let mut conv = self.conversations.lock().await;
             let history = conv.entry(session_id.clone()).or_default();
-            history.push(ChatMessage::user(message.text.clone()));
+            history.push(ChatMessage::user(message.text.clone(), images));
             // O(turns²) bandwidth otherwise — Ollama is stateless so
             // we'd resend the entire transcript on every turn forever.
             trim_history(history, MAX_HISTORY_MESSAGES);
@@ -550,6 +564,37 @@ fn resolve_model(raw: &str) -> Option<String> {
         return Some(rest.to_string());
     }
     None
+}
+
+/// Base64-encode the image attachments on a user turn into the bare-string
+/// array Ollama's `/api/chat` expects. Non-image attachments are dropped
+/// with a warning — the chat endpoint only accepts images. Returns `None`
+/// (rather than an empty vec) when there are no images, so the `images`
+/// field is omitted from the request entirely and a text-only turn
+/// serializes exactly as it did before image support.
+fn encode_image_attachments(
+    attachments: &[crate::provider::message::UserAttachment],
+) -> Option<Vec<String>> {
+    use base64::Engine as _;
+
+    let mut images = Vec::new();
+    for att in attachments {
+        if att.mime_type.starts_with("image/") {
+            images.push(base64::engine::general_purpose::STANDARD.encode(&att.data));
+        } else {
+            tracing::warn!(
+                filename = %att.filename,
+                mime = %att.mime_type,
+                "Dropping non-image attachment — Ollama /api/chat only accepts images"
+            );
+        }
+    }
+
+    if images.is_empty() {
+        None
+    } else {
+        Some(images)
+    }
 }
 
 fn setting_str(settings: &HashMap<String, serde_json::Value>, key: &str) -> Option<String> {
@@ -1377,7 +1422,7 @@ mod tests {
         // Build 6 turns (12 messages) — well past a cap of 4.
         let mut history = Vec::new();
         for i in 0..6 {
-            history.push(ChatMessage::user(format!("u{i}")));
+            history.push(ChatMessage::user(format!("u{i}"), None));
             history.push(ChatMessage::assistant(format!("a{i}"), None));
         }
         trim_history(&mut history, 4);
@@ -1407,7 +1452,7 @@ mod tests {
                 }]),
             ),
             ChatMessage::tool_result("math".into(), "2".into()),
-            ChatMessage::user("u1".into()),
+            ChatMessage::user("u1".into(), None),
             ChatMessage::assistant("a1".into(), None),
         ];
         trim_history(&mut history, 3);
@@ -1436,7 +1481,7 @@ mod tests {
         // A tool-free request must serialize exactly as before tools existed:
         // no `tools` key, and plain user/assistant messages carry no
         // `tool_calls`/`tool_name` noise.
-        let messages = vec![ChatMessage::user("hi".into())];
+        let messages = vec![ChatMessage::user("hi".into(), None)];
         let body = ChatRequest {
             model: "llama3.1",
             messages: &messages,
@@ -1449,6 +1494,48 @@ mod tests {
         assert_eq!(msg["role"], "user");
         assert!(msg.get("tool_calls").is_none());
         assert!(msg.get("tool_name").is_none());
+        // No attachments → no `images` key, so a text turn is unchanged.
+        assert!(msg.get("images").is_none());
+    }
+
+    #[test]
+    fn encode_image_attachments_keeps_images_drops_other() {
+        use crate::provider::message::UserAttachment;
+
+        // No attachments → None, so the request omits `images` entirely.
+        assert!(encode_image_attachments(&[]).is_none());
+
+        // A non-image-only set still yields None (nothing the chat
+        // endpoint can use), so the field stays omitted.
+        let pdf = UserAttachment {
+            filename: "doc.pdf".into(),
+            mime_type: "application/pdf".into(),
+            data: b"%PDF".to_vec(),
+        };
+        assert!(encode_image_attachments(std::slice::from_ref(&pdf)).is_none());
+
+        // An image is base64-encoded; the non-image alongside it is dropped.
+        let png = UserAttachment {
+            filename: "shot.png".into(),
+            mime_type: "image/png".into(),
+            data: vec![1, 2, 3, 4],
+        };
+        let images = encode_image_attachments(&[png, pdf]).expect("one image survives");
+        assert_eq!(images.len(), 1);
+        use base64::Engine as _;
+        assert_eq!(
+            images[0],
+            base64::engine::general_purpose::STANDARD.encode([1, 2, 3, 4])
+        );
+    }
+
+    #[test]
+    fn user_message_serializes_images_field() {
+        let msg = ChatMessage::user("what is this?".into(), Some(vec!["aGk=".into()]));
+        let v = serde_json::to_value(&msg).unwrap();
+        assert_eq!(v["role"], "user");
+        assert_eq!(v["content"], "what is this?");
+        assert_eq!(v["images"][0], "aGk=");
     }
 
     #[test]

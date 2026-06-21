@@ -78,6 +78,7 @@ async fn mock_echo_flows_through_dispatcher() {
         timeout_ms: None,
         metadata: serde_json::Value::Null,
         system_prompt_suffix: None,
+        system_prompt_override: None,
     };
 
     manager
@@ -150,6 +151,7 @@ async fn mock_todo_emits_normalized_todo_event() {
         timeout_ms: None,
         metadata: serde_json::Value::Null,
         system_prompt_suffix: None,
+        system_prompt_override: None,
     };
 
     manager

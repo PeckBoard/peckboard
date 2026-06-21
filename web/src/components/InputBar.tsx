@@ -12,6 +12,7 @@ interface InputBarProps {
 interface PendingAttachment {
   id: string
   name: string
+  mimeType: string
 }
 
 function fileToBase64(file: File): Promise<string> {
@@ -125,7 +126,7 @@ export default function InputBar({ sessionId }: InputBarProps) {
               throw new Error(typeof detail === 'string' ? detail : `upload failed (${res.status})`)
             }
             const result = await res.json()
-            setAttachments((prev) => [...prev, { id: result.id, name }])
+            setAttachments((prev) => [...prev, { id: result.id, name, mimeType: file.type }])
           } catch (err) {
             const reason = err instanceof Error ? err.message : 'upload failed'
             setUploadErrors((prev) => [...prev, `${name}: ${reason}`])
@@ -183,6 +184,7 @@ export default function InputBar({ sessionId }: InputBarProps) {
     const trimmed = text.trim()
     if ((!trimmed && attachments.length === 0) || sending) return
     const attachmentIds = attachments.map((a) => a.id)
+    const attachmentMeta = attachments.map((a) => ({ filename: a.name, mimeType: a.mimeType }))
     // Clear the composer up-front: lets the user start typing the next
     // message immediately (matches Slack/Discord/iMessage), and avoids
     // clobbering anything they type during the in-flight request.
@@ -196,7 +198,7 @@ export default function InputBar({ sessionId }: InputBarProps) {
     // empties but nothing visible happens until the round-trip
     // completes, which felt like the message had vanished. The real
     // event auto-clears the matching pending entry on arrival.
-    const pendingId = trimmed ? addPendingUserMessage(sessionId, trimmed) : ''
+    const pendingId = addPendingUserMessage(sessionId, trimmed, attachmentMeta)
     try {
       const body: Record<string, unknown> = { text: trimmed }
       if (attachmentIds.length > 0) {

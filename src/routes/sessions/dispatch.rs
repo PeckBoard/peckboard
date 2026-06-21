@@ -104,6 +104,18 @@ pub(super) async fn send_message(
     // exactly that with the user's actual text).
     dismiss_pending_questions(&state, &id).await;
 
+    // Resolve attachment IDs to bytes BEFORE appending the user event:
+    // the provider context owns the payload (move, not borrow), so doing
+    // the disk reads here means the provider's mid-stream injection path
+    // never has to reach back into the attachments dir. Doing it up front
+    // also lets us record each attachment's filename + mime on the user
+    // event, so the chat UI can show "image attached" on the bubble for
+    // every provider — not just the ones that forward the bytes to the
+    // model. Unknown/missing ids drop with a warning rather than failing
+    // the send — losing a stale id should not throw away the rest of the
+    // message.
+    let user_attachments = load_attachments(&id, attachment_ids.as_deref(), &state).await;
+
     // Always append the user event up front so the chat transcript
     // reflects the order the user typed in, regardless of whether the
     // agent is mid-turn or idle. In stream-json mode the Claude CLI
@@ -113,6 +125,20 @@ pub(super) async fn send_message(
     let mut user_data = serde_json::json!({ "text": resolved_text });
     if let Some(ref ids) = attachment_ids {
         user_data["attachmentIds"] = serde_json::json!(ids);
+    }
+    // Lightweight metadata (filename + mime) for the FE to render an
+    // attachment indicator on the bubble. Derived from the bytes we just
+    // loaded, so it only lists attachments that actually resolved.
+    if !user_attachments.is_empty() {
+        user_data["attachments"] = serde_json::json!(
+            user_attachments
+                .iter()
+                .map(|a| serde_json::json!({
+                    "filename": a.filename,
+                    "mime_type": a.mime_type,
+                }))
+                .collect::<Vec<_>>()
+        );
     }
 
     let user_event = state
@@ -174,16 +200,8 @@ pub(super) async fn send_message(
         timeout_ms: None,
         metadata: serde_json::Value::Null,
         system_prompt_suffix: None,
+        system_prompt_override: None,
     };
-
-    // Resolve attachment IDs to bytes BEFORE handing off to the
-    // dispatcher: the provider context owns the payload (move, not
-    // borrow), so doing the disk reads here means the provider's
-    // mid-stream injection path never has to reach back into the
-    // attachments dir. Unknown/missing ids drop with a warning rather
-    // than failing the send — losing a stale id should not throw
-    // away the rest of the message.
-    let user_attachments = load_attachments(&id, attachment_ids.as_deref(), &state).await;
 
     // `send_or_queue` acquires the per-session lock internally,
     // dispatches through the long-lived child (spawning lazily on

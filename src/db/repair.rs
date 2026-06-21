@@ -38,6 +38,7 @@ pub fn ensure_schema(conn: &mut SqliteConnection) -> anyhow::Result<()> {
     ensure_usage_events_table(conn)?;
     ensure_user_tabs_check_constraint(conn)?;
     ensure_plugin_data_tables(conn)?;
+    ensure_sessions_system_prompt_column(conn)?;
     Ok(())
 }
 
@@ -329,6 +330,25 @@ fn ensure_sessions_expert_columns(conn: &mut SqliteConnection) -> anyhow::Result
             tracing::info!("Repairing schema: adding sessions.{name}");
             sql_query(format!("ALTER TABLE sessions ADD COLUMN {name} {clause}")).execute(conn)?;
         }
+    }
+    Ok(())
+}
+
+/// Heal DBs that predate the `session_system_prompt` migration, whose sole
+/// statement is a non-idempotent `ALTER TABLE sessions ADD COLUMN
+/// system_prompt`. Detect-then-add so a DB that already has the column (or a
+/// fresh DB where the migration ran) is left untouched. Additive + nullable,
+/// so no backfill is needed.
+fn ensure_sessions_system_prompt_column(conn: &mut SqliteConnection) -> anyhow::Result<()> {
+    let rows: Vec<PragmaColumn> = sql_query("PRAGMA table_info(sessions)").load(conn)?;
+    let existing: Vec<String> = rows.into_iter().map(|r| r.name).collect();
+    if existing.is_empty() {
+        // Table missing — migrations haven't run; let the caller surface it.
+        return Ok(());
+    }
+    if !existing.iter().any(|c| c == "system_prompt") {
+        tracing::info!("Repairing schema: adding sessions.system_prompt");
+        sql_query("ALTER TABLE sessions ADD COLUMN system_prompt TEXT").execute(conn)?;
     }
     Ok(())
 }
