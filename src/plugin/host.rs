@@ -101,6 +101,16 @@ struct HostState {
 /// synchronous WASM `handle` call never blocks on an agent run (respecting the
 /// call timeout). Authorization/scope is enforced by the caller *before* these
 /// run; the impl just performs the already-checked action.
+/// An attachment delivered with [`LiveHost::send_message`] — decoded image or
+/// file bytes the receiving agent gets on the user message. The plugin passes
+/// these base64-encoded; the host function decodes them before constructing one.
+#[derive(Clone, Debug)]
+pub struct LiveAttachment {
+    pub filename: String,
+    pub mime_type: String,
+    pub data: Vec<u8>,
+}
+
 pub trait LiveHost: Send + Sync {
     /// Force a fresh capture run on `session_id` with `prompt` (maps to
     /// `ExpertDispatcher::dispatch_capture`).
@@ -108,6 +118,19 @@ pub trait LiveHost: Send + Sync {
     /// Deliver `text` to `session_id` and resume it — spawn if idle, queue /
     /// inject if running (maps to `ExpertDispatcher::resume_session`).
     fn resume_session(&self, session_id: String, text: String);
+    /// Deliver `text` plus `attachments` (images/files) to `session_id` and
+    /// resume it, like [`Self::resume_session`] but with attachments on the
+    /// user message. No-op default for impls that don't support attachments.
+    fn send_message(&self, _session_id: String, _text: String, _attachments: Vec<LiveAttachment>) {}
+    /// Interrupt the in-flight turn on `session_id` (cancel the current run
+    /// without deleting the session). Fire-and-forget; no-op default.
+    fn interrupt_session(&self, _session_id: String) {}
+    /// Terminate the long-lived agent process for `session_id` (kill it
+    /// between turns; the next message starts fresh). No-op default.
+    fn terminate_agent(&self, _session_id: String) {}
+    /// Clear `session_id`: cancel any run, wipe its events / todos /
+    /// attachments, and reset its conversation. Fire-and-forget; no-op default.
+    fn clear_session(&self, _session_id: String) {}
     /// Emit a single-question user prompt to `session_id` (same UI surface as
     /// the worker `ask_user` MCP tool: a "question" event + broadcast). `token`
     /// is an opaque correlation id stored on the question so the plugin can
@@ -711,6 +734,7 @@ pub(crate) fn create_session_impl(db: &Db, input: &str, inv: &InvocationContext)
         scope_path: None,
         is_permanent: false,
         repeating_task_id: None,
+        system_prompt: None,
     };
     match db.create_session_blocking(new) {
         Ok(session) => serde_json::json!({ "session": session }).to_string(),
@@ -766,6 +790,7 @@ pub(crate) fn update_session_impl(
         knowledge_area: None,
         scope_path: None,
         is_permanent: None,
+        system_prompt: None,
     };
     match db.update_session_blocking(req.session_id.trim(), update) {
         Ok(Some(session)) => serde_json::json!({ "session": session }).to_string(),
@@ -1244,6 +1269,149 @@ pub(crate) fn resume_session_impl(
     };
     live.resume_session(req.session_id.trim().to_string(), req.text);
     serde_json::json!({ "ok": true }).to_string()
+}
+
+// ── Session control (gated: `session_control`) ────────────────────────
+//
+// Full control of ANY session by id (no folder/project boundary — the
+// operator grants this by approving the plugin). Every action is
+// fire-and-forget via the LiveHost; the host fn only validates the request
+// and that the target session exists.
+
+/// Largest single attachment a session-control `send_message` accepts,
+/// matching the HTTP attachment upload cap.
+const SEND_ATTACHMENT_MAX_BYTES: usize = 10 * 1024 * 1024;
+
+#[derive(serde::Deserialize)]
+struct SessionControlRequest {
+    session_id: String,
+}
+
+#[derive(serde::Deserialize)]
+struct SendMessageRequest {
+    session_id: String,
+    #[serde(default)]
+    text: String,
+    #[serde(default)]
+    attachments: Vec<SendAttachment>,
+}
+
+#[derive(serde::Deserialize)]
+struct SendAttachment {
+    filename: String,
+    mime_type: String,
+    data_base64: String,
+}
+
+/// Look up a session by id with NO visibility boundary (session-control is
+/// deliberately cross-folder). Returns a uniform "not found" so a bad id is
+/// a clean error rather than a panic.
+fn require_session(db: &Db, session_id: &str) -> Result<crate::db::models::Session, String> {
+    let id = session_id.trim();
+    if id.is_empty() {
+        return Err("session_id is required".to_string());
+    }
+    match db.get_session_blocking(id) {
+        Ok(Some(s)) => Ok(s),
+        Ok(None) => Err(format!("session not found: {id}")),
+        Err(e) => Err(e.to_string()),
+    }
+}
+
+/// Shared body for the no-argument control actions (interrupt / terminate /
+/// clear): parse `{session_id}`, confirm it exists, then fire `action`.
+fn control_session(
+    db: &Db,
+    input: &str,
+    live: Option<Arc<dyn LiveHost>>,
+    action_name: &str,
+    action: impl FnOnce(Arc<dyn LiveHost>, String),
+) -> String {
+    let req: SessionControlRequest = match serde_json::from_str(input) {
+        Ok(r) => r,
+        Err(e) => return error_json(format!("invalid request: {e}")),
+    };
+    let sid = match require_session(db, &req.session_id) {
+        Ok(s) => s.id,
+        Err(e) => return error_json(e),
+    };
+    let Some(live) = live else {
+        return error_json("live control unavailable");
+    };
+    action(live, sid.clone());
+    serde_json::json!({ "ok": true, "session_id": sid, "action": action_name }).to_string()
+}
+
+pub(crate) fn interrupt_session_impl(
+    db: &Db,
+    input: &str,
+    live: Option<Arc<dyn LiveHost>>,
+) -> String {
+    control_session(db, input, live, "interrupt", |live, sid| {
+        live.interrupt_session(sid)
+    })
+}
+
+pub(crate) fn terminate_agent_impl(
+    db: &Db,
+    input: &str,
+    live: Option<Arc<dyn LiveHost>>,
+) -> String {
+    control_session(db, input, live, "terminate", |live, sid| {
+        live.terminate_agent(sid)
+    })
+}
+
+pub(crate) fn clear_session_impl(db: &Db, input: &str, live: Option<Arc<dyn LiveHost>>) -> String {
+    control_session(db, input, live, "clear", |live, sid| {
+        live.clear_session(sid)
+    })
+}
+
+/// `peckboard_send_message` — deliver a message (with optional base64 image /
+/// file attachments) to any session and resume it.
+pub(crate) fn send_message_impl(db: &Db, input: &str, live: Option<Arc<dyn LiveHost>>) -> String {
+    use base64::Engine as _;
+
+    let req: SendMessageRequest = match serde_json::from_str(input) {
+        Ok(r) => r,
+        Err(e) => return error_json(format!("invalid request: {e}")),
+    };
+    let sid = match require_session(db, &req.session_id) {
+        Ok(s) => s.id,
+        Err(e) => return error_json(e),
+    };
+    if req.text.trim().is_empty() && req.attachments.is_empty() {
+        return error_json("send_message requires non-empty text or at least one attachment");
+    }
+
+    let mut attachments = Vec::with_capacity(req.attachments.len());
+    for a in req.attachments {
+        let data = match base64::engine::general_purpose::STANDARD.decode(a.data_base64.as_bytes())
+        {
+            Ok(b) => b,
+            Err(e) => return error_json(format!("invalid base64 for '{}': {e}", a.filename)),
+        };
+        if data.len() > SEND_ATTACHMENT_MAX_BYTES {
+            return error_json(format!(
+                "attachment '{}' is {} bytes (max {SEND_ATTACHMENT_MAX_BYTES})",
+                a.filename,
+                data.len()
+            ));
+        }
+        attachments.push(LiveAttachment {
+            filename: a.filename,
+            mime_type: a.mime_type,
+            data,
+        });
+    }
+
+    let Some(live) = live else {
+        return error_json("live control unavailable");
+    };
+    let count = attachments.len();
+    live.send_message(sid.clone(), req.text, attachments);
+    serde_json::json!({ "ok": true, "session_id": sid, "attachments": count }).to_string()
 }
 
 // ── Outbound HTTP fetch (gated, SSRF-contained) ───────────────────────
@@ -1979,6 +2147,33 @@ host_fn!(peckboard_resume_session(user_data: HostState; input: String) -> String
     Ok(resume_session_impl(&db, &input, &inv, live))
 });
 
+// Session control: full cross-folder control of any session. Gated on the
+// `session_control` permission; no invocation-context boundary (the operator
+// grants this by approving the plugin).
+host_fn!(peckboard_interrupt_session(user_data: HostState; input: String) -> String {
+    let (db, _plugin_id, ok, _inv, live) = state_permission_invocation_and_live(&user_data, "session_control")?;
+    if !ok { return Ok(error_json("plugin lacks the 'session_control' permission")); }
+    Ok(interrupt_session_impl(&db, &input, live))
+});
+
+host_fn!(peckboard_terminate_agent(user_data: HostState; input: String) -> String {
+    let (db, _plugin_id, ok, _inv, live) = state_permission_invocation_and_live(&user_data, "session_control")?;
+    if !ok { return Ok(error_json("plugin lacks the 'session_control' permission")); }
+    Ok(terminate_agent_impl(&db, &input, live))
+});
+
+host_fn!(peckboard_clear_session(user_data: HostState; input: String) -> String {
+    let (db, _plugin_id, ok, _inv, live) = state_permission_invocation_and_live(&user_data, "session_control")?;
+    if !ok { return Ok(error_json("plugin lacks the 'session_control' permission")); }
+    Ok(clear_session_impl(&db, &input, live))
+});
+
+host_fn!(peckboard_send_message(user_data: HostState; input: String) -> String {
+    let (db, _plugin_id, ok, _inv, live) = state_permission_invocation_and_live(&user_data, "session_control")?;
+    if !ok { return Ok(error_json("plugin lacks the 'session_control' permission")); }
+    Ok(send_message_impl(&db, &input, live))
+});
+
 host_fn!(peckboard_http_fetch(user_data: HostState; input: String) -> String {
     let (_db, _plugin_id, ok) = state_and_permission(&user_data, "http_fetch")?;
     if !ok { return Ok(error_json("plugin lacks the 'http_fetch' permission")); }
@@ -2191,6 +2386,34 @@ pub(crate) fn host_functions(
             peckboard_resume_session,
         ),
         Function::new(
+            "peckboard_interrupt_session",
+            [PTR],
+            [PTR],
+            ud.clone(),
+            peckboard_interrupt_session,
+        ),
+        Function::new(
+            "peckboard_terminate_agent",
+            [PTR],
+            [PTR],
+            ud.clone(),
+            peckboard_terminate_agent,
+        ),
+        Function::new(
+            "peckboard_clear_session",
+            [PTR],
+            [PTR],
+            ud.clone(),
+            peckboard_clear_session,
+        ),
+        Function::new(
+            "peckboard_send_message",
+            [PTR],
+            [PTR],
+            ud.clone(),
+            peckboard_send_message,
+        ),
+        Function::new(
             "peckboard_http_fetch",
             [PTR],
             [PTR],
@@ -2266,6 +2489,50 @@ mod tests {
         // A session the plugin never tagged reads back null.
         let none = session_meta_get_impl(&db, "experts", r#"{"session_id":"nope"}"#);
         assert!(none.contains("null"), "absent meta should be null: {none}");
+    }
+
+    #[tokio::test]
+    async fn session_control_impls_validate_target_and_live() {
+        let db = Db::in_memory().unwrap();
+        let ts = chrono::Utc::now().to_rfc3339();
+        db.create_folder(NewFolder {
+            id: "f1".into(),
+            name: "f1".into(),
+            path: "/tmp/f1".into(),
+            created_at: ts.clone(),
+        })
+        .await
+        .unwrap();
+        db.create_session(crate::db::models::NewSession {
+            id: "s1".into(),
+            name: "s1".into(),
+            folder_id: "f1".into(),
+            created_at: ts.clone(),
+            last_activity: ts,
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+
+        // Unknown target id → "not found" (no boundary check, just existence).
+        let nf = interrupt_session_impl(&db, r#"{"session_id":"nope"}"#, None);
+        assert!(nf.contains("not found"), "{nf}");
+
+        // Known session, but no live host wired → reports unavailable, not a panic.
+        let nl = clear_session_impl(&db, r#"{"session_id":"s1"}"#, None);
+        assert!(nl.contains("live control unavailable"), "{nl}");
+
+        // send_message refuses an empty payload (no text, no attachments).
+        let empty = send_message_impl(&db, r#"{"session_id":"s1","text":"  "}"#, None);
+        assert!(empty.contains("requires"), "{empty}");
+
+        // Malformed base64 attachment is rejected before dispatch.
+        let bad = send_message_impl(
+            &db,
+            r#"{"session_id":"s1","text":"hi","attachments":[{"filename":"a.png","mime_type":"image/png","data_base64":"!notbase64!"}]}"#,
+            None,
+        );
+        assert!(bad.contains("invalid base64"), "{bad}");
     }
 
     fn inv(project: Option<&str>, folder: Option<&str>) -> InvocationContext {

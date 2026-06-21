@@ -46,6 +46,10 @@ pub struct Session {
     pub scope_path: Option<String>,
     pub is_permanent: bool,
     pub repeating_task_id: Option<String>,
+    /// Custom system prompt. When non-empty, it fully replaces the standing
+    /// Peckboard system prompt for this session's agent runs. Editable
+    /// across sessions via the `set_session_system_prompt` MCP tool.
+    pub system_prompt: Option<String>,
 }
 
 #[derive(Insertable, Deserialize, Debug, Default)]
@@ -69,6 +73,7 @@ pub struct NewSession {
     pub scope_path: Option<String>,
     pub is_permanent: bool,
     pub repeating_task_id: Option<String>,
+    pub system_prompt: Option<String>,
 }
 
 #[derive(AsChangeset, Deserialize, Debug, Default)]
@@ -87,6 +92,7 @@ pub struct UpdateSession {
     pub knowledge_area: Option<Option<String>>,
     pub scope_path: Option<Option<String>>,
     pub is_permanent: Option<bool>,
+    pub system_prompt: Option<Option<String>>,
 }
 
 // ── Repeating Tasks ──────────────────────────────────────────────────

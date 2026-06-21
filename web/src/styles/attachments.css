@@ -34,6 +34,13 @@
   padding: 8px 24px 0;
 }
 
+/* Attachment indicator rendered inside a chat bubble (not the input bar):
+   drop the input bar's wide horizontal padding and just space it off the
+   message text above. */
+.chat-attachment-chips {
+  padding: 6px 0 0;
+}
+
 .attachment-chip {
   display: inline-flex;
   align-items: center;

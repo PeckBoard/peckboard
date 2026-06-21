@@ -448,82 +448,65 @@ async fn clear_session(
         ));
     }
 
-    // Kill any running process for this session AND wait for it to fully
-    // wind down. The streaming task emits a synthetic `agent-end` (Crashed
-    // reason "interrupted") on every cancel path; if we don't wait, that
-    // event lands AFTER `delete_events_by_session` below and resurrects
-    // a stale "Agent crashed (interrupted)" line on the cleared session.
-    //
-    // The pre-cancel `interrupt` event is for live UI consumers: ChatView
-    // suppresses any subsequent agent-end-with-reason-"interrupted" when
-    // it follows an `interrupt`, so the brief window between the Crashed
-    // broadcast and the `session-cleared` wipe doesn't flash a crash
-    // banner. Both events will themselves be wiped by `delete_events_by_session`
-    // and never re-appear after a reload.
-    if state.session_manager.is_running(&id).await {
-        if let Ok(event) = state
-            .db
-            .append_event(
-                &id,
-                "interrupt",
-                serde_json::json!({ "reason": "session-clear" }),
-            )
-            .await
-        {
-            state
-                .broadcaster
-                .broadcast(crate::ws::broadcaster::WsEvent {
-                    event_type: "event".into(),
-                    session_id: id.clone(),
-                    data: serde_json::json!({
-                        "id": event.id,
-                        "seq": event.seq,
-                        "ts": event.ts,
-                        "kind": event.kind,
-                        "data": serde_json::from_str::<serde_json::Value>(&event.data).unwrap_or_default(),
-                    }),
-                });
-        }
-        state.session_manager.cancel_and_wait(&id).await;
-    }
-
-    // Delete all events for this session
-    state.db.delete_events_by_session(&id).await.map_err(|e| {
+    // Do the actual wipe via the shared core (also used by the
+    // session-control plugin's clear_session host function).
+    clear_session_core(&state, &id).await.map_err(|e| {
         (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(serde_json::json!({ "error": e.to_string() })),
         )
     })?;
 
-    // Wipe the dedicated todos table too. The chat view's local memo
-    // falls back to empty once events load empty, but the load-time
-    // /todos endpoint and the dedicated SessionTodosView read straight
-    // from this table — without this, todos reappear after a reload or
-    // when the user opens the standalone tasks view.
+    Ok::<_, (StatusCode, Json<serde_json::Value>)>(StatusCode::NO_CONTENT)
+}
+
+/// Wipe a session's transcript and reset it — the shared body behind both the
+/// `/clear` route (after its worker/repeating-task guards) and the
+/// session-control plugin's `clear_session`. No guards, no HTTP framing:
+/// cancels any in-flight run (waiting for it to wind down so a stale
+/// `agent-end` can't resurrect a cleared line), deletes events + todos,
+/// drops the attachments dir, and resets `conversation_id`.
+pub(crate) async fn clear_session_core(state: &AppState, id: &str) -> anyhow::Result<()> {
+    if state.session_manager.is_running(id).await {
+        if let Ok(event) = state
+            .db
+            .append_event(
+                id,
+                "interrupt",
+                serde_json::json!({ "reason": "session-clear" }),
+            )
+            .await
+        {
+            state.broadcaster.broadcast(crate::ws::broadcaster::WsEvent {
+                event_type: "event".into(),
+                session_id: id.to_string(),
+                data: serde_json::json!({
+                    "id": event.id,
+                    "seq": event.seq,
+                    "ts": event.ts,
+                    "kind": event.kind,
+                    "data": serde_json::from_str::<serde_json::Value>(&event.data).unwrap_or_default(),
+                }),
+            });
+        }
+        state.session_manager.cancel_and_wait(id).await;
+    }
+
+    state.db.delete_events_by_session(id).await?;
     state
         .db
-        .replace_session_todos(&id, crate::todo::TodoSnapshot::default())
-        .await
-        .map_err(|e| {
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(serde_json::json!({ "error": e.to_string() })),
-            )
-        })?;
+        .replace_session_todos(id, crate::todo::TodoSnapshot::default())
+        .await?;
 
-    // Tell any live subscribers (chat view, session-todos view) to drop
-    // their cached snapshot. Sent as a typed transient frame rather than
-    // a persisted `todo` event so the cleared events list stays empty.
     state
         .broadcaster
         .broadcast(crate::ws::broadcaster::WsEvent {
             event_type: "session-cleared".into(),
-            session_id: id.clone(),
+            session_id: id.to_string(),
             data: serde_json::json!({ "session_id": id }),
         });
 
-    // Delete attachments directory
-    let attachments_dir = state.config.data_dir.join("attachments").join(&id);
+    let attachments_dir = state.config.data_dir.join("attachments").join(id);
     if attachments_dir.exists()
         && let Err(e) = tokio::fs::remove_dir_all(&attachments_dir).await
     {
@@ -534,25 +517,17 @@ async fn clear_session(
         );
     }
 
-    // Reset conversation_id to None
     state
         .db
         .update_session(
-            &id,
+            id,
             UpdateSession {
                 conversation_id: Some(None),
                 ..Default::default()
             },
         )
-        .await
-        .map_err(|e| {
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(serde_json::json!({ "error": e.to_string() })),
-            )
-        })?;
-
-    Ok::<_, (StatusCode, Json<serde_json::Value>)>(StatusCode::NO_CONTENT)
+        .await?;
+    Ok(())
 }
 
 /// Resolve `[session:id]` and `[report:folder/file]` references in text.

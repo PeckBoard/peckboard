@@ -246,6 +246,10 @@ impl SessionManager {
             timeout_ms: config.timeout_ms,
             metadata: config.metadata,
             system_prompt_suffix: config.system_prompt_suffix,
+            // A session's custom prompt is read here, once, so every dispatch
+            // path (chat, worker, repeating task) honours it without each
+            // caller having to thread it through SpawnConfig.
+            system_prompt_override: session.system_prompt.clone(),
         };
 
         let ctx = SendMessageContext {

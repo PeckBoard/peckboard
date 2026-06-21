@@ -60,6 +60,9 @@ export interface PendingUserMessage {
   tempId: string
   text: string
   ts: number
+  /** Attachments carried by this turn, so the optimistic bubble shows the
+   *  same "image attached" indicator the persisted `user` event will. */
+  attachments?: { filename: string; mimeType: string }[]
 }
 
 /** Cursor returned by `GET /api/sessions`. Pass back as-is to fetch
@@ -114,7 +117,11 @@ interface SessionsState {
    *  `user` event arriving over the WS auto-clears it. Returns the
    *  `tempId` so the caller can roll back manually if the POST
    *  errors and no `user` event will ever arrive. */
-  addPendingUserMessage: (sessionId: string, text: string) => string
+  addPendingUserMessage: (
+    sessionId: string,
+    text: string,
+    attachments?: { filename: string; mimeType: string }[],
+  ) => string
   /** Remove a single pending user-message entry by id — used by the
    *  send path when the POST fails so the optimistic bubble doesn't
    *  hang around with no hope of being confirmed. */
@@ -331,12 +338,20 @@ export const useSessionsStore = create<SessionsState>((set, get) => ({
     })
   },
 
-  addPendingUserMessage: (sessionId: string, text: string) => {
-    if (!text) return ''
+  addPendingUserMessage: (
+    sessionId: string,
+    text: string,
+    attachments?: { filename: string; mimeType: string }[],
+  ) => {
+    // Allow an attachment-only turn (image with no caption) to still show
+    // an optimistic bubble — otherwise an image send looks like nothing
+    // happened until the WS `user` event lands.
+    if (!text && (!attachments || attachments.length === 0)) return ''
     const entry: PendingUserMessage = {
       tempId: `pending-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
       text,
       ts: Date.now(),
+      attachments: attachments && attachments.length > 0 ? attachments : undefined,
     }
     set((s) => ({
       pendingUserMessages: {

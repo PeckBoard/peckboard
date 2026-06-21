@@ -19,9 +19,15 @@ export interface QuestionItem {
   optionObjects?: QuestionOption[]
 }
 
+/** One attachment carried by a user turn, as recorded on the `user` event. */
+export interface MessageAttachment {
+  filename: string
+  mimeType: string
+}
+
 /** A display item derived from one or more raw events. */
 export type DisplayItem =
-  | { type: 'user'; text: string; key: string; ts: number }
+  | { type: 'user'; text: string; key: string; ts: number; attachments?: MessageAttachment[] }
   | { type: 'assistant'; text: string; key: string; ts: number }
   | {
       type: 'tool'
@@ -143,6 +149,32 @@ function closeOpenTools(
   openTools.clear()
 }
 
+/**
+ * Pull attachment metadata off a `user` event for the chat bubble's
+ * "image attached" indicator. The backend records a rich `attachments`
+ * array ({filename, mime_type}) for every provider; older events (and any
+ * the FE sent before that field existed) only carry `attachmentIds`, so we
+ * fall back to a bare placeholder per id. Returns undefined when the turn
+ * had no attachments, so the bubble renders exactly as before.
+ */
+function readAttachments(ev: Event): MessageAttachment[] | undefined {
+  const rich = ev.data.attachments
+  if (Array.isArray(rich) && rich.length > 0) {
+    return rich.map((a) => {
+      const obj = (a ?? {}) as Record<string, unknown>
+      return {
+        filename: (obj.filename as string) ?? 'attachment',
+        mimeType: (obj.mime_type as string) ?? (obj.mimeType as string) ?? '',
+      }
+    })
+  }
+  const ids = ev.data.attachmentIds
+  if (Array.isArray(ids) && ids.length > 0) {
+    return ids.map(() => ({ filename: 'attachment', mimeType: '' }))
+  }
+  return undefined
+}
+
 export function buildDisplayItems(events: Event[]): DisplayItem[] {
   const items: DisplayItem[] = []
   let assistantBuffer = ''
@@ -184,7 +216,7 @@ export function buildDisplayItems(events: Event[]): DisplayItem[] {
       case 'user': {
         flushAssistant()
         const text = (ev.data.text as string) ?? JSON.stringify(ev.data)
-        items.push({ type: 'user', text, key: ev.id, ts: ev.ts })
+        items.push({ type: 'user', text, key: ev.id, ts: ev.ts, attachments: readAttachments(ev) })
         break
       }
       case 'agent-text': {

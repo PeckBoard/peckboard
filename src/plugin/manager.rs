@@ -74,9 +74,10 @@ pub const ALLOWED_PERMISSIONS: &[&str] = &[
     "project_files_write", // peckboard_write_file
     "provide_mcp_tools", // declare mcp_tools (mcp.tool.invoke)
     "session_dispatch", // peckboard_dispatch_capture / resume_session
-    "session_read", // peckboard_get_session / list_sessions
-    "session_write", // peckboard_create_session / update_session
-    "user_authority", // serve authenticated UI + act under the user (ui_routes)
+    "session_control", // peckboard_interrupt_session / terminate_agent / clear_session / send_message — full cross-folder control of any session
+    "session_read",    // peckboard_get_session / list_sessions
+    "session_write",   // peckboard_create_session / update_session
+    "user_authority",  // serve authenticated UI + act under the user (ui_routes)
 ];
 
 /// Whether an operator has approved the set of hooks a loaded plugin
@@ -1065,6 +1066,73 @@ impl PluginManager {
         }
         info!("Installed plugin '{id}' ({} hooks)", info.hooks.len());
         Ok(info)
+    }
+
+    /// Resolve `id` against the configured plugin registries (the
+    /// `PECKBOARD_PLUGIN_REGISTRY_URL` env override first, then the
+    /// operator's repository rows), download + integrity-check the listed
+    /// `.wasm`, and install/upgrade it via [`Self::install`]. `repository`
+    /// restricts the search to a single registry url.
+    ///
+    /// This is the resolver behind the `upgrade_plugin` MCP tool. The HTTP
+    /// `registry/install` route keeps its own inline copy so it can map each
+    /// failure mode to a distinct status code (404 / 409 / 502); here every
+    /// failure is a plain `anyhow` error surfaced to the calling agent.
+    pub async fn install_from_registry(
+        &self,
+        id: &str,
+        repository: Option<&str>,
+    ) -> anyhow::Result<WasmPluginInfo> {
+        use super::registry;
+
+        let db = self
+            .db
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("this plugin manager cannot install plugins"))?;
+
+        // Candidate registries: env override first, then DB rows (de-duped).
+        let mut repos: Vec<String> = Vec::new();
+        if let Some((_, url)) = registry::env_repository() {
+            repos.push(url);
+        }
+        for row in db.list_plugin_repositories().await? {
+            if !repos.iter().any(|u| u == &row.url) {
+                repos.push(row.url);
+            }
+        }
+        if let Some(want) = repository {
+            repos.retain(|u| u == want);
+        }
+        if repos.is_empty() {
+            anyhow::bail!("no plugin registry configured");
+        }
+
+        let client = reqwest::Client::new();
+        let mut found: Option<registry::RegistryEntry> = None;
+        for url in &repos {
+            if let Ok(index) = registry::fetch_index(&client, url).await
+                && let Some(entry) = index.plugins.into_iter().find(|e| e.id == id)
+            {
+                found = Some(entry);
+                break;
+            }
+        }
+        let Some(entry) = found else {
+            anyhow::bail!("no plugin '{id}' in the registry");
+        };
+
+        let running = registry::peckboard_version();
+        if !registry::is_compatible(running, entry.min_peckboard.as_deref()) {
+            anyhow::bail!(
+                "plugin '{id}' requires Peckboard >= {} (running {running})",
+                entry.min_peckboard.as_deref().unwrap_or("?")
+            );
+        }
+
+        let bytes = registry::download_and_verify(&client, &entry.url, &entry.sha256)
+            .await
+            .map_err(|e| anyhow::anyhow!("download failed: {e}"))?;
+        self.install(&entry.id, &bytes).await
     }
 
     /// Uninstall a loaded WASM plugin: shut its instance down, drop it from

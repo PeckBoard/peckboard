@@ -628,6 +628,32 @@ pub(super) fn tool_definitions() -> Vec<McpToolDef> {
             }),
         },
         McpToolDef {
+            name: "upgrade_plugin".into(),
+            description: "Install or upgrade a Peckboard plugin from the configured plugin registry, by plugin id (e.g. \"common-tools\"). Downloads the version listed in the registry, verifies its checksum, and swaps it in. If the new version changed the plugin's hook set, it stays pending until an operator re-approves it. Use this to pick up a newer plugin release.".into(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "plugin_id": { "type": "string", "description": "The plugin id to install/upgrade (its registry id, e.g. \"common-tools\")." },
+                    "repository": { "type": "string", "description": "Optional registry.json URL to restrict the search to a single repository." }
+                },
+                "required": ["plugin_id"],
+                "additionalProperties": false
+            }),
+        },
+        McpToolDef {
+            name: "set_session_system_prompt".into(),
+            description: "Set (or clear) another session's system prompt. The text you set FULLY REPLACES that session's standing system prompt and takes effect on its next agent run. Pass system_prompt as a string to set it, or omit it / pass null to clear it (reverting to the default prompt). Works for any session you can reach (same folder, or same project for worker tokens).".into(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "session_id": { "type": "string", "description": "The session whose system prompt to edit." },
+                    "system_prompt": { "type": "string", "description": "The full system prompt text. Omit or pass null to clear and revert to the default." }
+                },
+                "required": ["session_id"],
+                "additionalProperties": false
+            }),
+        },
+        McpToolDef {
             name: "list_sessions".into(),
             description: "List every session you can read for debugging — chat, worker, and expert sessions alike. For a chat session this is all sessions in your folder; inside a project it's the project's sessions. Each entry has the session_id, name, kind (chat/worker/expert), and last activity so you can pick one to read or search.".into(),
             input_schema: serde_json::json!({

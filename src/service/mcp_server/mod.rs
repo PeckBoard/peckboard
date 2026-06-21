@@ -89,6 +89,7 @@ impl McpToolRegistry {
             "read_worker_session" => self.handle_read_worker_session(args, ctx).await,
             "search_sessions" => self.handle_search_sessions(args, ctx).await,
             "list_sessions" => self.handle_list_sessions(ctx).await,
+            "set_session_system_prompt" => self.handle_set_session_system_prompt(args, ctx).await,
             "list_worker_sessions" => self.handle_list_worker_sessions(ctx).await,
             "share_finding" => self.handle_share_finding(args, ctx).await,
             "get_finding_details" => self.handle_get_finding_details(args, ctx).await,
@@ -308,6 +309,12 @@ pub async fn dispatch_tool_call(
         .await
     {
         Some(r) => r,
+        // `upgrade_plugin` is a core tool that needs the PluginManager, which
+        // `McpToolRegistry::handle_tool_call` doesn't receive — handle it here
+        // where both `plugins` and the scoped `ctx` are in scope.
+        None if tool_name == "upgrade_plugin" => {
+            handle_upgrade_plugin(plugins, ctx, final_args).await
+        }
         None => registry.handle_tool_call(tool_name, final_args, ctx).await,
     };
 
@@ -338,6 +345,39 @@ pub async fn dispatch_tool_call(
         }
     }
     tool_result
+}
+
+/// `upgrade_plugin` MCP tool: install/upgrade a plugin from the configured
+/// registry. Lives here (not in `McpToolRegistry::handle_tool_call`) because
+/// it needs the `PluginManager`, which that handler doesn't receive.
+async fn handle_upgrade_plugin(
+    plugins: &crate::plugin::manager::PluginManager,
+    ctx: &ToolCallContext,
+    args: Value,
+) -> anyhow::Result<Value> {
+    let id = args
+        .get("plugin_id")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| anyhow::anyhow!("upgrade_plugin requires 'plugin_id'"))?;
+    let repository = args.get("repository").and_then(|v| v.as_str());
+
+    tracing::info!(session_id = %ctx.session_id, plugin_id = %id, "MCP tool: upgrade_plugin");
+
+    let info = plugins.install_from_registry(id, repository).await?;
+
+    // Refresh the plugin's card / approval state in the UI in real time,
+    // mirroring the HTTP install route.
+    ctx.broadcaster.broadcast(crate::ws::broadcaster::WsEvent {
+        event_type: "plugin-approval".into(),
+        session_id: String::new(),
+        data: serde_json::json!({ "plugin": info.name.clone(), "status": info.status }),
+    });
+
+    Ok(serde_json::json!({
+        "status": "ok",
+        "plugin": info,
+        "note": "Installed/upgraded. If the plugin's hook set changed, it stays pending until an operator re-approves it.",
+    }))
 }
 
 #[cfg(test)]
@@ -384,7 +424,9 @@ mod tests {
         assert!(names.contains(&"delete_repeating_task"));
         assert!(names.contains(&"search_sessions"));
         assert!(names.contains(&"list_sessions"));
-        assert_eq!(names.len(), 40);
+        assert!(names.contains(&"set_session_system_prompt"));
+        assert!(names.contains(&"upgrade_plugin"));
+        assert_eq!(names.len(), 42);
     }
 
     #[test]
@@ -417,6 +459,39 @@ mod tests {
             .await;
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("unknown tool"));
+    }
+
+    /// `upgrade_plugin` is intercepted by `dispatch_tool_call` (not the core
+    /// registry) because it needs the PluginManager. This pins that wiring:
+    /// the call reaches `handle_upgrade_plugin`, which validates args before
+    /// any registry/network work.
+    #[tokio::test]
+    async fn upgrade_plugin_requires_plugin_id() {
+        let registry = McpToolRegistry::new();
+        let db = crate::db::Db::in_memory().unwrap();
+        let tmp = tempfile::tempdir().unwrap();
+        let plugins = crate::plugin::manager::PluginManager::new(tmp.path(), db.clone());
+        let ctx = ToolCallContext {
+            session_id: "s1".into(),
+            project_id: None,
+            card_id: None,
+            db: Arc::new(db),
+            broadcaster: crate::ws::broadcaster::Broadcaster::new(),
+            provider_registry: None,
+            data_dir: None,
+            folder_id: "f1".into(),
+        };
+
+        let err = dispatch_tool_call(
+            &plugins,
+            &registry,
+            "upgrade_plugin",
+            serde_json::json!({}),
+            &ctx,
+        )
+        .await
+        .unwrap_err();
+        assert!(err.to_string().contains("plugin_id"), "got: {err}");
     }
 
     /// write_report / read_report must use the configured data dir from

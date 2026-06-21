@@ -82,6 +82,7 @@ async fn seed_session(
         scope_path: None,
         is_permanent: false,
         repeating_task_id: None,
+        system_prompt: None,
     })
     .await
     .unwrap();
@@ -475,6 +476,78 @@ async fn list_sessions_for_chat_caller_lists_folder_sessions_by_kind() {
     assert_eq!(chat["kind"], "chat");
     let worker = items.iter().find(|s| s["session_id"] == "w-f1").unwrap();
     assert_eq!(worker["kind"], "worker");
+}
+
+// ── set_session_system_prompt ───────────────────────────────────────
+
+#[tokio::test]
+async fn set_session_system_prompt_cross_folder_is_not_found() {
+    let db = Arc::new(Db::in_memory().unwrap());
+    two_folders_two_projects(&db).await;
+    seed_session(&db, "chat-f1", "f1", None, false, false, None).await;
+    seed_session(&db, "w-f2", "f2", Some("p2"), true, false, None).await;
+    let registry = McpToolRegistry::new();
+
+    let err = registry
+        .handle_tool_call(
+            "set_session_system_prompt",
+            serde_json::json!({ "session_id": "w-f2", "system_prompt": "pwn" }),
+            &ctx(&db, "chat-f1", "f1", None),
+        )
+        .await
+        .unwrap_err();
+    assert!(err.to_string().contains("not found"), "got: {err}");
+    // The foreign session's prompt is untouched.
+    let target = db.get_session("w-f2").await.unwrap().unwrap();
+    assert_eq!(target.system_prompt, None);
+}
+
+#[tokio::test]
+async fn set_session_system_prompt_sets_then_clears() {
+    let db = Arc::new(Db::in_memory().unwrap());
+    seed_folder(&db, "f1").await;
+    seed_session(&db, "chat-a", "f1", None, false, false, None).await;
+    seed_session(&db, "chat-b", "f1", None, false, false, None).await;
+    let registry = McpToolRegistry::new();
+    let caller = ctx(&db, "chat-a", "f1", None);
+
+    // Set chat-b's prompt from chat-a.
+    let set = registry
+        .handle_tool_call(
+            "set_session_system_prompt",
+            serde_json::json!({ "session_id": "chat-b", "system_prompt": "Be terse." }),
+            &caller,
+        )
+        .await
+        .unwrap();
+    assert_eq!(set["system_prompt_set"], true);
+    assert_eq!(
+        db.get_session("chat-b")
+            .await
+            .unwrap()
+            .unwrap()
+            .system_prompt,
+        Some("Be terse.".to_string())
+    );
+
+    // Clearing (omit system_prompt) reverts it to None.
+    let cleared = registry
+        .handle_tool_call(
+            "set_session_system_prompt",
+            serde_json::json!({ "session_id": "chat-b" }),
+            &caller,
+        )
+        .await
+        .unwrap();
+    assert_eq!(cleared["system_prompt_set"], false);
+    assert_eq!(
+        db.get_session("chat-b")
+            .await
+            .unwrap()
+            .unwrap()
+            .system_prompt,
+        None
+    );
 }
 
 // ── list_experts / ask_expert: cross-folder rejection ───────────────

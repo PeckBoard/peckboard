@@ -18,6 +18,7 @@ import {
   formatTime,
   getStatusDotClass,
   getStatusLabel,
+  type MessageAttachment,
   type QuestionItem,
 } from './chat/events'
 import 'highlight.js/styles/github-dark.css'
@@ -31,6 +32,29 @@ const EMPTY_PENDING_MESSAGES: PendingUserMessage[] = []
 interface ChatViewProps {
   sessionId: string
   onOpenTodos?: () => void
+}
+
+/**
+ * Renders the "image attached" indicator chips under a user message. Shown
+ * for every provider — the chips come off the persisted `user` event, so a
+ * message shows what it carried regardless of which model (Claude, Ollama,
+ * mock) actually consumed the bytes. An image-type attachment gets a
+ * picture icon, anything else a paperclip.
+ */
+function MessageAttachments({ attachments }: { attachments?: MessageAttachment[] }) {
+  if (!attachments || attachments.length === 0) return null
+  return (
+    <div className="attachment-chips chat-attachment-chips" data-testid="message-attachments">
+      {attachments.map((att, i) => (
+        <span key={`${att.filename}-${i}`} className="attachment-chip">
+          <span className="attachment-chip-icon">
+            {att.mimeType.startsWith('image/') ? '\u{1F5BC}\u{FE0F}' : '\u{1F4CE}'}
+          </span>
+          <span className="attachment-chip-name">{att.filename}</span>
+        </span>
+      ))}
+    </div>
+  )
 }
 
 function ResolvedQuestionCard({
@@ -721,6 +745,7 @@ export default function ChatView({ sessionId, onOpenTodos }: ChatViewProps) {
                 <div key={item.key} className="chat-row chat-row-user">
                   <div className="chat-bubble chat-bubble-user">
                     {item.text}
+                    <MessageAttachments attachments={item.attachments} />
                     <div className="chat-time chat-time-user">{formatTime(item.ts)}</div>
                   </div>
                 </div>
@@ -855,6 +880,7 @@ export default function ChatView({ sessionId, onOpenTodos }: ChatViewProps) {
           <div key={p.tempId} className="chat-row chat-row-user">
             <div className="chat-bubble chat-bubble-user chat-bubble-pending">
               {p.text}
+              <MessageAttachments attachments={p.attachments} />
               <div className="chat-time chat-time-user">Sending...</div>
             </div>
           </div>

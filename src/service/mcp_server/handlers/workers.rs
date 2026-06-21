@@ -631,6 +631,58 @@ impl McpToolRegistry {
         }))
     }
 
+    pub(crate) async fn handle_set_session_system_prompt(
+        &self,
+        args: Value,
+        ctx: &ToolCallContext,
+    ) -> anyhow::Result<Value> {
+        // Cap to a sane size so a runaway prompt can't bloat a session row.
+        const MAX_LEN: usize = 100_000;
+
+        let target_session_id = args
+            .get("session_id")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| anyhow::anyhow!("set_session_system_prompt requires 'session_id'"))?;
+
+        // `system_prompt` absent or null clears the custom prompt (the
+        // session reverts to the standing Peckboard prompt); a string sets it.
+        let prompt = args
+            .get("system_prompt")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string());
+        if let Some(ref p) = prompt
+            && p.len() > MAX_LEN
+        {
+            anyhow::bail!("system_prompt too long ({} > {MAX_LEN} chars)", p.len());
+        }
+
+        tracing::info!(
+            session_id = %ctx.session_id,
+            target = %target_session_id,
+            clearing = prompt.is_none(),
+            "MCP tool: set_session_system_prompt"
+        );
+
+        // Same read/write boundary as the other cross-session tools: the
+        // target must be in the caller's folder (and project, for worker
+        // tokens) or it looks like it doesn't exist.
+        self.scope_readable_session(ctx, target_session_id).await?;
+
+        let updated = ctx
+            .db
+            .set_session_system_prompt(target_session_id, prompt.clone())
+            .await?
+            .ok_or_else(|| anyhow::anyhow!("session not found: {target_session_id}"))?;
+
+        Ok(serde_json::json!({
+            "status": "ok",
+            "session_id": updated.id,
+            "session_name": updated.name,
+            "system_prompt_set": prompt.is_some(),
+            "note": "Fully replaces this session's system prompt; takes effect on its next agent run.",
+        }))
+    }
+
     pub(crate) async fn handle_list_worker_sessions(
         &self,
         ctx: &ToolCallContext,
