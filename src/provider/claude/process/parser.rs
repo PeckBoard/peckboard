@@ -6,7 +6,100 @@
 //! (conversation_id, model_name, current_tool_id, emitted_start) across
 //! calls so we can synthesize `Started` and `ToolEnd` events correctly.
 
-use crate::provider::stream::ProviderEvent;
+use crate::provider::stream::{ProviderEvent, ToolImage};
+
+/// Extract the textual output and any images from a `tool_result` block's
+/// `content`.
+///
+/// The CLI gives `content` in one of two shapes:
+/// - a bare string (the common case — a tool that returned only text), or
+/// - an array of content blocks, each `{"type": "text"|"image", …}`.
+///
+/// Tools that return images (Playwright MCP `browser_take_screenshot`, any
+/// image-returning MCP server) take the array form. We previously read only
+/// the string shape and dropped the array entirely, losing screenshots. We
+/// now concatenate every text block into `output` and pull each image block
+/// out as a [`ToolImage`].
+///
+/// Image blocks come in two flavours we tolerate:
+/// - Anthropic envelope: `{"type":"image","source":{"type":"base64",
+///   "media_type":"image/png","data":"…"}}`
+/// - raw MCP: `{"type":"image","data":"…","mimeType":"image/png"}`
+fn extract_tool_result(content: Option<&serde_json::Value>) -> (Option<String>, Vec<ToolImage>) {
+    let Some(content) = content else {
+        return (None, Vec::new());
+    };
+
+    // String shape: text only, no images.
+    if let Some(s) = content.as_str() {
+        return (Some(s.to_string()), Vec::new());
+    }
+
+    let Some(blocks) = content.as_array() else {
+        return (None, Vec::new());
+    };
+
+    let mut texts: Vec<String> = Vec::new();
+    let mut images: Vec<ToolImage> = Vec::new();
+    for block in blocks {
+        match block.get("type").and_then(|v| v.as_str()) {
+            Some("text") => {
+                if let Some(t) = block.get("text").and_then(|v| v.as_str()) {
+                    if !t.is_empty() {
+                        texts.push(t.to_string());
+                    }
+                }
+            }
+            Some("image") => {
+                if let Some(img) = parse_image_block(block) {
+                    images.push(img);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    let output = if texts.is_empty() {
+        None
+    } else {
+        Some(texts.join("\n"))
+    };
+    (output, images)
+}
+
+/// Pull a [`ToolImage`] out of a single `{"type":"image", …}` block,
+/// tolerating both the Anthropic `source.{media_type,data}` envelope and the
+/// raw MCP `{mimeType,data}` shape. Returns `None` if the base64 payload is
+/// missing.
+fn parse_image_block(block: &serde_json::Value) -> Option<ToolImage> {
+    // Anthropic envelope.
+    if let Some(source) = block.get("source") {
+        if let Some(data) = source.get("data").and_then(|v| v.as_str()) {
+            let mime_type = source
+                .get("media_type")
+                .and_then(|v| v.as_str())
+                .unwrap_or("image/png")
+                .to_string();
+            return Some(ToolImage {
+                mime_type,
+                data_base64: data.to_string(),
+            });
+        }
+    }
+    // Raw MCP shape.
+    if let Some(data) = block.get("data").and_then(|v| v.as_str()) {
+        let mime_type = block
+            .get("mimeType")
+            .and_then(|v| v.as_str())
+            .unwrap_or("image/png")
+            .to_string();
+        return Some(ToolImage {
+            mime_type,
+            data_base64: data.to_string(),
+        });
+    }
+    None
+}
 
 /// Parse a single JSON line from Claude CLI stream-json output into zero or
 /// more `ProviderEvent` values.
@@ -142,6 +235,7 @@ pub(super) fn parse_stream_json(
                     tool_use_id: tool_id,
                     output: None,
                     error: None,
+                    images: Vec::new(),
                 });
             }
         }
@@ -189,10 +283,7 @@ pub(super) fn parse_stream_json(
                                     .and_then(|v| v.as_str())
                                     .unwrap_or("")
                                     .to_string();
-                                let output = block
-                                    .get("content")
-                                    .and_then(|v| v.as_str())
-                                    .map(|s| s.to_string());
+                                let (output, images) = extract_tool_result(block.get("content"));
                                 let is_error = block
                                     .get("is_error")
                                     .and_then(|v| v.as_bool())
@@ -202,6 +293,7 @@ pub(super) fn parse_stream_json(
                                     tool_use_id: tool_id,
                                     output: if is_error { None } else { output },
                                     error,
+                                    images,
                                 });
                             }
                             _ => {}
@@ -223,10 +315,7 @@ pub(super) fn parse_stream_json(
                                 .and_then(|v| v.as_str())
                                 .unwrap_or("")
                                 .to_string();
-                            let output = block
-                                .get("content")
-                                .and_then(|v| v.as_str())
-                                .map(|s| s.to_string());
+                            let (output, images) = extract_tool_result(block.get("content"));
                             let is_error = block
                                 .get("is_error")
                                 .and_then(|v| v.as_bool())
@@ -236,6 +325,7 @@ pub(super) fn parse_stream_json(
                                 tool_use_id: tool_id,
                                 output: if is_error { None } else { output },
                                 error,
+                                images,
                             });
                         }
                     }
@@ -428,6 +518,117 @@ mod tests {
             ProviderEvent::ToolEnd { tool_use_id, .. } if tool_use_id == "tool_123"
         ));
         assert!(tool_id.is_none());
+    }
+
+    #[test]
+    fn test_tool_result_array_extracts_image_anthropic_shape() {
+        // A Playwright MCP screenshot arrives as a `user` tool_result whose
+        // `content` is an array of blocks, including an Anthropic-enveloped
+        // image. The parser must surface the image (previously dropped) and
+        // keep the accompanying text as output.
+        let json = serde_json::json!({
+            "type": "user",
+            "message": {
+                "content": [{
+                    "type": "tool_result",
+                    "tool_use_id": "tool_shot",
+                    "content": [
+                        { "type": "text", "text": "Took the screenshot" },
+                        { "type": "image", "source": {
+                            "type": "base64",
+                            "media_type": "image/png",
+                            "data": "QUJD"
+                        }}
+                    ]
+                }]
+            }
+        });
+
+        let mut cid = None;
+        let mut model = None;
+        let mut tool_id = None;
+        let mut started = true;
+        let events = parse_stream_json(&json, &mut cid, &mut model, &mut tool_id, &mut started);
+
+        assert_eq!(events.len(), 1);
+        let ProviderEvent::ToolEnd {
+            tool_use_id,
+            output,
+            error,
+            images,
+        } = &events[0]
+        else {
+            panic!("expected ToolEnd, got {:?}", events[0]);
+        };
+        assert_eq!(tool_use_id, "tool_shot");
+        assert_eq!(output.as_deref(), Some("Took the screenshot"));
+        assert!(error.is_none());
+        assert_eq!(images.len(), 1);
+        assert_eq!(images[0].mime_type, "image/png");
+        assert_eq!(images[0].data_base64, "QUJD");
+    }
+
+    #[test]
+    fn test_tool_result_array_extracts_image_mcp_shape() {
+        // Raw MCP image blocks use `{mimeType, data}` rather than the
+        // Anthropic `source` envelope. Both must be tolerated.
+        let json = serde_json::json!({
+            "type": "user",
+            "message": {
+                "content": [{
+                    "type": "tool_result",
+                    "tool_use_id": "tool_mcp",
+                    "content": [
+                        { "type": "image", "data": "WFla", "mimeType": "image/jpeg" }
+                    ]
+                }]
+            }
+        });
+
+        let mut cid = None;
+        let mut model = None;
+        let mut tool_id = None;
+        let mut started = true;
+        let events = parse_stream_json(&json, &mut cid, &mut model, &mut tool_id, &mut started);
+
+        assert_eq!(events.len(), 1);
+        let ProviderEvent::ToolEnd { images, output, .. } = &events[0] else {
+            panic!("expected ToolEnd, got {:?}", events[0]);
+        };
+        // No text blocks → no output, just the image.
+        assert!(output.is_none());
+        assert_eq!(images.len(), 1);
+        assert_eq!(images[0].mime_type, "image/jpeg");
+        assert_eq!(images[0].data_base64, "WFla");
+    }
+
+    #[test]
+    fn test_tool_result_string_shape_has_no_images() {
+        // The common case — a plain text tool result — must keep working
+        // exactly as before: output set, images empty.
+        let json = serde_json::json!({
+            "type": "user",
+            "message": {
+                "content": [{
+                    "type": "tool_result",
+                    "tool_use_id": "tool_txt",
+                    "content": "plain output"
+                }]
+            }
+        });
+
+        let mut cid = None;
+        let mut model = None;
+        let mut tool_id = None;
+        let mut started = true;
+        let events = parse_stream_json(&json, &mut cid, &mut model, &mut tool_id, &mut started);
+
+        assert_eq!(events.len(), 1);
+        let ProviderEvent::ToolEnd { output, images, .. } = &events[0] else {
+            panic!("expected ToolEnd, got {:?}", events[0]);
+        };
+        assert_eq!(output.as_deref(), Some("plain output"));
+        assert!(images.is_empty());
     }
 
     #[test]

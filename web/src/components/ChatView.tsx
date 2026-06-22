@@ -807,6 +807,7 @@ export default function ChatView({ sessionId, onOpenTodos }: ChatViewProps) {
                     input={item.input}
                     output={item.output}
                     error={item.error}
+                    images={item.images}
                     isRunning={item.isRunning}
                   />
                 </div>

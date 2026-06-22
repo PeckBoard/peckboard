@@ -9,7 +9,7 @@ use tokio::task::JoinHandle;
 
 use crate::provider::agent::{AgentProvider, ProcessCompletion, SendMessageContext, emit_event};
 use crate::provider::registry::{ProviderInfo, ProviderRegistry};
-use crate::provider::stream::{ModelInfo, ProviderEvent};
+use crate::provider::stream::{ModelInfo, ProviderEvent, ToolImage};
 
 /// Mock agent provider. Emits scripted `ProviderEvent` sequences based on
 /// the model id, which makes it usable as both a dev-mode stand-in (no
@@ -306,6 +306,7 @@ async fn run_scenario(
                     tool_use_id: tool_id,
                     output: Some("hello".into()),
                     error: None,
+                    images: Vec::new(),
                 },
             )
             .await;
@@ -359,6 +360,7 @@ async fn run_scenario(
                     tool_use_id: read_id,
                     output: Some("contents".into()),
                     error: None,
+                    images: Vec::new(),
                 },
             )
             .await;
@@ -384,6 +386,7 @@ async fn run_scenario(
                     tool_use_id: edit_id,
                     output: Some("edited".into()),
                     error: None,
+                    images: Vec::new(),
                 },
             )
             .await;
@@ -412,6 +415,7 @@ async fn run_scenario(
                     tool_use_id: ask_id,
                     output: Some("delivered".into()),
                     error: None,
+                    images: Vec::new(),
                 },
             )
             .await;
@@ -460,6 +464,63 @@ async fn run_scenario(
                     tool_use_id: tool_id,
                     output: Some("file contents".into()),
                     error: None,
+                    images: Vec::new(),
+                },
+            )
+            .await;
+        }
+        "screenshot" => {
+            // A tool call that returns an image, like the Playwright MCP's
+            // `browser_take_screenshot`. Drives the inline-screenshot chat
+            // rendering: the tool block should show a thumbnail that opens a
+            // full-image lightbox on click. The payload is a 1x1 PNG so the
+            // event stays tiny but is a genuinely decodable image.
+            const TINY_PNG: &str = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAAC0lEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==";
+            emit_event(
+                db,
+                broadcaster,
+                session_id,
+                ProviderEvent::Text {
+                    text: "Taking a screenshot...".into(),
+                },
+            )
+            .await;
+            tick().await;
+            let tool_id = format!("tool-{}", uuid::Uuid::new_v4());
+            emit_event(
+                db,
+                broadcaster,
+                session_id,
+                ProviderEvent::ToolStart {
+                    tool_use_id: tool_id.clone(),
+                    name: "mcp__playwright__browser_take_screenshot".into(),
+                    input: serde_json::json!({ "filename": "page.png" }),
+                },
+            )
+            .await;
+            tick().await;
+            emit_event(
+                db,
+                broadcaster,
+                session_id,
+                ProviderEvent::ToolEnd {
+                    tool_use_id: tool_id,
+                    output: Some("Took the screenshot".into()),
+                    error: None,
+                    images: vec![ToolImage {
+                        mime_type: "image/png".into(),
+                        data_base64: TINY_PNG.into(),
+                    }],
+                },
+            )
+            .await;
+            tick().await;
+            emit_event(
+                db,
+                broadcaster,
+                session_id,
+                ProviderEvent::Text {
+                    text: "Done.".into(),
                 },
             )
             .await;
@@ -618,6 +679,7 @@ async fn run_scenario(
                     tool_use_id: tool_id,
                     output: Some("Todos updated".into()),
                     error: None,
+                    images: Vec::new(),
                 },
             )
             .await;
@@ -728,6 +790,7 @@ async fn run_scenario(
                         tool_use_id: tool_id.clone(),
                         output: Some(output.into()),
                         error: None,
+                        images: Vec::new(),
                     },
                 )
                 .await;

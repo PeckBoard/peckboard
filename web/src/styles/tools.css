@@ -143,3 +143,58 @@
   background: var(--danger-bg);
   color: var(--danger);
 }
+
+/* Inline tool screenshots (e.g. Playwright MCP). Rendered outside the
+   collapsible body so they're always visible; each is a clickable
+   thumbnail that opens the full image in a lightbox. */
+.tool-images {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  padding: 6px 0 6px 18px;
+}
+.tool-image-thumb {
+  padding: 0;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--surface2);
+  cursor: zoom-in;
+  overflow: hidden;
+  line-height: 0;
+  transition: border-color 0.12s ease;
+}
+.tool-image-thumb:hover {
+  border-color: var(--accent);
+}
+.tool-image-thumb img {
+  display: block;
+  max-width: 240px;
+  max-height: 180px;
+  width: auto;
+  height: auto;
+  object-fit: contain;
+}
+
+/* Lightbox: a near-fullscreen overlay showing the screenshot at full size.
+   Reuses the shared Modal shell; these classes override the default panel
+   chrome so the image gets the whole viewport. */
+.image-lightbox-backdrop {
+  background: rgba(0, 0, 0, 0.85);
+  cursor: zoom-out;
+}
+.image-lightbox {
+  background: transparent;
+  border: none;
+  box-shadow: none;
+  padding: 0;
+  max-width: 95vw;
+}
+.image-lightbox-img {
+  display: block;
+  max-width: 95vw;
+  max-height: 92vh;
+  width: auto;
+  height: auto;
+  object-fit: contain;
+  border-radius: var(--radius);
+}

@@ -25,6 +25,13 @@ export interface MessageAttachment {
   mimeType: string
 }
 
+/** An image returned by a tool (e.g. a Playwright MCP screenshot), carried
+ *  inline on the `agent-tool-end` event as base64. */
+export interface ToolImage {
+  mimeType: string
+  dataBase64: string
+}
+
 /** A display item derived from one or more raw events. */
 export type DisplayItem =
   | { type: 'user'; text: string; key: string; ts: number; attachments?: MessageAttachment[] }
@@ -35,6 +42,7 @@ export type DisplayItem =
       input?: Record<string, unknown>
       output?: Record<string, unknown>
       error?: string
+      images?: ToolImage[]
       isRunning: boolean
       key: string
     }
@@ -175,6 +183,28 @@ function readAttachments(ev: Event): MessageAttachment[] | undefined {
   return undefined
 }
 
+/**
+ * Pull any images off an `agent-tool-end` event. Tools that return images
+ * (Playwright MCP `browser_take_screenshot`, any image-returning MCP server)
+ * carry them inline as `[{mimeType, dataBase64}]`. Returns undefined when the
+ * tool returned no images, so the tool block renders exactly as before.
+ */
+function readToolImages(ev: Event): ToolImage[] | undefined {
+  const raw = ev.data.images
+  if (!Array.isArray(raw) || raw.length === 0) return undefined
+  const images: ToolImage[] = []
+  for (const entry of raw) {
+    const obj = (entry ?? {}) as Record<string, unknown>
+    const dataBase64 = (obj.dataBase64 as string) ?? (obj.data_base64 as string)
+    if (!dataBase64) continue
+    images.push({
+      mimeType: (obj.mimeType as string) ?? (obj.mime_type as string) ?? 'image/png',
+      dataBase64,
+    })
+  }
+  return images.length > 0 ? images : undefined
+}
+
 export function buildDisplayItems(events: Event[]): DisplayItem[] {
   const items: DisplayItem[] = []
   let assistantBuffer = ''
@@ -244,12 +274,13 @@ export function buildDisplayItems(events: Event[]): DisplayItem[] {
       case 'agent-tool-end': {
         flushAssistant()
         const toolUseId = (ev.data.toolUseId as string) ?? (ev.data.tool_use_id as string) ?? ''
+        const images = readToolImages(ev)
         const idx = openTools.get(toolUseId)
         if (idx !== undefined) {
           const existing = items[idx] as Extract<DisplayItem, { type: 'tool' }>
           const errorText = ev.data.error as string | undefined
           const output = (ev.data.output as Record<string, unknown>) ?? undefined
-          items[idx] = { ...existing, isRunning: false, output, error: errorText }
+          items[idx] = { ...existing, isRunning: false, output, error: errorText, images }
           openTools.delete(toolUseId)
         } else {
           const toolName = (ev.data.name as string) ?? (ev.data.tool_name as string) ?? 'tool'
@@ -260,6 +291,7 @@ export function buildDisplayItems(events: Event[]): DisplayItem[] {
             toolName,
             output,
             error: errorText,
+            images,
             isRunning: false,
             key: ev.id,
           })

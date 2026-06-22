@@ -653,6 +653,7 @@ pub async fn stream_events(
                             tool_use_id,
                             output: None,
                             error: Some("tool did not return a result before turn ended".into()),
+                            images: Vec::new(),
                         },
                     )
                     .await;
@@ -699,6 +700,7 @@ pub async fn stream_events(
                     tool_use_id,
                     output: None,
                     error: Some("tool did not return a result before agent ended".into()),
+                    images: Vec::new(),
                 },
             )
             .await;

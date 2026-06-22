@@ -1379,6 +1379,7 @@ async fn run_one_tool(
                     tool_use_id,
                     output: Some(text.clone()),
                     error: None,
+                    images: Vec::new(),
                 },
             )
             .await;
@@ -1394,6 +1395,7 @@ async fn run_one_tool(
                     tool_use_id,
                     output: None,
                     error: Some(err.clone()),
+                    images: Vec::new(),
                 },
             )
             .await;

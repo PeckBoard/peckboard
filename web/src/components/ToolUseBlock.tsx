@@ -1,11 +1,20 @@
 import { useState } from 'react'
+import Modal from './Modal'
+import type { ToolImage } from './chat/events'
 
 interface ToolUseBlockProps {
   toolName: string
   input?: Record<string, unknown>
   output?: Record<string, unknown>
   error?: string
+  images?: ToolImage[]
   isRunning?: boolean
+}
+
+/** Build a `data:` URL from an inline tool image. */
+function imageDataUrl(img: ToolImage): string {
+  const mime = img.mimeType || 'image/png'
+  return `data:${mime};base64,${img.dataBase64}`
 }
 
 /** Map tool names to friendly labels. Per-tool emoji icons were removed
@@ -132,15 +141,20 @@ export default function ToolUseBlock({
   input,
   output,
   error,
+  images,
   isRunning,
 }: ToolUseBlockProps) {
   const [expanded, setExpanded] = useState(false)
+  // Index of the image currently shown full-size in the lightbox, or null.
+  const [lightboxIdx, setLightboxIdx] = useState<number | null>(null)
 
   const label = getToolLabel(toolName)
   const summary = getSummary(toolName, input)
+  const hasImages = !!images && images.length > 0
   const hasDetails = (input && Object.keys(input).length > 0) || output || error
 
   const statusClass = error ? 'tool-error' : isRunning ? 'tool-running' : ''
+  const lightboxImage = lightboxIdx !== null ? images?.[lightboxIdx] : undefined
 
   return (
     <div className={`tool-block ${statusClass}`}>
@@ -156,6 +170,25 @@ export default function ToolUseBlock({
         {isRunning && <span className="tool-spinner" />}
         {error && <span className="tool-status-badge tool-badge-error">Error</span>}
       </button>
+      {/* Screenshots render outside the collapsible body so they're visible
+          at a glance — the whole point of capturing them. Clicking a
+          thumbnail opens the full image in a lightbox. */}
+      {hasImages && (
+        <div className="tool-images" data-testid="tool-images">
+          {images!.map((img, i) => (
+            <button
+              key={i}
+              type="button"
+              className="tool-image-thumb"
+              onClick={() => setLightboxIdx(i)}
+              aria-label="Open screenshot"
+              data-testid="tool-image-thumb"
+            >
+              <img src={imageDataUrl(img)} alt="Screenshot" loading="lazy" />
+            </button>
+          ))}
+        </div>
+      )}
       {expanded && (
         <div className="tool-body">
           {input && Object.keys(input).length > 0 && (
@@ -177,6 +210,16 @@ export default function ToolUseBlock({
             </div>
           )}
         </div>
+      )}
+      {lightboxImage && (
+        <Modal
+          onClose={() => setLightboxIdx(null)}
+          className="image-lightbox"
+          backdropClassName="image-lightbox-backdrop"
+          data-testid="tool-image-lightbox"
+        >
+          <img src={imageDataUrl(lightboxImage)} alt="Screenshot" className="image-lightbox-img" />
+        </Modal>
       )}
     </div>
   )

@@ -2,6 +2,17 @@ use serde::{Deserialize, Serialize};
 
 use crate::todo::TodoItem;
 
+/// One image returned by a tool (e.g. a Playwright MCP screenshot). The CLI
+/// hands these to us inline as base64 inside the `tool_result` content
+/// blocks; we carry them on `ToolEnd` so the chat can render them under the
+/// tool block. `data_base64` is the raw base64 payload (no `data:` prefix)
+/// and `mime_type` is the source media type (`image/png`, `image/jpeg`, …).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ToolImage {
+    pub mime_type: String,
+    pub data_base64: String,
+}
+
 /// Unified event stream from any AI provider.
 /// Providers translate their native output format into these events.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -27,6 +38,11 @@ pub enum ProviderEvent {
         tool_use_id: String,
         output: Option<String>,
         error: Option<String>,
+        /// Images the tool returned (e.g. Playwright MCP screenshots).
+        /// Empty for the overwhelming majority of tools; carried inline so
+        /// the chat can render them under the tool block.
+        #[serde(default)]
+        images: Vec<ToolImage>,
     },
     /// The agent reported its current todo list (a full replace-all snapshot
     /// of its trackable work items). Provider-agnostic — any provider that can
@@ -113,10 +129,18 @@ impl ProviderEvent {
                 tool_use_id,
                 output,
                 error,
+                images,
             } => serde_json::json!({
                 "toolUseId": tool_use_id,
                 "output": output,
                 "error": error,
+                "images": images
+                    .iter()
+                    .map(|img| serde_json::json!({
+                        "mimeType": img.mime_type,
+                        "dataBase64": img.data_base64,
+                    }))
+                    .collect::<Vec<_>>(),
             }),
             ProviderEvent::Todo { todos } => serde_json::json!({ "todos": todos }),
             ProviderEvent::Usage {
