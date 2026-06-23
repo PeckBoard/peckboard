@@ -1,5 +1,6 @@
 pub mod agent;
 pub mod claude;
+pub mod cursor;
 pub mod manager;
 pub mod message;
 pub mod mock;

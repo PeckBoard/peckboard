@@ -110,8 +110,8 @@ async fn list_plugins_returns_builtin_catalog() {
     let plugins = json["plugins"].as_array().expect("plugins array");
     assert_eq!(
         plugins.len(),
-        3,
-        "expected built-in claude-code + mock + ollama; got {plugins:?}",
+        4,
+        "expected built-in claude-code + mock + ollama + cursor; got {plugins:?}",
     );
 
     // The catalog also carries the plugin-contributed UI panels (from
@@ -166,6 +166,33 @@ async fn list_plugins_returns_builtin_catalog() {
     // Mock never touches process / network / fs, so its catalog entry
     // should only carry the one permission it actually needs.
     assert_eq!(mock_perms, vec!["register_provider"]);
+
+    let cursor = plugins
+        .iter()
+        .find(|p| p["id"] == "cursor")
+        .expect("cursor plugin present");
+    assert_eq!(cursor["display_name"], "Cursor");
+    assert_eq!(cursor["built_in"], true);
+    let cursor_perms: Vec<&str> = cursor["permissions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|p| p["id"].as_str().unwrap())
+        .collect();
+    // The cursor-agent CLI spawns a subprocess, touches the working dir,
+    // and talks to Cursor's backend — pin the requested set.
+    for required in [
+        "register_provider",
+        "spawn_process",
+        "filesystem_read",
+        "filesystem_write",
+        "network_access",
+    ] {
+        assert!(
+            cursor_perms.contains(&required),
+            "cursor missing requested permission {required}: {cursor_perms:?}",
+        );
+    }
 
     // Each permission entry must carry a human label + description for
     // the UI; an empty string would mean the UI renders a blank row.
