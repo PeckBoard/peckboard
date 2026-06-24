@@ -186,6 +186,10 @@ impl crate::plugin::host::LiveHost for AppLiveHost {
             return;
         };
         self.rt.spawn(async move {
+            // interrupt deliberately preserves the queued follow-up (it is a
+            // "release the current turn" signal, not a hard stop); the
+            // completion listener drains the queue afterwards. Use
+            // terminate_agent for a hard stop that discards the queue.
             state.session_manager.interrupt(&session_id).await;
             broadcast_session_event(
                 &state,
@@ -202,6 +206,14 @@ impl crate::plugin::host::LiveHost for AppLiveHost {
             return;
         };
         self.rt.spawn(async move {
+            // Explicit stop: drop any queued follow-up so the completion
+            // listener doesn't immediately respawn the run from the queue.
+            crate::provider::manager::clear_queued_message(
+                &state.db,
+                &state.broadcaster,
+                &session_id,
+            )
+            .await;
             state.session_manager.cancel_and_wait(&session_id).await;
             broadcast_session_event(
                 &state,

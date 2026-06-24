@@ -5,6 +5,7 @@ import { authedFetch } from '../store/auth'
 import type { Card } from '../types/api'
 import DependencyPickerModal from './DependencyPickerModal'
 import Modal from './Modal'
+import ModelPicker from './ModelPicker'
 import WorkflowSelect from './WorkflowSelect'
 
 interface CardFormBaseProps {
@@ -235,14 +236,12 @@ export default function CardFormModal(props: CardFormProps) {
           </div>
           <div className="form-field">
             <label className="form-label">Model</label>
-            <select className="form-input" value={model} onChange={(e) => setModel(e.target.value)}>
-              <option value="">Default</option>
-              {(models as ModelInfo[]).map((m) => (
-                <option key={m.id} value={m.id}>
-                  {m.display_name}
-                </option>
-              ))}
-            </select>
+            <ModelPicker
+              value={model}
+              onChange={setModel}
+              models={models as ModelInfo[]}
+              testId="card-model"
+            />
           </div>
           <div className="form-field">
             <label className="form-label">Effort</label>

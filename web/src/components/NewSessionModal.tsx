@@ -3,6 +3,7 @@ import { useSessionsStore } from '../store/sessions'
 import { useFoldersStore } from '../store/folders'
 import { useResourcesStore } from '../store/resources'
 import Modal from './Modal'
+import ModelPicker from './ModelPicker'
 
 interface Props {
   onClose: () => void
@@ -14,7 +15,7 @@ export default function NewSessionModal({ onClose }: Props) {
   const folders = useFoldersStore((s) => s.folders)
   const fetchFolders = useFoldersStore((s) => s.fetchFolders)
   const createFolder = useFoldersStore((s) => s.createFolder)
-  const providers = useResourcesStore((s) => s.providers)
+  const models = useResourcesStore((s) => s.models)
   const fetchModels = useResourcesStore((s) => s.fetchModels)
 
   const [name, setName] = useState('')
@@ -142,18 +143,14 @@ export default function NewSessionModal({ onClose }: Props) {
         )}
         <div className="form-field">
           <label className="form-label">Model</label>
-          <select className="form-input" value={model} onChange={(e) => setModel(e.target.value)}>
-            <option value="">Server default</option>
-            {providers.map((p) => (
-              <optgroup key={p.id} label={p.display_name}>
-                {p.models.map((m) => (
-                  <option key={m.id} value={m.id}>
-                    {m.display_name}
-                  </option>
-                ))}
-              </optgroup>
-            ))}
-          </select>
+          <ModelPicker
+            value={model}
+            onChange={setModel}
+            models={models}
+            defaultLabel="Server default"
+            ariaLabel="Select model"
+            testId="new-session-model"
+          />
         </div>
         <div className="form-field">
           <label className="form-label">Effort</label>

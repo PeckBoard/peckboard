@@ -9,6 +9,7 @@ import InputBar from './InputBar'
 import ToolUseBlock from './ToolUseBlock'
 import ConfirmDialog from './ConfirmDialog'
 import { MenuButton, type MenuItem } from './Dropdown'
+import ModelPicker from './ModelPicker'
 import TodoPanel from './TodoPanel'
 import { parseTodoItems, latestTodoSnapshot, type TodoItem } from '../types/todo'
 import {
@@ -639,30 +640,24 @@ export default function ChatView({ sessionId, onOpenTodos }: ChatViewProps) {
       {/* Toolbar */}
       <div className="chat-toolbar">
         <span className="chat-toolbar-name">{sessionDetail?.name ?? 'Session'}</span>
-        <MenuButton
-          ariaLabel="Change model"
-          title="Change model"
+        <ModelPicker
+          value={sessionDetail?.model ?? ''}
+          onChange={(id) => patchSession({ model: id })}
+          models={availableModels}
+          valueLabel={modelDisplayName(sessionDetail?.model)}
           triggerClassName="chat-toolbar-model"
+          showChevron={false}
           align="left"
-          items={
-            modelsError
-              ? [
-                  {
-                    label: 'Failed to load models — retry',
-                    onSelect: () => setModelsError(false),
-                  },
-                ]
-              : availableModels.length > 0
-                ? availableModels.map((m) => ({
-                    label: m.display_name,
-                    active: m.id === sessionDetail?.model,
-                    onSelect: () => patchSession({ model: m.id }),
-                  }))
-                : [{ label: 'Loading models…', disabled: true }]
-          }
-        >
-          <span>{modelDisplayName(sessionDetail?.model)}</span>
-        </MenuButton>
+          ariaLabel="Change model"
+          defaultLabel="Default"
+          emptyHint={modelsError ? 'Failed to load models — reopen to retry' : 'Loading models…'}
+          onOpen={() => {
+            // Reopening after a failed fetch clears the error flag, which
+            // re-arms the load effect (it bails while `modelsError` is set).
+            if (modelsError) setModelsError(false)
+          }}
+          testId="chat-toolbar-model"
+        />
         <span className="chat-toolbar-status">
           <span className={getStatusDotClass(agentStatus)} />
           {getStatusLabel(agentStatus)}

@@ -654,11 +654,26 @@ fn model_info(name: String) -> ModelInfo {
 
 /// The built-in seed model list, used when discovery is off or fails.
 pub fn default_models() -> Vec<ModelInfo> {
+    // Fallback seed only — when discovery is enabled (the default) the live
+    // `cursor-agent models` list supersedes this. Kept to a small set of
+    // current flagships so the picker is still usable offline.
     [
         ("auto", "Auto (Cursor)"),
-        ("gpt-5", "GPT-5 (Cursor)"),
-        ("sonnet-4.5", "Claude Sonnet 4.5 (Cursor)"),
-        ("opus-4.1", "Claude Opus 4.1 (Cursor)"),
+        ("composer-2.5", "Composer 2.5 (Cursor)"),
+        ("composer-2.5-fast", "Composer 2.5 Fast (Cursor)"),
+        (
+            "claude-opus-4-8-thinking-high",
+            "Claude Opus 4.8 Thinking (Cursor)",
+        ),
+        ("claude-4.5-sonnet", "Claude Sonnet 4.5 (Cursor)"),
+        (
+            "claude-4.5-sonnet-thinking",
+            "Claude Sonnet 4.5 Thinking (Cursor)",
+        ),
+        ("gpt-5.5-high", "GPT-5.5 High (Cursor)"),
+        ("gpt-5.3-codex", "Codex 5.3 (Cursor)"),
+        ("gemini-3.1-pro", "Gemini 3.1 Pro (Cursor)"),
+        ("grok-4.3", "Grok 4.3 (Cursor)"),
     ]
     .into_iter()
     .map(|(id, name)| ModelInfo {
@@ -747,13 +762,13 @@ mod tests {
     fn merge_additional_models_dedups_against_seed() {
         let merged = merge_additional_models(
             default_models(),
-            vec!["gpt-5".into(), "my-custom".into(), "my-custom".into()],
+            vec!["auto".into(), "my-custom".into(), "my-custom".into()],
         );
         let ids: Vec<&str> = merged.iter().map(|m| m.id.as_str()).collect();
         assert!(ids.contains(&"auto"));
         assert!(ids.contains(&"my-custom"));
-        // "gpt-5" already seeded → not duplicated.
-        assert_eq!(ids.iter().filter(|id| **id == "gpt-5").count(), 1);
+        // "auto" already seeded → not duplicated.
+        assert_eq!(ids.iter().filter(|id| **id == "auto").count(), 1);
         assert_eq!(ids.iter().filter(|id| **id == "my-custom").count(), 1);
     }
 

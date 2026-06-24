@@ -548,6 +548,44 @@ pub async fn cancel_via_registry(registry: &ProviderRegistry, session_id: &str) 
     }
 }
 
+/// Drop any queued follow-up message for `session_id` and tell the UI.
+///
+/// Call this from the **hard-stop** paths (the `/cancel` and `/terminate`
+/// routes and their MCP equivalents) BEFORE cancelling the run. The
+/// completion listener drains the queue on every completion — including the
+/// synthetic one a cancel produces — so a queued message would otherwise
+/// immediately respawn a fresh run. For per-turn providers (Ollama) a "send
+/// while busy" follow-up always lands in the queue, so without this a
+/// Terminate looks like it did nothing: the model just keeps streaming the
+/// queued turn.
+///
+/// `/interrupt` deliberately does NOT call this — it is the "release the
+/// current turn so my queued follow-up runs" affordance, and draining the
+/// queue afterwards is its intended behaviour.
+///
+/// This is deliberately NOT folded into `SessionManager::cancel/interrupt`
+/// or `drain_queued`: an *involuntary* termination (a crash) must still
+/// drain so the user's queued message isn't stranded — only an explicit
+/// hard stop discards it.
+pub async fn clear_queued_message(db: &Db, broadcaster: &Arc<Broadcaster>, session_id: &str) {
+    match db.delete_queued_message(session_id).await {
+        Ok(true) => {
+            broadcaster.broadcast(WsEvent {
+                event_type: "queue".into(),
+                session_id: session_id.to_string(),
+                data: serde_json::json!({ "action": "deleted" }),
+            });
+        }
+        Ok(false) => {}
+        Err(e) => {
+            tracing::warn!(
+                session_id = %session_id,
+                "clear_queued_message: failed to drop queued message on stop: {e}"
+            );
+        }
+    }
+}
+
 /// Request a graceful shutdown of `session_id` on every registered provider.
 /// Fan-out mirrors [`cancel_via_registry`] but routes through each
 /// provider's `shutdown_after_turn` so the in-flight turn (including any

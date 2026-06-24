@@ -4,6 +4,7 @@ import { useFoldersStore } from '../store/folders'
 import { useRepeatingTasksStore } from '../store/repeatingTasks'
 import { useResourcesStore, type ModelInfo } from '../store/resources'
 import Modal from './Modal'
+import ModelPicker from './ModelPicker'
 import RepeatingTaskScheduleEditor from './RepeatingTaskScheduleEditor'
 
 interface Props {
@@ -190,19 +191,13 @@ export default function NewRepeatingTaskModal({ initial, onClose, onSaved }: Pro
           <label className="form-label" htmlFor="repeating-task-model">
             Model
           </label>
-          <select
+          <ModelPicker
             id="repeating-task-model"
-            className="form-input"
             value={model}
-            onChange={(e) => setModel(e.target.value)}
-          >
-            <option value="">Default</option>
-            {(models as ModelInfo[]).map((m) => (
-              <option key={m.id} value={m.id}>
-                {m.display_name}
-              </option>
-            ))}
-          </select>
+            onChange={setModel}
+            models={models as ModelInfo[]}
+            testId="repeating-task-model"
+          />
           <p className="form-help">
             Each spawned run starts on this model. &quot;Default&quot; uses the system default.
           </p>

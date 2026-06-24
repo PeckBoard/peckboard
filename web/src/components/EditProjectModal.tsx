@@ -3,6 +3,7 @@ import { useProjectsStore } from '../store/projects'
 import { authedFetch } from '../store/auth'
 import type { Project } from '../types/api'
 import Modal from './Modal'
+import ModelPicker from './ModelPicker'
 import WorkflowSelect from './WorkflowSelect'
 import WorkflowInstructionsModal from './WorkflowInstructionsModal'
 
@@ -144,14 +145,12 @@ export default function EditProjectModal({ project, onClose }: Props) {
           </div>
           <div className="form-field">
             <label className="form-label">Model</label>
-            <select className="form-input" value={model} onChange={(e) => setModel(e.target.value)}>
-              <option value="">Default</option>
-              {models.map((m) => (
-                <option key={m.id} value={m.id}>
-                  {m.display_name}
-                </option>
-              ))}
-            </select>
+            <ModelPicker
+              value={model}
+              onChange={setModel}
+              models={models}
+              testId="edit-project-model"
+            />
           </div>
           <div className="form-field">
             <label className="form-label">Effort</label>

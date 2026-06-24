@@ -101,8 +101,11 @@ test('model + effort are settable from the create form and used for the spawned 
   // that earlier tests may have left in the list.
   await page.locator('select.form-input').first().selectOption({ value: folder.id })
   await page.getByPlaceholder(/message sent to the new session/i).fill('do thing')
-  // Model select picks the mock provider so the run is deterministic.
-  await page.getByLabel('Model').selectOption({ value: 'mock:happy-path' })
+  // Model picker is now a searchable combobox: open it, filter, and pick the
+  // mock provider so the run is deterministic.
+  await page.getByTestId('repeating-task-model').click()
+  await page.getByTestId('repeating-task-model-search').fill('happy')
+  await page.getByRole('option', { name: 'Mock: happy path' }).click()
   await page.getByLabel('Effort').selectOption({ value: 'high' })
   await page.getByRole('button', { name: /create task/i }).click()
 
@@ -188,7 +191,7 @@ test('editing preserves model/effort and round-trips changes', async ({
   // form selects.
   await page.getByRole('button', { name: /^edit$/i }).click()
   await expect(page.getByRole('heading', { name: /edit repeating task/i })).toBeVisible()
-  await expect(page.getByLabel('Model', { exact: true })).toHaveValue('mock:happy-path')
+  await expect(page.getByTestId('repeating-task-model')).toContainText('Mock: happy path')
   await expect(page.getByLabel('Effort', { exact: true })).toHaveValue('low')
 
   // Change effort and save.

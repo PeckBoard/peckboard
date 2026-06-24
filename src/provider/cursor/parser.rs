@@ -281,9 +281,41 @@ pub(super) fn parse_cli_models(output: &str) -> Option<Vec<String>> {
     if trimmed.is_empty() {
         return None;
     }
-    let value = serde_json::from_str::<serde_json::Value>(trimmed).ok()?;
-    let ids = extract_model_ids(&value);
+    // `cursor-agent models` prints a human-readable table
+    // (`<id> - <Display Name>` per line) regardless of `--output-format`,
+    // but other/older shapes emit JSON. Try JSON first, then fall back to
+    // the line format so discovery picks up the full live model list.
+    if let Ok(value) = serde_json::from_str::<serde_json::Value>(trimmed) {
+        let ids = extract_model_ids(&value);
+        if !ids.is_empty() {
+            return Some(ids);
+        }
+    }
+    let ids = parse_plain_text_models(trimmed);
     if ids.is_empty() { None } else { Some(ids) }
+}
+
+/// Parse the CLI's human-readable `models` listing. Each model is a line of
+/// the form `<id> - <Display Name>`, where `<id>` is a single whitespace-free
+/// token. Header (`Available models`) and footer (`Tip: ...`) lines don't
+/// match that shape — their left side contains spaces — so they're skipped.
+fn parse_plain_text_models(text: &str) -> Vec<String> {
+    let mut ids = Vec::new();
+    for line in text.lines() {
+        let Some((id, _name)) = line.trim().split_once(" - ") else {
+            continue;
+        };
+        let id = id.trim();
+        // A model id is a single token; reject prose that happens to contain
+        // " - " (its left side would carry whitespace).
+        if id.is_empty() || id.contains(char::is_whitespace) {
+            continue;
+        }
+        if !ids.iter().any(|existing| existing == id) {
+            ids.push(id.to_string());
+        }
+    }
+    ids
 }
 
 /// Extract model ids from an already-parsed discovery JSON value.
@@ -482,11 +514,39 @@ mod tests {
 
     #[test]
     fn parse_cli_models_rejects_non_json_and_empty() {
-        // Non-JSON prose → None (we never parse words as model ids).
-        assert_eq!(parse_cli_models("no models are available here"), None);
         // Empty → None so caller seeds statically.
         assert_eq!(parse_cli_models("   "), None);
         // Valid JSON object with nothing usable → None.
         assert_eq!(parse_cli_models("{}"), None);
+        // Prose with no `<id> - <name>` lines → None.
+        assert_eq!(parse_cli_models("no models are available here"), None);
+    }
+
+    #[test]
+    fn parse_cli_models_plain_text_table() {
+        // The shape `cursor-agent models` actually emits: a header, one
+        // `<id> - <Display Name>` line per model (some with trailing markers),
+        // then a tip footer. Header and footer must be skipped.
+        let out = "Available models\n\
+            \n\
+            auto - Auto\n\
+            gpt-5.3-codex - Codex 5.3\n\
+            composer-2.5 - Composer 2.5 (current)\n\
+            composer-2.5-fast - Composer 2.5 Fast (default)\n\
+            claude-opus-4-8-thinking-high - Opus 4.8 1M Thinking\n\
+            claude-fable-5-low - Fable 5 1M Low (NO ZDR)\n\
+            \n\
+            Tip: use --model <id> (or /model <id> in interactive mode) to switch.";
+        assert_eq!(
+            parse_cli_models(out),
+            Some(vec![
+                "auto".into(),
+                "gpt-5.3-codex".into(),
+                "composer-2.5".into(),
+                "composer-2.5-fast".into(),
+                "claude-opus-4-8-thinking-high".into(),
+                "claude-fable-5-low".into(),
+            ])
+        );
     }
 }

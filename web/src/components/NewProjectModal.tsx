@@ -4,6 +4,7 @@ import { useFoldersStore } from '../store/folders'
 import { useResourcesStore } from '../store/resources'
 import { authedFetch } from '../store/auth'
 import Modal from './Modal'
+import ModelPicker from './ModelPicker'
 import WorkflowSelect from './WorkflowSelect'
 import WorkflowInstructionsModal, {
   type WorkflowInstructionsDraft,
@@ -229,18 +230,12 @@ export default function NewProjectModal({ onClose }: Props) {
               </div>
               <div className="form-field">
                 <label className="form-label">Model</label>
-                <select
-                  className="form-input"
+                <ModelPicker
                   value={model}
-                  onChange={(e) => setModel(e.target.value)}
-                >
-                  <option value="">Default</option>
-                  {models.map((m) => (
-                    <option key={m.id} value={m.id}>
-                      {m.display_name}
-                    </option>
-                  ))}
-                </select>
+                  onChange={setModel}
+                  models={models}
+                  testId="new-project-model"
+                />
                 <p className="form-hint">
                   Project-level model override. Cards and workflow steps can further override this.
                 </p>

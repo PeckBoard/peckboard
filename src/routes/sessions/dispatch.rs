@@ -290,6 +290,10 @@ pub(super) async fn cancel_session(
         ));
     }
 
+    // Discard any queued follow-up first: this is an explicit stop, so the
+    // completion listener must not drain the queue and respawn a fresh run.
+    crate::provider::manager::clear_queued_message(&state.db, &state.broadcaster, &id).await;
+
     // Kill the running process (if any)
     state.session_manager.cancel(&id).await;
 
@@ -346,6 +350,12 @@ pub(super) async fn interrupt_session(
             Json(serde_json::json!({ "error": "session not found" })),
         ));
     }
+
+    // NOTE: interrupt deliberately does NOT clear the queued message. It is
+    // the "release the current turn so my queued follow-up runs" affordance;
+    // the completion listener drains the queue afterwards by design (see
+    // `drain_queued_delivers_after_interrupted_run` and the session-lifecycle
+    // e2e). A hard stop that discards the queue is `/cancel` or `/terminate`.
 
     // Interrupt the running process (if any)
     state.session_manager.interrupt(&id).await;
@@ -408,6 +418,11 @@ pub(super) async fn terminate_agent(
             Json(serde_json::json!({ "error": "session not found" })),
         ));
     }
+
+    // Discard any queued follow-up first: terminate means "fresh start on
+    // the next message", so the completion listener must not drain the queue
+    // and respawn a run the moment this cancel's completion fires.
+    crate::provider::manager::clear_queued_message(&state.db, &state.broadcaster, &id).await;
 
     // Wait for the provider's stream loop to wind down (and emit its own
     // synthetic Crashed event if a turn was active) before appending the
