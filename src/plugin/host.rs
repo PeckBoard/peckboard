@@ -2918,6 +2918,14 @@ mod tests {
                 esc64.contains("within the project folder"),
                 "base64 escape: {esc64}"
             );
+            // A caller with no folder scope can read nothing through the base64
+            // path — it is bound to the caller's project/session folder.
+            let no_scope =
+                read_file_base64_impl(&db, r#"{"path":"src/main.rs"}"#, &inv(Some("p1"), None));
+            assert!(
+                no_scope.contains("no folder scope"),
+                "base64 requires folder scope: {no_scope}"
+            );
         }
 
         // `..` traversal is refused before touching the fs.
@@ -2939,6 +2947,14 @@ mod tests {
             assert!(
                 leak.contains("escapes the project folder"),
                 "symlink escape must be refused: {leak}"
+            );
+            // The base64 variant shares the same containment: a symlink that
+            // escapes the folder is refused there too (no folder-scoped read of
+            // out-of-folder bytes via the base64 path either).
+            let leak64 = read_file_base64_impl(&db, r#"{"path":"link.txt"}"#, &caller);
+            assert!(
+                leak64.contains("escapes the project folder"),
+                "base64 symlink escape must be refused: {leak64}"
             );
             let _ = fs::remove_file(&secret);
         }
