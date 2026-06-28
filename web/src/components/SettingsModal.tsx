@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react'
 import { useAuthStore, authedFetch } from '../store/auth'
 import { applyThemeColor, type Theme } from '../util/themeColor'
 import Modal from './Modal'
+import SoftwareUpdate from './SoftwareUpdate'
 
 const THEME_KEY = 'peckboard_theme'
 const HUE_KEY = 'peckboard_hue'
@@ -118,6 +119,8 @@ export default function SettingsModal({ onClose }: Props) {
           <p className="settings-loading">Loading server config...</p>
         )}
       </section>
+
+      <SoftwareUpdate />
 
       <section className="settings-section">
         <h3>Theme</h3>

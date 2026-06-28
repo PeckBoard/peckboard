@@ -12,6 +12,7 @@ pub mod projects;
 pub mod repeating_tasks;
 pub mod reports;
 pub mod sessions;
+pub mod update;
 pub mod usage;
 
 use crate::frontend::static_handler;
@@ -44,6 +45,7 @@ pub fn api_router(state: Arc<AppState>) -> Router<Arc<AppState>> {
         .merge(plugin_ui::router(state.clone()))
         .merge(usage::router(state.clone()))
         .merge(usage::trends::router(state.clone()))
+        .merge(update::router(state.clone()))
         .merge(misc::router(state))
         .fallback(static_handler)
 }

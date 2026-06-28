@@ -48,6 +48,29 @@
   color: var(--text2);
   min-width: 100px;
 }
+.settings-update-actions {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 10px;
+  margin-top: 8px;
+  font-size: var(--text-sm);
+}
+.settings-update-actions .settings-error {
+  flex-basis: 100%;
+  margin: 0;
+}
+.settings-error {
+  color: var(--danger);
+  font-size: var(--text-sm);
+}
+.settings-link {
+  color: var(--primary);
+  text-decoration: none;
+}
+.settings-link:hover {
+  text-decoration: underline;
+}
 .theme-toggle {
   display: flex;
   gap: 2px;
