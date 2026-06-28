@@ -113,11 +113,22 @@ async fn diff_viewer_plugin_multi_repo_end_to_end() {
     std::fs::copy(&wasm, plugins_dir.join(format!("{PLUGIN_ID}.wasm"))).unwrap();
 
     // A folder that is NOT itself a repo but contains two repos as subfolders,
-    // plus a plain (non-repo) subfolder that discovery must ignore.
+    // a repo nested under a non-repo dir (discovery must descend to find it but
+    // not flag the intermediate dir), and many plain subdirs (discovery probes
+    // each — it must do so with a cheap fs read, not a per-dir `git` spawn, or
+    // it blows core's 2s per-call timeout on a real folder).
     let root = data_dir.join("workspace");
     std::fs::create_dir_all(root.join("plain")).unwrap();
     std::fs::write(root.join("plain/notes.txt"), "just a file\n").unwrap();
-    if !make_repo(&root.join("repoA"), "v1\n") || !make_repo(&root.join("repoB"), "v1\n") {
+    for i in 0..40 {
+        let d = root.join(format!("noise{i}"));
+        std::fs::create_dir_all(&d).unwrap();
+        std::fs::write(d.join("f.txt"), "x\n").unwrap();
+    }
+    if !make_repo(&root.join("repoA"), "v1\n")
+        || !make_repo(&root.join("repoB"), "v1\n")
+        || !make_repo(&root.join("outer/inner"), "v1\n")
+    {
         eprintln!("SKIP diff_viewer_plugin_multi_repo_end_to_end: git unavailable");
         return;
     }
@@ -171,10 +182,18 @@ async fn diff_viewer_plugin_multi_repo_end_to_end() {
         .collect();
     assert!(prefixes.contains(&"repoA"), "repos discovered: {body}");
     assert!(prefixes.contains(&"repoB"), "repos discovered: {body}");
+    assert!(
+        prefixes.contains(&"outer/inner"),
+        "nested repo discovered by descending: {body}"
+    );
     assert!(!prefixes.contains(&""), "folder root is not a repo: {body}");
     assert!(
         !prefixes.contains(&"plain"),
         "plain dir is not a repo: {body}"
+    );
+    assert!(
+        !prefixes.contains(&"outer"),
+        "intermediate non-repo dir is not flagged: {body}"
     );
 
     // ── files: scoped to repoA (modified a.txt + untracked new.txt) ──
