@@ -1100,6 +1100,65 @@ pub(crate) fn read_file_impl(db: &Db, input: &str, inv: &InvocationContext) -> S
     .to_string()
 }
 
+/// `peckboard_read_file_base64` — read one file under the caller's folder and
+/// return its **raw bytes** base64-encoded, so binary content (images, etc.)
+/// survives intact rather than being mangled by the lossy UTF-8 decode
+/// `peckboard_read_file` applies. Same containment rules as `read_file`
+/// (relative, in-folder, symlink-escape-checked) and the same
+/// `PLUGIN_FS_MAX_READ_BYTES` cap (`truncated` flags a clipped read).
+pub(crate) fn read_file_base64_impl(db: &Db, input: &str, inv: &InvocationContext) -> String {
+    use base64::Engine as _;
+    let req: ReadFileRequest = match serde_json::from_str(input) {
+        Ok(r) => r,
+        Err(e) => return error_json(format!("invalid request: {e}")),
+    };
+    let root = match caller_folder_root(db, inv) {
+        Ok(r) => r,
+        Err(e) => return error_json(e),
+    };
+    let rel = Path::new(&req.path);
+    // Reject anything but plain, descending relative segments *before* touching
+    // the filesystem: no absolute/root/prefix, no `..`.
+    if rel.components().any(|c| {
+        matches!(
+            c,
+            Component::ParentDir | Component::RootDir | Component::Prefix(_)
+        )
+    }) {
+        return error_json("path must be relative and within the project folder");
+    }
+    let target = root.join(rel);
+    // Canonicalize and re-check containment — defeats a symlink that points
+    // outside the folder even though every textual segment looked safe.
+    let canon = match std::fs::canonicalize(&target) {
+        Ok(p) => p,
+        Err(e) => return error_json(format!("file not found: {e}")),
+    };
+    if !canon.starts_with(&root) {
+        return error_json("path escapes the project folder");
+    }
+    let meta = match std::fs::metadata(&canon) {
+        Ok(m) => m,
+        Err(e) => return error_json(e),
+    };
+    if !meta.is_file() {
+        return error_json("not a file");
+    }
+    let bytes = match std::fs::read(&canon) {
+        Ok(b) => b,
+        Err(e) => return error_json(e),
+    };
+    let truncated = bytes.len() > PLUGIN_FS_MAX_READ_BYTES;
+    let slice = &bytes[..bytes.len().min(PLUGIN_FS_MAX_READ_BYTES)];
+    let base64 = base64::engine::general_purpose::STANDARD.encode(slice);
+    serde_json::json!({
+        "base64": base64,
+        "truncated": truncated,
+        "size": meta.len(),
+    })
+    .to_string()
+}
+
 /// Max bytes a single `peckboard_write_file` may write.
 const PLUGIN_FS_MAX_WRITE_BYTES: usize = 8 * 1024 * 1024; // 8 MiB
 
@@ -2126,6 +2185,13 @@ host_fn!(peckboard_read_file(user_data: HostState; input: String) -> String {
     Ok(read_file_impl(&db, &input, &inv))
 });
 
+host_fn!(peckboard_read_file_base64(user_data: HostState; input: String) -> String {
+    let (db, _plugin_id, ok, inv) = state_permission_and_invocation(&user_data, "project_files_read")?;
+    if !ok { return Ok(error_json("plugin lacks the 'project_files_read' permission")); }
+    let Some(inv) = inv else { return Ok(error_json("no caller context; peckboard_read_file_base64 is only callable during a tool invocation")); };
+    Ok(read_file_base64_impl(&db, &input, &inv))
+});
+
 host_fn!(peckboard_write_file(user_data: HostState; input: String) -> String {
     let (db, _plugin_id, ok, inv) = state_permission_and_invocation(&user_data, "project_files_write")?;
     if !ok { return Ok(error_json("plugin lacks the 'project_files_write' permission")); }
@@ -2363,6 +2429,13 @@ pub(crate) fn host_functions(
             [PTR],
             ud.clone(),
             peckboard_read_file,
+        ),
+        Function::new(
+            "peckboard_read_file_base64",
+            [PTR],
+            [PTR],
+            ud.clone(),
+            peckboard_read_file_base64,
         ),
         Function::new(
             "peckboard_write_file",
@@ -2826,6 +2899,26 @@ mod tests {
         // Read a file inside the folder.
         let r = read_file_impl(&db, r#"{"path":"src/main.rs"}"#, &caller);
         assert!(r.contains("fn main"), "read: {r}");
+
+        // The base64 variant returns the raw bytes intact (decodes back to the
+        // file content) and is bound by the same containment checks.
+        {
+            use base64::Engine as _;
+            let b = read_file_base64_impl(&db, r#"{"path":"src/main.rs"}"#, &caller);
+            let bv: serde_json::Value = serde_json::from_str(&b).unwrap();
+            let decoded = base64::engine::general_purpose::STANDARD
+                .decode(bv["base64"].as_str().unwrap())
+                .unwrap();
+            assert!(
+                String::from_utf8_lossy(&decoded).contains("fn main"),
+                "base64 read: {b}"
+            );
+            let esc64 = read_file_base64_impl(&db, r#"{"path":"../../etc/passwd"}"#, &caller);
+            assert!(
+                esc64.contains("within the project folder"),
+                "base64 escape: {esc64}"
+            );
+        }
 
         // `..` traversal is refused before touching the fs.
         let esc = read_file_impl(&db, r#"{"path":"../../etc/passwd"}"#, &caller);

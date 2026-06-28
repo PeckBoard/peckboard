@@ -70,7 +70,7 @@ pub const ALLOWED_PERMISSIONS: &[&str] = &[
     "http_fetch", // peckboard_http_fetch — outbound public-web GET/HEAD
     "process_exec", // peckboard_exec — run an allowlisted command in the caller's folder
     "process_exec_any", // peckboard_exec_any — run ANY folder-contained command (after approval)
-    "project_files_read", // peckboard_list_project_files / read_file
+    "project_files_read", // peckboard_list_project_files / read_file / read_file_base64
     "project_files_write", // peckboard_write_file
     "provide_mcp_tools", // declare mcp_tools (mcp.tool.invoke)
     "session_dispatch", // peckboard_dispatch_capture / resume_session
