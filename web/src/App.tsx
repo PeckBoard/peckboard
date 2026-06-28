@@ -18,6 +18,7 @@ import SettingsModal from './components/SettingsModal'
 import { applyThemeColor } from './util/themeColor'
 import PluginsModal from './components/PluginsModal'
 import PluginPanelModal from './components/PluginPanelModal'
+import PluginFullPage from './components/PluginFullPage'
 import PluginApprovalPrompt from './components/PluginApprovalPrompt'
 import PluginRegistryModal from './components/PluginRegistryModal'
 import NewSessionModal from './components/NewSessionModal'
@@ -76,9 +77,16 @@ interface SidebarItem {
 }
 
 /** Sub-view for an active session or project — 'chat' (the default
- *  ChatView / KanbanBoard) or 'todos' (the dedicated *TodosView reachable at
- *  /{sessions,projects}/{id}/todos). */
-type SessionSub = 'chat' | 'todos'
+ *  ChatView / KanbanBoard), 'todos' (the dedicated *TodosView reachable at
+ *  /{sessions,projects}/{id}/todos), or `plugin:<itemId>` for a full-page
+ *  plugin view contributed via the manifest's project_items/session_items
+ *  (reachable at /{sessions,projects}/{id}/plugin/<itemId>). */
+type SessionSub = 'chat' | 'todos' | `plugin:${string}`
+
+/** The plugin item id encoded in a `plugin:<itemId>` sub, or null. */
+function pluginSubItemId(sub: SessionSub): string | null {
+  return sub.startsWith('plugin:') ? sub.slice('plugin:'.length) : null
+}
 
 /** Parse the current URL pathname into a view, optional active ID, an
  *  optional sub-view (only meaningful when `view` is 'sessions' or
@@ -99,20 +107,28 @@ function parseRoute(): {
   const first = segments[0] || 'sessions'
   const id = segments[1] || null
   const third = segments[2] || null
+  const fourth = segments[3] || null
+
+  // `/{sessions,projects}/<id>/todos` or `.../plugin/<itemId>`; else chat.
+  const subFor = (): SessionSub => {
+    if (third === 'todos') return 'todos'
+    if (third === 'plugin' && fourth) return `plugin:${fourth}`
+    return 'chat'
+  }
 
   switch (first) {
     case 'sessions':
       return {
         view: 'sessions',
         activeId: id,
-        sub: third === 'todos' ? 'todos' : 'chat',
+        sub: subFor(),
         modal: null,
       }
     case 'projects':
       return {
         view: 'projects',
         activeId: id,
-        sub: third === 'todos' ? 'todos' : 'chat',
+        sub: subFor(),
         modal: null,
       }
     case 'usage':
@@ -147,6 +163,14 @@ function parseRoute(): {
 function buildPath(view: View, activeId?: string | null, sub?: SessionSub): string {
   if ((view === 'sessions' || view === 'projects') && activeId && sub === 'todos') {
     return `/${view}/${activeId}/todos`
+  }
+  if (
+    (view === 'sessions' || view === 'projects') &&
+    activeId &&
+    sub &&
+    sub.startsWith('plugin:')
+  ) {
+    return `/${view}/${activeId}/plugin/${sub.slice('plugin:'.length)}`
   }
   if (view === 'repeatingTasks') {
     return activeId ? `/repeating-tasks/${activeId}` : '/repeating-tasks'
@@ -269,6 +293,9 @@ function App() {
   const [uiPanels, setUiPanels] = useState<UiPanel[]>([])
   // Plugin-contributed left-rail entries (generic; same /api/plugins catalog).
   const [sidebarItems, setSidebarItems] = useState<SidebarItem[]>([])
+  // Plugin-contributed full-page entries for the project / session pages.
+  const [projectItems, setProjectItems] = useState<SidebarItem[]>([])
+  const [sessionItems, setSessionItems] = useState<SidebarItem[]>([])
   const [openPanel, setOpenPanel] = useState<UiPanel | null>(null)
   const userMenuRef = useRef<HTMLDivElement | null>(null)
 
@@ -281,15 +308,26 @@ function App() {
     let cancelled = false
     authedFetch('/api/plugins')
       .then((res) => (res.ok ? res.json() : Promise.reject(new Error(`HTTP ${res.status}`))))
-      .then((data: { ui_panels?: UiPanel[]; sidebar_items?: SidebarItem[] }) => {
-        if (cancelled) return
-        setUiPanels(data.ui_panels ?? [])
-        setSidebarItems(data.sidebar_items ?? [])
-      })
+      .then(
+        (data: {
+          ui_panels?: UiPanel[]
+          sidebar_items?: SidebarItem[]
+          project_items?: SidebarItem[]
+          session_items?: SidebarItem[]
+        }) => {
+          if (cancelled) return
+          setUiPanels(data.ui_panels ?? [])
+          setSidebarItems(data.sidebar_items ?? [])
+          setProjectItems(data.project_items ?? [])
+          setSessionItems(data.session_items ?? [])
+        },
+      )
       .catch(() => {
         if (!cancelled) {
           setUiPanels([])
           setSidebarItems([])
+          setProjectItems([])
+          setSessionItems([])
         }
       })
     return () => {
@@ -1181,10 +1219,26 @@ function App() {
                   sessionId={activeSessionId}
                   onBack={() => navigate('sessions', activeSessionId, 'chat')}
                 />
+              ) : pluginSubItemId(sessionSub) &&
+                sessionItems.find((i) => i.id === pluginSubItemId(sessionSub)) ? (
+                (() => {
+                  const item = sessionItems.find((i) => i.id === pluginSubItemId(sessionSub))!
+                  return (
+                    <PluginFullPage
+                      title={item.label}
+                      plugin={item.plugin}
+                      path={item.path}
+                      scope={{ sessionId: activeSessionId }}
+                      onBack={() => navigate('sessions', activeSessionId, 'chat')}
+                    />
+                  )
+                })()
               ) : (
                 <ChatView
                   sessionId={activeSessionId}
                   onOpenTodos={() => navigate('sessions', activeSessionId, 'todos')}
+                  pluginItems={sessionItems}
+                  onOpenPlugin={(id) => navigate('sessions', activeSessionId, `plugin:${id}`)}
                 />
               )
             ) : (
@@ -1267,10 +1321,26 @@ function App() {
                   projectId={activeProjectId}
                   onClose={() => navigate('projects', activeProjectId, 'chat')}
                 />
+              ) : pluginSubItemId(sessionSub) &&
+                projectItems.find((i) => i.id === pluginSubItemId(sessionSub)) ? (
+                (() => {
+                  const item = projectItems.find((i) => i.id === pluginSubItemId(sessionSub))!
+                  return (
+                    <PluginFullPage
+                      title={item.label}
+                      plugin={item.plugin}
+                      path={item.path}
+                      scope={{ projectId: activeProjectId }}
+                      onBack={() => navigate('projects', activeProjectId, 'chat')}
+                    />
+                  )
+                })()
               ) : (
                 <KanbanBoard
                   projectId={activeProjectId}
                   onOpenTodos={() => navigate('projects', activeProjectId, 'todos')}
+                  pluginItems={projectItems}
+                  onOpenPlugin={(id) => navigate('projects', activeProjectId, `plugin:${id}`)}
                 />
               )
             ) : (

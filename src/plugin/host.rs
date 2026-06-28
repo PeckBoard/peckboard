@@ -187,16 +187,28 @@ pub(crate) struct InvocationContext {
 pub(crate) struct UserContext {
     #[allow(dead_code)] // carried for audit / future per-user scoping
     pub user_id: String,
+    /// Optional folder scope for this request, resolved by
+    /// [`crate::plugin::manager::PluginManager::serve_http_authed`] from a
+    /// caller-supplied project/session id (verified to exist). When set, the
+    /// plugin's folder-scoped host functions (`read_file`, `exec`, …) run in
+    /// this folder; `None` keeps the prior behaviour (no folder floor — global
+    /// app-data calls only).
+    pub folder_id: Option<String>,
+    /// The project this request is scoped to, if it came from a project page.
+    pub project_id: Option<String>,
+    /// The session this request is scoped to, if it came from a session page.
+    pub session_id: Option<String>,
 }
 
 impl UserContext {
     /// The caller context a host function sees for an authenticated user
-    /// request: full authority, no folder/project floor.
+    /// request: full authority, plus any project/session/folder scope the host
+    /// resolved from the request (so folder-scoped reads land in that folder).
     fn as_invocation(&self) -> InvocationContext {
         InvocationContext {
-            session_id: None,
-            project_id: None,
-            folder_id: None,
+            session_id: self.session_id.clone(),
+            project_id: self.project_id.clone(),
+            folder_id: self.folder_id.clone(),
             authority: true,
         }
     }

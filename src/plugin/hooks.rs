@@ -112,6 +112,21 @@ pub struct PluginManifest {
     /// embeds the page, nothing more.
     #[serde(default)]
     pub sidebar_items: Vec<SidebarItem>,
+    /// Full-page entries this plugin contributes to a **project** page. Same
+    /// iframe-sandbox model and `SidebarItem` shape as `sidebar_items`, but
+    /// rendered as a tab/section inside a single project's view. When the page
+    /// calls its `/api/plugin-ui/*` endpoints the host attaches the project's id
+    /// so the plugin's scoped host functions run in that project's folder.
+    /// Surfaced in the `/api/plugins` catalog; requires `contribute_sidebar`.
+    #[serde(default)]
+    pub project_items: Vec<SidebarItem>,
+    /// Full-page entries this plugin contributes to a **session** page. Same as
+    /// [`Self::project_items`] but scoped to a single session — the host
+    /// attaches the session's id so scoped host calls run in that session's
+    /// folder. Surfaced in the `/api/plugins` catalog; requires
+    /// `contribute_sidebar`.
+    #[serde(default)]
+    pub session_items: Vec<SidebarItem>,
     /// Host capabilities this plugin requests. Each must be in core's
     /// `ALLOWED_PERMISSIONS` allowlist; the granted set gates the host
     /// functions the plugin may call (see `src/plugin/host.rs`). Permissions

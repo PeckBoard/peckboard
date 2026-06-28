@@ -11,8 +11,8 @@ use serde::Serialize;
 
 use super::hooks::{
     HTTP_AUTHED_HOOK, HTTP_REQUEST_HOOK, HookResult, MCP_TOOL_INVOKE_HOOK, PluginHttpOutcome,
-    PluginHttpResponse, PluginManifest, PluginMcpToolEntry, SidebarItemEntry, UiPanelEntry,
-    Verdict,
+    PluginHttpResponse, PluginManifest, PluginMcpToolEntry, SidebarItem, SidebarItemEntry,
+    UiPanelEntry, Verdict,
 };
 use crate::db::Db;
 use crate::db::crud::{APPROVAL_APPROVED, APPROVAL_DENIED};
@@ -533,18 +533,21 @@ impl PluginManager {
 
         validate_mcp_tools(&name, &plugin_manifest)?;
 
-        // A plugin contributing sidebar items must hold `contribute_sidebar`;
-        // per-item path validity is enforced when the catalog is built
-        // (`sidebar_items()`), mirroring `ui_panels()`.
-        if !plugin_manifest.sidebar_items.is_empty()
+        // A plugin contributing sidebar / project / session items must hold
+        // `contribute_sidebar`; per-item path validity is enforced when the
+        // catalog is built (`sidebar_items()` / `scoped_items()`), mirroring
+        // `ui_panels()`.
+        if (!plugin_manifest.sidebar_items.is_empty()
+            || !plugin_manifest.project_items.is_empty()
+            || !plugin_manifest.session_items.is_empty())
             && !plugin_manifest
                 .permissions
                 .iter()
                 .any(|p| p == "contribute_sidebar")
         {
             return Err(anyhow::anyhow!(
-                "plugin '{name}' declares sidebar_items but not the \
-                 'contribute_sidebar' permission",
+                "plugin '{name}' declares sidebar/project/session items but not \
+                 the 'contribute_sidebar' permission",
             ));
         }
 
@@ -711,9 +714,13 @@ impl PluginManager {
         let call_input = serde_json::json!({ "hook": hook, "payload": payload }).to_string();
         for (name, plugin, user_slot) in targets {
             // Land the trusted user context for exactly this `handle` call.
+            // A notification dispatch carries no request scope.
             if let Ok(mut slot) = user_slot.write() {
                 *slot = Some(super::host::UserContext {
                     user_id: user_id.to_string(),
+                    folder_id: None,
+                    project_id: None,
+                    session_id: None,
                 });
             }
             let result = {
@@ -893,6 +900,17 @@ impl PluginManager {
             "user": { "id": user_id },
         });
 
+        // Resolve an optional folder scope from the request: a project- or
+        // session-scoped page (see `project_items` / `session_items`) sends its
+        // id as a header, which the frontend injects from the page context. We
+        // look up the folder it belongs to so the plugin's folder-scoped host
+        // functions run there. The id is only a *scope selector* — the authed
+        // surface already runs under the user's full authority, so this grants
+        // no access the user doesn't already have; an unknown id just yields no
+        // scope (the host functions then refuse with "caller has no folder
+        // scope") rather than an error here.
+        let scope = self.resolve_authed_scope(headers).await;
+
         for (name, plugin, params, user_slot) in targets {
             let mut req_payload = payload.clone();
             req_payload["params"] = serde_json::json!(params);
@@ -905,6 +923,9 @@ impl PluginManager {
             if let Ok(mut slot) = user_slot.write() {
                 *slot = Some(super::host::UserContext {
                     user_id: user_id.to_string(),
+                    folder_id: scope.folder_id.clone(),
+                    project_id: scope.project_id.clone(),
+                    session_id: scope.session_id.clone(),
                 });
             }
             let result = {
@@ -936,6 +957,43 @@ impl PluginManager {
         }
 
         error_outcome(500, "plugin did not produce a response")
+    }
+
+    /// Resolve the folder scope for an authed plugin request from its headers.
+    /// `x-peckboard-session-id` wins over `x-peckboard-project-id`; the folder
+    /// (and project, for a session) is taken from the looked-up row. A missing
+    /// or unknown id yields an empty scope — the host functions then refuse a
+    /// folder-scoped call, which is the correct "no scope" behaviour.
+    async fn resolve_authed_scope(&self, headers: &BTreeMap<String, String>) -> AuthedScope {
+        let Some(db) = self.db.as_ref() else {
+            return AuthedScope::default();
+        };
+        // Header names arrive lowercased (axum `HeaderName`).
+        if let Some(sid) = headers
+            .get("x-peckboard-session-id")
+            .map(|s| s.trim())
+            .filter(|s| !s.is_empty())
+            && let Ok(Some(session)) = db.get_session(sid).await
+        {
+            return AuthedScope {
+                folder_id: Some(session.folder_id),
+                project_id: session.project_id,
+                session_id: Some(session.id),
+            };
+        }
+        if let Some(pid) = headers
+            .get("x-peckboard-project-id")
+            .map(|s| s.trim())
+            .filter(|s| !s.is_empty())
+            && let Ok(Some(project)) = db.get_project(pid).await
+        {
+            return AuthedScope {
+                folder_id: Some(project.folder_id),
+                project_id: Some(project.id),
+                session_id: None,
+            };
+        }
+        AuthedScope::default()
     }
 
     /// Check if any *active* (approved) plugins are registered for a given
@@ -1284,37 +1342,22 @@ impl PluginManager {
     /// [`Self::ui_panels`], so a plugin can't aim the rail button off-origin.
     pub async fn sidebar_items(&self) -> Vec<SidebarItemEntry> {
         let plugins = self.plugins.lock().await;
-        let mut out = Vec::new();
-        for loaded in plugins.iter() {
-            if !loaded.is_active() {
-                continue;
-            }
-            for item in &loaded.manifest.sidebar_items {
-                if item.id.trim().is_empty() || item.label.trim().is_empty() {
-                    warn!(
-                        "Plugin '{}' declares a sidebar_item with an empty id/label; skipping",
-                        loaded.name
-                    );
-                    continue;
-                }
-                if !is_valid_panel_path(&item.path) {
-                    warn!(
-                        "Plugin '{}' sidebar_item '{}' has invalid path '{}' (must be an \
-                         absolute /plugin-api/ path); skipping",
-                        loaded.name, item.id, item.path
-                    );
-                    continue;
-                }
-                out.push(SidebarItemEntry {
-                    plugin: loaded.name.clone(),
-                    id: item.id.clone(),
-                    label: item.label.clone(),
-                    icon: item.icon.clone(),
-                    path: item.path.clone(),
-                });
-            }
-        }
-        out
+        collect_items(&plugins, "sidebar_item", |m| &m.sidebar_items)
+    }
+
+    /// Full-page entries active plugins contribute to the **project** page
+    /// (manifest `project_items`), for the `/api/plugins` catalog. Same
+    /// validation as [`Self::sidebar_items`].
+    pub async fn project_items(&self) -> Vec<SidebarItemEntry> {
+        let plugins = self.plugins.lock().await;
+        collect_items(&plugins, "project_item", |m| &m.project_items)
+    }
+
+    /// Full-page entries active plugins contribute to the **session** page
+    /// (manifest `session_items`), for the `/api/plugins` catalog.
+    pub async fn session_items(&self) -> Vec<SidebarItemEntry> {
+        let plugins = self.plugins.lock().await;
+        collect_items(&plugins, "session_item", |m| &m.session_items)
     }
 
     /// Every MCP tool declared by an active plugin, for merging into the
@@ -1435,6 +1478,57 @@ impl PluginManager {
             )),
         })
     }
+}
+
+/// The folder scope resolved for an authed plugin request from its
+/// project/session header. Empty when the request carried no (known) id.
+#[derive(Default)]
+struct AuthedScope {
+    folder_id: Option<String>,
+    project_id: Option<String>,
+    session_id: Option<String>,
+}
+
+/// Collect validated contribution entries (sidebar / project / session items)
+/// from the active plugins, applying the same id/label/path checks `ui_panels`
+/// and the original `sidebar_items` used. `kind` only labels skip warnings;
+/// `select` picks which manifest vector to read.
+fn collect_items(
+    plugins: &[LoadedPlugin],
+    kind: &str,
+    select: impl Fn(&PluginManifest) -> &Vec<SidebarItem>,
+) -> Vec<SidebarItemEntry> {
+    let mut out = Vec::new();
+    for loaded in plugins.iter() {
+        if !loaded.is_active() {
+            continue;
+        }
+        for item in select(&loaded.manifest) {
+            if item.id.trim().is_empty() || item.label.trim().is_empty() {
+                warn!(
+                    "Plugin '{}' declares a {kind} with an empty id/label; skipping",
+                    loaded.name
+                );
+                continue;
+            }
+            if !is_valid_panel_path(&item.path) {
+                warn!(
+                    "Plugin '{}' {kind} '{}' has invalid path '{}' (must be an \
+                     absolute /plugin-api/ path); skipping",
+                    loaded.name, item.id, item.path
+                );
+                continue;
+            }
+            out.push(SidebarItemEntry {
+                plugin: loaded.name.clone(),
+                id: item.id.clone(),
+                label: item.label.clone(),
+                icon: item.icon.clone(),
+                path: item.path.clone(),
+            });
+        }
+    }
+    out
 }
 
 /// Whether a plugin-declared UI-panel path is safe for the host to embed.
@@ -1763,6 +1857,8 @@ mod tests {
             ui_panels: Vec::new(),
             mcp_tools: tools,
             sidebar_items: Vec::new(),
+            project_items: Vec::new(),
+            session_items: Vec::new(),
             permissions,
         }
     }
@@ -1894,6 +1990,50 @@ mod tests {
         assert!(!err.to_string().is_empty());
         assert!(!tmp.path().join("plugins").join("demo.wasm").exists());
         assert!(mgr.wasm_plugins().await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn resolve_authed_scope_maps_session_header_to_folder() {
+        use crate::db::models::{NewFolder, NewSession};
+        let tmp = tempfile::tempdir().unwrap();
+        let db = crate::db::Db::in_memory().unwrap();
+        let ts = chrono::Utc::now().to_rfc3339();
+        db.create_folder(NewFolder {
+            id: "f1".into(),
+            name: "Repo".into(),
+            path: tmp.path().to_string_lossy().to_string(),
+            created_at: ts.clone(),
+        })
+        .await
+        .unwrap();
+        db.create_session(NewSession {
+            id: "s1".into(),
+            name: "S".into(),
+            folder_id: "f1".into(),
+            created_at: ts.clone(),
+            last_activity: ts.clone(),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+        let mgr = PluginManager::new(tmp.path(), db);
+
+        // A session id resolves to its folder (the scope the host fns read).
+        let mut h = BTreeMap::new();
+        h.insert("x-peckboard-session-id".to_string(), "s1".to_string());
+        let scope = mgr.resolve_authed_scope(&h).await;
+        assert_eq!(scope.folder_id.as_deref(), Some("f1"));
+        assert_eq!(scope.session_id.as_deref(), Some("s1"));
+
+        // An unknown id yields no scope (the host fns then refuse a folder
+        // call) rather than leaking a default folder.
+        let mut bad = BTreeMap::new();
+        bad.insert("x-peckboard-session-id".to_string(), "nope".to_string());
+        assert!(mgr.resolve_authed_scope(&bad).await.folder_id.is_none());
+
+        // No scope header at all → empty scope.
+        let none = mgr.resolve_authed_scope(&BTreeMap::new()).await;
+        assert!(none.folder_id.is_none() && none.session_id.is_none());
     }
 
     #[test]

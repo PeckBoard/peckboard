@@ -30,9 +30,18 @@ interface KanbanBoardProps {
   projectId: string
   /** Navigate to the dedicated project-todos view. */
   onOpenTodos?: () => void
+  /** Plugin project-page entries to surface as toolbar buttons. */
+  pluginItems?: { plugin: string; id: string; label: string }[]
+  /** Open a plugin entry's full-page view by its item id. */
+  onOpenPlugin?: (itemId: string) => void
 }
 
-export default function KanbanBoard({ projectId, onOpenTodos }: KanbanBoardProps) {
+export default function KanbanBoard({
+  projectId,
+  onOpenTodos,
+  pluginItems,
+  onOpenPlugin,
+}: KanbanBoardProps) {
   // The board renders the same classic vertical-columns kanban on every
   // viewport: columns side by side, cards stacked top-to-bottom inside
   // each column. On a narrow phone the columns get narrow but the
@@ -654,6 +663,19 @@ export default function KanbanBoard({ projectId, onOpenTodos }: KanbanBoardProps
             </svg>
           </button>
         )}
+        {onOpenPlugin &&
+          pluginItems?.map((item) => (
+            <button
+              key={item.plugin + ':' + item.id}
+              type="button"
+              className="btn-secondary btn-sm"
+              onClick={() => onOpenPlugin(item.id)}
+              title={item.label}
+              data-testid={`project-toolbar-plugin-${item.id}`}
+            >
+              {item.label}
+            </button>
+          ))}
         <button type="button" className="btn-primary btn-sm" onClick={() => setShowAddForm(true)}>
           Add Card
         </button>

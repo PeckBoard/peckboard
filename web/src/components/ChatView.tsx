@@ -30,9 +30,21 @@ import 'highlight.js/styles/github-dark.css'
 const EMPTY_TODOS: TodoItem[] = []
 const EMPTY_PENDING_MESSAGES: PendingUserMessage[] = []
 
+/** A plugin-contributed full-page entry for the session page (manifest
+ *  `session_items`), surfaced as a toolbar button. */
+interface PluginItem {
+  plugin: string
+  id: string
+  label: string
+}
+
 interface ChatViewProps {
   sessionId: string
   onOpenTodos?: () => void
+  /** Plugin session-page entries to surface as toolbar buttons. */
+  pluginItems?: PluginItem[]
+  /** Open a plugin entry's full-page view by its item id. */
+  onOpenPlugin?: (itemId: string) => void
 }
 
 /**
@@ -229,7 +241,12 @@ interface ModelInfo {
   display_name: string
 }
 
-export default function ChatView({ sessionId, onOpenTodos }: ChatViewProps) {
+export default function ChatView({
+  sessionId,
+  onOpenTodos,
+  pluginItems,
+  onOpenPlugin,
+}: ChatViewProps) {
   const events = useSessionsStore((s) => s.eventsBySession[sessionId] ?? EMPTY_EVENTS)
   const loading = useSessionsStore((s) => s.loadingEventsBySession[sessionId] ?? true)
   const eventsError = useSessionsStore((s) => s.eventsErrorBySession[sessionId] ?? false)
@@ -692,6 +709,19 @@ export default function ChatView({ sessionId, onOpenTodos }: ChatViewProps) {
             )}
           </button>
         )}
+        {onOpenPlugin &&
+          pluginItems?.map((item) => (
+            <button
+              key={item.plugin + ':' + item.id}
+              className="chat-toolbar-tasks"
+              onClick={() => onOpenPlugin(item.id)}
+              type="button"
+              title={item.label}
+              data-testid={`chat-toolbar-plugin-${item.id}`}
+            >
+              <span>{item.label}</span>
+            </button>
+          ))}
         <MenuButton
           ariaLabel="Session menu"
           triggerClassName="chat-toolbar-menu"

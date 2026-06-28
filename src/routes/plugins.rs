@@ -86,6 +86,10 @@ async fn list_plugins(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     // Left-rail entries declared by active WASM plugins (same validation +
     // inert-plugin exclusion as ui_panels).
     let sidebar_items = state.plugins.sidebar_items().await;
+    // Full-page entries declared for the project / session pages (same
+    // validation + inert-plugin exclusion).
+    let project_items = state.plugins.project_items().await;
+    let session_items = state.plugins.session_items().await;
     // Loaded WASM plugins and their approval status. The UI uses any with
     // status `pending` to drive the approval prompt; `ui_panels` already
     // excludes panels from unapproved plugins.
@@ -94,6 +98,8 @@ async fn list_plugins(State(state): State<Arc<AppState>>) -> impl IntoResponse {
         "plugins": entries,
         "ui_panels": ui_panels,
         "sidebar_items": sidebar_items,
+        "project_items": project_items,
+        "session_items": session_items,
         "wasm_plugins": wasm_plugins,
     }))
 }
