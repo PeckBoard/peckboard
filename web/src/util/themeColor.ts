@@ -1,6 +1,6 @@
 // Drives the `<meta name="theme-color">` tags so the iOS PWA status
 // bar matches the nav rail's `--surface`. Lives in its own module so
-// both SettingsModal (on user theme change) and App init can share it
+// both SettingsPage (on user theme change) and App init can share it
 // without violating react-refresh's components-only export rule.
 
 export type Theme = 'light' | 'dark' | 'auto'

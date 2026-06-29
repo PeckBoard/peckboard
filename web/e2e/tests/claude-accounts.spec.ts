@@ -39,9 +39,9 @@ async function openSettings(page: Page) {
   const menu = page.locator('.user-menu-dropdown')
   await expect(menu).toBeVisible()
   await menu.getByRole('menuitem', { name: 'Settings' }).click()
-  const modal = page.getByTestId('settings-modal')
-  await expect(modal).toBeVisible()
-  return modal
+  const settings = page.getByTestId('settings-page')
+  await expect(settings).toBeVisible()
+  return settings
 }
 
 /** Account-scoped model display names served by `/api/models`. */

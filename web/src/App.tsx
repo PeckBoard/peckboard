@@ -14,7 +14,7 @@ import ListViewHeader from './components/ListViewHeader'
 import ProjectList from './components/ProjectList'
 import KanbanBoard from './components/KanbanBoard'
 import ProjectTodosView from './components/ProjectTodosView'
-import SettingsModal from './components/SettingsModal'
+import SettingsPage from './components/SettingsPage'
 import { applyThemeColor } from './util/themeColor'
 import PluginsModal from './components/PluginsModal'
 import PluginPanelModal from './components/PluginPanelModal'
@@ -45,12 +45,21 @@ import ConnectionBanner from './components/ConnectionBanner'
 import { startTabsAutoSync, useTabsStore, type TabType } from './store/tabs'
 import './App.css'
 
-type View = 'sessions' | 'repeatingTasks' | 'projects' | 'usage' | 'folders' | 'reports' | 'users'
+type View =
+  | 'sessions'
+  | 'repeatingTasks'
+  | 'projects'
+  | 'usage'
+  | 'folders'
+  | 'reports'
+  | 'users'
+  | 'settings'
 
-/** Modals reachable from the user-icon dropdown. The URL maps a couple of
- *  paths (`/settings`, `/plugins`) to opening one of these on mount so
- *  bookmarks and the existing e2e routes still land somewhere useful. */
-type DropdownModal = 'settings' | 'plugins' | 'plugin-registry' | null
+/** Modals reachable from the user-icon dropdown. The URL maps `/plugins`
+ *  to opening one of these on mount so bookmarks and the existing e2e
+ *  routes still land somewhere useful. (Settings is a full-page view, not
+ *  a modal — see the `'settings'` `View`.) */
+type DropdownModal = 'plugins' | 'plugin-registry' | null
 
 /** A UI page a loaded plugin contributes, surfaced as a user-menu link.
  * Generic: the host renders whatever panels a plugin declares (from the
@@ -91,7 +100,7 @@ function pluginSubItemId(sub: SessionSub): string | null {
 /** Parse the current URL pathname into a view, optional active ID, an
  *  optional sub-view (only meaningful when `view` is 'sessions' or
  *  'projects'), and an optional dropdown-modal hint for the few routes
- *  that map straight to a modal (`/settings`, `/plugins`).
+ *  that map straight to a modal (`/plugins`).
  *
  *  For the reports view, `activeId` is the encoded `<folder>/<file>`
  *  pair the user is reading (the same id used as the report tab's
@@ -138,7 +147,7 @@ function parseRoute(): {
     case 'folders':
       return { view: 'folders', activeId: null, sub: 'chat', modal: null }
     case 'settings':
-      return { view: 'sessions', activeId: null, sub: 'chat', modal: 'settings' }
+      return { view: 'settings', activeId: null, sub: 'chat', modal: null }
     case 'plugins':
       return { view: 'sessions', activeId: null, sub: 'chat', modal: 'plugins' }
     case 'plugin-registry':
@@ -366,8 +375,8 @@ function App() {
     [],
   )
 
-  // Open one of the dropdown-modal targets (Settings / Plugins) and reflect
-  // it in the URL so the modal is bookmarkable and survives a reload. The
+  // Open one of the dropdown-modal targets (Plugins) and reflect it in the
+  // URL so the modal is bookmarkable and survives a reload. The
   // close handler simply navigates back, which pops the entry off history
   // and clears `dropdownModal` via popstate.
   const openDropdownModal = useCallback((target: Exclude<DropdownModal, null>) => {
@@ -381,8 +390,8 @@ function App() {
   const closeDropdownModal = useCallback(() => {
     // Just clear modal state. The URL-sync effect notices `dropdownModal`
     // went null and pushes the underlying view's path (typically `/`),
-    // which moves us off `/settings` or `/plugins` so a Back press
-    // re-enters the modal — natural Back/Forward UX.
+    // which moves us off `/plugins` so a Back press re-enters the modal
+    // — natural Back/Forward UX.
     setDropdownModal(null)
   }, [])
 
@@ -419,8 +428,8 @@ function App() {
   }, [setActiveSession, setActiveProject])
 
   // When activeSessionId changes, update URL — unless we're sitting on a
-  // dropdown-modal route (`/settings` or `/plugins`). Those routes map to
-  // `view: 'sessions'` but must keep their pathname so a reload still
+  // dropdown-modal route (`/plugins`). That route maps to
+  // `view: 'sessions'` but must keep its pathname so a reload still
   // lands on the same modal; without this guard the sync rewrites
   // `/plugins` back to `/` on first render and the modal vanishes.
   useEffect(() => {
@@ -1137,7 +1146,7 @@ function App() {
                   role="menuitem"
                   onClick={() => {
                     setUserMenuOpen(false)
-                    openDropdownModal('settings')
+                    navigate('settings')
                   }}
                 >
                   Settings
@@ -1397,6 +1406,7 @@ function App() {
               />
             ))}
           {view === 'users' && <UserManagement />}
+          {view === 'settings' && <SettingsPage onBack={() => navigate('sessions')} />}
         </ErrorBoundary>
       </main>
 
@@ -1405,7 +1415,6 @@ function App() {
       {showChangePassword && (
         <ChangePasswordModal mode={{ kind: 'self' }} onClose={() => setShowChangePassword(false)} />
       )}
-      {dropdownModal === 'settings' && <SettingsModal onClose={closeDropdownModal} />}
       {dropdownModal === 'plugins' && (
         <PluginsModal
           onClose={closeDropdownModal}

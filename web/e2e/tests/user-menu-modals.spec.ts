@@ -1,8 +1,8 @@
 import { test, expect, type APIRequestContext, type Page } from '@playwright/test'
 
 /**
- * UI e2e for the Settings + Plugins modals reached through the user-icon
- * dropdown in the nav rail.
+ * UI e2e for the Settings page + Plugins modal reached through the
+ * user-icon dropdown in the nav rail.
  *
  * The nav rail no longer carries a dedicated Settings icon — both
  * Settings and Plugins are reached from the avatar dropdown at the
@@ -12,8 +12,9 @@ import { test, expect, type APIRequestContext, type Page } from '@playwright/tes
  *    rail).
  * 2. Clicking the avatar reveals a menu with Settings and Plugins
  *    options.
- * 3. Each option opens the corresponding modal; closing returns to the
- *    underlying view.
+ * 3. Settings opens a full-page view (not a modal); its Back button
+ *    returns to the underlying view. Plugins opens a modal; closing it
+ *    returns to the underlying view.
  */
 
 const E2E_USER = 'e2e-user'
@@ -35,7 +36,7 @@ async function loadAppAt(page: Page, token: string, route: string) {
   await page.goto(route)
 }
 
-test('user dropdown opens Settings and Plugins modals; rail Settings icon is gone', async ({
+test('user dropdown opens Settings page and Plugins modal; rail Settings icon is gone', async ({
   request,
   page,
   baseURL,
@@ -57,15 +58,17 @@ test('user dropdown opens Settings and Plugins modals; rail Settings icon is gon
   await expect(menu).toBeVisible()
   await menu.getByRole('menuitem', { name: 'Settings' }).click()
 
-  const settingsModal = page.getByTestId('settings-modal')
-  await expect(settingsModal).toBeVisible()
-  // Sanity: the modal still carries the core sections.
-  await expect(settingsModal).toContainText('User Info')
-  await expect(settingsModal).toContainText('Theme')
+  const settingsPage = page.getByTestId('settings-page')
+  await expect(settingsPage).toBeVisible()
+  // Settings is a full-page view at `/settings`.
+  await expect(page).toHaveURL(/\/settings$/)
+  // Sanity: the page still carries the core sections.
+  await expect(settingsPage).toContainText('User Info')
+  await expect(settingsPage).toContainText('Theme')
 
-  // Close — opens via Close button.
-  await settingsModal.getByRole('button', { name: 'Close' }).click()
-  await expect(settingsModal).toBeHidden()
+  // Back returns to the underlying view and unmounts the page.
+  await settingsPage.getByRole('button', { name: 'Back' }).click()
+  await expect(settingsPage).toBeHidden()
 
   // Open the dropdown again and pick Plugins.
   await page.locator('.rail-avatar').click()

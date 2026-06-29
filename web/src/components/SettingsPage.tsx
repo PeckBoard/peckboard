@@ -2,7 +2,6 @@ import { useEffect, useState } from 'react'
 import { useAuthStore, authedFetch } from '../store/auth'
 import { applyThemeColor, type Theme } from '../util/themeColor'
 import ClaudeAccountsSection from './ClaudeAccountsSection'
-import Modal from './Modal'
 import SoftwareUpdate from './SoftwareUpdate'
 
 const THEME_KEY = 'peckboard_theme'
@@ -45,10 +44,10 @@ function applyHue(hue: number) {
 }
 
 interface Props {
-  onClose: () => void
+  onBack: () => void
 }
 
-export default function SettingsModal({ onClose }: Props) {
+export default function SettingsPage({ onBack }: Props) {
   const user = useAuthStore((s) => s.user)
   const [theme, setTheme] = useState<Theme>(getStoredTheme)
   const [hue, setHue] = useState<number>(() => {
@@ -80,8 +79,13 @@ export default function SettingsModal({ onClose }: Props) {
   }
 
   return (
-    <Modal onClose={onClose} className="settings-modal" data-testid="settings-modal">
-      <h2>Settings</h2>
+    <div className="settings-page" data-testid="settings-page">
+      <div className="settings-page-header">
+        <button type="button" className="btn-secondary settings-back" onClick={onBack}>
+          ← Back
+        </button>
+        <h2>Settings</h2>
+      </div>
 
       <section className="settings-section">
         <h3>User Info</h3>
@@ -155,12 +159,6 @@ export default function SettingsModal({ onClose }: Props) {
           <span className="hue-preview" style={{ backgroundColor: `hsl(${hue}, 72%, 50%)` }} />
         </div>
       </section>
-
-      <div className="form-actions">
-        <button type="button" className="btn-secondary" onClick={onClose}>
-          Close
-        </button>
-      </div>
-    </Modal>
+    </div>
   )
 }
