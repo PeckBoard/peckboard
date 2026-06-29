@@ -657,3 +657,58 @@ pub struct ClaudeAccountChanges {
     pub critical_threshold: Option<f64>,
     pub updated_at: Option<i64>,
 }
+
+/// One Grok / xAI account the spawned `grok` CLI can run as. Mirrors
+/// [`ClaudeAccount`]; see the `grok_accounts` migration for how each `kind`
+/// (`"device"` / `"api_key"`) authenticates the CLI. For a `device` account
+/// the `credential` is just the non-secret marker `"device"` — the real
+/// credentials live in `config_dir/auth.json` (the per-account GROK_HOME).
+#[derive(Queryable, Selectable, Serialize, Debug, Clone)]
+#[diesel(table_name = grok_accounts)]
+pub struct GrokAccount {
+    pub id: String,
+    pub name: String,
+    pub kind: String,
+    pub credential: String,
+    pub config_dir: Option<String>,
+    pub budget_window_hours: Option<i32>,
+    pub budget_limit_usd: Option<f64>,
+    pub budget_limit_tokens: Option<i64>,
+    pub warn_threshold: f64,
+    pub critical_threshold: f64,
+    pub created_at: i64,
+    pub updated_at: i64,
+}
+
+#[derive(Insertable, Debug)]
+#[diesel(table_name = grok_accounts)]
+pub struct NewGrokAccount {
+    pub id: String,
+    pub name: String,
+    pub kind: String,
+    pub credential: String,
+    pub config_dir: Option<String>,
+    pub budget_window_hours: Option<i32>,
+    pub budget_limit_usd: Option<f64>,
+    pub budget_limit_tokens: Option<i64>,
+    pub warn_threshold: f64,
+    pub critical_threshold: f64,
+    pub created_at: i64,
+    pub updated_at: i64,
+}
+
+/// Mutable fields of a Grok account. `None` leaves a field unchanged; the
+/// doubly-wrapped budget fields distinguish "leave as-is" (outer `None`)
+/// from "clear the budget" (`Some(None)`). Mirrors [`ClaudeAccountChanges`].
+#[derive(AsChangeset, Debug, Default)]
+#[diesel(table_name = grok_accounts)]
+pub struct GrokAccountChanges {
+    pub name: Option<String>,
+    pub credential: Option<String>,
+    pub budget_window_hours: Option<Option<i32>>,
+    pub budget_limit_usd: Option<Option<f64>>,
+    pub budget_limit_tokens: Option<Option<i64>>,
+    pub warn_threshold: Option<f64>,
+    pub critical_threshold: Option<f64>,
+    pub updated_at: Option<i64>,
+}

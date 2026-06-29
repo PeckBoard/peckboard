@@ -9,6 +9,7 @@ mod claude_accounts;
 mod dependencies;
 mod events;
 mod folders;
+mod grok_accounts;
 mod plugin_approvals;
 mod plugin_data;
 mod plugin_repositories;

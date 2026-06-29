@@ -184,6 +184,58 @@ export interface ClaudeAccountInput {
   critical_threshold: number
 }
 
+/** How a Grok account authenticates the spawned CLI: `device` is a browser
+ *  device-code sign-in (`grok login --device-auth`); `api_key` injects an
+ *  `XAI_API_KEY`. */
+export type GrokAccountKind = 'device' | 'api_key'
+
+export interface GrokAccountUsage {
+  total_tokens: number
+  est_cost_usd: number
+  turns: number
+  used_fraction: number | null
+  level: WarnLevel
+}
+
+/** One Grok/xAI account. The credential is never returned; `authenticated`
+ *  reports whether a device account has finished its browser sign-in (or an
+ *  api_key account has a key set). */
+export interface GrokAccount {
+  id: string
+  name: string
+  kind: GrokAccountKind
+  authenticated: boolean
+  config_dir: string | null
+  budget_window_hours: number | null
+  budget_limit_usd: number | null
+  budget_limit_tokens: number | null
+  warn_threshold: number
+  critical_threshold: number
+  created_at: number
+  updated_at: number
+  usage: GrokAccountUsage
+}
+
+/** The device-login URL returned by `POST /api/grok-accounts/{id}/login/start`.
+ *  The user opens it and authorises in the browser; the `grok` CLI completes
+ *  the sign-in on the server side. */
+export interface GrokLoginStart {
+  url: string
+}
+
+/** Body for creating/updating a Grok account. `credential` is only meaningful
+ *  for an `api_key` account; on update an empty/omitted value keeps the key. */
+export interface GrokAccountInput {
+  name: string
+  kind: GrokAccountKind
+  credential: string
+  budget_window_hours: number | null
+  budget_limit_usd: number | null
+  budget_limit_tokens: number | null
+  warn_threshold: number
+  critical_threshold: number
+}
+
 export interface PushSubscription {
   endpoint: string
   p256dh: string

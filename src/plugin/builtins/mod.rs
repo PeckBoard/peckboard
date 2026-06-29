@@ -14,6 +14,7 @@ use crate::provider::registry::ProviderRegistry;
 
 pub mod claude_code;
 pub mod cursor;
+pub mod grok;
 pub mod mock;
 pub mod ollama;
 
@@ -47,6 +48,13 @@ pub async fn register_all(
         )
         .await;
     catalog
-        .register_and_init(Arc::new(cursor::CursorPlugin), provider_registry, db)
+        .register_and_init(
+            Arc::new(cursor::CursorPlugin),
+            provider_registry.clone(),
+            db.clone(),
+        )
+        .await;
+    catalog
+        .register_and_init(Arc::new(grok::GrokPlugin), provider_registry, db)
         .await;
 }

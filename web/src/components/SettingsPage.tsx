@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react'
 import { useAuthStore, authedFetch } from '../store/auth'
 import { applyThemeColor, type Theme } from '../util/themeColor'
 import ClaudeAccountsSection from './ClaudeAccountsSection'
+import GrokAccountsSection from './GrokAccountsSection'
 import SoftwareUpdate from './SoftwareUpdate'
 
 const THEME_KEY = 'peckboard_theme'
@@ -126,6 +127,8 @@ export default function SettingsPage({ onBack }: Props) {
       </section>
 
       <ClaudeAccountsSection />
+
+      <GrokAccountsSection />
 
       <SoftwareUpdate />
 

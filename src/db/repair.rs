@@ -38,6 +38,7 @@ pub fn ensure_schema(conn: &mut SqliteConnection) -> anyhow::Result<()> {
     ensure_usage_events_table(conn)?;
     ensure_usage_events_account_id_column(conn)?;
     ensure_claude_accounts_table(conn)?;
+    ensure_grok_accounts_table(conn)?;
     ensure_user_tabs_check_constraint(conn)?;
     ensure_plugin_data_tables(conn)?;
     ensure_sessions_system_prompt_column(conn)?;
@@ -74,6 +75,31 @@ fn ensure_claude_accounts_table(conn: &mut SqliteConnection) -> anyhow::Result<(
     log_if_healing_table(conn, "claude_accounts")?;
     sql_query(
         "CREATE TABLE IF NOT EXISTS claude_accounts (
+            id                  TEXT    PRIMARY KEY NOT NULL,
+            name                TEXT    NOT NULL,
+            kind                TEXT    NOT NULL,
+            credential          TEXT    NOT NULL,
+            config_dir          TEXT,
+            budget_window_hours INTEGER,
+            budget_limit_usd    REAL,
+            budget_limit_tokens INTEGER,
+            warn_threshold      REAL    NOT NULL DEFAULT 0.75,
+            critical_threshold  REAL    NOT NULL DEFAULT 0.90,
+            created_at          BIGINT  NOT NULL,
+            updated_at          BIGINT  NOT NULL
+        )",
+    )
+    .execute(conn)?;
+    Ok(())
+}
+
+/// Heal DBs that predate `1782713952_grok_accounts`. `CREATE TABLE IF NOT
+/// EXISTS` is idempotent so this is safe on a fully-migrated DB and only does
+/// work on one that lacks the table. DDL mirrors the migration.
+fn ensure_grok_accounts_table(conn: &mut SqliteConnection) -> anyhow::Result<()> {
+    log_if_healing_table(conn, "grok_accounts")?;
+    sql_query(
+        "CREATE TABLE IF NOT EXISTS grok_accounts (
             id                  TEXT    PRIMARY KEY NOT NULL,
             name                TEXT    NOT NULL,
             kind                TEXT    NOT NULL,

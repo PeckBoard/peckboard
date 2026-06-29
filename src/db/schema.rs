@@ -295,6 +295,23 @@ diesel::table! {
     }
 }
 
+diesel::table! {
+    grok_accounts (id) {
+        id -> Text,
+        name -> Text,
+        kind -> Text,
+        credential -> Text,
+        config_dir -> Nullable<Text>,
+        budget_window_hours -> Nullable<Integer>,
+        budget_limit_usd -> Nullable<Double>,
+        budget_limit_tokens -> Nullable<BigInt>,
+        warn_threshold -> Double,
+        critical_threshold -> Double,
+        created_at -> BigInt,
+        updated_at -> BigInt,
+    }
+}
+
 diesel::joinable!(sessions -> folders (folder_id));
 diesel::joinable!(sessions -> projects (project_id));
 diesel::joinable!(sessions -> repeating_tasks (repeating_task_id));
@@ -333,4 +350,5 @@ diesel::allow_tables_to_appear_in_same_query!(
     plugin_session_meta,
     usage_events,
     claude_accounts,
+    grok_accounts,
 );
