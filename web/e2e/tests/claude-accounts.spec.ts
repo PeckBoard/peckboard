@@ -3,15 +3,16 @@ import { test, expect, type APIRequestContext, type Page } from '@playwright/tes
 /**
  * UI e2e for multi-account Claude support (Settings → Claude Accounts).
  *
- * Covers the whole user-visible flow:
- *  1. Add an account (the "login" flow: paste a subscription token).
- *  2. The account row renders with a masked credential hint, its kind tag,
- *     and — because it carries a budget with no spend yet — an "OK" warn
- *     badge.
- *  3. Account switching is wired: the account now appears in the model
- *     catalogue as `[Name] Model`, which is exactly what every model picker
- *     reads (verified against `/api/models`).
- *  4. Deleting the account removes the row and drops it from the catalogue.
+ * Two flows:
+ *  1. The deterministic CRUD/picker/delete path, driven through an API-key
+ *     account (its credential is a paste field, so no Anthropic round-trip is
+ *     needed). Covers the masked hint, kind tag, warn badge, model-catalogue
+ *     wiring, and delete.
+ *  2. The browser "log in with Claude" flow for subscription accounts:
+ *     generate a login URL, paste the code, and confirm the modal forwards the
+ *     PKCE login to the server. The real OAuth exchange hits Anthropic, so the
+ *     network calls are stubbed; the server-side exchange is unit-tested
+ *     separately.
  */
 
 const E2E_USER = 'e2e-user'
@@ -66,15 +67,15 @@ test('add, list, expose-in-picker, and delete a Claude account', async ({ reques
   await expect(section).toBeVisible()
   await expect(section).toContainText('No accounts added yet')
 
-  // ── Add an account (paste-a-token login flow) ──────────────────────
+  // ── Add an API-key account (deterministic paste path) ──────────────
   await section.getByTestId('acct-add').click()
   const modal = page.getByTestId('claude-account-modal')
   await expect(modal).toBeVisible()
 
   await modal.getByTestId('acct-name').fill('E2E Work')
-  // Subscription token is the default kind; give it a budget so the warn
-  // badge path renders (zero spend → "OK").
+  await modal.getByTestId('acct-kind-api_key').click()
   await modal.getByTestId('acct-credential').fill('sk-ant-e2e-TESTTOKEN9999')
+  // Give it a budget so the warn badge path renders (zero spend → "OK").
   await modal.getByTestId('acct-window').selectOption('24')
   await modal.getByTestId('acct-limit-tokens').fill('1000000')
   await modal.getByTestId('acct-save').click()
@@ -84,7 +85,7 @@ test('add, list, expose-in-picker, and delete a Claude account', async ({ reques
   const row = section.locator('[data-testid^="acct-row-"]')
   await expect(row).toHaveCount(1)
   await expect(row).toContainText('E2E Work')
-  await expect(row).toContainText('Subscription')
+  await expect(row).toContainText('API key')
   await expect(row).toContainText('••••9999') // masked credential
   const badge = section.locator('[data-testid^="acct-badge-"]')
   await expect(badge).toHaveAttribute('data-level', 'ok')
@@ -104,4 +105,70 @@ test('add, list, expose-in-picker, and delete a Claude account', async ({ reques
   await expect
     .poll(() => accountModelLabels(request, token))
     .not.toContain('[E2E Work] Claude Opus 4.8')
+})
+
+test('browser login flow: generate URL, paste code, forward the PKCE login', async ({
+  request,
+  page,
+}) => {
+  const token = await authenticate(request)
+  await loadApp(page, token)
+
+  // Stub the login-start so no real Claude round-trip is needed.
+  await page.route('**/api/claude-accounts/login/start', async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify({
+        url: 'https://claude.com/cai/oauth/authorize?code=true&state=STATE123',
+        verifier: 'VERIFIER123',
+        state: 'STATE123',
+      }),
+    })
+  })
+
+  // Stub the create POST (its server side would otherwise hit Anthropic's
+  // token endpoint) and capture the body to confirm the modal forwards the
+  // pasted login. GET (list) falls through to the real server.
+  let createdBody: { kind?: string; login?: unknown } | null = null
+  await page.route('**/api/claude-accounts', async (route) => {
+    if (route.request().method() === 'POST') {
+      createdBody = route.request().postDataJSON()
+      await route.fulfill({ status: 201, contentType: 'application/json', body: '{}' })
+    } else {
+      await route.continue()
+    }
+  })
+
+  const settings = await openSettings(page)
+  const section = settings.getByTestId('claude-accounts-section')
+  await section.getByTestId('acct-add').click()
+  const modal = page.getByTestId('claude-account-modal')
+  await expect(modal).toBeVisible()
+
+  await modal.getByTestId('acct-name').fill('E2E Sub')
+  // `oauth_token` (Subscription) is the default kind — generate the login URL.
+  await modal.getByTestId('acct-login-start').click()
+  await expect(modal.getByTestId('acct-login-url')).toBeVisible()
+  await expect(modal.getByTestId('acct-login-url')).toHaveAttribute(
+    'href',
+    /claude\.com\/cai\/oauth\/authorize/,
+  )
+
+  // Paste the `code#state` Claude shows and save.
+  await modal.getByTestId('acct-login-code').fill('AUTHCODE#STATE123')
+  await modal.getByTestId('acct-save').click()
+  await expect(modal).toBeHidden()
+
+  expect(createdBody).not.toBeNull()
+  expect(createdBody!.kind).toBe('oauth_token')
+  expect(createdBody!.login).toEqual({
+    code: 'AUTHCODE#STATE123',
+    verifier: 'VERIFIER123',
+    state: 'STATE123',
+  })
+
+  // Make sure no real account leaked in from the stubbed create.
+  await page.unroute('**/api/claude-accounts')
+  expect(await accountModelLabels(request, token)).not.toContain('[E2E Sub] Claude Opus 4.8')
 })

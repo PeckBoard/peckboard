@@ -1,3 +1,4 @@
+pub mod oauth;
 pub mod process;
 pub mod provider;
 

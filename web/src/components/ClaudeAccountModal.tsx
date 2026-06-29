@@ -21,8 +21,8 @@ const WINDOW_OPTIONS: { label: string; hours: number | null }[] = [
 const KIND_OPTIONS: { value: ClaudeAccountKind; label: string; hint: string }[] = [
   {
     value: 'oauth_token',
-    label: 'Subscription token',
-    hint: 'Run `claude setup-token` in a terminal and paste the token (Pro/Max).',
+    label: 'Subscription',
+    hint: 'Sign in with your Claude account in the browser (Pro/Max).',
   },
   {
     value: 'api_key',
@@ -40,11 +40,21 @@ const KIND_OPTIONS: { value: ClaudeAccountKind; label: string; hint: string }[] 
 export default function ClaudeAccountModal({ account, onClose }: Props) {
   const createAccount = useClaudeAccountsStore((s) => s.createAccount)
   const updateAccount = useClaudeAccountsStore((s) => s.updateAccount)
+  const startLogin = useClaudeAccountsStore((s) => s.startLogin)
   const editing = account !== null
 
   const [name, setName] = useState(account?.name ?? '')
   const [kind, setKind] = useState<ClaudeAccountKind>(account?.kind ?? 'oauth_token')
   const [credential, setCredential] = useState('')
+
+  // Browser-login (`oauth_token`) state. `loginUrl` is empty until the user
+  // generates one; `verifier`/`state` are the PKCE material echoed back on
+  // save; `loginCode` is the `code#state` string pasted from the browser.
+  const [loginUrl, setLoginUrl] = useState('')
+  const [loginVerifier, setLoginVerifier] = useState('')
+  const [loginState, setLoginState] = useState('')
+  const [loginCode, setLoginCode] = useState('')
+  const [startingLogin, setStartingLogin] = useState(false)
   const [windowHours, setWindowHours] = useState<number | null>(
     account?.budget_window_hours ?? null,
   )
@@ -62,6 +72,37 @@ export default function ClaudeAccountModal({ account, onClose }: Props) {
   const [loading, setLoading] = useState(false)
 
   const hasBudget = windowHours !== null
+  // A finished browser login is ready to submit once a code has been pasted
+  // against a generated PKCE pair.
+  const hasLogin = Boolean(loginCode.trim() && loginVerifier && loginState)
+
+  /** Switch credential type, discarding any in-progress login/paste so the
+   *  two paths never bleed into each other. */
+  const handleKindChange = (next: ClaudeAccountKind) => {
+    setKind(next)
+    setError('')
+    setCredential('')
+    setLoginUrl('')
+    setLoginVerifier('')
+    setLoginState('')
+    setLoginCode('')
+  }
+
+  /** Generate a Claude authorize URL and reveal the code field. */
+  const handleStartLogin = async () => {
+    setError('')
+    setStartingLogin(true)
+    try {
+      const { url, verifier, state } = await startLogin()
+      setLoginUrl(url)
+      setLoginVerifier(verifier)
+      setLoginState(state)
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Failed to start Claude login')
+    } finally {
+      setStartingLogin(false)
+    }
+  }
 
   const handleSubmit = async (e: FormEvent) => {
     e.preventDefault()
@@ -70,8 +111,15 @@ export default function ClaudeAccountModal({ account, onClose }: Props) {
       setError('Name is required')
       return
     }
-    if (!editing && !credential.trim()) {
-      setError('Paste a token or API key')
+    if (kind === 'oauth_token') {
+      // A new subscription account must complete the browser login; an edit
+      // may keep its current token (no new login).
+      if (!editing && !hasLogin) {
+        setError('Sign in with Claude to continue')
+        return
+      }
+    } else if (!editing && !credential.trim()) {
+      setError('Paste an API key')
       return
     }
     if (warnPct > criticalPct) {
@@ -89,7 +137,11 @@ export default function ClaudeAccountModal({ account, onClose }: Props) {
       const input = {
         name: name.trim(),
         kind,
-        credential: credential.trim(),
+        credential: kind === 'api_key' ? credential.trim() : '',
+        login:
+          kind === 'oauth_token' && hasLogin
+            ? { code: loginCode.trim(), verifier: loginVerifier, state: loginState }
+            : undefined,
         budget_window_hours: hasBudget ? windowHours : null,
         budget_limit_usd: hasBudget ? parseNum(limitUsd) : null,
         budget_limit_tokens: hasBudget ? parseNum(limitTokens) : null,
@@ -138,7 +190,7 @@ export default function ClaudeAccountModal({ account, onClose }: Props) {
                 key={k.value}
                 type="button"
                 className={`theme-btn ${kind === k.value ? 'active' : ''}`}
-                onClick={() => setKind(k.value)}
+                onClick={() => handleKindChange(k.value)}
                 data-testid={`acct-kind-${k.value}`}
               >
                 {k.label}
@@ -148,28 +200,74 @@ export default function ClaudeAccountModal({ account, onClose }: Props) {
           <span className="form-hint">{KIND_OPTIONS.find((k) => k.value === kind)?.hint}</span>
         </div>
 
-        <div className="form-field">
-          <label className="form-label" htmlFor="acct-credential">
-            {kind === 'api_key' ? 'API key' : 'Token'}
-            {editing && ' (leave blank to keep current)'}
-          </label>
-          <input
-            id="acct-credential"
-            className="form-input"
-            type="password"
-            value={credential}
-            onChange={(e) => setCredential(e.target.value)}
-            placeholder={
-              editing
-                ? `Keeping ${account.credential_hint}`
-                : kind === 'api_key'
-                  ? 'sk-ant-…'
-                  : 'Paste setup-token'
-            }
-            autoComplete="off"
-            data-testid="acct-credential"
-          />
-        </div>
+        {kind === 'api_key' ? (
+          <div className="form-field">
+            <label className="form-label" htmlFor="acct-credential">
+              API key
+              {editing && ' (leave blank to keep current)'}
+            </label>
+            <input
+              id="acct-credential"
+              className="form-input"
+              type="password"
+              value={credential}
+              onChange={(e) => setCredential(e.target.value)}
+              placeholder={editing ? `Keeping ${account.credential_hint}` : 'sk-ant-…'}
+              autoComplete="off"
+              data-testid="acct-credential"
+            />
+          </div>
+        ) : (
+          <div className="form-field">
+            <span className="form-label">
+              Claude login
+              {editing && ' (optional — re-authenticate)'}
+            </span>
+            {!loginUrl ? (
+              <button
+                type="button"
+                className="btn-secondary"
+                onClick={handleStartLogin}
+                disabled={startingLogin}
+                data-testid="acct-login-start"
+              >
+                {startingLogin
+                  ? 'Generating…'
+                  : editing
+                    ? 'Re-authenticate with Claude'
+                    : 'Generate login URL'}
+              </button>
+            ) : (
+              <>
+                <a
+                  className="form-link"
+                  href={loginUrl}
+                  target="_blank"
+                  rel="noreferrer noopener"
+                  data-testid="acct-login-url"
+                >
+                  Open Claude sign-in ↗
+                </a>
+                <span className="form-hint">
+                  Sign in, then paste the code Claude shows you back here.
+                </span>
+                <input
+                  id="acct-login-code"
+                  className="form-input"
+                  type="text"
+                  value={loginCode}
+                  onChange={(e) => setLoginCode(e.target.value)}
+                  placeholder="Paste code here"
+                  autoComplete="off"
+                  data-testid="acct-login-code"
+                />
+              </>
+            )}
+            {editing && !loginUrl && (
+              <span className="form-hint">Keeping {account.credential_hint}</span>
+            )}
+          </div>
+        )}
 
         <div className="form-field">
           <label className="form-label" htmlFor="acct-window">

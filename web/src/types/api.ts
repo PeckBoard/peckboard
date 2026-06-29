@@ -152,12 +152,31 @@ export interface ClaudeAccount {
   usage: ClaudeAccountUsage
 }
 
+/** A finished browser login (`claude setup-token` equivalent): the pasted
+ *  `code#state` plus the PKCE material from `login/start`. The server
+ *  exchanges it for the long-lived token, so the token never reaches here. */
+export interface ClaudeLogin {
+  code: string
+  verifier: string
+  state: string
+}
+
+/** The authorize URL + PKCE material returned by `POST
+ *  /api/claude-accounts/login/start`. */
+export interface ClaudeLoginStart {
+  url: string
+  verifier: string
+  state: string
+}
+
 /** Body for creating/updating a Claude account. On update, an empty/omitted
- *  `credential` leaves the stored secret untouched. */
+ *  `credential` leaves the stored secret untouched. When `login` is set, the
+ *  server exchanges it for the credential and the account is `oauth_token`. */
 export interface ClaudeAccountInput {
   name: string
   kind: ClaudeAccountKind
   credential: string
+  login?: ClaudeLogin
   budget_window_hours: number | null
   budget_limit_usd: number | null
   budget_limit_tokens: number | null

@@ -1,5 +1,5 @@
 import { create } from 'zustand'
-import type { ClaudeAccount, ClaudeAccountInput } from '../types/api'
+import type { ClaudeAccount, ClaudeAccountInput, ClaudeLoginStart } from '../types/api'
 import { authedFetch } from './auth'
 import { useResourcesStore } from './resources'
 
@@ -9,6 +9,7 @@ interface ClaudeAccountsState {
   loading: boolean
   error: string | null
   fetchAccounts: () => Promise<void>
+  startLogin: () => Promise<ClaudeLoginStart>
   createAccount: (input: ClaudeAccountInput) => Promise<void>
   updateAccount: (id: string, input: ClaudeAccountInput) => Promise<void>
   deleteAccount: (id: string) => Promise<void>
@@ -50,6 +51,12 @@ export const useClaudeAccountsStore = create<ClaudeAccountsState>((set, get) => 
     } catch {
       set({ error: 'Failed to load accounts', loading: false })
     }
+  },
+
+  startLogin: async () => {
+    const res = await authedFetch('/api/claude-accounts/login/start', { method: 'POST' })
+    if (!res.ok) throw new Error(await errorFrom(res, 'Failed to start Claude login'))
+    return (await res.json()) as ClaudeLoginStart
   },
 
   createAccount: async (input) => {

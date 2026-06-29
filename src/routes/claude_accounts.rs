@@ -26,6 +26,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::auth::middleware::require_auth;
 use crate::db::models::{ClaudeAccount, ClaudeAccountChanges, NewClaudeAccount};
+use crate::provider::claude::oauth;
 use crate::routes::usage::cost::usage_cost;
 use crate::state::AppState;
 
@@ -36,10 +37,22 @@ pub fn router(state: Arc<AppState>) -> Router<Arc<AppState>> {
             get(list_accounts).post(create_account),
         )
         .route(
+            "/api/claude-accounts/login/start",
+            axum::routing::post(start_login),
+        )
+        .route(
             "/api/claude-accounts/{id}",
             axum::routing::put(update_account).delete(delete_account),
         )
         .route_layer(middleware::from_fn_with_state(state, require_auth))
+}
+
+/// A short-lived client for the Claude OAuth token endpoint.
+fn http_client() -> reqwest::Client {
+    reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(30))
+        .build()
+        .unwrap_or_default()
 }
 
 type ApiError = (StatusCode, Json<serde_json::Value>);
@@ -113,11 +126,29 @@ struct AccountView {
     usage: AccountUsage,
 }
 
+/// A pasted Claude login from the browser flow: the `code#state` string the
+/// user copied plus the PKCE `verifier`/`state` issued by `login/start`. When
+/// present on a create/update, the server exchanges it for the long-lived
+/// access token and uses that as the credential — the token never touches the
+/// browser.
+#[derive(Debug, Deserialize)]
+struct OAuthLogin {
+    code: String,
+    verifier: String,
+    state: String,
+}
+
 #[derive(Debug, Deserialize)]
 struct CreateAccountBody {
     name: String,
+    #[serde(default)]
     kind: String,
-    credential: String,
+    #[serde(default)]
+    credential: Option<String>,
+    /// Browser login result; when set, takes precedence over `credential` and
+    /// forces an `oauth_token` account.
+    #[serde(default)]
+    login: Option<OAuthLogin>,
     #[serde(default)]
     budget_window_hours: Option<i32>,
     #[serde(default)]
@@ -137,6 +168,10 @@ struct UpdateAccountBody {
     /// rebudget never has to round-trip the secret.
     #[serde(default)]
     credential: Option<String>,
+    /// A fresh browser login to re-authenticate the account. When set, the
+    /// exchanged token replaces the stored credential.
+    #[serde(default)]
+    login: Option<OAuthLogin>,
     #[serde(default)]
     budget_window_hours: Option<i32>,
     #[serde(default)]
@@ -270,6 +305,13 @@ async fn to_view(state: &AppState, acct: ClaudeAccount) -> anyhow::Result<Accoun
 
 // ── Handlers ─────────────────────────────────────────────────────────
 
+/// Begin a browser login: mint a PKCE challenge and return the authorize URL
+/// plus the `verifier`/`state` the client echoes back on create/update. This
+/// is the in-app stand-in for `claude setup-token`.
+async fn start_login(State(_state): State<Arc<AppState>>) -> impl IntoResponse {
+    Json(oauth::start())
+}
+
 async fn list_accounts(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     let accounts = match state.db.list_claude_accounts().await {
         Ok(a) => a,
@@ -293,12 +335,30 @@ async fn create_account(
     if name.is_empty() {
         return Err(bad_request("name is required"));
     }
-    if !valid_kind(&body.kind) {
-        return Err(bad_request("kind must be 'api_key' or 'oauth_token'"));
-    }
-    if body.credential.trim().is_empty() {
-        return Err(bad_request("credential is required"));
-    }
+    // The credential comes from one of two paths: a finished browser login
+    // (exchanged here, forcing an `oauth_token` account) or a pasted secret.
+    let (kind, credential) = match body.login {
+        Some(login) => {
+            let token =
+                match oauth::exchange(&http_client(), &login.code, &login.verifier, &login.state)
+                    .await
+                {
+                    Ok(t) => t,
+                    Err(e) => return Err(bad_request(&format!("Claude login failed: {e}"))),
+                };
+            ("oauth_token".to_string(), token)
+        }
+        None => {
+            if !valid_kind(&body.kind) {
+                return Err(bad_request("kind must be 'api_key' or 'oauth_token'"));
+            }
+            let credential = body.credential.as_deref().unwrap_or("").trim().to_string();
+            if credential.is_empty() {
+                return Err(bad_request("credential is required"));
+            }
+            (body.kind, credential)
+        }
+    };
     let (warn, critical) = match normalize_thresholds(body.warn_threshold, body.critical_threshold)
     {
         Ok(t) => t,
@@ -320,8 +380,8 @@ async fn create_account(
     let new = NewClaudeAccount {
         id,
         name,
-        kind: body.kind,
-        credential: body.credential,
+        kind,
+        credential,
         config_dir: Some(config_dir),
         budget_window_hours: body.budget_window_hours,
         budget_limit_usd: body.budget_limit_usd,
@@ -358,13 +418,23 @@ async fn update_account(
 
     // PUT semantics: the form always sends the full editable state, so
     // budgets are set verbatim (a `null` clears them). The credential is the
-    // one exception — only replaced when a non-empty value is supplied.
-    let credential = body
-        .credential
-        .as_deref()
-        .map(str::trim)
-        .filter(|c| !c.is_empty())
-        .map(str::to_string);
+    // one exception — only replaced when a fresh browser login is exchanged or
+    // a non-empty secret is supplied; otherwise the stored secret is kept.
+    let credential = match body.login {
+        Some(login) => {
+            match oauth::exchange(&http_client(), &login.code, &login.verifier, &login.state).await
+            {
+                Ok(t) => Some(t),
+                Err(e) => return Err(bad_request(&format!("Claude login failed: {e}"))),
+            }
+        }
+        None => body
+            .credential
+            .as_deref()
+            .map(str::trim)
+            .filter(|c| !c.is_empty())
+            .map(str::to_string),
+    };
 
     let changes = ClaudeAccountChanges {
         name: Some(name),
