@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
-use extism::{Manifest as ExtismManifest, Plugin, Wasm};
+use extism::{Manifest as ExtismManifest, Plugin, PluginBuilder, Wasm};
 use tokio::sync::Mutex;
 use tracing::{error, info, warn};
 
@@ -18,6 +18,24 @@ use crate::db::Db;
 use crate::db::crud::{APPROVAL_APPROVED, APPROVAL_DENIED};
 
 const MEMORY_LIMIT_PAGES: u32 = 2048; // 128 MB (64 KB per page)
+
+/// Per-linear-memory virtual address-space reservation handed to wasmtime.
+///
+/// wasmtime reserves **4 GiB of address space per linear memory** by default
+/// (plus a 32 MiB guard) so it can elide bounds checks. `with_memory_max`
+/// above only installs a runtime `ResourceLimiter` that *caps growth* — it
+/// does nothing to this reservation. Multiplied across every plugin instance
+/// and each one's extism runtime kernel memory, the default inflates the
+/// process's virtual size (VSZ) into the tens of GiB. It's unbacked
+/// reservation, not resident memory (RSS), but it's alarming in `top` and a
+/// real hazard under `RLIMIT_AS` / strict overcommit.
+///
+/// Our plugins never grow past `MEMORY_LIMIT_PAGES`, so reserve exactly that
+/// and let wasmtime relocate the memory (the default `memory_may_move`) on the
+/// rare occasion a plugin grows into it. Passed via
+/// `PluginBuilder::with_wasmtime_config`, which leaves these memory tunables
+/// untouched (it only overrides epoch/fuel/exceptions/cache).
+const MEMORY_RESERVATION_BYTES: u64 = MEMORY_LIMIT_PAGES as u64 * 64 * 1024; // 128 MB
 const CALL_TIMEOUT: Duration = Duration::from_secs(2);
 
 /// The complete set of hook names Peckboard actually dispatches. A
@@ -473,7 +491,18 @@ impl PluginManager {
             ),
             None => Vec::new(),
         };
-        let mut plugin = Plugin::new(manifest, functions, true)?;
+        // Shrink wasmtime's per-memory address-space reservation from the 4 GiB
+        // default down to our growth cap (see `MEMORY_RESERVATION_BYTES`). Built
+        // via `PluginBuilder` so we can hand wasmtime a custom `Config`;
+        // `Plugin::new(manifest, functions, true)` is just this chain without the
+        // config override.
+        let mut wasmtime_config = wasmtime::Config::new();
+        wasmtime_config.memory_reservation(MEMORY_RESERVATION_BYTES);
+        let mut plugin = PluginBuilder::new(manifest)
+            .with_functions(functions)
+            .with_wasi(true)
+            .with_wasmtime_config(wasmtime_config)
+            .build()?;
 
         // Call manifest export to get hook declarations.
         let manifest_json = plugin.call::<&str, String>("manifest", "")?;

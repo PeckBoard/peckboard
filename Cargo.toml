@@ -42,6 +42,11 @@ mdns-sd = "0.12"
 
 # Plugin system (WASM)
 extism = "1"
+# Direct dep solely to construct `wasmtime::Config` for `PluginBuilder::
+# with_wasmtime_config` (shrinks the per-memory address-space reservation).
+# Must unify with extism's wasmtime (43.x); features are unioned with
+# extism's, so default-features can stay off here.
+wasmtime = { version = "43", default-features = false }
 
 # Embedded frontend assets
 rust-embed = { version = "8", features = ["interpolate-folder-path"] }
