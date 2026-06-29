@@ -573,6 +573,10 @@ pub struct UsageEvent {
     pub total_tokens: i64,
     pub context_tokens: i64,
     pub model: Option<String>,
+    /// The Claude account this turn billed against, or `None` for the
+    /// implicit Default account (host credentials). Derived at spawn from
+    /// the `@<account_id>` suffix on the session's model id.
+    pub account_id: Option<String>,
 }
 
 #[derive(Insertable, Debug, Default)]
@@ -592,4 +596,64 @@ pub struct NewUsageEvent {
     pub total_tokens: i64,
     pub context_tokens: i64,
     pub model: Option<String>,
+    pub account_id: Option<String>,
+}
+
+// ── Claude accounts ──────────────────────────────────────────────────
+
+/// One Claude/Anthropic credential the spawned `claude` CLI can run as.
+/// `kind` is `"api_key"` or `"oauth_token"`; see the migration for how
+/// each maps onto a spawn-time env var. `credential` is stored as-is —
+/// the data dir is host-local and the app is password-gated, so this is
+/// the same trust boundary as the JWT secret already kept beside it.
+#[derive(Queryable, Selectable, Serialize, Debug, Clone)]
+#[diesel(table_name = claude_accounts)]
+pub struct ClaudeAccount {
+    pub id: String,
+    pub name: String,
+    pub kind: String,
+    pub credential: String,
+    pub config_dir: Option<String>,
+    pub budget_window_hours: Option<i32>,
+    pub budget_limit_usd: Option<f64>,
+    pub budget_limit_tokens: Option<i64>,
+    pub warn_threshold: f64,
+    pub critical_threshold: f64,
+    pub created_at: i64,
+    pub updated_at: i64,
+}
+
+#[derive(Insertable, Debug)]
+#[diesel(table_name = claude_accounts)]
+pub struct NewClaudeAccount {
+    pub id: String,
+    pub name: String,
+    pub kind: String,
+    pub credential: String,
+    pub config_dir: Option<String>,
+    pub budget_window_hours: Option<i32>,
+    pub budget_limit_usd: Option<f64>,
+    pub budget_limit_tokens: Option<i64>,
+    pub warn_threshold: f64,
+    pub critical_threshold: f64,
+    pub created_at: i64,
+    pub updated_at: i64,
+}
+
+/// Mutable fields of an account. `None` leaves a field unchanged.
+/// `credential` is `None` on a metadata-only edit so the UI never has to
+/// round-trip the secret back just to rename or rebudget an account.
+/// The doubly-wrapped budget fields distinguish "leave as-is" (outer
+/// `None`) from "clear the budget" (`Some(None)`).
+#[derive(AsChangeset, Debug, Default)]
+#[diesel(table_name = claude_accounts)]
+pub struct ClaudeAccountChanges {
+    pub name: Option<String>,
+    pub credential: Option<String>,
+    pub budget_window_hours: Option<Option<i32>>,
+    pub budget_limit_usd: Option<Option<f64>>,
+    pub budget_limit_tokens: Option<Option<i64>>,
+    pub warn_threshold: Option<f64>,
+    pub critical_threshold: Option<f64>,
+    pub updated_at: Option<i64>,
 }

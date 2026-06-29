@@ -46,13 +46,26 @@ struct ClaudeRun {
 /// prefix to `"claude"`.
 pub struct ClaudeProvider {
     runs: Arc<Mutex<HashMap<String, ClaudeRun>>>,
+    /// DB handle for multi-account support: `dynamic_models` enumerates the
+    /// stored accounts and `send_message` resolves the per-account
+    /// credential to inject. `None` in tests / no-DB registrations, which
+    /// keeps the single-(Default-)account behaviour.
+    db: Option<crate::db::Db>,
 }
 
 impl ClaudeProvider {
     pub fn new() -> Self {
         ClaudeProvider {
             runs: Arc::new(Mutex::new(HashMap::new())),
+            db: None,
         }
+    }
+
+    /// Attach a DB handle so the provider can resolve Claude accounts.
+    /// The `claude-code` builtin wires this from its init context.
+    pub fn with_db(mut self, db: crate::db::Db) -> Self {
+        self.db = Some(db);
+        self
     }
 
     /// Start the idle-process reaper as a background task.
@@ -98,6 +111,74 @@ impl ClaudeProvider {
             cancel.notify_one();
         }
     }
+
+    /// Resolve `account_id` to its credential and add the env the spawned
+    /// `claude` CLI needs to authenticate as that account: an `api_key`
+    /// account injects `ANTHROPIC_API_KEY`, an `oauth_token` account injects
+    /// `CLAUDE_CODE_OAUTH_TOKEN`. Both also get an isolated
+    /// `CLAUDE_CONFIG_DIR` so accounts don't share local CLI state. An
+    /// account id that no longer exists (deleted out from under a live
+    /// session) is a hard error rather than a silent fall back to the
+    /// Default/host credentials — a turn must never bill the wrong account.
+    async fn inject_account_env(
+        &self,
+        account_id: &str,
+        env: &mut HashMap<String, String>,
+    ) -> anyhow::Result<()> {
+        let Some(db) = &self.db else {
+            return Ok(());
+        };
+        let account = db
+            .get_claude_account(account_id)
+            .await?
+            .ok_or_else(|| anyhow::anyhow!("claude account not found: {account_id}"))?;
+        match account.kind.as_str() {
+            "api_key" => {
+                env.insert("ANTHROPIC_API_KEY".into(), account.credential.clone());
+            }
+            "oauth_token" => {
+                env.insert("CLAUDE_CODE_OAUTH_TOKEN".into(), account.credential.clone());
+            }
+            other => return Err(anyhow::anyhow!("unknown claude account kind: {other}")),
+        }
+        if let Some(dir) = &account.config_dir {
+            std::fs::create_dir_all(dir).ok();
+            env.insert("CLAUDE_CONFIG_DIR".into(), dir.clone());
+        }
+        Ok(())
+    }
+
+    /// The model catalog the picker shows: the Default-account models (bare
+    /// ids, today's behaviour) plus one labelled variant per stored account
+    /// (`<model>@<account_id>`, shown as `[Account] Model`). Returns just the
+    /// base list when there are no accounts or no DB handle.
+    async fn account_scoped_models(&self) -> Vec<crate::provider::stream::ModelInfo> {
+        let base = super::discover_models();
+        let Some(db) = &self.db else {
+            return base;
+        };
+        let accounts = match db.list_claude_accounts().await {
+            Ok(a) => a,
+            Err(e) => {
+                tracing::warn!("claude: failed to list accounts for model catalog: {e}");
+                return base;
+            }
+        };
+        if accounts.is_empty() {
+            return base;
+        }
+        let mut out = base.clone();
+        for acct in &accounts {
+            for m in &base {
+                out.push(crate::provider::stream::ModelInfo {
+                    id: format!("{}@{}", m.id, acct.id),
+                    display_name: format!("[{}] {}", acct.name, m.display_name),
+                    capabilities: m.capabilities.clone(),
+                });
+            }
+        }
+        out
+    }
 }
 
 impl Default for ClaudeProvider {
@@ -110,6 +191,10 @@ impl Default for ClaudeProvider {
 impl AgentProvider for ClaudeProvider {
     fn id(&self) -> &str {
         "claude"
+    }
+
+    async fn dynamic_models(&self) -> Option<Vec<crate::provider::stream::ModelInfo>> {
+        Some(self.account_scoped_models().await)
     }
 
     async fn send_message(&self, ctx: SendMessageContext) -> anyhow::Result<()> {
@@ -127,13 +212,26 @@ impl AgentProvider for ClaudeProvider {
         } = ctx;
 
         // Strip the `claude:` prefix if present so the CLI sees the bare
-        // model id (e.g. `claude-opus-4-7`).
+        // model id (e.g. `claude-opus-4-7`), then peel off any
+        // `@<account_id>` suffix and resolve it to the credential env the
+        // CLI authenticates with. A model with no suffix is the implicit
+        // Default account: nothing injected, host credentials apply.
+        let stripped = config
+            .model
+            .strip_prefix("claude:")
+            .map(|m| m.to_string())
+            .unwrap_or_else(|| config.model.clone());
+        let (base_model, account_id) = crate::provider::registry::split_model_account(&stripped);
+        let base_model = base_model.to_string();
+
+        let mut env = config.env.clone();
+        if let Some(account_id) = account_id {
+            self.inject_account_env(account_id, &mut env).await?;
+        }
+
         let cli_config = crate::provider::stream::SpawnConfig {
-            model: config
-                .model
-                .strip_prefix("claude:")
-                .map(|m| m.to_string())
-                .unwrap_or(config.model.clone()),
+            model: base_model,
+            env,
             ..config
         };
 

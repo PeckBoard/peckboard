@@ -1,5 +1,6 @@
 pub mod attachments;
 pub mod auth;
+pub mod claude_accounts;
 pub mod folders;
 pub mod mcp;
 pub mod me;
@@ -28,6 +29,7 @@ pub fn api_router(state: Arc<AppState>) -> Router<Arc<AppState>> {
         // MCP route -- no auth middleware, uses its own token auth + loopback gating
         .merge(mcp::router(state.clone()))
         .merge(auth::router(state.clone()))
+        .merge(claude_accounts::router(state.clone()))
         .merge(folders::router(state.clone()))
         .merge(sessions::router(state.clone()))
         .merge(projects::router(state.clone()))

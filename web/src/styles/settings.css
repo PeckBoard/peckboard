@@ -645,3 +645,89 @@ a.wasm-plugin-repo:hover {
   opacity: 0.6;
   cursor: default;
 }
+
+/* ── Claude accounts ─────────────────────────────────────────────── */
+.settings-section-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+.form-row {
+  display: flex;
+  gap: 12px;
+}
+.form-row > .form-field {
+  flex: 1;
+  min-width: 0;
+}
+.acct-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-top: 10px;
+}
+.acct-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--surface);
+}
+.acct-row-main {
+  flex: 1;
+  min-width: 0;
+}
+.acct-row-title {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.acct-name {
+  font-weight: 600;
+}
+.acct-kind-tag {
+  font-size: var(--text-xs, 11px);
+  color: var(--text2);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  padding: 1px 8px;
+}
+.acct-row-sub {
+  display: flex;
+  gap: 12px;
+  margin-top: 4px;
+  font-size: var(--text-sm);
+  color: var(--text2);
+  flex-wrap: wrap;
+}
+.acct-hint {
+  font-family: var(--font-mono, monospace);
+}
+.acct-row-actions {
+  display: flex;
+  gap: 6px;
+}
+.acct-badge {
+  font-size: var(--text-xs, 11px);
+  font-weight: 600;
+  border-radius: 999px;
+  padding: 1px 8px;
+  white-space: nowrap;
+}
+.acct-badge-ok {
+  background: color-mix(in srgb, var(--success, #2a8) 18%, transparent);
+  color: var(--success, #2a8);
+}
+.acct-badge-warning {
+  background: color-mix(in srgb, var(--warning, #d90) 22%, transparent);
+  color: var(--warning, #b80);
+}
+.acct-badge-critical,
+.acct-badge-exceeded {
+  background: color-mix(in srgb, var(--danger, #c00) 20%, transparent);
+  color: var(--danger, #c00);
+}

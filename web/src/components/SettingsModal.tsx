@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react'
 import { useAuthStore, authedFetch } from '../store/auth'
 import { applyThemeColor, type Theme } from '../util/themeColor'
+import ClaudeAccountsSection from './ClaudeAccountsSection'
 import Modal from './Modal'
 import SoftwareUpdate from './SoftwareUpdate'
 
@@ -119,6 +120,8 @@ export default function SettingsModal({ onClose }: Props) {
           <p className="settings-loading">Loading server config...</p>
         )}
       </section>
+
+      <ClaudeAccountsSection />
 
       <SoftwareUpdate />
 

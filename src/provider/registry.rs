@@ -119,6 +119,23 @@ impl ProviderRegistry {
     }
 }
 
+/// Split a (possibly account-scoped) model id into its base model and the
+/// Claude account id it targets.
+///
+/// Multi-account support folds the account into the model id with an `@`
+/// suffix: `claude:claude-opus-4-8@acc_1a2b`. A model id with no `@` — every
+/// session/card stored before multi-account, plus the implicit "Default"
+/// account — yields `(model, None)`. `@` never appears in a Claude model id
+/// or a Bedrock ARN, and account ids are generated without it, so the split
+/// is unambiguous. Works on a full `claude:<model>@<acct>` or a bare
+/// `<model>@<acct>` — the provider prefix carries no `@` either.
+pub fn split_model_account(model_id: &str) -> (&str, Option<&str>) {
+    match model_id.rsplit_once('@') {
+        Some((model, acct)) if !acct.is_empty() => (model, Some(acct)),
+        _ => (model_id, None),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -198,5 +215,34 @@ mod tests {
         let (p, m) = ProviderRegistry::parse_model_id("openai:gpt-4o", "claude");
         assert_eq!(p, "openai");
         assert_eq!(m, "gpt-4o");
+    }
+
+    #[test]
+    fn test_split_model_account() {
+        // Account-scoped: base model + account id.
+        assert_eq!(
+            split_model_account("claude-opus-4-8@acc_1a2b"),
+            ("claude-opus-4-8", Some("acc_1a2b"))
+        );
+        // Works on the full provider-prefixed form too.
+        assert_eq!(
+            split_model_account("claude:claude-opus-4-8@acc_1a2b"),
+            ("claude:claude-opus-4-8", Some("acc_1a2b"))
+        );
+        // No suffix → Default account (backward compatible).
+        assert_eq!(
+            split_model_account("claude:claude-opus-4-8"),
+            ("claude:claude-opus-4-8", None)
+        );
+        // A trailing `@` with no id is treated as no account, not an empty one.
+        assert_eq!(
+            split_model_account("claude-opus-4-8@"),
+            ("claude-opus-4-8@", None)
+        );
+        // A Bedrock ARN (colons, slashes, no `@`) is left whole.
+        assert_eq!(
+            split_model_account("arn:aws:bedrock:us-east-1::model/x"),
+            ("arn:aws:bedrock:us-east-1::model/x", None)
+        );
     }
 }

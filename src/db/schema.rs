@@ -274,6 +274,24 @@ diesel::table! {
         total_tokens -> BigInt,
         context_tokens -> BigInt,
         model -> Nullable<Text>,
+        account_id -> Nullable<Text>,
+    }
+}
+
+diesel::table! {
+    claude_accounts (id) {
+        id -> Text,
+        name -> Text,
+        kind -> Text,
+        credential -> Text,
+        config_dir -> Nullable<Text>,
+        budget_window_hours -> Nullable<Integer>,
+        budget_limit_usd -> Nullable<Double>,
+        budget_limit_tokens -> Nullable<BigInt>,
+        warn_threshold -> Double,
+        critical_threshold -> Double,
+        created_at -> BigInt,
+        updated_at -> BigInt,
     }
 }
 
@@ -314,4 +332,5 @@ diesel::allow_tables_to_appear_in_same_query!(
     plugin_data,
     plugin_session_meta,
     usage_events,
+    claude_accounts,
 );

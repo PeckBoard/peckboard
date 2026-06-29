@@ -47,7 +47,7 @@ impl BuiltinPlugin for ClaudeCodePlugin {
         ctx.require(Permission::RegisterProvider)?;
         ctx.require(Permission::SpawnProcess)?;
 
-        let provider = Arc::new(ClaudeProvider::new());
+        let provider = Arc::new(ClaudeProvider::new().with_db(ctx.db.clone()));
         // 30 minute idle window matches the previous standalone
         // `register_claude_provider` behavior — gives the user a
         // meaningful "back from a meeting" window without keeping a CLI

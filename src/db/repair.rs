@@ -36,9 +36,59 @@ pub fn ensure_schema(conn: &mut SqliteConnection) -> anyhow::Result<()> {
     ensure_plugin_repositories_table(conn)?;
     ensure_pm_decisions_table(conn)?;
     ensure_usage_events_table(conn)?;
+    ensure_usage_events_account_id_column(conn)?;
+    ensure_claude_accounts_table(conn)?;
     ensure_user_tabs_check_constraint(conn)?;
     ensure_plugin_data_tables(conn)?;
     ensure_sessions_system_prompt_column(conn)?;
+    Ok(())
+}
+
+/// Heal DBs that predate `1782694873_claude_accounts`. The migration adds
+/// a non-idempotent `ALTER TABLE usage_events ADD COLUMN account_id`,
+/// detected-and-added here for any DB that somehow missed it. Plain
+/// nullable column (no FK), matching the migration — the delete path nulls
+/// orphaned rows itself.
+fn ensure_usage_events_account_id_column(conn: &mut SqliteConnection) -> anyhow::Result<()> {
+    let rows: Vec<PragmaColumn> = sql_query("PRAGMA table_info(usage_events)").load(conn)?;
+    let existing: Vec<String> = rows.into_iter().map(|r| r.name).collect();
+    if existing.is_empty() {
+        return Ok(());
+    }
+    if !existing.iter().any(|c| c == "account_id") {
+        tracing::info!("Repairing schema: adding usage_events.account_id");
+        sql_query("ALTER TABLE usage_events ADD COLUMN account_id TEXT").execute(conn)?;
+        sql_query(
+            "CREATE INDEX IF NOT EXISTS idx_usage_events_account \
+             ON usage_events (account_id, ts)",
+        )
+        .execute(conn)?;
+    }
+    Ok(())
+}
+
+/// Heal DBs that predate `1782694873_claude_accounts`. `CREATE TABLE IF
+/// NOT EXISTS` is idempotent so this is safe on a fully-migrated DB and
+/// only does work on one that lacks the table. DDL mirrors the migration.
+fn ensure_claude_accounts_table(conn: &mut SqliteConnection) -> anyhow::Result<()> {
+    log_if_healing_table(conn, "claude_accounts")?;
+    sql_query(
+        "CREATE TABLE IF NOT EXISTS claude_accounts (
+            id                  TEXT    PRIMARY KEY NOT NULL,
+            name                TEXT    NOT NULL,
+            kind                TEXT    NOT NULL,
+            credential          TEXT    NOT NULL,
+            config_dir          TEXT,
+            budget_window_hours INTEGER,
+            budget_limit_usd    REAL,
+            budget_limit_tokens INTEGER,
+            warn_threshold      REAL    NOT NULL DEFAULT 0.75,
+            critical_threshold  REAL    NOT NULL DEFAULT 0.90,
+            created_at          BIGINT  NOT NULL,
+            updated_at          BIGINT  NOT NULL
+        )",
+    )
+    .execute(conn)?;
     Ok(())
 }
 

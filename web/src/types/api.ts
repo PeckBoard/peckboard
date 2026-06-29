@@ -118,6 +118,53 @@ export interface AuthSession {
   ip_address: string | null
 }
 
+/** How a Claude account stores its credential — selects the env var the
+ *  spawned CLI authenticates through. */
+export type ClaudeAccountKind = 'api_key' | 'oauth_token'
+
+/** How close an account is to its budget; mirrors the backend `WarnLevel`. */
+export type WarnLevel = 'none' | 'ok' | 'warning' | 'critical' | 'exceeded'
+
+export interface ClaudeAccountUsage {
+  total_tokens: number
+  est_cost_usd: number
+  turns: number
+  /** Fraction of budget consumed (max of token/cost), or null if no budget. */
+  used_fraction: number | null
+  level: WarnLevel
+}
+
+/** One logged-in Claude/Anthropic account. The credential itself is never
+ *  returned — only a masked `credential_hint`. */
+export interface ClaudeAccount {
+  id: string
+  name: string
+  kind: ClaudeAccountKind
+  credential_hint: string
+  config_dir: string | null
+  budget_window_hours: number | null
+  budget_limit_usd: number | null
+  budget_limit_tokens: number | null
+  warn_threshold: number
+  critical_threshold: number
+  created_at: number
+  updated_at: number
+  usage: ClaudeAccountUsage
+}
+
+/** Body for creating/updating a Claude account. On update, an empty/omitted
+ *  `credential` leaves the stored secret untouched. */
+export interface ClaudeAccountInput {
+  name: string
+  kind: ClaudeAccountKind
+  credential: string
+  budget_window_hours: number | null
+  budget_limit_usd: number | null
+  budget_limit_tokens: number | null
+  warn_threshold: number
+  critical_threshold: number
+}
+
 export interface PushSubscription {
   endpoint: string
   p256dh: string

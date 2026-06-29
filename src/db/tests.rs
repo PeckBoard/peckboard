@@ -2420,4 +2420,91 @@ mod tests {
         assert_eq!(s2.len(), 1);
         assert_eq!(s2[0].input_tokens, 999);
     }
+
+    /// Claude accounts: CRUD round-trip, per-account usage attribution, and
+    /// delete orphan-nulling its usage rows while reporting the config dir.
+    #[tokio::test]
+    async fn claude_accounts_crud_and_usage_attribution() {
+        let db = test_db();
+        seed_usage_session(&db, "s1").await; // satisfies the usage FK
+
+        let acct = db
+            .create_claude_account(NewClaudeAccount {
+                id: "acc1".into(),
+                name: "Work".into(),
+                kind: "oauth_token".into(),
+                credential: "tok-secret".into(),
+                config_dir: Some("/tmp/peck/acc1".into()),
+                budget_window_hours: Some(5),
+                budget_limit_usd: Some(10.0),
+                budget_limit_tokens: None,
+                warn_threshold: 0.75,
+                critical_threshold: 0.90,
+                created_at: 1_000,
+                updated_at: 1_000,
+            })
+            .await
+            .unwrap();
+        assert_eq!(acct.name, "Work");
+
+        // Listed and fetchable.
+        assert_eq!(db.list_claude_accounts().await.unwrap().len(), 1);
+        assert_eq!(
+            db.get_claude_account("acc1").await.unwrap().unwrap().kind,
+            "oauth_token"
+        );
+
+        // Two turns billed to the account, one unattributed (Default).
+        for (i, acc) in [Some("acc1"), Some("acc1"), None].iter().enumerate() {
+            db.record_usage_event(NewUsageEvent {
+                id: format!("u{i}"),
+                session_id: "s1".into(),
+                ts: 5_000 + i as i64,
+                total_tokens: 100,
+                model: Some("claude-opus-4-8".into()),
+                account_id: acc.map(str::to_string),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        }
+
+        // Only the two attributed turns roll up to the account, grouped by model.
+        let rows = db.account_usage_since("acc1", 0).await.unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].turns, 2);
+        assert_eq!(rows[0].total_tokens, 200);
+
+        // Update: rename and clear the budget.
+        let changed = db
+            .update_claude_account(
+                "acc1",
+                ClaudeAccountChanges {
+                    name: Some("Personal".into()),
+                    budget_window_hours: Some(None),
+                    budget_limit_usd: Some(None),
+                    updated_at: Some(2_000),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(changed.name, "Personal");
+        assert_eq!(changed.budget_window_hours, None);
+        assert_eq!(changed.budget_limit_usd, None);
+        // Credential left untouched when not supplied.
+        assert_eq!(changed.credential, "tok-secret");
+
+        // Delete returns the config dir and orphan-nulls the usage rows.
+        let dir = db.delete_claude_account("acc1").await.unwrap().unwrap();
+        assert_eq!(dir.as_deref(), Some("/tmp/peck/acc1"));
+        assert!(db.get_claude_account("acc1").await.unwrap().is_none());
+        assert!(db.account_usage_since("acc1", 0).await.unwrap().is_empty());
+        // The usage rows themselves survive (now unattributed).
+        assert_eq!(db.usage_events_for_session("s1").await.unwrap().len(), 3);
+
+        // Deleting a missing account is a clean None, not an error.
+        assert!(db.delete_claude_account("nope").await.unwrap().is_none());
+    }
 }

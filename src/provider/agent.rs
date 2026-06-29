@@ -221,6 +221,18 @@ pub async fn emit_event(
                 turn_seq,
             } = event
             {
+                // Attribute the turn to the Claude account it billed
+                // against, parsed from the `@<account_id>` suffix on the
+                // session's model id. `None` for the implicit Default
+                // account (host credentials) or any non-Claude provider.
+                let account_id = match db.get_session(session_id).await {
+                    Ok(Some(s)) => s.model.as_deref().and_then(|m| {
+                        crate::provider::registry::split_model_account(m)
+                            .1
+                            .map(str::to_string)
+                    }),
+                    _ => None,
+                };
                 let new_usage = crate::db::models::NewUsageEvent {
                     id: uuid::Uuid::new_v4().to_string(),
                     session_id: session_id.to_string(),
@@ -234,6 +246,7 @@ pub async fn emit_event(
                     total_tokens,
                     context_tokens,
                     model: model.clone(),
+                    account_id,
                 };
                 if let Err(e) = db.record_usage_event(new_usage).await {
                     tracing::error!(

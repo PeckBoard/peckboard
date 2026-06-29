@@ -5,6 +5,7 @@ mod announcements;
 mod auth_sessions;
 mod cards;
 mod cascades;
+mod claude_accounts;
 mod dependencies;
 mod events;
 mod folders;
@@ -23,6 +24,7 @@ mod usage;
 mod users;
 mod workflow_instructions;
 
+pub use claude_accounts::AccountModelUsage;
 pub use folders::{MoveFolderOutcome, ProjectMoveReport, RepeatingTaskMoveReport};
 pub use plugin_approvals::{APPROVAL_APPROVED, APPROVAL_DENIED};
 pub use todos::ProjectCardTodos;
