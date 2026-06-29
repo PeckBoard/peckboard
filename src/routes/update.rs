@@ -89,13 +89,15 @@ async fn apply_update(State(_state): State<Arc<AppState>>) -> impl IntoResponse 
 
     // Download, verify, and swap the binary on disk.
     match update::download_and_swap(&client, &tag).await {
-        Ok(_sha) => {
+        Ok(exe) => {
             // Re-exec AFTER this response is flushed. exec() replaces the
             // process image, so do it from a detached task on a short delay.
-            tokio::spawn(async {
+            // Use the path captured before the swap — re-deriving it here via
+            // current_exe() would resolve to "<path> (deleted)" and exec() fail.
+            tokio::spawn(async move {
                 tokio::time::sleep(std::time::Duration::from_millis(600)).await;
                 tracing::warn!("Self-update applied — re-exec into the new binary");
-                if let Err(e) = update::restart() {
+                if let Err(e) = update::restart(&exe) {
                     tracing::error!("Self-update re-exec failed: {e}");
                 }
             });
