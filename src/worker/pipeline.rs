@@ -1,4 +1,310 @@
 use crate::db::models::{Card, Event, Project};
+use std::collections::BTreeMap;
+use std::path::Path;
+
+/// A file under the project's working directory, used to build the worker's
+/// codebase map. `path` is folder-relative with `/` separators.
+pub struct ProjectFileEntry {
+    pub path: String,
+    pub size: u64,
+}
+
+/// Depth / count caps for the worker-prompt codebase scan. Mirror the plugin
+/// host's project-file walk so a worker's map matches what experts see.
+const SCAN_MAX_DEPTH: usize = 8;
+const SCAN_MAX_FILES: usize = 20_000;
+/// Most top-level entries to list in the repo map before collapsing the rest.
+const REPO_MAP_MAX_GROUPS: usize = 24;
+/// Most "likely-relevant" files to surface for a card.
+const RELEVANT_FILES_MAX: usize = 10;
+/// Most distinct card tokens used for the relevance heuristic.
+const CARD_TOKENS_MAX: usize = 12;
+
+/// Walk `root` and collect files (folder-relative paths + sizes), skipping the
+/// same hidden/build/vendor dirs the plugin host's walk does. Best-effort: I/O
+/// errors are swallowed (a missing/locked dir just contributes nothing). This
+/// is the only filesystem-touching part of the codebase-map feature; the
+/// formatting in [`build_codebase_context`] is pure so it can be unit-tested.
+pub fn scan_project_files(root: &Path) -> Vec<ProjectFileEntry> {
+    let mut out = Vec::new();
+    scan_dir(root, root, 0, &mut out);
+    out
+}
+
+fn scan_dir(dir: &Path, root: &Path, depth: usize, out: &mut Vec<ProjectFileEntry>) {
+    if depth > SCAN_MAX_DEPTH || out.len() >= SCAN_MAX_FILES {
+        return;
+    }
+    let Ok(rd) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for entry in rd.flatten() {
+        if out.len() >= SCAN_MAX_FILES {
+            return;
+        }
+        let Ok(ft) = entry.file_type() else {
+            continue;
+        };
+        let path = entry.path();
+        if ft.is_dir() {
+            let name = entry.file_name().to_string_lossy().to_string();
+            if crate::plugin::host::is_ignored_fs_dir(&name) {
+                continue;
+            }
+            scan_dir(&path, root, depth + 1, out);
+        } else if ft.is_file()
+            && let Ok(rel) = path.strip_prefix(root)
+        {
+            let size = entry.metadata().map(|m| m.len()).unwrap_or(0);
+            out.push(ProjectFileEntry {
+                path: rel.to_string_lossy().replace('\\', "/"),
+                size,
+            });
+        }
+    }
+}
+
+/// Build the "Codebase Map" section body: a compact top-level layout plus a
+/// heuristic list of files likely relevant to this card. Returns `None` when
+/// there are no files to describe. Pure (takes the file list as data) so it's
+/// unit-testable without touching the filesystem.
+///
+/// Front-loading this into the worker prompt is a token-saving move: most cards
+/// otherwise burn their opening turns re-discovering the repo from zero
+/// (`grep`/`find`/`Read`) or paying a two-turn `ask_expert` just to get
+/// oriented. The map is generated from real file paths (our own data, not user
+/// text), so it doesn't need untrusted-content fencing.
+pub fn build_codebase_context(files: &[ProjectFileEntry], card: &Card) -> Option<String> {
+    if files.is_empty() {
+        return None;
+    }
+    let mut s = repo_map(files);
+    if let Some(rel) = relevant_files(files, card) {
+        s.push('\n');
+        s.push_str(&rel);
+    }
+    Some(s)
+}
+
+struct DirGroup {
+    count: usize,
+    langs: BTreeMap<&'static str, usize>,
+    entry: Option<String>,
+}
+
+fn repo_map(files: &[ProjectFileEntry]) -> String {
+    let mut groups: BTreeMap<String, DirGroup> = BTreeMap::new();
+    for f in files {
+        let top = match f.path.split_once('/') {
+            Some((dir, _)) => dir.to_string(),
+            None => "(root)".to_string(),
+        };
+        let g = groups.entry(top).or_insert_with(|| DirGroup {
+            count: 0,
+            langs: BTreeMap::new(),
+            entry: None,
+        });
+        g.count += 1;
+        *g.langs.entry(lang_for_path(&f.path)).or_insert(0) += 1;
+        if is_entry_point(&f.path)
+            && g.entry
+                .as_deref()
+                .is_none_or(|cur| entry_rank(&f.path) < entry_rank(cur))
+        {
+            g.entry = Some(f.path.clone());
+        }
+    }
+
+    // Most files first, then name — the worker sees the biggest areas up top.
+    let mut rows: Vec<(&String, &DirGroup)> = groups.iter().collect();
+    rows.sort_by(|a, b| b.1.count.cmp(&a.1.count).then_with(|| a.0.cmp(b.0)));
+
+    let mut out = String::from(
+        "Top-level layout of your working directory — go straight to the \
+         relevant area instead of exploring from scratch:\n\n",
+    );
+    for (name, g) in rows.iter().take(REPO_MAP_MAX_GROUPS) {
+        let display = if name.as_str() == "(root)" {
+            "(root files)".to_string()
+        } else {
+            format!("{name}/")
+        };
+        let plural = if g.count == 1 { "" } else { "s" };
+        out.push_str(&format!("- `{display}` — {} file{plural}", g.count));
+        if let Some(lang) = dominant_lang(&g.langs) {
+            out.push_str(&format!(" ({lang})"));
+        }
+        if let Some(e) = &g.entry {
+            out.push_str(&format!(" · entry: `{e}`"));
+        }
+        out.push('\n');
+    }
+    if rows.len() > REPO_MAP_MAX_GROUPS {
+        out.push_str(&format!(
+            "- … and {} more top-level entries\n",
+            rows.len() - REPO_MAP_MAX_GROUPS
+        ));
+    }
+    out
+}
+
+/// Heuristic: rank files by how many distinct card tokens appear in their path
+/// (basename matches count double). Surfaces likely starting points so a worker
+/// can open the right file directly instead of searching for it.
+fn relevant_files(files: &[ProjectFileEntry], card: &Card) -> Option<String> {
+    let tokens = card_tokens(card);
+    if tokens.is_empty() {
+        return None;
+    }
+    let mut scored: Vec<(usize, &str)> = Vec::new();
+    for f in files {
+        let lower = f.path.to_lowercase();
+        let base = f.path.rsplit('/').next().unwrap_or(&f.path).to_lowercase();
+        let mut score = 0usize;
+        for t in &tokens {
+            if base.contains(t.as_str()) {
+                score += 2;
+            } else if lower.contains(t.as_str()) {
+                score += 1;
+            }
+        }
+        if score > 0 {
+            scored.push((score, f.path.as_str()));
+        }
+    }
+    if scored.is_empty() {
+        return None;
+    }
+    scored.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.cmp(b.1)));
+
+    let mut out = String::from(
+        "### Likely-Relevant Files\n\n\
+         Heuristic match on this card's title/description — likely starting \
+         points, but verify before relying on them:\n\n",
+    );
+    for (_, p) in scored.iter().take(RELEVANT_FILES_MAX) {
+        out.push_str(&format!("- `{p}`\n"));
+    }
+    Some(out)
+}
+
+/// Tokenize the card's title + description into distinct, lowercased,
+/// non-trivial words for the relevance heuristic.
+fn card_tokens(card: &Card) -> Vec<String> {
+    let mut seen = std::collections::HashSet::new();
+    let mut tokens = Vec::new();
+    let text = format!("{} {}", card.title, card.description).to_lowercase();
+    for raw in text.split(|c: char| !c.is_alphanumeric()) {
+        if raw.len() < 3 || is_stopword(raw) {
+            continue;
+        }
+        if seen.insert(raw.to_string()) {
+            tokens.push(raw.to_string());
+            if tokens.len() >= CARD_TOKENS_MAX {
+                break;
+            }
+        }
+    }
+    tokens
+}
+
+/// Common words that carry no locating signal — dropped so the relevance
+/// heuristic matches on meaningful identifiers, not filler.
+fn is_stopword(w: &str) -> bool {
+    matches!(
+        w,
+        "the"
+            | "and"
+            | "for"
+            | "with"
+            | "from"
+            | "that"
+            | "this"
+            | "into"
+            | "add"
+            | "use"
+            | "using"
+            | "when"
+            | "your"
+            | "you"
+            | "are"
+            | "was"
+            | "will"
+            | "can"
+            | "should"
+            | "must"
+            | "all"
+            | "any"
+            | "not"
+            | "but"
+            | "make"
+            | "new"
+            | "update"
+            | "fix"
+            | "implement"
+            | "create"
+            | "support"
+            | "ensure"
+            | "code"
+            | "file"
+            | "files"
+    )
+}
+
+/// Coarse language label for a path by extension. A small subset is enough to
+/// annotate the repo map; unknown extensions map to `None` (no annotation).
+fn lang_for_path(path: &str) -> &'static str {
+    let ext = path.rsplit('.').next().unwrap_or("");
+    match ext {
+        "rs" => "Rust",
+        "ts" | "tsx" => "TypeScript",
+        "js" | "jsx" | "mjs" | "cjs" => "JavaScript",
+        "py" => "Python",
+        "go" => "Go",
+        "java" => "Java",
+        "rb" => "Ruby",
+        "c" | "h" => "C",
+        "cpp" | "cc" | "hpp" => "C++",
+        "cs" => "C#",
+        "css" | "scss" => "CSS",
+        "html" => "HTML",
+        "json" => "JSON",
+        "toml" => "TOML",
+        "yaml" | "yml" => "YAML",
+        "md" => "Markdown",
+        "sh" | "bash" => "Shell",
+        "sql" => "SQL",
+        _ => "Other",
+    }
+}
+
+/// The most common non-`Other` language in a group, or `None` if the group is
+/// all unclassified files.
+fn dominant_lang(langs: &BTreeMap<&'static str, usize>) -> Option<&'static str> {
+    langs
+        .iter()
+        .filter(|(l, _)| **l != "Other")
+        .max_by(|a, b| a.1.cmp(b.1).then_with(|| b.0.cmp(a.0)))
+        .map(|(l, _)| *l)
+}
+
+/// Whether a path's basename names a conventional entry point worth surfacing.
+fn is_entry_point(path: &str) -> bool {
+    entry_rank(path) < usize::MAX
+}
+
+/// Lower rank = stronger entry-point signal (used to pick one per directory).
+fn entry_rank(path: &str) -> usize {
+    let base = path.rsplit('/').next().unwrap_or(path);
+    match base {
+        "main.rs" | "main.ts" | "main.py" | "main.go" => 0,
+        "lib.rs" | "index.ts" | "index.tsx" | "index.js" => 1,
+        "mod.rs" | "__init__.py" => 2,
+        "Cargo.toml" | "package.json" | "go.mod" | "pyproject.toml" => 3,
+        "README.md" => 4,
+        _ => usize::MAX,
+    }
+}
 
 /// Build the system prompt for a worker agent given its assignment context.
 ///
@@ -14,6 +320,7 @@ pub fn build_worker_prompt(
     workflow_steps: &[String],
     handoff_context: Option<&str>,
     extra_step_instructions: Option<&str>,
+    codebase_context: Option<&str>,
 ) -> String {
     // Per-step instructions come from the workflow registry. The card's
     // workflow is baked in at create time (NOT NULL), so it's always set
@@ -53,6 +360,22 @@ pub fn build_worker_prompt(
     prompt.push_str("\n**Card description:**\n");
     prompt.push_str(&fence("card.description", &card.description));
     prompt.push_str("\n\n");
+
+    // Codebase orientation, generated from the project's working directory.
+    // Lets the worker jump to the right files instead of re-discovering the
+    // repo from scratch (saving the tokens that exploration would cost). This
+    // is our own derived data — real file paths — so it's NOT fenced as
+    // untrusted; the card-derived part only *selects* which of our paths to
+    // show, it never echoes user text.
+    if let Some(ctx) = codebase_context {
+        prompt.push_str("## Codebase Map\n\n");
+        prompt.push_str(ctx);
+        prompt.push_str(
+            "\nIf this map doesn't cover what you need, fall back to \
+             `grep`/`find` or consult a knowledge expert (`ask_expert`) — but try \
+             the map first.\n\n",
+        );
+    }
 
     prompt.push_str("**Workflow:** ");
     prompt.push_str(&card.workflow);
@@ -420,6 +743,7 @@ mod tests {
             &sample_steps(),
             None,
             None,
+            None,
         );
         assert!(prompt.contains("Test Project"));
         assert!(prompt.contains("Implement auth"));
@@ -436,6 +760,7 @@ mod tests {
             &sample_steps(),
             Some("Auth module is at src/auth/"),
             None,
+            None,
         );
         assert!(prompt.contains("Handoff Context"));
         assert!(prompt.contains("Auth module is at src/auth/"));
@@ -448,6 +773,7 @@ mod tests {
             &sample_card(),
             "backlog",
             &sample_steps(),
+            None,
             None,
             None,
         );
@@ -480,6 +806,7 @@ mod tests {
             &sample_steps(),
             None,
             None,
+            None,
         );
 
         // The untrusted-content warning is present.
@@ -510,6 +837,7 @@ mod tests {
             &sample_steps(),
             None,
             Some("At the end, commit to master and push."),
+            None,
         );
         // The extra section header and body are present alongside the
         // built-in step instructions — neither overrides the other.
@@ -529,9 +857,92 @@ mod tests {
             &sample_steps(),
             None,
             Some("   \n\t  "),
+            None,
         );
         // Whitespace-only extras shouldn't add a stray section.
         assert!(!prompt.contains("Additional Project Instructions for This Step"));
+    }
+
+    fn files(paths: &[&str]) -> Vec<ProjectFileEntry> {
+        paths
+            .iter()
+            .map(|p| ProjectFileEntry {
+                path: (*p).to_string(),
+                size: 100,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn codebase_context_is_none_without_files() {
+        assert!(build_codebase_context(&[], &sample_card()).is_none());
+    }
+
+    #[test]
+    fn repo_map_groups_by_top_level_dir_with_entry_points() {
+        let fs = files(&[
+            "src/main.rs",
+            "src/worker/mod.rs",
+            "src/worker/pipeline.rs",
+            "web/index.ts",
+            "web/app.tsx",
+            "Cargo.toml",
+        ]);
+        let ctx = build_codebase_context(&fs, &sample_card()).unwrap();
+        // Top-level dirs are listed with counts and language annotation.
+        assert!(ctx.contains("`src/` — 3 files (Rust)"));
+        assert!(ctx.contains("`web/` — 2 files (TypeScript)"));
+        // Root-level files collapse under a "(root files)" entry.
+        assert!(ctx.contains("(root files)"));
+        // The conventional entry point of the biggest dir is surfaced.
+        assert!(ctx.contains("entry: `src/main.rs`"));
+    }
+
+    #[test]
+    fn relevant_files_match_card_tokens_by_basename() {
+        let fs = files(&[
+            "src/auth/jwt.rs",
+            "src/auth/mod.rs",
+            "src/db/models.rs",
+            "web/app.tsx",
+        ]);
+        let mut card = sample_card();
+        card.title = "Implement auth".into();
+        card.description = "Add JWT-based authentication to the login flow.".into();
+        let ctx = build_codebase_context(&fs, &card).unwrap();
+        assert!(ctx.contains("Likely-Relevant Files"));
+        // "auth"/"jwt" tokens surface the auth files, not the unrelated ones.
+        assert!(ctx.contains("`src/auth/jwt.rs`"));
+        assert!(ctx.contains("`src/auth/mod.rs`"));
+        assert!(!ctx.contains("`web/app.tsx`"));
+    }
+
+    #[test]
+    fn relevant_files_section_omitted_when_nothing_matches() {
+        let fs = files(&["src/db/models.rs", "web/app.tsx"]);
+        let mut card = sample_card();
+        // Only stopwords / too-short tokens → no usable card tokens.
+        card.title = "Fix the bug".into();
+        card.description = "Make it work".into();
+        let ctx = build_codebase_context(&fs, &card).unwrap();
+        // Repo map is present, but no relevance section.
+        assert!(ctx.contains("Top-level layout"));
+        assert!(!ctx.contains("Likely-Relevant Files"));
+    }
+
+    #[test]
+    fn worker_prompt_includes_codebase_map_when_provided() {
+        let prompt = build_worker_prompt(
+            &sample_project(),
+            &sample_card(),
+            "in-progress",
+            &sample_steps(),
+            None,
+            None,
+            Some("Top-level layout:\n- `src/` — 3 files"),
+        );
+        assert!(prompt.contains("## Codebase Map"));
+        assert!(prompt.contains("- `src/` — 3 files"));
     }
 
     #[test]

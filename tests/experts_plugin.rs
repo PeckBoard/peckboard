@@ -1,7 +1,8 @@
 //! End-to-end test of the **experts WASM plugin** against the real core host
 //! functions. Loads the actual compiled `peckboard_experts_plugin.wasm`,
-//! approves it, and drives its three MCP tools (`spin_up_experts` /
-//! `list_experts` / `ask_expert`) through `PluginManager::invoke_mcp_tool`,
+//! approves it, and drives its MCP tools (`spin_up_experts` / `list_experts` /
+//! `ask_expert` / `record_expert_brief` / `read_expert_brief` / the PM tools)
+//! through `PluginManager::invoke_mcp_tool`,
 //! exercising the full platform built in Phase B: the `mcp.tool.invoke`
 //! dispatch, the trusted invocation context, and the session / project-file /
 //! dispatch host functions.
@@ -255,6 +256,49 @@ async fn experts_plugin_drives_all_three_tools_end_to_end() {
     assert!(
         res.get("error").is_some(),
         "consulting a non-expert id must error, got {res}"
+    );
+
+    // ── record_expert_brief + read_expert_brief: the cheap distilled path ──
+    // A knowledge expert persists its brief (keyed to its own session), then a
+    // worker reads it back SYNCHRONOUSLY — the one-turn alternative to a live
+    // two-turn ask_expert consult.
+    let brief_ctx = json!({ "sessionId": target, "projectId": "p1", "folderId": "f1" });
+    let res = invoke(
+        &plugins,
+        "record_expert_brief",
+        json!({ "brief": "Auth lives in src/auth (login.rs + token.rs); tokens are signed JWTs." }),
+        &brief_ctx,
+    )
+    .await;
+    assert_eq!(res["recorded"], true, "record_expert_brief: {res}");
+    assert_eq!(res["session_id"], target);
+
+    // The asking worker reads that expert's brief in one call.
+    let res = invoke(
+        &plugins,
+        "read_expert_brief",
+        json!({ "expert_id": target }),
+        &ctx,
+    )
+    .await;
+    let briefs = res["briefs"].as_array().unwrap();
+    assert_eq!(briefs.len(), 1, "read_expert_brief (targeted): {res}");
+    assert_eq!(briefs[0]["expert_id"], target);
+    assert!(
+        briefs[0]["brief"].as_str().unwrap().contains("signed JWTs"),
+        "brief content round-trips through the host store: {res}"
+    );
+
+    // Orientation mode (no args) returns in-scope knowledge-expert briefs; an
+    // expert with no recorded brief is surfaced via `note`, never an error.
+    let res = invoke(&plugins, "read_expert_brief", json!({}), &ctx).await;
+    assert!(
+        res["briefs"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|b| b["expert_id"] == target),
+        "orientation read includes the recorded brief: {res}"
     );
 
     // ── pm_record_decision (worker ADD) + pm_check_decisions round-trip ──

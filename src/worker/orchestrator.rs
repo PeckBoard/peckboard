@@ -536,6 +536,14 @@ async fn spawn_worker_for_card(
             tracing::warn!(error = %err, "failed to load project workflow instructions");
             None
         });
+    // Scan the project folder once to give the worker a compact codebase map
+    // (top-level layout + likely-relevant files) up front, so it doesn't burn
+    // its opening turns re-discovering the repo. Best-effort: an unreadable
+    // folder just yields no map.
+    let codebase_context = {
+        let files = pipeline::scan_project_files(std::path::Path::new(&folder.path));
+        pipeline::build_codebase_context(&files, card)
+    };
     let prompt = pipeline::build_worker_prompt(
         project,
         card,
@@ -543,6 +551,7 @@ async fn spawn_worker_for_card(
         &workflow_steps,
         card.handoff_context.as_deref(),
         extra_step_instructions.as_deref(),
+        codebase_context.as_deref(),
     );
 
     // 6. Build spawn config and send message

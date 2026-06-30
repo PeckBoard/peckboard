@@ -961,7 +961,11 @@ struct ReadFileRequest {
 /// Directories the file walk never descends into — hidden dirs (`.git`, …)
 /// plus common build/vendor output. Mirrors the experts handler's
 /// `is_ignored_dir` so a plugin's view matches core's codebase scan.
-fn is_ignored_fs_dir(name: &str) -> bool {
+///
+/// `pub(crate)` so the worker pipeline's codebase-map scan
+/// ([`crate::worker::pipeline::scan_project_files`]) skips the exact same
+/// dirs a plugin sees — a worker's map and an expert's view stay in sync.
+pub(crate) fn is_ignored_fs_dir(name: &str) -> bool {
     if name.starts_with('.') {
         return true;
     }
