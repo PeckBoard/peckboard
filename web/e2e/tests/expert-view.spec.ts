@@ -46,9 +46,9 @@ function readMcpToken(sessionId: string): string {
   expect(dataDir, 'PECKBOARD_E2E_DATA_DIR exported by playwright.config.ts').toBeTruthy()
   const cfgPath = path.join(dataDir!, 'worker-mcp', `${sessionId}.json`)
   const cfg = JSON.parse(readFileSync(cfgPath, 'utf8')) as {
-    mcpServers: { peckboard: { env: { PECKBOARD_TOKEN: string } } }
+    mcpServers: { peckboard: { headers: { Authorization: string } } }
   }
-  return cfg.mcpServers.peckboard.env.PECKBOARD_TOKEN
+  return cfg.mcpServers.peckboard.headers.Authorization.replace(/^Bearer /, '')
 }
 
 /** Build a temp source tree with a couple of sizeable topic dirs so

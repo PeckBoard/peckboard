@@ -20,7 +20,10 @@ struct JsonRpcRequest {
     method: String,
     #[serde(default)]
     params: Option<Value>,
-    id: Value,
+    // Absent for JSON-RPC notifications (e.g. `notifications/initialized`),
+    // which carry no `id` and expect no response body.
+    #[serde(default)]
+    id: Option<Value>,
 }
 
 #[derive(Serialize)]
@@ -85,16 +88,17 @@ async fn mcp_handler(
     let rpc_json =
         |resp: JsonRpcResponse| Json(serde_json::to_value(resp).unwrap_or(serde_json::json!({})));
 
+    // Requests carry an `id`; notifications don't. For error responses (which
+    // a notification never triggers a meaningful one for) fall back to null.
+    let is_notification = body.id.is_none();
+    let id = body.id.clone().unwrap_or(Value::Null);
+
     // Loopback gating: only allow from 127.0.0.1 or ::1
     let ip = addr.ip();
     if !ip.is_loopback() {
         return (
             StatusCode::FORBIDDEN,
-            rpc_json(JsonRpcResponse::error(
-                body.id,
-                -32000,
-                "loopback only".into(),
-            )),
+            rpc_json(JsonRpcResponse::error(id, -32000, "loopback only".into())),
         );
     }
 
@@ -103,7 +107,7 @@ async fn mcp_handler(
         return (
             StatusCode::BAD_REQUEST,
             rpc_json(JsonRpcResponse::error(
-                body.id,
+                id,
                 -32600,
                 "invalid jsonrpc version".into(),
             )),
@@ -117,7 +121,7 @@ async fn mcp_handler(
             return (
                 StatusCode::UNAUTHORIZED,
                 rpc_json(JsonRpcResponse::error(
-                    body.id,
+                    id,
                     -32000,
                     "missing or invalid Authorization header".into(),
                 )),
@@ -132,7 +136,7 @@ async fn mcp_handler(
             return (
                 StatusCode::UNAUTHORIZED,
                 rpc_json(JsonRpcResponse::error(
-                    body.id,
+                    id,
                     -32000,
                     "invalid MCP token".into(),
                 )),
@@ -140,9 +144,40 @@ async fn mcp_handler(
         }
     };
 
+    // Notifications (no `id`) — e.g. `notifications/initialized` after the
+    // handshake — expect no JSON-RPC response, just an HTTP 202. This path
+    // used to be answered locally by the node stdio proxy; it now lives here
+    // so the CLI can speak HTTP transport straight to this route.
+    if is_notification {
+        return (StatusCode::ACCEPTED, Json(serde_json::json!({})));
+    }
+
     let registry = McpToolRegistry::new();
 
     match body.method.as_str() {
+        // MCP lifecycle handshake. Echo the client's requested protocol
+        // version (or the documented default) and advertise the tools
+        // capability — the only one this server implements.
+        "initialize" => {
+            let protocol_version = body
+                .params
+                .as_ref()
+                .and_then(|p| p.get("protocolVersion"))
+                .and_then(|v| v.as_str())
+                .unwrap_or("2024-11-05")
+                .to_string();
+            (
+                StatusCode::OK,
+                rpc_json(JsonRpcResponse::success(
+                    id,
+                    serde_json::json!({
+                        "protocolVersion": protocol_version,
+                        "serverInfo": { "name": "peckboard", "version": "1.0.0" },
+                        "capabilities": { "tools": {} },
+                    }),
+                )),
+            )
+        }
         "tools/list" => {
             let mut tools: Vec<Value> = registry
                 .tool_definitions()
@@ -182,7 +217,7 @@ async fn mcp_handler(
             (
                 StatusCode::OK,
                 rpc_json(JsonRpcResponse::success(
-                    body.id,
+                    id.clone(),
                     serde_json::json!({ "tools": tools }),
                 )),
             )
@@ -217,7 +252,7 @@ async fn mcp_handler(
                     return (
                         StatusCode::UNAUTHORIZED,
                         rpc_json(JsonRpcResponse::error(
-                            body.id,
+                            id.clone(),
                             -32000,
                             "session not found for token".into(),
                         )),
@@ -261,21 +296,21 @@ async fn mcp_handler(
                     (
                         StatusCode::OK,
                         rpc_json(JsonRpcResponse::success(
-                            body.id,
+                            id.clone(),
                             serde_json::json!({ "content": content }),
                         )),
                     )
                 }
                 Err(e) => (
                     StatusCode::OK,
-                    rpc_json(JsonRpcResponse::error(body.id, -32000, e.to_string())),
+                    rpc_json(JsonRpcResponse::error(id.clone(), -32000, e.to_string())),
                 ),
             }
         }
         _ => (
             StatusCode::OK,
             rpc_json(JsonRpcResponse::error(
-                body.id,
+                id.clone(),
                 -32601,
                 format!("method not found: {}", body.method),
             )),

@@ -1,84 +1,11 @@
-//! Per-session MCP config file + stdio-to-HTTP proxy.
+//! Per-session MCP config file.
+//!
+//! Agents connect to the in-process Rust MCP server (`src/routes/mcp.rs`,
+//! `POST /mcp`) directly over its native HTTP transport — there is no
+//! Node-based stdio bridge. The config just points the CLI at the loopback
+//! `/mcp` endpoint and supplies the per-session bearer token as a header.
 
 use std::path::{Path, PathBuf};
-
-const PROXY_SCRIPT: &str = r#"#!/usr/bin/env node
-import { createInterface } from 'readline';
-import { request } from 'http';
-
-const TOKEN = process.env.PECKBOARD_TOKEN;
-const URL = process.env.PECKBOARD_MCP_URL;
-const parsed = new globalThis.URL(URL);
-
-const SERVER_INFO = {
-  name: "peckboard",
-  version: "1.0.0",
-};
-const CAPABILITIES = { tools: {} };
-
-function send(obj) {
-  process.stdout.write(JSON.stringify(obj) + '\n');
-}
-
-function httpPost(body) {
-  return new Promise((resolve, reject) => {
-    const req = request({
-      hostname: parsed.hostname,
-      port: parsed.port,
-      path: parsed.pathname,
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'Authorization': `Bearer ${TOKEN}`,
-      },
-    }, (res) => {
-      let data = '';
-      res.on('data', (c) => data += c);
-      res.on('end', () => {
-        try { resolve(JSON.parse(data)); }
-        catch { resolve({ error: { code: -32000, message: data } }); }
-      });
-    });
-    req.on('error', reject);
-    req.write(body);
-    req.end();
-  });
-}
-
-const rl = createInterface({ input: process.stdin });
-rl.on('line', async (line) => {
-  if (!line.trim()) return;
-  let msg;
-  try { msg = JSON.parse(line); } catch { return; }
-
-  // Handle MCP protocol messages locally
-  if (msg.method === 'initialize') {
-    send({
-      jsonrpc: '2.0',
-      id: msg.id,
-      result: {
-        protocolVersion: msg.params?.protocolVersion || '2024-11-05',
-        serverInfo: SERVER_INFO,
-        capabilities: CAPABILITIES,
-      },
-    });
-    return;
-  }
-
-  if (msg.method === 'notifications/initialized') {
-    // No response needed for notifications
-    return;
-  }
-
-  // Forward everything else to the HTTP backend
-  try {
-    const result = await httpPost(line);
-    send(result);
-  } catch (e) {
-    send({ jsonrpc: '2.0', id: msg.id, error: { code: -32000, message: String(e) } });
-  }
-});
-"#;
 
 /// Write a per-session MCP config JSON file so workers can discover
 /// the peckboard MCP endpoint.
@@ -92,23 +19,16 @@ pub fn write_mcp_config(
     std::fs::create_dir_all(&mcp_dir)?;
     let config_path = mcp_dir.join(format!("{session_id}.json"));
 
-    // Always rewrite the proxy script to pick up fixes.
-    let proxy_path = mcp_dir.join("mcp-proxy.mjs");
-    std::fs::write(&proxy_path, PROXY_SCRIPT)?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&proxy_path, std::fs::Permissions::from_mode(0o755))?;
-    }
-
+    // HTTP-transport MCP server: the CLI speaks JSON-RPC straight to the Rust
+    // `/mcp` route. No `node` subprocess — the route now answers `initialize`
+    // and `notifications/initialized` itself (previously faked by a proxy).
     let config = serde_json::json!({
         "mcpServers": {
             "peckboard": {
-                "command": "node",
-                "args": [proxy_path.to_string_lossy()],
-                "env": {
-                    "PECKBOARD_TOKEN": token,
-                    "PECKBOARD_MCP_URL": format!("http://127.0.0.1:{http_port}/mcp")
+                "type": "http",
+                "url": format!("http://127.0.0.1:{http_port}/mcp"),
+                "headers": {
+                    "Authorization": format!("Bearer {token}")
                 }
             }
         }
@@ -138,15 +58,15 @@ mod tests {
         assert!(path.exists());
         let content: serde_json::Value =
             serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
-        // Config uses command/args format (stdio subprocess)
-        assert!(content["mcpServers"]["peckboard"]["command"].is_string());
+        // Config uses native HTTP transport (no node subprocess).
+        assert_eq!(content["mcpServers"]["peckboard"]["type"], "http");
         assert_eq!(
-            content["mcpServers"]["peckboard"]["env"]["PECKBOARD_TOKEN"],
-            "tok123"
+            content["mcpServers"]["peckboard"]["url"],
+            "http://127.0.0.1:3333/mcp"
         );
         assert_eq!(
-            content["mcpServers"]["peckboard"]["env"]["PECKBOARD_MCP_URL"],
-            "http://127.0.0.1:3333/mcp"
+            content["mcpServers"]["peckboard"]["headers"]["Authorization"],
+            "Bearer tok123"
         );
 
         delete_mcp_config(tmp.path(), "sess-1");
