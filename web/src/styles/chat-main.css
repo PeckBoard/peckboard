@@ -574,6 +574,43 @@
   margin-left: auto;
 }
 
+/* Model-switch handover doc (collapsible archive of the doc the outgoing
+   model wrote for its successor). */
+.chat-handover {
+  width: 100%;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: var(--accent-subtle);
+  padding: 6px 10px;
+}
+.chat-handover-summary {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  cursor: pointer;
+  font-size: var(--text-xs);
+  font-weight: 600;
+  color: var(--text2);
+  list-style: none;
+}
+.chat-handover-summary::-webkit-details-marker {
+  display: none;
+}
+.chat-handover-icon {
+  font-size: 12px;
+}
+.chat-handover-time {
+  font-size: 10px;
+  color: var(--text3);
+  margin-left: auto;
+  font-weight: 400;
+}
+.chat-handover-doc {
+  margin-top: 8px;
+  padding-top: 8px;
+  border-top: 1px solid var(--border);
+}
+
 /* Ready notice */
 .chat-ready-notice {
   display: flex;

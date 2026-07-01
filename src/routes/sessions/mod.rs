@@ -249,9 +249,28 @@ async fn update_session(
     Json(body): Json<UpdateSessionRequest>,
 ) -> impl IntoResponse {
     tracing::info!(session_id = %id, "Updating session");
+
+    // A model change that crosses a provider/account boundary needs a
+    // handover: the outgoing model writes a context doc the incoming model
+    // reads (see `crate::handover`). Decide that here, before applying the
+    // patch, because a handover defers the actual `model` write until the
+    // doc-generation turn completes.
+    let requested_model = body.model.clone().flatten();
+    let handover_target = maybe_handover_target(&state, &id, requested_model.as_deref()).await;
+
+    // When handing over, don't write the new `model` yet — the outgoing
+    // provider must stay selected so its doc-generation turn routes to it.
+    // `begin_handover` parks the target in `handover_to_model` and flips
+    // `model` on completion.
+    let model_update = if handover_target.is_some() {
+        None
+    } else {
+        body.model
+    };
+
     let update = UpdateSession {
         name: body.name,
-        model: body.model,
+        model: model_update,
         effort: body.effort,
         project_id: body.project_id,
         card_id: body.card_id,
@@ -260,19 +279,110 @@ async fn update_session(
         ..Default::default()
     };
 
-    let session = state.db.update_session(&id, update).await.map_err(|e| {
+    // Stripping the model for a handover can leave an all-`None` changeset
+    // (the common "switch model" PATCH carries only `model`). Diesel rejects
+    // an empty changeset, so skip the write and just read the row back — the
+    // handover branch below does the meaningful state change.
+    let has_updates = update.name.is_some()
+        || update.model.is_some()
+        || update.effort.is_some()
+        || update.project_id.is_some()
+        || update.card_id.is_some()
+        || update.conversation_id.is_some()
+        || update.last_activity.is_some();
+
+    let session = if has_updates {
+        state.db.update_session(&id, update).await
+    } else {
+        state.db.get_session(&id).await
+    }
+    .map_err(|e| {
         (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(serde_json::json!({ "error": e.to_string() })),
         )
     })?;
 
-    match session {
-        Some(s) => Ok(Json(serde_json::json!(s))),
-        None => Err((
-            StatusCode::NOT_FOUND,
-            Json(serde_json::json!({ "error": "session not found" })),
-        )),
+    let mut session = match session {
+        Some(s) => s,
+        None => {
+            return Err((
+                StatusCode::NOT_FOUND,
+                Json(serde_json::json!({ "error": "session not found" })),
+            ));
+        }
+    };
+
+    if let Some(target) = handover_target {
+        let from = session.model.clone().unwrap_or_default();
+        if let Err(e) = crate::handover::begin_handover(&state, &id, &from, &target).await {
+            tracing::error!(session_id = %id, "Failed to begin handover: {e}");
+            // Fall back to a plain switch so the user isn't stuck: apply the
+            // model directly and clear the parked target.
+            let _ = state
+                .db
+                .update_session(
+                    &id,
+                    UpdateSession {
+                        model: Some(Some(target.clone())),
+                        handover_to_model: Some(None),
+                        ..Default::default()
+                    },
+                )
+                .await;
+        }
+        // Re-read so the response reflects the parked target (or the
+        // fallback switch).
+        if let Ok(Some(s)) = state.db.get_session(&id).await {
+            session = s;
+        }
+    }
+
+    Ok(Json(serde_json::json!(session)))
+}
+
+/// Decide whether a requested model change should trigger a handover, and
+/// return the target model id if so. Returns `None` (plain switch) when:
+/// no model change is requested, the change stays within the same
+/// provider+account, the session is a worker (orchestrator-driven), a
+/// handover is already in flight, or the session has no conversation yet to
+/// hand over.
+async fn maybe_handover_target(
+    state: &Arc<AppState>,
+    session_id: &str,
+    requested_model: Option<&str>,
+) -> Option<String> {
+    let new_model = requested_model?;
+    let session = state.db.get_session(session_id).await.ok().flatten()?;
+
+    // Workers are driven by the orchestrator/card, not interactive switches.
+    if session.is_worker {
+        return None;
+    }
+    // Don't stack handovers.
+    if session.handover_to_model.is_some() {
+        return None;
+    }
+    let current = session.model.as_deref().unwrap_or("default");
+    if !crate::handover::needs_handover(current, new_model) {
+        return None;
+    }
+    // Nothing to hand over if the outgoing model never actually spoke.
+    if !session_has_history(state, session_id).await {
+        return None;
+    }
+    Some(new_model.to_string())
+}
+
+/// Has the session accumulated any agent activity worth summarizing? A
+/// brand-new session (or one where only user text exists) has nothing for
+/// the outgoing model to hand over, so we skip straight to a plain switch.
+async fn session_has_history(state: &Arc<AppState>, session_id: &str) -> bool {
+    match state.db.events_tail(session_id, 100).await {
+        Ok(events) => events
+            .iter()
+            .any(|e| e.kind == "agent-text" || e.kind == "agent-start"),
+        Err(_) => false,
     }
 }
 

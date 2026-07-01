@@ -7,6 +7,9 @@ import { useMentions, filterMentions, type MentionItem } from '../hooks/useMenti
 interface InputBarProps {
   sessionId: string
   agentWorking: boolean
+  /** True while a provider/account model-switch handover is generating its
+   *  doc. Sending is blocked (the backend returns 409) until it lands. */
+  handoverActive?: boolean
 }
 
 interface PendingAttachment {
@@ -28,7 +31,7 @@ function fileToBase64(file: File): Promise<string> {
   })
 }
 
-export default function InputBar({ sessionId }: InputBarProps) {
+export default function InputBar({ sessionId, handoverActive = false }: InputBarProps) {
   const getDraft = useSessionsStore((s) => s.getDraft)
   const setDraft = useSessionsStore((s) => s.setDraft)
   const addPendingUserMessage = useSessionsStore((s) => s.addPendingUserMessage)
@@ -182,7 +185,7 @@ export default function InputBar({ sessionId }: InputBarProps) {
 
   const handleSend = useCallback(async () => {
     const trimmed = text.trim()
-    if ((!trimmed && attachments.length === 0) || sending) return
+    if ((!trimmed && attachments.length === 0) || sending || handoverActive) return
     const attachmentIds = attachments.map((a) => a.id)
     const attachmentMeta = attachments.map((a) => ({ filename: a.name, mimeType: a.mimeType }))
     // Clear the composer up-front: lets the user start typing the next
@@ -233,6 +236,7 @@ export default function InputBar({ sessionId }: InputBarProps) {
   }, [
     text,
     sending,
+    handoverActive,
     sessionId,
     setDraft,
     attachments,
@@ -248,10 +252,16 @@ export default function InputBar({ sessionId }: InputBarProps) {
     }
   }
 
-  const canSend = (text.trim().length > 0 || attachments.length > 0) && !sending
+  const canSend = (text.trim().length > 0 || attachments.length > 0) && !sending && !handoverActive
 
   return (
     <div className="input-bar">
+      {handoverActive && (
+        <div className="handover-banner" role="status" data-testid="handover-banner">
+          <span className="handover-spinner" aria-hidden="true" />
+          Handing over context to the new model…
+        </div>
+      )}
       {/* Autocomplete dropdown for @mentions */}
       {showAutocomplete && (
         <div className="autocomplete-dropdown">
@@ -308,7 +318,7 @@ export default function InputBar({ sessionId }: InputBarProps) {
           ref={textareaRef}
           className="input-textarea"
           rows={1}
-          placeholder="Send a message..."
+          placeholder={handoverActive ? 'Handover in progress…' : 'Send a message...'}
           value={text}
           onChange={handleChange}
           onKeyDown={handleKeyDown}

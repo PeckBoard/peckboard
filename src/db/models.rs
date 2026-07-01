@@ -50,6 +50,17 @@ pub struct Session {
     /// Peckboard system prompt for this session's agent runs. Editable
     /// across sessions via the `set_session_system_prompt` MCP tool.
     pub system_prompt: Option<String>,
+    /// Target model id while a model-switch handover is mid-flight. Set when
+    /// the user switches to a model whose (provider, account) differs from
+    /// the current one; the outgoing model is generating the handover doc.
+    /// `Some` means "a switch is pending, don't accept new user turns yet".
+    /// Cleared to `None` once the switch finalizes. See [`crate::handover`].
+    pub handover_to_model: Option<String>,
+    /// Handover document produced by the outgoing model, waiting to be read
+    /// by the incoming model on its first turn. Set the moment a switch
+    /// finalizes; cleared (consumed) when the next user message under the
+    /// new model prepends it. See [`crate::handover`].
+    pub pending_handover_doc: Option<String>,
 }
 
 #[derive(Insertable, Deserialize, Debug, Default)]
@@ -74,6 +85,8 @@ pub struct NewSession {
     pub is_permanent: bool,
     pub repeating_task_id: Option<String>,
     pub system_prompt: Option<String>,
+    pub handover_to_model: Option<String>,
+    pub pending_handover_doc: Option<String>,
 }
 
 #[derive(AsChangeset, Deserialize, Debug, Default)]
@@ -93,6 +106,8 @@ pub struct UpdateSession {
     pub scope_path: Option<Option<String>>,
     pub is_permanent: Option<bool>,
     pub system_prompt: Option<Option<String>>,
+    pub handover_to_model: Option<Option<String>>,
+    pub pending_handover_doc: Option<Option<String>>,
 }
 
 // ── Repeating Tasks ──────────────────────────────────────────────────

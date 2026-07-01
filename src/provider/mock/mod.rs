@@ -70,11 +70,12 @@ impl AgentProvider for MockProvider {
             plugins,
         } = ctx;
 
-        let scenario = config
-            .model
-            .strip_prefix("mock:")
-            .unwrap_or(&config.model)
-            .to_string();
+        // Derive the scenario from the model id, tolerating an `@account`
+        // suffix (`mock:echo@acct2`) so account-scoped ids — used to
+        // exercise the model-switch handover, which keys off provider+account
+        // — still map to their base scenario.
+        let raw = config.model.strip_prefix("mock:").unwrap_or(&config.model);
+        let scenario = raw.split('@').next().unwrap_or(raw).to_string();
 
         // Notify any prior run for this session to shut down.
         {

@@ -46,6 +46,18 @@ pub(super) async fn send_message(
         }
     };
 
+    // A model-switch handover is mid-flight: the outgoing model is still
+    // writing its handover doc. Refuse new user turns until it lands so we
+    // don't contaminate the doc-generation turn or race the model flip.
+    if session.handover_to_model.is_some() {
+        return Err((
+            StatusCode::CONFLICT,
+            Json(serde_json::json!({
+                "error": "model handover in progress; try again in a moment",
+            })),
+        ));
+    }
+
     let attachment_ids = body.attachment_ids.clone();
 
     // Resolve [session:id] and [report:folder/file] references early; both
@@ -203,6 +215,12 @@ pub(super) async fn send_message(
         system_prompt_override: None,
     };
 
+    // If a just-finalized handover left a doc waiting, prepend it so this
+    // first turn under the new model opens with the predecessor's context.
+    // The user event above kept the original text; only the bytes sent to
+    // the provider carry the injected preamble.
+    let dispatch_text = crate::handover::take_pending_injection(&state, &id, &resolved_text).await;
+
     // `send_or_queue` acquires the per-session lock internally,
     // dispatches through the long-lived child (spawning lazily on
     // the first turn) and returns `Queued` iff the agent was
@@ -212,7 +230,7 @@ pub(super) async fn send_message(
         .send_or_queue(
             &id,
             UserMessage {
-                text: resolved_text,
+                text: dispatch_text,
                 attachments: user_attachments,
             },
             &state.db,

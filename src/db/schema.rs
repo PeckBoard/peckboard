@@ -31,6 +31,8 @@ diesel::table! {
         is_permanent -> Bool,
         repeating_task_id -> Nullable<Text>,
         system_prompt -> Nullable<Text>,
+        handover_to_model -> Nullable<Text>,
+        pending_handover_doc -> Nullable<Text>,
     }
 }
 

@@ -287,6 +287,34 @@ async fn main() -> anyhow::Result<()> {
                 while let Some(completion) = rx.recv().await {
                     let sid = completion.session_id.clone();
 
+                    // 0. Handover finalize. If this completion is the
+                    //    outgoing model's doc-generation turn (session has a
+                    //    parked `handover_to_model`), capture the doc, flip
+                    //    the model, and stash the doc for the incoming model.
+                    //    Runs before worker bookkeeping and short-circuits the
+                    //    rest: a doc-gen turn isn't a normal worker/queue
+                    //    completion and must not respawn anything.
+                    {
+                        let is_handover = matches!(
+                            orchestrator_state.db.get_session(&sid).await,
+                            Ok(Some(s)) if s.handover_to_model.is_some()
+                        );
+                        if is_handover {
+                            let _guard =
+                                orchestrator_state.session_manager.lock_session(&sid).await;
+                            if let Err(e) =
+                                peckboard::handover::finalize_handover(&orchestrator_state, &sid)
+                                    .await
+                            {
+                                tracing::error!(
+                                    session_id = %sid,
+                                    "Handover finalize failed: {e}"
+                                );
+                            }
+                            continue;
+                        }
+                    }
+
                     // 1. Worker-specific bookkeeping. Hold the per-session
                     //    lock for the entire handler so the watchdog's
                     //    try_lock_session check skips this session while

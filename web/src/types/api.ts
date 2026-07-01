@@ -26,6 +26,10 @@ export interface Session {
   scope_path: string | null
   is_permanent: boolean
   repeating_task_id: string | null
+  /** Target model while a provider/account handover is mid-flight; null otherwise. */
+  handover_to_model?: string | null
+  /** Handover doc awaiting the incoming model's first turn; null otherwise. */
+  pending_handover_doc?: string | null
 }
 
 export type RepeatingScheduleKind = 'interval' | 'daily' | 'weekly'

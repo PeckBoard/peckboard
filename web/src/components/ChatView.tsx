@@ -363,6 +363,22 @@ export default function ChatView({
     }
   }, [sessionId])
 
+  // Reflect server-pushed session updates (the async model-switch handover
+  // flip lands here): refresh the local detail so the model label and the
+  // composer's disabled-during-handover state track the backend without a
+  // manual refetch.
+  useEffect(() => {
+    const onUpdated = (e: CustomEvent<{ session_id: string; data: Session }>) => {
+      if (e.detail?.session_id !== sessionId) return
+      const updated = e.detail?.data
+      if (updated && typeof updated === 'object') setSessionDetail(updated)
+    }
+    window.addEventListener('peckboard:session-updated', onUpdated as EventListener)
+    return () => {
+      window.removeEventListener('peckboard:session-updated', onUpdated as EventListener)
+    }
+  }, [sessionId])
+
   // Load the model catalogue once per session mount so the 3-dot menu's
   // "Model" submenu has options ready the first time the user opens it.
   useEffect(() => {
@@ -829,6 +845,35 @@ export default function ChatView({
                   </div>
                 </div>
               )
+            case 'handover-start':
+              return (
+                <div key={item.key} className="chat-row chat-row-system">
+                  <div className="chat-agent-start">
+                    <span className="chat-agent-start-label">Handover</span>
+                    <span className="chat-agent-start-detail">
+                      preparing context for {item.to.replace(/^claude:/, '')}
+                    </span>
+                    <span className="chat-agent-start-time">{formatTime(item.ts)}</span>
+                  </div>
+                </div>
+              )
+            case 'handover':
+              return (
+                <div key={item.key} className="chat-row chat-row-system">
+                  <details className="chat-handover" data-testid="chat-handover">
+                    <summary className="chat-handover-summary">
+                      <span className="chat-handover-icon" aria-hidden="true">
+                        {'↔️'}
+                      </span>
+                      <span>Context handed over to {item.to.replace(/^claude:/, '')}</span>
+                      <span className="chat-handover-time">{formatTime(item.ts)}</span>
+                    </summary>
+                    <SafeMarkdown className="chat-markdown chat-handover-doc">
+                      {item.doc}
+                    </SafeMarkdown>
+                  </details>
+                </div>
+              )
             case 'tool':
               return (
                 <div key={item.key} className="chat-row chat-row-tool">
@@ -946,7 +991,12 @@ export default function ChatView({
       {/* `key` forces a fresh InputBar per session — drafts and any
           pending attachments belong to the session that started them
           and shouldn't bleed across switches. */}
-      <InputBar key={sessionId} sessionId={sessionId} agentWorking={agentWorking} />
+      <InputBar
+        key={sessionId}
+        sessionId={sessionId}
+        agentWorking={agentWorking}
+        handoverActive={!!sessionDetail?.handover_to_model}
+      />
       {confirmAction && (
         <ConfirmDialog
           title={confirmAction.title}

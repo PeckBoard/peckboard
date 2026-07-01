@@ -747,6 +747,8 @@ pub(crate) fn create_session_impl(db: &Db, input: &str, inv: &InvocationContext)
         is_permanent: false,
         repeating_task_id: None,
         system_prompt: None,
+        handover_to_model: None,
+        pending_handover_doc: None,
     };
     match db.create_session_blocking(new) {
         Ok(session) => serde_json::json!({ "session": session }).to_string(),
@@ -803,6 +805,8 @@ pub(crate) fn update_session_impl(
         scope_path: None,
         is_permanent: None,
         system_prompt: None,
+        handover_to_model: None,
+        pending_handover_doc: None,
     };
     match db.update_session_blocking(req.session_id.trim(), update) {
         Ok(Some(session)) => serde_json::json!({ "session": session }).to_string(),

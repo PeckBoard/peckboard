@@ -107,6 +107,35 @@
   gap: 8px;
 }
 
+/* Shown above the composer while a provider/account model-switch handover
+   is generating its doc; sending is blocked until it lands. */
+.handover-banner {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 8px;
+  padding: 6px 12px;
+  font-size: var(--text-xs);
+  color: var(--text2);
+  background: var(--accent-subtle);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+}
+.handover-spinner {
+  width: 12px;
+  height: 12px;
+  border: 2px solid var(--border);
+  border-top-color: var(--accent);
+  border-radius: 50%;
+  animation: handover-spin 0.7s linear infinite;
+  flex-shrink: 0;
+}
+@keyframes handover-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
 .input-textarea {
   flex: 1;
   resize: none;

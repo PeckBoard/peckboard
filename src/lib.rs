@@ -3,6 +3,7 @@ pub mod config;
 pub mod db;
 pub mod error;
 pub mod frontend;
+pub mod handover;
 pub mod keepalive;
 pub mod plugin;
 pub mod provider;

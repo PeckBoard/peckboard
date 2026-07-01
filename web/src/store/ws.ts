@@ -190,6 +190,15 @@ export const useWsStore = create<WsState>((set, get) => ({
         return
       }
 
+      if (msg.type === 'session-updated') {
+        // A server-side change to a session row that clients should reflect
+        // without a manual refetch — currently the async model-switch
+        // handover flip (outgoing model → incoming model). The full updated
+        // session rides in `data`; fan out for ChatView / the sessions store.
+        window.dispatchEvent(new CustomEvent('peckboard:session-updated', { detail: msg }))
+        return
+      }
+
       if (msg.type === 'session-cleared') {
         // Server wiped this session's events + todos. Two event caches
         // need to drop the snapshot in lockstep — `useWsStore`'s
