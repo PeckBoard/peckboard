@@ -256,7 +256,7 @@ async fn update_session(
     // patch, because a handover defers the actual `model` write until the
     // doc-generation turn completes.
     let requested_model = body.model.clone().flatten();
-    let handover_target = maybe_handover_target(&state, &id, requested_model.as_deref()).await;
+    let handover_target = maybe_handover_target(&state, &id, requested_model.as_deref()).await?;
 
     // When handing over, don't write the new `model` yet — the outgoing
     // provider must stay selected so its doc-generation turn routes to it.
@@ -342,47 +342,83 @@ async fn update_session(
 }
 
 /// Decide whether a requested model change should trigger a handover, and
-/// return the target model id if so. Returns `None` (plain switch) when:
-/// no model change is requested, the change stays within the same
-/// provider+account, the session is a worker (orchestrator-driven), a
-/// handover is already in flight, or the session has no conversation yet to
-/// hand over.
+/// return the target model id if so. `Ok(None)` means a plain switch: no
+/// model change requested, the change stays within the same
+/// provider+account, the session is a worker (orchestrator-driven), or the
+/// session has no conversation yet to hand over.
+///
+/// Rejects with 409 when the change can't be honoured right now:
+/// - a handover is already in flight (a second switch would race the
+///   finalize step's deferred `model` write and silently lose one of them);
+/// - a cross-boundary switch while a turn is actively streaming (the
+///   handover shuts the outgoing provider down after the NEXT result — see
+///   `begin_handover` — which mid-turn would be the user's turn, not the
+///   doc turn, so the doc would never be generated).
 async fn maybe_handover_target(
     state: &Arc<AppState>,
     session_id: &str,
     requested_model: Option<&str>,
-) -> Option<String> {
-    let new_model = requested_model?;
-    let session = state.db.get_session(session_id).await.ok().flatten()?;
+) -> Result<Option<String>, (StatusCode, Json<serde_json::Value>)> {
+    let Some(new_model) = requested_model else {
+        return Ok(None);
+    };
+    let Some(session) = state.db.get_session(session_id).await.ok().flatten() else {
+        return Ok(None); // route 404s on the main update path
+    };
 
+    if session.handover_to_model.is_some() {
+        return Err((
+            StatusCode::CONFLICT,
+            Json(serde_json::json!({
+                "error": "model handover in progress; wait for it to finish before switching again",
+            })),
+        ));
+    }
     // Workers are driven by the orchestrator/card, not interactive switches.
     if session.is_worker {
-        return None;
-    }
-    // Don't stack handovers.
-    if session.handover_to_model.is_some() {
-        return None;
+        return Ok(None);
     }
     let current = session.model.as_deref().unwrap_or("default");
     if !crate::handover::needs_handover(current, new_model) {
-        return None;
+        return Ok(None);
     }
+
+    let events = state
+        .db
+        .events_tail(session_id, 100)
+        .await
+        .unwrap_or_default();
+
     // Nothing to hand over if the outgoing model never actually spoke.
-    if !session_has_history(state, session_id).await {
-        return None;
+    let has_history = events
+        .iter()
+        .any(|e| e.kind == "agent-text" || e.kind == "agent-start");
+    if !has_history {
+        return Ok(None);
     }
-    Some(new_model.to_string())
+
+    if turn_in_flight(&events) {
+        return Err((
+            StatusCode::CONFLICT,
+            Json(serde_json::json!({
+                "error": "agent is mid-turn; wait for it to finish before switching provider or account",
+            })),
+        ));
+    }
+
+    Ok(Some(new_model.to_string()))
 }
 
-/// Has the session accumulated any agent activity worth summarizing? A
-/// brand-new session (or one where only user text exists) has nothing for
-/// the outgoing model to hand over, so we skip straight to a plain switch.
-async fn session_has_history(state: &Arc<AppState>, session_id: &str) -> bool {
-    match state.db.events_tail(session_id, 100).await {
-        Ok(events) => events
-            .iter()
-            .any(|e| e.kind == "agent-text" || e.kind == "agent-start"),
-        Err(_) => false,
+/// Is a turn actively streaming? True when the latest `agent-start` has no
+/// `agent-end` after it — the same signal `derive_status` uses for the
+/// toolbar indicator.
+fn turn_in_flight(events: &[crate::db::models::Event]) -> bool {
+    let last_start = events.iter().rposition(|e| e.kind == "agent-start");
+    let last_end = events.iter().rposition(|e| e.kind == "agent-end");
+    match (last_start, last_end) {
+        (Some(s), Some(e)) => s > e,
+        (Some(_), None) => true,
+        _ => false,
     }
 }
 

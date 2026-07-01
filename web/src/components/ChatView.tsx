@@ -283,6 +283,10 @@ export default function ChatView({
   const [todosErrorFor, setTodosErrorFor] = useState<string | null>(null)
   const [metaRetryNonce, setMetaRetryNonce] = useState(0)
   const metaError = detailErrorFor === sessionId || todosErrorFor === sessionId
+  // Message from a refused session PATCH (e.g. 409 "agent is mid-turn"
+  // on a provider/account switch). Cleared on the next successful patch
+  // or by the dismiss button.
+  const [patchError, setPatchError] = useState<string | null>(null)
   const scrollRef = useRef<HTMLDivElement>(null)
   const userScrolledUp = useRef(false)
   /** Saved scroll-height immediately before a "Load older" fetch so
@@ -574,6 +578,13 @@ export default function ChatView({
       if (res.ok) {
         const updated: Session = await res.json()
         setSessionDetail(updated)
+        setPatchError(null)
+      } else {
+        // Surface refusals — the backend 409s a provider/account switch
+        // while the agent is mid-turn or a handover is already running.
+        // Silently ignoring those made the model picker look broken.
+        const err = (await res.json().catch(() => null)) as { error?: string } | null
+        setPatchError(err?.error ?? `update failed (${res.status})`)
       }
     } catch {
       /* ignore */
@@ -756,6 +767,15 @@ export default function ChatView({
           <span>Some session details failed to load.</span>
           <button type="button" onClick={() => setMetaRetryNonce((n) => n + 1)}>
             Retry
+          </button>
+        </div>
+      )}
+
+      {patchError && (
+        <div className="fetch-error-banner" role="alert" data-testid="chat-patch-error">
+          <span>{patchError}</span>
+          <button type="button" onClick={() => setPatchError(null)}>
+            Dismiss
           </button>
         </div>
       )}

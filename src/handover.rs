@@ -177,6 +177,33 @@ pub async fn begin_handover(
         )
         .await?;
 
+    // Ask the outgoing provider to exit once the doc turn's result lands.
+    // Load-bearing, twice over:
+    //
+    // - Mid-stream providers (Claude) keep one long-lived child per session
+    //   and deliver a `ProcessCompletion` only when that child EXITS — not
+    //   at end of turn. The completion listener that calls
+    //   `finalize_handover` would otherwise not fire until the 30-minute
+    //   idle reaper recycles the child, leaving the session stuck in
+    //   "handover in progress" (composer locked, sends 409ing) the whole
+    //   time.
+    // - The old child is authenticated as the OUTGOING provider/account and
+    //   can never serve a turn after the switch. If it stayed alive, the
+    //   provider's run map would still hold it and the incoming model's
+    //   first message would be written to the stale child's stdin.
+    //
+    // The shutdown request rides the same FIFO stdin channel as the doc
+    // turn just dispatched, so it cannot overtake it: the stream loop marks
+    // the doc turn active, then records the shutdown, then exits right
+    // after the doc turn's result. Default no-op for per-turn providers
+    // (mock/ollama/grok/cursor), which already deliver a completion after
+    // every turn.
+    crate::provider::manager::shutdown_after_turn_via_registry(
+        &state.provider_registry,
+        session_id,
+    )
+    .await;
+
     Ok(())
 }
 
