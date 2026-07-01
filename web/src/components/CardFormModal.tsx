@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState, type FormEvent } from 'react'
 import { useProjectsStore } from '../store/projects'
-import { useResourcesStore } from '../store/resources'
+import { effortOptionsForModel, useResourcesStore } from '../store/resources'
 import { authedFetch } from '../store/auth'
 import type { Card } from '../types/api'
 import DependencyPickerModal from './DependencyPickerModal'
@@ -21,15 +21,6 @@ interface ModelInfo {
   id: string
   display_name: string
 }
-
-const EFFORT_OPTIONS = [
-  { value: '', label: 'Default' },
-  { value: 'low', label: 'Low' },
-  { value: 'medium', label: 'Medium' },
-  { value: 'high', label: 'High' },
-  { value: 'xhigh', label: 'Extra high' },
-  { value: 'max', label: 'Max' },
-]
 
 /**
  * One modal for both creating and editing a card. The two flows share so much
@@ -71,6 +62,7 @@ export default function CardFormModal(props: CardFormProps) {
   const workflows = useResourcesStore((s) => s.workflows)
   const fetchWorkflows = useResourcesStore((s) => s.fetchWorkflows)
   const models = useResourcesStore((s) => s.models)
+  const providers = useResourcesStore((s) => s.providers)
   const fetchModels = useResourcesStore((s) => s.fetchModels)
   const [priorities, setPriorities] = useState<{ label: string; value: number }[]>([
     { label: 'Critical', value: 0 },
@@ -89,6 +81,16 @@ export default function CardFormModal(props: CardFormProps) {
       })
       .catch(() => {})
   }, [fetchWorkflows, fetchModels])
+
+  // Effort options follow the chosen model's provider.
+  const effortOptions = useMemo(() => effortOptionsForModel(model, providers), [model, providers])
+  // Clear a now-invalid effort back to Default on model change so we never
+  // save one the provider can't use.
+  const handleModelChange = (id: string) => {
+    setModel(id)
+    const opts = effortOptionsForModel(id, providers)
+    if (providers.length > 0 && effort && !opts.some((o) => o.value === effort)) setEffort('')
+  }
 
   const projectWorkflowId = project?.workflow
   const projectWorkflowName = workflows.find((w) => w.id === projectWorkflowId)?.name ?? null
@@ -238,7 +240,7 @@ export default function CardFormModal(props: CardFormProps) {
             <label className="form-label">Model</label>
             <ModelPicker
               value={model}
-              onChange={setModel}
+              onChange={handleModelChange}
               models={models as ModelInfo[]}
               testId="card-model"
             />
@@ -250,7 +252,7 @@ export default function CardFormModal(props: CardFormProps) {
               value={effort}
               onChange={(e) => setEffort(e.target.value)}
             >
-              {EFFORT_OPTIONS.map((o) => (
+              {effortOptions.map((o) => (
                 <option key={o.value} value={o.value}>
                   {o.label}
                 </option>

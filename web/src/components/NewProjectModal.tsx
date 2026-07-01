@@ -1,7 +1,7 @@
-import { useEffect, useState, type FormEvent } from 'react'
+import { useEffect, useMemo, useState, type FormEvent } from 'react'
 import { useProjectsStore } from '../store/projects'
 import { useFoldersStore } from '../store/folders'
-import { useResourcesStore } from '../store/resources'
+import { effortOptionsForModel, useResourcesStore } from '../store/resources'
 import { authedFetch } from '../store/auth'
 import Modal from './Modal'
 import ModelPicker from './ModelPicker'
@@ -14,21 +14,13 @@ interface Props {
   onClose: () => void
 }
 
-const EFFORT_OPTIONS = [
-  { value: '', label: 'Default' },
-  { value: 'low', label: 'Low' },
-  { value: 'medium', label: 'Medium' },
-  { value: 'high', label: 'High' },
-  { value: 'xhigh', label: 'Extra high' },
-  { value: 'max', label: 'Max' },
-]
-
 export default function NewProjectModal({ onClose }: Props) {
   const createProject = useProjectsStore((s) => s.createProject)
   const setActiveProject = useProjectsStore((s) => s.setActiveProject)
   const folders = useFoldersStore((s) => s.folders)
   const fetchFolders = useFoldersStore((s) => s.fetchFolders)
   const models = useResourcesStore((s) => s.models)
+  const providers = useResourcesStore((s) => s.providers)
   const fetchWorkflows = useResourcesStore((s) => s.fetchWorkflows)
   const fetchModels = useResourcesStore((s) => s.fetchModels)
 
@@ -63,6 +55,17 @@ export default function NewProjectModal({ onClose }: Props) {
     fetchWorkflows()
     fetchModels()
   }, [fetchWorkflows, fetchModels])
+
+  // Effort options follow the chosen model's provider.
+  const effortOptions = useMemo(() => effortOptionsForModel(model, providers), [model, providers])
+  // When the model changes to a provider that doesn't offer the current
+  // effort, clear it back to Default so we never submit an effort the
+  // provider can't use.
+  const handleModelChange = (id: string) => {
+    setModel(id)
+    const opts = effortOptionsForModel(id, providers)
+    if (providers.length > 0 && effort && !opts.some((o) => o.value === effort)) setEffort('')
+  }
 
   const handleSubmit = async (e: FormEvent) => {
     e.preventDefault()
@@ -232,7 +235,7 @@ export default function NewProjectModal({ onClose }: Props) {
                 <label className="form-label">Model</label>
                 <ModelPicker
                   value={model}
-                  onChange={setModel}
+                  onChange={handleModelChange}
                   models={models}
                   testId="new-project-model"
                 />
@@ -247,7 +250,7 @@ export default function NewProjectModal({ onClose }: Props) {
                   value={effort}
                   onChange={(e) => setEffort(e.target.value)}
                 >
-                  {EFFORT_OPTIONS.map((o) => (
+                  {effortOptions.map((o) => (
                     <option key={o.value} value={o.value}>
                       {o.label}
                     </option>

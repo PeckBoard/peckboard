@@ -1,6 +1,7 @@
-import { useEffect, useState, type FormEvent } from 'react'
+import { useEffect, useMemo, useState, type FormEvent } from 'react'
 import { useProjectsStore } from '../store/projects'
 import { authedFetch } from '../store/auth'
+import { effortOptionsForModel, type ProviderInfo } from '../store/resources'
 import type { Project } from '../types/api'
 import Modal from './Modal'
 import ModelPicker from './ModelPicker'
@@ -16,15 +17,6 @@ interface ModelInfo {
   id: string
   display_name: string
 }
-
-const EFFORT_OPTIONS = [
-  { value: '', label: 'Default' },
-  { value: 'low', label: 'Low' },
-  { value: 'medium', label: 'Medium' },
-  { value: 'high', label: 'High' },
-  { value: 'xhigh', label: 'Extra high' },
-  { value: 'max', label: 'Max' },
-]
 
 export default function EditProjectModal({ project, onClose }: Props) {
   const updateProject = useProjectsStore((s) => s.updateProject)
@@ -43,15 +35,27 @@ export default function EditProjectModal({ project, onClose }: Props) {
   const [showInstructions, setShowInstructions] = useState(false)
 
   const [models, setModels] = useState<ModelInfo[]>([])
+  const [providers, setProviders] = useState<ProviderInfo[]>([])
 
   useEffect(() => {
     authedFetch('/api/models')
       .then((res) => (res.ok ? res.json() : null))
       .then((data) => {
         if (data?.models) setModels(data.models)
+        if (data?.providers) setProviders(data.providers)
       })
       .catch(() => {})
   }, [])
+
+  // Effort options follow the chosen model's provider.
+  const effortOptions = useMemo(() => effortOptionsForModel(model, providers), [model, providers])
+  // Clear a now-invalid effort back to Default on model change so we never
+  // save one the provider can't use.
+  const handleModelChange = (id: string) => {
+    setModel(id)
+    const opts = effortOptionsForModel(id, providers)
+    if (providers.length > 0 && effort && !opts.some((o) => o.value === effort)) setEffort('')
+  }
 
   const handleSubmit = async (e: FormEvent) => {
     e.preventDefault()
@@ -147,7 +151,7 @@ export default function EditProjectModal({ project, onClose }: Props) {
             <label className="form-label">Model</label>
             <ModelPicker
               value={model}
-              onChange={setModel}
+              onChange={handleModelChange}
               models={models}
               testId="edit-project-model"
             />
@@ -159,7 +163,7 @@ export default function EditProjectModal({ project, onClose }: Props) {
               value={effort}
               onChange={(e) => setEffort(e.target.value)}
             >
-              {EFFORT_OPTIONS.map((o) => (
+              {effortOptions.map((o) => (
                 <option key={o.value} value={o.value}>
                   {o.label}
                 </option>

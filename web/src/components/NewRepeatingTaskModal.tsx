@@ -2,7 +2,7 @@ import { useEffect, useMemo, useState, type FormEvent } from 'react'
 import type { RepeatingScheduleKind, RepeatingTask } from '../types/api'
 import { useFoldersStore } from '../store/folders'
 import { useRepeatingTasksStore } from '../store/repeatingTasks'
-import { useResourcesStore, type ModelInfo } from '../store/resources'
+import { effortOptionsForModel, useResourcesStore, type ModelInfo } from '../store/resources'
 import Modal from './Modal'
 import ModelPicker from './ModelPicker'
 import RepeatingTaskScheduleEditor from './RepeatingTaskScheduleEditor'
@@ -13,21 +13,13 @@ interface Props {
   onSaved?: (task: RepeatingTask) => void
 }
 
-const EFFORT_OPTIONS = [
-  { value: '', label: 'Default' },
-  { value: 'low', label: 'Low' },
-  { value: 'medium', label: 'Medium' },
-  { value: 'high', label: 'High' },
-  { value: 'xhigh', label: 'Extra high' },
-  { value: 'max', label: 'Max' },
-]
-
 export default function NewRepeatingTaskModal({ initial, onClose, onSaved }: Props) {
   const folders = useFoldersStore((s) => s.folders)
   const fetchFolders = useFoldersStore((s) => s.fetchFolders)
   const createTask = useRepeatingTasksStore((s) => s.createTask)
   const updateTask = useRepeatingTasksStore((s) => s.updateTask)
   const models = useResourcesStore((s) => s.models)
+  const providers = useResourcesStore((s) => s.providers)
   const fetchModels = useResourcesStore((s) => s.fetchModels)
 
   const editing = !!initial
@@ -52,6 +44,15 @@ export default function NewRepeatingTaskModal({ initial, onClose, onSaved }: Pro
   const [scheduleValue, setScheduleValue] = useState<Record<string, number>>(initialScheduleValue)
   const [model, setModel] = useState<string>(initial?.model ?? '')
   const [effort, setEffort] = useState<string>(initial?.effort ?? '')
+  // Effort options follow the chosen model's provider.
+  const effortOptions = useMemo(() => effortOptionsForModel(model, providers), [model, providers])
+  // Clear a now-invalid effort back to Default on model change so we never
+  // save one the provider can't use.
+  const handleModelChange = (id: string) => {
+    setModel(id)
+    const opts = effortOptionsForModel(id, providers)
+    if (providers.length > 0 && effort && !opts.some((o) => o.value === effort)) setEffort('')
+  }
   const [enabled, setEnabled] = useState<boolean>(initial?.enabled ?? true)
   const [error, setError] = useState('')
   const [loading, setLoading] = useState(false)
@@ -194,7 +195,7 @@ export default function NewRepeatingTaskModal({ initial, onClose, onSaved }: Pro
           <ModelPicker
             id="repeating-task-model"
             value={model}
-            onChange={setModel}
+            onChange={handleModelChange}
             models={models as ModelInfo[]}
             testId="repeating-task-model"
           />
@@ -213,7 +214,7 @@ export default function NewRepeatingTaskModal({ initial, onClose, onSaved }: Pro
             value={effort}
             onChange={(e) => setEffort(e.target.value)}
           >
-            {EFFORT_OPTIONS.map((o) => (
+            {effortOptions.map((o) => (
               <option key={o.value} value={o.value}>
                 {o.label}
               </option>

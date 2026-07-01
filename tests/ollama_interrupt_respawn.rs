@@ -130,6 +130,7 @@ async fn build_state(base_url: String) -> (Arc<AppState>, String) {
                 id: "ollama".into(),
                 display_name: "Ollama".into(),
                 models: default_models(),
+                effort_levels: vec![],
             },
         )
         .await;

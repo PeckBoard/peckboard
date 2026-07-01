@@ -161,6 +161,10 @@ impl BuiltinPlugin for CursorPlugin {
                     id: "cursor".into(),
                     display_name: "Cursor".into(),
                     models: default_models(),
+                    // Cursor bakes the effort into the model id itself
+                    // (e.g. `gpt-5.3-codex-high`), so there's no separate
+                    // effort control to expose.
+                    effort_levels: vec![],
                 },
             )
             .await;

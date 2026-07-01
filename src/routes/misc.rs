@@ -70,6 +70,10 @@ async fn list_models(State(state): State<Arc<AppState>>) -> impl IntoResponse {
                 "display_name": m.display_name,
                 "capabilities": m.capabilities,
             })).collect::<Vec<_>>(),
+            "effort_levels": p.effort_levels.iter().map(|e| serde_json::json!({
+                "id": e.id,
+                "label": e.label,
+            })).collect::<Vec<_>>(),
         })).collect::<Vec<_>>(),
         "models": providers.iter().flat_map(|p| p.models.iter().map(move |m| serde_json::json!({
             "id": format!("{}:{}", p.id, m.id),

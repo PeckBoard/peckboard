@@ -12,7 +12,7 @@ use std::time::Duration;
 
 use crate::plugin::builtin::{BuiltinPlugin, Permission, PluginInitContext, PluginMetadata};
 use crate::provider::claude::{ClaudeProvider, discover_models};
-use crate::provider::registry::ProviderInfo;
+use crate::provider::registry::{ProviderInfo, standard_effort_levels};
 
 pub struct ClaudeCodePlugin;
 
@@ -61,6 +61,7 @@ impl BuiltinPlugin for ClaudeCodePlugin {
                     id: "claude".into(),
                     display_name: "Claude (CLI)".into(),
                     models: discover_models(),
+                    effort_levels: standard_effort_levels(),
                 },
             )
             .await;

@@ -1029,6 +1029,7 @@ async fn registry_with_recorder() -> (Arc<ProviderRegistry>, Arc<RecordingProvid
                 id: "recording".into(),
                 display_name: "Recording".into(),
                 models: vec![],
+                effort_levels: vec![],
             },
         )
         .await;

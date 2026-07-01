@@ -553,6 +553,7 @@ mod midstream {
                         display_name: "Any".into(),
                         capabilities: vec![],
                     }],
+                    effort_levels: vec![],
                 },
             )
             .await;

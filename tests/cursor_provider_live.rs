@@ -99,6 +99,7 @@ async fn cursor_auto_turn_completes_end_to_end() {
                 id: "cursor".into(),
                 display_name: "Cursor".into(),
                 models: default_models(),
+                effort_levels: vec![],
             },
         )
         .await;
@@ -234,6 +235,7 @@ async fn cursor_models_surface_through_catalog_api() {
                 id: "cursor".into(),
                 display_name: "Cursor".into(),
                 models: default_models(),
+                effort_levels: vec![],
             },
         )
         .await;

@@ -894,6 +894,10 @@ pub async fn register_mock_provider(registry: &ProviderRegistry) {
                 id: "mock".into(),
                 display_name: "Mock".into(),
                 models: mock_model_infos(),
+                // Mirrors the plugin-registered mock provider: the standard
+                // ladder so effort-picker e2e/tests have a deterministic
+                // provider that offers effort levels.
+                effort_levels: crate::provider::registry::standard_effort_levels(),
             },
         )
         .await;

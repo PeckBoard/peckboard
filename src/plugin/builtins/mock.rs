@@ -10,7 +10,7 @@ use std::sync::Arc;
 
 use crate::plugin::builtin::{BuiltinPlugin, Permission, PluginInitContext, PluginMetadata};
 use crate::provider::mock::{MockProvider, mock_model_infos};
-use crate::provider::registry::ProviderInfo;
+use crate::provider::registry::{ProviderInfo, standard_effort_levels};
 
 pub struct MockPlugin;
 
@@ -44,6 +44,10 @@ impl BuiltinPlugin for MockPlugin {
                     id: "mock".into(),
                     display_name: "Mock".into(),
                     models: mock_model_infos(),
+                    // The mock provider ignores effort at run time, but it's
+                    // the deterministic vehicle e2e uses to exercise the
+                    // effort picker, so it exposes the standard ladder.
+                    effort_levels: standard_effort_levels(),
                 },
             )
             .await;

@@ -11,7 +11,7 @@ use std::sync::Arc;
 
 use crate::plugin::builtin::{BuiltinPlugin, Permission, PluginInitContext, PluginMetadata};
 use crate::provider::grok::{GrokProvider, default_models};
-use crate::provider::registry::ProviderInfo;
+use crate::provider::registry::{ProviderInfo, standard_effort_levels};
 
 pub struct GrokPlugin;
 
@@ -53,6 +53,7 @@ impl BuiltinPlugin for GrokPlugin {
                     id: "grok".into(),
                     display_name: "Grok (CLI)".into(),
                     models: default_models(),
+                    effort_levels: standard_effort_levels(),
                 },
             )
             .await;

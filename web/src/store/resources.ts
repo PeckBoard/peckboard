@@ -19,10 +19,42 @@ export interface ModelInfo {
   display_name: string
 }
 
+/** One selectable reasoning-effort level, as served per-provider by
+ *  `/api/models`. `id` is passed to the provider's `--effort` flag; `label`
+ *  is shown in the effort picker. */
+export interface EffortLevel {
+  id: string
+  label: string
+}
+
 export interface ProviderInfo {
   id: string
   display_name: string
   models: ModelInfo[]
+  /** Effort levels this provider exposes. Empty ⇒ the provider has no
+   *  effort control, so only the "Default" option is offered. */
+  effort_levels?: EffortLevel[]
+}
+
+/** The always-present "Default" effort option (no override — the provider
+ *  decides). Value is `''` so it round-trips as "no effort" everywhere. */
+export const DEFAULT_EFFORT_OPTION = { value: '', label: 'Default' }
+
+/**
+ * Effort dropdown options for a given model id. Derives the provider from the
+ * `provider:model` prefix (bare ids default to `claude`, matching the backend),
+ * then returns "Default" followed by that provider's effort levels. This is how
+ * the effort picker "loads effort levels from the provider" once a model is
+ * chosen — Claude/Grok expose the full ladder, Cursor/Ollama/Mock only Default.
+ */
+export function effortOptionsForModel(
+  modelId: string | null | undefined,
+  providers: ProviderInfo[],
+): { value: string; label: string }[] {
+  const providerId = modelId && modelId.includes(':') ? modelId.split(':')[0] : 'claude'
+  const provider = providers.find((p) => p.id === providerId)
+  const levels = provider?.effort_levels ?? []
+  return [DEFAULT_EFFORT_OPTION, ...levels.map((l) => ({ value: l.id, label: l.label }))]
 }
 
 interface ResourcesState {

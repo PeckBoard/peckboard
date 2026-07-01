@@ -1,7 +1,7 @@
-import { useEffect, useState, type FormEvent } from 'react'
+import { useEffect, useMemo, useState, type FormEvent } from 'react'
 import { useSessionsStore } from '../store/sessions'
 import { useFoldersStore } from '../store/folders'
-import { useResourcesStore } from '../store/resources'
+import { effortOptionsForModel, useResourcesStore } from '../store/resources'
 import Modal from './Modal'
 import ModelPicker from './ModelPicker'
 
@@ -16,6 +16,7 @@ export default function NewSessionModal({ onClose }: Props) {
   const fetchFolders = useFoldersStore((s) => s.fetchFolders)
   const createFolder = useFoldersStore((s) => s.createFolder)
   const models = useResourcesStore((s) => s.models)
+  const providers = useResourcesStore((s) => s.providers)
   const fetchModels = useResourcesStore((s) => s.fetchModels)
 
   const [name, setName] = useState('')
@@ -23,7 +24,7 @@ export default function NewSessionModal({ onClose }: Props) {
   const [chosenFolderId, setChosenFolderId] = useState<string | null>(null)
   const folderId = chosenFolderId ?? folders[0]?.id ?? ''
   const [model, setModel] = useState('')
-  const [effort, setEffort] = useState('default')
+  const [effort, setEffort] = useState('')
   const [newFolderName, setNewFolderName] = useState('')
   const [newFolderPath, setNewFolderPath] = useState('')
   const [showNewFolder, setShowNewFolder] = useState(false)
@@ -37,6 +38,16 @@ export default function NewSessionModal({ onClose }: Props) {
   useEffect(() => {
     fetchModels()
   }, [fetchModels])
+
+  // Effort options follow the chosen model's provider.
+  const effortOptions = useMemo(() => effortOptionsForModel(model, providers), [model, providers])
+  // Clear a now-invalid effort back to Default on model change so we never
+  // submit one the provider can't use.
+  const handleModelChange = (id: string) => {
+    setModel(id)
+    const opts = effortOptionsForModel(id, providers)
+    if (providers.length > 0 && effort && !opts.some((o) => o.value === effort)) setEffort('')
+  }
 
   const handleCreateFolder = async () => {
     if (!newFolderName.trim() || !newFolderPath.trim()) return
@@ -64,7 +75,7 @@ export default function NewSessionModal({ onClose }: Props) {
         name.trim(),
         folderId,
         model || undefined,
-        effort !== 'default' ? effort : undefined,
+        effort || undefined,
       )
       setActiveSession(session.id)
       onClose()
@@ -145,7 +156,7 @@ export default function NewSessionModal({ onClose }: Props) {
           <label className="form-label">Model</label>
           <ModelPicker
             value={model}
-            onChange={setModel}
+            onChange={handleModelChange}
             models={models}
             defaultLabel="Server default"
             ariaLabel="Select model"
@@ -155,10 +166,11 @@ export default function NewSessionModal({ onClose }: Props) {
         <div className="form-field">
           <label className="form-label">Effort</label>
           <select className="form-input" value={effort} onChange={(e) => setEffort(e.target.value)}>
-            <option value="default">Default</option>
-            <option value="low">Low</option>
-            <option value="medium">Medium</option>
-            <option value="high">High</option>
+            {effortOptions.map((o) => (
+              <option key={o.value} value={o.value}>
+                {o.label}
+              </option>
+            ))}
           </select>
         </div>
         {error && <p className="form-error">{error}</p>}

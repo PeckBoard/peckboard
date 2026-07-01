@@ -1,10 +1,44 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
+use serde::{Deserialize, Serialize};
 use tokio::sync::Mutex;
 
 use super::agent::AgentProvider;
 use super::stream::ModelInfo;
+
+/// One selectable reasoning-effort level a provider exposes.
+///
+/// `id` is the raw value handed to the provider (e.g. the CLI `--effort`
+/// flag); `label` is the human-facing name shown in the effort picker.
+/// Every provider supplies its own set — Claude and Grok expose the full
+/// ladder, Cursor bakes effort into the model id, and Ollama/Mock have
+/// none — so the UI can load a model's provider's levels the moment a
+/// model is chosen.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EffortLevel {
+    pub id: String,
+    pub label: String,
+}
+
+/// The standard reasoning-effort ladder shared by the Claude and Grok CLIs:
+/// `low`, `medium`, `high`, `xhigh` (Extra high), `max`. Providers that
+/// support the same set reuse this so the ladder is defined once.
+pub fn standard_effort_levels() -> Vec<EffortLevel> {
+    [
+        ("low", "Low"),
+        ("medium", "Medium"),
+        ("high", "High"),
+        ("xhigh", "Extra high"),
+        ("max", "Max"),
+    ]
+    .into_iter()
+    .map(|(id, label)| EffortLevel {
+        id: id.into(),
+        label: label.into(),
+    })
+    .collect()
+}
 
 /// Registered provider metadata.
 #[derive(Debug, Clone)]
@@ -12,6 +46,11 @@ pub struct ProviderInfo {
     pub id: String,
     pub display_name: String,
     pub models: Vec<ModelInfo>,
+    /// Effort levels this provider exposes for the effort picker. Empty when
+    /// the provider has no reasoning-effort control (e.g. Ollama, or Cursor
+    /// where effort is baked into the model id). The UI always prepends a
+    /// "Default" option, so an empty list means "Default only".
+    pub effort_levels: Vec<EffortLevel>,
 }
 
 struct RegisteredProvider {
@@ -163,6 +202,7 @@ mod tests {
                             capabilities: vec!["code".into()],
                         },
                     ],
+                    effort_levels: standard_effort_levels(),
                 },
             )
             .await;
@@ -193,6 +233,7 @@ mod tests {
                         display_name: "Opus".into(),
                         capabilities: vec![],
                     }],
+                    effort_levels: vec![],
                 },
             )
             .await;

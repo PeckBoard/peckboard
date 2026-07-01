@@ -585,6 +585,7 @@ pub async fn register_claude_provider(registry: &ProviderRegistry) {
                 id: "claude".into(),
                 display_name: "Claude (CLI)".into(),
                 models,
+                effort_levels: crate::provider::registry::standard_effort_levels(),
             },
         )
         .await;

@@ -5,6 +5,7 @@ import type { Event, Session } from '../types/api'
 import { authedFetch } from '../store/auth'
 import { useWsStore } from '../store/ws'
 import { useSessionsStore, type PendingUserMessage } from '../store/sessions'
+import { effortOptionsForModel, type ProviderInfo } from '../store/resources'
 import InputBar from './InputBar'
 import ToolUseBlock from './ToolUseBlock'
 import ConfirmDialog from './ConfirmDialog'
@@ -270,6 +271,7 @@ export default function ChatView({
     onConfirm: () => void
   } | null>(null)
   const [availableModels, setAvailableModels] = useState<ModelInfo[]>([])
+  const [availableProviders, setAvailableProviders] = useState<ProviderInfo[]>([])
   const [modelsError, setModelsError] = useState(false)
   const [loadedTodos, setLoadedTodos] = useState<TodoItem[]>([])
   // Session id whose session-detail / todo-snapshot fetch failed. The
@@ -373,6 +375,9 @@ export default function ChatView({
       .then((data) => {
         if (data && Array.isArray(data.models)) {
           setAvailableModels(data.models as ModelInfo[])
+          if (Array.isArray(data.providers)) {
+            setAvailableProviders(data.providers as ProviderInfo[])
+          }
         } else {
           setModelsError(true)
         }
@@ -559,11 +564,11 @@ export default function ChatView({
     }
   }
 
-  const EFFORT_LEVELS: { id: string; label: string }[] = [
-    { id: 'low', label: 'Low' },
-    { id: 'medium', label: 'Medium' },
-    { id: 'high', label: 'High' },
-  ]
+  // Effort options for the current session's model, loaded from that
+  // model's provider (Claude/Grok expose the full ladder; Cursor/Ollama
+  // only "Default"). Includes the Default entry (value '') which clears
+  // any override.
+  const effortOptions = effortOptionsForModel(sessionDetail?.model, availableProviders)
 
   const modelDisplayName = (id: string | null | undefined): string => {
     if (!id) return 'default'
@@ -595,10 +600,10 @@ export default function ChatView({
     {
       label: 'Effort',
       hint: sessionDetail?.effort ?? 'default',
-      submenu: EFFORT_LEVELS.map((e) => ({
-        label: e.label,
-        active: e.id === sessionDetail?.effort,
-        onSelect: () => patchSession({ effort: e.id }),
+      submenu: effortOptions.map((o) => ({
+        label: o.label,
+        active: (sessionDetail?.effort ?? '') === o.value,
+        onSelect: () => patchSession({ effort: o.value || null }),
       })),
     },
     { divider: true },

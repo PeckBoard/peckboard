@@ -190,6 +190,8 @@ impl BuiltinPlugin for OllamaPlugin {
                     id: "ollama".into(),
                     display_name: "Ollama".into(),
                     models: default_models(),
+                    // Local models have no reasoning-effort control.
+                    effort_levels: vec![],
                 },
             )
             .await;
