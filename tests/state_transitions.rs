@@ -50,6 +50,7 @@ async fn build_state() -> Arc<AppState> {
             host: "127.0.0.1".into(),
             data_dir: data_dir.clone(),
             mdns: false,
+            keep_alive_hours: 0,
         },
         db,
         plugins,

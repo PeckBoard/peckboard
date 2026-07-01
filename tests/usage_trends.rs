@@ -43,6 +43,7 @@ async fn build_state() -> (Arc<AppState>, String) {
         host: "127.0.0.1".into(),
         data_dir: tmp.path().to_path_buf(),
         mdns: false,
+        keep_alive_hours: 0,
     };
     let db = Db::in_memory().unwrap();
     let plugins = Arc::new(PluginManager::new(&config.data_dir, db.clone()));

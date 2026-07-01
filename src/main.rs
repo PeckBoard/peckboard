@@ -219,6 +219,10 @@ async fn main() -> anyhow::Result<()> {
     state.repeating_task_manager.spawn_lock_sweeper();
     tracing::info!("Lock-map sweepers started (5min interval)");
 
+    // Provider login keep-alive: periodically ping each auth login with a
+    // throwaway "hi" so tokens don't go stale. No-op when the interval is 0.
+    peckboard::keepalive::spawn(state.clone(), state.config.keep_alive_hours);
+
     let app = api_router(state.clone())
         .layer(axum::extract::DefaultBodyLimit::max(20 * 1024 * 1024))
         .layer(middleware::from_fn(security_headers))

@@ -113,12 +113,16 @@ async fn create_folder(
 /// GET /api/folders
 async fn list_folders(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     tracing::info!("Listing folders");
-    let folders = state.db.list_folders().await.map_err(|e| {
+    let mut folders = state.db.list_folders().await.map_err(|e| {
         (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(serde_json::json!({ "error": e.to_string() })),
         )
     })?;
+
+    // Hide the internal keep-alive folder — it's an implementation detail of
+    // the login keep-alive, not a place the user picks work from.
+    folders.retain(|f| f.id != crate::keepalive::KEEPALIVE_FOLDER_ID);
 
     Ok::<_, (StatusCode, Json<serde_json::Value>)>(Json(serde_json::json!(folders)))
 }

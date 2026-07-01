@@ -38,6 +38,12 @@ pub struct CliArgs {
     /// discovery (e.g. an iPad on the same Wi-Fi).
     #[arg(long, env = "PECKBOARD_MDNS")]
     pub mdns: bool,
+
+    /// How often (in hours) to run the provider login keep-alive, which
+    /// pings each auth login (Claude/Grok per account, Cursor) with a
+    /// throwaway "hi" so tokens don't go stale. `0` disables it.
+    #[arg(long, env = "PECKBOARD_KEEPALIVE_HOURS", default_value = "4")]
+    pub keep_alive_hours: u64,
 }
 
 #[derive(Debug, Clone)]
@@ -47,6 +53,7 @@ pub struct Config {
     pub host: String,
     pub data_dir: PathBuf,
     pub mdns: bool,
+    pub keep_alive_hours: u64,
 }
 
 impl Config {
@@ -67,6 +74,7 @@ impl Config {
             host: args.host,
             data_dir,
             mdns: args.mdns,
+            keep_alive_hours: args.keep_alive_hours,
         }
     }
 }
@@ -87,6 +95,7 @@ mod tests {
             reset_password: false,
             user: None,
             mdns: false,
+            keep_alive_hours: 4,
         }
     }
 
@@ -98,6 +107,15 @@ mod tests {
         assert_eq!(args.host, "0.0.0.0");
         assert!(!args.reset_password);
         assert!(args.user.is_none());
+        assert_eq!(args.keep_alive_hours, 4);
+    }
+
+    #[test]
+    fn keep_alive_hours_parses_and_disables_at_zero() {
+        let on = CliArgs::try_parse_from(["peckboard", "--keep-alive-hours", "12"]).unwrap();
+        assert_eq!(on.keep_alive_hours, 12);
+        let off = CliArgs::try_parse_from(["peckboard", "--keep-alive-hours", "0"]).unwrap();
+        assert_eq!(off.keep_alive_hours, 0);
     }
 
     #[test]

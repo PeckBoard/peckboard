@@ -140,6 +140,7 @@ mod tests {
                 host: "127.0.0.1".into(),
                 data_dir: dir.to_path_buf(),
                 mdns: false,
+                keep_alive_hours: 0,
             },
             db: Db::in_memory().unwrap(),
             plugins: Arc::new(crate::plugin::manager::PluginManager::empty()),
