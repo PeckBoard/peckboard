@@ -5,6 +5,15 @@
 
 use super::context::McpToolDef;
 
+/// The canonical names of every MCP tool the Peckboard server exposes, in
+/// definition order. Single source of truth: the MCP `tools/list` response and
+/// each provider's `--allowedTools` allow-list both derive from this, so adding
+/// a tool to [`tool_definitions`] offers it to every session without a
+/// per-provider edit.
+pub fn tool_names() -> Vec<String> {
+    tool_definitions().into_iter().map(|t| t.name).collect()
+}
+
 pub(super) fn tool_definitions() -> Vec<McpToolDef> {
     vec![
         McpToolDef {
@@ -272,7 +281,7 @@ pub(super) fn tool_definitions() -> Vec<McpToolDef> {
         },
         McpToolDef {
             name: "update_card".into(),
-            description: "Update fields on an existing card.".into(),
+            description: "Update fields on an existing card. Only the fields you pass are changed; omit a field to leave it as-is.".into(),
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
@@ -295,6 +304,23 @@ pub(super) fn tool_definitions() -> Vec<McpToolDef> {
                     "step": {
                         "type": "string",
                         "description": "New workflow step"
+                    },
+                    "workflow": {
+                        "type": "string",
+                        "description": "New workflow id for the card (must be a known workflow). Pass `step` alongside it if the card's current step doesn't exist in the new workflow."
+                    },
+                    "model": {
+                        "type": ["string", "null"],
+                        "description": "New model override (e.g. claude-opus-4-8), or null to clear it and fall back to the project/host default."
+                    },
+                    "effort": {
+                        "type": ["string", "null"],
+                        "description": "New effort level (low, medium, high, xhigh, max), or null to clear it."
+                    },
+                    "depends_on": {
+                        "type": "array",
+                        "items": { "type": "string" },
+                        "description": "Replace the card's dependency set with these card ids (must be cards in the same project; may not form a cycle). Pass an empty array to clear all dependencies. Omit to leave dependencies unchanged."
                     },
                     "blocked": {
                         "type": "boolean",

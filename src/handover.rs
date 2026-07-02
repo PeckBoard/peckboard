@@ -164,6 +164,8 @@ pub async fn begin_handover(
         metadata: serde_json::Value::Null,
         system_prompt_suffix: None,
         system_prompt_override: None,
+        // Populated in SessionManager::final_config from the plugin registry.
+        extra_allowed_tools: Vec::new(),
     };
 
     state

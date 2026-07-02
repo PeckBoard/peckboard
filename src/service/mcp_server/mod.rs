@@ -14,6 +14,7 @@ mod spawn;
 pub use auth::McpTokenRegistry;
 pub use config::{delete_mcp_config, write_mcp_config};
 pub use context::{ExpertDispatcher, McpToolDef, ScopedFolderId, ScopedProjectId, ToolCallContext};
+pub use schemas::tool_names;
 pub use spawn::{AppExpertDispatcher, AppLiveHost};
 
 use serde_json::Value;
@@ -717,6 +718,183 @@ mod tests {
             )
             .await;
         assert!(err.is_err());
+    }
+
+    /// update_card can now edit the fields create_card sets but the tool
+    /// previously couldn't reach: workflow, model, effort, and the dependency
+    /// set — including validation (unknown workflow, cross-project / cycle
+    /// dependencies) and clearing a nullable override.
+    #[tokio::test]
+    async fn test_update_card_edits_extended_fields() {
+        use crate::db::models::{NewFolder, NewProject};
+
+        let registry = McpToolRegistry::new();
+        let db = Arc::new(crate::db::Db::in_memory().unwrap());
+        let ts = chrono::Utc::now().to_rfc3339();
+
+        db.create_folder(NewFolder {
+            id: "f1".into(),
+            name: "Folder".into(),
+            path: "/tmp/f".into(),
+            created_at: ts.clone(),
+        })
+        .await
+        .unwrap();
+        db.create_project(NewProject {
+            id: "p1".into(),
+            name: "Project".into(),
+            context: "".into(),
+            folder_id: "f1".into(),
+            worker_count: 1,
+            status: "active".into(),
+            workflow: "task".into(),
+            model: None,
+            effort: None,
+            parallel_instructions: false,
+            auto_notify_changes: true,
+            worker_communication: false,
+            created_at: ts.clone(),
+            last_accessed_at: ts.clone(),
+        })
+        .await
+        .unwrap();
+
+        let ctx = ToolCallContext {
+            session_id: "s1".into(),
+            project_id: Some("p1".into()),
+            card_id: None,
+            db: db.clone(),
+            broadcaster: crate::ws::broadcaster::Broadcaster::new(),
+            provider_registry: None,
+            data_dir: None,
+            folder_id: "f1".into(),
+        };
+
+        let a = registry
+            .handle_tool_call(
+                "create_card",
+                serde_json::json!({ "title": "A", "description": "prereq" }),
+                &ctx,
+            )
+            .await
+            .unwrap();
+        let a_id = a["card"]["id"].as_str().unwrap().to_string();
+        let b = registry
+            .handle_tool_call(
+                "create_card",
+                serde_json::json!({ "title": "B", "description": "editable" }),
+                &ctx,
+            )
+            .await
+            .unwrap();
+        let b_id = b["card"]["id"].as_str().unwrap().to_string();
+
+        // Edit workflow + model + effort + dependencies in one call.
+        let edited = registry
+            .handle_tool_call(
+                "update_card",
+                serde_json::json!({
+                    "card_id": b_id,
+                    "workflow": "research",
+                    "model": "claude-opus-4-8",
+                    "effort": "high",
+                    "depends_on": [a_id, b_id],
+                }),
+                &ctx,
+            )
+            .await
+            .unwrap();
+        assert_eq!(edited["card"]["workflow"], serde_json::json!("research"));
+        assert_eq!(
+            edited["card"]["model"],
+            serde_json::json!("claude-opus-4-8")
+        );
+        assert_eq!(edited["card"]["effort"], serde_json::json!("high"));
+        // The self-reference is silently dropped; only the real prereq remains.
+        assert_eq!(edited["card"]["depends_on"], serde_json::json!([a_id]));
+
+        // Unlike create_card, editing rejects a dependency on a non-existent
+        // card outright rather than silently dropping it, and leaves the set
+        // untouched.
+        let bad_dep = registry
+            .handle_tool_call(
+                "update_card",
+                serde_json::json!({ "card_id": b_id, "depends_on": ["does-not-exist"] }),
+                &ctx,
+            )
+            .await;
+        assert!(
+            bad_dep.is_err(),
+            "an unknown dependency id should be rejected"
+        );
+        assert_eq!(
+            db.list_card_dependencies(&b_id).await.unwrap(),
+            vec![a_id.clone()],
+            "a rejected dependency edit must not change the set"
+        );
+
+        // The change persisted to the row, not just the response.
+        let stored = db.get_card(&b_id).await.unwrap().unwrap();
+        assert_eq!(stored.workflow, "research");
+        assert_eq!(stored.model.as_deref(), Some("claude-opus-4-8"));
+
+        // An explicit null clears a nullable override; omitted fields are left
+        // untouched (workflow stays "research").
+        let cleared = registry
+            .handle_tool_call(
+                "update_card",
+                serde_json::json!({ "card_id": b_id, "model": null }),
+                &ctx,
+            )
+            .await
+            .unwrap();
+        assert_eq!(cleared["card"]["model"], serde_json::Value::Null);
+        assert_eq!(cleared["card"]["workflow"], serde_json::json!("research"));
+        assert_eq!(cleared["card"]["depends_on"], serde_json::json!([a_id]));
+
+        // Passing an empty array clears the dependency set.
+        let no_deps = registry
+            .handle_tool_call(
+                "update_card",
+                serde_json::json!({ "card_id": b_id, "depends_on": [] }),
+                &ctx,
+            )
+            .await
+            .unwrap();
+        assert_eq!(no_deps["card"]["depends_on"], serde_json::json!([]));
+
+        // Re-establish B -> A, then a cycle (A -> B) must be rejected and no
+        // dependency written for A.
+        registry
+            .handle_tool_call(
+                "update_card",
+                serde_json::json!({ "card_id": b_id, "depends_on": [a_id] }),
+                &ctx,
+            )
+            .await
+            .unwrap();
+        let cycle = registry
+            .handle_tool_call(
+                "update_card",
+                serde_json::json!({ "card_id": a_id, "depends_on": [b_id] }),
+                &ctx,
+            )
+            .await;
+        assert!(cycle.is_err(), "a dependency cycle should be rejected");
+        assert!(
+            db.list_card_dependencies(&a_id).await.unwrap().is_empty(),
+            "the rejected cycle must not have been persisted"
+        );
+
+        // An unknown workflow id is rejected.
+        let bad_wf = registry
+            .handle_tool_call(
+                "update_card",
+                serde_json::json!({ "card_id": b_id, "workflow": "no-such-workflow" }),
+                &ctx,
+            )
+            .await;
+        assert!(bad_wf.is_err(), "an unknown workflow id should be rejected");
     }
 
     #[tokio::test]

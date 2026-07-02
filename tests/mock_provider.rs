@@ -79,6 +79,7 @@ async fn mock_echo_flows_through_dispatcher() {
         metadata: serde_json::Value::Null,
         system_prompt_suffix: None,
         system_prompt_override: None,
+        extra_allowed_tools: Vec::new(),
     };
 
     manager
@@ -152,6 +153,7 @@ async fn mock_todo_emits_normalized_todo_event() {
         metadata: serde_json::Value::Null,
         system_prompt_suffix: None,
         system_prompt_override: None,
+        extra_allowed_tools: Vec::new(),
     };
 
     manager

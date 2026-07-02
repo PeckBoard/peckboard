@@ -217,6 +217,13 @@ pub struct SpawnConfig {
     /// path (chat, worker, repeating task) honours it from one place.
     #[serde(default)]
     pub system_prompt_override: Option<String>,
+    /// Bare names of MCP tools contributed by active plugins (e.g.
+    /// common-tools' `read_file` / `edit_file`), to pre-approve alongside the
+    /// core tools. Populated once per dispatch in `SessionManager::final_config`
+    /// from the plugin registry; the Claude provider namespaces them into
+    /// `--allowedTools`. Other providers ignore it.
+    #[serde(default)]
+    pub extra_allowed_tools: Vec<String>,
 }
 
 /// Model info from a provider.

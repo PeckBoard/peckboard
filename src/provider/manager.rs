@@ -250,6 +250,16 @@ impl SessionManager {
             // path (chat, worker, repeating task) honours it without each
             // caller having to thread it through SpawnConfig.
             system_prompt_override: session.system_prompt.clone(),
+            // Resolve active-plugin tool names once here — the single dispatch
+            // chokepoint — so the Claude provider can pre-approve the
+            // common-tools file tools it now routes file access through.
+            extra_allowed_tools: self
+                .plugins
+                .mcp_tools()
+                .await
+                .into_iter()
+                .map(|t| t.name)
+                .collect(),
         };
 
         let ctx = SendMessageContext {

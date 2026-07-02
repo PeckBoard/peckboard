@@ -109,6 +109,63 @@ fn cancel_stale_worker(ctx: &ToolCallContext, session_id: &str) {
     });
 }
 
+/// Parse a nullable string-override field (e.g. `model`, `effort`) from tool
+/// args into the `Option<Option<String>>` an [`UpdateCard`] expects: `None`
+/// when the key is absent (leave the field unchanged), `Some(None)` for an
+/// explicit null or empty string (clear the override back to the default),
+/// and `Some(Some(v))` for a trimmed value.
+fn parse_nullable_override(args: &Value, key: &str) -> Option<Option<String>> {
+    let v = args.get(key)?;
+    match v.as_str().map(str::trim) {
+        Some(s) if !s.is_empty() => Some(Some(s.to_string())),
+        _ => Some(None),
+    }
+}
+
+/// Normalize and validate a replacement dependency set for `card_id`: drop
+/// self-references and duplicates, reject ids that aren't cards in the same
+/// project, and reject any set that would close a dependency cycle. Returns
+/// the cleaned set ready for `set_card_dependencies`. Mirrors the REST
+/// route's `apply_dependencies` (and reuses its cycle check) so both entry
+/// points enforce the same invariants.
+async fn validate_dependency_set(
+    ctx: &ToolCallContext,
+    project_id: &str,
+    card_id: &str,
+    depends_on: Vec<String>,
+) -> anyhow::Result<Vec<String>> {
+    let mut deps: Vec<String> = Vec::new();
+    for d in depends_on {
+        if d != card_id && !deps.contains(&d) {
+            deps.push(d);
+        }
+    }
+    if deps.is_empty() {
+        return Ok(deps);
+    }
+
+    let project_cards = ctx.db.list_cards_by_project(project_id).await?;
+    let valid: std::collections::HashSet<&str> =
+        project_cards.iter().map(|c| c.id.as_str()).collect();
+    for d in &deps {
+        if !valid.contains(d.as_str()) {
+            anyhow::bail!("dependency {d} is not a card in this project");
+        }
+    }
+
+    let existing = ctx.db.list_dependencies_by_project(project_id).await?;
+    let mut edges: std::collections::HashMap<String, Vec<String>> =
+        std::collections::HashMap::new();
+    for (c, dep) in existing {
+        edges.entry(c).or_default().push(dep);
+    }
+    if crate::routes::projects::would_create_cycle(&edges, card_id, &deps) {
+        anyhow::bail!("dependency cycle detected — a card cannot transitively depend on itself");
+    }
+
+    Ok(deps)
+}
+
 impl McpToolRegistry {
     pub(crate) async fn handle_complete_step(
         &self,
@@ -724,6 +781,50 @@ impl McpToolRegistry {
         let block_reason = args
             .get("block_reason")
             .map(|v| v.as_str().map(|s| s.to_string()));
+
+        // A card's workflow can be re-pointed; validate the id like create_card
+        // does. `step` is left to the caller — pass it alongside if the current
+        // step doesn't exist in the new workflow.
+        let workflow = match args.get("workflow").and_then(|v| v.as_str()).map(str::trim) {
+            Some(w) if !w.is_empty() => {
+                if crate::workflow::workflow_by_id(w).is_none() {
+                    anyhow::bail!("unknown workflow id '{w}'");
+                }
+                Some(w.to_string())
+            }
+            _ => None,
+        };
+        // model/effort are nullable overrides: a string sets it, an explicit
+        // null (or empty string) clears it back to the default, and omitting
+        // the key leaves it untouched.
+        let model = parse_nullable_override(&args, "model");
+        let effort = parse_nullable_override(&args, "effort");
+
+        // A present `depends_on` array replaces the card's dependency set
+        // (empty clears it); omitting the key leaves dependencies alone.
+        // Resolve and validate it up front so a bad set fails before any field
+        // is mutated.
+        let requested_deps: Option<Vec<String>> = args
+            .get("depends_on")
+            .and_then(|v| v.as_array())
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                    .collect()
+            });
+        let validated_deps = match requested_deps {
+            Some(deps) => {
+                let project_id = ctx
+                    .db
+                    .get_card(card_id)
+                    .await?
+                    .ok_or_else(|| anyhow::anyhow!("card not found: {card_id}"))?
+                    .project_id;
+                Some(validate_dependency_set(ctx, &project_id, card_id, deps).await?)
+            }
+            None => None,
+        };
+
         let updated_at = Some(chrono::Utc::now().to_rfc3339());
 
         // Capture the previously assigned worker if this update is going
@@ -748,6 +849,9 @@ impl McpToolRegistry {
                     description,
                     priority,
                     step: new_step,
+                    workflow,
+                    model,
+                    effort,
                     blocked,
                     block_reason,
                     worker_session_id,
@@ -759,10 +863,27 @@ impl McpToolRegistry {
             .await?
             .ok_or_else(|| anyhow::anyhow!("card not found: {card_id}"))?;
 
+        // Persist the already-validated dependency replacement, if one was
+        // requested. Validation ran before the field update, so this can't
+        // fail on a bad set.
+        if let Some(deps) = validated_deps {
+            ctx.db.set_card_dependencies(card_id, deps).await?;
+        }
+
+        let deps = ctx
+            .db
+            .list_card_dependencies(card_id)
+            .await
+            .unwrap_or_default();
+        let mut card_value = serde_json::to_value(&card).unwrap_or_else(|_| serde_json::json!({}));
+        if let Some(obj) = card_value.as_object_mut() {
+            obj.insert("depends_on".into(), serde_json::json!(deps));
+        }
+
         ctx.broadcaster.broadcast(crate::ws::broadcaster::WsEvent {
             event_type: "card-update".into(),
             session_id: card.project_id.clone(),
-            data: serde_json::json!({ "card": card }),
+            data: serde_json::json!({ "card": card_value }),
         });
 
         if let Some(sid) = stale_worker_cell.lock().unwrap().take() {
@@ -776,7 +897,12 @@ impl McpToolRegistry {
                 "title": card.title,
                 "step": card.step,
                 "priority": card.priority,
+                "workflow": card.workflow,
+                "model": card.model,
+                "effort": card.effort,
                 "blocked": card.blocked,
+                "block_reason": card.block_reason,
+                "depends_on": deps,
             }
         }))
     }

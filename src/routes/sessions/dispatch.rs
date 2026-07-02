@@ -213,6 +213,8 @@ pub(super) async fn send_message(
         metadata: serde_json::Value::Null,
         system_prompt_suffix: None,
         system_prompt_override: None,
+        // Populated in SessionManager::final_config from the plugin registry.
+        extra_allowed_tools: Vec::new(),
     };
 
     // If a just-finalized handover left a doc waiting, prepend it so this

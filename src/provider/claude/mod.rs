@@ -257,8 +257,22 @@ pub fn build_cli_args(config: &SpawnConfig, conversation_id: Option<&str>) -> Ve
 
     // `--disallowedTools` is a hard denylist that overrides
     // `--dangerously-skip-permissions`, so it's the real enforcement point.
-    // AskUserQuestion is denied for every session (it doesn't work headless).
-    let disallowed = "AskUserQuestion";
+    // AskUserQuestion is always denied (it doesn't work headless).
+    //
+    // Claude's built-in whole-file tools (Read/Write/Edit/MultiEdit) are denied
+    // ONLY when the common-tools plugin is active and provides replacements —
+    // then all file access is forced through its read_file (partial,
+    // line-windowed) and edit_file (hash-guarded diff) tools, which enforce
+    // project-folder containment and size caps. If that plugin isn't loaded we
+    // leave the built-ins in place so agents can still read and edit files.
+    let has_plugin_file_tools = ["read_file", "edit_file"]
+        .iter()
+        .all(|needed| config.extra_allowed_tools.iter().any(|t| t == needed));
+    let disallowed = if has_plugin_file_tools {
+        "AskUserQuestion,Read,Write,Edit,MultiEdit"
+    } else {
+        "AskUserQuestion"
+    };
 
     let mut args = vec![
         "claude".to_string(),
@@ -293,49 +307,19 @@ pub fn build_cli_args(config: &SpawnConfig, conversation_id: Option<&str>) -> Ve
     if let Some(mcp_path) = &config.mcp_config_path {
         args.push(format!("--mcp-config={mcp_path}"));
 
-        // Tell Claude which MCP tools are allowed.
-        let full_mcp_tools = [
-            "create_card",
-            "list_projects",
-            "list_workflows",
-            "list_cards",
-            "write_report",
-            "attach_report_file",
-            "update_card",
-            "update_project",
-            "create_project",
-            "create_folder",
-            "list_folders",
-            "pause_project",
-            "resume_project",
-            "delete_project",
-            "delete_card",
-            "move_card_to_done",
-            "move_card_to_wont_do",
-            // Worker-only tools (harmless to allow for plain sessions — they just
-            // fail with "requires card context" if called without one)
-            "complete_step",
-            "finish_card",
-            "wont_do_card",
-            "ask_user",
-            "notify_workers",
-            "fetch_url",
-            "share_finding",
-            "get_finding_details",
-            "send_worker_message",
-            "list_project_reports",
-            "read_report",
-            "read_worker_session",
-            "list_worker_sessions",
-            // Cross-session debug tools — available to every session
-            // (chat included) for reading/grepping other sessions.
-            "list_sessions",
-            "search_sessions",
-            "set_session_system_prompt",
-            "upgrade_plugin",
-            "list_models",
-        ];
-        let allowed: Vec<String> = full_mcp_tools
+        // Pre-approve every tool the Peckboard MCP server exposes: the core
+        // tools (single source of truth via `tool_names()`) plus any tools
+        // contributed by active plugins (e.g. common-tools' read_file /
+        // edit_file), threaded in through `SpawnConfig::extra_allowed_tools`.
+        // In the default bypass mode this is advisory, but it keeps "prompt"
+        // permission mode from stalling on a plugin file tool.
+        let mut names: Vec<String> = crate::service::mcp_server::tool_names();
+        for t in &config.extra_allowed_tools {
+            if !names.contains(t) {
+                names.push(t.clone());
+            }
+        }
+        let allowed: Vec<String> = names
             .iter()
             .map(|t| format!("mcp__peckboard__{t}"))
             .collect();
@@ -448,6 +432,7 @@ mod tests {
             metadata: serde_json::Value::Null,
             system_prompt_suffix: None,
             system_prompt_override: None,
+            extra_allowed_tools: Vec::new(),
         }
     }
 
@@ -559,6 +544,7 @@ mod tests {
             metadata: serde_json::Value::Null,
             system_prompt_suffix: None,
             system_prompt_override: None,
+            extra_allowed_tools: Vec::new(),
         };
 
         let args = build_cli_args(&config, Some("conv-123"));
@@ -570,13 +556,14 @@ mod tests {
 
     #[test]
     fn test_build_cli_args_plain_session_keeps_full_toolset() {
-        // A non-restricted session keeps the full MCP allowlist and only the
-        // baseline AskUserQuestion denial.
         let config = SpawnConfig {
             mcp_config_path: Some("/tmp/mcp.json".into()),
             ..default_spawn("claude-opus-4-8")
         };
         let args = build_cli_args(&config, None);
+        // With no common-tools plugin providing replacements (empty
+        // extra_allowed_tools), Claude keeps its built-in file tools — only
+        // AskUserQuestion is denied.
         assert!(args.contains(&"--disallowedTools=AskUserQuestion".to_string()));
         let allowed = args
             .iter()
@@ -584,6 +571,71 @@ mod tests {
             .expect("allowedTools present");
         assert!(allowed.contains("mcp__peckboard__create_card"));
         assert!(allowed.contains("mcp__peckboard__fetch_url"));
+        // The allowlist is derived from the common MCP tool source, not a
+        // hand-maintained Claude copy: every exposed tool is present, including
+        // ones the old hardcoded list had drifted past (e.g. repeating tasks).
+        assert!(allowed.contains("mcp__peckboard__create_repeating_task"));
+        // With no plugin tools passed, the allowlist is exactly the core set.
+        assert_eq!(
+            allowed
+                .trim_start_matches("--allowedTools=")
+                .split(',')
+                .count(),
+            crate::service::mcp_server::tool_names().len(),
+            "allowlist should list exactly the common tool set"
+        );
+    }
+
+    #[test]
+    fn test_build_cli_args_merges_plugin_tools_and_denies_builtin_file_tools() {
+        // Plugin-contributed file tools (from common-tools) are threaded in via
+        // extra_allowed_tools and must appear in --allowedTools, while Claude's
+        // built-in Read/Write/Edit are denied so agents route through them.
+        let config = SpawnConfig {
+            mcp_config_path: Some("/tmp/mcp.json".into()),
+            extra_allowed_tools: vec![
+                "read_file".into(),
+                "edit_file".into(),
+                // A duplicate of a core tool name must not double-list.
+                "list_models".into(),
+            ],
+            ..default_spawn("claude-opus-4-8")
+        };
+        let args = build_cli_args(&config, None);
+
+        let disallowed = args
+            .iter()
+            .find(|a| a.starts_with("--disallowedTools="))
+            .expect("disallowedTools present");
+        for builtin in ["Read", "Write", "Edit"] {
+            assert!(
+                disallowed.split(',').any(|t| t == builtin),
+                "{builtin} should be denied"
+            );
+        }
+
+        let allowed = args
+            .iter()
+            .find(|a| a.starts_with("--allowedTools="))
+            .expect("allowedTools present");
+        assert!(allowed.contains("mcp__peckboard__read_file"));
+        assert!(allowed.contains("mcp__peckboard__edit_file"));
+        // list_models is a core tool; passing it again as a plugin name must
+        // not produce a duplicate entry.
+        let list_models_hits = allowed
+            .trim_start_matches("--allowedTools=")
+            .split(',')
+            .filter(|t| *t == "mcp__peckboard__list_models")
+            .count();
+        assert_eq!(list_models_hits, 1, "core/plugin name overlap must dedupe");
+        // Two genuinely new plugin tools beyond the core set.
+        assert_eq!(
+            allowed
+                .trim_start_matches("--allowedTools=")
+                .split(',')
+                .count(),
+            crate::service::mcp_server::tool_names().len() + 2,
+        );
     }
 
     #[test]

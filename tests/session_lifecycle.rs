@@ -77,6 +77,7 @@ fn cfg(model: &str) -> SpawnConfig {
         metadata: serde_json::Value::Null,
         system_prompt_suffix: None,
         system_prompt_override: None,
+        extra_allowed_tools: Vec::new(),
     }
 }
 
@@ -527,6 +528,7 @@ mod midstream {
             metadata: serde_json::Value::Null,
             system_prompt_suffix: None,
             system_prompt_override: None,
+            extra_allowed_tools: Vec::new(),
         }
     }
 

@@ -17,8 +17,9 @@
 //! credential env). Cursor has a single system login. Mock/Ollama have no
 //! login and are skipped.
 
+use std::collections::HashMap;
 use std::path::Path;
-use std::sync::Arc;
+use std::sync::{Arc, LazyLock, Mutex};
 use std::time::Duration;
 
 use crate::db::Db;
@@ -45,6 +46,49 @@ const MULTI_ACCOUNT_PROVIDERS: &[&str] = &["claude", "grok"];
 /// Per-login cap: how long to wait for the "hi" turn before force-killing the
 /// run and cleaning up. A hung/unauthenticated CLI is bounded by this.
 const RUN_TIMEOUT: Duration = Duration::from_secs(90);
+
+/// One recorded keep-alive: which login (provider + optional account) it
+/// refreshed, a human label for the UI, and when it last ran (RFC3339).
+#[derive(Clone, serde::Serialize)]
+pub struct LastRun {
+    pub provider: String,
+    /// `None` for the host's own default login; the stored account id otherwise.
+    pub account_id: Option<String>,
+    pub label: String,
+    pub at: String,
+}
+
+/// Per-login last-run times for the current process, keyed by
+/// `provider:{account_id|default}`. Process-ephemeral (reset on restart) — a
+/// diagnostic surfaced in Settings via `GET /api/config`, not durable state,
+/// so it lives here instead of the DB (no migration).
+static LAST_RUNS: LazyLock<Mutex<HashMap<String, LastRun>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+
+/// Last-run record for every login pinged since startup, newest first.
+pub fn last_runs() -> Vec<LastRun> {
+    let mut runs: Vec<LastRun> = LAST_RUNS
+        .lock()
+        .map(|m| m.values().cloned().collect())
+        .unwrap_or_default();
+    runs.sort_by(|a, b| b.at.cmp(&a.at).then_with(|| a.label.cmp(&b.label)));
+    runs
+}
+
+/// Stamp `target` as refreshed at `at` (RFC3339).
+fn record_run(target: &Target, at: String) {
+    if let Ok(mut runs) = LAST_RUNS.lock() {
+        runs.insert(
+            target.key(),
+            LastRun {
+                provider: target.provider.clone(),
+                account_id: target.account_id.clone(),
+                label: target.label.clone(),
+                at,
+            },
+        );
+    }
+}
 
 /// Spawn the keep-alive loop. No-op when `interval_hours == 0` (disabled).
 pub fn spawn(state: Arc<AppState>, interval_hours: u64) {
@@ -75,11 +119,26 @@ pub fn spawn(state: Arc<AppState>, interval_hours: u64) {
     tracing::info!("Provider keep-alive started ({interval_hours}h interval)");
 }
 
-/// A single login to keep alive: a human label for logs and the fully
-/// qualified `provider:model[@account]` id that selects it.
+/// A single login to keep alive: which provider/account it selects, a human
+/// label for logs and the UI, and the fully qualified `provider:model[@account]`
+/// id that selects it.
 struct Target {
+    provider: String,
+    /// `None` for the host default login; the stored account id otherwise.
+    account_id: Option<String>,
     label: String,
     model: String,
+}
+
+impl Target {
+    /// Stable per-login key: `provider:{account_id|default}`.
+    fn key(&self) -> String {
+        format!(
+            "{}:{}",
+            self.provider,
+            self.account_id.as_deref().unwrap_or("default")
+        )
+    }
 }
 
 /// Run one keep-alive cycle: ping every configured login once. Never returns
@@ -106,9 +165,15 @@ pub async fn run_once(
     }
 
     for target in targets {
+        // Stamp the login as run when its ping starts, so "last run" reflects
+        // this cycle even if the ping itself then fails.
+        let at = chrono::Utc::now().to_rfc3339();
+        record_run(&target, at.clone());
         match ping(db, session_manager, broadcaster, &folder_id, &target).await {
-            Ok(()) => tracing::info!(login = %target.label, "keep-alive ping ok"),
-            Err(e) => tracing::warn!(login = %target.label, "keep-alive ping failed: {e}"),
+            Ok(()) => tracing::info!(login = %target.label, at = %at, "keep-alive ping ok"),
+            Err(e) => {
+                tracing::warn!(login = %target.label, at = %at, "keep-alive ping failed: {e}")
+            }
         }
     }
 }
@@ -131,6 +196,8 @@ async fn collect_targets(db: &Db, registry: &ProviderRegistry) -> Vec<Target> {
 
         // Host default login (no account suffix).
         targets.push(Target {
+            provider: provider.to_string(),
+            account_id: None,
             label: format!("{provider} (default)"),
             model: format!("{provider}:{base_id}"),
         });
@@ -156,6 +223,8 @@ async fn collect_targets(db: &Db, registry: &ProviderRegistry) -> Vec<Target> {
             Ok(accounts) => {
                 for (id, name) in accounts {
                     targets.push(Target {
+                        provider: provider.to_string(),
+                        account_id: Some(id.clone()),
                         label: format!("{provider} ({name})"),
                         model: format!("{provider}:{base_id}@{id}"),
                     });
@@ -231,6 +300,7 @@ async fn ping(
         metadata: serde_json::Value::Null,
         system_prompt_suffix: None,
         system_prompt_override: None,
+        extra_allowed_tools: Vec::new(),
     };
 
     let dispatch = session_manager

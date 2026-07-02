@@ -8,11 +8,30 @@ import SoftwareUpdate from './SoftwareUpdate'
 const THEME_KEY = 'peckboard_theme'
 const HUE_KEY = 'peckboard_hue'
 
+interface KeepAliveRun {
+  provider: string
+  account_id: string | null
+  label: string
+  at: string
+}
+
 interface ServerConfig {
   port: number
   https_port: number
   host: string
   data_dir: string
+  keep_alive_hours: number
+  keepalive_last_runs: KeepAliveRun[]
+}
+
+function formatInterval(hours: number): string {
+  if (hours === 0) return 'Keep-alive is disabled.'
+  return hours === 1 ? 'Runs every hour.' : `Runs every ${hours} hours.`
+}
+
+function formatWhen(at: string): string {
+  const d = new Date(at)
+  return isNaN(d.getTime()) ? at : d.toLocaleString()
 }
 
 function getStoredTheme(): Theme {
@@ -123,6 +142,33 @@ export default function SettingsPage({ onBack }: Props) {
           </div>
         ) : (
           <p className="settings-loading">Loading server config...</p>
+        )}
+      </section>
+
+      <section className="settings-section" data-testid="keepalive-section">
+        <h3>Provider Keep-Alive</h3>
+        {serverConfig ? (
+          <>
+            <p className="form-hint">
+              {formatInterval(serverConfig.keep_alive_hours)} Each provider login — the host default
+              and every account — is pinged with a throwaway message so its token doesn&apos;t go
+              stale.
+            </p>
+            {serverConfig.keepalive_last_runs.length === 0 ? (
+              <p className="settings-loading">No login has been kept alive yet this session.</p>
+            ) : (
+              <div className="settings-info-grid">
+                {serverConfig.keepalive_last_runs.map((r) => (
+                  <div className="settings-row" key={`${r.provider}:${r.account_id ?? 'default'}`}>
+                    <span className="settings-label">{r.label}</span>
+                    <span>{formatWhen(r.at)}</span>
+                  </div>
+                ))}
+              </div>
+            )}
+          </>
+        ) : (
+          <p className="settings-loading">Loading keep-alive status...</p>
         )}
       </section>
 

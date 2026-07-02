@@ -334,6 +334,8 @@ pub async fn check_and_spawn_workers(state: &Arc<AppState>) {
                     metadata: serde_json::json!({ "worker": true, "inter_worker_followup": true }),
                     system_prompt_suffix: None,
                     system_prompt_override: None,
+                    // Populated in SessionManager::final_config from the plugin registry.
+                    extra_allowed_tools: Vec::new(),
                 };
 
                 if let Err(e) = state
@@ -570,6 +572,8 @@ async fn spawn_worker_for_card(
         }),
         system_prompt_suffix: None,
         system_prompt_override: None,
+        // Populated in SessionManager::final_config from the plugin registry.
+        extra_allowed_tools: Vec::new(),
     };
 
     // The lock is uncontested for a brand-new uuid; we acquire it anyway
@@ -1006,6 +1010,8 @@ pub async fn drain_queue_for_session(
         metadata: serde_json::Value::Null,
         system_prompt_suffix: None,
         system_prompt_override: None,
+        // Populated in SessionManager::final_config from the plugin registry.
+        extra_allowed_tools: Vec::new(),
     };
 
     state

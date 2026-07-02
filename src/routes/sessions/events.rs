@@ -417,6 +417,8 @@ pub(super) async fn append_event(
                 metadata: serde_json::Value::Null,
                 system_prompt_suffix: None,
                 system_prompt_override: None,
+                // Populated in SessionManager::final_config from the plugin registry.
+                extra_allowed_tools: Vec::new(),
             };
 
             if let Err(e) = state_clone

@@ -148,6 +148,7 @@ async fn cursor_auto_turn_completes_end_to_end() {
         metadata: serde_json::Value::Null,
         system_prompt_suffix: None,
         system_prompt_override: None,
+        extra_allowed_tools: Vec::new(),
     };
 
     manager

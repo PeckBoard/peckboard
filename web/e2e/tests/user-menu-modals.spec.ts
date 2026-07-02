@@ -66,6 +66,12 @@ test('user dropdown opens Settings page and Plugins modal; rail Settings icon is
   await expect(settingsPage).toContainText('User Info')
   await expect(settingsPage).toContainText('Theme')
 
+  // A dedicated Provider Keep-Alive section reports the cadence and per-login
+  // (per account per provider) last-run status, sourced from GET /api/config.
+  const keepAlive = settingsPage.getByTestId('keepalive-section')
+  await expect(keepAlive).toContainText('Provider Keep-Alive')
+  await expect(keepAlive).toContainText(/Runs every hour|Runs every \d+ hours|disabled/)
+
   // Back returns to the underlying view and unmounts the page.
   await settingsPage.getByRole('button', { name: 'Back' }).click()
   await expect(settingsPage).toBeHidden()

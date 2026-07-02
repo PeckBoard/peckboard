@@ -42,7 +42,7 @@ pub struct CliArgs {
     /// How often (in hours) to run the provider login keep-alive, which
     /// pings each auth login (Claude/Grok per account, Cursor) with a
     /// throwaway "hi" so tokens don't go stale. `0` disables it.
-    #[arg(long, env = "PECKBOARD_KEEPALIVE_HOURS", default_value = "4")]
+    #[arg(long, env = "PECKBOARD_KEEPALIVE_HOURS", default_value = "1")]
     pub keep_alive_hours: u64,
 }
 
@@ -95,7 +95,7 @@ mod tests {
             reset_password: false,
             user: None,
             mdns: false,
-            keep_alive_hours: 4,
+            keep_alive_hours: 1,
         }
     }
 
@@ -107,7 +107,7 @@ mod tests {
         assert_eq!(args.host, "0.0.0.0");
         assert!(!args.reset_password);
         assert!(args.user.is_none());
-        assert_eq!(args.keep_alive_hours, 4);
+        assert_eq!(args.keep_alive_hours, 1);
     }
 
     #[test]

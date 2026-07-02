@@ -255,6 +255,8 @@ async fn get_config(State(state): State<Arc<AppState>>) -> impl IntoResponse {
         "https_port": config.https_port,
         "host": config.host,
         "data_dir": config.data_dir.to_string_lossy(),
+        "keep_alive_hours": config.keep_alive_hours,
+        "keepalive_last_runs": crate::keepalive::last_runs(),
     }))
 }
 

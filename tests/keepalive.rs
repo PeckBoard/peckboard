@@ -49,6 +49,16 @@ async fn keep_alive_pings_then_cleans_up_after_itself() {
 
     keepalive::run_once(&db, &registry, &manager, &broadcaster, &data_dir).await;
 
+    // Each login records its own last-run, surfaced per account/provider in
+    // Settings via /api/config. Here the mock is registered under `cursor`,
+    // so its default login is stamped.
+    let runs = keepalive::last_runs();
+    assert!(
+        runs.iter()
+            .any(|r| r.provider == "cursor" && r.account_id.is_none()),
+        "run_once should record a per-login last-run for the cursor default"
+    );
+
     // The throwaway session was created AND torn down: nothing left behind.
     let sessions = db.list_sessions().await.unwrap();
     assert!(

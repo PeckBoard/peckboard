@@ -240,6 +240,137 @@ async fn common_tools_plugin_drives_tools_end_to_end() {
         "read back: {res}"
     );
 
+    // ── file_outline: deterministic symbol parse + content hash ──
+    let res = invoke(
+        &plugins,
+        "file_outline",
+        json!({ "path": "src/main.rs" }),
+        &ctx,
+    )
+    .await;
+    assert_eq!(res["language"], json!("rust"), "file_outline: {res}");
+    let main_sym = res["symbols"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|s| s["name"] == json!("main"))
+        .unwrap_or_else(|| panic!("fn main not in outline: {res}"));
+    assert_eq!(main_sym["kind"], json!("fn"), "file_outline: {res}");
+    assert_eq!(main_sym["start_line"], json!(1), "file_outline: {res}");
+    assert_eq!(main_sym["end_line"], json!(3), "file_outline: {res}");
+    let hash = res["hash"]
+        .as_str()
+        .expect("outline returns a hash")
+        .to_string();
+
+    // read_file reports the same whole-file hash.
+    let res = invoke(
+        &plugins,
+        "read_file",
+        json!({ "path": "src/main.rs" }),
+        &ctx,
+    )
+    .await;
+    assert_eq!(res["hash"], json!(hash), "read_file hash: {res}");
+
+    // ── read_symbol: just one function's body, not the whole file ──
+    let res = invoke(
+        &plugins,
+        "read_symbol",
+        json!({ "path": "src/main.rs", "name": "main" }),
+        &ctx,
+    )
+    .await;
+    assert_eq!(res["hash"], json!(hash), "read_symbol hash: {res}");
+    let body = res["symbols"][0]["content"].as_str().unwrap();
+    assert!(body.contains("hello needle"), "read_symbol body: {res}");
+
+    // ── edit_file: hash-guarded positional edit ──
+    // A stale/wrong hash is rejected before anything is written.
+    let err = try_invoke(
+        &plugins,
+        "edit_file",
+        json!({
+            "path": "src/main.rs",
+            "original_hash": "0000000000000000",
+            "edits": [{ "op": "delete", "start_line": 1, "end_line": 1 }],
+        }),
+        &ctx,
+    )
+    .await
+    .expect_err("a wrong hash must be rejected");
+    assert!(err.contains("hash mismatch"), "edit_file guard: {err}");
+
+    // With the right hash the edit applies and the new hash comes back.
+    let res = invoke(
+        &plugins,
+        "edit_file",
+        json!({
+            "path": "src/main.rs",
+            "original_hash": hash,
+            "edits": [{
+                "op": "update", "start_line": 2, "end_line": 2,
+                "text": "    println!(\"hello edited\");",
+            }],
+        }),
+        &ctx,
+    )
+    .await;
+    assert_eq!(res["ok"], json!(true), "edit_file: {res}");
+    let new_hash = res["hash"]
+        .as_str()
+        .expect("edit returns new hash")
+        .to_string();
+    assert_ne!(new_hash, hash, "hash must change after an edit");
+    assert_eq!(
+        std::fs::read_to_string(repo.join("src/main.rs")).unwrap(),
+        "fn main() {\n    println!(\"hello edited\");\n}\n"
+    );
+
+    // The pre-edit hash is now stale — the guard catches the lost update.
+    let err = try_invoke(
+        &plugins,
+        "edit_file",
+        json!({
+            "path": "src/main.rs",
+            "original_hash": hash,
+            "edits": [{ "op": "delete", "start_line": 2, "end_line": 2 }],
+        }),
+        &ctx,
+    )
+    .await
+    .expect_err("the stale hash must be rejected");
+    assert!(err.contains("hash mismatch"), "stale hash: {err}");
+
+    // write_file's returned hash chains straight into edit_file.
+    let res = invoke(
+        &plugins,
+        "write_file",
+        json!({ "path": "out/notes.txt", "content": "alpha\nbeta\n" }),
+        &ctx,
+    )
+    .await;
+    let wh = res["hash"]
+        .as_str()
+        .expect("write_file returns hash")
+        .to_string();
+    let res = invoke(
+        &plugins,
+        "edit_file",
+        json!({
+            "path": "out/notes.txt",
+            "original_hash": wh,
+            "edits": [{ "op": "insert", "line": 2, "text": "middle" }],
+        }),
+        &ctx,
+    )
+    .await;
+    assert_eq!(res["ok"], json!(true), "edit after write: {res}");
+    assert_eq!(
+        std::fs::read_to_string(repo.join("out/notes.txt")).unwrap(),
+        "alpha\nmiddle\nbeta\n"
+    );
+
     // ── run_command: the full two-step interactive approval ──
     // First call: a non-allowlisted command → the plugin asks the user and
     // returns awaiting_approval (nothing is executed yet).

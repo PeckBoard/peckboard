@@ -93,7 +93,10 @@ pub(super) fn internal_error(e: impl std::fmt::Display) -> RouteError {
 /// cycle, given the project's existing edges (each card mapped to the
 /// cards it depends on)? Walk outward from `new_deps`; if we can reach
 /// `card_id` again, the new edges would close a loop.
-fn would_create_cycle(
+///
+/// `pub(crate)` so the `update_card` MCP tool applies the same cycle
+/// guarantee as this REST route rather than duplicating the algorithm.
+pub(crate) fn would_create_cycle(
     edges: &std::collections::HashMap<String, Vec<String>>,
     card_id: &str,
     new_deps: &[String],
