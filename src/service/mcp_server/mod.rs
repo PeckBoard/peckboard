@@ -106,7 +106,7 @@ impl McpToolRegistry {
                 self.handle_common_tool(tool_name, args, ctx).await
             }
             "browser_open" | "browser_outline" | "browser_find" | "browser_act"
-            | "browser_screenshot" | "browser_close" => {
+            | "browser_screenshot" | "browser_close" | "browser_pages" => {
                 self.handle_browser_tool(tool_name, args, ctx).await
             }
             "run_command" => self.handle_run_command(args, ctx).await,
@@ -452,7 +452,8 @@ mod tests {
         assert!(names.contains(&"browser_act"));
         assert!(names.contains(&"browser_screenshot"));
         assert!(names.contains(&"browser_close"));
-        assert_eq!(names.len(), 63);
+        assert!(names.contains(&"browser_pages"));
+        assert_eq!(names.len(), 64);
     }
 
     #[test]

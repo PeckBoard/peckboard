@@ -1311,7 +1311,7 @@ pub(super) fn tool_definitions() -> Vec<McpToolDef> {
         },
         McpToolDef {
             name: "browser_act".into(),
-            description: "Interact with an open page. action: click|type|fill|select|hover|press_key|navigate|back|forward|scroll_top|scroll_bottom|wait_selector|wait_ms|dialog. Element actions take `ref` (eN from outline/find); type/fill/select/press_key/navigate/wait_selector put their argument in `text`. Set outline=true to get the fresh page structure in the same call.".into(),
+            description: "Interact with an open page. action: click|type|fill|select|hover|press_key|upload|navigate|back|forward|scroll_top|scroll_bottom|wait_selector|wait_ms|dialog. Element actions take `ref` (eN from outline/find); type/fill/select/press_key/navigate/wait_selector put their argument in `text`; multi-select uses `values`, upload uses `files`. Set outline=true to get the fresh page structure in the same call.".into(),
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
@@ -1319,6 +1319,8 @@ pub(super) fn tool_definitions() -> Vec<McpToolDef> {
                     "action": { "type": "string", "description": "One of the actions above." },
                     "ref": { "type": "string", "description": "Element handle, e.g. e12." },
                     "text": { "type": "string", "description": "Text/value/key/url/selector for the action." },
+                    "values": { "type": "array", "items": { "type": "string" }, "description": "select: multiple option values." },
+                    "files": { "type": "array", "items": { "type": "string" }, "description": "upload: file paths." },
                     "timeout_ms": { "type": "integer", "description": "wait_ms duration (max 30000)." },
                     "accept": { "type": "boolean", "description": "dialog: accept or dismiss (default true)." },
                     "outline": { "type": "boolean", "description": "Also return the post-action outline (default false; costs ~2k tokens)." }
@@ -1336,6 +1338,14 @@ pub(super) fn tool_definitions() -> Vec<McpToolDef> {
                     "full_page": { "type": "boolean", "description": "Default false." }
                 },
                 "required": ["page_id"]
+            }),
+        },
+        McpToolDef {
+            name: "browser_pages".into(),
+            description: "List open browser pages (id, name, url, title).".into(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {}
             }),
         },
         McpToolDef {

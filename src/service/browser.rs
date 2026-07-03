@@ -197,6 +197,10 @@ pub(crate) async fn post(path: &str, body: serde_json::Value) -> anyhow::Result<
     request(reqwest::Method::POST, path, Some(body)).await
 }
 
+/// GET `path` and return the parsed JSON response.
+pub(crate) async fn get(path: &str) -> anyhow::Result<serde_json::Value> {
+    request(reqwest::Method::GET, path, None).await
+}
 /// DELETE `path`, ignoring the response body shape.
 pub(crate) async fn delete(path: &str) -> anyhow::Result<serde_json::Value> {
     request(reqwest::Method::DELETE, path, None).await

@@ -109,10 +109,19 @@ impl McpToolRegistry {
                         format!("/api/pages/{page_id}/fill"),
                         serde_json::json!({ "ref": need_ref()?, "value": req_str(&args, "text")?, "element": format!("ref={}", refe.unwrap_or_default()) }),
                     ),
-                    "select" => (
-                        format!("/api/pages/{page_id}/select"),
-                        serde_json::json!({ "ref": need_ref()?, "value": args.get("text").cloned().unwrap_or(Value::Null), "element": format!("ref={}", refe.unwrap_or_default()) }),
-                    ),
+                    "select" => {
+                        // Multi-select passes `values` (array); single select `text`.
+                        let value = args
+                            .get("values")
+                            .filter(|v| v.is_array())
+                            .cloned()
+                            .or_else(|| args.get("text").cloned())
+                            .unwrap_or(Value::Null);
+                        (
+                            format!("/api/pages/{page_id}/select"),
+                            serde_json::json!({ "ref": need_ref()?, "value": value, "element": format!("ref={}", refe.unwrap_or_default()) }),
+                        )
+                    }
                     "hover" => (
                         format!("/api/pages/{page_id}/hover"),
                         serde_json::json!({ "ref": need_ref()?, "element": format!("ref={}", refe.unwrap_or_default()) }),
@@ -150,9 +159,25 @@ impl McpToolRegistry {
                         format!("/api/pages/{page_id}/dialog"),
                         serde_json::json!({ "accept": args.get("accept").and_then(|v| v.as_bool()).unwrap_or(true), "text": opt_str(&args, "text") }),
                     ),
+                    "upload" => {
+                        let files = args
+                            .get("files")
+                            .filter(|v| v.as_array().is_some_and(|a| !a.is_empty()))
+                            .cloned()
+                            .ok_or_else(|| {
+                                anyhow::anyhow!(
+                                    "`files` (non-empty array of file paths) is required for upload"
+                                )
+                            })?;
+                        (
+                            format!("/api/pages/{page_id}/upload"),
+                            serde_json::json!({ "ref": need_ref()?, "files": files }),
+                        )
+                    }
                     other => anyhow::bail!(
                         "unknown action `{other}` (use click|type|fill|select|hover|press_key|\
-                         navigate|back|forward|scroll_top|scroll_bottom|wait_selector|wait_ms|dialog)"
+                         upload|navigate|back|forward|scroll_top|scroll_bottom|wait_selector|\
+                         wait_ms|dialog)"
                     ),
                 };
                 let r = browser::post(&path, body).await?;
@@ -200,6 +225,12 @@ impl McpToolRegistry {
                 }))
             }
 
+            // Mirror of upstream `listPages`.
+            "browser_pages" => {
+                let r = browser::get("/api/pages").await?;
+                Ok(serde_json::json!({ "pages": r }))
+            }
+
             "browser_close" => {
                 let page_id = req_str(&args, "page_id")?;
                 browser::delete(&format!("/api/pages/{page_id}")).await?;
@@ -239,7 +270,12 @@ mod tests {
         let app = axum::Router::new()
             .route(
                 "/api/pages",
-                post(|| async { Json(serde_json::json!({ "pageId": "p1", "success": true })) }),
+                post(|| async { Json(serde_json::json!({ "pageId": "p1", "success": true })) })
+                    .get(|| async {
+                        Json(serde_json::json!([
+                            { "id": "p1", "name": "page", "url": "https://example.com", "title": "Hi" }
+                        ]))
+                    }),
             )
             .route(
                 "/api/pages/p1/outline",
@@ -261,6 +297,18 @@ mod tests {
                 "/api/pages/p1/click",
                 post(|Json(b): Json<serde_json::Value>| async move {
                     Json(serde_json::json!({ "success": true, "ref": b["ref"] }))
+                }),
+            )
+            .route(
+                "/api/pages/p1/select",
+                post(|Json(b): Json<serde_json::Value>| async move {
+                    Json(serde_json::json!({ "success": true, "value": b["value"] }))
+                }),
+            )
+            .route(
+                "/api/pages/p1/upload",
+                post(|Json(b): Json<serde_json::Value>| async move {
+                    Json(serde_json::json!({ "success": true, "files": b["files"] }))
                 }),
             )
             .route(
@@ -347,6 +395,44 @@ mod tests {
             )
             .await
             .unwrap();
+        let pages = reg
+            .handle_tool_call("browser_pages", serde_json::json!({}), &ctx)
+            .await
+            .unwrap();
+        assert_eq!(pages["pages"][0]["id"], "p1", "got: {pages}");
+
+        let selected = reg
+            .handle_tool_call(
+                "browser_act",
+                serde_json::json!({ "page_id": "p1", "action": "select", "ref": "e2", "values": ["a", "b"] }),
+                &ctx,
+            )
+            .await
+            .unwrap();
+        assert_eq!(selected["success"], true);
+
+        let uploaded = reg
+            .handle_tool_call(
+                "browser_act",
+                serde_json::json!({ "page_id": "p1", "action": "upload", "ref": "e3", "files": ["/tmp/a.png"] }),
+                &ctx,
+            )
+            .await
+            .unwrap();
+        assert_eq!(uploaded["success"], true);
+
+        // upload without files is a clear error.
+        let err = reg
+            .handle_tool_call(
+                "browser_act",
+                serde_json::json!({ "page_id": "p1", "action": "upload", "ref": "e3" }),
+                &ctx,
+            )
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("`files`"), "got: {err}");
+
         assert_eq!(closed["closed"], "p1");
     }
 }
