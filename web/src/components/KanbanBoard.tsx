@@ -661,44 +661,6 @@ export default function KanbanBoard({
             <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z" />
           </svg>
         </button>
-        {onOpenTodos && (
-          <button
-            type="button"
-            className="kanban-header-icon-btn"
-            onClick={onOpenTodos}
-            title="Project todos"
-            aria-label="Project todos"
-            data-testid="project-todos-button"
-          >
-            <svg
-              width="16"
-              height="16"
-              viewBox="0 0 24 24"
-              fill="none"
-              stroke="currentColor"
-              strokeWidth="2"
-              strokeLinecap="round"
-              strokeLinejoin="round"
-              aria-hidden="true"
-            >
-              <polyline points="9 11 12 14 22 4" />
-              <path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11" />
-            </svg>
-          </button>
-        )}
-        {onOpenPlugin &&
-          pluginItems?.map((item) => (
-            <button
-              key={item.plugin + ':' + item.id}
-              type="button"
-              className="btn-secondary btn-sm"
-              onClick={() => onOpenPlugin(item.id)}
-              title={item.label}
-              data-testid={`project-toolbar-plugin-${item.id}`}
-            >
-              {item.label}
-            </button>
-          ))}
         <button type="button" className="btn-primary btn-sm" onClick={() => setShowAddForm(true)}>
           Add Card
         </button>
@@ -712,6 +674,20 @@ export default function KanbanBoard({
                     label: 'Edit project',
                     onSelect: () => setEditingProject(true),
                   },
+                  { divider: true },
+                  {
+                    label: 'Tasks',
+                    onSelect: onOpenTodos,
+                    hidden: !onOpenTodos,
+                    testId: 'project-menu-todos',
+                  },
+                  ...(onOpenPlugin
+                    ? (pluginItems ?? []).map((item) => ({
+                        label: item.label,
+                        onSelect: () => onOpenPlugin(item.id),
+                        testId: `project-menu-plugin-${item.id}`,
+                      }))
+                    : []),
                   { divider: true },
                   {
                     label: project.status === 'paused' ? 'Resume' : 'Pause',

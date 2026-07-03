@@ -573,6 +573,26 @@ export default function ChatView({
     })
   }
 
+  const handleCompact = () => {
+    setConfirmAction({
+      title: 'Compact context',
+      message:
+        'Summarize the conversation and drop earlier history from the context window? The transcript stays intact.',
+      onConfirm: async () => {
+        setConfirmAction(null)
+        try {
+          const res = await authedFetch(`/api/sessions/${sessionId}/compact`, { method: 'POST' })
+          if (!res.ok) {
+            const err = (await res.json().catch(() => null)) as { error?: string } | null
+            setPatchError(err?.error ?? `compaction failed (${res.status})`)
+          }
+        } catch {
+          /* ignore */
+        }
+      },
+    })
+  }
+
   const handleDelete = () => {
     setConfirmAction({
       title: 'Delete session',
@@ -623,8 +643,9 @@ export default function ChatView({
   // TabBar.tsx) so a session's controls read the same wherever they
   // surface — that's the rule in CLAUDE.md "Component Reuse".
   //   rename, divider, clear session, terminate agent, delete
-  // Plus a Model and Effort submenu so users can change either from the
-  // 3-dot menu without hunting for a separate picker.
+  // Plus chat-only entries the TabBar menu doesn't carry: Tasks and
+  // plugin pages (moved here from the toolbar), Model and Effort
+  // submenus, and a manual "Compact context" action.
   // Mirror of the backend continuity key (provider + account). Switching
   // across it means the incoming model starts cold, so confirm with the
   // user before the PATCH: hand over a summary, or clear & switch fresh.
@@ -645,6 +666,24 @@ export default function ChatView({
 
   const sessionMenuItems: MenuItem[] = [
     { label: 'Rename', onSelect: handleRename, testId: 'chat-menu-rename' },
+    { divider: true },
+    {
+      label: 'Tasks',
+      hint:
+        todos.length > 0
+          ? `${todos.filter((t) => t.status === 'done').length}/${todos.length}`
+          : undefined,
+      onSelect: onOpenTodos,
+      hidden: !onOpenTodos,
+      testId: 'chat-menu-tasks',
+    },
+    ...(onOpenPlugin
+      ? (pluginItems ?? []).map((item) => ({
+          label: item.label,
+          onSelect: () => onOpenPlugin(item.id),
+          testId: `chat-menu-plugin-${item.id}`,
+        }))
+      : []),
     { divider: true },
     {
       label: 'Model',
@@ -668,6 +707,11 @@ export default function ChatView({
       })),
     },
     { divider: true },
+    {
+      label: 'Compact context',
+      onSelect: handleCompact,
+      testId: 'chat-menu-compact',
+    },
     {
       label: 'Clear session',
       onSelect: handleClear,
@@ -745,36 +789,6 @@ export default function ChatView({
           <span className={getStatusDotClass(agentStatus)} />
           {getStatusLabel(agentStatus)}
         </span>
-        {onOpenTodos && (
-          <button
-            className="chat-toolbar-tasks"
-            onClick={onOpenTodos}
-            type="button"
-            title="Tasks"
-            data-testid="chat-toolbar-tasks"
-          >
-            <svg
-              width="14"
-              height="14"
-              viewBox="0 0 24 24"
-              fill="none"
-              stroke="currentColor"
-              strokeWidth="2"
-              strokeLinecap="round"
-              strokeLinejoin="round"
-              aria-hidden="true"
-            >
-              <polyline points="9 11 12 14 22 4" />
-              <path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11" />
-            </svg>
-            <span>Tasks</span>
-            {todos.length > 0 && (
-              <span className="chat-toolbar-tasks-count">
-                {todos.filter((t) => t.status === 'done').length}/{todos.length}
-              </span>
-            )}
-          </button>
-        )}
         {contextTokens > 0 && (
           <span
             className={`chat-toolbar-context${
@@ -786,19 +800,6 @@ export default function ChatView({
             {Math.round(contextTokens / 1000)}k ctx
           </span>
         )}
-        {onOpenPlugin &&
-          pluginItems?.map((item) => (
-            <button
-              key={item.plugin + ':' + item.id}
-              className="chat-toolbar-tasks"
-              onClick={() => onOpenPlugin(item.id)}
-              type="button"
-              title={item.label}
-              data-testid={`chat-toolbar-plugin-${item.id}`}
-            >
-              <span>{item.label}</span>
-            </button>
-          ))}
         <MenuButton
           ariaLabel="Session menu"
           triggerClassName="chat-toolbar-menu"

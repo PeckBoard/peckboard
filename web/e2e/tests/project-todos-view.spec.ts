@@ -156,10 +156,14 @@ test('Todos button opens dedicated view that aggregates worker todos', async ({
 
   await loadAppAt(page, token, `/projects/${project.id}`)
 
-  // The Todos button is on the Kanban header and navigates to the dedicated view.
-  const todosBtn = page.getByTestId('project-todos-button')
-  await expect(todosBtn).toBeVisible({ timeout: 15_000 })
-  await todosBtn.click()
+  // The Todos entry lives in the project 3-dot menu and navigates to the
+  // dedicated view.
+  const projectMenu = page.getByLabel('Project menu')
+  await expect(projectMenu).toBeVisible({ timeout: 15_000 })
+  await projectMenu.click()
+  const todosItem = page.getByTestId('project-menu-todos')
+  await expect(todosItem).toBeVisible()
+  await todosItem.click()
 
   await expect(page).toHaveURL(new RegExp(`/projects/${project.id}/todos$`))
   const view = page.getByTestId('project-todos-view')
@@ -186,7 +190,7 @@ test('Todos button opens dedicated view that aggregates worker todos', async ({
   // Back button returns to the board view.
   await page.locator('.project-todos-header button', { hasText: 'Back' }).click()
   await expect(page).toHaveURL(new RegExp(`/projects/${project.id}$`))
-  await expect(page.getByTestId('project-todos-button')).toBeVisible()
+  await expect(page.getByLabel('Project menu')).toBeVisible()
 })
 
 test('dedicated project todos view renders explicit empty state when there are no todos', async ({

@@ -89,13 +89,18 @@ test('session todos button opens the dedicated view with the grouped snapshot', 
   })
   expect(sendRes.ok(), `send failed: ${await sendRes.text()}`).toBeTruthy()
 
-  // The chat-toolbar Tasks button shows the rolled-up done/total once todos arrive.
-  const tasksBtn = page.getByTestId('chat-toolbar-tasks')
-  await expect(tasksBtn).toBeVisible({ timeout: 10_000 })
-  await expect(tasksBtn).toContainText('1/3')
+  // Todos land in the chat view's TodoPanel once the scripted turn finishes.
+  await expect(page.getByTestId('todo-panel-count')).toHaveText('1/3 done', { timeout: 10_000 })
+
+  // The Tasks entry lives in the session 3-dot menu and shows the rolled-up
+  // done/total as its hint.
+  await page.getByTestId('chat-toolbar-menu').click()
+  const tasksItem = page.getByTestId('chat-menu-tasks')
+  await expect(tasksItem).toBeVisible()
+  await expect(tasksItem).toContainText('1/3')
 
   // Click to navigate to the dedicated view.
-  await tasksBtn.click()
+  await tasksItem.click()
   await expect(page).toHaveURL(new RegExp(`/sessions/${sessionId}/todos$`))
   await expect(page.getByTestId('session-todos-view')).toBeVisible()
 
