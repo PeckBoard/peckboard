@@ -869,9 +869,13 @@ export default function ChatView({
               return (
                 <div key={item.key} className="chat-row chat-row-system">
                   <div className="chat-agent-start">
-                    <span className="chat-agent-start-label">Handover</span>
+                    <span className="chat-agent-start-label">
+                      {item.compaction ? 'Compaction' : 'Handover'}
+                    </span>
                     <span className="chat-agent-start-detail">
-                      preparing context for {item.to.replace(/^claude:/, '')}
+                      {item.compaction
+                        ? 'summarizing context to free the window'
+                        : `preparing context for ${item.to.replace(/^claude:/, '')}`}
                     </span>
                     <span className="chat-agent-start-time">{formatTime(item.ts)}</span>
                   </div>
@@ -885,7 +889,11 @@ export default function ChatView({
                       <span className="chat-handover-icon" aria-hidden="true">
                         {'↔️'}
                       </span>
-                      <span>Context handed over to {item.to.replace(/^claude:/, '')}</span>
+                      <span>
+                        {item.compaction
+                          ? 'Context compacted'
+                          : `Context handed over to ${item.to.replace(/^claude:/, '')}`}
+                      </span>
                       <span className="chat-handover-time">{formatTime(item.ts)}</span>
                     </summary>
                     <SafeMarkdown className="chat-markdown chat-handover-doc">

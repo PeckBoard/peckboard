@@ -129,9 +129,22 @@ impl UsageTracker {
         json: &serde_json::Value,
         main_model: Option<&str>,
     ) -> Vec<TurnModelUsage> {
-        let main_context = json
-            .get("usage")
-            .map(|u| UsageSlices::from_api_usage(u).context());
+        // Context-window occupancy = the largest single API call's context
+        // this turn, taken from the per-message snapshots. `result.usage`
+        // is NOT usable for this — it sums every API call in the turn, so
+        // a multi-call agentic turn would report a multiple of the window
+        // (the DB was full of impossible multi-million "occupancy" rows).
+        let exact_ctx = self
+            .turn_messages
+            .values()
+            .filter(|(model, _)| model.as_deref() == main_model)
+            .map(|(_, s)| s.context())
+            .max();
+        let any_ctx = self.turn_messages.values().map(|(_, s)| s.context()).max();
+        let main_context = exact_ctx.or(any_ctx).or_else(|| {
+            json.get("usage")
+                .map(|u| UsageSlices::from_api_usage(u).context())
+        });
 
         let from_model_usage = json
             .get("modelUsage")
@@ -185,7 +198,7 @@ impl UsageTracker {
             } else {
                 vec![TurnModelUsage {
                     model: main_model.map(|s| s.to_string()),
-                    context_tokens: slices.context(),
+                    context_tokens: main_context.unwrap_or_else(|| slices.context()),
                     slices,
                 }]
             }

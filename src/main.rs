@@ -300,15 +300,34 @@ async fn main() -> anyhow::Result<()> {
                             Ok(Some(s)) if s.handover_to_model.is_some()
                         );
                         if is_handover {
-                            let _guard =
-                                orchestrator_state.session_manager.lock_session(&sid).await;
-                            if let Err(e) =
-                                peckboard::handover::finalize_handover(&orchestrator_state, &sid)
-                                    .await
                             {
-                                tracing::error!(
+                                let _guard =
+                                    orchestrator_state.session_manager.lock_session(&sid).await;
+                                if let Err(e) = peckboard::handover::finalize_handover(
+                                    &orchestrator_state,
+                                    &sid,
+                                )
+                                .await
+                                {
+                                    tracing::error!(
+                                        session_id = %sid,
+                                        "Handover finalize failed: {e}"
+                                    );
+                                }
+                            } // drop the lock — the drain re-acquires it
+                            // A message may have queued behind the doc turn;
+                            // deliver it now. Its dispatch injects the freshly
+                            // stashed doc via `take_pending_injection`.
+                            if let Err(e) =
+                                peckboard::worker::orchestrator::drain_queue_for_session(
+                                    &orchestrator_state,
+                                    &sid,
+                                )
+                                .await
+                            {
+                                tracing::warn!(
                                     session_id = %sid,
-                                    "Handover finalize failed: {e}"
+                                    "Post-handover queue drain failed: {e}"
                                 );
                             }
                             continue;
@@ -372,6 +391,26 @@ async fn main() -> anyhow::Result<()> {
                     } // release lock before drain_queue_for_session, which
                     // re-acquires it inside drain_queued (tokio Mutex is
                     // not reentrant).
+
+                    // 1.5 Auto-compaction: an interactive session whose
+                    // context occupancy crossed the threshold gets its
+                    // compaction turn dispatched now — in the idle gap right
+                    // after its child exited, prefix still cache-warm. On
+                    // dispatch, skip the drain: the doc turn is running, and
+                    // its own completion (step 0) drains the queue after
+                    // finalize stashes the doc.
+                    if completion.completed {
+                        match peckboard::handover::maybe_begin_compaction(&orchestrator_state, &sid)
+                            .await
+                        {
+                            Ok(true) => continue,
+                            Ok(false) => {}
+                            Err(e) => tracing::warn!(
+                                session_id = %sid,
+                                "Auto-compaction check failed: {e}"
+                            ),
+                        }
+                    }
 
                     // 2. Drain any queued message — runs for every session
                     // (worker or interactive) and every completion outcome.

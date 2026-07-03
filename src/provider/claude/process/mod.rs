@@ -627,6 +627,11 @@ pub async fn stream_events(
             // `modelUsage` deltas (which include subagent and utility-call
             // tokens the main-loop `usage` object misses).
             let turn_usages = usage_tracker.on_result(&json, model_name.as_deref());
+            let turn_context = turn_usages
+                .iter()
+                .map(|u| u.context_tokens)
+                .max()
+                .unwrap_or(0);
             emit_turn_usage(&db, &broadcaster, &session_id, turn_usages).await;
             emit_event(
                 &db,
@@ -662,6 +667,20 @@ pub async fn stream_events(
             }
             saw_clean_completion = true;
 
+            // Context occupancy crossed the compaction threshold: recycle
+            // the child after this turn so a ProcessCompletion fires NOW
+            // (mid-stream children otherwise only complete on the ~30-minute
+            // idle reap) and the completion listener can dispatch a
+            // compaction turn. Harmless for sessions the listener declines
+            // to compact (workers): their next turn re-spawns via --resume.
+            if turn_context >= crate::handover::COMPACT_CONTEXT_THRESHOLD && !shutdown_after_turn {
+                tracing::info!(
+                    session_id = %session_id,
+                    context_tokens = turn_context,
+                    "Context over compaction threshold; recycling child after this turn"
+                );
+                shutdown_after_turn = true;
+            }
             // Graceful-shutdown rendezvous: a tool handler (e.g.
             // `finish_card`) set the flag mid-turn so the response
             // could reach the agent. Now that the turn's `result`

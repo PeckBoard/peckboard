@@ -207,6 +207,21 @@ impl SessionManager {
             .await?
             .ok_or_else(|| anyhow::anyhow!("session not found: {}", session_id))?;
 
+        // If a finalized handover/compaction left a doc waiting, prepend it
+        // so the first turn of the fresh conversation opens with the
+        // preserved context. Done here — the single dispatch chokepoint — so
+        // the HTTP route, the queue drain, and the worker/repeating paths
+        // all inject consistently.
+        let message = if session.pending_handover_doc.is_some() {
+            let text = crate::handover::take_pending_injection(db, session_id, &message.text).await;
+            UserMessage {
+                text,
+                attachments: message.attachments,
+            }
+        } else {
+            message
+        };
+
         let folder = db
             .get_folder(&session.folder_id)
             .await?
@@ -531,6 +546,12 @@ impl SessionManager {
 
         for event in tail.iter().rev() {
             if event.kind == "agent-start" || event.kind == "agent-end" {
+                // A `handover` event marks a conversation reset (model switch or
+                // compaction) — anything older belongs to the pre-reset
+                // conversation and must never be resumed.
+                if event.kind == "handover" {
+                    return None;
+                }
                 if let Ok(data) = serde_json::from_str::<serde_json::Value>(&event.data) {
                     if let Some(cid) = data.get("conversationId").and_then(|v| v.as_str()) {
                         if !cid.is_empty() {

@@ -436,7 +436,15 @@ async fn spawn_worker_for_card(
                     name: format!("worker: {}", card.title),
                     folder_id: project.folder_id.clone(),
                     model: card.model.clone().or_else(|| project.model.clone()),
-                    effort: card.effort.clone().or_else(|| project.effort.clone()),
+                    // Default to medium effort when neither the card nor the
+                    // project sets one — unset effort otherwise falls through
+                    // to the provider's own default (high thinking on capable
+                    // models), which measurably doubles worker output tokens.
+                    effort: card
+                        .effort
+                        .clone()
+                        .or_else(|| project.effort.clone())
+                        .or_else(|| Some("medium".into())),
                     is_worker: true,
                     project_id: Some(project.id.clone()),
                     card_id: Some(card.id.clone()),
@@ -594,12 +602,21 @@ async fn spawn_worker_for_card(
                 None
             });
         // Scan the project folder once to give the worker a compact codebase map
-        // (top-level layout + likely-relevant files) up front, so it doesn't burn
-        // its opening turns re-discovering the repo. Best-effort: an unreadable
-        // folder just yields no map.
+        // (top-level layout + likely-relevant files + their symbol outlines) up
+        // front, so it doesn't burn its opening turns — each of which re-reads
+        // the whole context — re-discovering the repo. Best-effort: an
+        // unreadable folder just yields no map.
         let codebase_context = {
-            let files = pipeline::scan_project_files(std::path::Path::new(&folder.path));
-            pipeline::build_codebase_context(&files, card)
+            let root = std::path::Path::new(&folder.path);
+            let files = pipeline::scan_project_files(root);
+            let mut ctx = pipeline::build_codebase_context(&files, card);
+            if let Some(outlines) = pipeline::build_relevant_outlines(root, &files, card) {
+                ctx = Some(match ctx {
+                    Some(map) => format!("{map}\n{outlines}"),
+                    None => outlines,
+                });
+            }
+            ctx
         };
         pipeline::build_worker_prompt(
             project,

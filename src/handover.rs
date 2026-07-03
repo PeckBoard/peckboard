@@ -24,6 +24,13 @@
 //! 3. [`take_pending_injection`] — the next user message under the new
 //!    model consumes the doc and prepends it, so the incoming model opens
 //!    with its predecessor's context.
+//!
+//! **Auto-compaction** reuses the same machinery with `from == to`: when a
+//! session's context occupancy crosses [`COMPACT_CONTEXT_THRESHOLD`], the
+//! Claude stream loop recycles its child after the turn, the completion
+//! listener calls [`maybe_begin_compaction`], the model writes a continuation
+//! doc for itself, and the conversation restarts fresh with the doc injected
+//! — same model, same account, a fraction of the context.
 
 use std::sync::Arc;
 
@@ -38,6 +45,13 @@ use crate::ws::broadcaster::WsEvent;
 /// sync with `SessionManager`'s constant of the same name — bare ids are
 /// legacy Claude sessions.
 const DEFAULT_PROVIDER: &str = "claude";
+
+/// Context-window occupancy (tokens) above which a session gets
+/// auto-compacted. Checked against the latest `usage_events.context_tokens`
+/// row — the real occupancy of the last API call, not the turn-sum. 150k ≈
+/// 75% of a 200k window: late enough that compaction stays rare, early
+/// enough that the doc-generation turn itself still fits comfortably.
+pub const COMPACT_CONTEXT_THRESHOLD: i64 = 150_000;
 
 /// A session's continuity key: `(provider, account)`. Two model ids that
 /// share a key can resume the same conversation; a differing key means the
@@ -80,6 +94,26 @@ fn handover_prompt(to_model: &str) -> String {
     )
 }
 
+/// Instruction for a same-model compaction doc: the model summarizes for
+/// ITSELF — the visible history is dropped and the doc is all that survives.
+fn compaction_prompt() -> &'static str {
+    "Your context window is nearly full, so this conversation is being \
+     COMPACTED: the visible history will be dropped and you will continue \
+     with only the document you write now. Write a CONTINUATION document, \
+     in Markdown, for yourself. Be concrete and self-contained. Cover:\n\n\
+     1. **Goal** — what the user is ultimately trying to accomplish.\n\
+     2. **Current state** — what has been done so far, what works, what \
+     doesn't. Reference concrete files, functions, commands, and results.\n\
+     3. **Key decisions & rationale** — choices made and why, so they \
+     aren't relitigated or reversed by accident.\n\
+     4. **Important context & constraints** — anything non-obvious to \
+     respect (conventions, gotchas, user preferences).\n\
+     5. **Open threads** — unresolved questions and known issues.\n\
+     6. **Next steps** — the concrete actions you'd take next.\n\n\
+     Write ONLY the document — no preamble, no sign-off. Do not run tools \
+     or make further changes; just summarize from what you already know."
+}
+
 /// Wrap `user_text` with the handover doc so the incoming model opens with
 /// its predecessor's context ahead of the user's actual message.
 pub fn build_injection(from_model: &str, doc: &str, user_text: &str) -> String {
@@ -90,6 +124,20 @@ pub fn build_injection(from_model: &str, doc: &str, user_text: &str) -> String {
          authoritative background, then respond to the user's message that \
          follows.]\n\n\
          <handover>\n{doc}\n</handover>\n\n\
+         ---\n\nUser's message:\n{user_text}"
+    )
+}
+
+/// Same-model variant of [`build_injection`] used after auto-compaction: the
+/// reader IS the author, so frame the doc as its own preserved summary.
+pub fn build_compaction_injection(doc: &str, user_text: &str) -> String {
+    format!(
+        "[Context compaction — this conversation's earlier history was \
+         compacted to keep the context window small. The document below is \
+         the continuation summary you wrote before the reset; treat it as \
+         authoritative background, then respond to the user's message that \
+         follows.]\n\n\
+         <compaction>\n{doc}\n</compaction>\n\n\
          ---\n\nUser's message:\n{user_text}"
     )
 }
@@ -131,7 +179,11 @@ pub async fn begin_handover(
 
     // Visible marker that also bounds the text scan in `finalize_handover`
     // to exactly this turn's output.
-    let start_data = serde_json::json!({ "from": from_model, "to": to_model });
+    let start_data = serde_json::json!({
+        "from": from_model,
+        "to": to_model,
+        "compaction": from_model == to_model,
+    });
     if let Ok(ev) = state
         .db
         .append_event(session_id, "handover-start", start_data.clone())
@@ -172,7 +224,11 @@ pub async fn begin_handover(
         .session_manager
         .send_or_queue(
             session_id,
-            UserMessage::from_text(handover_prompt(to_model)),
+            UserMessage::from_text(if from_model == to_model {
+                compaction_prompt().to_string()
+            } else {
+                handover_prompt(to_model)
+            }),
             &state.db,
             &state.broadcaster,
             config,
@@ -209,6 +265,47 @@ pub async fn begin_handover(
     Ok(())
 }
 
+/// Auto-compaction trigger: a same-model handover when the session's context
+/// occupancy has crossed [`COMPACT_CONTEXT_THRESHOLD`]. Called by the
+/// completion listener after a normal (non-handover) completion — the natural
+/// idle gap right after a turn, while the prompt prefix is still cache-warm.
+/// Returns whether a compaction turn was dispatched.
+///
+/// Guards: interactive sessions only (workers are short-lived and their cards
+/// depend on uninterrupted resume semantics), and never while a handover is
+/// already in flight or a doc is still waiting to inject.
+pub async fn maybe_begin_compaction(
+    state: &Arc<AppState>,
+    session_id: &str,
+) -> anyhow::Result<bool> {
+    let Some(session) = state.db.get_session(session_id).await? else {
+        return Ok(false);
+    };
+    if session.is_worker
+        || session.handover_to_model.is_some()
+        || session.pending_handover_doc.is_some()
+    {
+        return Ok(false);
+    }
+    let occupancy = state
+        .db
+        .latest_context_tokens(session_id)
+        .await
+        .unwrap_or(None)
+        .unwrap_or(0);
+    if occupancy < COMPACT_CONTEXT_THRESHOLD {
+        return Ok(false);
+    }
+    let model = session.model.clone().unwrap_or_else(|| "default".into());
+    tracing::info!(
+        session_id = %session_id,
+        occupancy,
+        "Context occupancy over compaction threshold; dispatching compaction turn"
+    );
+    begin_handover(state, session_id, &model, &model).await?;
+    Ok(true)
+}
+
 /// Complete a handover after the outgoing model's doc-generation turn
 /// finishes. Collects that turn's `agent-text` into the doc, records a
 /// `handover` event, flips `session.model` to the parked target, and stashes
@@ -240,6 +337,7 @@ pub async fn finalize_handover(state: &Arc<AppState>, session_id: &str) -> anyho
         "from": from_model,
         "to": to_model,
         "doc": doc,
+        "compaction": from_model == to_model,
     });
     if let Ok(ev) = state
         .db
@@ -334,11 +432,13 @@ pub(crate) fn extract_doc(events: &[crate::db::models::Event]) -> String {
 
 /// If a finalized handover left a doc waiting, consume it (clearing the
 /// column) and return the injection-wrapped message. Otherwise return
-/// `text` unchanged. Called from the message-dispatch path so the incoming
-/// model's first turn opens with the predecessor's context. The predecessor
-/// label is read back from the most recent `handover` event.
-pub async fn take_pending_injection(state: &Arc<AppState>, session_id: &str, text: &str) -> String {
-    let session = match state.db.get_session(session_id).await {
+/// `text` unchanged. Called from `send_message_locked` — the single dispatch
+/// chokepoint — so the HTTP route, the queue drain, and every other path
+/// inject consistently. Compactions (same-model handovers) get the
+/// compaction wording; real model switches get the predecessor's label,
+/// read back from the most recent `handover` event.
+pub async fn take_pending_injection(db: &crate::db::Db, session_id: &str, text: &str) -> String {
+    let session = match db.get_session(session_id).await {
         Ok(Some(s)) => s,
         _ => return text.to_string(),
     };
@@ -348,8 +448,7 @@ pub async fn take_pending_injection(state: &Arc<AppState>, session_id: &str, tex
     };
 
     // Consume it so it's injected exactly once.
-    let _ = state
-        .db
+    let _ = db
         .update_session(
             session_id,
             UpdateSession {
@@ -359,25 +458,27 @@ pub async fn take_pending_injection(state: &Arc<AppState>, session_id: &str, tex
         )
         .await;
 
-    let from_label = latest_handover_from(state, session_id)
-        .await
-        .unwrap_or_else(|| "a previous model".to_string());
-
-    build_injection(&from_label, &doc, text)
+    match latest_handover_meta(db, session_id).await {
+        Some((_, true)) => build_compaction_injection(&doc, text),
+        Some((from, false)) => build_injection(&from, &doc, text),
+        None => build_injection("a previous model", &doc, text),
+    }
 }
 
-/// The `from` model of the most recent `handover` event, if any.
-async fn latest_handover_from(state: &Arc<AppState>, session_id: &str) -> Option<String> {
-    let events = state.db.events_tail(session_id, 200).await.ok()?;
+/// `(from_model, is_compaction)` of the most recent `handover` event, if any.
+async fn latest_handover_meta(db: &crate::db::Db, session_id: &str) -> Option<(String, bool)> {
+    let events = db.events_tail(session_id, 200).await.ok()?;
     events.iter().rev().find_map(|e| {
         if e.kind != "handover" {
             return None;
         }
-        serde_json::from_str::<serde_json::Value>(&e.data)
-            .ok()?
-            .get("from")?
-            .as_str()
-            .map(str::to_string)
+        let v = serde_json::from_str::<serde_json::Value>(&e.data).ok()?;
+        let from = v.get("from")?.as_str()?.to_string();
+        let compaction = v
+            .get("compaction")
+            .and_then(|c| c.as_bool())
+            .unwrap_or_else(|| v.get("to").and_then(|t| t.as_str()) == Some(from.as_str()));
+        Some((from, compaction))
     })
 }
 
@@ -465,5 +566,12 @@ mod tests {
         assert!(out.contains("<handover>\nthe doc body\n</handover>"));
         assert!(out.contains("do the thing"));
         assert!(out.contains("claude:opus"));
+    }
+
+    #[test]
+    fn build_compaction_injection_wraps_doc_and_message() {
+        let out = build_compaction_injection("the doc body", "do the thing");
+        assert!(out.contains("<compaction>\nthe doc body\n</compaction>"));
+        assert!(out.contains("do the thing"));
     }
 }

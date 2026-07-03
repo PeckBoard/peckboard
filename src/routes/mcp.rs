@@ -179,9 +179,27 @@ async fn mcp_handler(
             )
         }
         "tools/list" => {
+            // Workers get a trimmed tool surface: admin tools they can never
+            // legitimately use are not advertised, so their schemas stop
+            // occupying context on every worker API call. Enforcement stays
+            // with the per-handler scope checks — this is advertisement only.
+            let is_worker = state
+                .db
+                .get_session(&session_id)
+                .await
+                .ok()
+                .flatten()
+                .map(|s| s.is_worker)
+                .unwrap_or(false);
+            let hidden: &[&str] = if is_worker {
+                crate::service::mcp_server::worker_hidden_tool_names()
+            } else {
+                &[]
+            };
             let mut tools: Vec<Value> = registry
                 .tool_definitions()
                 .iter()
+                .filter(|t| !hidden.contains(&t.name.as_str()))
                 .map(|t| {
                     serde_json::json!({
                         "name": t.name,

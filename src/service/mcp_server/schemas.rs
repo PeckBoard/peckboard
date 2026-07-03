@@ -13,6 +13,35 @@ use super::context::McpToolDef;
 pub fn tool_names() -> Vec<String> {
     tool_definitions().into_iter().map(|t| t.name).collect()
 }
+/// Core tools NOT advertised to worker sessions via `tools/list`. Workers
+/// never legitimately administer projects, folders, schedules, plugins, or
+/// other chat sessions — and every schema dropped here is context that every
+/// worker API call stops paying for. This trims ADVERTISEMENT only; the
+/// per-handler scope checks (e.g. `ScopedFolderId`) remain the enforcement
+/// point if a worker calls a hidden tool by name anyway.
+pub fn worker_hidden_tool_names() -> &'static [&'static str] {
+    &[
+        "list_projects",
+        "create_project",
+        "update_project",
+        "pause_project",
+        "resume_project",
+        "delete_project",
+        "list_workflows",
+        "set_workflow_instructions",
+        "list_folders",
+        "create_folder",
+        "list_repeating_tasks",
+        "create_repeating_task",
+        "update_repeating_task",
+        "delete_repeating_task",
+        "upgrade_plugin",
+        "set_session_system_prompt",
+        "list_models",
+        "list_sessions",
+        "search_sessions",
+    ]
+}
 
 pub(super) fn tool_definitions() -> Vec<McpToolDef> {
     vec![
@@ -1245,4 +1274,47 @@ pub(super) fn tool_definitions() -> Vec<McpToolDef> {
 }),
         },
     ]
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn worker_hidden_tools_exist_and_spare_worker_essentials() {
+        let names = tool_names();
+        for hidden in worker_hidden_tool_names() {
+            assert!(
+                names.iter().any(|n| n == hidden),
+                "hidden tool {hidden} is not a core tool"
+            );
+        }
+        for essential in [
+            "complete_step",
+            "finish_card",
+            "wont_do_card",
+            "ask_user",
+            "list_cards",
+            "create_card",
+            "share_finding",
+            "write_report",
+            "read_report",
+            "list_project_reports",
+            "send_worker_message",
+            "list_worker_sessions",
+            "read_worker_session",
+            "read_file",
+            "edit_file",
+            "file_outline",
+            "read_symbol",
+            "search_files",
+            "run_command",
+            "run_tests",
+        ] {
+            assert!(
+                !worker_hidden_tool_names().contains(&essential),
+                "essential worker tool {essential} must stay advertised"
+            );
+        }
+    }
 }

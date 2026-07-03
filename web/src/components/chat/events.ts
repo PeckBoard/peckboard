@@ -58,8 +58,16 @@ export type DisplayItem =
   | { type: 'step'; label: string; key: string }
   | { type: 'agent-start'; model: string; effort: string; ts: number; key: string }
   | { type: 'agent-crashed'; reason: string; ts: number; key: string }
-  | { type: 'handover-start'; to: string; ts: number; key: string }
-  | { type: 'handover'; from: string; to: string; doc: string; ts: number; key: string }
+  | { type: 'handover-start'; to: string; compaction: boolean; ts: number; key: string }
+  | {
+      type: 'handover'
+      from: string
+      to: string
+      doc: string
+      compaction: boolean
+      ts: number
+      key: string
+    }
   | { type: 'interrupt'; ts: number; key: string }
   | { type: 'question'; questionId: string; questions: QuestionItem[]; key: string }
   | {
@@ -346,7 +354,8 @@ export function buildDisplayItems(events: Event[]): DisplayItem[] {
       case 'handover-start': {
         flushAssistant()
         const to = (ev.data.to as string) ?? 'the new model'
-        items.push({ type: 'handover-start', to, ts: ev.ts, key: ev.id })
+        const compaction = (ev.data.compaction as boolean) ?? false
+        items.push({ type: 'handover-start', to, compaction, ts: ev.ts, key: ev.id })
         break
       }
       case 'handover': {
@@ -356,6 +365,7 @@ export function buildDisplayItems(events: Event[]): DisplayItem[] {
           from: (ev.data.from as string) ?? '',
           to: (ev.data.to as string) ?? '',
           doc: (ev.data.doc as string) ?? '',
+          compaction: (ev.data.compaction as boolean) ?? false,
           ts: ev.ts,
           key: ev.id,
         })

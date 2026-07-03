@@ -653,6 +653,14 @@ struct CreateSessionRequest {
     model: Option<String>,
     #[serde(default)]
     effort: Option<String>,
+    /// Mark the session as an expert session. This sets the core
+    /// `is_expert`/`expert_kind` columns so usage attribution and session
+    /// listings classify it correctly; expert *knowledge* state still lives
+    /// in the plugin's own `plugin_session_meta`.
+    #[serde(default)]
+    is_expert: bool,
+    #[serde(default)]
+    expert_kind: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -708,8 +716,9 @@ fn session_visible_to(session: &crate::db::models::Session, inv: &InvocationCont
 }
 
 /// `peckboard_create_session` — create a generic session in the *caller's*
-/// folder and project. Expert-ness etc. is the plugin's own metadata
-/// (`peckboard_session_meta_set`), never a core column.
+/// folder and project. Expert *knowledge* state is the plugin's own metadata
+/// (`peckboard_session_meta_set`); the optional `is_expert`/`expert_kind`
+/// flags only classify the session for usage attribution and listings.
 pub(crate) fn create_session_impl(db: &Db, input: &str, inv: &InvocationContext) -> String {
     let req: CreateSessionRequest = match serde_json::from_str(input) {
         Ok(r) => r,
@@ -739,8 +748,8 @@ pub(crate) fn create_session_impl(db: &Db, input: &str, inv: &InvocationContext)
         conversation_id: None,
         created_at: now.clone(),
         last_activity: now,
-        is_expert: false,
-        expert_kind: None,
+        is_expert: req.is_expert,
+        expert_kind: req.expert_kind,
         knowledge_summary: None,
         knowledge_area: None,
         scope_path: None,
@@ -2794,6 +2803,16 @@ mod tests {
         assert_eq!(v["session"]["is_expert"], false); // generic; expert-ness is meta
         let sid = v["session"]["id"].as_str().unwrap().to_string();
 
+        // Opting in via the flags sets the core classification columns.
+        let out2 = create_session_impl(
+            &db,
+            r#"{"name":"expert: ws","is_expert":true,"expert_kind":"knowledge"}"#,
+            &caller,
+        );
+        let v2: serde_json::Value = serde_json::from_str(&out2).unwrap();
+        assert!(v2.get("error").is_none(), "create flagged: {out2}");
+        assert_eq!(v2["session"]["is_expert"], true);
+        assert_eq!(v2["session"]["expert_kind"], "knowledge");
         // Before the plugin marks it, it doesn't "own" it → not found.
         let pre = get_session_impl(&db, pid, &format!(r#"{{"session_id":"{sid}"}}"#), &caller);
         assert!(pre.contains("not found"), "unowned read: {pre}");

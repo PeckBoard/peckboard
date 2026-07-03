@@ -5,7 +5,7 @@
 //! `crate::service::mcp_server::…`.
 
 mod auth;
-mod common_tools;
+pub(crate) mod common_tools;
 mod config;
 mod context;
 mod handlers;
@@ -15,7 +15,7 @@ mod spawn;
 pub use auth::McpTokenRegistry;
 pub use config::{delete_mcp_config, write_mcp_config};
 pub use context::{ExpertDispatcher, McpToolDef, ScopedFolderId, ScopedProjectId, ToolCallContext};
-pub use schemas::tool_names;
+pub use schemas::{tool_names, worker_hidden_tool_names};
 pub use spawn::{AppExpertDispatcher, AppLiveHost};
 
 use serde_json::Value;

@@ -63,6 +63,23 @@ const ROLLUP_AGG_COLS: &str = "\
     COALESCE(MAX(u.context_tokens), 0) AS context_tokens";
 
 impl Db {
+    /// Latest recorded context-window occupancy for a session: the newest
+    /// usage row with a positive `context_tokens` (subagent/utility rows
+    /// carry 0 and are skipped). Drives the auto-compaction threshold check.
+    pub async fn latest_context_tokens(&self, session_id: &str) -> anyhow::Result<Option<i64>> {
+        let session_id = session_id.to_string();
+        self.with_conn(move |conn| {
+            let v = usage_events::table
+                .filter(usage_events::session_id.eq(&session_id))
+                .filter(usage_events::context_tokens.gt(0))
+                .order((usage_events::ts.desc(), usage_events::turn_seq.desc()))
+                .select(usage_events::context_tokens)
+                .first::<i64>(conn)
+                .optional()?;
+            Ok(v)
+        })
+        .await
+    }
     /// Insert a per-turn usage row. If `new.turn_seq` is `None`, the next
     /// per-session turn number is assigned (max + 1), mirroring how
     /// `append_event` assigns event seqs.

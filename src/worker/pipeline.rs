@@ -19,6 +19,13 @@ const REPO_MAP_MAX_GROUPS: usize = 24;
 const RELEVANT_FILES_MAX: usize = 10;
 /// Most distinct card tokens used for the relevance heuristic.
 const CARD_TOKENS_MAX: usize = 12;
+/// Caps for the inline outlines of likely-relevant files (see
+/// [`build_relevant_outlines`]): orientation for the worker, not a code dump.
+const OUTLINE_FILES_MAX: usize = 5;
+const OUTLINE_SYMBOLS_MAX: usize = 25;
+const OUTLINE_SIG_MAX_CHARS: usize = 90;
+const OUTLINE_SECTION_MAX_CHARS: usize = 4_000;
+const OUTLINE_FILE_MAX_BYTES: u64 = 512_000;
 
 /// Walk `root` and collect files (folder-relative paths + sizes), skipping the
 /// same hidden/build/vendor dirs the plugin host's walk does. Best-effort: I/O
@@ -150,11 +157,12 @@ fn repo_map(files: &[ProjectFileEntry]) -> String {
 
 /// Heuristic: rank files by how many distinct card tokens appear in their path
 /// (basename matches count double). Surfaces likely starting points so a worker
-/// can open the right file directly instead of searching for it.
-fn relevant_files(files: &[ProjectFileEntry], card: &Card) -> Option<String> {
+/// can open the right file directly instead of searching for it. Returns ALL
+/// matches, best first; callers apply their own caps.
+fn relevant_file_paths<'a>(files: &'a [ProjectFileEntry], card: &Card) -> Vec<&'a str> {
     let tokens = card_tokens(card);
     if tokens.is_empty() {
-        return None;
+        return Vec::new();
     }
     let mut scored: Vec<(usize, &str)> = Vec::new();
     for f in files {
@@ -172,20 +180,94 @@ fn relevant_files(files: &[ProjectFileEntry], card: &Card) -> Option<String> {
             scored.push((score, f.path.as_str()));
         }
     }
-    if scored.is_empty() {
+    scored.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.cmp(b.1)));
+    scored.into_iter().map(|(_, p)| p).collect()
+}
+
+fn relevant_files(files: &[ProjectFileEntry], card: &Card) -> Option<String> {
+    let paths = relevant_file_paths(files, card);
+    if paths.is_empty() {
         return None;
     }
-    scored.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.cmp(b.1)));
-
     let mut out = String::from(
         "### Likely-Relevant Files\n\n\
          Heuristic match on this card's title/description — likely starting \
          points, but verify before relying on them:\n\n",
     );
-    for (_, p) in scored.iter().take(RELEVANT_FILES_MAX) {
+    for p in paths.iter().take(RELEVANT_FILES_MAX) {
         out.push_str(&format!("- `{p}`\n"));
     }
     Some(out)
+}
+
+/// Inline symbol outlines of the top likely-relevant source files, so a worker
+/// can jump straight to `read_symbol` / `read_file` line windows instead of
+/// spending API round-trips (each re-reading its whole context) rediscovering
+/// file structure. Hard-capped in files, symbols per file, and total size.
+pub fn build_relevant_outlines(
+    root: &Path,
+    files: &[ProjectFileEntry],
+    card: &Card,
+) -> Option<String> {
+    use crate::service::mcp_server::common_tools::outline::{detect_lang, outline};
+
+    let paths = relevant_file_paths(files, card);
+    if paths.is_empty() {
+        return None;
+    }
+    let mut out = String::from(
+        "### Relevant File Outlines\n\n\
+         Symbol maps (signature + line range) of the likely-relevant files. Jump \
+         straight to a symbol with `read_symbol` or a `read_file` line window — \
+         don't re-read whole files for structure you already have here:\n\n",
+    );
+    let header_len = out.len();
+    let mut outlined = 0usize;
+    for p in paths {
+        if outlined >= OUTLINE_FILES_MAX {
+            break;
+        }
+        let Some(lang) = detect_lang(p) else { continue };
+        let abs = root.join(p);
+        match std::fs::metadata(&abs) {
+            Ok(m) if m.len() <= OUTLINE_FILE_MAX_BYTES => {}
+            _ => continue,
+        }
+        let Ok(content) = std::fs::read_to_string(&abs) else {
+            continue;
+        };
+        let symbols = outline(&content, lang);
+        if symbols.is_empty() {
+            continue;
+        }
+        let mut block = format!("`{p}`:\n");
+        for s in symbols.iter().take(OUTLINE_SYMBOLS_MAX) {
+            let flat = s.signature.replace('\n', " ");
+            let sig: String = flat.chars().take(OUTLINE_SIG_MAX_CHARS).collect();
+            let ellipsis = if flat.chars().count() > OUTLINE_SIG_MAX_CHARS {
+                "…"
+            } else {
+                ""
+            };
+            block.push_str(&format!(
+                "- {sig}{ellipsis} ({}-{})\n",
+                s.start_line, s.end_line
+            ));
+        }
+        if symbols.len() > OUTLINE_SYMBOLS_MAX {
+            block.push_str(&format!(
+                "- … {} more symbols (call `file_outline`)\n",
+                symbols.len() - OUTLINE_SYMBOLS_MAX
+            ));
+        }
+        block.push('\n');
+        if out.len() + block.len() > OUTLINE_SECTION_MAX_CHARS {
+            break;
+        }
+        out.push_str(&block);
+        outlined += 1;
+    }
+    (out.len() > header_len).then_some(out)
 }
 
 /// Tokenize the card's title + description into distinct, lowercased,
@@ -510,6 +592,17 @@ pub fn build_worker_prompt(
             prompt.push_str(&fence("project.workflow_instructions", trimmed));
             prompt.push_str("\n\n");
         }
+        prompt.push_str(
+            "## Token Discipline\n\n\
+         Work lean — tokens are a budget:\n\
+         - Edit with targeted `edit_file` operations; never rewrite a whole file \
+         (`write_file` is for genuinely new files only)\n\
+         - Read selectively: `file_outline` + `read_symbol` or a line window via \
+         `read_file`, not whole files; `search_files` instead of shell text search\n\
+         - Keep command output small: filter and limit instead of dumping full logs\n\
+         - Keep reports, findings, summaries, and handoff context terse — facts and \
+         `file:line` references, no prose padding\n\n",
+        );
     }
     prompt.push_str(
         "## Parallel Worker Awareness\n\n\
@@ -955,6 +1048,36 @@ mod tests {
         // Repo map is present, but no relevance section.
         assert!(ctx.contains("Top-level layout"));
         assert!(!ctx.contains("Likely-Relevant Files"));
+    }
+
+    #[test]
+    fn relevant_outlines_render_symbols_and_skip_non_code() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("src/auth")).unwrap();
+        std::fs::write(
+            dir.path().join("src/auth/jwt.rs"),
+            "pub fn issue_jwt() {}\npub struct AuthClaims {\n    exp: u64,\n}\n",
+        )
+        .unwrap();
+        std::fs::write(dir.path().join("src/auth/notes.txt"), "not code").unwrap();
+        let fs = files(&["src/auth/jwt.rs", "src/auth/notes.txt", "web/app.tsx"]);
+        let out = build_relevant_outlines(dir.path(), &fs, &sample_card()).unwrap();
+        assert!(out.contains("`src/auth/jwt.rs`:"), "got: {out}");
+        assert!(out.contains("issue_jwt"), "got: {out}");
+        assert!(out.contains("AuthClaims"), "got: {out}");
+        // Non-code and unmatched files are not outlined.
+        assert!(!out.contains("notes.txt"));
+        assert!(!out.contains("app.tsx"));
+    }
+
+    #[test]
+    fn relevant_outlines_none_when_no_matches() {
+        let dir = tempfile::tempdir().unwrap();
+        let fs = files(&["src/db/models.rs"]);
+        let mut card = sample_card();
+        card.title = "Fix the bug".into();
+        card.description = "Make it work".into();
+        assert!(build_relevant_outlines(dir.path(), &fs, &card).is_none());
     }
 
     #[test]

@@ -46,14 +46,15 @@ pub(super) async fn send_message(
         }
     };
 
-    // A model-switch handover is mid-flight: the outgoing model is still
-    // writing its handover doc. Refuse new user turns until it lands so we
-    // don't contaminate the doc-generation turn or race the model flip.
+    // A model-switch handover or context compaction is mid-flight: the
+    // outgoing model is still writing its doc. Refuse new user turns until
+    // it lands so we don't contaminate the doc-generation turn or race the
+    // model flip / conversation reset.
     if session.handover_to_model.is_some() {
         return Err((
             StatusCode::CONFLICT,
             Json(serde_json::json!({
-                "error": "model handover in progress; try again in a moment",
+                "error": "handover or context compaction in progress; try again in a moment",
             })),
         ));
     }
@@ -217,11 +218,10 @@ pub(super) async fn send_message(
         extra_allowed_tools: Vec::new(),
     };
 
-    // If a just-finalized handover left a doc waiting, prepend it so this
-    // first turn under the new model opens with the predecessor's context.
-    // The user event above kept the original text; only the bytes sent to
-    // the provider carry the injected preamble.
-    let dispatch_text = crate::handover::take_pending_injection(&state, &id, &resolved_text).await;
+    // Any pending handover/compaction doc is injected inside
+    // `send_message_locked` (the single dispatch chokepoint), so the text
+    // goes out as typed here. The user event above already recorded it.
+    let dispatch_text = resolved_text;
 
     // `send_or_queue` acquires the per-session lock internally,
     // dispatches through the long-lived child (spawning lazily on
