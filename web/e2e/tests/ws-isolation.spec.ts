@@ -2,6 +2,7 @@ import { test, expect, type APIRequestContext } from '@playwright/test'
 import { mkdtempSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
+import { WebSocketImpl, type WsMessageEvent } from './ws-compat'
 
 /**
  * Regression test for the WS fan-out leak: the send decision used
@@ -35,7 +36,7 @@ function collectFrames(
   timeoutMs: number,
 ): Promise<{ sessionId: string; kind: string }[]> {
   const wsUrl = baseURL.replace(/^http/, 'ws') + '/ws'
-  const ws = new WebSocket(wsUrl)
+  const ws = new WebSocketImpl(wsUrl)
   const collected: { sessionId: string; kind: string }[] = []
 
   return new Promise((resolve, reject) => {
@@ -53,7 +54,7 @@ function collectFrames(
     ws.addEventListener('open', () => {
       ws.send(JSON.stringify({ type: 'auth', token }))
     })
-    ws.addEventListener('message', (msg: MessageEvent) => {
+    ws.addEventListener('message', (msg: WsMessageEvent) => {
       const frame = JSON.parse(String(msg.data))
       if (frame.type === 'auth_ok') {
         ws.send(JSON.stringify({ type: 'subscribe', session_id: subscribeTo }))

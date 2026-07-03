@@ -2,6 +2,7 @@ import { test, expect, type APIRequestContext } from '@playwright/test'
 import { mkdtempSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
+import { WebSocketImpl, type WsMessageEvent } from './ws-compat'
 
 /**
  * End-to-end coverage for the user-visible contract of worker session
@@ -60,7 +61,7 @@ async function openCollector(
   onFrame: (frame: WsFrame) => void,
 ): Promise<{ stop: () => void }> {
   const wsUrl = baseURL.replace(/^http/, 'ws') + '/ws'
-  const ws = new WebSocket(wsUrl)
+  const ws = new WebSocketImpl(wsUrl)
 
   await new Promise<void>((resolve, reject) => {
     const timer = setTimeout(() => reject(new Error('WS handshake timed out')), 5_000)
@@ -77,7 +78,7 @@ async function openCollector(
   ws.send(JSON.stringify({ type: 'auth', token }))
   await new Promise<void>((resolve, reject) => {
     const timer = setTimeout(() => reject(new Error('auth_ok not received')), 5_000)
-    const handler = (msg: MessageEvent) => {
+    const handler = (msg: WsMessageEvent) => {
       const frame = JSON.parse(String(msg.data))
       if (frame.type === 'auth_ok') {
         clearTimeout(timer)

@@ -116,17 +116,12 @@ test('cross-account model switch generates a handover the new model reads', asyn
   expect(parked.handover_to_model).toBe('mock:echo@acct2')
   expect(parked.model).toBe('mock:echo')
 
-  // While the handover is in flight, new user turns are refused (409). (Best
-  // effort: if the doc turn already finalized, this send is legitimately
-  // accepted — so only assert the negative when the flag is still set.)
-  const stillPending = await request.get(`/api/sessions/${session.id}`, { headers: authHeader })
-  if (((await stillPending.json()) as { handover_to_model: string | null }).handover_to_model) {
-    const blocked = await request.post(`/api/sessions/${session.id}/message`, {
-      headers: authHeader,
-      data: { text: 'too soon' },
-    })
-    expect(blocked.status()).toBe(409)
-  }
+  // The "messages are refused with 409 while the handover is pending" guard
+  // is pinned by the Rust route test `message_during_pending_handover_is_409`
+  // (tests/message_during_handover.rs). Probing it here raced the mock's
+  // instant doc turn: the flag could clear between a GET pre-check and the
+  // probe POST, and an accepted probe consumed the handover preamble that
+  // step 4 below asserts on.
 
   const handoverEvents = await waitForEvent(
     request,

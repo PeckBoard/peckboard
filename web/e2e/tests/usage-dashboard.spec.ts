@@ -2,6 +2,7 @@ import { test, expect, type APIRequestContext, type Page } from '@playwright/tes
 import { mkdtempSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
+import { WebSocketImpl, type WsMessageEvent } from './ws-compat'
 
 /**
  * E2E for the Usage Dashboard.
@@ -49,7 +50,7 @@ async function collectEventsUntil(
   timeoutMs: number,
 ): Promise<WsEvent[]> {
   const wsUrl = baseURL.replace(/^http/, 'ws') + '/ws'
-  const ws = new WebSocket(wsUrl)
+  const ws = new WebSocketImpl(wsUrl)
   const collected: WsEvent[] = []
 
   try {
@@ -71,7 +72,7 @@ async function collectEventsUntil(
     ws.send(JSON.stringify({ type: 'auth', token }))
     await new Promise<void>((resolve, reject) => {
       const timer = setTimeout(() => reject(new Error('WS auth_ok not received')), timeoutMs)
-      const handler = (msg: MessageEvent) => {
+      const handler = (msg: WsMessageEvent) => {
         const frame = JSON.parse(String(msg.data))
         if (frame.type === 'auth_ok') {
           clearTimeout(timer)
