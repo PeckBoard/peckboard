@@ -291,31 +291,6 @@ export default function ChatView({
   // Cross-provider/account model switch awaiting the user's choice in the
   // modal below (hand over a summary / clear & switch / cancel).
   const [pendingModelSwitch, setPendingModelSwitch] = useState<string | null>(null)
-  // Server-suggested compaction (context near full). The occupancy at last
-  // dismissal is kept so the re-fired suggestion only re-prompts after
-  // meaningful growth (+20k tokens).
-  const [compactionPrompt, setCompactionPrompt] = useState<{ occupancy: number } | null>(null)
-  const compactionDismissedAt = useRef(0)
-
-  // The completion listener broadcasts `compaction-suggested` when this
-  // session's context crosses the threshold; surface it as a modal instead
-  // of compacting silently — the user picks compact / clear / not now.
-  useEffect(() => {
-    const onSuggest = (e: globalThis.Event) => {
-      const detail = (e as CustomEvent).detail as {
-        session_id?: string
-        data?: { occupancy?: number }
-      }
-      if (detail?.session_id !== sessionId) return
-      const occupancy = detail?.data?.occupancy ?? 0
-      if (compactionDismissedAt.current > 0 && occupancy < compactionDismissedAt.current + 20_000) {
-        return
-      }
-      setCompactionPrompt({ occupancy })
-    }
-    window.addEventListener('peckboard:compaction-suggested', onSuggest)
-    return () => window.removeEventListener('peckboard:compaction-suggested', onSuggest)
-  }, [sessionId])
   const scrollRef = useRef<HTMLDivElement>(null)
   const userScrolledUp = useRef(false)
   /** Saved scroll-height immediately before a "Load older" fetch so
@@ -805,7 +780,7 @@ export default function ChatView({
             className={`chat-toolbar-context${
               contextTokens >= 150_000 ? ' over' : contextTokens >= 120_000 ? ' warn' : ''
             }`}
-            title={`Context size: ${contextTokens.toLocaleString()} tokens (compaction suggested at 150k)`}
+            title={`Context size: ${contextTokens.toLocaleString()} tokens (auto-compacts at 150k)`}
             data-testid="chat-toolbar-context"
           >
             {Math.round(contextTokens / 1000)}k ctx
@@ -1138,65 +1113,6 @@ export default function ChatView({
                   }}
                 >
                   Hand over context
-                </button>
-              </div>
-            </div>
-          </div>,
-          document.body,
-        )}
-      {compactionPrompt !== null &&
-        createPortal(
-          <div
-            className="modal-backdrop"
-            onMouseDown={(e) => {
-              if (e.target === e.currentTarget) {
-                compactionDismissedAt.current = compactionPrompt.occupancy
-                setCompactionPrompt(null)
-              }
-            }}
-          >
-            <div
-              className="confirm-dialog"
-              data-testid="compaction-prompt"
-              onMouseDown={(e) => e.stopPropagation()}
-            >
-              <h3 className="confirm-dialog-title">Context is nearly full</h3>
-              <p className="confirm-dialog-message">
-                {`This conversation is using ~${Math.round(compactionPrompt.occupancy / 1000)}k tokens of context. Compact it (the model writes a continuation summary and restarts from it), or clear the context entirely.`}
-              </p>
-              <div className="confirm-dialog-actions">
-                <button
-                  className="btn-secondary"
-                  onClick={() => {
-                    compactionDismissedAt.current = compactionPrompt.occupancy
-                    setCompactionPrompt(null)
-                  }}
-                >
-                  Not now
-                </button>
-                <button
-                  className="btn-secondary"
-                  data-testid="compaction-clear"
-                  onClick={async () => {
-                    setCompactionPrompt(null)
-                    await clearSession(sessionId)
-                  }}
-                >
-                  Clear context
-                </button>
-                <button
-                  className="btn-primary"
-                  data-testid="compaction-compact"
-                  onClick={async () => {
-                    setCompactionPrompt(null)
-                    try {
-                      await authedFetch(`/api/sessions/${sessionId}/compact`, { method: 'POST' })
-                    } catch {
-                      /* transient; the suggestion re-fires on the next turn */
-                    }
-                  }}
-                >
-                  Compact
                 </button>
               </div>
             </div>

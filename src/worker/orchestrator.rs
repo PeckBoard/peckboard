@@ -411,7 +411,12 @@ async fn spawn_worker_for_card(
                 prev.is_worker
                     && prev.card_id.as_deref() == Some(card.id.as_str())
                     && prev.worker_step.as_deref() == Some(effective_step.as_str())
-                    && prev.conversation_id.is_some()
+                    // A live conversation resumes via the provider; after an
+                    // auto-compaction the conversation_id is cleared but the
+                    // continuation doc is parked in pending_handover_doc —
+                    // the dispatch chokepoint injects it, so the resumed
+                    // chunk starts fresh WITH the preserved context.
+                    && (prev.conversation_id.is_some() || prev.pending_handover_doc.is_some())
             }),
         None => None,
     };

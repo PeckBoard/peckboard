@@ -92,6 +92,10 @@ export interface Card {
   handoff_context: string | null
   blocked: boolean
   block_reason: string | null
+  /** Latest context-window occupancy (tokens) of the card's worker session,
+   *  seeded by the cards fetch; live updates ride the streamed `agent-usage`
+   *  events. Absent for terminal cards and cards without a worker session. */
+  context_tokens?: number
   depends_on?: string[]
   created_at: string
   updated_at: string

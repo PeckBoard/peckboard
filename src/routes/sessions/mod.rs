@@ -329,7 +329,7 @@ async fn update_session(
 
     if let Some(target) = handover_target {
         let from = session.model.clone().unwrap_or_default();
-        if let Err(e) = crate::handover::begin_handover(&state, &id, &from, &target).await {
+        if let Err(e) = crate::handover::begin_handover(&state, &id, &from, &target, None).await {
             tracing::error!(session_id = %id, "Failed to begin handover: {e}");
             // Fall back to a plain switch so the user isn't stuck: apply the
             // model directly and clear the parked target.
@@ -554,9 +554,9 @@ async fn mark_read(
     Ok::<_, (StatusCode, Json<serde_json::Value>)>(StatusCode::NO_CONTENT)
 }
 
-/// POST /api/sessions/:id/compact — user-confirmed context compaction (the
-/// `compaction-suggested` modal's Compact button; also valid as a manual
-/// action at any occupancy). Dispatches the same-model handover doc turn and
+/// POST /api/sessions/:id/compact — manual context compaction, valid at any
+/// occupancy (threshold-crossing compaction is dispatched automatically by
+/// the completion listener). Dispatches the same-model handover doc turn and
 /// returns 202; the conversation restarts fresh once the doc lands. 409 with
 /// a reason when the session is ineligible (worker, handover already in
 /// flight, nothing to compact).

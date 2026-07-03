@@ -670,9 +670,10 @@ pub async fn stream_events(
             // Context occupancy crossed the compaction threshold: recycle
             // the child after this turn so a ProcessCompletion fires NOW
             // (mid-stream children otherwise only complete on the ~30-minute
-            // idle reap) and the completion listener can dispatch a
-            // compaction turn. Harmless for sessions the listener declines
-            // to compact (workers): their next turn re-spawns via --resume.
+            // idle reap) and the completion listener can auto-dispatch a
+            // compaction turn. Harmless for sessions the listener skips
+            // (e.g. an ineligible worker): the next turn re-spawns via
+            // --resume.
             if turn_context >= crate::handover::COMPACT_CONTEXT_THRESHOLD && !shutdown_after_turn {
                 tracing::info!(
                     session_id = %session_id,

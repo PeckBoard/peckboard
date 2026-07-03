@@ -28,12 +28,14 @@
 //! **Compaction** reuses the same machinery with `from == to`: when a
 //! session's context occupancy crosses [`COMPACT_CONTEXT_THRESHOLD`], the
 //! Claude stream loop recycles its child after the turn and the completion
-//! listener calls [`maybe_suggest_compaction`], which asks the USER (a
-//! `compaction-suggested` ws event → modal: compact / clear / not now).
-//! Confirming hits `POST /api/sessions/:id/compact` → [`begin_compaction`]:
-//! the model writes a continuation doc for itself and the conversation
-//! restarts fresh with the doc injected — same model, same account, a
-//! fraction of the context.
+//! listener calls [`maybe_auto_compact`], which dispatches the compaction
+//! turn automatically — no user prompt: the model writes a continuation doc
+//! for itself and the conversation restarts fresh with the doc injected —
+//! same model, same account, a fraction of the context. Interactive chats
+//! and workers alike; workers additionally require that their card would
+//! still resume this session (see the guards on [`maybe_auto_compact`]).
+//! `POST /api/sessions/:id/compact` → [`begin_compaction`] remains as a
+//! manual trigger, valid at any occupancy.
 
 use std::sync::Arc;
 
@@ -158,14 +160,21 @@ const EMPTY_DOC_FALLBACK: &str = "(The previous model could not produce a handov
 /// flips it once the doc is ready. Returns `Ok(())` once the turn is
 /// dispatched; the finalize step runs later off the completion listener.
 ///
-/// Precondition (enforced by the single caller in `update_session`):
-/// `session.model` and `new_model` cross a continuity boundary, the session
-/// has real history to summarize, and it isn't a worker session.
+/// `lock`: pass the already-held session lock to dispatch immediately
+/// without queueing (the auto-compaction path, which decides under the lock
+/// that the session is idle and must not queue a doc turn behind a racing
+/// dispatch); pass `None` to go through `send_or_queue` (the route paths,
+/// where queueing behind an in-flight turn is the desired behaviour).
+///
+/// Preconditions (enforced by the callers): for a model switch, `from` and
+/// `to` cross a continuity boundary and the session has real history to
+/// summarize; for a compaction, `from == to`.
 pub async fn begin_handover(
     state: &Arc<AppState>,
     session_id: &str,
     from_model: &str,
     to_model: &str,
+    lock: Option<&crate::provider::manager::SessionLock>,
 ) -> anyhow::Result<()> {
     // Park the target. Leaving `model` alone keeps the doc-gen turn routed
     // to the outgoing provider/account so it can resume the conversation.
@@ -223,20 +232,25 @@ pub async fn begin_handover(
         extra_allowed_tools: Vec::new(),
     };
 
-    state
-        .session_manager
-        .send_or_queue(
-            session_id,
-            UserMessage::from_text(if from_model == to_model {
-                compaction_prompt().to_string()
-            } else {
-                handover_prompt(to_model)
-            }),
-            &state.db,
-            &state.broadcaster,
-            config,
-        )
-        .await?;
+    let message = UserMessage::from_text(if from_model == to_model {
+        compaction_prompt().to_string()
+    } else {
+        handover_prompt(to_model)
+    });
+    match lock {
+        Some(lock) => {
+            state
+                .session_manager
+                .send_message_locked(lock, message, &state.db, &state.broadcaster, config)
+                .await?;
+        }
+        None => {
+            state
+                .session_manager
+                .send_or_queue(session_id, message, &state.db, &state.broadcaster, config)
+                .await?;
+        }
+    }
 
     // Ask the outgoing provider to exit once the doc turn's result lands.
     // Load-bearing, twice over:
@@ -268,25 +282,34 @@ pub async fn begin_handover(
     Ok(())
 }
 
-/// Auto-compaction trigger: a same-model handover when the session's context
-/// occupancy has crossed [`COMPACT_CONTEXT_THRESHOLD`]. Called by the
-/// completion listener after a normal (non-handover) completion — the natural
-/// idle gap right after a turn, while the prompt prefix is still cache-warm.
-/// Returns whether a compaction turn was dispatched.
+/// Auto-compaction: a same-model handover dispatched automatically when the
+/// session's context occupancy has crossed [`COMPACT_CONTEXT_THRESHOLD`].
+/// Called by the completion listener after a normal (non-handover)
+/// completion — the natural idle gap right after a turn, while the prompt
+/// prefix is still cache-warm. Returns whether a compaction turn was
+/// dispatched.
 ///
-/// Guards: interactive sessions only (workers are short-lived and their cards
-/// depend on uninterrupted resume semantics), and never while a handover is
-/// already in flight or a doc is still waiting to inject.
-pub async fn maybe_suggest_compaction(
-    state: &Arc<AppState>,
-    session_id: &str,
-) -> anyhow::Result<bool> {
+/// Every guard is a conservative skip — occupancy only grows, so a skipped
+/// check simply retries at the next completion:
+/// - no handover in flight and no doc still waiting to inject;
+/// - not an expert or repeating-task session (their dispatchers own the
+///   session lifecycle and aren't audited for a doc turn interleaving);
+/// - no queued message (the listener's drain right after this check would
+///   deliver it into the middle of the doc turn);
+/// - workers: only while the card would still resume THIS session (same
+///   step, currently unclaimed, non-terminal, resumable conversation) —
+///   otherwise the doc would summarize a conversation nothing reads;
+/// - idle under the session lock — losing the race to a concurrent
+///   dispatch (e.g. the orchestrator tick resuming the card) means that
+///   turn runs first and we compact after it instead.
+pub async fn maybe_auto_compact(state: &Arc<AppState>, session_id: &str) -> anyhow::Result<bool> {
     let Some(session) = state.db.get_session(session_id).await? else {
         return Ok(false);
     };
-    if session.is_worker
-        || session.handover_to_model.is_some()
+    if session.handover_to_model.is_some()
         || session.pending_handover_doc.is_some()
+        || session.is_expert
+        || session.repeating_task_id.is_some()
     {
         return Ok(false);
     }
@@ -299,32 +322,61 @@ pub async fn maybe_suggest_compaction(
     if occupancy < COMPACT_CONTEXT_THRESHOLD {
         return Ok(false);
     }
+    if matches!(state.db.get_queued_message(session_id).await, Ok(Some(_))) {
+        return Ok(false);
+    }
+    if session.is_worker && !card_resumes_session(state, &session).await {
+        return Ok(false);
+    }
+    let model = session.model.clone().unwrap_or_else(|| "default".into());
+    let lock = state.session_manager.lock_session(session_id).await;
+    if state.session_manager.is_running(session_id).await {
+        return Ok(false);
+    }
     tracing::info!(
         session_id = %session_id,
         occupancy,
-        "Context occupancy over compaction threshold; suggesting compaction to the user"
+        is_worker = session.is_worker,
+        "Context occupancy over compaction threshold; auto-compacting"
     );
-    state.broadcaster.broadcast(WsEvent {
-        event_type: "compaction-suggested".into(),
-        session_id: session_id.to_string(),
-        data: serde_json::json!({
-            "occupancy": occupancy,
-            "threshold": COMPACT_CONTEXT_THRESHOLD,
-        }),
-    });
+    begin_handover(state, session_id, &model, &model, Some(&lock)).await?;
     Ok(true)
 }
 
-/// User-confirmed compaction (the suggestion modal's Compact button; also
-/// valid as a manual action at any occupancy). Same-model handover: the model
-/// writes a continuation doc, the conversation restarts fresh with the doc
-/// injected. Errors describe why the session is ineligible.
+/// Would the worker orchestrator resume `session` for its card's next
+/// chunk? Mirrors the resume filter in `spawn_worker_for_card`: same card,
+/// same step, currently unclaimed, non-terminal, and a conversation to
+/// resume. Only then is a compaction doc worth writing — the resumed chunk
+/// is what reads it.
+async fn card_resumes_session(state: &Arc<AppState>, session: &crate::db::models::Session) -> bool {
+    if session.conversation_id.is_none() {
+        return false;
+    }
+    let Some(card_id) = session.card_id.as_deref() else {
+        return false;
+    };
+    let Ok(Some(card)) = state.db.get_card(card_id).await else {
+        return false;
+    };
+    card.worker_session_id.is_none()
+        && card.last_worker_session_id.as_deref() == Some(session.id.as_str())
+        && session.worker_step.as_deref() == Some(card.step.as_str())
+        && card.step != "done"
+        && card.step != "wont_do"
+}
+
+/// Manual compaction (`POST /api/sessions/:id/compact`), valid at any
+/// occupancy. Same-model handover: the model writes a continuation doc, the
+/// conversation restarts fresh with the doc injected. Errors describe why
+/// the session is ineligible. Interactive sessions only — workers compact
+/// automatically between chunks via [`maybe_auto_compact`], where the card
+/// resume-link eligibility is checked.
 pub async fn begin_compaction(state: &Arc<AppState>, session_id: &str) -> anyhow::Result<()> {
     let Some(session) = state.db.get_session(session_id).await? else {
         anyhow::bail!("session not found");
     };
     if session.is_worker {
-        anyhow::bail!("worker sessions are not compacted");
+        anyhow::bail!("worker sessions compact automatically between chunks");
     }
     if session.handover_to_model.is_some() {
         anyhow::bail!("a handover or compaction is already in progress");
@@ -342,8 +394,8 @@ pub async fn begin_compaction(state: &Arc<AppState>, session_id: &str) -> anyhow
         anyhow::bail!("nothing to compact yet — the session has no recorded context");
     }
     let model = session.model.clone().unwrap_or_else(|| "default".into());
-    tracing::info!(session_id = %session_id, occupancy, "User-confirmed compaction dispatching");
-    begin_handover(state, session_id, &model, &model).await
+    tracing::info!(session_id = %session_id, occupancy, "Manual compaction dispatching");
+    begin_handover(state, session_id, &model, &model, None).await
 }
 
 /// Complete a handover after the outgoing model's doc-generation turn

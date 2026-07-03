@@ -216,17 +216,36 @@ pub(super) async fn list_cards(
             .push(dep_id.as_str());
     }
 
-    let items: Vec<serde_json::Value> = cards
-        .iter()
-        .map(|c| {
-            let deps = deps_by_card.get(c.id.as_str()).cloned().unwrap_or_default();
-            let mut value = serde_json::to_value(c).unwrap_or_else(|_| serde_json::json!({}));
-            if let Some(obj) = value.as_object_mut() {
-                obj.insert("depends_on".into(), serde_json::json!(deps));
+    let mut items: Vec<serde_json::Value> = Vec::with_capacity(cards.len());
+    for c in &cards {
+        let deps = deps_by_card.get(c.id.as_str()).cloned().unwrap_or_default();
+        let mut value = serde_json::to_value(c).unwrap_or_else(|_| serde_json::json!({}));
+        if let Some(obj) = value.as_object_mut() {
+            obj.insert("depends_on".into(), serde_json::json!(deps));
+            // Seed the board's per-card context badge: latest context-window
+            // occupancy of the card's (current or resumable) worker session.
+            // Live updates then ride the streamed `agent-usage` events, same
+            // as the chat toolbar. Terminal cards skip the lookup — no badge.
+            if c.step != "done"
+                && c.step != "wont_do"
+                && let Some(sid) = c
+                    .worker_session_id
+                    .as_deref()
+                    .or(c.last_worker_session_id.as_deref())
+            {
+                let ctx = state
+                    .db
+                    .latest_context_tokens(sid)
+                    .await
+                    .unwrap_or(None)
+                    .unwrap_or(0);
+                if ctx > 0 {
+                    obj.insert("context_tokens".into(), serde_json::json!(ctx));
+                }
             }
-            value
-        })
-        .collect();
+        }
+        items.push(value);
+    }
 
     Ok::<_, (StatusCode, Json<serde_json::Value>)>(Json(serde_json::json!(items)))
 }

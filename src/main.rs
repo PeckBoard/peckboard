@@ -392,21 +392,23 @@ async fn main() -> anyhow::Result<()> {
                     // re-acquires it inside drain_queued (tokio Mutex is
                     // not reentrant).
 
-                    // 1.5 Compaction suggestion: an interactive session whose
-                    // context occupancy crossed the threshold gets a
-                    // `compaction-suggested` ws event — the web UI turns it
-                    // into a modal (compact / clear context / not now). The
-                    // actual compaction turn only runs when the user confirms
-                    // via POST /api/sessions/:id/compact. Suggestion only, so
-                    // the queue drain below still runs.
+                    // 1.5 Auto-compaction: a session whose context occupancy
+                    // crossed the threshold gets a same-model compaction turn
+                    // dispatched right here — the model writes a continuation
+                    // doc and the conversation restarts fresh with it
+                    // injected (see crate::handover). Applies to chats and
+                    // workers alike; the eligibility guards (idle, nothing
+                    // queued, worker card still resuming this session) live
+                    // in maybe_auto_compact. A dispatched compaction implies
+                    // an empty queue (guard), so falling through to the
+                    // drain below is harmless.
                     if completion.completed
                         && let Err(e) =
-                            peckboard::handover::maybe_suggest_compaction(&orchestrator_state, &sid)
-                                .await
+                            peckboard::handover::maybe_auto_compact(&orchestrator_state, &sid).await
                     {
                         tracing::warn!(
                             session_id = %sid,
-                            "Compaction suggestion check failed: {e}"
+                            "Auto-compaction check failed: {e}"
                         );
                     }
 

@@ -103,6 +103,14 @@ export default function KanbanBoard({
   const bubbleTimers = useRef<Record<string, ReturnType<typeof setTimeout>>>({})
   // Latest session→card map, read inside the (stable) event listener.
   const sessionToCardRef = useRef<Record<string, string>>({})
+  // cardId -> latest worker context-window occupancy, live from streamed
+  // `agent-usage` events; seeded per card by `context_tokens` on the cards
+  // fetch (the badge falls back to the seed until a live event arrives).
+  const [ctxByCard, setCtxByCard] = useState<Record<string, number>>({})
+  // Same session→card idea as sessionToCardRef, but including
+  // `last_worker_session_id` so the badge keeps updating between chunk
+  // dispatches (e.g. during an auto-compaction doc turn).
+  const ctxSessionToCardRef = useRef<Record<string, string>>({})
   const cardReports = useProjectsStore((s) =>
     selectedCard ? (s.cardReportsByCard[selectedCard.id] ?? EMPTY_REPORTS) : EMPTY_REPORTS,
   )
@@ -219,13 +227,20 @@ export default function KanbanBoard({
     return () => window.removeEventListener('peckboard:card-delete', handler)
   }, [projectId])
 
-  // Keep a live session→card lookup for the thought-bubble listener.
+  // Keep a live session→card lookup for the thought-bubble listener, plus a
+  // wider one (including resumable last-sessions) for the context badge.
   useEffect(() => {
     const map: Record<string, string> = {}
+    const ctxMap: Record<string, string> = {}
     for (const c of cards) {
-      if (c.worker_session_id) map[c.worker_session_id] = c.id
+      if (c.worker_session_id) {
+        map[c.worker_session_id] = c.id
+        ctxMap[c.worker_session_id] = c.id
+      }
+      if (c.last_worker_session_id) ctxMap[c.last_worker_session_id] = c.id
     }
     sessionToCardRef.current = map
+    ctxSessionToCardRef.current = ctxMap
   }, [cards])
 
   // Subscribe to every worker session so its events stream in even when no one
@@ -255,6 +270,14 @@ export default function KanbanBoard({
   useEffect(() => {
     const timers = bubbleTimers.current
     const listener = (event: Event) => {
+      // Context badge: any subscribed worker session's usage event updates
+      // its card's occupancy, mirroring the chat toolbar's live badge.
+      if (event.kind === 'agent-usage') {
+        const ctxCard = ctxSessionToCardRef.current[event.session_id]
+        const ctx = (event.data?.contextTokens as number) ?? 0
+        if (ctxCard && ctx > 0) setCtxByCard((prev) => ({ ...prev, [ctxCard]: ctx }))
+        return
+      }
       const cardId = sessionToCardRef.current[event.session_id]
       if (!cardId) return
       const text = summarizeEvent(event)
@@ -939,6 +962,11 @@ export default function KanbanBoard({
                       draggingCardId !== card.id
                     const cardStep = normalizeStep(card.step)
                     const priorityLocked = cardStep === 'done' || cardStep === 'wont_do'
+                    // Worker context badge: live value falls back to the
+                    // fetch-time seed; hidden once the card is terminal.
+                    const workerCtx = priorityLocked
+                      ? 0
+                      : (ctxByCard[card.id] ?? card.context_tokens ?? 0)
                     const expanded = expandedCardIds.has(card.id)
                     return (
                       <div
@@ -985,6 +1013,20 @@ export default function KanbanBoard({
                             {card.title}
                           </span>
                           <div className="kanban-card-actions" data-no-toggle>
+                            {workerCtx > 0 && (
+                              <span
+                                className={`kanban-card-ctx${
+                                  workerCtx >= 150_000
+                                    ? ' over'
+                                    : workerCtx >= 120_000
+                                      ? ' warn'
+                                      : ''
+                                }`}
+                                title={`Worker context: ${workerCtx.toLocaleString()} tokens (auto-compacts at 150k)`}
+                              >
+                                {Math.round(workerCtx / 1000)}k
+                              </span>
+                            )}
                             <button
                               className="kanban-card-menu-btn"
                               aria-label="Card menu"

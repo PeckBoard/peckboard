@@ -1,11 +1,14 @@
-//! Integration coverage for the model-switch handover:
+//! Integration coverage for the model-switch handover and auto-compaction:
 //!
 //! - the two new session columns round-trip through `update_session`;
 //! - the PATCH route's guards (409 while a turn is streaming, 409 while a
 //!   handover is already in flight, same-key switches unaffected);
 //! - the full begin → doc turn → finalize flow through the real dispatcher
 //!   with the mock provider, driving the completion channel the way the
-//!   main.rs listener does.
+//!   main.rs listener does;
+//! - `maybe_auto_compact`'s threshold/queued/pending-doc guards, the worker
+//!   resume-link eligibility, and the worker end-to-end path (compact →
+//!   finalize → orchestrator resumes the session with the doc injected).
 //!
 //! The pure decision/extraction logic is unit-tested in `src/handover.rs`;
 //! the user-visible flow is also covered by Playwright (web/e2e).
@@ -18,7 +21,10 @@ use peckboard::auth::rate_limit::RateLimiter;
 use peckboard::auth::token::{create_token, generate_jwt_secret, hash_token};
 use peckboard::config::Config;
 use peckboard::db::Db;
-use peckboard::db::models::{NewAuthSession, NewFolder, NewSession, NewUser, UpdateSession};
+use peckboard::db::models::{
+    NewAuthSession, NewCard, NewFolder, NewProject, NewQueuedMessage, NewSession, NewUsageEvent,
+    NewUser, UpdateCard, UpdateSession,
+};
 use peckboard::plugin::builtin::BuiltinPluginRegistry;
 use peckboard::plugin::manager::PluginManager;
 use peckboard::provider::manager::SessionManager;
@@ -347,4 +353,380 @@ async fn handover_runs_to_completion() {
     let events = state.db.events_tail("s1", 50).await.unwrap();
     assert!(events.iter().any(|e| e.kind == "handover"));
     assert!(events.iter().any(|e| e.kind == "handover-start"));
+}
+
+// ─── Auto-compaction ──────────────────────────────────────────────────────────
+
+/// Record a usage row so `latest_context_tokens` reports `context` occupancy.
+async fn seed_context(db: &Db, id: &str, session_id: &str, context: i64) {
+    db.record_usage_event(NewUsageEvent {
+        id: id.into(),
+        session_id: session_id.into(),
+        ts: 1,
+        context_tokens: context,
+        total_tokens: context,
+        model: Some("mock:echo".into()),
+        ..Default::default()
+    })
+    .await
+    .unwrap();
+}
+
+#[tokio::test]
+async fn auto_compact_skips_under_threshold() {
+    let (state, _token) = build_state("mock:echo").await;
+    seed_turn(&state.db, true).await;
+    seed_context(&state.db, "u1", "s1", 100_000).await;
+
+    let did = peckboard::handover::maybe_auto_compact(&state, "s1")
+        .await
+        .unwrap();
+    assert!(!did);
+    let s = state.db.get_session("s1").await.unwrap().unwrap();
+    assert_eq!(s.handover_to_model, None);
+}
+
+#[tokio::test]
+async fn auto_compact_skips_when_message_queued() {
+    let (state, _token) = build_state("mock:echo").await;
+    seed_turn(&state.db, true).await;
+    seed_context(&state.db, "u1", "s1", 160_000).await;
+    state
+        .db
+        .upsert_queued_message(NewQueuedMessage {
+            session_id: "s1".into(),
+            text: "queued while busy".into(),
+            queued_at: chrono::Utc::now().to_rfc3339(),
+            model: None,
+            effort: None,
+        })
+        .await
+        .unwrap();
+
+    let did = peckboard::handover::maybe_auto_compact(&state, "s1")
+        .await
+        .unwrap();
+    assert!(!did, "a queued message must defer compaction");
+}
+
+/// Interactive session over the threshold: the compaction dispatches
+/// unprompted, runs to completion, and a second check right after the
+/// finalize is a no-op (the pending-doc guard).
+#[tokio::test]
+async fn auto_compact_dispatches_over_threshold() {
+    let (state, _token) = build_state("mock:echo").await;
+    seed_turn(&state.db, true).await;
+    seed_context(&state.db, "u1", "s1", 160_000).await;
+
+    let mut completion_rx = state
+        .session_manager
+        .take_completion_rx()
+        .await
+        .expect("completion rx available");
+
+    let did = peckboard::handover::maybe_auto_compact(&state, "s1")
+        .await
+        .unwrap();
+    assert!(did);
+
+    // Same-model handover parked; the start marker is flagged compaction.
+    let s = state.db.get_session("s1").await.unwrap().unwrap();
+    assert_eq!(s.handover_to_model.as_deref(), Some("mock:echo"));
+    let events = state.db.events_tail("s1", 50).await.unwrap();
+    let start = events
+        .iter()
+        .find(|e| e.kind == "handover-start")
+        .expect("start marker");
+    let data: serde_json::Value = serde_json::from_str(&start.data).unwrap();
+    assert_eq!(data["compaction"], true);
+
+    // Doc turn completes; finalize leaves an idle session carrying the doc.
+    tokio::time::timeout(std::time::Duration::from_secs(5), completion_rx.recv())
+        .await
+        .expect("doc turn must complete")
+        .expect("channel open");
+    peckboard::handover::finalize_handover(&state, "s1")
+        .await
+        .unwrap();
+    let s = state.db.get_session("s1").await.unwrap().unwrap();
+    assert_eq!(s.handover_to_model, None);
+    assert_eq!(s.conversation_id, None);
+    assert!(s.pending_handover_doc.is_some());
+
+    // Occupancy still reads over-threshold (the doc turn's usage isn't
+    // recorded here), but the pending doc must block a re-compaction.
+    let again = peckboard::handover::maybe_auto_compact(&state, "s1")
+        .await
+        .unwrap();
+    assert!(!again, "pending doc must block a second compaction");
+}
+
+/// Worker fixture: project p1 / card c1 on step "implement", worker session
+/// w1 that already ran a chunk (conversation to resume, card unclaimed with
+/// the resume link pointing at w1) — the post-`handle_worker_done` Continue
+/// state the listener sees when it runs the compaction check.
+async fn seed_worker(state: &Arc<AppState>) {
+    let ts = chrono::Utc::now().to_rfc3339();
+    state
+        .db
+        .create_project(NewProject {
+            id: "p1".into(),
+            name: "P".into(),
+            context: "ctx".into(),
+            folder_id: "f1".into(),
+            worker_count: 1,
+            status: "active".into(),
+            workflow: "kanban".into(),
+            model: None,
+            effort: None,
+            parallel_instructions: false,
+            auto_notify_changes: true,
+            worker_communication: false,
+            created_at: ts.clone(),
+            last_accessed_at: ts.clone(),
+        })
+        .await
+        .unwrap();
+    state
+        .db
+        .create_card(NewCard {
+            id: "c1".into(),
+            project_id: "p1".into(),
+            title: "card".into(),
+            description: "desc".into(),
+            step: "implement".into(),
+            priority: 1,
+            workflow: "kanban".into(),
+            model: None,
+            effort: None,
+            blocked: false,
+            block_reason: None,
+            created_at: ts.clone(),
+            updated_at: ts.clone(),
+        })
+        .await
+        .unwrap();
+    state
+        .db
+        .create_session(NewSession {
+            id: "w1".into(),
+            name: "worker: card".into(),
+            folder_id: "f1".into(),
+            model: Some("mock:echo".into()),
+            is_worker: true,
+            project_id: Some("p1".into()),
+            card_id: Some("c1".into()),
+            conversation_id: Some("conv-1".into()),
+            worker_step: Some("implement".into()),
+            created_at: ts.clone(),
+            last_activity: ts.clone(),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    state
+        .db
+        .update_card(
+            "c1",
+            UpdateCard {
+                worker_session_id: Some(None),
+                last_worker_session_id: Some(Some("w1".into())),
+                updated_at: Some(ts),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    state
+        .db
+        .append_event(
+            "w1",
+            "agent-text",
+            serde_json::json!({ "text": "chunk work" }),
+        )
+        .await
+        .unwrap();
+}
+
+/// A worker only compacts while its card would still resume THIS session;
+/// every broken link variant must skip.
+#[tokio::test]
+async fn auto_compact_worker_requires_resume_link() {
+    let (state, _token) = build_state("mock:echo").await;
+    seed_worker(&state).await;
+    seed_context(&state.db, "u1", "w1", 160_000).await;
+
+    let ts = chrono::Utc::now().to_rfc3339();
+
+    // Card advanced past the worker's step — a fresh session runs next.
+    state
+        .db
+        .update_card(
+            "c1",
+            UpdateCard {
+                step: Some("review".into()),
+                updated_at: Some(ts.clone()),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    assert!(
+        !peckboard::handover::maybe_auto_compact(&state, "w1")
+            .await
+            .unwrap()
+    );
+
+    // Card reclaimed by a different session (a real row — the column has a
+    // sessions FK).
+    state
+        .db
+        .create_session(NewSession {
+            id: "w2".into(),
+            name: "worker: replacement".into(),
+            folder_id: "f1".into(),
+            is_worker: true,
+            project_id: Some("p1".into()),
+            card_id: Some("c1".into()),
+            created_at: ts.clone(),
+            last_activity: ts.clone(),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    state
+        .db
+        .update_card(
+            "c1",
+            UpdateCard {
+                step: Some("implement".into()),
+                worker_session_id: Some(Some("w2".into())),
+                updated_at: Some(ts.clone()),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    assert!(
+        !peckboard::handover::maybe_auto_compact(&state, "w1")
+            .await
+            .unwrap()
+    );
+
+    // No conversation to resume for the doc turn.
+    state
+        .db
+        .update_card(
+            "c1",
+            UpdateCard {
+                worker_session_id: Some(None),
+                updated_at: Some(ts),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    state
+        .db
+        .update_session(
+            "w1",
+            UpdateSession {
+                conversation_id: Some(None),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    assert!(
+        !peckboard::handover::maybe_auto_compact(&state, "w1")
+            .await
+            .unwrap()
+    );
+    let s = state.db.get_session("w1").await.unwrap().unwrap();
+    assert_eq!(s.handover_to_model, None, "no doc turn may have dispatched");
+
+    // Link restored → eligible. The step moves above severed the resume
+    // link (`sever_worker_resume_link` nulls the session's `worker_step` on
+    // real step changes), so restore that too — the state a Continue
+    // completion leaves behind.
+    state
+        .db
+        .update_card(
+            "c1",
+            UpdateCard {
+                last_worker_session_id: Some(Some("w1".into())),
+                updated_at: Some(chrono::Utc::now().to_rfc3339()),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    state
+        .db
+        .update_session(
+            "w1",
+            UpdateSession {
+                conversation_id: Some(Some("conv-1".into())),
+                worker_step: Some(Some("implement".into())),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    assert!(
+        peckboard::handover::maybe_auto_compact(&state, "w1")
+            .await
+            .unwrap()
+    );
+}
+
+/// The worker continuity path end to end: auto-compact between chunks →
+/// doc turn completes → finalize → the orchestrator's next tick RESUMES the
+/// same session (pending doc stands in for the cleared conversation_id) and
+/// the dispatch consumes the doc.
+#[tokio::test]
+async fn worker_auto_compaction_resumes_with_doc() {
+    let (state, _token) = build_state("mock:echo").await;
+    seed_worker(&state).await;
+    seed_context(&state.db, "u1", "w1", 160_000).await;
+
+    let mut completion_rx = state
+        .session_manager
+        .take_completion_rx()
+        .await
+        .expect("completion rx available");
+
+    assert!(
+        peckboard::handover::maybe_auto_compact(&state, "w1")
+            .await
+            .unwrap()
+    );
+    tokio::time::timeout(std::time::Duration::from_secs(5), completion_rx.recv())
+        .await
+        .expect("doc turn must complete")
+        .expect("channel open");
+    peckboard::handover::finalize_handover(&state, "w1")
+        .await
+        .unwrap();
+
+    let s = state.db.get_session("w1").await.unwrap().unwrap();
+    assert_eq!(s.conversation_id, None);
+    assert!(s.pending_handover_doc.is_some());
+
+    // The orchestrator tick: the relaxed resume filter must pick w1 back up
+    // (conversation_id is gone but the doc is parked), not mint a fresh
+    // session that would orphan the doc.
+    peckboard::worker::orchestrator::check_and_spawn_workers(&state).await;
+
+    let card = state.db.get_card("c1").await.unwrap().unwrap();
+    assert_eq!(
+        card.worker_session_id.as_deref(),
+        Some("w1"),
+        "card must resume the compacted session"
+    );
+    let s = state.db.get_session("w1").await.unwrap().unwrap();
+    assert_eq!(
+        s.pending_handover_doc, None,
+        "the resume dispatch must consume the doc"
+    );
 }
