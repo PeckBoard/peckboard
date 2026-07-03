@@ -488,6 +488,12 @@ impl PluginManager {
                 invocation.clone(),
                 self.live.clone(),
                 user.clone(),
+                // plugins_dir is `<data_dir>/plugins`; the browser-run host
+                // functions need the data dir itself.
+                self.plugins_dir
+                    .parent()
+                    .map(std::path::Path::to_path_buf)
+                    .unwrap_or_else(|| self.plugins_dir.clone()),
             ),
             None => Vec::new(),
         };

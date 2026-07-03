@@ -58,6 +58,9 @@ use crate::db::models::NewCard;
 /// [`host_functions`]); they are not shared across plugins.
 struct HostState {
     db: Db,
+    /// App data dir — where `service::browser_runs` records test runs; the
+    /// browser-run host functions read from it (gated by `browser_runs_read`).
+    data_dir: std::path::PathBuf,
     plugin_id: String,
     /// The plugin's granted host permissions. Shared (and populated) by the
     /// loader after it parses the manifest — host functions are wired before
@@ -2305,6 +2308,62 @@ host_fn!(peckboard_get_answer(user_data: HostState; input: String) -> String {
     Ok(get_answer_impl(&db, &inv, &input))
 });
 
+/// Shared accessor for the browser-run host functions: permission check +
+/// the app data dir where `service::browser_runs` records runs.
+fn state_permission_and_data_dir(
+    user_data: &UserData<HostState>,
+    permission: &str,
+) -> Result<(bool, std::path::PathBuf), Error> {
+    let state = user_data.get()?;
+    let state = state
+        .lock()
+        .map_err(|_| anyhow::anyhow!("plugin host state mutex poisoned"))?;
+    let ok = state
+        .permissions
+        .read()
+        .map(|p| p.contains(permission))
+        .unwrap_or(false);
+    Ok((ok, state.data_dir.clone()))
+}
+
+// `peckboard_browser_runs` — list recorded browser test runs (newest first,
+// steps included; frame bytes fetched separately). Gated by
+// `browser_runs_read`.
+host_fn!(peckboard_browser_runs(user_data: HostState; _input: String) -> String {
+    let (ok, data_dir) = state_permission_and_data_dir(&user_data, "browser_runs_read")?;
+    if !ok { return Ok(error_json("plugin lacks the 'browser_runs_read' permission")); }
+    let runs = crate::service::browser_runs::list_runs(&data_dir);
+    Ok(serde_json::json!({ "runs": runs }).to_string())
+});
+
+// `peckboard_browser_run` — one run's full meta. `{run_id}` → `{run}`.
+host_fn!(peckboard_browser_run(user_data: HostState; input: String) -> String {
+    let (ok, data_dir) = state_permission_and_data_dir(&user_data, "browser_runs_read")?;
+    if !ok { return Ok(error_json("plugin lacks the 'browser_runs_read' permission")); }
+    let run_id = serde_json::from_str::<serde_json::Value>(&input)
+        .ok()
+        .and_then(|v| v.get("run_id").and_then(|r| r.as_str()).map(str::to_string))
+        .unwrap_or_default();
+    match crate::service::browser_runs::get_run(&data_dir, &run_id) {
+        Some(run) => Ok(serde_json::json!({ "run": run }).to_string()),
+        None => Ok(error_json("run not found")),
+    }
+});
+
+// `peckboard_browser_run_frame` — one frame's PNG bytes as base64.
+// `{run_id, frame}` → `{base64}`.
+host_fn!(peckboard_browser_run_frame(user_data: HostState; input: String) -> String {
+    let (ok, data_dir) = state_permission_and_data_dir(&user_data, "browser_runs_read")?;
+    if !ok { return Ok(error_json("plugin lacks the 'browser_runs_read' permission")); }
+    let v = serde_json::from_str::<serde_json::Value>(&input).unwrap_or_default();
+    let run_id = v.get("run_id").and_then(|r| r.as_str()).unwrap_or_default();
+    let frame = v.get("frame").and_then(|r| r.as_str()).unwrap_or_default();
+    match crate::service::browser_runs::get_frame(&data_dir, run_id, frame) {
+        Some(base64) => Ok(serde_json::json!({ "base64": base64 }).to_string()),
+        None => Ok(error_json("frame not found")),
+    }
+});
+
 /// Build the host-function set a single loaded plugin is wired with. Every
 /// function shares one `UserData<HostState>` (a cheap `Arc` clone of the live
 /// `Db` plus this plugin's id). `plugin_id` namespaces the plugin-settings
@@ -2318,9 +2377,11 @@ pub(crate) fn host_functions(
     invocation: Arc<std::sync::RwLock<Option<InvocationContext>>>,
     live: Arc<std::sync::RwLock<Option<Arc<dyn LiveHost>>>>,
     user: Arc<std::sync::RwLock<Option<UserContext>>>,
+    data_dir: std::path::PathBuf,
 ) -> Vec<Function> {
     let ud = UserData::new(HostState {
         db: db.clone(),
+        data_dir,
         plugin_id: plugin_id.to_string(),
         permissions,
         invocation,
@@ -2328,6 +2389,27 @@ pub(crate) fn host_functions(
         user,
     });
     vec![
+        Function::new(
+            "peckboard_browser_runs",
+            [PTR],
+            [PTR],
+            ud.clone(),
+            peckboard_browser_runs,
+        ),
+        Function::new(
+            "peckboard_browser_run",
+            [PTR],
+            [PTR],
+            ud.clone(),
+            peckboard_browser_run,
+        ),
+        Function::new(
+            "peckboard_browser_run_frame",
+            [PTR],
+            [PTR],
+            ud.clone(),
+            peckboard_browser_run_frame,
+        ),
         Function::new(
             "peckboard_list_projects",
             [PTR],

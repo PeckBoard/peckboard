@@ -32,12 +32,26 @@ async fn outline(page_id: &str) -> anyhow::Result<String> {
         .to_string())
 }
 
+/// Viewport screenshot of `page_id` as base64 PNG — the frame source for
+/// run recording. Best-effort: recording must never fail a tool call, and
+/// frames never enter model context (server-side only).
+async fn capture_frame(page_id: &str) -> Option<String> {
+    let r = browser::post(
+        &format!("/api/pages/{page_id}/screenshot"),
+        serde_json::json!({ "fullPage": false }),
+    )
+    .await
+    .ok()?;
+    let shot = r.get("screenshot")?.as_str()?;
+    Some(shot.rsplit(',').next().unwrap_or(shot).to_string())
+}
+
 impl McpToolRegistry {
     pub(crate) async fn handle_browser_tool(
         &self,
         tool_name: &str,
         args: Value,
-        _ctx: &ToolCallContext,
+        ctx: &ToolCallContext,
     ) -> anyhow::Result<Value> {
         match tool_name {
             // Create a page, navigate, and return the compressed outline in
@@ -60,6 +74,26 @@ impl McpToolRegistry {
                     .ok_or_else(|| anyhow::anyhow!("browser server returned no pageId: {created}"))?
                     .to_string();
                 let outline = outline(&page_id).await.unwrap_or_default();
+                // Start run recording (playwright-video replay).
+                if let Some(data_dir) = ctx.data_dir.as_deref() {
+                    crate::service::browser_runs::start(
+                        data_dir,
+                        &page_id,
+                        name,
+                        url,
+                        &ctx.session_id,
+                        ctx.project_id.as_deref(),
+                        ctx.card_id.as_deref(),
+                    );
+                    let frame = capture_frame(&page_id).await;
+                    crate::service::browser_runs::record_step(
+                        &page_id,
+                        "open",
+                        None,
+                        Some(serde_json::json!({ "url": url })),
+                        frame.as_deref(),
+                    );
+                }
                 Ok(serde_json::json!({ "page_id": page_id, "url": url, "outline": outline }))
             }
 
@@ -181,6 +215,25 @@ impl McpToolRegistry {
                     ),
                 };
                 let r = browser::post(&path, body).await?;
+                // Step + fresh frame for replay. Gated on data_dir (the
+                // recording precondition) so unrecorded pages skip the
+                // screenshot round-trip entirely.
+                if ctx.data_dir.is_some() {
+                    let frame = capture_frame(page_id).await;
+                    let mut detail = serde_json::Map::new();
+                    for k in ["text", "values", "files", "timeout_ms", "accept"] {
+                        if let Some(v) = args.get(k) {
+                            detail.insert(k.to_string(), v.clone());
+                        }
+                    }
+                    crate::service::browser_runs::record_step(
+                        page_id,
+                        action,
+                        refe,
+                        (!detail.is_empty()).then_some(Value::Object(detail)),
+                        frame.as_deref(),
+                    );
+                }
                 let mut out = serde_json::json!({
                     "success": r.get("success").cloned().unwrap_or(Value::Bool(true)),
                     "action": action,
@@ -215,6 +268,13 @@ impl McpToolRegistry {
                     .ok_or_else(|| anyhow::anyhow!("browser server returned no screenshot"))?;
                 // Defensive: strip a data-URL prefix if the server sends one.
                 let b64 = shot.rsplit(',').next().unwrap_or(shot).to_string();
+                crate::service::browser_runs::record_step(
+                    page_id,
+                    "screenshot",
+                    None,
+                    None,
+                    Some(&b64),
+                );
                 // `_image_base64` is the routes/mcp.rs convention for
                 // returning an MCP image content block.
                 Ok(serde_json::json!({
@@ -234,6 +294,7 @@ impl McpToolRegistry {
             "browser_close" => {
                 let page_id = req_str(&args, "page_id")?;
                 browser::delete(&format!("/api/pages/{page_id}")).await?;
+                crate::service::browser_runs::finish(page_id);
                 Ok(serde_json::json!({ "closed": page_id }))
             }
 

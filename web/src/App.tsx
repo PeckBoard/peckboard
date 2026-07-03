@@ -54,6 +54,7 @@ type View =
   | 'reports'
   | 'users'
   | 'settings'
+  | 'pluginPage'
 
 /** Modals reachable from the user-icon dropdown. The URL maps `/plugins`
  *  to opening one of these on mount so bookmarks and the existing e2e
@@ -163,6 +164,13 @@ function parseRoute(): {
     }
     case 'users':
       return { view: 'users', activeId: null, sub: 'chat', modal: null }
+    case 'plugin-page':
+      return {
+        view: 'pluginPage',
+        activeId: id && third ? `${id}:${third}` : null,
+        sub: 'chat',
+        modal: null,
+      }
     default:
       return { view: 'sessions', activeId: null, sub: 'chat', modal: null }
   }
@@ -189,6 +197,11 @@ function buildPath(view: View, activeId?: string | null, sub?: SessionSub): stri
     // (it's the path separator). Each segment is already restricted to
     // the safe charset by the reports route, so passing through is OK.
     return activeId ? `/reports/${activeId}` : '/reports'
+  }
+  if (view === 'pluginPage') {
+    // activeId is the `plugin:itemId` composite; the colon becomes the
+    // path separator.
+    return activeId ? `/plugin-page/${activeId.replace(':', '/')}` : '/'
   }
   if (activeId) return `/${view}/${activeId}`
   if (view === 'sessions') return '/'
@@ -302,6 +315,13 @@ function App() {
   const [uiPanels, setUiPanels] = useState<UiPanel[]>([])
   // Plugin-contributed left-rail entries (generic; same /api/plugins catalog).
   const [sidebarItems, setSidebarItems] = useState<SidebarItem[]>([])
+  // `plugin:itemId` composite of the open plugin full page (rail entries
+  // below Sessions). Lazily seeded from the URL so a bookmarked
+  // /plugin-page/<plugin>/<item> reload lands back on the page.
+  const [activePluginPageId, setActivePluginPageId] = useState<string | null>(() => {
+    const r = parseRoute()
+    return r.view === 'pluginPage' ? r.activeId : null
+  })
   // Plugin-contributed full-page entries for the project / session pages.
   const [projectItems, setProjectItems] = useState<SidebarItem[]>([])
   const [sessionItems, setSessionItems] = useState<SidebarItem[]>([])
@@ -421,6 +441,8 @@ function App() {
         setActiveRepeatingTaskId(route.activeId)
       } else if (route.view === 'reports') {
         setActiveReportId(route.activeId)
+      } else if (route.view === 'pluginPage') {
+        setActivePluginPageId(route.activeId)
       }
     }
     window.addEventListener('popstate', onPopState)
@@ -950,6 +972,38 @@ function App() {
               <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z" />
             </svg>
           </button>
+          {/* Plugin-contributed pages (from /api/plugins), directly below
+              Sessions. Each opens as a full-page view (not a modal). */}
+          {sidebarItems.map((item) => (
+            <button
+              key={`${item.plugin}:${item.id}`}
+              className={`rail-btn ${
+                view === 'pluginPage' && activePluginPageId === `${item.plugin}:${item.id}`
+                  ? 'active'
+                  : ''
+              }`}
+              data-testid={`plugin-sidebar-${item.plugin}-${item.id}`}
+              onClick={() => {
+                setActivePluginPageId(`${item.plugin}:${item.id}`)
+                navigate('pluginPage', `${item.plugin}:${item.id}`)
+              }}
+              title={item.label}
+              aria-label={item.label}
+            >
+              <svg
+                width="18"
+                height="18"
+                viewBox="0 0 24 24"
+                fill="none"
+                stroke="currentColor"
+                strokeWidth="2"
+                strokeLinecap="round"
+                strokeLinejoin="round"
+              >
+                <polygon points="5 3 19 12 5 21 5 3" />
+              </svg>
+            </button>
+          ))}
           <button
             className={`rail-btn ${view === 'repeatingTasks' ? 'active' : ''}`}
             onClick={() => navigate('repeatingTasks', null)}
@@ -1038,40 +1092,6 @@ function App() {
               <rect x="13" y="7" width="3" height="10" />
             </svg>
           </button>
-          {/* Plugin-contributed rail entries (generic; from /api/plugins).
-              Each opens its plugin-served page in the same sandboxed iframe
-              panels use. A generic icon is shown until icon sanitization is
-              designed (the manifest `icon` is intentionally not injected). */}
-          {sidebarItems.map((item) => (
-            <button
-              key={`${item.plugin}:${item.id}`}
-              className="rail-btn"
-              data-testid={`plugin-sidebar-${item.plugin}-${item.id}`}
-              onClick={() =>
-                setOpenPanel({
-                  plugin: item.plugin,
-                  id: item.id,
-                  title: item.label,
-                  path: item.path,
-                })
-              }
-              title={item.label}
-              aria-label={item.label}
-            >
-              <svg
-                width="18"
-                height="18"
-                viewBox="0 0 24 24"
-                fill="none"
-                stroke="currentColor"
-                strokeWidth="2"
-                strokeLinecap="round"
-                strokeLinejoin="round"
-              >
-                <path d="M4 7h4V4a2 2 0 0 1 2-2h0a2 2 0 0 1 2 2v3h4a1 1 0 0 1 1 1v4h-3a2 2 0 0 0 0 4h3v4a1 1 0 0 1-1 1H4a1 1 0 0 1-1-1V8a1 1 0 0 1 1-1z" />
-              </svg>
-            </button>
-          ))}
           <div className="rail-separator" aria-hidden="true" />
           <button
             className={`rail-btn ${view === 'folders' ? 'active' : ''}`}
@@ -1371,6 +1391,22 @@ function App() {
             />
           )}
           {view === 'usage' && <UsageDashboard />}
+          {view === 'pluginPage' &&
+            (() => {
+              const [pl, itemId] = (activePluginPageId ?? '').split(':')
+              const item = sidebarItems.find((i) => i.plugin === pl && i.id === itemId)
+              return item ? (
+                <PluginFullPage
+                  title={item.label}
+                  plugin={item.plugin}
+                  path={item.path}
+                  scope={{}}
+                  onBack={() => navigate('sessions', null)}
+                />
+              ) : (
+                <div className="list-view" />
+              )
+            })()}
           {view === 'folders' && <FoldersPage />}
           {view === 'reports' &&
             (activeReportId ? (
