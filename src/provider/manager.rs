@@ -588,27 +588,37 @@ impl SessionManager {
     /// events. Used as a fallback when `session.conversation_id` is empty.
     async fn find_conversation_id_from_events(&self, db: &Db, session_id: &str) -> Option<String> {
         let tail = db.events_tail(session_id, 50).await.ok()?;
+        resume_conversation_id_from_tail(&tail)
+    }
+}
 
-        for event in tail.iter().rev() {
-            if event.kind == "agent-start" || event.kind == "agent-end" {
-                // A `handover` event marks a conversation reset (model switch or
-                // compaction) — anything older belongs to the pre-reset
-                // conversation and must never be resumed.
-                if event.kind == "handover" {
-                    return None;
-                }
-                if let Ok(data) = serde_json::from_str::<serde_json::Value>(&event.data) {
-                    if let Some(cid) = data.get("conversationId").and_then(|v| v.as_str()) {
-                        if !cid.is_empty() {
-                            return Some(cid.to_string());
-                        }
+/// Newest-first scan of an event tail for a resumable conversationId.
+///
+/// A `handover` event marks a conversation reset (model switch or
+/// compaction) — anything older belongs to the pre-reset conversation and
+/// must never be resumed, so the scan stops there. In particular, the
+/// doc-generation turn that precedes the `handover` event carries the OLD
+/// conversationId in its agent-start/agent-end events; resuming it would
+/// silently restore the entire pre-compaction history.
+pub(crate) fn resume_conversation_id_from_tail(
+    events: &[crate::db::models::Event],
+) -> Option<String> {
+    for event in events.iter().rev() {
+        if event.kind == "handover" {
+            return None;
+        }
+        if event.kind == "agent-start" || event.kind == "agent-end" {
+            if let Ok(data) = serde_json::from_str::<serde_json::Value>(&event.data) {
+                if let Some(cid) = data.get("conversationId").and_then(|v| v.as_str()) {
+                    if !cid.is_empty() {
+                        return Some(cid.to_string());
                     }
                 }
             }
         }
-
-        None
     }
+
+    None
 }
 
 /// Cancel `session_id` on every registered provider, identical fan-out to
@@ -741,5 +751,58 @@ mod tests {
         // Re-acquire — must succeed and yield a fresh, working lock.
         let lock = m.lock_session("s1").await;
         assert_eq!(lock.session_id(), "s1");
+    }
+
+    fn make_event(kind: &str, data: &str) -> crate::db::models::Event {
+        crate::db::models::Event {
+            id: uuid::Uuid::new_v4().to_string(),
+            session_id: "s1".into(),
+            seq: 0,
+            ts: 0,
+            kind: kind.into(),
+            data: data.into(),
+        }
+    }
+
+    #[test]
+    fn resume_scan_finds_latest_conversation_id() {
+        let events = vec![
+            make_event("agent-start", r#"{"conversationId":"conv-old"}"#),
+            make_event("agent-end", r#"{"conversationId":"conv-new"}"#),
+        ];
+        assert_eq!(
+            resume_conversation_id_from_tail(&events),
+            Some("conv-new".into())
+        );
+    }
+
+    #[test]
+    fn resume_scan_stops_at_handover() {
+        // Regression: after a compaction, the doc-generation turn's
+        // agent-start/agent-end still carry the pre-reset conversationId.
+        // The `handover` event that follows them must act as a barrier —
+        // resuming past it restores the entire pre-compaction history.
+        let events = vec![
+            make_event("agent-start", r#"{"conversationId":"conv-old"}"#),
+            make_event("agent-end", r#"{"conversationId":"conv-old"}"#),
+            make_event("handover-start", r#"{"compaction":true}"#),
+            make_event("agent-start", r#"{"conversationId":"conv-old"}"#),
+            make_event("agent-end", r#"{"conversationId":"conv-old"}"#),
+            make_event("handover", r#"{"compaction":true}"#),
+        ];
+        assert_eq!(resume_conversation_id_from_tail(&events), None);
+    }
+
+    #[test]
+    fn resume_scan_finds_post_handover_conversation() {
+        let events = vec![
+            make_event("agent-end", r#"{"conversationId":"conv-old"}"#),
+            make_event("handover", r#"{"compaction":true}"#),
+            make_event("agent-start", r#"{"conversationId":"conv-fresh"}"#),
+        ];
+        assert_eq!(
+            resume_conversation_id_from_tail(&events),
+            Some("conv-fresh".into())
+        );
     }
 }
