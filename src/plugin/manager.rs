@@ -82,6 +82,7 @@ pub const ALLOWED_HOOKS: &[&str] = &[
 pub const ALLOWED_PERMISSIONS: &[&str] = &[
     "ask_user",  // peckboard_ask_user / peckboard_get_answer — prompt the caller's user
     "broadcast", // peckboard_broadcast — push a namespaced ws event
+    "browser_runs_read", // peckboard_browser_runs / _run / _run_frame — recorded test runs
     "contribute_sidebar", // declare sidebar_items
     "data_store", // peckboard_store_* — plugin-owned document store
     "event_append", // peckboard_append_event
