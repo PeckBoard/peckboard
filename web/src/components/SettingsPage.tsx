@@ -77,6 +77,7 @@ export default function SettingsPage({ onBack }: Props) {
     return stored
   })
   const [serverConfig, setServerConfig] = useState<ServerConfig | null>(null)
+  const [caveman, setCaveman] = useState<string>('off')
 
   useEffect(() => {
     authedFetch('/api/config')
@@ -86,6 +87,24 @@ export default function SettingsPage({ onBack }: Props) {
       })
       .catch(() => {})
   }, [])
+
+  useEffect(() => {
+    authedFetch('/api/settings/caveman')
+      .then((res) => (res.ok ? res.json() : null))
+      .then((data: { level?: string } | null) => {
+        if (data?.level) setCaveman(data.level)
+      })
+      .catch(() => {})
+  }, [])
+
+  const changeCaveman = (level: string) => {
+    setCaveman(level)
+    authedFetch('/api/settings/caveman', {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ level }),
+    }).catch(() => {})
+  }
 
   const changeTheme = (t: Theme) => {
     setTheme(t)
@@ -180,6 +199,26 @@ export default function SettingsPage({ onBack }: Props) {
       <ApprovedCommandsSection />
 
       <SoftwareUpdate />
+
+      <section className="settings-section" data-testid="caveman-section">
+        <h3>Caveman Mode</h3>
+        <p className="form-hint">
+          Terse agent replies in chat sessions — cuts output tokens (roughly 65% at Full) while
+          keeping code and technical content exact. Workers are always terse. Applies from each
+          session&apos;s next message.
+        </p>
+        <div className="theme-toggle">
+          {['off', 'lite', 'full'].map((l) => (
+            <button
+              key={l}
+              className={`theme-btn ${caveman === l ? 'active' : ''}`}
+              onClick={() => changeCaveman(l)}
+            >
+              {l.charAt(0).toUpperCase() + l.slice(1)}
+            </button>
+          ))}
+        </div>
+      </section>
 
       <section className="settings-section">
         <h3>Theme</h3>

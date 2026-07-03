@@ -251,6 +251,38 @@ impl SessionManager {
             .await
             .ok_or_else(|| anyhow::anyhow!("unknown agent provider: {}", provider_id))?;
 
+        // Interactive caveman mode: the global `caveman_mode` app setting
+        // appends a terse output-style block to every non-worker session's
+        // system prompt (workers carry their own copy in the worker prompt).
+        let system_prompt_suffix = if session.is_worker {
+            config.system_prompt_suffix
+        } else {
+            let db2 = db.clone();
+            let level = tokio::task::spawn_blocking(move || {
+                db2.plugin_store_get_blocking(
+                    crate::routes::settings::SETTINGS_NS,
+                    crate::routes::settings::SETTINGS_COLLECTION,
+                    "caveman_mode",
+                )
+            })
+            .await
+            .ok()
+            .and_then(|r| r.ok())
+            .flatten()
+            .and_then(|raw| {
+                serde_json::from_str::<serde_json::Value>(&raw)
+                    .ok()
+                    .and_then(|v| v.get("level").and_then(|l| l.as_str()).map(str::to_string))
+            })
+            .unwrap_or_default();
+            match crate::provider::caveman_style(&level) {
+                Some(style) => Some(match config.system_prompt_suffix {
+                    Some(s) => format!("{s}\n{style}"),
+                    None => style.to_string(),
+                }),
+                None => config.system_prompt_suffix,
+            }
+        };
         let final_config = SpawnConfig {
             working_dir,
             model: final_model,
@@ -260,7 +292,7 @@ impl SessionManager {
             permission_mode: config.permission_mode,
             timeout_ms: config.timeout_ms,
             metadata: config.metadata,
-            system_prompt_suffix: config.system_prompt_suffix,
+            system_prompt_suffix,
             // A session's custom prompt is read here, once, so every dispatch
             // path (chat, worker, repeating task) honours it without each
             // caller having to thread it through SpawnConfig.

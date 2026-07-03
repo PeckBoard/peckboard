@@ -210,6 +210,55 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn read_file_rejects_untargeted_large_reads() {
+        let (ctx, _dir) = ctx_with_folder().await;
+        let reg = McpToolRegistry::new();
+
+        // 500 lines > the 400-line whole-file cap.
+        let big: String = (0..500).map(|i| format!("line {i}\n")).collect();
+        reg.handle_common_tool(
+            "write_file",
+            serde_json::json!({ "path": "big.txt", "content": big }),
+            &ctx,
+        )
+        .await
+        .unwrap();
+
+        // Whole-file read of a large file is rejected with guidance.
+        let err = reg
+            .handle_common_tool("read_file", serde_json::json!({ "path": "big.txt" }), &ctx)
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("too large"), "got: {err}");
+        assert!(err.contains("file_outline"), "got: {err}");
+
+        // An oversized window is rejected too.
+        let err = reg
+            .handle_common_tool(
+                "read_file",
+                serde_json::json!({ "path": "big.txt", "start_line": 1, "line_count": 5000 }),
+                &ctx,
+            )
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("line_count"), "got: {err}");
+
+        // A bounded window still works and reports the full line count.
+        let ok = reg
+            .handle_common_tool(
+                "read_file",
+                serde_json::json!({ "path": "big.txt", "start_line": 490, "line_count": 5 }),
+                &ctx,
+            )
+            .await
+            .unwrap();
+        assert_eq!(ok["returned_lines"], 5, "got: {ok}");
+        assert_eq!(ok["total_lines"], 500, "got: {ok}");
+    }
+
+    #[tokio::test]
     async fn math_tool_through_handler() {
         let (ctx, _dir) = ctx_with_folder().await;
         let reg = McpToolRegistry::new();

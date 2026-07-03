@@ -50,6 +50,15 @@ pub fn list_files_tool(
 
 // ── read_file ─────────────────────────────────────────────────────────
 
+/// Caps that keep `read_file` targeted: whole-file reads only for small
+/// files, and a bounded explicit window for anything larger. Big dumps are
+/// exactly what bloats agent transcripts — every later API call in the turn
+/// re-reads them — so oversized reads are rejected with guidance instead of
+/// silently truncated (a silent clamp would let the agent believe it saw the
+/// whole file).
+const WHOLE_FILE_MAX_LINES: usize = 400;
+const WINDOW_MAX_LINES: u64 = 600;
+
 pub fn read_file_tool(args: serde_json::Value, ctx: &HostCtx) -> Result<serde_json::Value, String> {
     let path = args
         .get("path")
@@ -76,8 +85,15 @@ pub fn read_file_tool(args: serde_json::Value, ctx: &HostCtx) -> Result<serde_js
         let count = args
             .get("line_count")
             .and_then(|v| v.as_u64())
-            .unwrap_or(200)
-            .clamp(1, 10_000) as usize;
+            .unwrap_or(200);
+        if count > WINDOW_MAX_LINES {
+            return Err(format!(
+                "line_count {count} too large (max {WINDOW_MAX_LINES}). Read targeted \
+                 windows — locate the right range first with file_outline / read_symbol / \
+                 search_files."
+            ));
+        }
+        let count = count.max(1) as usize;
         let from = (start - 1).min(total);
         let to = (from + count).min(total);
         return Ok(serde_json::json!({
@@ -90,6 +106,15 @@ pub fn read_file_tool(args: serde_json::Value, ctx: &HostCtx) -> Result<serde_js
             "hash": hash,
             "content": lines[from..to].join("\n"),
         }));
+    }
+
+    if total > WHOLE_FILE_MAX_LINES {
+        return Err(format!(
+            "{path} has {total} lines — too large for a whole-file read (max \
+             {WHOLE_FILE_MAX_LINES}). Pass a line window (start_line + line_count ≤ \
+             {WINDOW_MAX_LINES}), or locate the target first with file_outline / \
+             read_symbol / search_files."
+        ));
     }
 
     Ok(serde_json::json!({
