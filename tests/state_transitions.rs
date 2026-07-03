@@ -25,7 +25,8 @@ use peckboard::service::mcp_server::McpTokenRegistry;
 use peckboard::service::push::PushService;
 use peckboard::state::AppState;
 use peckboard::worker::orchestrator::{
-    cancel_worker_for_card_move, drain_queue_for_session, handle_worker_done,
+    cancel_worker_for_card_move, check_and_spawn_workers, drain_queue_for_session,
+    handle_worker_done,
 };
 use peckboard::ws::broadcaster::Broadcaster;
 
@@ -431,4 +432,206 @@ async fn pause_clears_all_project_worker_queues() {
     assert_eq!(n, 2, "every worker on the paused project should be cleared");
     assert!(state.db.get_queued_message("ws1").await.unwrap().is_none());
     assert!(state.db.get_queued_message("ws2").await.unwrap().is_none());
+}
+
+// ── worker-session resume ───────────────────────────────────────────────
+
+/// Seed a card with no active worker but an intact resume link: `prev_ws`
+/// worked `worker_step` on this card before being interrupted, and its
+/// conversation survives (`conversation_id` set).
+async fn seed_resumable_card(state: &Arc<AppState>, card_id: &str, step: &str, prev_ws: &str) {
+    let ts = chrono::Utc::now().to_rfc3339();
+    state
+        .db
+        .create_card(NewCard {
+            id: card_id.into(),
+            project_id: "p1".into(),
+            title: format!("card-{card_id}"),
+            description: "".into(),
+            step: step.into(),
+            priority: 1,
+            workflow: "task".into(),
+            model: Some("mock:echo".into()),
+            effort: None,
+            blocked: false,
+            block_reason: None,
+            created_at: ts.clone(),
+            updated_at: ts.clone(),
+        })
+        .await
+        .unwrap();
+    state
+        .db
+        .create_session(NewSession {
+            id: prev_ws.into(),
+            name: format!("worker-{prev_ws}"),
+            folder_id: "f1".into(),
+            model: Some("mock:echo".into()),
+            effort: None,
+            is_worker: true,
+            project_id: Some("p1".into()),
+            card_id: Some(card_id.into()),
+            conversation_id: Some("conv-1".into()),
+            created_at: ts.clone(),
+            last_activity: ts,
+            worker_step: Some(step.into()),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    state
+        .db
+        .update_card(
+            card_id,
+            UpdateCard {
+                last_worker_session_id: Some(Some(prev_ws.into())),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+}
+
+/// A card still on the step its previous worker session was working (the
+/// session ended without an intent, or the card detoured through backlog /
+/// wont_do / blocked and came back) must get that SAME session back — the
+/// provider resumes its conversation — not a freshly minted one.
+#[tokio::test]
+async fn orchestrator_resumes_previous_worker_session_on_same_step() {
+    let state = build_state().await;
+    seed_project(&state).await;
+    seed_resumable_card(&state, "c1", "in_progress", "prev-ws").await;
+
+    check_and_spawn_workers(&state).await;
+
+    let card = state.db.get_card("c1").await.unwrap().unwrap();
+    assert_eq!(
+        card.worker_session_id.as_deref(),
+        Some("prev-ws"),
+        "orchestrator must resume the previous session, not mint a new one"
+    );
+    let sessions = state
+        .db
+        .list_worker_sessions_by_project("p1")
+        .await
+        .unwrap();
+    assert_eq!(
+        sessions.len(),
+        1,
+        "no duplicate worker session should be created on resume"
+    );
+}
+
+/// Once the card has moved to a different real step, the old session's
+/// resume link is severed and a later return to the original step gets a
+/// fresh session.
+#[tokio::test]
+async fn orchestrator_spawns_fresh_session_after_card_advanced() {
+    let state = build_state().await;
+    seed_project(&state).await;
+    seed_resumable_card(&state, "c1", "in_progress", "prev-ws").await;
+
+    // User drags the card forward to `review`, then back to `in_progress`.
+    for step in ["review", "in_progress"] {
+        state
+            .db
+            .update_card(
+                "c1",
+                UpdateCard {
+                    step: Some(step.into()),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+    }
+    let prev = state.db.get_session("prev-ws").await.unwrap().unwrap();
+    assert_eq!(
+        prev.worker_step, None,
+        "moving to a different real step must sever the resume link"
+    );
+
+    check_and_spawn_workers(&state).await;
+
+    let card = state.db.get_card("c1").await.unwrap().unwrap();
+    let assigned = card.worker_session_id.as_deref().unwrap();
+    assert_ne!(assigned, "prev-ws", "a severed session must not be resumed");
+}
+
+/// The resume link survives every detour the card can take without
+/// actually advancing: back to backlog, into wont_do, and back again.
+/// Only a move to a different real step (here `done`) severs it.
+#[tokio::test]
+async fn worker_resume_link_survives_backlog_and_wont_do_but_not_forward_moves() {
+    let state = build_state().await;
+    seed_project(&state).await;
+    seed_resumable_card(&state, "c1", "in_progress", "prev-ws").await;
+
+    let worker_step = |state: &Arc<AppState>| {
+        let db = state.db.clone();
+        async move {
+            db.get_session("prev-ws")
+                .await
+                .unwrap()
+                .unwrap()
+                .worker_step
+        }
+    };
+
+    for step in ["backlog", "in_progress", "wont_do", "in_progress"] {
+        state
+            .db
+            .update_card(
+                "c1",
+                UpdateCard {
+                    step: Some(step.into()),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            worker_step(&state).await.as_deref(),
+            Some("in_progress"),
+            "detour through {step} must keep the resume link"
+        );
+    }
+
+    state
+        .db
+        .update_card(
+            "c1",
+            UpdateCard {
+                step: Some("done".into()),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        worker_step(&state).await,
+        None,
+        "moving to done must sever the resume link"
+    );
+}
+
+/// A worker that exits without signalling any intent (crash, context
+/// cutoff, plain stop) leaves the card on its step. The completion handler
+/// must stamp `last_worker_session_id` so the respawn resumes this
+/// session's conversation instead of starting a fresh agent.
+#[tokio::test]
+async fn worker_done_without_intent_keeps_resume_link() {
+    let state = build_state().await;
+    seed_project(&state).await;
+    seed_card_with_worker(&state, "c1", "in_progress", "ws1").await;
+
+    handle_worker_done(&state, "ws1").await;
+
+    let card = state.db.get_card("c1").await.unwrap().unwrap();
+    assert_eq!(card.worker_session_id, None, "slot must be freed");
+    assert_eq!(
+        card.last_worker_session_id.as_deref(),
+        Some("ws1"),
+        "resume link must point at the interrupted session"
+    );
 }

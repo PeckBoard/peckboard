@@ -379,47 +379,91 @@ async fn spawn_worker_for_card(
         .await?
         .ok_or_else(|| anyhow::anyhow!("folder not found: {}", project.folder_id))?;
 
-    // 2. Create worker session
     let now = chrono::Utc::now().to_rfc3339();
-    let session_id = uuid::Uuid::new_v4().to_string();
 
-    let session = state
-        .db
-        .create_session(NewSession {
-            id: session_id.clone(),
-            name: format!("worker: {}", card.title),
-            folder_id: project.folder_id.clone(),
-            model: card.model.clone().or_else(|| project.model.clone()),
-            effort: card.effort.clone().or_else(|| project.effort.clone()),
-            is_worker: true,
-            project_id: Some(project.id.clone()),
-            card_id: Some(card.id.clone()),
-            conversation_id: None,
-            created_at: now.clone(),
-            last_activity: now.clone(),
-            ..Default::default()
-        })
-        .await?;
-
-    tracing::info!(
-        session_id = %session.id,
-        card_id = %card.id,
-        project_id = %project.id,
-        "Created worker session for card \"{}\"",
-        card.title
-    );
-
-    // Claim the card BEFORE dispatching the agent. The conditional claim
-    // (WHERE worker_session_id IS NULL) is what makes concurrent spawn
-    // paths safe: whoever loses the claim must not start an agent. If it's
-    // the card's intake step, advance it to the workflow's second step (the
-    // first one a worker actually performs).
+    // The step the worker will actually run. Cards picked up from the
+    // intake step are advanced to the workflow's second step (the first
+    // one a worker performs) as part of the claim below.
     let workflow_steps = crate::workflow::steps_for(Some(&card.workflow));
     let new_step = if card.step == "backlog" || card.step == "todo" {
         workflow_steps.get(1).cloned()
     } else {
         None
     };
+    let effective_step = new_step.clone().unwrap_or_else(|| card.step.clone());
+
+    // 2. Reuse or create the worker session. If the card's previous worker
+    // session was working THIS step and its resume link is intact (the
+    // card never moved to a different real step since — detours through
+    // backlog / wont_do / the blocked flag don't sever it, see
+    // `sever_worker_resume_link` in db::crud::cards), resume that session:
+    // the provider restores the old conversation via its conversation_id,
+    // so the agent keeps its context instead of rediscovering the card
+    // from scratch.
+    let resume_session = match card.last_worker_session_id.as_deref() {
+        Some(prev_sid) => state
+            .db
+            .get_session(prev_sid)
+            .await
+            .ok()
+            .flatten()
+            .filter(|prev| {
+                prev.is_worker
+                    && prev.card_id.as_deref() == Some(card.id.as_str())
+                    && prev.worker_step.as_deref() == Some(effective_step.as_str())
+                    && prev.conversation_id.is_some()
+            }),
+        None => None,
+    };
+
+    let (session, is_resume) = match resume_session {
+        Some(prev) => {
+            tracing::info!(
+                session_id = %prev.id,
+                card_id = %card.id,
+                project_id = %project.id,
+                step = %effective_step,
+                "Resuming previous worker session for card \"{}\"",
+                card.title
+            );
+            (prev, true)
+        }
+        None => {
+            let session = state
+                .db
+                .create_session(NewSession {
+                    id: uuid::Uuid::new_v4().to_string(),
+                    name: format!("worker: {}", card.title),
+                    folder_id: project.folder_id.clone(),
+                    model: card.model.clone().or_else(|| project.model.clone()),
+                    effort: card.effort.clone().or_else(|| project.effort.clone()),
+                    is_worker: true,
+                    project_id: Some(project.id.clone()),
+                    card_id: Some(card.id.clone()),
+                    conversation_id: None,
+                    created_at: now.clone(),
+                    last_activity: now.clone(),
+                    worker_step: Some(effective_step.clone()),
+                    ..Default::default()
+                })
+                .await?;
+            tracing::info!(
+                session_id = %session.id,
+                card_id = %card.id,
+                project_id = %project.id,
+                "Created worker session for card \"{}\"",
+                card.title
+            );
+            (session, false)
+        }
+    };
+    let session_id = session.id.clone();
+
+    // Claim the card BEFORE dispatching the agent. The conditional claim
+    // (WHERE worker_session_id IS NULL) is what makes concurrent spawn
+    // paths safe: whoever loses the claim must not start an agent. If it's
+    // the card's intake step, advance it to the workflow's second step (the
+    // first one a worker actually performs).
     let claimed = state
         .db
         .claim_card_for_worker(&card.id, &session_id, new_step, &now)
@@ -430,7 +474,11 @@ async fn spawn_worker_for_card(
             session_id = %session_id,
             "Card already claimed by another worker; skipping spawn"
         );
-        let _ = state.db.delete_session(&session_id).await;
+        // Only a freshly-minted session is ours to discard; a resumed one
+        // predates this spawn attempt and keeps its history.
+        if !is_resume {
+            let _ = state.db.delete_session(&session_id).await;
+        }
         return Ok(());
     }
     // Any exit between here and a successful dispatch must release the
@@ -527,34 +575,42 @@ async fn spawn_worker_for_card(
     // time, so it always carries a concrete id and the per-step prompt
     // doesn't need to consult the project as a fallback. `workflow_steps`
     // was computed above, before the claim.
-    // Per-project additional step instructions, if the user set any in
-    // the edit-project modal. A lookup failure must not block the spawn;
-    // we fall back to no extras.
-    let extra_step_instructions = state
-        .db
-        .get_project_workflow_instruction(&project.id, &card.workflow, &card.step)
-        .await
-        .unwrap_or_else(|err| {
-            tracing::warn!(error = %err, "failed to load project workflow instructions");
-            None
-        });
-    // Scan the project folder once to give the worker a compact codebase map
-    // (top-level layout + likely-relevant files) up front, so it doesn't burn
-    // its opening turns re-discovering the repo. Best-effort: an unreadable
-    // folder just yields no map.
-    let codebase_context = {
-        let files = pipeline::scan_project_files(std::path::Path::new(&folder.path));
-        pipeline::build_codebase_context(&files, card)
+    //
+    // A resumed session gets a short "pick up where you left off" prompt
+    // instead — the full assignment prompt is already in its restored
+    // conversation, so we skip the instruction lookup + codebase scan too.
+    let prompt = if is_resume {
+        pipeline::build_worker_resume_prompt(card, &effective_step)
+    } else {
+        // Per-project additional step instructions, if the user set any in
+        // the edit-project modal. A lookup failure must not block the spawn;
+        // we fall back to no extras.
+        let extra_step_instructions = state
+            .db
+            .get_project_workflow_instruction(&project.id, &card.workflow, &card.step)
+            .await
+            .unwrap_or_else(|err| {
+                tracing::warn!(error = %err, "failed to load project workflow instructions");
+                None
+            });
+        // Scan the project folder once to give the worker a compact codebase map
+        // (top-level layout + likely-relevant files) up front, so it doesn't burn
+        // its opening turns re-discovering the repo. Best-effort: an unreadable
+        // folder just yields no map.
+        let codebase_context = {
+            let files = pipeline::scan_project_files(std::path::Path::new(&folder.path));
+            pipeline::build_codebase_context(&files, card)
+        };
+        pipeline::build_worker_prompt(
+            project,
+            card,
+            &card.step,
+            &workflow_steps,
+            card.handoff_context.as_deref(),
+            extra_step_instructions.as_deref(),
+            codebase_context.as_deref(),
+        )
     };
-    let prompt = pipeline::build_worker_prompt(
-        project,
-        card,
-        &card.step,
-        &workflow_steps,
-        card.handoff_context.as_deref(),
-        extra_step_instructions.as_deref(),
-        codebase_context.as_deref(),
-    );
 
     // 6. Build spawn config and send message
     let config = SpawnConfig {
@@ -577,8 +633,22 @@ async fn spawn_worker_for_card(
     };
 
     // The lock is uncontested for a brand-new uuid; we acquire it anyway
-    // so `send_message_locked` is the single dispatch entry point.
+    // so `send_message_locked` is the single dispatch entry point. For a
+    // RESUMED session the lock is real: the session may be mid-run on an
+    // inter-worker follow-up, in which case we must not inject a resume
+    // turn into the live agent — release the claim and let a later tick
+    // retry once it winds down.
     let lock = state.session_manager.lock_session(&session_id).await;
+    if is_resume && state.session_manager.is_running(&session_id).await {
+        drop(lock);
+        tracing::info!(
+            session_id = %session_id,
+            card_id = %card.id,
+            "Resume target is mid-run; releasing claim until it finishes"
+        );
+        release_claim("resume target still running").await;
+        return Ok(());
+    }
     let dispatched = state
         .session_manager
         .send_message_locked(
@@ -855,13 +925,17 @@ pub async fn handle_worker_done(state: &Arc<AppState>, session_id: &str) {
 
         Some(WorkerIntent::Continue) | None => {
             // No special intent detected. Clear worker_session_id so the
-            // orchestrator can re-spawn if needed.
+            // orchestrator can re-spawn if needed, but stamp
+            // last_worker_session_id: the card is still on the step this
+            // session was working, so the re-spawn resumes this session's
+            // conversation instead of starting a fresh agent.
             let _ = state
                 .db
                 .update_card(
                     &card_id,
                     UpdateCard {
                         worker_session_id: Some(None),
+                        last_worker_session_id: Some(Some(session_id.to_string())),
                         updated_at: Some(now),
                         ..Default::default()
                     },

@@ -43,6 +43,7 @@ pub fn ensure_schema(conn: &mut SqliteConnection) -> anyhow::Result<()> {
     ensure_plugin_data_tables(conn)?;
     ensure_sessions_system_prompt_column(conn)?;
     ensure_sessions_handover_columns(conn)?;
+    ensure_sessions_worker_step_column(conn)?;
     Ok(())
 }
 
@@ -447,6 +448,21 @@ fn ensure_sessions_handover_columns(conn: &mut SqliteConnection) -> anyhow::Resu
     if !existing.iter().any(|c| c == "pending_handover_doc") {
         tracing::info!("Repairing schema: adding sessions.pending_handover_doc");
         sql_query("ALTER TABLE sessions ADD COLUMN pending_handover_doc TEXT").execute(conn)?;
+    }
+    Ok(())
+}
+/// Heal DBs that predate the `session_worker_step` migration, whose single
+/// statement is a non-idempotent `ALTER TABLE sessions ADD COLUMN`.
+/// Additive + nullable, so no backfill.
+fn ensure_sessions_worker_step_column(conn: &mut SqliteConnection) -> anyhow::Result<()> {
+    let rows: Vec<PragmaColumn> = sql_query("PRAGMA table_info(sessions)").load(conn)?;
+    let existing: Vec<String> = rows.into_iter().map(|r| r.name).collect();
+    if existing.is_empty() {
+        return Ok(());
+    }
+    if !existing.iter().any(|c| c == "worker_step") {
+        tracing::info!("Repairing schema: adding sessions.worker_step");
+        sql_query("ALTER TABLE sessions ADD COLUMN worker_step TEXT").execute(conn)?;
     }
     Ok(())
 }
@@ -1228,6 +1244,7 @@ mod tests {
             "knowledge_area",
             "scope_path",
             "is_permanent",
+            "worker_step",
         ] {
             assert!(
                 cols.iter().any(|c| c == expected),

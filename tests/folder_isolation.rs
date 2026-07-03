@@ -85,6 +85,7 @@ async fn seed_session(
         system_prompt: None,
         handover_to_model: None,
         pending_handover_doc: None,
+        worker_step: None,
     })
     .await
     .unwrap();

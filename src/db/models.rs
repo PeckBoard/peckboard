@@ -61,6 +61,12 @@ pub struct Session {
     /// finalizes; cleared (consumed) when the next user message under the
     /// new model prepends it. See [`crate::handover`].
     pub pending_handover_doc: Option<String>,
+    /// Workflow step this worker session is working on. `None` for
+    /// non-worker sessions, and for worker sessions whose card has since
+    /// advanced to a different step — at which point the session can no
+    /// longer be resumed for the card (the resume link is severed by the
+    /// card-update path in `db::crud::cards`).
+    pub worker_step: Option<String>,
 }
 
 #[derive(Insertable, Deserialize, Debug, Default)]
@@ -87,8 +93,8 @@ pub struct NewSession {
     pub system_prompt: Option<String>,
     pub handover_to_model: Option<String>,
     pub pending_handover_doc: Option<String>,
+    pub worker_step: Option<String>,
 }
-
 #[derive(AsChangeset, Deserialize, Debug, Default)]
 #[diesel(table_name = sessions)]
 pub struct UpdateSession {
@@ -108,8 +114,8 @@ pub struct UpdateSession {
     pub system_prompt: Option<Option<String>>,
     pub handover_to_model: Option<Option<String>>,
     pub pending_handover_doc: Option<Option<String>>,
+    pub worker_step: Option<Option<String>>,
 }
-
 // ── Repeating Tasks ──────────────────────────────────────────────────
 
 #[derive(Queryable, Selectable, Serialize, Debug, Clone)]

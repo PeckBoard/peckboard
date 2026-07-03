@@ -564,6 +564,33 @@ pub fn build_worker_prompt(
 
     prompt
 }
+/// Prompt for RESUMING a worker session on the same card and step it was
+/// already working. The session's earlier conversation is restored by the
+/// provider (e.g. `claude --resume`), so the full assignment prompt from
+/// [`build_worker_prompt`] is already in the agent's context — repeating
+/// it would only burn tokens. This explains the interruption and points
+/// the agent back at the intent tools.
+pub fn build_worker_resume_prompt(card: &Card, step: &str) -> String {
+    let mut prompt = String::new();
+    prompt.push_str(&format!(
+        "You are resuming your earlier work on the card titled {}. This is \
+         the same conversation as before: your previous run was interrupted \
+         (it ended without an intent, or the card was temporarily blocked \
+         or moved away and back).\n\n",
+        quote_untrusted_inline(&card.title)
+    ));
+    prompt.push_str(&format!("The card is on step `{step}` again.\n\n"));
+    prompt.push_str(
+        "Take stock before continuing: review what you already did (your \
+         earlier messages, todos, and any files you changed), verify the \
+         current state on disk, then continue the remaining work.\n\n\
+         As before, finish by calling exactly one of: `complete_step` (this \
+         step done, hand off to the next step's worker), `finish_card` (the \
+         ENTIRE card is done), `wont_do_card` (cannot or should not be \
+         done), or `ask_user` if you are blocked on the user.\n",
+    );
+    prompt
+}
 
 /// Wrap untrusted user-supplied text in a fenced block the agent is
 /// trained to treat as data. A randomized nonce stops the inner text

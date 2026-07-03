@@ -33,6 +33,7 @@ diesel::table! {
         system_prompt -> Nullable<Text>,
         handover_to_model -> Nullable<Text>,
         pending_handover_doc -> Nullable<Text>,
+        worker_step -> Nullable<Text>,
     }
 }
 

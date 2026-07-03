@@ -57,6 +57,43 @@ fn stamp_completed_at(prev_step: &str, update: &mut UpdateCard) {
         update.completed_at = Some(None);
     }
 }
+/// Sever the resume link between a card and its last worker session when
+/// the card's step moves somewhere that session wasn't working.
+///
+/// A worker session persists for its card while the card stays on the step
+/// the session was working, or detours through `backlog` / `wont_do` (being
+/// blocked is a flag, not a step, so it never lands here) — coming back to
+/// the worked step resumes the same session/conversation instead of
+/// spawning a fresh agent (see `spawn_worker_for_card`). Moving the card to
+/// any OTHER real step ends that: we null the session's `worker_step` so it
+/// is never picked as a resume candidate again. Lives in the DB write path
+/// (like `stamp_completed_at`) so every step transition — route handler,
+/// MCP tool, orchestrator — enforces the same rule.
+fn sever_worker_resume_link(
+    conn: &mut SqliteConnection,
+    prev_step: &str,
+    card: &Card,
+) -> anyhow::Result<()> {
+    if card.step == prev_step
+        || card.step == "backlog"
+        || card.step == "todo"
+        || card.step == "wont_do"
+    {
+        return Ok(());
+    }
+    let Some(sid) = card.last_worker_session_id.as_deref() else {
+        return Ok(());
+    };
+    diesel::update(
+        sessions::table
+            .find(sid)
+            .filter(sessions::worker_step.is_not_null())
+            .filter(sessions::worker_step.ne(&card.step)),
+    )
+    .set(sessions::worker_step.eq::<Option<String>>(None))
+    .execute(conn)?;
+    Ok(())
+}
 
 impl Db {
     pub async fn create_card(&self, new: NewCard) -> anyhow::Result<Card> {
@@ -110,22 +147,28 @@ impl Db {
             // connection scope, so the read/write pair is atomic under
             // the DB connection mutex — concurrent step changes can't
             // interleave between the lookup and the write.
-            if update.step.is_some() && update.completed_at.is_none() {
-                let existing: Option<String> = cards::table
+            let mut prev_step: Option<String> = None;
+            if update.step.is_some() {
+                prev_step = cards::table
                     .find(&id)
                     .select(cards::step)
                     .first::<String>(conn)
                     .optional()?;
-                if let Some(prev_step) = existing {
-                    stamp_completed_at(&prev_step, &mut update);
+                if let Some(ref prev) = prev_step
+                    && update.completed_at.is_none()
+                {
+                    stamp_completed_at(prev, &mut update);
                 }
             }
-            diesel::update(cards::table.find(&id))
+            let card: Option<Card> = diesel::update(cards::table.find(&id))
                 .set(&update)
                 .returning(Card::as_returning())
                 .get_result(conn)
-                .optional()
-                .map_err(Into::into)
+                .optional()?;
+            if let (Some(card), Some(prev)) = (card.as_ref(), prev_step.as_deref()) {
+                sever_worker_resume_link(conn, prev, card)?;
+            }
+            Ok(card)
         })
         .await
     }
@@ -161,12 +204,15 @@ impl Db {
             if update.step.is_some() && update.completed_at.is_none() {
                 stamp_completed_at(&existing.step, &mut update);
             }
-            diesel::update(cards::table.find(&id))
+            let card: Option<Card> = diesel::update(cards::table.find(&id))
                 .set(&update)
                 .returning(Card::as_returning())
                 .get_result(conn)
-                .optional()
-                .map_err(Into::into)
+                .optional()?;
+            if let Some(card) = card.as_ref() {
+                sever_worker_resume_link(conn, &existing.step, card)?;
+            }
+            Ok(card)
         })
         .await
     }
