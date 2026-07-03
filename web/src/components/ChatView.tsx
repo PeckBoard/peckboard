@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { createPortal } from 'react-dom'
 import rehypeHighlight from 'rehype-highlight'
 import SafeMarkdown from './SafeMarkdown'
 import type { Event, Session } from '../types/api'
@@ -287,6 +288,34 @@ export default function ChatView({
   // on a provider/account switch). Cleared on the next successful patch
   // or by the dismiss button.
   const [patchError, setPatchError] = useState<string | null>(null)
+  // Cross-provider/account model switch awaiting the user's choice in the
+  // modal below (hand over a summary / clear & switch / cancel).
+  const [pendingModelSwitch, setPendingModelSwitch] = useState<string | null>(null)
+  // Server-suggested compaction (context near full). The occupancy at last
+  // dismissal is kept so the re-fired suggestion only re-prompts after
+  // meaningful growth (+20k tokens).
+  const [compactionPrompt, setCompactionPrompt] = useState<{ occupancy: number } | null>(null)
+  const compactionDismissedAt = useRef(0)
+
+  // The completion listener broadcasts `compaction-suggested` when this
+  // session's context crosses the threshold; surface it as a modal instead
+  // of compacting silently — the user picks compact / clear / not now.
+  useEffect(() => {
+    const onSuggest = (e: globalThis.Event) => {
+      const detail = (e as CustomEvent).detail as {
+        session_id?: string
+        data?: { occupancy?: number }
+      }
+      if (detail?.session_id !== sessionId) return
+      const occupancy = detail?.data?.occupancy ?? 0
+      if (compactionDismissedAt.current > 0 && occupancy < compactionDismissedAt.current + 20_000) {
+        return
+      }
+      setCompactionPrompt({ occupancy })
+    }
+    window.addEventListener('peckboard:compaction-suggested', onSuggest)
+    return () => window.removeEventListener('peckboard:compaction-suggested', onSuggest)
+  }, [sessionId])
   const scrollRef = useRef<HTMLDivElement>(null)
   const userScrolledUp = useRef(false)
   /** Saved scroll-height immediately before a "Load older" fetch so
@@ -609,6 +638,24 @@ export default function ChatView({
   //   rename, divider, clear session, terminate agent, delete
   // Plus a Model and Effort submenu so users can change either from the
   // 3-dot menu without hunting for a separate picker.
+  // Mirror of the backend continuity key (provider + account). Switching
+  // across it means the incoming model starts cold, so confirm with the
+  // user before the PATCH: hand over a summary, or clear & switch fresh.
+  const continuityKey = (id: string | null | undefined): string => {
+    const m = id ?? ''
+    const provider = m.includes(':') ? m.slice(0, m.indexOf(':')) : 'claude'
+    const at = m.lastIndexOf('@')
+    return `${provider}@${at >= 0 ? m.slice(at + 1) : ''}`
+  }
+  const requestModelChange = (id: string) => {
+    const crosses = continuityKey(sessionDetail?.model) !== continuityKey(id)
+    if (crosses && events.length > 0 && !sessionDetail?.is_worker) {
+      setPendingModelSwitch(id)
+    } else {
+      patchSession({ model: id })
+    }
+  }
+
   const sessionMenuItems: MenuItem[] = [
     { label: 'Rename', onSelect: handleRename, testId: 'chat-menu-rename' },
     { divider: true },
@@ -620,7 +667,7 @@ export default function ChatView({
           ? availableModels.map((m) => ({
               label: m.display_name,
               active: m.id === sessionDetail?.model,
-              onSelect: () => patchSession({ model: m.id }),
+              onSelect: () => requestModelChange(m.id),
             }))
           : [{ label: 'Loading models…', disabled: true }],
     },
@@ -691,7 +738,7 @@ export default function ChatView({
         <span className="chat-toolbar-name">{sessionDetail?.name ?? 'Session'}</span>
         <ModelPicker
           value={sessionDetail?.model ?? ''}
-          onChange={(id) => patchSession({ model: id })}
+          onChange={(id) => requestModelChange(id)}
           models={availableModels}
           valueLabel={modelDisplayName(sessionDetail?.model)}
           triggerClassName="chat-toolbar-model"
@@ -1025,6 +1072,114 @@ export default function ChatView({
         agentWorking={agentWorking}
         handoverActive={!!sessionDetail?.handover_to_model}
       />
+      {pendingModelSwitch !== null &&
+        createPortal(
+          <div
+            className="modal-backdrop"
+            onMouseDown={(e) => {
+              if (e.target === e.currentTarget) setPendingModelSwitch(null)
+            }}
+          >
+            <div
+              className="confirm-dialog"
+              data-testid="model-switch-prompt"
+              onMouseDown={(e) => e.stopPropagation()}
+            >
+              <h3 className="confirm-dialog-title">Switch model?</h3>
+              <p className="confirm-dialog-message">
+                {`Switching to ${modelDisplayName(pendingModelSwitch)} crosses a provider or account boundary — the new model starts with no memory of this conversation. Hand over a summary, or clear the context and switch fresh.`}
+              </p>
+              <div className="confirm-dialog-actions">
+                <button className="btn-secondary" onClick={() => setPendingModelSwitch(null)}>
+                  Cancel
+                </button>
+                <button
+                  className="btn-secondary"
+                  data-testid="model-switch-clear"
+                  onClick={async () => {
+                    const target = pendingModelSwitch
+                    setPendingModelSwitch(null)
+                    await clearSession(sessionId)
+                    patchSession({ model: target })
+                  }}
+                >
+                  Clear &amp; switch
+                </button>
+                <button
+                  className="btn-primary"
+                  data-testid="model-switch-handover"
+                  onClick={() => {
+                    const target = pendingModelSwitch
+                    setPendingModelSwitch(null)
+                    patchSession({ model: target })
+                  }}
+                >
+                  Hand over context
+                </button>
+              </div>
+            </div>
+          </div>,
+          document.body,
+        )}
+      {compactionPrompt !== null &&
+        createPortal(
+          <div
+            className="modal-backdrop"
+            onMouseDown={(e) => {
+              if (e.target === e.currentTarget) {
+                compactionDismissedAt.current = compactionPrompt.occupancy
+                setCompactionPrompt(null)
+              }
+            }}
+          >
+            <div
+              className="confirm-dialog"
+              data-testid="compaction-prompt"
+              onMouseDown={(e) => e.stopPropagation()}
+            >
+              <h3 className="confirm-dialog-title">Context is nearly full</h3>
+              <p className="confirm-dialog-message">
+                {`This conversation is using ~${Math.round(compactionPrompt.occupancy / 1000)}k tokens of context. Compact it (the model writes a continuation summary and restarts from it), or clear the context entirely.`}
+              </p>
+              <div className="confirm-dialog-actions">
+                <button
+                  className="btn-secondary"
+                  onClick={() => {
+                    compactionDismissedAt.current = compactionPrompt.occupancy
+                    setCompactionPrompt(null)
+                  }}
+                >
+                  Not now
+                </button>
+                <button
+                  className="btn-secondary"
+                  data-testid="compaction-clear"
+                  onClick={async () => {
+                    setCompactionPrompt(null)
+                    await clearSession(sessionId)
+                  }}
+                >
+                  Clear context
+                </button>
+                <button
+                  className="btn-primary"
+                  data-testid="compaction-compact"
+                  onClick={async () => {
+                    setCompactionPrompt(null)
+                    try {
+                      await authedFetch(`/api/sessions/${sessionId}/compact`, { method: 'POST' })
+                    } catch {
+                      /* transient; the suggestion re-fires on the next turn */
+                    }
+                  }}
+                >
+                  Compact
+                </button>
+              </div>
+            </div>
+          </div>,
+          document.body,
+        )}
       {confirmAction && (
         <ConfirmDialog
           title={confirmAction.title}

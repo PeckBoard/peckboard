@@ -25,12 +25,15 @@
 //!    model consumes the doc and prepends it, so the incoming model opens
 //!    with its predecessor's context.
 //!
-//! **Auto-compaction** reuses the same machinery with `from == to`: when a
+//! **Compaction** reuses the same machinery with `from == to`: when a
 //! session's context occupancy crosses [`COMPACT_CONTEXT_THRESHOLD`], the
-//! Claude stream loop recycles its child after the turn, the completion
-//! listener calls [`maybe_begin_compaction`], the model writes a continuation
-//! doc for itself, and the conversation restarts fresh with the doc injected
-//! — same model, same account, a fraction of the context.
+//! Claude stream loop recycles its child after the turn and the completion
+//! listener calls [`maybe_suggest_compaction`], which asks the USER (a
+//! `compaction-suggested` ws event → modal: compact / clear / not now).
+//! Confirming hits `POST /api/sessions/:id/compact` → [`begin_compaction`]:
+//! the model writes a continuation doc for itself and the conversation
+//! restarts fresh with the doc injected — same model, same account, a
+//! fraction of the context.
 
 use std::sync::Arc;
 
@@ -274,7 +277,7 @@ pub async fn begin_handover(
 /// Guards: interactive sessions only (workers are short-lived and their cards
 /// depend on uninterrupted resume semantics), and never while a handover is
 /// already in flight or a doc is still waiting to inject.
-pub async fn maybe_begin_compaction(
+pub async fn maybe_suggest_compaction(
     state: &Arc<AppState>,
     session_id: &str,
 ) -> anyhow::Result<bool> {
@@ -296,14 +299,51 @@ pub async fn maybe_begin_compaction(
     if occupancy < COMPACT_CONTEXT_THRESHOLD {
         return Ok(false);
     }
-    let model = session.model.clone().unwrap_or_else(|| "default".into());
     tracing::info!(
         session_id = %session_id,
         occupancy,
-        "Context occupancy over compaction threshold; dispatching compaction turn"
+        "Context occupancy over compaction threshold; suggesting compaction to the user"
     );
-    begin_handover(state, session_id, &model, &model).await?;
+    state.broadcaster.broadcast(WsEvent {
+        event_type: "compaction-suggested".into(),
+        session_id: session_id.to_string(),
+        data: serde_json::json!({
+            "occupancy": occupancy,
+            "threshold": COMPACT_CONTEXT_THRESHOLD,
+        }),
+    });
     Ok(true)
+}
+
+/// User-confirmed compaction (the suggestion modal's Compact button; also
+/// valid as a manual action at any occupancy). Same-model handover: the model
+/// writes a continuation doc, the conversation restarts fresh with the doc
+/// injected. Errors describe why the session is ineligible.
+pub async fn begin_compaction(state: &Arc<AppState>, session_id: &str) -> anyhow::Result<()> {
+    let Some(session) = state.db.get_session(session_id).await? else {
+        anyhow::bail!("session not found");
+    };
+    if session.is_worker {
+        anyhow::bail!("worker sessions are not compacted");
+    }
+    if session.handover_to_model.is_some() {
+        anyhow::bail!("a handover or compaction is already in progress");
+    }
+    if session.pending_handover_doc.is_some() {
+        anyhow::bail!("a handover/compaction doc is still waiting to be delivered");
+    }
+    let occupancy = state
+        .db
+        .latest_context_tokens(session_id)
+        .await
+        .unwrap_or(None)
+        .unwrap_or(0);
+    if occupancy == 0 {
+        anyhow::bail!("nothing to compact yet — the session has no recorded context");
+    }
+    let model = session.model.clone().unwrap_or_else(|| "default".into());
+    tracing::info!(session_id = %session_id, occupancy, "User-confirmed compaction dispatching");
+    begin_handover(state, session_id, &model, &model).await
 }
 
 /// Complete a handover after the outgoing model's doc-generation turn

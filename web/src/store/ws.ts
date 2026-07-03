@@ -120,6 +120,13 @@ export const useWsStore = create<WsState>((set, get) => ({
         return
       }
 
+      if (msg.type === 'compaction-suggested') {
+        // A session's context crossed the compaction threshold; ChatView
+        // shows the compact / clear / not-now modal for its session.
+        window.dispatchEvent(new CustomEvent('peckboard:compaction-suggested', { detail: msg }))
+        return
+      }
+
       if (msg.type === 'queue') {
         window.dispatchEvent(new CustomEvent('peckboard:queue', { detail: msg }))
         return

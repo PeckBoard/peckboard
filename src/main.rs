@@ -392,24 +392,22 @@ async fn main() -> anyhow::Result<()> {
                     // re-acquires it inside drain_queued (tokio Mutex is
                     // not reentrant).
 
-                    // 1.5 Auto-compaction: an interactive session whose
-                    // context occupancy crossed the threshold gets its
-                    // compaction turn dispatched now — in the idle gap right
-                    // after its child exited, prefix still cache-warm. On
-                    // dispatch, skip the drain: the doc turn is running, and
-                    // its own completion (step 0) drains the queue after
-                    // finalize stashes the doc.
-                    if completion.completed {
-                        match peckboard::handover::maybe_begin_compaction(&orchestrator_state, &sid)
-                            .await
-                        {
-                            Ok(true) => continue,
-                            Ok(false) => {}
-                            Err(e) => tracing::warn!(
-                                session_id = %sid,
-                                "Auto-compaction check failed: {e}"
-                            ),
-                        }
+                    // 1.5 Compaction suggestion: an interactive session whose
+                    // context occupancy crossed the threshold gets a
+                    // `compaction-suggested` ws event — the web UI turns it
+                    // into a modal (compact / clear context / not now). The
+                    // actual compaction turn only runs when the user confirms
+                    // via POST /api/sessions/:id/compact. Suggestion only, so
+                    // the queue drain below still runs.
+                    if completion.completed
+                        && let Err(e) =
+                            peckboard::handover::maybe_suggest_compaction(&orchestrator_state, &sid)
+                                .await
+                    {
+                        tracing::warn!(
+                            session_id = %sid,
+                            "Compaction suggestion check failed: {e}"
+                        );
                     }
 
                     // 2. Drain any queued message — runs for every session

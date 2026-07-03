@@ -85,6 +85,7 @@ pub fn router(state: Arc<AppState>) -> Router<Arc<AppState>> {
         .route("/api/sessions/{id}/todos", get(events::get_session_todos))
         .route("/api/sessions/{id}/read", post(mark_read))
         .route("/api/sessions/{id}/clear", post(clear_session))
+        .route("/api/sessions/{id}/compact", post(compact_session))
         .route("/api/sessions/{id}/message", post(dispatch::send_message))
         .route("/api/sessions/{id}/cancel", post(dispatch::cancel_session))
         .route(
@@ -538,6 +539,25 @@ async fn mark_read(
         })?;
 
     Ok::<_, (StatusCode, Json<serde_json::Value>)>(StatusCode::NO_CONTENT)
+}
+
+/// POST /api/sessions/:id/compact — user-confirmed context compaction (the
+/// `compaction-suggested` modal's Compact button; also valid as a manual
+/// action at any occupancy). Dispatches the same-model handover doc turn and
+/// returns 202; the conversation restarts fresh once the doc lands. 409 with
+/// a reason when the session is ineligible (worker, handover already in
+/// flight, nothing to compact).
+async fn compact_session(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> Result<StatusCode, (StatusCode, Json<serde_json::Value>)> {
+    match crate::handover::begin_compaction(&state, &id).await {
+        Ok(()) => Ok(StatusCode::ACCEPTED),
+        Err(e) => Err((
+            StatusCode::CONFLICT,
+            Json(serde_json::json!({ "error": e.to_string() })),
+        )),
+    }
 }
 
 /// POST /api/sessions/:id/clear -- kill process (placeholder), delete events,
