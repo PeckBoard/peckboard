@@ -517,7 +517,10 @@ pub fn build_worker_prompt(
          - `read_worker_session` — another worker's session history.\n\
          - `search_sessions` — search a session's history (or all sessions) \
          for a keyword or its errors instead of reading whole transcripts.\n\
-         - `list_project_reports` / `read_report` — workers' reports.\n\n",
+         - `list_project_reports` / `read_report` — workers' reports.\n\
+         - `browser_*` — headless browser for web testing: `browser_open` (url → \
+         page_id + compressed outline w/ ref=eN handles) → `browser_find`/`browser_outline` → \
+         `browser_act` (click/type/… by ref) → `browser_screenshot` → `browser_close`.\n\n",
     );
 
     prompt.push_str("## Instructions\n\n");

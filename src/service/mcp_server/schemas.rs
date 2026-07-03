@@ -1272,6 +1272,83 @@ pub(super) fn tool_definitions() -> Vec<McpToolDef> {
                 "additionalProperties": false
 }),
         },
+        McpToolDef {
+            name: "browser_open".into(),
+            description: "Open URL in the managed headless browser for web testing. Returns page_id + compressed page outline (~91% smaller than DOM; elements carry ref=eN handles for browser_act). First call may take a minute (server + browser spin-up).".into(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "url": { "type": "string", "description": "URL to open." },
+                    "name": { "type": "string", "description": "Short page label." }
+                },
+                "required": ["url"]
+            }),
+        },
+        McpToolDef {
+            name: "browser_outline".into(),
+            description: "Compressed structure of an open page (list-folded, ref=eN handles). Call after actions that change the page. Prefer browser_find for locating specific content.".into(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "page_id": { "type": "string", "description": "From browser_open." }
+                },
+                "required": ["page_id"]
+            }),
+        },
+        McpToolDef {
+            name: "browser_find".into(),
+            description: "Regex-search the page snapshot (ripgrep) instead of reading the whole outline — returns matching lines with their ref=eN handles.".into(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "page_id": { "type": "string", "description": "From browser_open." },
+                    "pattern": { "type": "string", "description": "Regex (alternatives OK: `login|sign in`)." },
+                    "ignore_case": { "type": "boolean", "description": "Default true." },
+                    "line_limit": { "type": "integer", "description": "Max result lines (default 50, max 100)." }
+                },
+                "required": ["page_id", "pattern"]
+            }),
+        },
+        McpToolDef {
+            name: "browser_act".into(),
+            description: "Interact with an open page. action: click|type|fill|select|hover|press_key|navigate|back|forward|scroll_top|scroll_bottom|wait_selector|wait_ms|dialog. Element actions take `ref` (eN from outline/find); type/fill/select/press_key/navigate/wait_selector put their argument in `text`. Set outline=true to get the fresh page structure in the same call.".into(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "page_id": { "type": "string", "description": "From browser_open." },
+                    "action": { "type": "string", "description": "One of the actions above." },
+                    "ref": { "type": "string", "description": "Element handle, e.g. e12." },
+                    "text": { "type": "string", "description": "Text/value/key/url/selector for the action." },
+                    "timeout_ms": { "type": "integer", "description": "wait_ms duration (max 30000)." },
+                    "accept": { "type": "boolean", "description": "dialog: accept or dismiss (default true)." },
+                    "outline": { "type": "boolean", "description": "Also return the post-action outline (default false; costs ~2k tokens)." }
+                },
+                "required": ["page_id", "action"]
+            }),
+        },
+        McpToolDef {
+            name: "browser_screenshot".into(),
+            description: "Screenshot an open page (PNG, returned as image). Viewport by default; full_page=true for the whole page.".into(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "page_id": { "type": "string", "description": "From browser_open." },
+                    "full_page": { "type": "boolean", "description": "Default false." }
+                },
+                "required": ["page_id"]
+            }),
+        },
+        McpToolDef {
+            name: "browser_close".into(),
+            description: "Close an open browser page when done testing.".into(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "page_id": { "type": "string", "description": "From browser_open." }
+                },
+                "required": ["page_id"]
+            }),
+        },
     ]
 }
 

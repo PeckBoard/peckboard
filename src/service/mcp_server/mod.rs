@@ -105,6 +105,10 @@ impl McpToolRegistry {
             | "read_symbol" | "git" | "run_tests" => {
                 self.handle_common_tool(tool_name, args, ctx).await
             }
+            "browser_open" | "browser_outline" | "browser_find" | "browser_act"
+            | "browser_screenshot" | "browser_close" => {
+                self.handle_browser_tool(tool_name, args, ctx).await
+            }
             "run_command" => self.handle_run_command(args, ctx).await,
             _ => anyhow::bail!("unknown tool: {tool_name}"),
         }
@@ -441,7 +445,14 @@ mod tests {
         assert!(names.contains(&"edit_file"));
         assert!(names.contains(&"run_command"));
         assert!(names.contains(&"git"));
-        assert_eq!(names.len(), 57);
+        // Headless-browser testing tools (managed better-playwright-mcp3).
+        assert!(names.contains(&"browser_open"));
+        assert!(names.contains(&"browser_outline"));
+        assert!(names.contains(&"browser_find"));
+        assert!(names.contains(&"browser_act"));
+        assert!(names.contains(&"browser_screenshot"));
+        assert!(names.contains(&"browser_close"));
+        assert_eq!(names.len(), 63);
     }
 
     #[test]

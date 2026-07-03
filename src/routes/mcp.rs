@@ -306,11 +306,30 @@ async fn mcp_handler(
             .await;
 
             match tool_result {
-                Ok(result) => {
-                    let content = serde_json::json!([{
+                Ok(mut result) => {
+                    // Handlers return an image (e.g. browser_screenshot) by
+                    // embedding `_image_base64` (+ optional `_image_mime`):
+                    // emitted as an MCP image content block so vision models
+                    // see pixels, with the remaining fields as text.
+                    let image = result.as_object_mut().and_then(|o| {
+                        let data = o.remove("_image_base64")?;
+                        let mime = o
+                            .remove("_image_mime")
+                            .and_then(|m| m.as_str().map(str::to_string))
+                            .unwrap_or_else(|| "image/png".into());
+                        Some((data, mime))
+                    });
+                    let text_block = serde_json::json!({
                         "type": "text",
                         "text": serde_json::to_string(&result).unwrap_or_default(),
-                    }]);
+                    });
+                    let content = match image {
+                        Some((data, mime)) => serde_json::json!([
+                            { "type": "image", "data": data, "mimeType": mime },
+                            text_block,
+                        ]),
+                        None => serde_json::json!([text_block]),
+                    };
                     (
                         StatusCode::OK,
                         rpc_json(JsonRpcResponse::success(

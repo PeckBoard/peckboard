@@ -1,3 +1,4 @@
+pub mod browser;
 pub mod mcp_server;
 pub mod mdns;
 pub mod push;
