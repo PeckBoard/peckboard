@@ -72,14 +72,19 @@ that one. Do not run `pkill peckboard` / `killall peckboard` /
 ## Definition of Done
 
 **After making code changes, run the full verification cycle and fix
-anything it surfaces before reporting done:**
+anything it surfaces before reporting done — use the script, do not run
+the steps by hand:**
 
-1. `cargo fmt --check` — format clean
-2. `cargo clippy --all-targets --no-deps` — no errors
-3. `cargo test` — all unit + integration tests pass
-4. `cd web && npm run lint` — no errors
-5. `cd web && npm run format:check` — prettier clean
-6. `cd web && npm run e2e` — Playwright suite green
+```bash
+scripts/verify.sh          # everything, including release build + Playwright e2e
+scripts/verify.sh --fast   # skip the release build + e2e (quick inner-loop check)
+```
+
+It runs, in order: `cargo fmt --check`, `cargo clippy --all-targets
+--no-deps`, `cargo test`, `cd web && npm run lint`, `npm run
+format:check`, then `cargo build --release` (the binary Playwright
+boots) and `npm run e2e`. Every step runs even if an earlier one fails,
+and it exits non-zero with a per-step summary if anything failed.
 
 If a step fails because of something _unrelated_ to the current change
 (pre-existing backlog), call it out explicitly rather than silently
