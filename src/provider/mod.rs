@@ -9,6 +9,12 @@ pub mod ollama;
 pub mod registry;
 pub mod stream;
 
+/// Shared "working style" rules appended to (or, for full-replace providers,
+/// used as) the system prompt of every agent provider's sessions. Single
+/// source of truth so Claude, grok, ollama, and cursor all ship the same
+/// guidance. The leading newline lets it be appended directly onto a prompt.
+pub const WORKING_STYLE: &str = "\n# Working style\n\n- Prefer the code tools \u{2014} `file_outline`, `read_symbol`, `search_files`, `read_file`, `edit_file` \u{2014} and the search tool to navigate and edit code. Do NOT use `grep` or `sed`; use `search_files` (ripgrep-backed) for searching.\n- Keep answers short and to the point. Minimize output \u{2014} don't over-explain or add detail the user didn't ask for.\n- Be critical of the user's direction. When a choice looks suboptimal or wrong, say so and advise or push back with a better option before acting \u{2014} don't just comply.\n";
+
 // Provider factory — AI provider abstraction
 //
 // Providers implement the full agent lifecycle: spawn, send,

@@ -627,12 +627,14 @@ fn build_cli_args(
     if let Some(effort) = effort.map(str::trim).filter(|e| !e.is_empty()) {
         args.push(format!("--effort={effort}"));
     }
-    if let Some(sp) = system_prompt_override
+    // Grok's flag fully REPLACES its system prompt, so this mirrors Claude's
+    // override semantics: a non-empty override wins outright; otherwise every
+    // session ships the shared working-style rules.
+    let system_prompt = system_prompt_override
         .map(str::trim)
         .filter(|s| !s.is_empty())
-    {
-        args.push(format!("--system-prompt-override={sp}"));
-    }
+        .unwrap_or(crate::provider::WORKING_STYLE);
+    args.push(format!("--system-prompt-override={system_prompt}"));
     args
 }
 
@@ -668,6 +670,7 @@ mod tests {
 
     #[test]
     fn build_args_includes_session_effort_and_system_prompt() {
+        // An override fully replaces the system prompt (mirrors Claude).
         let args = build_cli_args(
             "grok-build",
             "hi",
@@ -681,15 +684,26 @@ mod tests {
     }
 
     #[test]
+    fn build_args_sends_working_style_when_no_override() {
+        // With no override, every session still ships the shared rules.
+        let args = build_cli_args("grok-build", "hi", None, None, None);
+        assert!(args.contains(&format!(
+            "--system-prompt-override={}",
+            crate::provider::WORKING_STYLE
+        )));
+    }
+
+    #[test]
     fn build_args_omits_optional_flags_when_absent() {
         let args = build_cli_args("grok-build", "hi", None, Some("  "), None);
         assert!(!args.iter().any(|a| a.starts_with("--session-id")));
         // Whitespace-only effort is treated as absent.
         assert!(!args.iter().any(|a| a.starts_with("--effort")));
+        // The system prompt is ALWAYS sent now (falls back to the shared
+        // working-style rules), so it's present even with no override.
         assert!(
-            !args
-                .iter()
-                .any(|a| a.starts_with("--system-prompt-override"))
+            args.iter()
+                .any(|a| a.starts_with("--system-prompt-override="))
         );
     }
 

@@ -116,6 +116,16 @@ struct ChatMessage {
 }
 
 impl ChatMessage {
+    fn system(content: String) -> Self {
+        ChatMessage {
+            role: "system".into(),
+            content,
+            images: None,
+            tool_calls: None,
+            tool_name: None,
+        }
+    }
+
     fn user(content: String, images: Option<Vec<String>>) -> Self {
         ChatMessage {
             role: "user".into(),
@@ -612,6 +622,15 @@ impl AgentProvider for OllamaProvider {
         let client = self.client.clone();
         let sid = session_id.clone();
         let model_label = config.model.clone();
+        // The per-session override fully replaces the system prompt; with no
+        // override, every session ships the shared working-style rules.
+        let system_prompt = config
+            .system_prompt_override
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .unwrap_or(crate::provider::WORKING_STYLE)
+            .to_string();
 
         let handle = tokio::spawn(async move {
             let completed = run_chat_stream(ChatStreamArgs {
@@ -628,6 +647,7 @@ impl AgentProvider for OllamaProvider {
                 extra_headers,
                 timeout_secs,
                 cancel: cancel_for_task,
+                system_prompt,
             })
             .await;
 
@@ -922,6 +942,11 @@ struct ChatStreamArgs<'a> {
     extra_headers: Vec<(String, String)>,
     timeout_secs: u64,
     cancel: Arc<Notify>,
+    /// System prompt for this turn: the per-session override if set,
+    /// otherwise the shared working-style rules. Prepended as the first
+    /// `role:"system"` message of the outgoing request (not persisted to
+    /// the transcript, so history stays user-first).
+    system_prompt: String,
 }
 
 /// Outcome of streaming one model response (one `/api/chat` call).
@@ -956,6 +981,7 @@ async fn run_chat_stream(args: ChatStreamArgs<'_>) -> bool {
         extra_headers,
         timeout_secs,
         cancel,
+        system_prompt,
     } = args;
     let broadcaster: &crate::ws::broadcaster::Broadcaster = broadcaster_arc.as_ref();
 
@@ -981,6 +1007,14 @@ async fn run_chat_stream(args: ChatStreamArgs<'_>) -> bool {
         // empty POST to Ollama.
         crash(db, broadcaster, session_id, "no messages to send", None).await;
         return false;
+    }
+
+    // Prepend the system prompt to THIS request's messages only. It's not
+    // pushed to `new_messages` (the persisted transcript), so history stays
+    // user-first; it rides along on every outgoing request via this local
+    // copy, which `messages.push(...)` extends as the turn progresses.
+    if !system_prompt.trim().is_empty() {
+        messages.insert(0, ChatMessage::system(system_prompt.clone()));
     }
 
     // Build the tool offer once for the turn. Running a tool needs a scoped
@@ -1697,6 +1731,33 @@ mod tests {
         assert!(msg.get("tool_name").is_none());
         // No attachments → no `images` key, so a text turn is unchanged.
         assert!(msg.get("images").is_none());
+    }
+
+    #[test]
+    fn system_message_leads_request_and_carries_the_rules() {
+        // Mirrors how run_chat_stream builds the outgoing request: the system
+        // prompt is prepended as the first message, ahead of the user turn.
+        let mut messages = vec![ChatMessage::user("hi".into(), None)];
+        messages.insert(
+            0,
+            ChatMessage::system(crate::provider::WORKING_STYLE.to_string()),
+        );
+        let body = ChatRequest {
+            model: "llama3.1",
+            messages: &messages,
+            stream: true,
+            tools: None,
+        };
+        let v = serde_json::to_value(&body).unwrap();
+        assert_eq!(v["messages"][0]["role"], "system");
+        assert!(
+            v["messages"][0]["content"]
+                .as_str()
+                .unwrap()
+                .contains("# Working style")
+        );
+        // The user turn is still present, right after the system message.
+        assert_eq!(v["messages"][1]["role"], "user");
     }
 
     #[test]

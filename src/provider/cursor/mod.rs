@@ -182,11 +182,14 @@ impl AgentProvider for CursorProvider {
             );
         }
 
+        // cursor has no override concept plumbed, so the shared working-style
+        // rules are the system prompt (used only on the first turn).
         let args = build_cli_args(
             &model,
             &message.text,
             conversation_id.as_deref(),
             auto_approve,
+            crate::provider::WORKING_STYLE,
         );
 
         let cancel = Arc::new(Notify::new());
@@ -562,6 +565,7 @@ fn build_cli_args(
     prompt: &str,
     conversation_id: Option<&str>,
     auto_approve: bool,
+    system_prompt: &str,
 ) -> Vec<String> {
     let mut args = vec![
         "--print".to_string(),
@@ -581,7 +585,18 @@ fn build_cli_args(
         args.push("--force".to_string());
     }
     args.push("--".to_string());
-    args.push(prompt.to_string());
+    // `cursor-agent` has no system-prompt / rules flag (its rules are an
+    // interactive `generate-rule` flow), so the shared working-style rules
+    // are folded into the prompt. Only on the FIRST turn of a conversation
+    // (no `--resume` id) — resumes carry the model's context forward, so
+    // repeating the rules every turn would just waste tokens.
+    let prompt = match conversation_id {
+        None if !system_prompt.trim().is_empty() => {
+            format!("{}\n\n{}", system_prompt.trim(), prompt)
+        }
+        _ => prompt.to_string(),
+    };
+    args.push(prompt);
     args
 }
 
@@ -737,7 +752,8 @@ mod tests {
 
     #[test]
     fn build_args_omits_model_for_auto_and_quotes_prompt_positionally() {
-        let args = build_cli_args("auto", "hello", None, true);
+        // No system prompt passed here — the positional is exactly the prompt.
+        let args = build_cli_args("auto", "hello", None, true, "");
         assert!(!args.iter().any(|a| a == "--model"));
         assert!(args.contains(&"--print".to_string()));
         assert!(args.contains(&"stream-json".to_string()));
@@ -750,12 +766,32 @@ mod tests {
 
     #[test]
     fn build_args_includes_model_and_resume() {
-        let args = build_cli_args("gpt-5", "do it", Some("chat-7"), false);
+        let args = build_cli_args("gpt-5", "do it", Some("chat-7"), false, "");
         let m = args.iter().position(|a| a == "--model").unwrap();
         assert_eq!(args[m + 1], "gpt-5");
         let r = args.iter().position(|a| a == "--resume").unwrap();
         assert_eq!(args[r + 1], "chat-7");
         assert!(!args.iter().any(|a| a == "--force"));
+    }
+
+    #[test]
+    fn first_turn_prepends_working_style_rules_but_resume_does_not() {
+        // First turn (no conversation id): the rules are folded into the
+        // prompt ahead of the user's text.
+        let first = build_cli_args("auto", "do it", None, true, crate::provider::WORKING_STYLE);
+        let prompt = first.last().unwrap();
+        assert!(prompt.contains("# Working style"));
+        assert!(prompt.ends_with("do it"));
+
+        // Resume turn (conversation id present): rules are NOT repeated.
+        let resume = build_cli_args(
+            "auto",
+            "do it",
+            Some("chat-7"),
+            true,
+            crate::provider::WORKING_STYLE,
+        );
+        assert_eq!(resume.last().unwrap(), "do it");
     }
 
     #[test]
