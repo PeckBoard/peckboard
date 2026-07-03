@@ -627,7 +627,7 @@ export default function ChatView({
   const effortOptions = effortOptionsForModel(sessionDetail?.model, availableProviders)
 
   const modelDisplayName = (id: string | null | undefined): string => {
-    if (!id) return 'default'
+    if (!id) return 'auto'
     const m = availableModels.find((x) => x.id === id)
     return m?.display_name ?? id
   }
@@ -745,7 +745,7 @@ export default function ChatView({
           showChevron={false}
           align="left"
           ariaLabel="Change model"
-          defaultLabel="Default"
+          defaultLabel="Auto"
           emptyHint={modelsError ? 'Failed to load models — reopen to retry' : 'Loading models…'}
           onOpen={() => {
             // Reopening after a failed fetch clears the error flag, which

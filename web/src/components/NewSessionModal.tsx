@@ -158,7 +158,7 @@ export default function NewSessionModal({ onClose }: Props) {
             value={model}
             onChange={handleModelChange}
             models={models}
-            defaultLabel="Server default"
+            defaultLabel="Auto"
             ariaLabel="Select model"
             testId="new-session-model"
           />

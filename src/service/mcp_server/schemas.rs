@@ -42,6 +42,25 @@ pub fn worker_hidden_tool_names() -> &'static [&'static str] {
     ]
 }
 
+/// Core tools NOT advertised to non-worker (chat/expert) sessions: the
+/// card-lifecycle and worker-coordination tools only make sense with a
+/// card/worker scope, so their schemas are dead weight in every chat API
+/// call. Advertisement-only, same as the worker list — the per-handler
+/// scope checks remain the enforcement point. Chats keep the read-side
+/// worker tools (list/read worker sessions, search_sessions, reports) for
+/// supervising projects.
+pub fn chat_hidden_tool_names() -> &'static [&'static str] {
+    &[
+        "complete_step",
+        "finish_card",
+        "wont_do_card",
+        "share_finding",
+        "send_worker_message",
+        "notify_workers",
+        "get_finding_details",
+    ]
+}
+
 pub(super) fn tool_definitions() -> Vec<McpToolDef> {
     vec![
         McpToolDef {
@@ -1401,6 +1420,45 @@ mod tests {
             assert!(
                 !worker_hidden_tool_names().contains(&essential),
                 "essential worker tool {essential} must stay advertised"
+            );
+        }
+    }
+
+    #[test]
+    fn chat_hidden_tools_exist_and_spare_chat_essentials() {
+        let names = tool_names();
+        for hidden in chat_hidden_tool_names() {
+            assert!(
+                names.iter().any(|n| n == hidden),
+                "hidden tool {hidden} is not a core tool"
+            );
+        }
+        // Chats keep project admin, cards CRUD, the read side of worker
+        // supervision, files/exec, and the browser tools.
+        for essential in [
+            "ask_user",
+            "create_card",
+            "list_cards",
+            "update_card",
+            "create_project",
+            "list_projects",
+            "write_report",
+            "read_report",
+            "list_project_reports",
+            "list_worker_sessions",
+            "read_worker_session",
+            "search_sessions",
+            "read_file",
+            "edit_file",
+            "search_files",
+            "run_command",
+            "run_tests",
+            "browser_open",
+            "browser_act",
+        ] {
+            assert!(
+                !chat_hidden_tool_names().contains(&essential),
+                "essential chat tool {essential} must stay advertised"
             );
         }
     }

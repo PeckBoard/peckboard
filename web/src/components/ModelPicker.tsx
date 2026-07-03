@@ -45,7 +45,7 @@ export default function ModelPicker({
   value,
   onChange,
   models,
-  defaultLabel = 'Default',
+  defaultLabel = 'Auto',
   valueLabel,
   triggerClassName = 'form-input model-picker-trigger',
   showChevron = true,

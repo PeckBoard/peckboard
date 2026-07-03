@@ -237,10 +237,23 @@ impl SessionManager {
 
         // Session-level model overrides the request, matching the
         // pre-refactor behaviour.
-        let final_model = session
+        let requested_model = session
             .model
             .clone()
             .unwrap_or_else(|| config.model.clone());
+
+        // Resolve effort once — it rides the spawn config AND drives the
+        // auto-model routing below.
+        let resolved_effort = session.effort.clone().or_else(|| config.effort.clone());
+
+        // Auto mode: an unset model (legacy "default" included) routes to
+        // the best model for the task by effort — cheap tasks stop paying
+        // frontier rates and hard ones aren't underpowered.
+        let final_model = if crate::provider::is_auto_model(&requested_model) {
+            crate::provider::auto_model(resolved_effort.as_deref(), session.is_worker).to_string()
+        } else {
+            requested_model
+        };
 
         let (provider_id, _model_id) =
             ProviderRegistry::parse_model_id(&final_model, DEFAULT_PROVIDER);
@@ -286,7 +299,7 @@ impl SessionManager {
         let final_config = SpawnConfig {
             working_dir,
             model: final_model,
-            effort: session.effort.or(config.effort),
+            effort: resolved_effort,
             mcp_config_path: config.mcp_config_path,
             env: config.env,
             permission_mode: config.permission_mode,

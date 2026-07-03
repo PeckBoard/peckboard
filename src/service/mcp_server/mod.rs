@@ -15,7 +15,7 @@ mod spawn;
 pub use auth::McpTokenRegistry;
 pub use config::{delete_mcp_config, write_mcp_config};
 pub use context::{ExpertDispatcher, McpToolDef, ScopedFolderId, ScopedProjectId, ToolCallContext};
-pub use schemas::{tool_names, worker_hidden_tool_names};
+pub use schemas::{chat_hidden_tool_names, tool_names, worker_hidden_tool_names};
 pub use spawn::{AppExpertDispatcher, AppLiveHost};
 
 use serde_json::Value;

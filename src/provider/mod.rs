@@ -32,6 +32,53 @@ pub fn caveman_style(level: &str) -> Option<&'static str> {
 const CAVEMAN_LITE: &str = "\n# Output style \u{2014} terse\n\nNo filler, no pleasantries, no hedging, no tool-call narration. Keep articles and full sentences \u{2014} professional but tight. Code, commands, identifiers, and error strings stay exact. Plain full clarity for security warnings, destructive or irreversible actions, and order-sensitive multi-step sequences.\n";
 
 const CAVEMAN_FULL: &str = "\n# Output style \u{2014} caveman\n\nSpeak terse like smart caveman. All technical substance stay; only fluff die. Active EVERY response \u{2014} no drift back to verbose.\n- Drop articles, filler (just/really/basically), pleasantries, hedging. Fragments OK. Short synonyms.\n- No tool-call narration, no decorative tables or emoji, no raw log dumps \u{2014} quote shortest decisive line.\n- Code, commands, identifiers, file paths, error strings: EXACT, never abbreviated. Standard acronyms OK (DB/API/HTTP); invent none.\n- Keep the user's language \u{2014} compress style, not language.\n- Plain, full-sentence clarity returns for: security warnings, destructive or irreversible actions, and ordered multi-step sequences where fragments risk misread. Then caveman resume.\n";
+/// Model ids that mean "let PeckBoard choose": empty, the legacy
+/// "default", or the explicit "auto".
+pub fn is_auto_model(id: &str) -> bool {
+    let id = id.trim();
+    id.is_empty() || id.eq_ignore_ascii_case("default") || id.eq_ignore_ascii_case("auto")
+}
+
+/// Auto mode: pick the best Claude model for the task from its resolved
+/// effort. Effort is the app's own "how hard is this" signal, so routing on
+/// it is deterministic and costs zero tokens (no classifier call). With no
+/// effort at all, workers get Sonnet (their effort defaults to medium) and
+/// chats get Opus (interactive quality expectations).
+pub fn auto_model(effort: Option<&str>, is_worker: bool) -> &'static str {
+    match effort {
+        Some("low") => "claude-haiku-4-5",
+        Some("medium") => "claude-sonnet-4-6",
+        Some("high") => "claude-opus-4-8",
+        Some("xhigh") | Some("max") => "claude-fable-5",
+        _ => {
+            if is_worker {
+                "claude-sonnet-4-6"
+            } else {
+                "claude-opus-4-8"
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod auto_tests {
+    use super::*;
+
+    #[test]
+    fn auto_model_routes_by_effort_then_role() {
+        assert!(is_auto_model("") && is_auto_model("default") && is_auto_model("Auto"));
+        assert!(!is_auto_model("claude-opus-4-8"));
+        assert_eq!(auto_model(Some("low"), true), "claude-haiku-4-5");
+        assert_eq!(auto_model(Some("medium"), false), "claude-sonnet-4-6");
+        assert_eq!(auto_model(Some("high"), true), "claude-opus-4-8");
+        assert_eq!(auto_model(Some("xhigh"), false), "claude-fable-5");
+        assert_eq!(auto_model(Some("max"), true), "claude-fable-5");
+        assert_eq!(auto_model(None, true), "claude-sonnet-4-6");
+        assert_eq!(auto_model(None, false), "claude-opus-4-8");
+        // Junk effort falls back by role rather than panicking.
+        assert_eq!(auto_model(Some("very high"), false), "claude-opus-4-8");
+    }
+}
 
 // Provider factory — AI provider abstraction
 //

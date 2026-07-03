@@ -122,6 +122,22 @@ fn parse_nullable_override(args: &Value, key: &str) -> Option<Option<String>> {
     }
 }
 
+/// Validate an effort id against the app's canonical levels
+/// (`standard_effort_levels`): low|medium|high|xhigh|max. Junk like
+/// "very high" used to be stored verbatim and silently shaped the
+/// `--effort` flag of every worker spawned for the card.
+fn validate_effort(effort: Option<&str>) -> anyhow::Result<()> {
+    let Some(e) = effort else { return Ok(()) };
+    let ok = crate::provider::registry::standard_effort_levels()
+        .iter()
+        .any(|l| l.id == e);
+    anyhow::ensure!(
+        ok,
+        "invalid effort `{e}` — use one of low|medium|high|xhigh|max (or omit it)"
+    );
+    Ok(())
+}
+
 /// Normalize and validate a replacement dependency set for `card_id`: drop
 /// self-references and duplicates, reject ids that aren't cards in the same
 /// project, and reject any set that would close a dependency cycle. Returns
@@ -466,6 +482,7 @@ impl McpToolRegistry {
             .get("effort")
             .and_then(|v| v.as_str())
             .map(|s| s.to_string());
+        validate_effort(effort.as_deref())?;
 
         // Optional dependency ids: only keep those that are real cards in
         // the same project (a new card can't form a cycle since nothing
@@ -799,6 +816,9 @@ impl McpToolRegistry {
         // the key leaves it untouched.
         let model = parse_nullable_override(&args, "model");
         let effort = parse_nullable_override(&args, "effort");
+        if let Some(Some(e)) = &effort {
+            validate_effort(Some(e))?;
+        }
 
         // A present `depends_on` array replaces the card's dependency set
         // (empty clears it); omitting the key leaves dependencies alone.

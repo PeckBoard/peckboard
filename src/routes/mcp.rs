@@ -179,10 +179,12 @@ async fn mcp_handler(
             )
         }
         "tools/list" => {
-            // Workers get a trimmed tool surface: admin tools they can never
-            // legitimately use are not advertised, so their schemas stop
-            // occupying context on every worker API call. Enforcement stays
-            // with the per-handler scope checks — this is advertisement only.
+            // Every session gets a role-trimmed tool surface: workers lose
+            // the admin tools, chats/experts lose the card-lifecycle and
+            // worker-coordination tools — schemas they can never legitimately
+            // use stop occupying context on every API call. Advertisement
+            // only; the per-handler scope checks remain the enforcement
+            // point.
             let is_worker = state
                 .db
                 .get_session(&session_id)
@@ -194,7 +196,7 @@ async fn mcp_handler(
             let hidden: &[&str] = if is_worker {
                 crate::service::mcp_server::worker_hidden_tool_names()
             } else {
-                &[]
+                crate::service::mcp_server::chat_hidden_tool_names()
             };
             let mut tools: Vec<Value> = registry
                 .tool_definitions()

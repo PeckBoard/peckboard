@@ -386,6 +386,17 @@ pub(crate) fn create_card_impl(db: &Db, input: &str) -> String {
         .unwrap_or("backlog")
         .to_string();
 
+    // Same canonical-effort validation as the MCP create_card handler —
+    // junk like "very high" used to be stored verbatim.
+    if let Some(e) = req.effort.as_deref()
+        && !crate::provider::registry::standard_effort_levels()
+            .iter()
+            .any(|l| l.id == e)
+    {
+        return error_json(format!(
+            "invalid effort `{e}` — use one of low|medium|high|xhigh|max (or omit it)"
+        ));
+    }
     let now = chrono::Utc::now().to_rfc3339();
     let new = NewCard {
         id: uuid::Uuid::new_v4().to_string(),
@@ -3626,6 +3637,20 @@ mod tests {
                 .to_string(),
         );
         assert!(out.contains("unknown workflow id"), "got: {out}");
+
+        let out = create_card_impl(
+            &db,
+            &serde_json::json!({ "project_id": "p1", "title": "x", "effort": "very high" })
+                .to_string(),
+        );
+        assert!(out.contains("invalid effort"), "got: {out}");
+
+        // Canonical levels (incl. xhigh/max) pass.
+        let out = create_card_impl(
+            &db,
+            &serde_json::json!({ "project_id": "p1", "title": "x", "effort": "xhigh" }).to_string(),
+        );
+        assert!(out.contains("\"card\""), "got: {out}");
     }
 
     #[tokio::test]
