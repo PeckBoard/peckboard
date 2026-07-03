@@ -235,7 +235,20 @@ async fn get_session(
     })?;
 
     match session {
-        Some(s) => Ok(Json(serde_json::json!(s))),
+        Some(s) => {
+            // Ride the latest context-window occupancy along so the chat
+            // toolbar can seed its context badge without a second request;
+            // live updates then come from the streamed `agent-usage` events.
+            let occupancy = state
+                .db
+                .latest_context_tokens(&id)
+                .await
+                .unwrap_or(None)
+                .unwrap_or(0);
+            let mut v = serde_json::json!(s);
+            v["context_tokens"] = serde_json::json!(occupancy);
+            Ok(Json(v))
+        }
         None => Err((
             StatusCode::NOT_FOUND,
             Json(serde_json::json!({ "error": "session not found" })),

@@ -534,6 +534,18 @@ export default function ChatView({
   }, [events, loadedTodos, loading])
 
   // Determine if agent is working (includes waiting for CLI to start after user sends)
+  // Latest context-window occupancy — live from the turn's `agent-usage`
+  // events, seeded by the session fetch. Drives the toolbar context badge.
+  const contextTokens = useMemo(() => {
+    for (let i = events.length - 1; i >= 0; i--) {
+      const ev = events[i]
+      if (ev.kind !== 'agent-usage') continue
+      const ctx = (ev.data?.contextTokens as number) ?? 0
+      if (ctx > 0) return ctx
+    }
+    return sessionDetail?.context_tokens ?? 0
+  }, [events, sessionDetail])
+
   const agentWorking = (() => {
     for (let i = events.length - 1; i >= 0; i--) {
       const kind = events[i].kind
@@ -787,6 +799,17 @@ export default function ChatView({
               </span>
             )}
           </button>
+        )}
+        {contextTokens > 0 && (
+          <span
+            className={`chat-toolbar-context${
+              contextTokens >= 150_000 ? ' over' : contextTokens >= 120_000 ? ' warn' : ''
+            }`}
+            title={`Context size: ${contextTokens.toLocaleString()} tokens (compaction suggested at 150k)`}
+            data-testid="chat-toolbar-context"
+          >
+            {Math.round(contextTokens / 1000)}k ctx
+          </span>
         )}
         {onOpenPlugin &&
           pluginItems?.map((item) => (

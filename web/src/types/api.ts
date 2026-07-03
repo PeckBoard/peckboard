@@ -30,6 +30,10 @@ export interface Session {
   handover_to_model?: string | null
   /** Handover doc awaiting the incoming model's first turn; null otherwise. */
   pending_handover_doc?: string | null
+  /** Latest context-window occupancy (tokens) from the session's usage
+   *  rows — present on GET /api/sessions/:id only; live updates arrive via
+   *  streamed `agent-usage` events. */
+  context_tokens?: number
 }
 
 export type RepeatingScheduleKind = 'interval' | 'daily' | 'weekly'
