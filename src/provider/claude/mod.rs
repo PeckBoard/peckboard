@@ -260,15 +260,20 @@ pub fn build_cli_args(config: &SpawnConfig, conversation_id: Option<&str>) -> Ve
     // AskUserQuestion is always denied (it doesn't work headless).
     //
     // Claude's built-in whole-file tools (Read/Write/Edit/MultiEdit) are denied
-    // ONLY when the common-tools plugin is active and provides replacements —
-    // then all file access is forced through its read_file (partial,
-    // line-windowed) and edit_file (hash-guarded diff) tools, which enforce
-    // project-folder containment and size caps. If that plugin isn't loaded we
-    // leave the built-ins in place so agents can still read and edit files.
-    let has_plugin_file_tools = ["read_file", "edit_file"]
-        .iter()
-        .all(|needed| config.extra_allowed_tools.iter().any(|t| t == needed));
-    let disallowed = if has_plugin_file_tools {
+    // whenever Peckboard's own file tools are available — all file access is
+    // then forced through the native read_file (partial, line-windowed) and
+    // edit_file (hash-guarded diff) MCP tools, which enforce project-folder
+    // containment and size caps. Those tools are now core, always-on MCP tools
+    // (moved out of the former common-tools plugin), so the built-ins are
+    // denied whenever an MCP config is wired up.
+    let has_file_tools = {
+        let core = crate::service::mcp_server::tool_names();
+        ["read_file", "edit_file"].iter().all(|needed| {
+            core.iter().any(|t| t == needed)
+                || config.extra_allowed_tools.iter().any(|t| t == needed)
+        })
+    };
+    let disallowed = if has_file_tools {
         "AskUserQuestion,Read,Write,Edit,MultiEdit"
     } else {
         "AskUserQuestion"
@@ -561,10 +566,14 @@ mod tests {
             ..default_spawn("claude-opus-4-8")
         };
         let args = build_cli_args(&config, None);
-        // With no common-tools plugin providing replacements (empty
-        // extra_allowed_tools), Claude keeps its built-in file tools — only
-        // AskUserQuestion is denied.
-        assert!(args.contains(&"--disallowedTools=AskUserQuestion".to_string()));
+        // read_file / edit_file are now core, always-on MCP tools, so Claude's
+        // built-in whole-file tools are denied even for a plain session — all
+        // file access routes through the containment-enforcing MCP tools.
+        assert!(
+            args.contains(
+                &"--disallowedTools=AskUserQuestion,Read,Write,Edit,MultiEdit".to_string()
+            )
+        );
         let allowed = args
             .iter()
             .find(|a| a.starts_with("--allowedTools="))
@@ -588,14 +597,14 @@ mod tests {
 
     #[test]
     fn test_build_cli_args_merges_plugin_tools_and_denies_builtin_file_tools() {
-        // Plugin-contributed file tools (from common-tools) are threaded in via
-        // extra_allowed_tools and must appear in --allowedTools, while Claude's
-        // built-in Read/Write/Edit are denied so agents route through them.
+        // Plugin-contributed tools are threaded in via extra_allowed_tools and
+        // must appear in --allowedTools, while Claude's built-in Read/Write/Edit
+        // are denied so agents route through the MCP file tools (now core).
         let config = SpawnConfig {
             mcp_config_path: Some("/tmp/mcp.json".into()),
             extra_allowed_tools: vec![
-                "read_file".into(),
-                "edit_file".into(),
+                "some_plugin_tool_a".into(),
+                "some_plugin_tool_b".into(),
                 // A duplicate of a core tool name must not double-list.
                 "list_models".into(),
             ],
@@ -618,8 +627,12 @@ mod tests {
             .iter()
             .find(|a| a.starts_with("--allowedTools="))
             .expect("allowedTools present");
+        // read_file / edit_file are now core MCP tools (moved out of the plugin).
         assert!(allowed.contains("mcp__peckboard__read_file"));
         assert!(allowed.contains("mcp__peckboard__edit_file"));
+        // The two genuinely-new plugin tools are threaded through.
+        assert!(allowed.contains("mcp__peckboard__some_plugin_tool_a"));
+        assert!(allowed.contains("mcp__peckboard__some_plugin_tool_b"));
         // list_models is a core tool; passing it again as a plugin name must
         // not produce a duplicate entry.
         let list_models_hits = allowed

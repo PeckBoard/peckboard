@@ -5,6 +5,7 @@
 //! `crate::service::mcp_server::…`.
 
 mod auth;
+mod common_tools;
 mod config;
 mod context;
 mod handlers;
@@ -99,6 +100,12 @@ impl McpToolRegistry {
             "create_repeating_task" => self.handle_create_repeating_task(args, ctx).await,
             "update_repeating_task" => self.handle_update_repeating_task(args, ctx).await,
             "delete_repeating_task" => self.handle_delete_repeating_task(args, ctx).await,
+            "math" | "search_web" | "fetch_web" | "web_get_part" | "parse_web" | "search_files"
+            | "list_files" | "read_file" | "write_file" | "edit_file" | "file_outline"
+            | "read_symbol" | "git" | "run_tests" => {
+                self.handle_common_tool(tool_name, args, ctx).await
+            }
+            "run_command" => self.handle_run_command(args, ctx).await,
             _ => anyhow::bail!("unknown tool: {tool_name}"),
         }
     }
@@ -427,7 +434,14 @@ mod tests {
         assert!(names.contains(&"list_sessions"));
         assert!(names.contains(&"set_session_system_prompt"));
         assert!(names.contains(&"upgrade_plugin"));
-        assert_eq!(names.len(), 42);
+        // Native common tools (moved out of the common-tools WASM plugin).
+        assert!(names.contains(&"math"));
+        assert!(names.contains(&"read_file"));
+        assert!(names.contains(&"write_file"));
+        assert!(names.contains(&"edit_file"));
+        assert!(names.contains(&"run_command"));
+        assert!(names.contains(&"git"));
+        assert_eq!(names.len(), 57);
     }
 
     #[test]

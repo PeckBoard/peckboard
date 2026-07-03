@@ -148,8 +148,15 @@ impl crate::plugin::host::LiveHost for AppLiveHost {
             return;
         };
         self.rt.spawn(async move {
-            if let Err(e) =
-                emit_plugin_question(&state, &session_id, &question, &options, &token).await
+            if let Err(e) = emit_plugin_question(
+                &state.db,
+                &state.broadcaster,
+                &session_id,
+                &question,
+                &options,
+                &token,
+            )
+            .await
             {
                 tracing::warn!("plugin ask_user for {session_id} failed: {e}");
             }
@@ -272,8 +279,9 @@ async fn broadcast_session_event(
 /// emitting plugin can later resolve the user's answer via
 /// `peckboard_get_answer`. Card/project are looked up from the session for the
 /// worker-question broadcast.
-async fn emit_plugin_question(
-    state: &Arc<AppState>,
+pub(crate) async fn emit_plugin_question(
+    db: &crate::db::Db,
+    broadcaster: &crate::ws::broadcaster::Broadcaster,
     session_id: &str,
     question: &str,
     options: &[String],
@@ -297,7 +305,7 @@ async fn emit_plugin_question(
         );
     }
 
-    let session = state.db.get_session(session_id).await.ok().flatten();
+    let session = db.get_session(session_id).await.ok().flatten();
     let card_id = session.as_ref().and_then(|s| s.card_id.clone());
     let project_id = session.as_ref().and_then(|s| s.project_id.clone());
     let is_worker = card_id.is_some() || session.as_ref().map(|s| s.is_worker).unwrap_or(false);
@@ -315,12 +323,11 @@ async fn emit_plugin_question(
         event_data["projectId"] = Value::String(pid.clone());
     }
 
-    let event = state
-        .db
+    let event = db
         .append_event(session_id, "question", event_data.clone())
         .await?;
 
-    state.broadcaster.broadcast(WsEvent {
+    broadcaster.broadcast(WsEvent {
         event_type: "event".into(),
         session_id: session_id.to_string(),
         data: json!({
@@ -333,7 +340,7 @@ async fn emit_plugin_question(
     });
 
     if is_worker && let Some(ref pid) = project_id {
-        state.broadcaster.broadcast(WsEvent {
+        broadcaster.broadcast(WsEvent {
             event_type: "worker-question".into(),
             session_id: pid.clone(),
             data: json!({
@@ -344,14 +351,12 @@ async fn emit_plugin_question(
         });
     }
 
-    state
-        .db
-        .append_event(
-            session_id,
-            "ask-user-requested",
-            json!({ "questionEventId": event.id, "cardId": card_id }),
-        )
-        .await?;
+    db.append_event(
+        session_id,
+        "ask-user-requested",
+        json!({ "questionEventId": event.id, "cardId": card_id }),
+    )
+    .await?;
 
     Ok(())
 }

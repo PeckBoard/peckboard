@@ -4,6 +4,7 @@
 //! parent `mod.rs` routes tool names to the right method.
 
 mod cards;
+mod common_tools;
 mod folders;
 mod misc;
 mod projects;

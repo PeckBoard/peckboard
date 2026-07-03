@@ -772,5 +772,477 @@ pub(super) fn tool_definitions() -> Vec<McpToolDef> {
                 "additionalProperties": false
             }),
         },
+        McpToolDef {
+            name: "math".into(),
+            description: "Evaluate an arithmetic expression and return the numeric result. Supports + - * / %, ^/** (power), parentheses, unary minus, the constants pi/e/tau, and functions: abs, sqrt, sin, cos, tan, asin, acos, atan, ln, log/log10, log2, exp, floor, ceil, round, sign, min, max, pow.".into(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                                "expression": {
+                                                "type": "string",
+                                                "description": "The expression to evaluate, e.g. \"sqrt(2) * (3 + 4)^2\"."
+                                }
+                },
+                "required": [
+                                "expression"
+                ],
+                "additionalProperties": false
+}),
+        },
+        McpToolDef {
+            name: "search_web".into(),
+            description: "Search the public web (via DuckDuckGo) and return the top results as a list of {title, url, snippet}. Use this to find pages when you don't already have a URL; then call fetch_web or parse_web on a result url to read it. Returns ranked results only — it does not fetch the linked pages.".into(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                                "query": {
+                                                "type": "string",
+                                                "description": "What to search for, e.g. \"rust async runtime comparison\"."
+                                },
+                                "max_results": {
+                                                "type": "integer",
+                                                "description": "How many results to return (default 10, max 25)."
+                                }
+                },
+                "required": [
+                                "query"
+                ],
+                "additionalProperties": false
+}),
+        },
+        McpToolDef {
+            name: "fetch_web".into(),
+            description: "Fetch a public http(s) URL (GET or HEAD) and STORE the body, returning a compact reference plus a short preview instead of the whole page. Private/loopback hosts are blocked; redirects are not followed (the Location is surfaced as redirect_location so you can re-fetch it). Use web_get_part with the returned reference to read specific lines, a slice, or search matches.".into(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                                "url": {
+                                                "type": "string",
+                                                "description": "Absolute http(s) URL to fetch."
+                                },
+                                "method": {
+                                                "type": "string",
+                                                "enum": [
+                                                                "GET",
+                                                                "HEAD"
+                                                ],
+                                                "description": "HTTP method (default GET)."
+                                },
+                                "headers": {
+                                                "type": "object",
+                                                "description": "Optional extra request headers (string→string).",
+                                                "additionalProperties": {
+                                                                "type": "string"
+                                                }
+                                }
+                },
+                "required": [
+                                "url"
+                ],
+                "additionalProperties": false
+}),
+        },
+        McpToolDef {
+            name: "web_get_part".into(),
+            description: "Read a portion of a page previously stored by fetch_web or parse_web, addressed by its reference. Modes: 'info' (metadata: url, status, content_type, title, length, line_count), 'lines' (start_line + line_count), 'slice' (offset + length in characters), 'search' (find a query string, returns matching line numbers + snippets).".into(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                                "reference": {
+                                                "type": "string",
+                                                "description": "Reference id returned by fetch_web/parse_web."
+                                },
+                                "mode": {
+                                                "type": "string",
+                                                "enum": [
+                                                                "info",
+                                                                "lines",
+                                                                "slice",
+                                                                "search"
+                                                ],
+                                                "description": "What to return (default info)."
+                                },
+                                "start_line": {
+                                                "type": "integer",
+                                                "description": "lines mode: 1-based first line."
+                                },
+                                "line_count": {
+                                                "type": "integer",
+                                                "description": "lines mode: how many lines (default 100)."
+                                },
+                                "offset": {
+                                                "type": "integer",
+                                                "description": "slice mode: 0-based character offset."
+                                },
+                                "length": {
+                                                "type": "integer",
+                                                "description": "slice mode: number of characters (default 4000)."
+                                },
+                                "query": {
+                                                "type": "string",
+                                                "description": "search mode: substring to find."
+                                },
+                                "case_insensitive": {
+                                                "type": "boolean",
+                                                "description": "search mode: case-insensitive (default true)."
+                                },
+                                "max_matches": {
+                                                "type": "integer",
+                                                "description": "search mode: cap on matches (default 30)."
+                                }
+                },
+                "required": [
+                                "reference"
+                ],
+                "additionalProperties": false
+}),
+        },
+        McpToolDef {
+            name: "parse_web".into(),
+            description: "Convert an HTML page to readable text and extract its title, headings, and links. Pass either a `url` (fetched now) or a `reference` from a prior fetch_web. Returns the structure inline plus a text_reference you can read in full with web_get_part.".into(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                                "url": {
+                                                "type": "string",
+                                                "description": "Absolute http(s) URL to fetch and parse."
+                                },
+                                "reference": {
+                                                "type": "string",
+                                                "description": "Reference of an already-fetched page to parse instead of fetching."
+                                }
+                },
+                "additionalProperties": false
+}),
+        },
+        McpToolDef {
+            name: "search_files".into(),
+            description: "Search the contents of files in the current project folder for a literal string or regex, returning matching file paths, line numbers, and line text. Scoped to the caller's project folder (build/vendor/hidden dirs are skipped by the host).".into(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                                "query": {
+                                                "type": "string",
+                                                "description": "Text or regex to search for."
+                                },
+                                "regex": {
+                                                "type": "boolean",
+                                                "description": "Treat query as a regular expression (default false = literal)."
+                                },
+                                "case_insensitive": {
+                                                "type": "boolean",
+                                                "description": "Case-insensitive match (default false)."
+                                },
+                                "path_contains": {
+                                                "type": "string",
+                                                "description": "Only search files whose path contains this substring."
+                                },
+                                "max_results": {
+                                                "type": "integer",
+                                                "description": "Cap on returned matches (default 200)."
+                                }
+                },
+                "required": [
+                                "query"
+                ],
+                "additionalProperties": false
+}),
+        },
+        McpToolDef {
+            name: "list_files".into(),
+            description: "List files in the current project folder (relative path + byte size). Optionally filter by a path substring. Scoped to the caller's folder.".into(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                                "path_contains": {
+                                                "type": "string",
+                                                "description": "Only list files whose path contains this substring."
+                                },
+                                "max": {
+                                                "type": "integer",
+                                                "description": "Cap on returned files (default 1000)."
+                                }
+                },
+                "additionalProperties": false
+}),
+        },
+        McpToolDef {
+            name: "read_file".into(),
+            description: "Read a UTF-8 text file from the current project folder. AVOID reading whole files: for source code, prefer file_outline + read_symbol to find and read just the relevant function/class; otherwise pass a line window (start_line + line_count). Returns the whole file's content `hash` — keep it to pass as edit_file's original_hash. Path must be project-relative and stay within the folder.".into(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                                "path": {
+                                                "type": "string",
+                                                "description": "Project-relative file path."
+                                },
+                                "start_line": {
+                                                "type": "integer",
+                                                "description": "1-based first line of an optional window."
+                                },
+                                "line_count": {
+                                                "type": "integer",
+                                                "description": "Number of lines to return from start_line (default 200)."
+                                }
+                },
+                "required": [
+                                "path"
+                ],
+                "additionalProperties": false
+}),
+        },
+        McpToolDef {
+            name: "write_file".into(),
+            description: "Write (or append to) a UTF-8 text file in the current project folder. Use this to CREATE new files or fully rewrite one — to modify an existing file, prefer edit_file (targeted, hash-guarded edits without resending the content). Overwrites by default; set append=true to append. Missing parent directories are created unless create_dirs=false. Returns the written content's `hash` for use with edit_file. Path must be project-relative and stay within the folder.".into(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                                "path": {
+                                                "type": "string",
+                                                "description": "Project-relative file path to write."
+                                },
+                                "content": {
+                                                "type": "string",
+                                                "description": "The full text to write (or to append when append=true)."
+                                },
+                                "append": {
+                                                "type": "boolean",
+                                                "description": "Append to the file instead of overwriting (default false)."
+                                },
+                                "create_dirs": {
+                                                "type": "boolean",
+                                                "description": "Create missing parent directories (default true)."
+                                }
+                },
+                "required": [
+                                "path",
+                                "content"
+                ],
+                "additionalProperties": false
+}),
+        },
+        McpToolDef {
+            name: "edit_file".into(),
+            description: "Modify an existing UTF-8 text file with targeted insert/update/delete operations instead of rewriting it. Guarded by optimistic concurrency: pass the `hash` you got from read_file / file_outline / read_symbol / write_file / a previous edit_file as original_hash — if the file on disk no longer matches, the edit is rejected and the current hash is reported so you can re-read and retry. All line/column numbers are 1-based and refer to the file BEFORE any of this call's edits (ranges must not overlap). Omit columns to operate on whole lines; provide columns for within-line edits (columns count characters; end_column is exclusive). Returns the new `hash` — use it as original_hash for your next edit of this file.".into(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                                "path": {
+                                                "type": "string",
+                                                "description": "Project-relative path of an existing file."
+                                },
+                                "original_hash": {
+                                                "type": "string",
+                                                "description": "The file's content hash as last read; proves you are editing the version you think you are."
+                                },
+                                "edits": {
+                                                "type": "array",
+                                                "description": "The operations to apply, each addressed against the original file.",
+                                                "items": {
+                                                                "type": "object",
+                                                                "properties": {
+                                                                                "op": {
+                                                                                                "type": "string",
+                                                                                                "enum": [
+                                                                                                                "insert",
+                                                                                                                "update",
+                                                                                                                "delete"
+                                                                                                ],
+                                                                                                "description": "What to do."
+                                                                                },
+                                                                                "line": {
+                                                                                                "type": "integer",
+                                                                                                "description": "insert: target line. Without `column`, `text` is inserted as new line(s) BEFORE this line (use total_lines+1 to append at end of file). With `column`, `text` is inserted inside this line at that character position."
+                                                                                },
+                                                                                "column": {
+                                                                                                "type": "integer",
+                                                                                                "description": "insert only: 1-based character position within `line`."
+                                                                                },
+                                                                                "start_line": {
+                                                                                                "type": "integer",
+                                                                                                "description": "update/delete: first line of the range."
+                                                                                },
+                                                                                "start_column": {
+                                                                                                "type": "integer",
+                                                                                                "description": "update/delete: optional 1-based start character (inclusive). Provide both columns or neither."
+                                                                                },
+                                                                                "end_line": {
+                                                                                                "type": "integer",
+                                                                                                "description": "update/delete: last line of the range (inclusive in whole-line mode)."
+                                                                                },
+                                                                                "end_column": {
+                                                                                                "type": "integer",
+                                                                                                "description": "update/delete: optional 1-based end character (exclusive)."
+                                                                                },
+                                                                                "text": {
+                                                                                                "type": "string",
+                                                                                                "description": "insert/update: the new text. In whole-line mode it replaces the whole lines; multi-line strings are fine."
+                                                                                }
+                                                                },
+                                                                "required": [
+                                                                                "op"
+                                                                ],
+                                                                "additionalProperties": false
+                                                }
+                                }
+                },
+                "required": [
+                                "path",
+                                "original_hash",
+                                "edits"
+                ],
+                "additionalProperties": false
+}),
+        },
+        McpToolDef {
+            name: "file_outline".into(),
+            description: "Parse a source file deterministically (no AI) and list its symbols — functions, classes, methods, types, etc. — with their kind, enclosing parent, 1-based start/end lines, and signature, plus the file's content `hash`. Supports Rust, TypeScript/JavaScript, Python, Go, Java/Kotlin, and C/C++ (by file extension). Use this FIRST to find the part of a file you need, then read_symbol (or read_file with a line window) — don't read whole files.".into(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                                "path": {
+                                                "type": "string",
+                                                "description": "Project-relative path of the source file."
+                                },
+                                "name_contains": {
+                                                "type": "string",
+                                                "description": "Only list symbols whose name contains this substring (case-insensitive)."
+                                },
+                                "max": {
+                                                "type": "integer",
+                                                "description": "Cap on returned symbols (default 200, max 1000)."
+                                }
+                },
+                "required": [
+                                "path"
+                ],
+                "additionalProperties": false
+}),
+        },
+        McpToolDef {
+            name: "read_symbol".into(),
+            description: "Read just the source of a named function/class/method from a file (languages as in file_outline), returning its content with start/end lines and the file's `hash` — ready to use with edit_file. Matches the exact symbol name; if several symbols share it, disambiguate with `kind` and/or `parent` (the enclosing class/impl, or a Go method's receiver type).".into(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                                "path": {
+                                                "type": "string",
+                                                "description": "Project-relative path of the source file."
+                                },
+                                "name": {
+                                                "type": "string",
+                                                "description": "Exact symbol name, e.g. \"handle_invoke\" or \"Repo\"."
+                                },
+                                "kind": {
+                                                "type": "string",
+                                                "description": "Optional filter, e.g. fn/function/method/class/struct/impl/trait."
+                                },
+                                "parent": {
+                                                "type": "string",
+                                                "description": "Optional filter: name of the enclosing container (class, impl, module) or a Go receiver type."
+                                }
+                },
+                "required": [
+                                "path",
+                                "name"
+                ],
+                "additionalProperties": false
+}),
+        },
+        McpToolDef {
+            name: "git".into(),
+            description: "Run a READ-ONLY git subcommand in the current project folder and return its output (exit_code, stdout, stderr). Permitted subcommands: status, log, diff, show, branch, blame, ls-files, ls-tree, rev-parse, rev-list, describe, shortlog, tag, remote, for-each-ref, cat-file, name-rev, symbolic-ref, whatchanged, reflog. Mutating commands are rejected.".into(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                                "subcommand": {
+                                                "type": "string",
+                                                "description": "The git subcommand, e.g. \"log\" or \"diff\"."
+                                },
+                                "args": {
+                                                "type": "array",
+                                                "items": {
+                                                                "type": "string"
+                                                },
+                                                "description": "Additional argv passed after the subcommand, e.g. [\"--oneline\", \"-n\", \"10\"]."
+                                },
+                                "timeout_secs": {
+                                                "type": "integer",
+                                                "description": "Optional timeout (default 120, max 600)."
+                                }
+                },
+                "required": [
+                                "subcommand"
+                ],
+                "additionalProperties": false
+}),
+        },
+        McpToolDef {
+            name: "run_command".into(),
+            description: "Run an arbitrary command in the current project folder, gated by USER APPROVAL. If the program is on the operator allowlist or was previously approved 'always', it runs immediately. Otherwise this asks the user to approve (Approve once / Approve always / Deny) and returns status 'awaiting_approval' — the user's answer resumes the session, then you re-call run_command with the SAME command to proceed. Args are passed as an argv array (no shell); cwd is the project folder; output is capped and timed out.".into(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                                "command": {
+                                                "type": "string",
+                                                "description": "Bare executable name (no path, no shell), e.g. \"rg\"."
+                                },
+                                "args": {
+                                                "type": "array",
+                                                "items": {
+                                                                "type": "string"
+                                                },
+                                                "description": "Arguments passed after the command, e.g. [\"-n\", \"TODO\", \"src\"]."
+                                },
+                                "timeout_secs": {
+                                                "type": "integer",
+                                                "description": "Optional timeout (default 120, max 600)."
+                                }
+                },
+                "required": [
+                                "command"
+                ],
+                "additionalProperties": false
+}),
+        },
+        McpToolDef {
+            name: "run_tests".into(),
+            description: "Run the project's test suite in the current folder and return the result (exit_code, passed, stdout, stderr). With runner=auto (default) the runner is detected from project markers (Cargo.toml→cargo, package.json→npm, go.mod→go, pyproject/pytest→pytest, pom.xml→maven, build.gradle→gradle, Gemfile→rspec, composer.json→phpunit). Pass `args` to forward extra arguments (e.g. a test name filter).".into(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                                "runner": {
+                                                "type": "string",
+                                                "enum": [
+                                                                "auto",
+                                                                "cargo",
+                                                                "npm",
+                                                                "pnpm",
+                                                                "yarn",
+                                                                "pytest",
+                                                                "go",
+                                                                "gradle",
+                                                                "maven",
+                                                                "rspec",
+                                                                "phpunit",
+                                                                "dotnet"
+                                                ],
+                                                "description": "Which runner to use (default auto)."
+                                },
+                                "args": {
+                                                "type": "array",
+                                                "items": {
+                                                                "type": "string"
+                                                },
+                                                "description": "Extra arguments forwarded to the runner."
+                                },
+                                "timeout_secs": {
+                                                "type": "integer",
+                                                "description": "Optional timeout (default 300, max 600)."
+                                }
+                },
+                "additionalProperties": false
+}),
+        },
     ]
 }

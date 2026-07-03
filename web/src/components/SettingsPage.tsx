@@ -3,6 +3,7 @@ import { useAuthStore, authedFetch } from '../store/auth'
 import { applyThemeColor, type Theme } from '../util/themeColor'
 import ClaudeAccountsSection from './ClaudeAccountsSection'
 import GrokAccountsSection from './GrokAccountsSection'
+import ApprovedCommandsSection from './ApprovedCommandsSection'
 import SoftwareUpdate from './SoftwareUpdate'
 
 const THEME_KEY = 'peckboard_theme'
@@ -175,6 +176,8 @@ export default function SettingsPage({ onBack }: Props) {
       <ClaudeAccountsSection />
 
       <GrokAccountsSection />
+
+      <ApprovedCommandsSection />
 
       <SoftwareUpdate />
 

@@ -746,3 +746,30 @@ a.wasm-plugin-repo:hover {
   background: color-mix(in srgb, var(--danger, #c00) 20%, transparent);
   color: var(--danger, #c00);
 }
+
+/* ── Approved commands (run_command standing approvals) ──────────── */
+.approved-cmd-list {
+  list-style: none;
+  margin: 10px 0 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.approved-cmd-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--surface);
+}
+.approved-cmd-name {
+  font-family: var(--font-mono, monospace);
+  font-size: var(--text-sm);
+  color: var(--text);
+  word-break: break-all;
+  min-width: 0;
+}
