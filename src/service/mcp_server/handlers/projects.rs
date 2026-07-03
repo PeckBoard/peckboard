@@ -115,8 +115,8 @@ impl McpToolRegistry {
                 model: None,
                 effort: None,
                 parallel_instructions: false,
-                auto_notify_changes: true,
-                worker_communication: true,
+                auto_notify_changes: false,
+                worker_communication: false,
                 created_at: now.clone(),
                 last_accessed_at: now,
             })

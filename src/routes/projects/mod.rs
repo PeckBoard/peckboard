@@ -36,18 +36,14 @@ struct CreateProjectRequest {
     workflow: Option<String>,
     #[serde(default)]
     parallel_instructions: bool,
-    #[serde(default = "default_true")]
+    #[serde(default)]
     auto_notify_changes: bool,
-    #[serde(default = "default_true")]
+    #[serde(default)]
     worker_communication: bool,
 }
 
 fn default_worker_count() -> i32 {
     1
-}
-
-fn default_true() -> bool {
-    true
 }
 
 #[derive(Deserialize)]
