@@ -224,6 +224,15 @@ pub struct SpawnConfig {
     /// `--allowedTools`. Other providers ignore it.
     #[serde(default)]
     pub extra_allowed_tools: Vec<String>,
+    /// Whether the session being spawned is worker-flagged. Set from the
+    /// session row in `SessionManager::final_config` — the single dispatch
+    /// chokepoint — so values at other construction sites are placeholders.
+    /// The Claude provider disables the CLI's built-in auto-compaction when
+    /// this is false: only worker sessions may compact automatically;
+    /// interactive sessions get the UI's clear / compact / continue prompt
+    /// instead (see `crate::handover`).
+    #[serde(default)]
+    pub is_worker: bool,
 }
 
 /// Model info from a provider.

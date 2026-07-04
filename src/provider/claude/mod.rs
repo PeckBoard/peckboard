@@ -228,6 +228,16 @@ pub fn build_cli_args(config: &SpawnConfig, conversation_id: Option<&str>) -> Ve
         args.push(format!("--allowedTools={}", allowed.join(",")));
     }
 
+    // Only worker sessions may compact automatically. Peckboard's own
+    // machinery already enforces that (crate::handover::maybe_auto_compact
+    // is worker-gated; the UI prompts interactive users to clear / compact /
+    // continue instead), but the CLI ALSO auto-compacts on its own near the
+    // context limit — silently, bypassing that rule — so it is switched off
+    // for non-workers here. Workers keep the built-in behaviour as a
+    // backstop below peckboard's own threshold recycle.
+    if !config.is_worker {
+        args.push(r#"--settings={"autoCompactEnabled":false}"#.to_string());
+    }
     // Permission handling: Peckboard runs Claude headless, so we need
     // to skip interactive permission prompts. Without this, the CLI
     // blocks waiting for user input on tool use approvals.
@@ -335,7 +345,23 @@ mod tests {
             system_prompt_suffix: None,
             system_prompt_override: None,
             extra_allowed_tools: Vec::new(),
+            is_worker: false,
         }
+    }
+
+    #[test]
+    fn test_build_cli_args_autocompact_gated_on_worker() {
+        // Non-worker spawns disable the CLI's built-in auto-compaction —
+        // only worker sessions may compact automatically.
+        let args = build_cli_args(&default_spawn("claude-opus-4-8"), None);
+        assert!(args.contains(&r#"--settings={"autoCompactEnabled":false}"#.to_string()));
+
+        let worker = SpawnConfig {
+            is_worker: true,
+            ..default_spawn("claude-opus-4-8")
+        };
+        let args = build_cli_args(&worker, None);
+        assert!(!args.iter().any(|a| a.starts_with("--settings")));
     }
 
     /// Returns true iff `args` contains an entry equal to `value`. Used
@@ -447,6 +473,7 @@ mod tests {
             system_prompt_suffix: None,
             system_prompt_override: None,
             extra_allowed_tools: Vec::new(),
+            is_worker: false,
         };
 
         let args = build_cli_args(&config, Some("conv-123"));

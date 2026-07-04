@@ -80,6 +80,7 @@ async fn mock_echo_flows_through_dispatcher() {
         system_prompt_suffix: None,
         system_prompt_override: None,
         extra_allowed_tools: Vec::new(),
+        is_worker: false,
     };
 
     manager
@@ -154,6 +155,7 @@ async fn mock_todo_emits_normalized_todo_event() {
         system_prompt_suffix: None,
         system_prompt_override: None,
         extra_allowed_tools: Vec::new(),
+        is_worker: false,
     };
 
     manager

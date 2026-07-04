@@ -216,6 +216,8 @@ pub(super) async fn send_message(
         system_prompt_override: None,
         // Populated in SessionManager::final_config from the plugin registry.
         extra_allowed_tools: Vec::new(),
+        // Set from the session row in SessionManager::final_config.
+        is_worker: false,
     };
 
     // Any pending handover/compaction doc is injected inside

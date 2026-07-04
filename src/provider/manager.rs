@@ -320,6 +320,10 @@ impl SessionManager {
                 .into_iter()
                 .map(|t| t.name)
                 .collect(),
+            // The authoritative worker flag — every dispatch path funnels
+            // through here, so providers can trust it over whatever the
+            // construction sites filled in.
+            is_worker: session.is_worker,
         };
 
         let ctx = SendMessageContext {
