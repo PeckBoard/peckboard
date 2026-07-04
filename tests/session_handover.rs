@@ -373,15 +373,34 @@ async fn seed_context(db: &Db, id: &str, session_id: &str, context: i64) {
 }
 
 #[tokio::test]
-async fn auto_compact_skips_under_threshold() {
+async fn auto_compact_worker_skips_under_threshold() {
+    let (state, _token) = build_state("mock:echo").await;
+    seed_worker(&state).await;
+    // 150k is over the interactive prompt point but under the worker
+    // auto-compaction threshold (200k) — a worker here must not compact.
+    seed_context(&state.db, "u1", "w1", 150_000).await;
+
+    let did = peckboard::handover::maybe_auto_compact(&state, "w1")
+        .await
+        .unwrap();
+    assert!(!did);
+    let s = state.db.get_session("w1").await.unwrap().unwrap();
+    assert_eq!(s.handover_to_model, None);
+}
+
+/// Interactive sessions are never auto-compacted, even well past the old
+/// threshold — the UI prompts the user (clear / compact / continue). Only
+/// workers compact unattended.
+#[tokio::test]
+async fn auto_compact_skips_interactive_session() {
     let (state, _token) = build_state("mock:echo").await;
     seed_turn(&state.db, true).await;
-    seed_context(&state.db, "u1", "s1", 100_000).await;
+    seed_context(&state.db, "u1", "s1", 210_000).await;
 
     let did = peckboard::handover::maybe_auto_compact(&state, "s1")
         .await
         .unwrap();
-    assert!(!did);
+    assert!(!did, "interactive sessions must never auto-compact");
     let s = state.db.get_session("s1").await.unwrap().unwrap();
     assert_eq!(s.handover_to_model, None);
 }
@@ -389,12 +408,12 @@ async fn auto_compact_skips_under_threshold() {
 #[tokio::test]
 async fn auto_compact_skips_when_message_queued() {
     let (state, _token) = build_state("mock:echo").await;
-    seed_turn(&state.db, true).await;
-    seed_context(&state.db, "u1", "s1", 160_000).await;
+    seed_worker(&state).await;
+    seed_context(&state.db, "u1", "w1", 210_000).await;
     state
         .db
         .upsert_queued_message(NewQueuedMessage {
-            session_id: "s1".into(),
+            session_id: "w1".into(),
             text: "queued while busy".into(),
             queued_at: chrono::Utc::now().to_rfc3339(),
             model: None,
@@ -403,20 +422,20 @@ async fn auto_compact_skips_when_message_queued() {
         .await
         .unwrap();
 
-    let did = peckboard::handover::maybe_auto_compact(&state, "s1")
+    let did = peckboard::handover::maybe_auto_compact(&state, "w1")
         .await
         .unwrap();
     assert!(!did, "a queued message must defer compaction");
 }
 
-/// Interactive session over the threshold: the compaction dispatches
-/// unprompted, runs to completion, and a second check right after the
-/// finalize is a no-op (the pending-doc guard).
+/// Worker over the threshold: the compaction dispatches unprompted, runs to
+/// completion, and a second check right after the finalize is a no-op (the
+/// pending-doc guard).
 #[tokio::test]
-async fn auto_compact_dispatches_over_threshold() {
+async fn auto_compact_dispatches_for_worker_over_threshold() {
     let (state, _token) = build_state("mock:echo").await;
-    seed_turn(&state.db, true).await;
-    seed_context(&state.db, "u1", "s1", 160_000).await;
+    seed_worker(&state).await;
+    seed_context(&state.db, "u1", "w1", 210_000).await;
 
     let mut completion_rx = state
         .session_manager
@@ -424,15 +443,15 @@ async fn auto_compact_dispatches_over_threshold() {
         .await
         .expect("completion rx available");
 
-    let did = peckboard::handover::maybe_auto_compact(&state, "s1")
+    let did = peckboard::handover::maybe_auto_compact(&state, "w1")
         .await
         .unwrap();
     assert!(did);
 
     // Same-model handover parked; the start marker is flagged compaction.
-    let s = state.db.get_session("s1").await.unwrap().unwrap();
+    let s = state.db.get_session("w1").await.unwrap().unwrap();
     assert_eq!(s.handover_to_model.as_deref(), Some("mock:echo"));
-    let events = state.db.events_tail("s1", 50).await.unwrap();
+    let events = state.db.events_tail("w1", 50).await.unwrap();
     let start = events
         .iter()
         .find(|e| e.kind == "handover-start")
@@ -445,17 +464,17 @@ async fn auto_compact_dispatches_over_threshold() {
         .await
         .expect("doc turn must complete")
         .expect("channel open");
-    peckboard::handover::finalize_handover(&state, "s1")
+    peckboard::handover::finalize_handover(&state, "w1")
         .await
         .unwrap();
-    let s = state.db.get_session("s1").await.unwrap().unwrap();
+    let s = state.db.get_session("w1").await.unwrap().unwrap();
     assert_eq!(s.handover_to_model, None);
     assert_eq!(s.conversation_id, None);
     assert!(s.pending_handover_doc.is_some());
 
     // Occupancy still reads over-threshold (the doc turn's usage isn't
     // recorded here), but the pending doc must block a re-compaction.
-    let again = peckboard::handover::maybe_auto_compact(&state, "s1")
+    let again = peckboard::handover::maybe_auto_compact(&state, "w1")
         .await
         .unwrap();
     assert!(!again, "pending doc must block a second compaction");
@@ -554,7 +573,7 @@ async fn seed_worker(state: &Arc<AppState>) {
 async fn auto_compact_worker_requires_resume_link() {
     let (state, _token) = build_state("mock:echo").await;
     seed_worker(&state).await;
-    seed_context(&state.db, "u1", "w1", 160_000).await;
+    seed_context(&state.db, "u1", "w1", 210_000).await;
 
     let ts = chrono::Utc::now().to_rfc3339();
 
@@ -688,7 +707,7 @@ async fn auto_compact_worker_requires_resume_link() {
 async fn worker_auto_compaction_resumes_with_doc() {
     let (state, _token) = build_state("mock:echo").await;
     seed_worker(&state).await;
-    seed_context(&state.db, "u1", "w1", 160_000).await;
+    seed_context(&state.db, "u1", "w1", 210_000).await;
 
     let mut completion_rx = state
         .session_manager
@@ -729,4 +748,61 @@ async fn worker_auto_compaction_resumes_with_doc() {
         s.pending_handover_doc, None,
         "the resume dispatch must consume the doc"
     );
+}
+
+// ─── Handover abort (don't switch if the switch fails / is interrupted) ──────
+
+/// A failed or interrupted doc-generation turn must NOT switch the model:
+/// aborting clears only the parked target and leaves `model` and
+/// `conversation_id` intact so no context is lost.
+#[tokio::test]
+async fn abort_handover_keeps_model_and_context() {
+    let (state, _token) = build_state("mock:echo").await;
+    // Park a handover and give the session a live conversation to preserve.
+    state
+        .db
+        .update_session(
+            "s1",
+            UpdateSession {
+                conversation_id: Some(Some("conv-x".into())),
+                handover_to_model: Some(Some("grok:grok-4@acct2".into())),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+
+    peckboard::handover::abort_handover(&state, "s1")
+        .await
+        .unwrap();
+
+    let s = state.db.get_session("s1").await.unwrap().unwrap();
+    assert_eq!(s.handover_to_model, None, "parked target cleared");
+    assert_eq!(s.model.as_deref(), Some("mock:echo"), "model unchanged");
+    assert_eq!(
+        s.conversation_id.as_deref(),
+        Some("conv-x"),
+        "conversation preserved so context isn't lost"
+    );
+    let events = state.db.events_tail("s1", 50).await.unwrap();
+    assert!(
+        events.iter().any(|e| e.kind == "handover-aborted"),
+        "an abort marker is recorded"
+    );
+}
+
+/// Abort is a no-op when nothing is parked — a spurious completion can't
+/// misfire and stamp an abort marker on an ordinary session.
+#[tokio::test]
+async fn abort_handover_noop_without_parked_target() {
+    let (state, _token) = build_state("mock:echo").await;
+
+    peckboard::handover::abort_handover(&state, "s1")
+        .await
+        .unwrap();
+
+    let s = state.db.get_session("s1").await.unwrap().unwrap();
+    assert_eq!(s.model.as_deref(), Some("mock:echo"));
+    let events = state.db.events_tail("s1", 50).await.unwrap();
+    assert!(!events.iter().any(|e| e.kind == "handover-aborted"));
 }

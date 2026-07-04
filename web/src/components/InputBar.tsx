@@ -36,6 +36,10 @@ export default function InputBar({ sessionId, handoverActive = false }: InputBar
   const setDraft = useSessionsStore((s) => s.setDraft)
   const addPendingUserMessage = useSessionsStore((s) => s.addPendingUserMessage)
   const removePendingUserMessage = useSessionsStore((s) => s.removePendingUserMessage)
+  // Pulled straight from the store (no prop drilling) so the handover
+  // banner can offer a Cancel that interrupts the in-flight doc turn — the
+  // backend then aborts the switch and keeps the current model + context.
+  const interruptSession = useSessionsStore((s) => s.interruptSession)
   const allMentions = useMentions(sessionId)
 
   // The parent passes a `key={sessionId}` so this component remounts
@@ -259,7 +263,16 @@ export default function InputBar({ sessionId, handoverActive = false }: InputBar
       {handoverActive && (
         <div className="handover-banner" role="status" data-testid="handover-banner">
           <span className="handover-spinner" aria-hidden="true" />
-          Handing over context to the new model…
+          <span className="handover-banner-text">Handing over context to the new model…</span>
+          <button
+            type="button"
+            className="handover-cancel-btn"
+            data-testid="handover-cancel"
+            onClick={() => interruptSession(sessionId)}
+            title="Cancel the switch and keep the current model and context"
+          >
+            Cancel
+          </button>
         </div>
       )}
       {/* Autocomplete dropdown for @mentions */}

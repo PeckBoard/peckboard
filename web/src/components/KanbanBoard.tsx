@@ -992,13 +992,13 @@ export default function KanbanBoard({
                             {workerCtx > 0 && (
                               <span
                                 className={`kanban-card-ctx${
-                                  workerCtx >= 150_000
+                                  workerCtx >= 200_000
                                     ? ' over'
-                                    : workerCtx >= 120_000
+                                    : workerCtx >= 170_000
                                       ? ' warn'
                                       : ''
                                 }`}
-                                title={`Worker context: ${workerCtx.toLocaleString()} tokens (auto-compacts at 150k)`}
+                                title={`Worker context: ${workerCtx.toLocaleString()} tokens (auto-compacts at 200k)`}
                               >
                                 {Math.round(workerCtx / 1000)}k
                               </span>

@@ -81,6 +81,33 @@
   flex-shrink: 0;
 }
 
+/* Interactive-session context prompt: shown when the context window fills
+   past ~150k. Amber (a heads-up, not an error) with Compact / Clear /
+   Continue actions. Interactive sessions are never auto-compacted, so this
+   is how the user decides. */
+.chat-context-banner {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 12px;
+  padding: 8px 16px;
+  background: var(--warn-bg, #e0a83218);
+  border-bottom: 1px solid var(--warn-border, #e0a83255);
+  color: var(--text);
+  font-size: 13px;
+  flex-shrink: 0;
+}
+
+.chat-context-banner-text {
+  color: var(--text2);
+}
+
+.chat-context-banner-actions {
+  display: flex;
+  gap: 8px;
+  flex-shrink: 0;
+}
+
 .fetch-error-banner button {
   padding: 3px 12px;
   border: 1px solid var(--danger);

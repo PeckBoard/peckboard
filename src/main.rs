@@ -303,15 +303,28 @@ async fn main() -> anyhow::Result<()> {
                             {
                                 let _guard =
                                     orchestrator_state.session_manager.lock_session(&sid).await;
-                                if let Err(e) = peckboard::handover::finalize_handover(
-                                    &orchestrator_state,
-                                    &sid,
-                                )
-                                .await
-                                {
+                                // Only a CLEAN doc turn switches the model.
+                                // A crashed or interrupted doc turn aborts
+                                // the handover instead — leaving the model
+                                // and conversation_id untouched so no context
+                                // is lost ("don't switch if the switch
+                                // fails", and the hook that lets the user
+                                // interrupt a handover).
+                                let res = if completion.completed {
+                                    peckboard::handover::finalize_handover(
+                                        &orchestrator_state,
+                                        &sid,
+                                    )
+                                    .await
+                                } else {
+                                    peckboard::handover::abort_handover(&orchestrator_state, &sid)
+                                        .await
+                                };
+                                if let Err(e) = res {
                                     tracing::error!(
                                         session_id = %sid,
-                                        "Handover finalize failed: {e}"
+                                        completed = completion.completed,
+                                        "Handover finalize/abort failed: {e}"
                                     );
                                 }
                             } // drop the lock — the drain re-acquires it
@@ -392,16 +405,18 @@ async fn main() -> anyhow::Result<()> {
                     // re-acquires it inside drain_queued (tokio Mutex is
                     // not reentrant).
 
-                    // 1.5 Auto-compaction: a session whose context occupancy
-                    // crossed the threshold gets a same-model compaction turn
-                    // dispatched right here — the model writes a continuation
-                    // doc and the conversation restarts fresh with it
-                    // injected (see crate::handover). Applies to chats and
-                    // workers alike; the eligibility guards (idle, nothing
-                    // queued, worker card still resuming this session) live
-                    // in maybe_auto_compact. A dispatched compaction implies
-                    // an empty queue (guard), so falling through to the
-                    // drain below is harmless.
+                    // 1.5 Auto-compaction: a worker whose context occupancy
+                    // crossed the threshold gets a same-model compaction
+                    // turn dispatched right here — the model writes a
+                    // continuation doc and the conversation restarts fresh
+                    // with it injected (see crate::handover). Workers only —
+                    // interactive sessions are prompted in the UI (clear /
+                    // compact / continue) and never auto-compacted; that and
+                    // the other eligibility guards (idle, nothing queued,
+                    // card still resuming this session) live in
+                    // maybe_auto_compact. A dispatched compaction implies an
+                    // empty queue (guard), so falling through to the drain
+                    // below is harmless.
                     if completion.completed
                         && let Err(e) =
                             peckboard::handover::maybe_auto_compact(&orchestrator_state, &sid).await

@@ -28,6 +28,9 @@ use crate::provider::stream::{ModelInfo, ProviderEvent, ToolImage};
 /// * `todo` — Started → ToolStart/ToolEnd(TodoWrite) → Todo(snapshot) → Completed
 /// * `tasks` — Started → scripted TaskCreate/TaskUpdate ToolStart/ToolEnd
 ///   sequence, each assembled into a Todo snapshot via `TaskTracker` → Completed
+/// * `ctx` — Started → Text → Usage(context = message parsed as a number,
+///   default 160_000) → Completed. Drives the interactive context-prompt
+///   banner e2e across the 150k floor / +20k reappear thresholds.
 pub struct MockProvider {
     runs: Arc<Mutex<HashMap<String, MockRun>>>,
 }
@@ -286,6 +289,13 @@ async fn run_scenario(
             )
             .await;
             tick().await;
+            // NOTE: this `Bash` fixture is intentionally NOT denied. The mock
+            // provider is a pure test double — it emits scripted ProviderEvents
+            // to drive the UI / event-log / usage pipelines and never executes
+            // a command. The terminal-tool deny targets real agents that could
+            // run shell commands (Claude's `can_use_tool` gate; the grok/cursor
+            // parser rejection). Here the `Bash` block exists precisely to test
+            // how a terminal tool call renders, so it is left untouched.
             let tool_id = format!("tool-{}", uuid::Uuid::new_v4());
             emit_event(
                 db,
@@ -648,6 +658,37 @@ async fn run_scenario(
             )
             .await;
         }
+        "block" => {
+            // Blocks until interrupted/cancelled WITHOUT emitting a
+            // ControlRequest — so the normal composer (and its handover
+            // Cancel button) stays on screen while a turn is in flight,
+            // unlike `ask` whose question form replaces the composer. Drives
+            // the handover-abort e2e: the doc-generation turn runs this and
+            // hitting Cancel lands it as a not-completed completion → abort.
+            emit_event(
+                db,
+                broadcaster,
+                session_id,
+                ProviderEvent::Text {
+                    text: "working…".into(),
+                },
+            )
+            .await;
+            tick().await;
+            cancel.notified().await;
+            emit_event(
+                db,
+                broadcaster,
+                session_id,
+                ProviderEvent::Crashed {
+                    reason: "interrupted".into(),
+                    exit_code: None,
+                    stderr: None,
+                },
+            )
+            .await;
+            return false;
+        }
         "todo" => {
             // Emit a TodoWrite tool call exactly as Claude would, then run it
             // through the same `snapshot_from_tool_call` seam the real provider
@@ -809,6 +850,40 @@ async fn run_scenario(
                 tick().await;
             }
         }
+        "ctx" => {
+            // Interactive context-prompt banner e2e. Emits a Usage event
+            // whose context occupancy is the message parsed as a number
+            // (default 160_000), so a test can drive the context badge and
+            // the interactive compact/clear/continue prompt across the 150k
+            // floor and the +20k reappear step deterministically.
+            let ctx: i64 = message.trim().parse().unwrap_or(160_000);
+            emit_event(
+                db,
+                broadcaster,
+                session_id,
+                ProviderEvent::Text {
+                    text: format!("context now {ctx}"),
+                },
+            )
+            .await;
+            tick().await;
+            emit_event(
+                db,
+                broadcaster,
+                session_id,
+                ProviderEvent::Usage {
+                    input_tokens: 100,
+                    output_tokens: 50,
+                    cache_read_tokens: 0,
+                    cache_creation_tokens: 0,
+                    total_tokens: 150,
+                    context_tokens: ctx,
+                    model: Some(model_label.to_string()),
+                    turn_seq: None,
+                },
+            )
+            .await;
+        }
         other => {
             emit_event(
                 db,
@@ -880,6 +955,16 @@ pub fn mock_model_infos() -> Vec<ModelInfo> {
             id: "markdown".into(),
             display_name: "Mock: markdown".into(),
             capabilities: vec!["mock".into(), "markdown".into()],
+        },
+        ModelInfo {
+            id: "ctx".into(),
+            display_name: "Mock: context".into(),
+            capabilities: vec!["mock".into()],
+        },
+        ModelInfo {
+            id: "block".into(),
+            display_name: "Mock: block".into(),
+            capabilities: vec!["mock".into(), "interactive".into()],
         },
     ]
 }

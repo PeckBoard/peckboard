@@ -32,6 +32,14 @@ import 'highlight.js/styles/github-dark.css'
 const EMPTY_TODOS: TodoItem[] = []
 const EMPTY_PENDING_MESSAGES: PendingUserMessage[] = []
 
+// Interactive-session context prompt: the banner appears once context
+// occupancy reaches this, and after "Continue" reappears each time it grows
+// another CONTEXT_PROMPT_STEP. Interactive sessions are never auto-compacted
+// — the user chooses (compact / clear / continue). Workers auto-compact
+// server-side at 200k instead and never see the banner.
+const CONTEXT_PROMPT_THRESHOLD = 150_000
+const CONTEXT_PROMPT_STEP = 20_000
+
 /** A plugin-contributed full-page entry for the session page (manifest
  *  `session_items`), surfaced as a toolbar button. */
 interface PluginItem {
@@ -291,6 +299,10 @@ export default function ChatView({
   // Cross-provider/account model switch awaiting the user's choice in the
   // modal below (hand over a summary / clear & switch / cancel).
   const [pendingModelSwitch, setPendingModelSwitch] = useState<string | null>(null)
+  // Suppression floor for the interactive context prompt: the banner shows
+  // once contextTokens reaches this. Picking Continue bumps it by
+  // CONTEXT_PROMPT_STEP so the choice returns as the window keeps filling.
+  const [ctxPromptDismissedUntil, setCtxPromptDismissedUntil] = useState(CONTEXT_PROMPT_THRESHOLD)
   const scrollRef = useRef<HTMLDivElement>(null)
   const userScrolledUp = useRef(false)
   /** Saved scroll-height immediately before a "Load older" fetch so
@@ -794,7 +806,11 @@ export default function ChatView({
             className={`chat-toolbar-context${
               contextTokens >= 150_000 ? ' over' : contextTokens >= 120_000 ? ' warn' : ''
             }`}
-            title={`Context size: ${contextTokens.toLocaleString()} tokens (auto-compacts at 150k)`}
+            title={`Context size: ${contextTokens.toLocaleString()} tokens${
+              sessionDetail?.is_worker
+                ? ' (auto-compacts at 200k)'
+                : " — you'll be prompted to compact past 150k"
+            }`}
             data-testid="chat-toolbar-context"
           >
             {Math.round(contextTokens / 1000)}k ctx
@@ -825,6 +841,49 @@ export default function ChatView({
           </button>
         </div>
       )}
+
+      {!sessionDetail?.is_worker &&
+        !sessionDetail?.repeating_task_id &&
+        contextTokens >= ctxPromptDismissedUntil && (
+          <div className="chat-context-banner" role="status" data-testid="chat-context-prompt">
+            <span className="chat-context-banner-text">
+              This conversation is using {Math.round(contextTokens / 1000)}k tokens of context.
+              Compact it, clear it, or keep going at higher cost.
+            </span>
+            <div className="chat-context-banner-actions">
+              <button
+                type="button"
+                className="btn-primary btn-sm"
+                data-testid="chat-context-compact"
+                onClick={() => {
+                  setCtxPromptDismissedUntil(contextTokens + CONTEXT_PROMPT_STEP)
+                  handleCompact()
+                }}
+              >
+                Compact
+              </button>
+              <button
+                type="button"
+                className="btn-secondary btn-sm"
+                data-testid="chat-context-clear"
+                onClick={() => {
+                  setCtxPromptDismissedUntil(contextTokens + CONTEXT_PROMPT_STEP)
+                  handleClear()
+                }}
+              >
+                Clear
+              </button>
+              <button
+                type="button"
+                className="btn-secondary btn-sm"
+                data-testid="chat-context-continue"
+                onClick={() => setCtxPromptDismissedUntil(contextTokens + CONTEXT_PROMPT_STEP)}
+              >
+                Continue
+              </button>
+            </div>
+          </div>
+        )}
 
       <TodoPanel todos={todos} />
 
@@ -922,6 +981,22 @@ export default function ChatView({
                       {item.compaction
                         ? 'summarizing context to free the window'
                         : `preparing context for ${item.to.replace(/^claude:/, '')}`}
+                    </span>
+                    <span className="chat-agent-start-time">{formatTime(item.ts)}</span>
+                  </div>
+                </div>
+              )
+            case 'handover-aborted':
+              return (
+                <div key={item.key} className="chat-row chat-row-system">
+                  <div className="chat-agent-start">
+                    <span className="chat-agent-start-label">
+                      {item.compaction ? 'Compaction cancelled' : 'Switch cancelled'}
+                    </span>
+                    <span className="chat-agent-start-detail">
+                      {item.compaction
+                        ? 'context left intact'
+                        : `staying on ${item.from.replace(/^claude:/, '')} — context kept`}
                     </span>
                     <span className="chat-agent-start-time">{formatTime(item.ts)}</span>
                   </div>

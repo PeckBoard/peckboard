@@ -667,18 +667,28 @@ pub async fn stream_events(
             }
             saw_clean_completion = true;
 
-            // Context occupancy crossed the compaction threshold: recycle
-            // the child after this turn so a ProcessCompletion fires NOW
-            // (mid-stream children otherwise only complete on the ~30-minute
-            // idle reap) and the completion listener can auto-dispatch a
-            // compaction turn. Harmless for sessions the listener skips
-            // (e.g. an ineligible worker): the next turn re-spawns via
-            // --resume.
-            if turn_context >= crate::handover::COMPACT_CONTEXT_THRESHOLD && !shutdown_after_turn {
+            // A worker whose context crossed the compaction threshold gets
+            // its child recycled after this turn so a ProcessCompletion
+            // fires NOW (mid-stream children otherwise only complete on the
+            // ~30-minute idle reap) and the completion listener can
+            // auto-dispatch a compaction turn. Interactive sessions are
+            // never auto-compacted (the UI prompts the user instead), so
+            // they are left running to --resume normally — no forced
+            // recycle. The is_worker lookup only runs in the rare
+            // over-threshold case, so the extra query is cheap.
+            if turn_context >= crate::handover::WORKER_COMPACT_CONTEXT_THRESHOLD
+                && !shutdown_after_turn
+                && db
+                    .get_session(&session_id)
+                    .await
+                    .ok()
+                    .flatten()
+                    .is_some_and(|s| s.is_worker)
+            {
                 tracing::info!(
                     session_id = %session_id,
                     context_tokens = turn_context,
-                    "Context over compaction threshold; recycling child after this turn"
+                    "Worker context over compaction threshold; recycling child after this turn"
                 );
                 shutdown_after_turn = true;
             }

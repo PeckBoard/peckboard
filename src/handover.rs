@@ -16,8 +16,9 @@
 //!    marker event, and dispatch a doc-generation turn to the *current*
 //!    (outgoing) model. The session's stored `model` is left unchanged so
 //!    that turn still routes to the outgoing provider/account.
-//! 2. [`finalize_handover`] — when that turn completes (the process
-//!    completion listener calls this), collect the outgoing model's text
+//! 2. [`finalize_handover`] — when that turn completes **cleanly** (the
+//!    process completion listener calls this), collect the outgoing model's
+//!    text into the handover doc, record a `handover` event, flip
 //!    into the handover doc, record a `handover` event, flip
 //!    `session.model` to the target, and stash the doc in
 //!    `session.pending_handover_doc`.
@@ -25,17 +26,26 @@
 //!    model consumes the doc and prepends it, so the incoming model opens
 //!    with its predecessor's context.
 //!
+//! If the doc-generation turn instead fails or the user interrupts it, the
+//! completion listener calls [`abort_handover`] rather than
+//! [`finalize_handover`]: it clears the parked target and leaves `model` and
+//! `conversation_id` untouched, so the switch simply doesn't happen and no
+//! context is lost. The user can therefore cancel a handover mid-flight.
+//!
 //! **Compaction** reuses the same machinery with `from == to`: when a
-//! session's context occupancy crosses [`COMPACT_CONTEXT_THRESHOLD`], the
-//! Claude stream loop recycles its child after the turn and the completion
-//! listener calls [`maybe_auto_compact`], which dispatches the compaction
-//! turn automatically — no user prompt: the model writes a continuation doc
-//! for itself and the conversation restarts fresh with the doc injected —
-//! same model, same account, a fraction of the context. Interactive chats
-//! and workers alike; workers additionally require that their card would
-//! still resume this session (see the guards on [`maybe_auto_compact`]).
-//! `POST /api/sessions/:id/compact` → [`begin_compaction`] remains as a
-//! manual trigger, valid at any occupancy.
+//! **worker** session's context occupancy crosses
+//! [`WORKER_COMPACT_CONTEXT_THRESHOLD`], the Claude stream loop recycles its
+//! child after the turn and the completion listener calls
+//! [`maybe_auto_compact`], which dispatches the compaction turn
+//! automatically — no user prompt: the model writes a continuation doc for
+//! itself and the conversation restarts fresh with the doc injected — same
+//! model, same account, a fraction of the context. Workers additionally
+//! require that their card would still resume this session (see the guards
+//! on [`maybe_auto_compact`]). Interactive sessions are **never**
+//! auto-compacted: the UI prompts the user to clear / compact / continue
+//! instead. `POST /api/sessions/:id/compact` → [`begin_compaction`] is the
+//! manual trigger, valid at any occupancy (it is what the UI's Compact
+//! choice calls).
 
 use std::sync::Arc;
 
@@ -51,12 +61,14 @@ use crate::ws::broadcaster::WsEvent;
 /// legacy Claude sessions.
 const DEFAULT_PROVIDER: &str = "claude";
 
-/// Context-window occupancy (tokens) above which a session gets
+/// Context-window occupancy (tokens) above which a **worker** session gets
 /// auto-compacted. Checked against the latest `usage_events.context_tokens`
-/// row — the real occupancy of the last API call, not the turn-sum. 150k ≈
-/// 75% of a 200k window: late enough that compaction stays rare, early
-/// enough that the doc-generation turn itself still fits comfortably.
-pub const COMPACT_CONTEXT_THRESHOLD: i64 = 150_000;
+/// row — the real occupancy of the last API call, not the turn-sum.
+/// Interactive sessions are never auto-compacted; the UI prompts the user
+/// to clear / compact / continue instead (client-side, from ~150k). 200k
+/// keeps unattended worker compaction rare while still leaving room for the
+/// doc-generation turn itself.
+pub const WORKER_COMPACT_CONTEXT_THRESHOLD: i64 = 200_000;
 
 /// A session's continuity key: `(provider, account)`. Two model ids that
 /// share a key can resume the same conversation; a differing key means the
@@ -282,23 +294,25 @@ pub async fn begin_handover(
     Ok(())
 }
 
-/// Auto-compaction: a same-model handover dispatched automatically when the
-/// session's context occupancy has crossed [`COMPACT_CONTEXT_THRESHOLD`].
-/// Called by the completion listener after a normal (non-handover)
-/// completion — the natural idle gap right after a turn, while the prompt
-/// prefix is still cache-warm. Returns whether a compaction turn was
-/// dispatched.
+/// Auto-compaction: a same-model handover dispatched automatically when a
+/// **worker** session's context occupancy has crossed
+/// [`WORKER_COMPACT_CONTEXT_THRESHOLD`]. Called by the completion listener
+/// after a normal (non-handover) completion — the natural idle gap right
+/// after a turn, while the prompt prefix is still cache-warm. Returns
+/// whether a compaction turn was dispatched.
 ///
 /// Every guard is a conservative skip — occupancy only grows, so a skipped
 /// check simply retries at the next completion:
+/// - interactive sessions never auto-compact — the UI prompts the user to
+///   clear / compact / continue; only workers compact unattended;
 /// - no handover in flight and no doc still waiting to inject;
 /// - not an expert or repeating-task session (their dispatchers own the
 ///   session lifecycle and aren't audited for a doc turn interleaving);
 /// - no queued message (the listener's drain right after this check would
 ///   deliver it into the middle of the doc turn);
-/// - workers: only while the card would still resume THIS session (same
-///   step, currently unclaimed, non-terminal, resumable conversation) —
-///   otherwise the doc would summarize a conversation nothing reads;
+/// - only while the card would still resume THIS session (same step,
+///   currently unclaimed, non-terminal, resumable conversation) — otherwise
+///   the doc would summarize a conversation nothing reads;
 /// - idle under the session lock — losing the race to a concurrent
 ///   dispatch (e.g. the orchestrator tick resuming the card) means that
 ///   turn runs first and we compact after it instead.
@@ -306,6 +320,11 @@ pub async fn maybe_auto_compact(state: &Arc<AppState>, session_id: &str) -> anyh
     let Some(session) = state.db.get_session(session_id).await? else {
         return Ok(false);
     };
+    // Interactive sessions are never auto-compacted — the UI prompts the
+    // user (clear / compact / continue). Only workers compact unattended.
+    if !session.is_worker {
+        return Ok(false);
+    }
     if session.handover_to_model.is_some()
         || session.pending_handover_doc.is_some()
         || session.is_expert
@@ -319,13 +338,13 @@ pub async fn maybe_auto_compact(state: &Arc<AppState>, session_id: &str) -> anyh
         .await
         .unwrap_or(None)
         .unwrap_or(0);
-    if occupancy < COMPACT_CONTEXT_THRESHOLD {
+    if occupancy < WORKER_COMPACT_CONTEXT_THRESHOLD {
         return Ok(false);
     }
     if matches!(state.db.get_queued_message(session_id).await, Ok(Some(_))) {
         return Ok(false);
     }
-    if session.is_worker && !card_resumes_session(state, &session).await {
+    if !card_resumes_session(state, &session).await {
         return Ok(false);
     }
     let model = session.model.clone().unwrap_or_else(|| "default".into());
@@ -481,6 +500,81 @@ pub async fn finalize_handover(state: &Arc<AppState>, session_id: &str) -> anyho
         from = %from_model,
         to = %to_model,
         "Model-switch handover finalized"
+    );
+    Ok(())
+}
+
+/// Abort an in-flight handover WITHOUT switching models. Called when the
+/// outgoing model's doc-generation turn failed (crashed) or the user
+/// interrupted it: clearing only `handover_to_model` leaves `model` and
+/// `conversation_id` untouched, so the outgoing model resumes with its full
+/// context on the next turn — nothing is lost. This is the load-bearing
+/// half of "don't switch if the switch fails": [`finalize_handover`] (which
+/// flips the model and drops the conversation) runs only on a *clean* doc
+/// turn; every other outcome lands here. Records a `handover-aborted` marker
+/// so the transcript shows the switch didn't happen.
+///
+/// No-op if no handover is parked, so a spurious completion can't misfire.
+pub async fn abort_handover(state: &Arc<AppState>, session_id: &str) -> anyhow::Result<()> {
+    let Some(session) = state.db.get_session(session_id).await? else {
+        return Ok(());
+    };
+    let Some(to_model) = session.handover_to_model.clone() else {
+        return Ok(()); // no handover in flight
+    };
+    let from_model = session.model.clone().unwrap_or_default();
+
+    let data = serde_json::json!({
+        "from": from_model,
+        "to": to_model,
+        "compaction": from_model == to_model,
+    });
+    if let Ok(ev) = state
+        .db
+        .append_event(session_id, "handover-aborted", data.clone())
+        .await
+    {
+        state.broadcaster.broadcast(WsEvent {
+            event_type: "event".into(),
+            session_id: session_id.to_string(),
+            data: serde_json::json!({
+                "id": ev.id,
+                "seq": ev.seq,
+                "ts": ev.ts,
+                "kind": ev.kind,
+                "data": data,
+            }),
+        });
+    }
+
+    // Clear ONLY the parked target. Deliberately leave `model` and
+    // `conversation_id` as they were so the next turn resumes the original
+    // conversation on the original model — the whole point of aborting
+    // instead of finalizing.
+    let updated = state
+        .db
+        .update_session(
+            session_id,
+            UpdateSession {
+                handover_to_model: Some(None),
+                ..Default::default()
+            },
+        )
+        .await?;
+
+    if let Some(s) = updated {
+        state.broadcaster.broadcast(WsEvent {
+            event_type: "session-updated".into(),
+            session_id: session_id.to_string(),
+            data: serde_json::to_value(&s).unwrap_or(serde_json::Value::Null),
+        });
+    }
+
+    tracing::info!(
+        session_id = %session_id,
+        from = %from_model,
+        to = %to_model,
+        "Handover aborted — model and context left unchanged"
     );
     Ok(())
 }
