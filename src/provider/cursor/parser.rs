@@ -25,6 +25,7 @@ pub(super) fn parse_stream_json(
     conversation_id: &mut Option<String>,
     model_name: &mut Option<String>,
     emitted_start: &mut bool,
+    denied_tool_ids: &mut std::collections::HashSet<String>,
 ) -> Vec<ProviderEvent> {
     let mut events = Vec::new();
     let msg_type = json.get("type").and_then(|v| v.as_str()).unwrap_or("");
@@ -66,7 +67,7 @@ pub(super) fn parse_stream_json(
                         metadata: json.clone(),
                     });
                 }
-                push_content_blocks(msg.get("content"), &mut events);
+                push_content_blocks(msg.get("content"), &mut events, denied_tool_ids);
             }
         }
 
@@ -77,6 +78,15 @@ pub(super) fn parse_stream_json(
             {
                 for block in blocks {
                     if block.get("type").and_then(|v| v.as_str()) == Some("tool_result") {
+                        let id = block
+                            .get("tool_use_id")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("");
+                        if denied_tool_ids.remove(id) {
+                            // Real result of a terminal tool we denied at its
+                            // `tool_use`; drop it so its output never lands.
+                            continue;
+                        }
                         events.push(tool_result_event(block));
                     }
                 }
@@ -105,7 +115,11 @@ pub(super) fn parse_stream_json(
 
 /// Pull text + `tool_use` blocks out of an assistant message's `content`,
 /// which may be a bare string or an array of typed blocks.
-fn push_content_blocks(content: Option<&serde_json::Value>, events: &mut Vec<ProviderEvent>) {
+fn push_content_blocks(
+    content: Option<&serde_json::Value>,
+    events: &mut Vec<ProviderEvent>,
+    denied_tool_ids: &mut std::collections::HashSet<String>,
+) {
     let Some(content) = content else { return };
 
     if let Some(text) = content.as_str() {
@@ -146,11 +160,32 @@ fn push_content_blocks(content: Option<&serde_json::Value>, events: &mut Vec<Pro
                     .get("input")
                     .cloned()
                     .unwrap_or(serde_json::Value::Null);
-                events.push(ProviderEvent::ToolStart {
-                    tool_use_id,
-                    name,
-                    input,
-                });
+                if crate::provider::is_terminal_tool(&name) {
+                    // cursor-agent's headless `--force` runs tools autonomously
+                    // with no pre-execution gate, so peckboard cannot stop the
+                    // CLI from executing a terminal command. Surface it as a
+                    // denied tool call and drop the real result in the `user`
+                    // frame; the model's own context is unchanged, so the
+                    // WORKING_STYLE prompt stays the only model-side deterrent.
+                    denied_tool_ids.insert(tool_use_id.clone());
+                    events.push(ProviderEvent::ToolStart {
+                        tool_use_id: tool_use_id.clone(),
+                        name,
+                        input,
+                    });
+                    events.push(ProviderEvent::ToolEnd {
+                        tool_use_id,
+                        output: None,
+                        error: Some(crate::provider::TERMINAL_TOOL_DISABLED_MSG.to_string()),
+                        images: Vec::new(),
+                    });
+                } else {
+                    events.push(ProviderEvent::ToolStart {
+                        tool_use_id,
+                        name,
+                        input,
+                    });
+                }
             }
             _ => {}
         }
@@ -363,7 +398,78 @@ mod tests {
         started: &mut bool,
     ) -> Vec<ProviderEvent> {
         let mut model = None;
-        parse_stream_json(&json, conv, &mut model, started)
+        let mut denied = std::collections::HashSet::new();
+        parse_stream_json(&json, conv, &mut model, started, &mut denied)
+    }
+
+    #[test]
+    fn bash_tool_use_is_denied_and_real_result_suppressed() {
+        let mut conv = None;
+        let mut model = None;
+        let mut started = true;
+        let mut denied = std::collections::HashSet::new();
+        let events = parse_stream_json(
+            &serde_json::json!({
+                "type": "assistant",
+                "message": { "content": [
+                    { "type": "tool_use", "id": "t1", "name": "Bash",
+                      "input": { "command": "ls" } }
+                ]}
+            }),
+            &mut conv,
+            &mut model,
+            &mut started,
+            &mut denied,
+        );
+        assert_eq!(events.len(), 2);
+        assert!(matches!(&events[0], ProviderEvent::ToolStart { name, .. } if name == "Bash"));
+        let ProviderEvent::ToolEnd { output, error, .. } = &events[1] else {
+            panic!("expected ToolEnd, got {:?}", events[1]);
+        };
+        assert!(output.is_none());
+        assert_eq!(
+            error.as_deref(),
+            Some(crate::provider::TERMINAL_TOOL_DISABLED_MSG)
+        );
+        assert!(denied.contains("t1"));
+
+        // The matching tool_result frame is dropped entirely.
+        let result = parse_stream_json(
+            &serde_json::json!({
+                "type": "user",
+                "message": { "content": [
+                    { "type": "tool_result", "tool_use_id": "t1", "content": "ran" }
+                ]}
+            }),
+            &mut conv,
+            &mut model,
+            &mut started,
+            &mut denied,
+        );
+        assert!(result.is_empty());
+        assert!(!denied.contains("t1"));
+    }
+
+    #[test]
+    fn non_terminal_tool_result_still_emitted() {
+        let mut conv = None;
+        let mut model = None;
+        let mut started = true;
+        let mut denied = std::collections::HashSet::new();
+        let events = parse_stream_json(
+            &serde_json::json!({
+                "type": "user",
+                "message": { "content": [
+                    { "type": "tool_result", "tool_use_id": "r1", "content": "ok" }
+                ]}
+            }),
+            &mut conv,
+            &mut model,
+            &mut started,
+            &mut denied,
+        );
+        assert_eq!(events.len(), 1);
+        assert!(matches!(&events[0], ProviderEvent::ToolEnd { .. }));
     }
 
     #[test]
@@ -399,8 +505,8 @@ mod tests {
                 "type": "assistant",
                 "message": { "content": [
                     { "type": "text", "text": "Working on it" },
-                    { "type": "tool_use", "id": "t1", "name": "Bash",
-                      "input": { "command": "ls" } }
+                    { "type": "tool_use", "id": "t1", "name": "read_file",
+                      "input": { "path": "a.rs" } }
                 ]}
             }),
             &mut conv,
@@ -411,7 +517,7 @@ mod tests {
         assert!(matches!(
             &events[1],
             ProviderEvent::ToolStart { tool_use_id, name, .. }
-            if tool_use_id == "t1" && name == "Bash"
+            if tool_use_id == "t1" && name == "read_file"
         ));
     }
 

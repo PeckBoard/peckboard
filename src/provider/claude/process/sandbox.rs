@@ -1,10 +1,13 @@
-//! Best-effort sandbox: reject Claude CLI tool calls that touch paths
-//! outside the project's allowed directory.
+//! Sandbox gate for Claude CLI tool calls.
 //!
-//! This is a defense-in-depth layer, not a security boundary — the agent
-//! still runs as the user. The intent is to catch obvious mistakes
-//! (`cd /etc`, an absolute path that resolves outside the project) before
-//! they execute, while staying permissive enough not to block normal work.
+//! Two jobs: (1) hard-deny the terminal/shell tool (`Bash` and its
+//! `BashOutput` / `KillShell` companions) so all command execution is forced
+//! through the approval-gated `run_command` MCP tool; (2) best-effort reject
+//! tool calls that touch paths outside the project's allowed directory.
+//!
+//! The path check is defense-in-depth, not a security boundary — the agent
+//! still runs as the user. It catches obvious mistakes (an absolute path that
+//! resolves outside the project) while staying permissive for normal work.
 
 /// Check if a tool's input references paths outside the allowed directory.
 /// Returns `Some(reason)` if the tool should be denied, `None` if allowed.
@@ -13,6 +16,13 @@ pub(super) fn check_path_violation(
     input: &serde_json::Value,
     allowed_dir: &str,
 ) -> Option<String> {
+    // Terminal/shell tools are hard-disabled: force all command execution
+    // through the approval-gated `run_command` MCP tool. Deny unconditionally
+    // (before the allowed_dir guard) so the model always gets our guidance.
+    if crate::provider::is_terminal_tool(tool_name) {
+        return Some(crate::provider::TERMINAL_TOOL_DISABLED_MSG.to_string());
+    }
+
     if allowed_dir.is_empty() {
         return None;
     }
@@ -37,42 +47,6 @@ pub(super) fn check_path_violation(
                 paths.push(p.to_string());
             }
             paths
-        }
-        "Bash" => {
-            // For Bash, check the command for obvious path references
-            // This is a best-effort check — can't fully parse shell commands
-            if let Some(cmd) = input.get("command").and_then(|v| v.as_str()) {
-                // Check for cd to outside directory
-                let suspicious_patterns = ["cd /", "cd ~/", "cd ..", "rm -rf /", "cat /etc"];
-                for pattern in &suspicious_patterns {
-                    if cmd.contains(pattern) {
-                        // Try to extract the target path from cd commands
-                        if cmd.starts_with("cd ") {
-                            let target = cmd
-                                .trim_start_matches("cd ")
-                                .split_whitespace()
-                                .next()
-                                .unwrap_or("");
-                            if !target.is_empty() {
-                                let target_path = if target.starts_with('/') {
-                                    std::path::PathBuf::from(target)
-                                } else {
-                                    std::path::Path::new(allowed_dir).join(target)
-                                };
-                                if let Ok(resolved) = target_path.canonicalize() {
-                                    if !resolved.starts_with(&allowed) {
-                                        return Some(format!(
-                                            "Access denied: path '{}' is outside the project folder '{}'",
-                                            target, allowed_dir
-                                        ));
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-            return None; // Bash commands are complex; allow unless clearly violating
         }
         "NotebookEdit" => {
             let mut paths = Vec::new();
@@ -119,4 +93,54 @@ pub(super) fn check_path_violation(
     }
 
     None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn bash_is_denied_with_run_command_message() {
+        for tool in ["Bash", "BashOutput", "KillShell"] {
+            let denied = check_path_violation(tool, &json!({"command": "ls"}), ".");
+            assert_eq!(
+                denied.as_deref(),
+                Some(crate::provider::TERMINAL_TOOL_DISABLED_MSG),
+                "{tool} should be denied"
+            );
+        }
+    }
+
+    #[test]
+    fn bash_denied_even_when_allowed_dir_empty() {
+        // Deny is unconditional — must fire before the allowed_dir guard.
+        let denied = check_path_violation("Bash", &json!({"command": "pwd"}), "");
+        assert_eq!(
+            denied.as_deref(),
+            Some(crate::provider::TERMINAL_TOOL_DISABLED_MSG)
+        );
+    }
+
+    #[test]
+    fn non_terminal_tools_are_not_affected() {
+        // MCP / file tools inside the allowed dir are allowed.
+        for tool in ["read_file", "edit_file", "run_command", "NotebookEdit"] {
+            let res = check_path_violation(tool, &json!({"file_path": "."}), ".");
+            assert!(res.is_none(), "{tool} should not be denied, got {res:?}");
+        }
+    }
+
+    #[test]
+    fn path_violation_still_denies_outside_read() {
+        let denied = check_path_violation("Read", &json!({"file_path": "/etc/passwd"}), ".");
+        assert!(denied.is_some());
+        assert!(denied.unwrap().contains("outside the project folder"));
+    }
+
+    #[test]
+    fn path_violation_allows_inside_read() {
+        let denied = check_path_violation("Read", &json!({"file_path": "Cargo.toml"}), ".");
+        assert!(denied.is_none());
+    }
 }

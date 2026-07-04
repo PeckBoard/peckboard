@@ -373,6 +373,9 @@ async fn run_turn(args: TurnArgs<'_>) -> bool {
     let mut conversation_id: Option<String> = None;
     let mut model_name: Option<String> = None;
     let mut emitted_start = false;
+    // Terminal-tool calls denied at parse time; ids tracked so the CLI's real
+    // tool_result frame can be dropped (see cursor parser).
+    let mut denied_tool_ids: std::collections::HashSet<String> = std::collections::HashSet::new();
     let mut saw_any = false;
 
     let mut lines = BufReader::new(stdout).lines();
@@ -406,6 +409,7 @@ async fn run_turn(args: TurnArgs<'_>) -> bool {
                             &mut conversation_id,
                             &mut model_name,
                             &mut emitted_start,
+                            &mut denied_tool_ids,
                         );
                         for event in events {
                             saw_any = true;

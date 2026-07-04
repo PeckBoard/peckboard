@@ -30,6 +30,7 @@ use crate::provider::stream::ProviderEvent;
 pub(super) fn parse_stream_json(
     json: &serde_json::Value,
     conversation_id: &mut Option<String>,
+    denied_tool_ids: &mut std::collections::HashSet<String>,
 ) -> Vec<ProviderEvent> {
     let mut events = Vec::new();
     let msg_type = json.get("type").and_then(|v| v.as_str()).unwrap_or("");
@@ -69,16 +70,42 @@ pub(super) fn parse_stream_json(
                 .or_else(|| json.get("params"))
                 .cloned()
                 .unwrap_or(serde_json::Value::Null);
-            events.push(ProviderEvent::ToolStart {
-                tool_use_id,
-                name,
-                input,
-            });
+            if crate::provider::is_terminal_tool(&name) {
+                // Grok's headless `--always-approve` runs tools autonomously
+                // with no pre-execution gate, so peckboard cannot stop the CLI
+                // from executing a terminal command. Surface it as a denied
+                // tool call and drop the real result (see the `tool` arm); the
+                // model's own context is unchanged, so the WORKING_STYLE prompt
+                // stays the only model-side deterrent.
+                denied_tool_ids.insert(tool_use_id.clone());
+                events.push(ProviderEvent::ToolStart {
+                    tool_use_id: tool_use_id.clone(),
+                    name,
+                    input,
+                });
+                events.push(ProviderEvent::ToolEnd {
+                    tool_use_id,
+                    output: None,
+                    error: Some(crate::provider::TERMINAL_TOOL_DISABLED_MSG.to_string()),
+                    images: Vec::new(),
+                });
+            } else {
+                events.push(ProviderEvent::ToolStart {
+                    tool_use_id,
+                    name,
+                    input,
+                });
+            }
         }
 
         // A tool finished, carrying its result.
         "tool" => {
             let tool_use_id = tool_id(json);
+            if denied_tool_ids.remove(&tool_use_id) {
+                // Result of a terminal tool we already denied at `tool_call`;
+                // drop the CLI's real output so it never enters the transcript.
+                return events;
+            }
             let is_error = json
                 .get("isError")
                 .or_else(|| json.get("is_error"))
@@ -188,7 +215,8 @@ mod tests {
     use super::*;
 
     fn parse(json: serde_json::Value, conv: &mut Option<String>) -> Vec<ProviderEvent> {
-        parse_stream_json(&json, conv)
+        let mut denied = std::collections::HashSet::new();
+        parse_stream_json(&json, conv, &mut denied)
     }
 
     #[test]
@@ -298,6 +326,75 @@ mod tests {
         assert_eq!(error.as_deref(), Some("boom"));
     }
 
+    #[test]
+    fn bash_tool_call_is_denied_and_real_result_suppressed() {
+        let mut conv = None;
+        let mut denied = std::collections::HashSet::new();
+        let events = parse_stream_json(
+            &serde_json::json!({
+                "type":"tool_call","toolCallId":"b1","name":"Bash",
+                "input":{"command":"rm -rf /"}
+            }),
+            &mut conv,
+            &mut denied,
+        );
+        // Attempt surfaced as ToolStart, then a ToolEnd carrying our error.
+        assert_eq!(events.len(), 2);
+        assert!(matches!(&events[0], ProviderEvent::ToolStart { name, .. } if name == "Bash"));
+        let ProviderEvent::ToolEnd { output, error, .. } = &events[1] else {
+            panic!("expected ToolEnd, got {:?}", events[1]);
+        };
+        assert!(output.is_none());
+        assert_eq!(
+            error.as_deref(),
+            Some(crate::provider::TERMINAL_TOOL_DISABLED_MSG)
+        );
+        assert!(denied.contains("b1"));
+
+        // The CLI's real result for the same id is dropped entirely.
+        let result = parse_stream_json(
+            &serde_json::json!({"type":"tool","toolCallId":"b1","result":"deleted"}),
+            &mut conv,
+            &mut denied,
+        );
+        assert!(result.is_empty());
+        assert!(!denied.contains("b1"));
+    }
+
+    #[test]
+    fn bash_companion_tools_are_denied() {
+        for tool in ["BashOutput", "KillShell"] {
+            let mut conv = None;
+            let mut denied = std::collections::HashSet::new();
+            let events = parse_stream_json(
+                &serde_json::json!({"type":"tool_call","toolCallId":"x","name":tool}),
+                &mut conv,
+                &mut denied,
+            );
+            assert_eq!(events.len(), 2, "{tool} should deny");
+            assert!(matches!(
+                &events[1],
+                ProviderEvent::ToolEnd { error: Some(_), .. }
+            ));
+        }
+    }
+
+    #[test]
+    fn non_terminal_tool_is_unaffected_by_deny() {
+        let mut conv = None;
+        let mut denied = std::collections::HashSet::new();
+        let events = parse_stream_json(
+            &serde_json::json!({
+                "type":"tool_call","toolCallId":"r1","name":"read_file",
+                "input":{"path":"a.rs"}
+            }),
+            &mut conv,
+            &mut denied,
+        );
+        assert_eq!(events.len(), 1);
+        assert!(matches!(&events[0], ProviderEvent::ToolStart { name, .. } if name == "read_file"));
+        assert!(denied.is_empty());
+    }
     #[test]
     fn end_event_captures_session_id_and_emits_nothing() {
         let mut conv = None;
