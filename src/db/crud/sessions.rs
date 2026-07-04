@@ -307,6 +307,19 @@ impl Db {
         })
     }
 
+    /// Blocking twin of [`list_sessions`]: every session, newest first. Used
+    /// by the session-control host functions, which run on a blocking thread
+    /// and deliberately span all folders (no visibility boundary).
+    pub(crate) fn list_sessions_blocking(&self) -> anyhow::Result<Vec<Session>> {
+        self.with_conn_blocking(move |conn| {
+            sessions::table
+                .select(Session::as_select())
+                .order(sessions::last_activity.desc())
+                .load(conn)
+                .map_err(Into::into)
+        })
+    }
+
     /// Synchronous twin of [`update_session`].
     pub(crate) fn update_session_blocking(
         &self,

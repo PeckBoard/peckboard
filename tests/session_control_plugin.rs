@@ -169,6 +169,16 @@ async fn session_control_plugin_drives_tools_end_to_end() {
     assert_eq!(msgs[0], ("target-1".into(), "stop and wait".into(), 0));
     assert_eq!(msgs[1], ("target-1".into(), "see this".into(), 1));
 
+    // find_session lists sessions folder-blind (no LiveHost needed). With no
+    // query it returns every session; a query narrows by substring.
+    let all = invoke(&plugins, "find_session", json!({}), &ctx).await;
+    let sessions = all["sessions"].as_array().expect("sessions array");
+    assert_eq!(sessions.len(), 2, "both sessions listed: {all}");
+    let filtered = invoke(&plugins, "find_session", json!({ "query": "target" }), &ctx).await;
+    let hits = filtered["sessions"].as_array().expect("sessions array");
+    assert_eq!(hits.len(), 1, "query narrows: {filtered}");
+    assert_eq!(hits[0]["session_id"], json!("target-1"));
+
     // Unknown target id → clean "not found" error, no LiveHost call.
     let err = try_invoke(
         &plugins,

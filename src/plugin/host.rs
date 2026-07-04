@@ -1392,6 +1392,14 @@ struct SessionControlRequest {
 }
 
 #[derive(serde::Deserialize)]
+struct FindSessionsRequest {
+    /// Optional case-insensitive substring filter over session id, name,
+    /// conversation_id, model, and folder_id. Omit to list every session.
+    #[serde(default)]
+    query: Option<String>,
+}
+
+#[derive(serde::Deserialize)]
 struct SendMessageRequest {
     session_id: String,
     #[serde(default)]
@@ -1424,6 +1432,61 @@ fn require_session(db: &Db, session_id: &str) -> Result<crate::db::models::Sessi
 
 /// Shared body for the no-argument control actions (interrupt / terminate /
 /// clear): parse `{session_id}`, confirm it exists, then fire `action`.
+/// `peckboard_list_all_sessions` — folder-blind session discovery for
+/// session-control. Where `peckboard_list_sessions` is ownership- and
+/// visibility-scoped, this returns EVERY session in the instance so a
+/// controller can resolve a target anywhere (e.g. map a `conversation_id` to
+/// its `session_id`). Gated on the same `session_control` permission as the
+/// action host functions, with no invocation/folder boundary. An optional
+/// `query` filters (case-insensitive substring) over id, name,
+/// conversation_id, model, and folder_id. Sessions come newest-first.
+pub(crate) fn list_all_sessions_impl(db: &Db, input: &str) -> String {
+    let req: FindSessionsRequest = match serde_json::from_str(input) {
+        Ok(r) => r,
+        Err(e) => return error_json(format!("invalid request: {e}")),
+    };
+    let sessions = match db.list_sessions_blocking() {
+        Ok(s) => s,
+        Err(e) => return error_json(e.to_string()),
+    };
+    let needle = req
+        .query
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_lowercase);
+    let matches = |s: &crate::db::models::Session, q: &str| {
+        let opt = |v: &Option<String>| v.as_deref().unwrap_or("").to_lowercase();
+        s.id.to_lowercase().contains(q)
+            || s.name.to_lowercase().contains(q)
+            || opt(&s.conversation_id).contains(q)
+            || opt(&s.model).contains(q)
+            || s.folder_id.to_lowercase().contains(q)
+    };
+    let out: Vec<serde_json::Value> = sessions
+        .into_iter()
+        .filter(|s| match &needle {
+            None => true,
+            Some(q) => matches(s, q),
+        })
+        .map(|s| {
+            serde_json::json!({
+                "session_id": s.id,
+                "name": s.name,
+                "folder_id": s.folder_id,
+                "project_id": s.project_id,
+                "conversation_id": s.conversation_id,
+                "model": s.model,
+                "is_worker": s.is_worker,
+                "is_expert": s.is_expert,
+                "card_id": s.card_id,
+                "last_activity": s.last_activity,
+            })
+        })
+        .collect();
+    serde_json::json!({ "sessions": out }).to_string()
+}
+
 fn control_session(
     db: &Db,
     input: &str,
@@ -2285,6 +2348,12 @@ host_fn!(peckboard_send_message(user_data: HostState; input: String) -> String {
     Ok(send_message_impl(&db, &input, live))
 });
 
+host_fn!(peckboard_list_all_sessions(user_data: HostState; input: String) -> String {
+    let (db, _plugin_id, ok) = state_and_permission(&user_data, "session_control")?;
+    if !ok { return Ok(error_json("plugin lacks the 'session_control' permission")); }
+    Ok(list_all_sessions_impl(&db, &input))
+});
+
 host_fn!(peckboard_http_fetch(user_data: HostState; input: String) -> String {
     let (_db, _plugin_id, ok) = state_and_permission(&user_data, "http_fetch")?;
     if !ok { return Ok(error_json("plugin lacks the 'http_fetch' permission")); }
@@ -2609,6 +2678,13 @@ pub(crate) fn host_functions(
             [PTR],
             ud.clone(),
             peckboard_send_message,
+        ),
+        Function::new(
+            "peckboard_list_all_sessions",
+            [PTR],
+            [PTR],
+            ud.clone(),
+            peckboard_list_all_sessions,
         ),
         Function::new(
             "peckboard_http_fetch",
