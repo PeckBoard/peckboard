@@ -747,6 +747,51 @@ a.wasm-plugin-repo:hover {
   color: var(--danger, #c00);
 }
 
+/* Subscription plan usage (the `claude /usage` buckets) */
+.acct-plan-panel {
+  margin-top: 10px;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--surface);
+}
+.acct-plan-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+.acct-plan-title {
+  font-weight: 600;
+  font-size: var(--text-sm);
+}
+.acct-plan-line {
+  margin-top: 6px;
+  font-size: var(--text-sm);
+  color: var(--text2);
+}
+.acct-plan-empty {
+  font-style: italic;
+}
+.acct-plan-error {
+  margin-top: 4px;
+  font-size: var(--text-xs, 11px);
+  color: var(--danger, #c00);
+  overflow-wrap: anywhere;
+}
+.acct-plan-updated {
+  margin-top: 4px;
+  font-size: var(--text-xs, 11px);
+  color: var(--text2);
+  opacity: 0.8;
+}
+.acct-plan-row .acct-plan-label {
+  font-size: var(--text-xs, 11px);
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
 /* ── Approved commands (run_command standing approvals) ──────────── */
 .approved-cmd-list {
   list-style: none;

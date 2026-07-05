@@ -146,6 +146,32 @@ export interface ClaudeAccountUsage {
   level: WarnLevel
 }
 
+/** One subscription plan-usage bucket (the `claude /usage` numbers):
+ *  percent of the enforced limit consumed, and when the bucket resets. */
+export interface PlanBucket {
+  utilization: number
+  resets_at: string | null
+}
+
+/** The stable buckets the plan-usage endpoint reports. */
+export interface PlanUsageBuckets {
+  five_hour: PlanBucket | null
+  seven_day: PlanBucket | null
+  seven_day_sonnet: PlanBucket | null
+  seven_day_opus: PlanBucket | null
+}
+
+/** Cached plan usage for one login (`default` = host login, else account
+ *  id). `usage` is the last good snapshot; `last_error` is set when the
+ *  most recent refresh failed (the snapshot may then be stale). */
+export interface PlanUsageEntry {
+  usage: PlanUsageBuckets | null
+  fetched_at: number | null
+  last_error: string | null
+}
+
+/** Per-login plan usage keyed by `default` or account id. */
+export type PlanUsageMap = Record<string, PlanUsageEntry>
 /** One logged-in Claude/Anthropic account. The credential itself is never
  *  returned — only a masked `credential_hint`. */
 export interface ClaudeAccount {

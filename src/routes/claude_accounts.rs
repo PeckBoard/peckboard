@@ -27,6 +27,7 @@ use serde::{Deserialize, Serialize};
 use crate::auth::middleware::require_auth;
 use crate::db::models::{ClaudeAccount, ClaudeAccountChanges, NewClaudeAccount};
 use crate::provider::claude::oauth;
+use crate::provider::claude::plan_usage;
 use crate::routes::usage::cost::usage_cost;
 use crate::state::AppState;
 
@@ -39,6 +40,10 @@ pub fn router(state: Arc<AppState>) -> Router<Arc<AppState>> {
         .route(
             "/api/claude-accounts/login/start",
             axum::routing::post(start_login),
+        )
+        .route(
+            "/api/claude-accounts/plan-usage",
+            get(get_plan_usage).post(refresh_plan_usage),
         )
         .route(
             "/api/claude-accounts/{id}",
@@ -312,6 +317,20 @@ async fn start_login(State(_state): State<Arc<AppState>>) -> impl IntoResponse {
     Json(oauth::start())
 }
 
+/// Cached subscription plan usage (the `claude /usage` buckets) for every
+/// login, keyed by account id — `"default"` is the host's own login. A
+/// background poller refreshes the cache every 30 minutes; this endpoint
+/// never blocks on the network.
+async fn get_plan_usage(State(_state): State<Arc<AppState>>) -> impl IntoResponse {
+    Json(plan_usage::snapshot())
+}
+
+/// Force an immediate refresh of every login's plan usage, then return the
+/// updated snapshot. Used by the settings page's manual refresh.
+async fn refresh_plan_usage(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+    plan_usage::refresh_once(&state.db).await;
+    Json(plan_usage::snapshot())
+}
 async fn list_accounts(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     let accounts = match state.db.list_claude_accounts().await {
         Ok(a) => a,

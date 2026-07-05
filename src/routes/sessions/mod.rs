@@ -777,7 +777,6 @@ pub(super) async fn resolve_references(text: &str, state: &Arc<AppState>) -> Str
 
         if let Ok(Some(ref_session)) = state.db.get_session(&ref_session_id).await {
             let session_name = &ref_session.name;
-            let conv_id = ref_session.conversation_id.as_deref().unwrap_or("unknown");
             let card_info = if let Some(ref card_id) = ref_session.card_id {
                 state
                     .db
@@ -790,13 +789,27 @@ pub(super) async fn resolve_references(text: &str, state: &Arc<AppState>) -> Str
             } else {
                 String::new()
             };
-            let replacement = format!(
-                "[Referenced session \"{}\"{} — conversation_id: {}. \
-                 To read this session's full history, you can resume it with \
-                 conversation_id \"{}\". The session contains the work and \
-                 context from that conversation.]",
-                session_name, card_info, conv_id, conv_id
-            );
+            // A session that has never run a turn (or was cleared) has no
+            // conversation_id — say so instead of fabricating a resume
+            // instruction with a placeholder id the agent can't use.
+            let replacement = match ref_session.conversation_id.as_deref() {
+                Some(conv_id) => format!(
+                    "[Referenced session \"{}\"{} — conversation_id: {}. \
+                     To read this session's full history, you can resume it with \
+                     conversation_id \"{}\". The session contains the work and \
+                     context from that conversation.]",
+                    session_name, card_info, conv_id, conv_id
+                ),
+                None => format!(
+                    "[Referenced session \"{}\"{} — session_id: {}. This session \
+                     has no conversation history yet (it has never run a turn, or \
+                     its history was cleared), so there is no conversation_id to \
+                     resume. If you need its events, use the peckboard session \
+                     tools (e.g. read_worker_session / search_sessions) with the \
+                     session_id.]",
+                    session_name, card_info, ref_session.id
+                ),
+            };
             session_replacements.push((full_match, replacement));
         } else {
             session_replacements.push((

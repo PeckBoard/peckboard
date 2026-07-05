@@ -223,6 +223,11 @@ async fn main() -> anyhow::Result<()> {
     // throwaway "hi" so tokens don't go stale. No-op when the interval is 0.
     peckboard::keepalive::spawn(state.clone(), state.config.keep_alive_hours);
 
+    // Claude plan-usage poller: refresh the `/usage` buckets (5-hour /
+    // weekly quotas) for the host login and every stored oauth account, so
+    // Settings → Claude Accounts always shows current subscription usage.
+    peckboard::provider::claude::plan_usage::spawn(state.clone());
+
     let app = api_router(state.clone())
         .layer(axum::extract::DefaultBodyLimit::max(20 * 1024 * 1024))
         .layer(middleware::from_fn(security_headers))

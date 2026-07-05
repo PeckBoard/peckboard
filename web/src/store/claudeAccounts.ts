@@ -1,5 +1,10 @@
 import { create } from 'zustand'
-import type { ClaudeAccount, ClaudeAccountInput, ClaudeLoginStart } from '../types/api'
+import type {
+  ClaudeAccount,
+  ClaudeAccountInput,
+  ClaudeLoginStart,
+  PlanUsageMap,
+} from '../types/api'
 import { authedFetch } from './auth'
 import { useResourcesStore } from './resources'
 
@@ -8,7 +13,12 @@ interface ClaudeAccountsState {
   loaded: boolean
   loading: boolean
   error: string | null
+  /** Subscription plan usage per login (`default` = host login). */
+  planUsage: PlanUsageMap
+  planUsageRefreshing: boolean
   fetchAccounts: () => Promise<void>
+  fetchPlanUsage: () => Promise<void>
+  refreshPlanUsage: () => Promise<void>
   startLogin: () => Promise<ClaudeLoginStart>
   createAccount: (input: ClaudeAccountInput) => Promise<void>
   updateAccount: (id: string, input: ClaudeAccountInput) => Promise<void>
@@ -37,6 +47,30 @@ export const useClaudeAccountsStore = create<ClaudeAccountsState>((set, get) => 
   loaded: false,
   loading: false,
   error: null,
+  planUsage: {},
+  planUsageRefreshing: false,
+
+  fetchPlanUsage: async () => {
+    try {
+      const res = await authedFetch('/api/claude-accounts/plan-usage')
+      if (!res.ok) return
+      set({ planUsage: (await res.json()) as PlanUsageMap })
+    } catch {
+      /* cached data only — a failed poll is already surfaced per-entry */
+    }
+  },
+
+  refreshPlanUsage: async () => {
+    set({ planUsageRefreshing: true })
+    try {
+      const res = await authedFetch('/api/claude-accounts/plan-usage', { method: 'POST' })
+      if (res.ok) set({ planUsage: (await res.json()) as PlanUsageMap })
+    } catch {
+      /* keep last snapshot */
+    } finally {
+      set({ planUsageRefreshing: false })
+    }
+  },
 
   fetchAccounts: async () => {
     set({ loading: true })
