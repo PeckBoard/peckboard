@@ -348,11 +348,24 @@ async fn update_session(
         let model_changed = requested_model.is_some() && requested_model != prior.model;
         let effort_changed = matches!(&requested_effort, Some(e) if *e != prior.effort);
         if model_changed || effort_changed {
-            crate::provider::manager::shutdown_after_turn_via_registry(
-                &state.provider_registry,
-                &id,
-            )
-            .await;
+            if prior.is_worker {
+                // A worker's in-flight turn can span the rest of its card,
+                // so winding down after the turn would land only when the
+                // work is essentially done — the switch would never be
+                // seen. Hard-cancel instead: the completion listener treats
+                // the interrupted run as a non-counting crash, releases the
+                // card's claim, and check_and_spawn_workers resumes this
+                // same session right away — `--resume` carries the
+                // conversation and the fresh spawn reads the new
+                // model/effort from the row just written.
+                state.session_manager.cancel(&id).await;
+            } else {
+                crate::provider::manager::shutdown_after_turn_via_registry(
+                    &state.provider_registry,
+                    &id,
+                )
+                .await;
+            }
         }
     }
 
@@ -369,6 +382,13 @@ async fn update_session(
                     UpdateSession {
                         model: Some(Some(target.clone())),
                         handover_to_model: Some(None),
+                        // The switch crossed the continuity boundary, so
+                        // the incoming provider/account cannot resume the
+                        // outgoing conversation — a later `--resume` under
+                        // the new credentials would fail the spawn. Drop it
+                        // and start cold (the doc turn failed; there is no
+                        // context to carry either way).
+                        conversation_id: Some(None),
                         ..Default::default()
                     },
                 )
@@ -387,8 +407,7 @@ async fn update_session(
 /// Decide whether a requested model change should trigger a handover, and
 /// return the target model id if so. `Ok(None)` means a plain switch: no
 /// model change requested, the change stays within the same
-/// provider+account, the session is a worker (orchestrator-driven), or the
-/// session has no conversation yet to hand over.
+/// provider+account, or the session has no conversation yet to hand over.
 ///
 /// Rejects with 409 when the change can't be honoured right now:
 /// - a handover is already in flight (a second switch would race the
@@ -397,6 +416,9 @@ async fn update_session(
 ///   handover shuts the outgoing provider down after the NEXT result — see
 ///   `begin_handover` — which mid-turn would be the user's turn, not the
 ///   doc turn, so the doc would never be generated).
+/// - any cross-boundary switch on a worker session (nothing would dispatch
+///   the doc turn mid-card, and a silent plain switch would strand the
+///   card's resume on a conversation the incoming provider can't open).
 async fn maybe_handover_target(
     state: &Arc<AppState>,
     session_id: &str,
@@ -417,13 +439,24 @@ async fn maybe_handover_target(
             })),
         ));
     }
-    // Workers are driven by the orchestrator/card, not interactive switches.
-    if session.is_worker {
-        return Ok(None);
-    }
     let current = session.model.as_deref().unwrap_or("default");
     if !crate::handover::needs_handover(current, new_model) {
         return Ok(None);
+    }
+    // Workers never hand over. Nothing would dispatch the doc-generation
+    // turn mid-card, and silently plain-switching across the continuity
+    // boundary is worse: the incoming provider can't resume the outgoing
+    // conversation, so the card's resume loop would crash straight into
+    // auto-pause. Same-provider+account switches (above) go through as
+    // plain switches — the PATCH handler interrupts and the orchestrator
+    // resumes the session under the new settings.
+    if session.is_worker {
+        return Err((
+            StatusCode::CONFLICT,
+            Json(serde_json::json!({
+                "error": "worker sessions can only switch models within the same provider and account; set the card or project model to move future workers elsewhere",
+            })),
+        ));
     }
 
     let events = state

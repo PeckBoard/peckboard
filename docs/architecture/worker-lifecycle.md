@@ -36,6 +36,7 @@ Output is newline-delimited JSON parsed into event kinds: agent-start, agent chu
 - The session is viewable by clicking the card's 3-dot menu → "Session" on the kanban board
 - The full transcript (all steps) is visible in the same chat view used for interactive sessions
 - Card sessions are `is_worker = true` and do not appear in the main session list
+- Changing the session's model/effort from the chat UI (`PATCH /api/sessions/:id`) takes effect immediately: the live CLI is hard-cancelled (an `interrupted` crash, excluded from auto-pause counting), the card's claim is released, and the orchestrator resumes the same session with `--resume` under the new settings. Cross-provider/account switches are refused with 409 — workers can't run the handover doc turn; set the card/project model to move future workers instead.
 
 ### Done
 
@@ -49,6 +50,7 @@ Worker signals completion via one of four MCP tools (logged as durable events be
 Fallback: message ending with "DONE" (works but less preferred)
 
 On done event, `handleWorkerDone`:
+
 - Derives intent from event log via `deriveWorkerIntent`
 - Acts on intent (advance step, release context, move card)
 - If no intent and no "DONE": schedules continue-retry with exponential backoff
@@ -56,6 +58,7 @@ On done event, `handleWorkerDone`:
 ### Error / Crash
 
 On crash:
+
 - `handleWorkerError` checks if reason is deterministic (e.g. `invalid-model`) — blocks immediately
 - Otherwise schedules `sendRecoveryPrompt` (5s delay) on the SAME session
 - Recovery prompt calls `detectRetryLoop` before spawning

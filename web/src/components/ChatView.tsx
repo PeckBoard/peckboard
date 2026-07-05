@@ -733,10 +733,16 @@ export default function ChatView({
     {
       label: 'Model',
       hint: modelDisplayName(sessionDetail?.model),
+      // Long catalogue (Cursor alone exposes 100+ models) — filter by
+      // display name or id, whose provider:model@account shape lets the
+      // user narrow by account too.
+      searchable: true,
+      searchPlaceholder: 'Search models…',
       submenu:
         availableModels.length > 0
           ? availableModels.map((m) => ({
               label: m.display_name,
+              searchText: m.id,
               active: m.id === sessionDetail?.model,
               onSelect: () => requestModelChange(m.id),
             }))

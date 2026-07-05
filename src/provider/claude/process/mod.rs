@@ -151,10 +151,7 @@ pub fn spawn_claude(
         // shutdown (e.g. JoinHandle::abort), the child still gets SIGKILL.
         .kill_on_drop(true);
 
-    // Apply any extra environment variables from the config
-    for (key, value) in &config.env {
-        cmd.env(key, value);
-    }
+    apply_config_env(&mut cmd, &config.env);
 
     let child = cmd.spawn().map_err(|e| {
         anyhow::anyhow!(
@@ -170,6 +167,23 @@ pub fn spawn_claude(
     })
 }
 
+/// Layer `env` over the child's inherited environment. When the map
+/// carries an injected account credential, the inherited credential vars
+/// are masked first: the spawn must authenticate as exactly the selected
+/// account, and a stray ANTHROPIC_API_KEY exported in peckboard's own
+/// shell would otherwise outrank the account's CLAUDE_CODE_OAUTH_TOKEN
+/// inside the CLI and silently bill the wrong account. Default-account
+/// spawns (no injected credential) keep the inherited host credentials —
+/// that is their contract.
+fn apply_config_env(cmd: &mut Command, env: &std::collections::HashMap<String, String>) {
+    if env.contains_key("ANTHROPIC_API_KEY") || env.contains_key("CLAUDE_CODE_OAUTH_TOKEN") {
+        cmd.env_remove("ANTHROPIC_API_KEY");
+        cmd.env_remove("CLAUDE_CODE_OAUTH_TOKEN");
+    }
+    for (key, value) in env {
+        cmd.env(key, value);
+    }
+}
 /// State shared with the streaming loop for mid-turn coordination.
 ///
 /// These flags read from outside the loop (e.g. `is_running` on the
@@ -1063,6 +1077,31 @@ mod tests {
     use tokio::process::Command;
     use tokio::time::timeout;
 
+    /// An injected account credential must mask the credential vars the
+    /// child would otherwise inherit from peckboard's own environment —
+    /// `get_envs` reports a masked var as `(key, None)`.
+    #[test]
+    fn account_env_masks_inherited_credentials() {
+        let mut cmd = Command::new("true");
+        let mut env = std::collections::HashMap::new();
+        env.insert("CLAUDE_CODE_OAUTH_TOKEN".to_string(), "tok".to_string());
+        apply_config_env(&mut cmd, &env);
+        let envs: Vec<_> = cmd.as_std().get_envs().collect();
+        assert!(envs.contains(&(std::ffi::OsStr::new("ANTHROPIC_API_KEY"), None)));
+        assert!(envs.contains(&(
+            std::ffi::OsStr::new("CLAUDE_CODE_OAUTH_TOKEN"),
+            Some(std::ffi::OsStr::new("tok"))
+        )));
+    }
+
+    /// No injected credential (the Default account) must leave the
+    /// inherited environment untouched.
+    #[test]
+    fn default_account_env_keeps_inherited_credentials() {
+        let mut cmd = Command::new("true");
+        apply_config_env(&mut cmd, &std::collections::HashMap::new());
+        assert_eq!(cmd.as_std().get_envs().count(), 0);
+    }
     /// Drive `cat` as a stand-in CLI. Returns the channels and shared
     /// state the caller needs to interact with the loop, plus a
     /// JoinHandle on the spawned stream_events task. Creates the

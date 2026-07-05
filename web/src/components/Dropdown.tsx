@@ -34,6 +34,14 @@ export interface MenuItem {
   /** Skip rendering. Lets callers express "this action only applies to
    *  sessions" without splitting the list. */
   hidden?: boolean
+  /** Extra text matched by a searchable submenu's filter, never displayed.
+   *  E.g. a model's full id, which carries the provider and account. */
+  searchText?: string
+  /** With `submenu`: render a filter input at the top of the flyout and make
+   *  the list scrollable. For long single-choice lists (model catalogue). */
+  searchable?: boolean
+  /** Placeholder for the searchable flyout's filter input. */
+  searchPlaceholder?: string
   /** Optional testid forwarded to the rendered button. */
   testId?: string
 }
@@ -50,6 +58,10 @@ interface DropdownProps {
   align?: 'left' | 'right'
   /** Optional class for the popup, for one-off layout overrides. */
   className?: string
+  /** Render a filter input above the items; rows are matched on label, hint,
+   *  and `searchText`. Set via `searchable: true` on a submenu item. */
+  searchable?: boolean
+  searchPlaceholder?: string
 }
 
 const MENU_MARGIN = 8
@@ -66,6 +78,8 @@ export default function Dropdown({
   onClose,
   align = 'right',
   className,
+  searchable,
+  searchPlaceholder,
 }: DropdownProps) {
   const ref = useRef<HTMLDivElement | null>(null)
   const [pos, setPos] = useState<{ left: number; top: number }>(() => ({
@@ -73,6 +87,25 @@ export default function Dropdown({
     top: anchor.y,
   }))
   const visible = items.filter((i) => !i.hidden)
+  // Searchable variant: filter rows by the query and track a keyboard cursor
+  // over the selectable rows so ArrowUp/Down + Enter work from the input
+  // (mirrors ModelPicker's interaction).
+  const [query, setQuery] = useState('')
+  const q = query.trim().toLowerCase()
+  const filtered = q
+    ? visible.filter(
+        (i) =>
+          !i.divider &&
+          `${i.label ?? ''} ${i.hint ?? ''} ${i.searchText ?? ''}`.toLowerCase().includes(q),
+      )
+    : visible
+  const selectable = filtered.filter((i) => !i.divider && !i.disabled && i.onSelect)
+  const [highlight, setHighlight] = useState(() =>
+    Math.max(
+      0,
+      selectable.findIndex((i) => i.active),
+    ),
+  )
 
   useLayoutEffect(() => {
     const el = ref.current
@@ -106,24 +139,94 @@ export default function Dropdown({
     }
   }, [onClose])
 
-  if (visible.length === 0) return null
+  const onSearchKey = (e: React.KeyboardEvent) => {
+    if (e.key === 'ArrowDown') {
+      e.preventDefault()
+      setHighlight((h) => Math.min(h + 1, selectable.length - 1))
+    } else if (e.key === 'ArrowUp') {
+      e.preventDefault()
+      setHighlight((h) => Math.max(h - 1, 0))
+    } else if (e.key === 'Enter') {
+      e.preventDefault()
+      const item = selectable[highlight]
+      if (item) {
+        onClose()
+        item.onSelect?.()
+      }
+    }
+  }
+
+  if (!searchable && visible.length === 0) return null
+
+  let selIdx = -1
+  const rows = filtered.map((item, idx) => {
+    const isSelectable = !item.divider && !item.disabled && !!item.onSelect
+    if (isSelectable) selIdx++
+    const at = selIdx
+    return (
+      <MenuRow
+        key={idx}
+        item={item}
+        onClose={onClose}
+        highlighted={searchable && isSelectable && at === highlight}
+        onHover={searchable && isSelectable ? () => setHighlight(at) : undefined}
+      />
+    )
+  })
 
   return createPortal(
     <div
       ref={ref}
-      className={`dropdown-menu${className ? ` ${className}` : ''}`}
+      className={`dropdown-menu${searchable ? ' model-picker-popup' : ''}${className ? ` ${className}` : ''}`}
       role="menu"
       style={{ position: 'fixed', left: pos.left, top: pos.top }}
     >
-      {visible.map((item, idx) => (
-        <MenuRow key={idx} item={item} onClose={onClose} />
-      ))}
+      {searchable ? (
+        <>
+          <input
+            className="model-picker-search"
+            type="text"
+            autoFocus
+            value={query}
+            placeholder={searchPlaceholder ?? 'Search…'}
+            aria-label={searchPlaceholder ?? 'Search'}
+            onChange={(e) => {
+              setQuery(e.target.value)
+              setHighlight(0)
+            }}
+            onKeyDown={onSearchKey}
+          />
+          <div className="model-picker-list">
+            {rows.length > 0 ? (
+              rows
+            ) : (
+              <button type="button" className="dropdown-item" disabled>
+                No matches
+              </button>
+            )}
+          </div>
+        </>
+      ) : (
+        rows
+      )}
     </div>,
     document.body,
   )
 }
 
-function MenuRow({ item, onClose }: { item: MenuItem; onClose: () => void }) {
+function MenuRow({
+  item,
+  onClose,
+  highlighted,
+  onHover,
+}: {
+  item: MenuItem
+  onClose: () => void
+  /** Keyboard cursor from a searchable parent — visual only. */
+  highlighted?: boolean
+  /** Sync the keyboard cursor when the mouse moves over this row. */
+  onHover?: () => void
+}) {
   const [subAnchor, setSubAnchor] = useState<{ x: number; y: number } | null>(null)
   const btnRef = useRef<HTMLButtonElement | null>(null)
 
@@ -164,6 +267,8 @@ function MenuRow({ item, onClose }: { item: MenuItem; onClose: () => void }) {
               setSubAnchor(null)
               onClose()
             }}
+            searchable={item.searchable}
+            searchPlaceholder={item.searchPlaceholder}
             align="left"
           />
         )}
@@ -175,8 +280,9 @@ function MenuRow({ item, onClose }: { item: MenuItem; onClose: () => void }) {
     <button
       role="menuitem"
       type="button"
-      className={`dropdown-item${item.danger ? ' dropdown-item-danger' : ''}${item.active ? ' dropdown-item-active' : ''}${item.description ? ' dropdown-item-with-desc' : ''}`}
+      className={`dropdown-item${item.danger ? ' dropdown-item-danger' : ''}${item.active ? ' dropdown-item-active' : ''}${item.description ? ' dropdown-item-with-desc' : ''}${highlighted ? ' model-picker-item-highlight' : ''}`}
       disabled={item.disabled}
+      onMouseEnter={onHover}
       onClick={(e) => {
         e.stopPropagation()
         onClose()

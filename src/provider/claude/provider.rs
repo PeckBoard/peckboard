@@ -29,6 +29,11 @@ struct ClaudeRun {
     /// stdin). Used by the idle reaper to decide whether to recycle
     /// a quiet child.
     last_activity: Arc<AtomicU64>,
+    /// Which stored Claude account (`@<account_id>` model suffix) this
+    /// child authenticated as; `None` is the Default/host account.
+    /// Checked on reuse in `send_message` so a turn is never written
+    /// into a child billing a different account.
+    account_id: Option<String>,
 }
 
 /// `AgentProvider` impl backed by the Claude CLI in stream-json
@@ -240,6 +245,35 @@ impl AgentProvider for ClaudeProvider {
             ..config
         };
 
+        // Never reuse a live child that authenticated as a DIFFERENT
+        // account. Normally the handover machinery recycles the child
+        // before the account flips, but two paths bypass it: the
+        // begin_handover failure fallback (direct model write), and a
+        // cross-account switch on a session with no history yet. Writing
+        // this turn into the old child would bill the previous account —
+        // wind it down and spawn fresh under the right credentials.
+        let account_mismatch = {
+            let runs = self.runs.lock().await;
+            runs.get(&session_id)
+                .is_some_and(|r| r.account_id.as_deref() != account_id)
+        };
+        let conversation_id = if account_mismatch {
+            tracing::warn!(
+                session_id = %session_id,
+                account = account_id.unwrap_or("default"),
+                "Live claude child belongs to a different account; recycling before dispatch"
+            );
+            self.cancel(&session_id).await;
+            self.wait_for_termination(&session_id).await;
+            // The old conversation lives under the previous account's
+            // CLAUDE_CONFIG_DIR — `--resume` under the new credentials
+            // would fail the spawn outright. Start a fresh conversation;
+            // the next agent-start records the new id on the session row.
+            None
+        } else {
+            conversation_id
+        };
+
         // Lock the runs map ONCE, then either reuse the existing run's
         // stdin or spawn a new child and insert. The lock spans the
         // is-present check + insert so two concurrent first-sends for
@@ -263,6 +297,7 @@ impl AgentProvider for ClaudeProvider {
                     stdin_tx: tx.clone(),
                     turn_active: turn_active.clone(),
                     last_activity: last_activity.clone(),
+                    account_id: account_id.map(str::to_string),
                 };
                 runs.insert(session_id.clone(), run);
 
@@ -500,6 +535,7 @@ mod tests {
             stdin_tx: tx,
             turn_active: Arc::new(AtomicBool::new(true)),
             last_activity: Arc::new(AtomicU64::new(now_ms())),
+            account_id: None,
         };
         provider
             .runs
@@ -509,6 +545,91 @@ mod tests {
         rx
     }
 
+    /// Minimal account row for the credential-injection tests.
+    fn account(
+        id: &str,
+        kind: &str,
+        credential: &str,
+        config_dir: Option<&str>,
+    ) -> crate::db::models::NewClaudeAccount {
+        crate::db::models::NewClaudeAccount {
+            id: id.into(),
+            name: id.into(),
+            kind: kind.into(),
+            credential: credential.into(),
+            config_dir: config_dir.map(str::to_string),
+            budget_window_hours: None,
+            budget_limit_usd: None,
+            budget_limit_tokens: None,
+            warn_threshold: 0.75,
+            critical_threshold: 0.95,
+            created_at: 0,
+            updated_at: 0,
+        }
+    }
+
+    /// The credential seam behind every spawn AND resume: an `api_key`
+    /// account must surface as ANTHROPIC_API_KEY, an `oauth_token`
+    /// account as CLAUDE_CODE_OAUTH_TOKEN plus its isolated
+    /// CLAUDE_CONFIG_DIR — the dir the CLI also resumes conversations
+    /// from, so a resumed session lands back on the same account state.
+    #[tokio::test]
+    async fn inject_account_env_resolves_kind_and_config_dir() {
+        let db = crate::db::Db::in_memory().unwrap();
+        db.create_claude_account(account("acc_key", "api_key", "sk-test", None))
+            .await
+            .unwrap();
+        let tmp = std::env::temp_dir().join("pb-test-acc-oauth");
+        db.create_claude_account(account(
+            "acc_oauth",
+            "oauth_token",
+            "tok-test",
+            Some(tmp.to_str().unwrap()),
+        ))
+        .await
+        .unwrap();
+        let provider = ClaudeProvider::new().with_db(db);
+
+        let mut env = HashMap::new();
+        provider
+            .inject_account_env("acc_key", &mut env)
+            .await
+            .unwrap();
+        assert_eq!(
+            env.get("ANTHROPIC_API_KEY").map(String::as_str),
+            Some("sk-test")
+        );
+        assert!(!env.contains_key("CLAUDE_CODE_OAUTH_TOKEN"));
+
+        let mut env = HashMap::new();
+        provider
+            .inject_account_env("acc_oauth", &mut env)
+            .await
+            .unwrap();
+        assert_eq!(
+            env.get("CLAUDE_CODE_OAUTH_TOKEN").map(String::as_str),
+            Some("tok-test")
+        );
+        assert_eq!(
+            env.get("CLAUDE_CONFIG_DIR").map(String::as_str),
+            tmp.to_str()
+        );
+    }
+
+    /// An account id that no longer resolves must be a hard error — never
+    /// a silent fallback to the Default/host credentials.
+    #[tokio::test]
+    async fn inject_account_env_missing_account_is_hard_error() {
+        let db = crate::db::Db::in_memory().unwrap();
+        let provider = ClaudeProvider::new().with_db(db);
+        let mut env = HashMap::new();
+        let res = provider.inject_account_env("acc_gone", &mut env).await;
+        assert!(
+            res.is_err(),
+            "missing account must not fall back to host credentials"
+        );
+        assert!(env.is_empty());
+    }
     #[tokio::test]
     async fn shutdown_after_turn_sends_message_to_stream_loop() {
         // The provider must NOT touch the cancel signal — the whole
@@ -554,6 +675,7 @@ mod tests {
             stdin_tx: tx,
             turn_active: Arc::new(AtomicBool::new(true)),
             last_activity: Arc::new(AtomicU64::new(now_ms())),
+            account_id: None,
         };
         provider.runs.lock().await.insert("s2".into(), run);
 

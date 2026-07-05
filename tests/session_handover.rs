@@ -217,9 +217,20 @@ async fn patch_model(
     token: &str,
     model: &str,
 ) -> (StatusCode, serde_json::Value) {
+    patch_model_on(state, token, "s1", model).await
+}
+
+/// Like [`patch_model`] but against an arbitrary session id — the worker
+/// tests target "w1".
+async fn patch_model_on(
+    state: &Arc<AppState>,
+    token: &str,
+    session_id: &str,
+    model: &str,
+) -> (StatusCode, serde_json::Value) {
     let req = Request::builder()
         .method("PATCH")
-        .uri("/api/sessions/s1")
+        .uri(format!("/api/sessions/{session_id}"))
         .header(header::AUTHORIZATION, format!("Bearer {token}"))
         .header(header::CONTENT_TYPE, "application/json")
         .body(Body::from(format!(r#"{{"model":"{model}"}}"#)))
@@ -285,6 +296,37 @@ async fn same_key_switch_mid_turn_is_allowed() {
     assert_eq!(s.handover_to_model, None);
 }
 
+/// A worker switching within its provider+account is a plain switch: the
+/// row updates immediately. (The PATCH handler also hard-cancels any live
+/// child so the orchestrator resumes it under the new model — a no-op
+/// here, where no child is running.)
+#[tokio::test]
+async fn worker_same_key_switch_is_applied() {
+    let (state, token) = build_state("mock:echo").await;
+    seed_worker(&state).await;
+
+    let (status, body) = patch_model_on(&state, &token, "w1", "mock:happy-path").await;
+    assert_eq!(status, StatusCode::OK, "body: {body}");
+    let s = state.db.get_session("w1").await.unwrap().unwrap();
+    assert_eq!(s.model.as_deref(), Some("mock:happy-path"));
+    assert_eq!(s.handover_to_model, None);
+}
+
+/// A worker switching across the provider/account boundary is refused: no
+/// handover doc turn can run mid-card, and a silent plain switch would
+/// strand the card's resume on a conversation the incoming provider can't
+/// open (crash-looping into auto-pause).
+#[tokio::test]
+async fn worker_cross_boundary_switch_is_refused() {
+    let (state, token) = build_state("mock:echo").await;
+    seed_worker(&state).await;
+
+    let (status, body) = patch_model_on(&state, &token, "w1", "mock:echo@acct2").await;
+    assert_eq!(status, StatusCode::CONFLICT, "body: {body}");
+    let s = state.db.get_session("w1").await.unwrap().unwrap();
+    assert_eq!(s.model.as_deref(), Some("mock:echo"));
+    assert_eq!(s.handover_to_model, None);
+}
 #[tokio::test]
 async fn second_switch_during_handover_is_refused() {
     let (state, token) = build_state("mock:echo").await;
