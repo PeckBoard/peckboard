@@ -278,6 +278,13 @@ export default function KanbanBoard({
         if (ctxCard && ctx > 0) setCtxByCard((prev) => ({ ...prev, [ctxCard]: ctx }))
         return
       }
+      // A `handover` event (worker auto-compaction) restarts the worker's
+      // conversation — drop the card's live occupancy so the badge doesn't
+      // keep showing the pre-compaction window until the next turn reports.
+      if (event.kind === 'handover') {
+        const ctxCard = ctxSessionToCardRef.current[event.session_id]
+        if (ctxCard) setCtxByCard((prev) => ({ ...prev, [ctxCard]: 0 }))
+      }
       const cardId = sessionToCardRef.current[event.session_id]
       if (!cardId) return
       const text = summarizeEvent(event)

@@ -34,6 +34,8 @@ diesel::table! {
         handover_to_model -> Nullable<Text>,
         pending_handover_doc -> Nullable<Text>,
         worker_step -> Nullable<Text>,
+        user_id -> Nullable<Text>,
+        context_reset_ts -> Nullable<BigInt>,
     }
 }
 

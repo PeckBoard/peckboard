@@ -2507,4 +2507,128 @@ mod tests {
         // Deleting a missing account is a clean None, not an error.
         assert!(db.delete_claude_account("nope").await.unwrap().is_none());
     }
+
+    // ── Session ownership ────────────────────────────────────────────
+
+    async fn seed_user(db: &Db, id: &str) {
+        let ts = now();
+        db.create_user(NewUser {
+            id: id.into(),
+            username: id.into(),
+            email: None,
+            password_hash: "h".into(),
+            role: "user".into(),
+            created_at: ts.clone(),
+            updated_at: ts,
+        })
+        .await
+        .unwrap();
+    }
+
+    #[tokio::test]
+    async fn resolve_owner_uses_sole_user() {
+        let db = test_db();
+        seed_user(&db, "u1").await;
+        // No parent session, single user -> that user (the backfill rule).
+        assert_eq!(
+            db.resolve_spawned_session_owner(None).await.as_deref(),
+            Some("u1")
+        );
+        assert_eq!(
+            db.resolve_spawned_session_owner_blocking(None).as_deref(),
+            Some("u1")
+        );
+    }
+
+    #[tokio::test]
+    async fn resolve_owner_none_when_multiple_users() {
+        let db = test_db();
+        seed_user(&db, "u1").await;
+        seed_user(&db, "u2").await;
+        // Ambiguous -> unowned (NULL), per the documented multi-user policy.
+        assert!(db.resolve_spawned_session_owner(None).await.is_none());
+        assert!(db.resolve_spawned_session_owner_blocking(None).is_none());
+    }
+
+    #[tokio::test]
+    async fn resolve_owner_inherits_parent_over_ambiguity() {
+        let db = test_db();
+        let ts = now();
+        db.create_folder(NewFolder {
+            id: "f1".into(),
+            name: "F".into(),
+            path: "/tmp/f".into(),
+            created_at: ts.clone(),
+        })
+        .await
+        .unwrap();
+        seed_user(&db, "u1").await;
+        seed_user(&db, "u2").await;
+        db.create_session(NewSession {
+            id: "parent".into(),
+            name: "parent".into(),
+            folder_id: "f1".into(),
+            created_at: ts.clone(),
+            last_activity: ts.clone(),
+            user_id: Some("u2".into()),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+        // Parent owner wins even when the sole-user fallback is ambiguous.
+        assert_eq!(
+            db.resolve_spawned_session_owner(Some("parent"))
+                .await
+                .as_deref(),
+            Some("u2")
+        );
+        assert_eq!(
+            db.resolve_spawned_session_owner_blocking(Some("parent"))
+                .as_deref(),
+            Some("u2")
+        );
+        // Unknown / unowned parent falls through to the ambiguous fallback.
+        assert!(
+            db.resolve_spawned_session_owner(Some("nope"))
+                .await
+                .is_none()
+        );
+    }
+
+    #[tokio::test]
+    async fn chat_style_session_stores_explicit_owner() {
+        // Mirrors the authenticated create_session route: an explicit owner is
+        // persisted and round-trips through get_session.
+        let db = test_db();
+        let ts = now();
+        db.create_folder(NewFolder {
+            id: "f1".into(),
+            name: "F".into(),
+            path: "/tmp/f".into(),
+            created_at: ts.clone(),
+        })
+        .await
+        .unwrap();
+        seed_user(&db, "u1").await;
+        db.create_session(NewSession {
+            id: "s1".into(),
+            name: "chat".into(),
+            folder_id: "f1".into(),
+            created_at: ts.clone(),
+            last_activity: ts.clone(),
+            user_id: Some("u1".into()),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+        assert_eq!(
+            db.get_session("s1")
+                .await
+                .unwrap()
+                .unwrap()
+                .user_id
+                .as_deref(),
+            Some("u1")
+        );
+    }
 }

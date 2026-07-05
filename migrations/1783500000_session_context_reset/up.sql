@@ -1,0 +1,12 @@
+-- Context-occupancy reset marker. `latest_context_tokens` (which seeds the
+-- chat/card context badges and drives the worker auto-compaction check)
+-- reads the newest positive `usage_events.context_tokens` row -- but usage
+-- rows are billing history and survive both a session clear and a context
+-- compaction, so the reported occupancy stayed at its pre-clear/pre-compact
+-- value until the next turn landed.
+--
+-- `context_reset_ts` (ms epoch) is stamped when the session's conversation
+-- is reset (clear, compaction/handover finalize); occupancy queries ignore
+-- usage rows at or before it. Nullable + additive: existing rows need no
+-- backfill (NULL = never reset).
+ALTER TABLE sessions ADD COLUMN context_reset_ts BIGINT;

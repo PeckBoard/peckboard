@@ -67,6 +67,18 @@ pub struct Session {
     /// longer be resumed for the card (the resume link is severed by the
     /// card-update path in `db::crud::cards`).
     pub worker_step: Option<String>,
+    /// Owning PeckBoard user. `None` for legacy rows and internally-spawned
+    /// sessions that resolve to no single user. Set on every creation path;
+    /// the session-control send_message gate treats two sessions as same-user
+    /// only when both `user_id`s are `Some` and equal (NULL = non-matching).
+    pub user_id: Option<String>,
+    /// When (ms epoch) this session's context occupancy was last reset —
+    /// stamped on session clear and on handover/compaction finalize.
+    /// `latest_context_tokens` ignores usage rows at or before it, so the
+    /// context badge and the auto-compaction check don't keep reporting the
+    /// pre-reset conversation's occupancy (usage rows are billing history
+    /// and are never deleted). `None` = never reset.
+    pub context_reset_ts: Option<i64>,
 }
 
 #[derive(Insertable, Deserialize, Debug, Default)]
@@ -94,6 +106,8 @@ pub struct NewSession {
     pub handover_to_model: Option<String>,
     pub pending_handover_doc: Option<String>,
     pub worker_step: Option<String>,
+    pub user_id: Option<String>,
+    pub context_reset_ts: Option<i64>,
 }
 #[derive(AsChangeset, Deserialize, Debug, Default)]
 #[diesel(table_name = sessions)]
@@ -115,6 +129,7 @@ pub struct UpdateSession {
     pub handover_to_model: Option<Option<String>>,
     pub pending_handover_doc: Option<Option<String>>,
     pub worker_step: Option<Option<String>>,
+    pub context_reset_ts: Option<Option<i64>>,
 }
 // ── Repeating Tasks ──────────────────────────────────────────────────
 

@@ -282,6 +282,7 @@ async fn ping(
         // A non-empty system prompt FULLY replaces the standing Peckboard
         // prompt — a single "." keeps the turn's token count near zero.
         system_prompt: Some(".".to_string()),
+        user_id: db.resolve_spawned_session_owner(None).await,
         created_at: now.clone(),
         last_activity: now,
         ..Default::default()

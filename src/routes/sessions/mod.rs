@@ -8,7 +8,7 @@ mod dispatch;
 mod events;
 
 use axum::{
-    Json, Router,
+    Extension, Json, Router,
     extract::{Path, Query, State},
     http::StatusCode,
     middleware,
@@ -18,7 +18,7 @@ use axum::{
 use serde::Deserialize;
 use std::sync::Arc;
 
-use crate::auth::middleware::require_auth;
+use crate::auth::middleware::{AuthUser, require_auth};
 use crate::db::models::{NewSession, UpdateSession};
 use crate::state::AppState;
 
@@ -106,6 +106,7 @@ pub fn router(state: Arc<AppState>) -> Router<Arc<AppState>> {
 /// POST /api/sessions
 async fn create_session(
     State(state): State<Arc<AppState>>,
+    Extension(user): Extension<AuthUser>,
     Json(body): Json<CreateSessionRequest>,
 ) -> impl IntoResponse {
     tracing::info!(name = %body.name, folder_id = %body.folder_id, "Creating session");
@@ -126,6 +127,7 @@ async fn create_session(
             conversation_id: None,
             created_at: now.clone(),
             last_activity: now,
+            user_id: Some(user.user_id),
             ..Default::default()
         })
         .await
@@ -270,7 +272,13 @@ async fn update_session(
     // patch, because a handover defers the actual `model` write until the
     // doc-generation turn completes.
     let requested_model = body.model.clone().flatten();
+    let requested_effort = body.effort.clone();
     let handover_target = maybe_handover_target(&state, &id, requested_model.as_deref()).await?;
+
+    // Snapshot the pre-patch model/effort: a plain (same provider+account)
+    // switch must recycle any live child process below, and "did it actually
+    // change" is decided against these.
+    let prior = state.db.get_session(&id).await.ok().flatten();
 
     // When handing over, don't write the new `model` yet — the outgoing
     // provider must stay selected so its doc-generation turn routes to it.
@@ -326,6 +334,27 @@ async fn update_session(
             ));
         }
     };
+
+    // A plain model/effort switch leaves any live child process running with
+    // the OLD spawn config — the CLI was started with the old `--model` and
+    // the old account's credential env, so without this the session row (and
+    // the UI label) say one model while replies keep coming from — and
+    // billing keeps going to — another. Wind the child down after its
+    // current turn (immediately when idle); the next message spawns fresh
+    // with the new config. The handover path recycles its own child.
+    if handover_target.is_none()
+        && let Some(prior) = &prior
+    {
+        let model_changed = requested_model.is_some() && requested_model != prior.model;
+        let effort_changed = matches!(&requested_effort, Some(e) if *e != prior.effort);
+        if model_changed || effort_changed {
+            crate::provider::manager::shutdown_after_turn_via_registry(
+                &state.provider_registry,
+                &id,
+            )
+            .await;
+        }
+    }
 
     if let Some(target) = handover_target {
         let from = session.model.clone().unwrap_or_default();
@@ -643,8 +672,11 @@ async fn clear_session(
 /// `/clear` route (after its worker/repeating-task guards) and the
 /// session-control plugin's `clear_session`. No guards, no HTTP framing:
 /// cancels any in-flight run (waiting for it to wind down so a stale
-/// `agent-end` can't resurrect a cleared line), deletes events + todos,
-/// drops the attachments dir, and resets `conversation_id`.
+/// `agent-end` can't resurrect a cleared line), tears down any idle child
+/// process (which still holds the old conversation in memory — reusing it
+/// would resurrect the cleared context on the next turn), deletes events +
+/// todos, drops the attachments dir, resets `conversation_id`, and stamps
+/// `context_reset_ts` so the reported occupancy drops to 0.
 pub(crate) async fn clear_session_core(state: &AppState, id: &str) -> anyhow::Result<()> {
     if state.session_manager.is_running(id).await {
         if let Ok(event) = state
@@ -668,8 +700,12 @@ pub(crate) async fn clear_session_core(state: &AppState, id: &str) -> anyhow::Re
                 }),
             });
         }
-        state.session_manager.cancel_and_wait(id).await;
     }
+    // Outside the is_running guard: `is_running` is only true mid-turn, but
+    // an IDLE child survives between turns holding the full pre-clear
+    // conversation in-process. Kill it unconditionally so the next message
+    // spawns fresh. No-op when nothing is tracked.
+    state.session_manager.cancel_and_wait(id).await;
 
     state.db.delete_events_by_session(id).await?;
     state
@@ -702,6 +738,7 @@ pub(crate) async fn clear_session_core(state: &AppState, id: &str) -> anyhow::Re
             id,
             UpdateSession {
                 conversation_id: Some(None),
+                context_reset_ts: Some(Some(chrono::Utc::now().timestamp_millis())),
                 ..Default::default()
             },
         )

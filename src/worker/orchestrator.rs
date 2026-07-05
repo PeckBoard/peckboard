@@ -459,6 +459,9 @@ async fn spawn_worker_for_card(
                     created_at: now.clone(),
                     last_activity: now.clone(),
                     worker_step: Some(effective_step.clone()),
+                    // Owner: workers have no authed user in scope; inherit the
+                    // sole-user fallback (multi-user installs stay NULL).
+                    user_id: state.db.resolve_spawned_session_owner(None).await,
                     ..Default::default()
                 })
                 .await?;

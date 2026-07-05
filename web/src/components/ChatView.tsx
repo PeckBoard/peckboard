@@ -300,9 +300,15 @@ export default function ChatView({
   // modal below (hand over a summary / clear & switch / cancel).
   const [pendingModelSwitch, setPendingModelSwitch] = useState<string | null>(null)
   // Suppression floor for the interactive context prompt: the banner shows
-  // once contextTokens reaches this. Picking Continue bumps it by
+  // once contextTokens reaches `until`. Picking Continue bumps it by
   // CONTEXT_PROMPT_STEP so the choice returns as the window keeps filling.
-  const [ctxPromptDismissedUntil, setCtxPromptDismissedUntil] = useState(CONTEXT_PROMPT_THRESHOLD)
+  // `boundary` pins the dismissal to the conversation segment it was made in
+  // (the seq of the last handover event, null before any): a compaction or
+  // model switch starts a fresh window, so an old dismissal no longer applies.
+  const [ctxPromptDismissal, setCtxPromptDismissal] = useState<{
+    boundary: number | null
+    until: number
+  } | null>(null)
   const scrollRef = useRef<HTMLDivElement>(null)
   const userScrolledUp = useRef(false)
   /** Saved scroll-height immediately before a "Load older" fetch so
@@ -373,16 +379,21 @@ export default function ChatView({
   // cached snapshot. Without this the panel keeps rendering pre-clear
   // todos until the user navigates away — the load-time fetch above
   // only runs on sessionId change, not on a same-session wipe.
+  // Also zero the seeded context occupancy and re-arm the context prompt:
+  // the events list empties, so the badge would otherwise fall back to the
+  // stale pre-clear `sessionDetail.context_tokens`.
   useEffect(() => {
     const onCleared = (e: CustomEvent<{ sessionId: string }>) => {
-      if (e.detail?.sessionId === sessionId) setLoadedTodos([])
+      if (e.detail?.sessionId !== sessionId) return
+      setLoadedTodos([])
+      setSessionDetail((prev) => (prev ? { ...prev, context_tokens: 0 } : prev))
+      setCtxPromptDismissal(null)
     }
     window.addEventListener('peckboard:session-cleared', onCleared as EventListener)
     return () => {
       window.removeEventListener('peckboard:session-cleared', onCleared as EventListener)
     }
   }, [sessionId])
-
   // Reflect server-pushed session updates (the async model-switch handover
   // flip lands here): refresh the local detail so the model label and the
   // composer's disabled-during-handover state track the backend without a
@@ -520,12 +531,16 @@ export default function ChatView({
     return loadedTodos
   }, [events, loadedTodos, loading])
 
-  // Determine if agent is working (includes waiting for CLI to start after user sends)
   // Latest context-window occupancy — live from the turn's `agent-usage`
   // events, seeded by the session fetch. Drives the toolbar context badge.
+  // A `handover` event (compaction or model switch) restarts the
+  // conversation, so anything recorded before it — including the
+  // doc-generation turn's full-context usage — no longer describes the
+  // window: occupancy is 0 until the fresh conversation's first turn.
   const contextTokens = useMemo(() => {
     for (let i = events.length - 1; i >= 0; i--) {
       const ev = events[i]
+      if (ev.kind === 'handover') return 0
       if (ev.kind !== 'agent-usage') continue
       const ctx = (ev.data?.contextTokens as number) ?? 0
       if (ctx > 0) return ctx
@@ -533,6 +548,24 @@ export default function ChatView({
     return sessionDetail?.context_tokens ?? 0
   }, [events, sessionDetail])
 
+  // The context prompt's suppression floor only applies within the
+  // conversation segment it was dismissed in — the Compact/Clear buttons
+  // bump it past the pre-compact occupancy, which would otherwise mute the
+  // banner well past 150k in the fresh conversation.
+  const lastHandoverSeq = useMemo(() => {
+    for (let i = events.length - 1; i >= 0; i--) {
+      if (events[i].kind === 'handover') return events[i].seq
+    }
+    return null
+  }, [events])
+  const ctxPromptDismissedUntil =
+    ctxPromptDismissal && ctxPromptDismissal.boundary === lastHandoverSeq
+      ? ctxPromptDismissal.until
+      : CONTEXT_PROMPT_THRESHOLD
+  const dismissCtxPrompt = () =>
+    setCtxPromptDismissal({ boundary: lastHandoverSeq, until: contextTokens + CONTEXT_PROMPT_STEP })
+
+  // Determine if agent is working (includes waiting for CLI to start after user sends)
   const agentWorking = (() => {
     for (let i = events.length - 1; i >= 0; i--) {
       const kind = events[i].kind
@@ -856,7 +889,7 @@ export default function ChatView({
                 className="btn-primary btn-sm"
                 data-testid="chat-context-compact"
                 onClick={() => {
-                  setCtxPromptDismissedUntil(contextTokens + CONTEXT_PROMPT_STEP)
+                  dismissCtxPrompt()
                   handleCompact()
                 }}
               >
@@ -867,7 +900,7 @@ export default function ChatView({
                 className="btn-secondary btn-sm"
                 data-testid="chat-context-clear"
                 onClick={() => {
-                  setCtxPromptDismissedUntil(contextTokens + CONTEXT_PROMPT_STEP)
+                  dismissCtxPrompt()
                   handleClear()
                 }}
               >
@@ -877,7 +910,7 @@ export default function ChatView({
                 type="button"
                 className="btn-secondary btn-sm"
                 data-testid="chat-context-continue"
-                onClick={() => setCtxPromptDismissedUntil(contextTokens + CONTEXT_PROMPT_STEP)}
+                onClick={dismissCtxPrompt}
               >
                 Continue
               </button>

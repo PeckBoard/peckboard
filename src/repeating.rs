@@ -392,6 +392,7 @@ impl RepeatingTaskManager {
                 created_at: now.clone(),
                 last_activity: now.clone(),
                 repeating_task_id: Some(task.id.clone()),
+                user_id: db.resolve_spawned_session_owner(None).await,
                 ..Default::default()
             })
             .await?;

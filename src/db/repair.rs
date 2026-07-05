@@ -44,6 +44,9 @@ pub fn ensure_schema(conn: &mut SqliteConnection) -> anyhow::Result<()> {
     ensure_sessions_system_prompt_column(conn)?;
     ensure_sessions_handover_columns(conn)?;
     ensure_sessions_worker_step_column(conn)?;
+    ensure_sessions_user_id_column(conn)?;
+    ensure_sessions_context_reset_column(conn)?;
+    backfill_session_owners(conn)?;
     Ok(())
 }
 
@@ -463,6 +466,66 @@ fn ensure_sessions_worker_step_column(conn: &mut SqliteConnection) -> anyhow::Re
     if !existing.iter().any(|c| c == "worker_step") {
         tracing::info!("Repairing schema: adding sessions.worker_step");
         sql_query("ALTER TABLE sessions ADD COLUMN worker_step TEXT").execute(conn)?;
+    }
+    Ok(())
+}
+
+/// Heal DBs that predate `1783300000_session_user_id`. Adds the nullable,
+/// FK-less `sessions.user_id` owner column (mirrors the migration) for any DB
+/// that missed it. Backfill is handled separately by `backfill_session_owners`
+/// so it also runs on already-migrated DBs.
+fn ensure_sessions_user_id_column(conn: &mut SqliteConnection) -> anyhow::Result<()> {
+    let rows: Vec<PragmaColumn> = sql_query("PRAGMA table_info(sessions)").load(conn)?;
+    let existing: Vec<String> = rows.into_iter().map(|r| r.name).collect();
+    if existing.is_empty() {
+        return Ok(());
+    }
+    if !existing.iter().any(|c| c == "user_id") {
+        tracing::info!("Repairing schema: adding sessions.user_id");
+        sql_query("ALTER TABLE sessions ADD COLUMN user_id TEXT").execute(conn)?;
+    }
+    Ok(())
+}
+
+/// Heal DBs that predate `1783500000_session_context_reset`, whose single
+/// statement is a non-idempotent `ALTER TABLE sessions ADD COLUMN`.
+/// Additive + nullable, so no backfill.
+fn ensure_sessions_context_reset_column(conn: &mut SqliteConnection) -> anyhow::Result<()> {
+    let rows: Vec<PragmaColumn> = sql_query("PRAGMA table_info(sessions)").load(conn)?;
+    let existing: Vec<String> = rows.into_iter().map(|r| r.name).collect();
+    if existing.is_empty() {
+        return Ok(());
+    }
+    if !existing.iter().any(|c| c == "context_reset_ts") {
+        tracing::info!("Repairing schema: adding sessions.context_reset_ts");
+        sql_query("ALTER TABLE sessions ADD COLUMN context_reset_ts BIGINT").execute(conn)?;
+    }
+    Ok(())
+}
+/// Backfill session ownership for single-operator installs: when the DB holds
+/// exactly one user, every still-unowned session becomes theirs. Multi-user
+/// installs are left untouched (ambiguous -- the operator resolves them). No-op
+/// once every row is owned; idempotent, safe on every boot. Mirrors the
+/// `1783300000_session_user_id` migration so it also heals rows that predate it.
+fn backfill_session_owners(conn: &mut SqliteConnection) -> anyhow::Result<()> {
+    if !table_exists(conn, "users")? {
+        return Ok(());
+    }
+    let cols: Vec<PragmaColumn> = sql_query("PRAGMA table_info(sessions)").load(conn)?;
+    if !cols.iter().any(|c| c.name == "user_id") {
+        return Ok(());
+    }
+    let user_count: i64 = sql_query("SELECT COUNT(*) AS n FROM users")
+        .get_result::<CountRow>(conn)?
+        .n;
+    if user_count != 1 {
+        return Ok(());
+    }
+    let updated =
+        sql_query("UPDATE sessions SET user_id = (SELECT id FROM users) WHERE user_id IS NULL")
+            .execute(conn)?;
+    if updated > 0 {
+        tracing::info!("Backfilled {updated} session owner(s) to the sole user");
     }
     Ok(())
 }
@@ -1426,5 +1489,69 @@ mod tests {
 
         // Second call must be a no-op (healthy-path early exit).
         ensure_schema(&mut conn).unwrap();
+    }
+
+    fn count(conn: &mut SqliteConnection, where_sql: &str) -> i64 {
+        sql_query(format!(
+            "SELECT COUNT(*) AS n FROM sessions WHERE {where_sql}"
+        ))
+        .get_result::<CountRow>(conn)
+        .unwrap()
+        .n
+    }
+
+    #[test]
+    fn ensure_sessions_user_id_column_added_when_missing() {
+        let mut conn = SqliteConnection::establish(":memory:").unwrap();
+        sql_query("CREATE TABLE sessions (id TEXT PRIMARY KEY NOT NULL)")
+            .execute(&mut conn)
+            .unwrap();
+        ensure_sessions_user_id_column(&mut conn).unwrap();
+        let cols: Vec<PragmaColumn> = sql_query("PRAGMA table_info(sessions)")
+            .load(&mut conn)
+            .unwrap();
+        assert!(cols.iter().any(|c| c.name == "user_id"));
+        // Idempotent second run.
+        ensure_sessions_user_id_column(&mut conn).unwrap();
+    }
+
+    #[test]
+    fn backfill_owns_sessions_for_single_user() {
+        let mut conn = SqliteConnection::establish(":memory:").unwrap();
+        sql_query("CREATE TABLE users (id TEXT PRIMARY KEY NOT NULL)")
+            .execute(&mut conn)
+            .unwrap();
+        sql_query("CREATE TABLE sessions (id TEXT PRIMARY KEY NOT NULL, user_id TEXT)")
+            .execute(&mut conn)
+            .unwrap();
+        sql_query("INSERT INTO users (id) VALUES ('u1')")
+            .execute(&mut conn)
+            .unwrap();
+        sql_query("INSERT INTO sessions (id, user_id) VALUES ('s1', NULL), ('s2', NULL)")
+            .execute(&mut conn)
+            .unwrap();
+        backfill_session_owners(&mut conn).unwrap();
+        assert_eq!(count(&mut conn, "user_id = 'u1'"), 2);
+        assert_eq!(count(&mut conn, "user_id IS NULL"), 0);
+    }
+
+    #[test]
+    fn backfill_leaves_null_for_multiple_users() {
+        let mut conn = SqliteConnection::establish(":memory:").unwrap();
+        sql_query("CREATE TABLE users (id TEXT PRIMARY KEY NOT NULL)")
+            .execute(&mut conn)
+            .unwrap();
+        sql_query("CREATE TABLE sessions (id TEXT PRIMARY KEY NOT NULL, user_id TEXT)")
+            .execute(&mut conn)
+            .unwrap();
+        sql_query("INSERT INTO users (id) VALUES ('u1'), ('u2')")
+            .execute(&mut conn)
+            .unwrap();
+        sql_query("INSERT INTO sessions (id, user_id) VALUES ('s1', NULL)")
+            .execute(&mut conn)
+            .unwrap();
+        backfill_session_owners(&mut conn).unwrap();
+        // Ambiguous ownership -> left NULL per the documented policy.
+        assert_eq!(count(&mut conn, "user_id IS NULL"), 1);
     }
 }

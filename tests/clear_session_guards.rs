@@ -326,3 +326,61 @@ async fn clear_on_unknown_session_returns_404() {
     let status = clear_session(state.clone(), &token, "ghost").await;
     assert_eq!(status, StatusCode::NOT_FOUND);
 }
+
+#[tokio::test]
+async fn clear_resets_reported_context_occupancy() {
+    // Usage rows are billing history and survive a clear, but the occupancy
+    // they snapshot belongs to the wiped conversation — after a clear the
+    // session must report 0 context, not the pre-clear peak.
+    let (state, token) = build_state().await;
+    seed(&state).await;
+
+    state
+        .db
+        .record_usage_event(peckboard::db::models::NewUsageEvent {
+            id: "usage-1".into(),
+            session_id: "plain".into(),
+            ts: 1,
+            context_tokens: 160_000,
+            total_tokens: 160_000,
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    assert_eq!(
+        state.db.latest_context_tokens("plain").await.unwrap(),
+        Some(160_000)
+    );
+
+    let status = clear_session(state.clone(), &token, "plain").await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+
+    // The usage row survives (billing), but occupancy reads fresh.
+    assert_eq!(
+        state.db.latest_context_tokens("plain").await.unwrap(),
+        None,
+        "cleared session must not report pre-clear occupancy",
+    );
+
+    // A turn recorded after the clear is reported again.
+    let s = state.db.get_session("plain").await.unwrap().unwrap();
+    let reset = s
+        .context_reset_ts
+        .expect("clear must stamp context_reset_ts");
+    state
+        .db
+        .record_usage_event(peckboard::db::models::NewUsageEvent {
+            id: "usage-2".into(),
+            session_id: "plain".into(),
+            ts: reset + 1,
+            context_tokens: 9_000,
+            total_tokens: 9_000,
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    assert_eq!(
+        state.db.latest_context_tokens("plain").await.unwrap(),
+        Some(9_000)
+    );
+}

@@ -134,6 +134,13 @@ pub trait LiveHost: Send + Sync {
     /// Clear `session_id`: cancel any run, wipe its events / todos /
     /// attachments, and reset its conversation. Fire-and-forget; no-op default.
     fn clear_session(&self, _session_id: String) {}
+    /// Gracefully recycle the agent process for `session_id`: wind the child
+    /// down after its current turn (immediately when idle) so the next
+    /// message spawns with the session's current config. Used after a
+    /// plugin-driven model/effort change — a live child keeps its spawn-time
+    /// model and account credentials, so reusing it would keep answering (and
+    /// billing) as the old model/account. Fire-and-forget; no-op default.
+    fn recycle_agent_after_turn(&self, _session_id: String) {}
     /// Emit a single-question user prompt to `session_id` (same UI surface as
     /// the worker `ask_user` MCP tool: a "question" event + broadcast). `token`
     /// is an opaque correlation id stored on the question so the plugin can
@@ -773,6 +780,10 @@ pub(crate) fn create_session_impl(db: &Db, input: &str, inv: &InvocationContext)
         handover_to_model: None,
         pending_handover_doc: None,
         worker_step: None,
+        // Inherit the caller session's owner (experts/plugin-spawned sessions);
+        // falls back to the sole user, else NULL on multi-user installs.
+        user_id: db.resolve_spawned_session_owner_blocking(inv.session_id.as_deref()),
+        context_reset_ts: None,
     };
     match db.create_session_blocking(new) {
         Ok(session) => serde_json::json!({ "session": session }).to_string(),
@@ -805,15 +816,26 @@ pub(crate) fn update_session_impl(
     plugin_id: &str,
     input: &str,
     inv: &InvocationContext,
+    live: Option<Arc<dyn LiveHost>>,
 ) -> String {
     let req: UpdateSessionRequest = match serde_json::from_str(input) {
         Ok(r) => r,
         Err(e) => return error_json(format!("invalid request: {e}")),
     };
-    // Authorize against the *current* row before writing.
-    if let Err(e) = fetch_owned_visible_session(db, plugin_id, req.session_id.trim(), inv) {
-        return error_json(e);
-    }
+    // Authorize against the *current* row before writing; keep the row as
+    // the pre-patch snapshot for the model/effort change detection below.
+    let prior = match fetch_owned_visible_session(db, plugin_id, req.session_id.trim(), inv) {
+        Ok(s) => s,
+        Err(e) => return error_json(e),
+    };
+    // A model/effort change must recycle any live child process — it was
+    // spawned with the old `--model` and the old account's credential env,
+    // so reusing it would keep answering (and billing) as the old
+    // model/account. This path has no handover machinery (every change is a
+    // direct write), so recycle on any actual change; mirrors the plain-
+    // switch handling in the `PATCH /api/sessions/:id` route.
+    let model_changed = matches!(&req.model, Some(m) if *m != prior.model);
+    let effort_changed = matches!(&req.effort, Some(e) if *e != prior.effort);
     let update = crate::db::models::UpdateSession {
         name: req.name,
         model: req.model,
@@ -832,9 +854,17 @@ pub(crate) fn update_session_impl(
         handover_to_model: None,
         pending_handover_doc: None,
         worker_step: None,
+        context_reset_ts: None,
     };
     match db.update_session_blocking(req.session_id.trim(), update) {
-        Ok(Some(session)) => serde_json::json!({ "session": session }).to_string(),
+        Ok(Some(session)) => {
+            if (model_changed || effort_changed)
+                && let Some(live) = live
+            {
+                live.recycle_agent_after_turn(req.session_id.trim().to_string());
+            }
+            serde_json::json!({ "session": session }).to_string()
+        }
         Ok(None) => error_json("session not found"),
         Err(e) => error_json(e),
     }
@@ -2266,10 +2296,10 @@ host_fn!(peckboard_list_sessions(user_data: HostState; input: String) -> String 
 });
 
 host_fn!(peckboard_update_session(user_data: HostState; input: String) -> String {
-    let (db, plugin_id, ok, inv) = state_permission_and_invocation(&user_data, "session_write")?;
+    let (db, plugin_id, ok, inv, live) = state_permission_invocation_and_live(&user_data, "session_write")?;
     if !ok { return Ok(error_json("plugin lacks the 'session_write' permission")); }
     let Some(inv) = inv else { return Ok(error_json("no caller context; peckboard_update_session is only callable during a tool invocation")); };
-    Ok(update_session_impl(&db, &plugin_id, &input, &inv))
+    Ok(update_session_impl(&db, &plugin_id, &input, &inv, live))
 });
 
 host_fn!(peckboard_append_event(user_data: HostState; input: String) -> String {
@@ -2808,6 +2838,63 @@ mod tests {
         assert!(bad.contains("invalid base64"), "{bad}");
     }
 
+    #[tokio::test]
+    async fn create_session_impl_inherits_caller_owner() {
+        let db = Db::in_memory().unwrap();
+        let ts = chrono::Utc::now().to_rfc3339();
+        db.create_user(crate::db::models::NewUser {
+            id: "u1".into(),
+            username: "u1".into(),
+            email: None,
+            password_hash: "h".into(),
+            role: "user".into(),
+            created_at: ts.clone(),
+            updated_at: ts.clone(),
+        })
+        .await
+        .unwrap();
+        db.create_folder(NewFolder {
+            id: "f1".into(),
+            name: "f1".into(),
+            path: "/tmp/f1".into(),
+            created_at: ts.clone(),
+        })
+        .await
+        .unwrap();
+        // Caller (e.g. an agent spinning up an expert) owned by u1.
+        db.create_session(crate::db::models::NewSession {
+            id: "caller".into(),
+            name: "caller".into(),
+            folder_id: "f1".into(),
+            created_at: ts.clone(),
+            last_activity: ts.clone(),
+            user_id: Some("u1".into()),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+
+        let caller = InvocationContext {
+            session_id: Some("caller".into()),
+            project_id: None,
+            folder_id: Some("f1".into()),
+            authority: false,
+        };
+        let out = create_session_impl(
+            &db,
+            r#"{"name":"expert: x","is_expert":true,"expert_kind":"pm"}"#,
+            &caller,
+        );
+        let sid = serde_json::from_str::<serde_json::Value>(&out).unwrap()["session"]["id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        let spawned = db.get_session(&sid).await.unwrap().unwrap();
+        // Plugin/expert-spawned session inherits the caller's owner.
+        assert_eq!(spawned.user_id.as_deref(), Some("u1"));
+        assert!(spawned.is_expert);
+    }
+
     fn inv(project: Option<&str>, folder: Option<&str>) -> InvocationContext {
         InvocationContext {
             session_id: None,
@@ -3007,6 +3094,7 @@ mod tests {
             pid,
             &format!(r#"{{"session_id":"{sid}","name":"expert: auth+ws"}}"#),
             &caller,
+            None,
         );
         assert!(upd.contains("auth+ws"), "update: {upd}");
 
@@ -3360,6 +3448,87 @@ mod tests {
         }
     }
 
+    /// A plugin-driven model/effort change must recycle the session's live
+    /// agent process — it keeps its spawn-time model and account credentials,
+    /// so reusing it would answer (and bill) as the old model/account.
+    /// Unrelated updates and no-op writes must not recycle.
+    #[tokio::test]
+    async fn update_session_model_change_recycles_agent() {
+        let db = setup().await; // folder f1 / project p1
+        let pid = "experts";
+        let caller = inv(Some("p1"), Some("f1"));
+
+        let sid = serde_json::from_str::<serde_json::Value>(&create_session_impl(
+            &db,
+            r#"{"name":"expert: m"}"#,
+            &caller,
+        ))
+        .unwrap()["session"]["id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        session_meta_set_impl(
+            &db,
+            pid,
+            &format!(r#"{{"session_id":"{sid}","data":{{}}}}"#),
+        );
+
+        let rec = Arc::new(RecordingLive::default());
+
+        // Name-only update: no recycle.
+        let r = update_session_impl(
+            &db,
+            pid,
+            &format!(r#"{{"session_id":"{sid}","name":"renamed"}}"#),
+            &caller,
+            Some(rec.clone()),
+        );
+        assert!(r.contains("renamed"), "update: {r}");
+        assert!(
+            rec.calls.lock().unwrap().is_empty(),
+            "name-only update must not recycle"
+        );
+
+        // Model change: the live child is recycled.
+        let r = update_session_impl(
+            &db,
+            pid,
+            &format!(r#"{{"session_id":"{sid}","model":"claude:claude-fable-5"}}"#),
+            &caller,
+            Some(rec.clone()),
+        );
+        assert!(r.contains("claude-fable-5"), "update: {r}");
+        assert_eq!(
+            rec.calls.lock().unwrap().as_slice(),
+            [format!("recycle:{sid}")]
+        );
+
+        // Writing the same model again is not a change: no second recycle.
+        let r = update_session_impl(
+            &db,
+            pid,
+            &format!(r#"{{"session_id":"{sid}","model":"claude:claude-fable-5"}}"#),
+            &caller,
+            Some(rec.clone()),
+        );
+        assert!(r.contains("session"), "update: {r}");
+        assert_eq!(
+            rec.calls.lock().unwrap().len(),
+            1,
+            "unchanged model must not recycle"
+        );
+
+        // Effort change: recycles too (effort rides the spawn config).
+        let r = update_session_impl(
+            &db,
+            pid,
+            &format!(r#"{{"session_id":"{sid}","effort":"high"}}"#),
+            &caller,
+            Some(rec.clone()),
+        );
+        assert!(r.contains("high"), "update: {r}");
+        assert_eq!(rec.calls.lock().unwrap().len(), 2);
+    }
     /// Records the live calls it receives so tests can assert dispatch only
     /// happens after authorization.
     #[derive(Default)]
@@ -3384,6 +3553,12 @@ mod tests {
                 .lock()
                 .unwrap()
                 .push(format!("ask:{session_id}:{token}"));
+        }
+        fn recycle_agent_after_turn(&self, session_id: String) {
+            self.calls
+                .lock()
+                .unwrap()
+                .push(format!("recycle:{session_id}"));
         }
     }
 

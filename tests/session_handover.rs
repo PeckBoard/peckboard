@@ -359,10 +359,16 @@ async fn handover_runs_to_completion() {
 
 /// Record a usage row so `latest_context_tokens` reports `context` occupancy.
 async fn seed_context(db: &Db, id: &str, session_id: &str, context: i64) {
+    seed_context_at(db, id, session_id, context, 1).await;
+}
+
+/// Like [`seed_context`] but with an explicit `ts`, for rows that must land
+/// after a `context_reset_ts` stamp.
+async fn seed_context_at(db: &Db, id: &str, session_id: &str, context: i64, ts: i64) {
     db.record_usage_event(NewUsageEvent {
         id: id.into(),
         session_id: session_id.into(),
-        ts: 1,
+        ts,
         context_tokens: context,
         total_tokens: context,
         model: Some("mock:echo".into()),
@@ -472,12 +478,62 @@ async fn auto_compact_dispatches_for_worker_over_threshold() {
     assert_eq!(s.conversation_id, None);
     assert!(s.pending_handover_doc.is_some());
 
-    // Occupancy still reads over-threshold (the doc turn's usage isn't
-    // recorded here), but the pending doc must block a re-compaction.
+    // Occupancy reads 0 (finalize stamps `context_reset_ts`), and the
+    // pending doc must block a re-compaction regardless.
     let again = peckboard::handover::maybe_auto_compact(&state, "w1")
         .await
         .unwrap();
     assert!(!again, "pending doc must block a second compaction");
+}
+
+/// Finalizing a compaction resets the reported context occupancy: the
+/// pre-compaction rows (and the doc turn's own full-context row) belong to
+/// the discarded conversation, so the badge/threshold must read 0 until the
+/// fresh conversation's first turn records usage.
+#[tokio::test]
+async fn finalize_resets_context_occupancy() {
+    let (state, _token) = build_state("mock:echo").await;
+    seed_worker(&state).await;
+    seed_context(&state.db, "u1", "w1", 210_000).await;
+    assert_eq!(
+        state.db.latest_context_tokens("w1").await.unwrap(),
+        Some(210_000)
+    );
+
+    let mut completion_rx = state
+        .session_manager
+        .take_completion_rx()
+        .await
+        .expect("completion rx available");
+    assert!(
+        peckboard::handover::maybe_auto_compact(&state, "w1")
+            .await
+            .unwrap()
+    );
+    tokio::time::timeout(std::time::Duration::from_secs(5), completion_rx.recv())
+        .await
+        .expect("doc turn must complete")
+        .expect("channel open");
+    peckboard::handover::finalize_handover(&state, "w1")
+        .await
+        .unwrap();
+
+    assert_eq!(
+        state.db.latest_context_tokens("w1").await.unwrap(),
+        None,
+        "post-compaction occupancy must not report the discarded conversation",
+    );
+
+    // A turn recorded after the reset is reported again.
+    let s = state.db.get_session("w1").await.unwrap().unwrap();
+    let reset = s
+        .context_reset_ts
+        .expect("finalize must stamp context_reset_ts");
+    seed_context_at(&state.db, "u2", "w1", 12_000, reset + 1).await;
+    assert_eq!(
+        state.db.latest_context_tokens("w1").await.unwrap(),
+        Some(12_000)
+    );
 }
 
 /// Worker fixture: project p1 / card c1 on step "implement", worker session

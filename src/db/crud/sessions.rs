@@ -16,6 +16,61 @@ impl Db {
         .await
     }
 
+    /// Resolve the owner (`user_id`) for a session spawned internally, when no
+    /// authenticated user is directly in scope. Order:
+    /// 1. Inherit the owner of `parent_session_id` when that session has one.
+    /// 2. Else, if the install holds exactly one user, that user (the same rule
+    ///    the ownership backfill applies to legacy rows).
+    /// 3. Else `None` -- ambiguous multi-user install; ownership left unknown
+    ///    and treated as non-matching by the same-user send_message gate.
+    pub async fn resolve_spawned_session_owner(
+        &self,
+        parent_session_id: Option<&str>,
+    ) -> Option<String> {
+        if let Some(pid) = parent_session_id
+            && let Ok(Some(sess)) = self.get_session(pid).await
+            && sess.user_id.is_some()
+        {
+            return sess.user_id;
+        }
+        self.sole_user_id().await
+    }
+
+    /// The single user's id when the install has exactly one user, else `None`.
+    pub async fn sole_user_id(&self) -> Option<String> {
+        self.with_conn(move |conn| {
+            let ids: Vec<String> = users::table.select(users::id).limit(2).load(conn)?;
+            Ok::<_, anyhow::Error>(ids)
+        })
+        .await
+        .ok()
+        .and_then(|ids| (ids.len() == 1).then(|| ids.into_iter().next().unwrap()))
+    }
+
+    /// Synchronous twin of [`Db::resolve_spawned_session_owner`], for the
+    /// blocking plugin-host call path.
+    pub(crate) fn resolve_spawned_session_owner_blocking(
+        &self,
+        parent_session_id: Option<&str>,
+    ) -> Option<String> {
+        self.with_conn_blocking(move |conn| {
+            if let Some(pid) = parent_session_id {
+                let owner: Option<Option<String>> = sessions::table
+                    .find(pid)
+                    .select(sessions::user_id)
+                    .first::<Option<String>>(conn)
+                    .optional()?;
+                if let Some(Some(uid)) = owner {
+                    return Ok(Some(uid));
+                }
+            }
+            let ids: Vec<String> = users::table.select(users::id).limit(2).load(conn)?;
+            Ok::<_, anyhow::Error>((ids.len() == 1).then(|| ids.into_iter().next().unwrap()))
+        })
+        .ok()
+        .flatten()
+    }
+
     pub async fn get_session(&self, id: &str) -> anyhow::Result<Option<Session>> {
         let id = id.to_string();
         self.with_conn(move |conn| {

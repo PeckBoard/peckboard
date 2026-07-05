@@ -64,14 +64,31 @@ const ROLLUP_AGG_COLS: &str = "\
 
 impl Db {
     /// Latest recorded context-window occupancy for a session: the newest
+    /// Latest recorded context-window occupancy for a session: the newest
     /// usage row with a positive `context_tokens` (subagent/utility rows
-    /// carry 0 and are skipped). Drives the auto-compaction threshold check.
+    /// carry 0 and are skipped). Rows at or before the session's
+    /// `context_reset_ts` are ignored — usage rows are billing history and
+    /// survive a clear/compaction, but the occupancy they snapshot belongs
+    /// to the discarded conversation. Drives the auto-compaction threshold
+    /// check and seeds the chat/card context badges.
     pub async fn latest_context_tokens(&self, session_id: &str) -> anyhow::Result<Option<i64>> {
+        use crate::db::schema::sessions;
         let session_id = session_id.to_string();
         self.with_conn(move |conn| {
-            let v = usage_events::table
+            let reset_ts: Option<i64> = sessions::table
+                .find(&session_id)
+                .select(sessions::context_reset_ts)
+                .first::<Option<i64>>(conn)
+                .optional()?
+                .flatten();
+            let mut query = usage_events::table
                 .filter(usage_events::session_id.eq(&session_id))
                 .filter(usage_events::context_tokens.gt(0))
+                .into_boxed();
+            if let Some(reset) = reset_ts {
+                query = query.filter(usage_events::ts.gt(reset));
+            }
+            let v = query
                 .order((usage_events::ts.desc(), usage_events::turn_seq.desc()))
                 .select(usage_events::context_tokens)
                 .first::<i64>(conn)
@@ -80,8 +97,6 @@ impl Db {
         })
         .await
     }
-    /// Insert a per-turn usage row. If `new.turn_seq` is `None`, the next
-    /// per-session turn number is assigned (max + 1), mirroring how
     /// `append_event` assigns event seqs.
     pub async fn record_usage_event(&self, mut new: NewUsageEvent) -> anyhow::Result<UsageEvent> {
         self.with_conn(move |conn| {

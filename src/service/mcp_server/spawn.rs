@@ -248,6 +248,22 @@ impl crate::plugin::host::LiveHost for AppLiveHost {
             }
         });
     }
+
+    fn recycle_agent_after_turn(&self, session_id: String) {
+        let Some(state) = self.state.upgrade() else {
+            return;
+        };
+        self.rt.spawn(async move {
+            // Graceful: the stream loop exits after the current turn
+            // (immediately when idle); the next message spawns a fresh child
+            // with the session's current model/account/effort.
+            crate::provider::manager::shutdown_after_turn_via_registry(
+                &state.provider_registry,
+                &session_id,
+            )
+            .await;
+        });
+    }
 }
 
 /// Append an event to `session_id` and broadcast it to live subscribers, in

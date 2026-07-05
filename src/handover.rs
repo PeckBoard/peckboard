@@ -472,7 +472,11 @@ pub async fn finalize_handover(state: &Arc<AppState>, session_id: &str) -> anyho
 
     // Flip to the new model, clear the in-flight flag, stash the doc for
     // injection. Also drop any stale conversation_id — the incoming
-    // provider/account can't resume the outgoing one's conversation.
+    // provider/account can't resume the outgoing one's conversation — and
+    // stamp `context_reset_ts`: the doc-generation turn just recorded a
+    // full-context usage row, and without the stamp the badge (and the
+    // worker auto-compaction check) would keep reporting the discarded
+    // conversation's occupancy until the next turn lands.
     let updated = state
         .db
         .update_session(
@@ -482,6 +486,7 @@ pub async fn finalize_handover(state: &Arc<AppState>, session_id: &str) -> anyho
                 conversation_id: Some(None),
                 handover_to_model: Some(None),
                 pending_handover_doc: Some(Some(doc)),
+                context_reset_ts: Some(Some(chrono::Utc::now().timestamp_millis())),
                 ..Default::default()
             },
         )
