@@ -76,18 +76,27 @@ const HAIKU: ModelRates = ModelRates {
 /// conservative rather than misleadingly low.
 const DEFAULT_RATES: ModelRates = OPUS;
 
-/// Rates for a model id. Accepts ids with or without the `claude:` provider
-/// prefix (usage rows store either form — see `usage_events.model`).
-pub fn rates_for(model: Option<&str>) -> ModelRates {
-    let Some(model) = model else {
-        return DEFAULT_RATES;
-    };
+/// Exact published rates for a known Claude model id, or `None` for a model
+/// we carry no price for. Accepts ids with or without the `claude:` provider
+/// prefix and with or without an `@account` suffix.
+pub fn known_rates_for(model: &str) -> Option<ModelRates> {
+    let (model, _acct) = crate::provider::registry::split_model_account(model);
     let id = model.strip_prefix("claude:").unwrap_or(model);
     match id {
-        "claude-opus-4-8" | "claude-opus-4-7" | "claude-opus-4-6" | "claude-fable-5" => OPUS,
-        "claude-sonnet-4-6" => SONNET,
-        "claude-haiku-4-5" => HAIKU,
-        _ => DEFAULT_RATES,
+        "claude-opus-4-8" | "claude-opus-4-7" | "claude-opus-4-6" | "claude-fable-5" => Some(OPUS),
+        "claude-sonnet-4-6" => Some(SONNET),
+        "claude-haiku-4-5" => Some(HAIKU),
+        _ => None,
+    }
+}
+
+/// Rates for a model id. Accepts ids with or without the `claude:` provider
+/// prefix (usage rows store either form — see `usage_events.model`). Unknown
+/// models fall back to the conservative default tier.
+pub fn rates_for(model: Option<&str>) -> ModelRates {
+    match model {
+        Some(m) => known_rates_for(m).unwrap_or(DEFAULT_RATES),
+        None => DEFAULT_RATES,
     }
 }
 

@@ -15,7 +15,7 @@ use crate::provider::stream::SpawnConfig;
 use crate::ws::broadcaster::{Broadcaster, WsEvent};
 
 /// Default provider id used when a model string has no `provider:` prefix.
-const DEFAULT_PROVIDER: &str = "claude";
+pub const DEFAULT_PROVIDER: &str = "claude";
 
 /// Outcome of `SessionManager::send_or_queue`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

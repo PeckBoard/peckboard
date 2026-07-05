@@ -361,8 +361,30 @@ pub(super) async fn append_event(
         // CLI buffers the user envelope and consumes it after the
         // current `result`. Spawned so the HTTP response returns
         // immediately.
+        // A plugin question may redirect the answer to another session: the
+        // pre-igniter's clarifying question renders on the chat session, but
+        // the answer must feed its temp research session — resuming the chat
+        // agent with a bare answer would start the very turn the plugin is
+        // still preparing. The target is read from the question event core
+        // itself persisted (host-side), never from the client request.
+        let redirect_target = if question_id.is_empty() {
+            None
+        } else {
+            state
+                .db
+                .get_event(question_id)
+                .await
+                .ok()
+                .flatten()
+                .and_then(|q| serde_json::from_str::<serde_json::Value>(&q.data).ok())
+                .and_then(|d| {
+                    d.get("redirectSessionId")
+                        .and_then(|v| v.as_str())
+                        .map(|s| s.to_string())
+                })
+        };
         let state_clone = state.clone();
-        let id_clone = id.clone();
+        let id_clone = redirect_target.unwrap_or_else(|| id.clone());
         tokio::spawn(async move {
             // Append the user event up front so the conversation log
             // reflects the typed order regardless of mid-turn vs. idle.

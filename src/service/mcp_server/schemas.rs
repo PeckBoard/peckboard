@@ -1226,7 +1226,7 @@ pub(super) fn tool_definitions() -> Vec<McpToolDef> {
         },
         McpToolDef {
             name: "run_command".into(),
-            description: "Run an arbitrary command in the project folder, gated by USER APPROVAL. Allowlisted or 'always'-approved programs run immediately; otherwise returns status 'awaiting_approval' while the user picks Approve once / Approve always / Deny — their answer resumes the session, then re-call run_command with the SAME command. Args are argv (no shell); cwd = project folder; output capped and timed out.".into(),
+            description: "Run an arbitrary command in the project folder. Worker sessions run commands immediately, no approval needed (exec is always scoped to the project folder). Chat sessions are gated by USER APPROVAL: allowlisted or 'always'-approved programs run immediately; otherwise returns status 'awaiting_approval' while the user picks Approve once / Approve always / Deny \u{2014} their answer resumes the session, then re-call run_command with the SAME command. Args are argv (no shell); cwd = project folder; output capped and timed out.".into(),
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {

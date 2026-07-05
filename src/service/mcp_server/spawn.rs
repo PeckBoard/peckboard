@@ -145,7 +145,14 @@ impl crate::plugin::host::LiveHost for AppLiveHost {
         });
     }
 
-    fn ask_user(&self, session_id: String, question: String, options: Vec<String>, token: String) {
+    fn ask_user(
+        &self,
+        session_id: String,
+        question: String,
+        options: Vec<String>,
+        token: String,
+        redirect_session_id: Option<String>,
+    ) {
         let Some(state) = self.state.upgrade() else {
             return;
         };
@@ -157,6 +164,7 @@ impl crate::plugin::host::LiveHost for AppLiveHost {
                 &question,
                 &options,
                 &token,
+                redirect_session_id.as_deref(),
             )
             .await
             {
@@ -192,6 +200,22 @@ impl crate::plugin::host::LiveHost for AppLiveHost {
         });
     }
 
+    fn deliver_user_message(&self, session_id: String, text: String, data: serde_json::Value) {
+        let Some(state) = self.state.upgrade() else {
+            return;
+        };
+        self.rt.spawn(async move {
+            // Persist + broadcast the user event first so the transcript
+            // shows the message before any agent output streams in.
+            broadcast_session_event(&state, &session_id, "user", data).await;
+            if let Err(e) = AppExpertDispatcher::new(state)
+                .resume_session(&session_id, &text)
+                .await
+            {
+                tracing::warn!("plugin deliver_user_message for {session_id} failed: {e}");
+            }
+        });
+    }
     fn interrupt_session(&self, session_id: String) {
         let Some(state) = self.state.upgrade() else {
             return;
@@ -297,6 +321,9 @@ async fn broadcast_session_event(
 /// emitting plugin can later resolve the user's answer via
 /// `peckboard_get_answer`. Card/project are looked up from the session for the
 /// worker-question broadcast.
+/// `redirect_session_id`, when set, is persisted on the question event
+/// (`redirectSessionId`) so the answer route resumes that session with the
+/// user's answer instead of the asker.
 pub(crate) async fn emit_plugin_question(
     db: &crate::db::Db,
     broadcaster: &crate::ws::broadcaster::Broadcaster,
@@ -304,6 +331,7 @@ pub(crate) async fn emit_plugin_question(
     question: &str,
     options: &[String],
     token: &str,
+    redirect_session_id: Option<&str>,
 ) -> anyhow::Result<()> {
     use crate::ws::broadcaster::WsEvent;
     use serde_json::{Value, json};
@@ -339,6 +367,9 @@ pub(crate) async fn emit_plugin_question(
     });
     if let Some(ref pid) = project_id {
         event_data["projectId"] = Value::String(pid.clone());
+    }
+    if let Some(rid) = redirect_session_id {
+        event_data["redirectSessionId"] = Value::String(rid.to_string());
     }
 
     let event = db

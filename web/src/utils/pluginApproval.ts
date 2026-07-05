@@ -101,6 +101,10 @@ export const HOOK_META: Record<string, HookMeta> = {
     title: 'Resolve references',
     description: 'Resolves @-references in session messages',
   },
+  'session.message.before': {
+    title: 'Pre-process chat messages',
+    description: 'Intercepts or rewrites chat messages before they reach the agent',
+  },
   'mcp.tool.call.before': {
     title: 'Gate MCP tool calls',
     description: 'Inspects or vetoes MCP tool calls',

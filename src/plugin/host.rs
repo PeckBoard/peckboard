@@ -125,6 +125,14 @@ pub trait LiveHost: Send + Sync {
     /// resume it, like [`Self::resume_session`] but with attachments on the
     /// user message. No-op default for impls that don't support attachments.
     fn send_message(&self, _session_id: String, _text: String, _attachments: Vec<LiveAttachment>) {}
+    /// Persist a `user` event carrying `data` on `session_id`, broadcast it
+    /// (same frame the session routes emit), then deliver `text` to the
+    /// agent and resume — spawn if idle, queue/inject if running. The
+    /// transcript-writing twin of [`Self::resume_session`]: the caller keeps
+    /// the persisted `data` and the delivered `text` consistent (e.g. the
+    /// pre-igniter stores `{text, pre_ignite: {original}}` and delivers
+    /// `text`). No-op default.
+    fn deliver_user_message(&self, _session_id: String, _text: String, _data: serde_json::Value) {}
     /// Interrupt the in-flight turn on `session_id` (cancel the current run
     /// without deleting the session). Fire-and-forget; no-op default.
     fn interrupt_session(&self, _session_id: String) {}
@@ -144,15 +152,19 @@ pub trait LiveHost: Send + Sync {
     /// Emit a single-question user prompt to `session_id` (same UI surface as
     /// the worker `ask_user` MCP tool: a "question" event + broadcast). `token`
     /// is an opaque correlation id stored on the question so the plugin can
-    /// later resolve the answer (see `get_answer_impl`). Fire-and-forget; a
-    /// no-op in headless/test contexts. The caller has already authorized the
-    /// target session (it is the caller's own, from the trusted context).
+    /// later resolve the answer (see `get_answer_impl`). When
+    /// `redirect_session_id` is set, the user's answer resumes THAT session
+    /// instead of the asker — the pre-igniter's clarifying flow, where the
+    /// question renders on the chat session but the answer must feed the temp
+    /// research session. Fire-and-forget; a no-op in headless/test contexts.
+    /// The caller has already authorized the target session(s).
     fn ask_user(
         &self,
         _session_id: String,
         _question: String,
         _options: Vec<String>,
         _token: String,
+        _redirect_session_id: Option<String>,
     ) {
     }
 }
@@ -1405,6 +1417,52 @@ pub(crate) fn resume_session_impl(
     serde_json::json!({ "ok": true }).to_string()
 }
 
+#[derive(Deserialize)]
+struct DeliverMessageRequest {
+    session_id: String,
+    text: String,
+    /// Optional extra fields persisted on the `user` event (a `text` field is
+    /// filled in from `text` when absent), e.g. the pre-igniter's
+    /// `pre_ignite: {original, enriched}` block.
+    #[serde(default)]
+    data: Option<serde_json::Value>,
+}
+
+/// `peckboard_deliver_message` — persist a `user` event on a session in the
+/// caller's scope, broadcast it, and resume the session with `text`: the
+/// transcript-writing twin of `peckboard_resume_session`. Used by the
+/// pre-igniter to land the final (possibly enriched) chat message so the UI
+/// shows exactly what the agent received.
+pub(crate) fn deliver_message_impl(
+    db: &Db,
+    input: &str,
+    inv: &InvocationContext,
+    live: Option<Arc<dyn LiveHost>>,
+) -> String {
+    let req: DeliverMessageRequest = match serde_json::from_str(input) {
+        Ok(r) => r,
+        Err(e) => return error_json(format!("invalid request: {e}")),
+    };
+    if req.text.trim().is_empty() {
+        return error_json("text is required");
+    }
+    if let Err(e) = fetch_visible_session(db, req.session_id.trim(), inv) {
+        return error_json(e);
+    }
+    let mut data = req.data.unwrap_or_else(|| serde_json::json!({}));
+    if !data.is_object() {
+        return error_json("data must be a JSON object");
+    }
+    if data.get("text").is_none() {
+        data["text"] = serde_json::Value::String(req.text.clone());
+    }
+    let Some(live) = live else {
+        return error_json("live dispatch unavailable");
+    };
+    live.deliver_user_message(req.session_id.trim().to_string(), req.text, data);
+    serde_json::json!({ "ok": true }).to_string()
+}
+
 // ── Session control (gated: `session_control`) ────────────────────────
 //
 // Full control of ANY session by id (no folder/project boundary — the
@@ -1976,17 +2034,32 @@ struct AskUserRequest {
     #[serde(default)]
     options: Vec<String>,
     token: String,
+    /// Optional explicit target: a session visible to the caller. Defaults
+    /// to the caller's own session (the MCP invocation's).
+    #[serde(default)]
+    session_id: Option<String>,
+    /// Optional: session the user's ANSWER should resume (instead of the
+    /// session carrying the question). Must be visible to the caller.
+    #[serde(default)]
+    redirect_session_id: Option<String>,
 }
 
 #[derive(Deserialize)]
 struct GetAnswerRequest {
     token: String,
+    /// Optional explicit target: the session carrying the question — must be
+    /// visible to the caller. Defaults to the caller's own session.
+    #[serde(default)]
+    session_id: Option<String>,
 }
 
-/// `peckboard_ask_user` — emit a prompt to the caller's session. Returns
-/// `{"ok": true}` (fire-and-forget) or an error if there is no caller session
-/// / no live host bound (headless).
+/// `peckboard_ask_user` — emit a prompt to the caller's session (or, with an
+/// explicit `session_id`, to another session visible to the caller — e.g. the
+/// pre-igniter asking a clarifying question on the chat session it is
+/// enriching). Returns `{"ok": true}` (fire-and-forget) or an error if there
+/// is no target session / no live host bound (headless).
 pub(crate) fn ask_user_impl(
+    db: &Db,
     inv: &InvocationContext,
     input: &str,
     live: Option<Arc<dyn LiveHost>>,
@@ -1995,8 +2068,26 @@ pub(crate) fn ask_user_impl(
         Ok(r) => r,
         Err(e) => return error_json(format!("invalid request: {e}")),
     };
-    let Some(session_id) = inv.session_id.clone() else {
-        return error_json("no caller session; peckboard_ask_user needs an MCP invocation context");
+    let session_id = match req.session_id.as_deref() {
+        Some(sid) => match fetch_visible_session(db, sid.trim(), inv) {
+            Ok(s) => s.id,
+            Err(e) => return error_json(e),
+        },
+        None => match inv.session_id.clone() {
+            Some(s) => s,
+            None => {
+                return error_json(
+                    "no caller session; pass session_id or call during an MCP invocation",
+                );
+            }
+        },
+    };
+    let redirect = match req.redirect_session_id.as_deref() {
+        Some(rid) => match fetch_visible_session(db, rid.trim(), inv) {
+            Ok(s) => Some(s.id),
+            Err(e) => return error_json(e),
+        },
+        None => None,
     };
     if req.question.trim().is_empty() {
         return error_json("question is required");
@@ -2007,25 +2098,35 @@ pub(crate) fn ask_user_impl(
     let Some(live) = live else {
         return error_json("interactive prompts unavailable (no live host bound)");
     };
-    live.ask_user(session_id, req.question, req.options, req.token);
+    live.ask_user(session_id, req.question, req.options, req.token, redirect);
     serde_json::json!({ "ok": true }).to_string()
 }
 
 /// `peckboard_get_answer` — resolve the answer to a plugin-emitted question
-/// carrying `token` in the caller's session. Returns
+/// carrying `token` in the caller's session (or, with an explicit
+/// `session_id`, another session visible to the caller). Returns
 /// `{"status": "pending" | "answered" | "unknown", "answer"?, "rejected"?}`.
-/// `unknown` means no question with that token exists for this session.
+/// `unknown` means no question with that token exists for that session.
 pub(crate) fn get_answer_impl(db: &Db, inv: &InvocationContext, input: &str) -> String {
     let req: GetAnswerRequest = match serde_json::from_str(input) {
         Ok(r) => r,
         Err(e) => return error_json(format!("invalid request: {e}")),
     };
-    let Some(session_id) = inv.session_id.as_deref() else {
-        return error_json(
-            "no caller session; peckboard_get_answer needs an MCP invocation context",
-        );
+    let session_id = match req.session_id.as_deref() {
+        Some(sid) => match fetch_visible_session(db, sid.trim(), inv) {
+            Ok(s) => s.id,
+            Err(e) => return error_json(e),
+        },
+        None => match inv.session_id.clone() {
+            Some(s) => s,
+            None => {
+                return error_json(
+                    "no caller session; pass session_id or call during an MCP invocation",
+                );
+            }
+        },
     };
-    let events = match db.list_events_by_session_blocking(session_id) {
+    let events = match db.list_events_by_session_blocking(&session_id) {
         Ok(e) => e,
         Err(e) => return error_json(e.to_string()),
     };
@@ -2351,6 +2452,13 @@ host_fn!(peckboard_resume_session(user_data: HostState; input: String) -> String
     Ok(resume_session_impl(&db, &input, &inv, live))
 });
 
+host_fn!(peckboard_deliver_message(user_data: HostState; input: String) -> String {
+    let (db, _plugin_id, ok, inv, live) = state_permission_invocation_and_live(&user_data, "session_dispatch")?;
+    if !ok { return Ok(error_json("plugin lacks the 'session_dispatch' permission")); }
+    let Some(inv) = inv else { return Ok(error_json("no caller context; peckboard_deliver_message is only callable during a tool invocation")); };
+    Ok(deliver_message_impl(&db, &input, &inv, live))
+});
+
 // Session control: full cross-folder control of any session. Gated on the
 // `session_control` permission; no invocation-context boundary (the operator
 // grants this by approving the plugin).
@@ -2405,10 +2513,10 @@ host_fn!(peckboard_exec_any(user_data: HostState; input: String) -> String {
 });
 
 host_fn!(peckboard_ask_user(user_data: HostState; input: String) -> String {
-    let (_db, _plugin_id, ok, inv, live) = state_permission_invocation_and_live(&user_data, "ask_user")?;
+    let (db, _plugin_id, ok, inv, live) = state_permission_invocation_and_live(&user_data, "ask_user")?;
     if !ok { return Ok(error_json("plugin lacks the 'ask_user' permission")); }
     let Some(inv) = inv else { return Ok(error_json("no caller context; peckboard_ask_user is only callable during a tool invocation")); };
-    Ok(ask_user_impl(&inv, &input, live))
+    Ok(ask_user_impl(&db, &inv, &input, live))
 });
 
 host_fn!(peckboard_get_answer(user_data: HostState; input: String) -> String {
@@ -2680,6 +2788,13 @@ pub(crate) fn host_functions(
             [PTR],
             ud.clone(),
             peckboard_resume_session,
+        ),
+        Function::new(
+            "peckboard_deliver_message",
+            [PTR],
+            [PTR],
+            ud.clone(),
+            peckboard_deliver_message,
         ),
         Function::new(
             "peckboard_interrupt_session",
@@ -3548,7 +3663,14 @@ mod tests {
                 .unwrap()
                 .push(format!("resume:{session_id}"));
         }
-        fn ask_user(&self, session_id: String, _q: String, _o: Vec<String>, token: String) {
+        fn ask_user(
+            &self,
+            session_id: String,
+            _q: String,
+            _o: Vec<String>,
+            token: String,
+            _redirect: Option<String>,
+        ) {
             self.calls
                 .lock()
                 .unwrap()
@@ -3600,6 +3722,7 @@ mod tests {
 
         // ask_user with no live host → error; with a live host → ok + recorded.
         let no_live = ask_user_impl(
+            &db,
             &ctx,
             r#"{"question":"run rg?","options":["yes"],"token":"tok1"}"#,
             None,
@@ -3607,6 +3730,7 @@ mod tests {
         assert!(no_live.contains("error"), "no live: {no_live}");
         let rec = std::sync::Arc::new(RecordingLive::default());
         let ok = ask_user_impl(
+            &db,
             &ctx,
             r#"{"question":"run rg?","options":["Approve once","Approve always","Deny"],"token":"tok1"}"#,
             Some(rec.clone()),

@@ -147,6 +147,32 @@ impl ProviderRegistry {
         }
         models
     }
+    /// The cheapest model `provider_id` offers, ranked by the provider's own
+    /// published price (input + output USD per million tokens, via
+    /// `AgentProvider::model_price`). `None` when the provider is unknown or
+    /// prices none of its models — an unpriced model is unknown, never free.
+    /// Ties keep the earlier catalog entry.
+    pub async fn cheapest_model(&self, provider_id: &str) -> Option<String> {
+        let (info, provider) = {
+            let providers = self.providers.lock().await;
+            let r = providers.get(provider_id)?;
+            (r.info.clone(), r.provider.clone())
+        };
+        let models = match provider.dynamic_models().await {
+            Some(models) => models,
+            None => info.models,
+        };
+        let mut best: Option<(String, f64)> = None;
+        for m in &models {
+            if let Some((input, output)) = provider.model_price(&m.id) {
+                let total = input + output;
+                if best.as_ref().map_or(true, |(_, b)| total < *b) {
+                    best = Some((m.id.clone(), total));
+                }
+            }
+        }
+        best.map(|(id, _)| id)
+    }
 
     /// Parse a model ID. Returns (provider_id, model_id).
     /// If no prefix, uses the default provider.
@@ -285,5 +311,30 @@ mod tests {
             split_model_account("arn:aws:bedrock:us-east-1::model/x"),
             ("arn:aws:bedrock:us-east-1::model/x", None)
         );
+    }
+
+    #[tokio::test]
+    async fn cheapest_model_ranks_by_provider_price() {
+        let registry = ProviderRegistry::new();
+        registry
+            .register(
+                Arc::new(MockProvider::new()),
+                ProviderInfo {
+                    id: "mock".into(),
+                    display_name: "Mock".into(),
+                    models: crate::provider::mock::mock_model_infos(),
+                    effort_levels: vec![],
+                },
+            )
+            .await;
+
+        // `echo` (0.1 + 0.5) undercuts `happy-path` (1.0 + 5.0); the
+        // unpriced scenarios never win even though they'd sort "free".
+        assert_eq!(
+            registry.cheapest_model("mock").await.as_deref(),
+            Some("echo")
+        );
+        // Unknown provider → no answer.
+        assert_eq!(registry.cheapest_model("nope").await, None);
     }
 }

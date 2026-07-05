@@ -68,6 +68,7 @@ pub const ALLOWED_HOOKS: &[&str] = &[
     "mcp.tool.call.before",
     "mcp.tool.call.failed",
     "mcp.tool.invoke",
+    "session.message.before",
     "session.reference.resolve",
     "session.user.answer",
     "todo",
@@ -721,6 +722,89 @@ impl PluginManager {
         HookResult::Allowed(current_payload)
     }
 
+    /// Dispatch a cancellable/modifying hook under the authority of an
+    /// authenticated user, scoped to a session — the same trusted
+    /// [`super::host::UserContext`] an authed session-page request gets.
+    /// Combines [`dispatch`](Self::dispatch)'s verdict handling with
+    /// [`dispatch_authed`](Self::dispatch_authed)'s context landing: for the
+    /// span of each plugin's `handle` call the scoped host functions may act
+    /// on the user's behalf inside `folder_id` / `project_id` /
+    /// `session_id` (gated by the `user_authority` permission). Used by the
+    /// `session.message.before` pre-dispatch hook so a plugin can create and
+    /// dispatch helper sessions in the caller's folder while deciding its
+    /// verdict.
+    pub async fn dispatch_scoped(
+        &self,
+        hook: &str,
+        user_id: &str,
+        folder_id: Option<String>,
+        project_id: Option<String>,
+        session_id: Option<String>,
+        payload: serde_json::Value,
+    ) -> HookResult {
+        type ScopedTarget = (
+            String,
+            Arc<Mutex<Plugin>>,
+            Arc<std::sync::RwLock<Option<super::host::UserContext>>>,
+        );
+        let targets: Vec<ScopedTarget> = {
+            let plugins = self.plugins.lock().await;
+            plugins
+                .iter()
+                .filter(|p| p.is_active() && p.manifest.hooks.iter().any(|h| h == hook))
+                .map(|p| (p.name.clone(), p.plugin.clone(), p.user.clone()))
+                .collect()
+        };
+
+        let mut current_payload = payload;
+        for (name, plugin, user_slot) in targets {
+            let call_input = serde_json::json!({
+                "hook": hook,
+                "payload": current_payload,
+            });
+            // Land the trusted user context for exactly this `handle` call.
+            if let Ok(mut slot) = user_slot.write() {
+                *slot = Some(super::host::UserContext {
+                    user_id: user_id.to_string(),
+                    folder_id: folder_id.clone(),
+                    project_id: project_id.clone(),
+                    session_id: session_id.clone(),
+                });
+            }
+            let result = {
+                let mut guard = plugin.lock().await;
+                guard.call::<String, String>("handle".to_string(), call_input.to_string())
+            };
+            if let Ok(mut slot) = user_slot.write() {
+                *slot = None;
+            }
+            match result {
+                Ok(output) => match serde_json::from_str::<Verdict>(&output) {
+                    Ok(Verdict::Allow { payload }) => {
+                        if let Some(modified) = payload {
+                            current_payload = modified;
+                        }
+                    }
+                    Ok(Verdict::Cancel { reason }) => {
+                        info!("Plugin '{name}' cancelled hook '{hook}': {reason}");
+                        return HookResult::Cancelled {
+                            plugin: name,
+                            reason,
+                        };
+                    }
+                    Ok(Verdict::Skip) => {}
+                    Err(e) => {
+                        warn!("Plugin '{name}' returned invalid verdict for hook '{hook}': {e}");
+                    }
+                },
+                Err(e) => {
+                    warn!("Plugin '{name}' failed on hook '{hook}': {e}");
+                }
+            }
+        }
+
+        HookResult::Allowed(current_payload)
+    }
     /// Fire a **notification** hook under the authority of an authenticated
     /// user. Unlike [`dispatch`], this lands a trusted [`super::host::UserContext`]
     /// for the duration of each plugin's `handle` call (exactly as
@@ -1753,6 +1837,7 @@ mod tests {
             "card.priorities.list",
             "http.request.before",
             "mcp.tool.call.before",
+            "session.message.before",
             "session.reference.resolve",
             "todo",
         ] {

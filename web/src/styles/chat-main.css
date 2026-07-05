@@ -776,3 +776,62 @@
   height: 1px;
   background: var(--border);
 }
+
+/* ── Pre-igniter (message pre-warming) ─────────────────────────────── */
+
+/* Parked user bubble while the pre-igniter researches. */
+.chat-bubble-preignite {
+  opacity: 0.85;
+}
+
+.chat-preignite-indicator {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 6px;
+  font-size: 12px;
+  font-style: italic;
+  opacity: 0.8;
+}
+
+.chat-preignite-spinner {
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  border: 2px solid currentColor;
+  border-top-color: transparent;
+  animation: preignite-spin 0.9s linear infinite;
+}
+
+@keyframes preignite-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+/* Badge on a delivered, enriched message. */
+.chat-preignite-badge {
+  font-size: 11px;
+  font-weight: 600;
+  margin-bottom: 4px;
+  opacity: 0.8;
+}
+
+/* Expandable original message under the enriched text. */
+.chat-preignite-original {
+  margin-top: 8px;
+  font-size: 12px;
+}
+
+.chat-preignite-original summary {
+  cursor: pointer;
+  opacity: 0.75;
+}
+
+.chat-preignite-original-text {
+  margin-top: 4px;
+  padding-left: 8px;
+  border-left: 2px solid currentColor;
+  white-space: pre-wrap;
+  opacity: 0.85;
+}

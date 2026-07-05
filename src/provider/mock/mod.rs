@@ -61,6 +61,18 @@ impl AgentProvider for MockProvider {
         "mock"
     }
 
+    fn model_price(&self, model_id: &str) -> Option<(f64, f64)> {
+        // Scripted prices so tests can exercise cheapest-model selection:
+        // `echo` is the cheap tier, `happy-path` the expensive one; the
+        // rest stay unpriced (unknown, never treated as free).
+        let raw = model_id.strip_prefix("mock:").unwrap_or(model_id);
+        match raw.split('@').next().unwrap_or(raw) {
+            "echo" => Some((0.1, 0.5)),
+            "happy-path" => Some((1.0, 5.0)),
+            _ => None,
+        }
+    }
+
     async fn send_message(&self, ctx: SendMessageContext) -> anyhow::Result<()> {
         let SendMessageContext {
             session_id,

@@ -197,6 +197,11 @@ impl AgentProvider for ClaudeProvider {
         Some(self.account_scoped_models().await)
     }
 
+    fn model_price(&self, model_id: &str) -> Option<(f64, f64)> {
+        crate::routes::usage::cost::known_rates_for(model_id)
+            .map(|r| (r.input_per_mtok, r.output_per_mtok))
+    }
+
     async fn send_message(&self, ctx: SendMessageContext) -> anyhow::Result<()> {
         let SendMessageContext {
             session_id,

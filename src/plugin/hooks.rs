@@ -258,6 +258,21 @@ pub const MCP_TOOL_INVOKE_HOOK: &str = "mcp.tool.invoke";
 /// [`crate::plugin::manager::PluginManager::dispatch_authed`].
 pub const USER_ANSWER_HOOK: &str = "session.user.answer";
 
+/// Fired before an interactive chat message is dispatched to the agent
+/// (`POST /api/sessions/:id/message`) — chat sessions only, never workers or
+/// experts, and only for plain text turns (attachments pass straight
+/// through). Payload: `{ session_id, text, model, effort, cheap_model }`,
+/// where `cheap_model` is the session provider's cheapest priced model
+/// (`provider:model` form) or null when the provider prices nothing.
+/// Verdicts: `Allow` with a modified `text` rewrites the message inline;
+/// `Cancel` means the plugin took ownership of the turn — core appends a
+/// `pre-ignite` placeholder event and does NOT dispatch, and the plugin is
+/// expected to append the final `user` event and resume the session when its
+/// enrichment finishes. Fired under a **user-authority** context scoped to
+/// the chat session (like [`HTTP_AUTHED_HOOK`]), so the handler may create
+/// and dispatch helper sessions in the caller's folder — see
+/// [`crate::plugin::manager::PluginManager::dispatch_scoped`].
+pub const MESSAGE_BEFORE_HOOK: &str = "session.message.before";
 /// The request a plugin receives for a plugin-served HTTP route.
 ///
 /// Serialized as the `payload` of the [`HTTP_REQUEST_HOOK`] hook call.

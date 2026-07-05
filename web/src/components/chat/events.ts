@@ -34,7 +34,28 @@ export interface ToolImage {
 
 /** A display item derived from one or more raw events. */
 export type DisplayItem =
-  | { type: 'user'; text: string; key: string; ts: number; attachments?: MessageAttachment[] }
+  | {
+      type: 'user'
+      text: string
+      key: string
+      ts: number
+      attachments?: MessageAttachment[]
+      /** Set when the pre-igniter delivered this message: the user's
+       *  original text (shown expandable under the enriched message). */
+      preIgniteOriginal?: string
+      /** True when the delivered text was enriched (differs from the
+       *  original); false when the pre-igniter passed it through. */
+      preIgniteEnriched?: boolean
+    }
+  | {
+      /** A message parked by the pre-igniter: shown as the user's bubble
+       *  with a "pre-igniting…" indicator until the final `user` event
+       *  (or any later user turn) supersedes it. */
+      type: 'pre-ignite'
+      text: string
+      key: string
+      ts: number
+    }
   | { type: 'assistant'; text: string; key: string; ts: number }
   | {
       type: 'tool'
@@ -96,6 +117,7 @@ export function deriveAgentStatus(events: Event[]): AgentStatus {
   for (let i = events.length - 1; i >= 0; i--) {
     const kind = events[i].kind
     if (kind === 'agent-end') return 'idle'
+    if (kind === 'pre-ignite') return 'working'
     if (kind === 'agent-error' || kind === 'error') return 'crashed'
     if (kind === 'question') {
       // Check if resolved later
@@ -262,12 +284,31 @@ export function buildDisplayItems(events: Event[]): DisplayItem[] {
   // looks like the agent broke instead of acknowledging the user's action.
   let pendingInterrupt = false
 
-  for (const ev of events) {
+  // A `pre-ignite` placeholder (a parked message being pre-warmed) is only
+  // live while nothing later has been delivered: any later `user` event —
+  // the enriched delivery, or the user typing past a dead pre-ignite —
+  // supersedes it.
+  let lastUserIdx = -1
+  events.forEach((e, i) => {
+    if (e.kind === 'user') lastUserIdx = i
+  })
+
+  for (let evIdx = 0; evIdx < events.length; evIdx++) {
+    const ev = events[evIdx]
     switch (ev.kind) {
       case 'user': {
         flushAssistant()
         const text = (ev.data.text as string) ?? JSON.stringify(ev.data)
-        items.push({ type: 'user', text, key: ev.id, ts: ev.ts, attachments: readAttachments(ev) })
+        const pi = ev.data.pre_ignite as Record<string, unknown> | undefined
+        items.push({
+          type: 'user',
+          text,
+          key: ev.id,
+          ts: ev.ts,
+          attachments: readAttachments(ev),
+          preIgniteOriginal: typeof pi?.original === 'string' ? pi.original : undefined,
+          preIgniteEnriched: pi?.enriched === true,
+        })
         break
       }
       case 'agent-text': {
@@ -445,6 +486,14 @@ export function buildDisplayItems(events: Event[]): DisplayItem[] {
           })
         } else {
           items.push({ type: 'question', questionId: ev.id, questions, key: ev.id })
+        }
+        break
+      }
+      case 'pre-ignite': {
+        flushAssistant()
+        if (evIdx > lastUserIdx) {
+          const text = (ev.data.text as string) ?? ''
+          items.push({ type: 'pre-ignite', text, key: ev.id, ts: ev.ts })
         }
         break
       }

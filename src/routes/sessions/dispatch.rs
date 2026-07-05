@@ -1,7 +1,10 @@
-use axum::{Json, extract::Path, extract::State, http::StatusCode, response::IntoResponse};
+use axum::{
+    Extension, Json, extract::Path, extract::State, http::StatusCode, response::IntoResponse,
+};
 use serde::Deserialize;
 use std::sync::Arc;
 
+use crate::auth::middleware::AuthUser;
 use crate::db::models::UpdateSession;
 use crate::provider::message::{UserAttachment, UserMessage};
 use crate::provider::stream::SpawnConfig;
@@ -25,6 +28,7 @@ pub(super) struct SendMessageRequest {
 pub(super) async fn send_message(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
+    Extension(user): Extension<AuthUser>,
     Json(body): Json<SendMessageRequest>,
 ) -> impl IntoResponse {
     tracing::info!(session_id = %id, "Sending message");
@@ -63,7 +67,7 @@ pub(super) async fn send_message(
 
     // Resolve [session:id] and [report:folder/file] references early; both
     // the queued and started paths use the resolved text.
-    let resolved_text = resolve_references(&body.text, &state).await;
+    let mut resolved_text = resolve_references(&body.text, &state).await;
 
     // Build spawn config — resolve model/effort with precedence:
     //   request body > session > card > project > "default"
@@ -116,6 +120,110 @@ pub(super) async fn send_message(
     // side effect that respawns the agent (this turn is about to do
     // exactly that with the user's actual text).
     dismiss_pending_questions(&state, &id).await;
+
+    // Pre-warm hook: let a plugin intercept an interactive chat message
+    // before it reaches the agent (e.g. the pre-igniter plugin enriches it
+    // with context gathered by a cheaper model). Chats only — workers and
+    // experts run orchestrated prompts — and only plain text turns
+    // (attachments pass straight through). Allow-with-payload rewrites the
+    // text inline; Cancel means the plugin took ownership of the turn: core
+    // appends a `pre-ignite` placeholder event (the UI renders it as the
+    // pending user bubble) and does NOT dispatch — the plugin appends the
+    // final `user` event and resumes the session when its enrichment lands.
+    if !session.is_worker
+        && !session.is_expert
+        && attachment_ids.as_deref().map_or(true, |a| a.is_empty())
+        && state
+            .plugins
+            .has_listeners(crate::plugin::hooks::MESSAGE_BEFORE_HOOK)
+            .await
+    {
+        let (provider_id, _) = crate::provider::registry::ProviderRegistry::parse_model_id(
+            &resolved_model,
+            crate::provider::manager::DEFAULT_PROVIDER,
+        );
+        let cheap_model = state
+            .provider_registry
+            .cheapest_model(&provider_id)
+            .await
+            .map(|m| format!("{provider_id}:{m}"));
+        let hook_result = state
+            .plugins
+            .dispatch_scoped(
+                crate::plugin::hooks::MESSAGE_BEFORE_HOOK,
+                &user.user_id,
+                Some(session.folder_id.clone()),
+                session.project_id.clone(),
+                Some(id.clone()),
+                serde_json::json!({
+                    "session_id": id,
+                    "text": resolved_text,
+                    "model": resolved_model,
+                    "effort": resolved_effort,
+                    "cheap_model": cheap_model,
+                }),
+            )
+            .await;
+        match hook_result {
+            crate::plugin::hooks::HookResult::Cancelled { plugin, reason } => {
+                let ev = state
+                    .db
+                    .append_event(
+                        &id,
+                        "pre-ignite",
+                        serde_json::json!({
+                            "text": resolved_text,
+                            "plugin": plugin,
+                            "reason": reason,
+                        }),
+                    )
+                    .await
+                    .map_err(|e| {
+                        (
+                            StatusCode::INTERNAL_SERVER_ERROR,
+                            Json(serde_json::json!({ "error": e.to_string() })),
+                        )
+                    })?;
+                state
+                    .broadcaster
+                    .broadcast(crate::ws::broadcaster::WsEvent {
+                        event_type: "event".into(),
+                        session_id: id.clone(),
+                        data: serde_json::json!({
+                            "id": ev.id,
+                            "seq": ev.seq,
+                            "ts": ev.ts,
+                            "kind": ev.kind,
+                            "data": serde_json::from_str::<serde_json::Value>(&ev.data)
+                                .unwrap_or_default(),
+                        }),
+                    });
+                let now = chrono::Utc::now().to_rfc3339();
+                let _ = state
+                    .db
+                    .update_session(
+                        &id,
+                        UpdateSession {
+                            last_activity: Some(now),
+                            ..Default::default()
+                        },
+                    )
+                    .await;
+                return Ok(Json(serde_json::json!({
+                    "status": "pre-igniting",
+                    "session_id": id,
+                    "plugin": plugin,
+                })));
+            }
+            crate::plugin::hooks::HookResult::Allowed(p) => {
+                if let Some(t) = p.get("text").and_then(|v| v.as_str())
+                    && t != resolved_text
+                {
+                    resolved_text = t.to_string();
+                }
+            }
+        }
+    }
 
     // Resolve attachment IDs to bytes BEFORE appending the user event:
     // the provider context owns the payload (move, not borrow), so doing

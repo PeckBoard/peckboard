@@ -75,6 +75,16 @@ pub trait AgentProvider: Send + Sync + 'static {
         None
     }
 
+    /// Published price of `model_id` in USD per million tokens as
+    /// `(input, output)`, as defined by this provider. `None` means the
+    /// provider carries no price for the model — callers must treat that as
+    /// unknown, NOT free. Local providers that bill nothing return
+    /// `Some((0.0, 0.0))`. Lets callers rank a provider's models by price
+    /// (see `ProviderRegistry::cheapest_model`) without hardcoding model
+    /// names outside the provider.
+    fn model_price(&self, _model_id: &str) -> Option<(f64, f64)> {
+        None
+    }
     /// Begin an agent run for `ctx.session_id`. Returning Ok means the run
     /// has been scheduled; the actual streaming happens in a background
     /// task. Errors should be returned synchronously (e.g. spawn failure).

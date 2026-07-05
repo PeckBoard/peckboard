@@ -14,6 +14,12 @@
 //!    answer and runs the command, refuses it, or (for *always*) records a
 //!    persisted grant keyed by program name.
 //!
+//! **Worker sessions skip the prompt entirely** (`auto_approve`): their
+//! commands run immediately. The scoping that makes this acceptable lives in
+//! `exec_impl` — cwd is pinned to the caller's own folder, the command is a
+//! bare executable name, and args are an argv array (no shell) — so a worker
+//! only ever runs programs against its own project folder.
+//!
 //! The pending request is correlated across the two calls by a key derived
 //! from the caller's session + the exact command, so a re-call with the same
 //! command finds its in-flight approval rather than prompting again.
@@ -58,6 +64,8 @@ pub enum Decision {
 
 /// The synchronous core of `run_command`, safe to run inside `spawn_blocking`.
 /// Ports the plugin's two-step approval flow, minus the operator allowlist.
+/// `auto_approve` (worker sessions) bypasses the user prompt entirely: the
+/// command runs immediately under the same folder-pinned exec.
 pub fn decide(
     db: &Db,
     inv: &InvocationContext,
@@ -65,7 +73,14 @@ pub fn decide(
     command: &str,
     argv: &[String],
     timeout: Option<u64>,
+    auto_approve: bool,
 ) -> Result<Decision, String> {
+    // 0. Worker auto-approval — no prompt, straight to the folder-pinned exec.
+    if auto_approve {
+        return Ok(Decision::Ran(run_now(
+            db, inv, command, argv, timeout, "worker",
+        )?));
+    }
     // 1. Persisted "always" approval → run now (unrestricted exec).
     if always_approved(db, command)? {
         return Ok(Decision::Ran(run_now(

@@ -948,8 +948,41 @@ export default function ChatView({
               return (
                 <div key={item.key} className="chat-row chat-row-user">
                   <div className="chat-bubble chat-bubble-user">
+                    {item.preIgniteEnriched && (
+                      <div
+                        className="chat-preignite-badge"
+                        title="This message was enriched by the pre-igniter before dispatch"
+                      >
+                        ⚡ pre-ignited
+                      </div>
+                    )}
                     {item.text}
+                    {item.preIgniteEnriched && item.preIgniteOriginal && (
+                      <details
+                        className="chat-preignite-original"
+                        data-testid="chat-preignite-original"
+                      >
+                        <summary>Original message</summary>
+                        <div className="chat-preignite-original-text">{item.preIgniteOriginal}</div>
+                      </details>
+                    )}
                     <MessageAttachments attachments={item.attachments} />
+                    <div className="chat-time chat-time-user">{formatTime(item.ts)}</div>
+                  </div>
+                </div>
+              )
+            case 'pre-ignite':
+              return (
+                <div key={item.key} className="chat-row chat-row-user">
+                  <div
+                    className="chat-bubble chat-bubble-user chat-bubble-preignite"
+                    data-testid="chat-preignite"
+                  >
+                    {item.text}
+                    <div className="chat-preignite-indicator">
+                      <span className="chat-preignite-spinner" aria-hidden />
+                      Pre-igniting — a cheaper model is gathering context…
+                    </div>
                     <div className="chat-time chat-time-user">{formatTime(item.ts)}</div>
                   </div>
                 </div>

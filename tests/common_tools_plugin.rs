@@ -40,6 +40,7 @@ impl LiveHost for ApprovalRecorder {
         _question: String,
         _options: Vec<String>,
         token: String,
+        _redirect_session_id: Option<String>,
     ) {
         self.asks.lock().unwrap().push((session_id, token));
     }

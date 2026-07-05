@@ -34,7 +34,9 @@ impl McpToolRegistry {
         result.map_err(|e| anyhow::anyhow!(e))
     }
 
-    /// `run_command` — approval-gated arbitrary command execution.
+    /// `run_command` — approval-gated arbitrary command execution. Worker
+    /// sessions bypass the prompt: exec is already pinned to the session's
+    /// own folder, so their commands run immediately.
     pub(crate) async fn handle_run_command(
         &self,
         args: Value,
@@ -67,13 +69,23 @@ impl McpToolRegistry {
 
         tracing::info!(session_id = %ctx.session_id, command = %command, "MCP tool: run_command");
 
+        // Workers run without prompting — their exec is already scoped to the
+        // session's own folder, and a human answer would stall the pipeline.
+        let auto_approve = ctx
+            .db
+            .get_session(&ctx.session_id)
+            .await
+            .ok()
+            .flatten()
+            .map(|s| s.is_worker)
+            .unwrap_or(false);
         let db = ctx.db.clone();
         let inv = common_tools::inv_from_ctx(ctx);
         let session_id = ctx.session_id.clone();
         let cmd = command.clone();
         let av = argv.clone();
         let decision = tokio::task::spawn_blocking(move || {
-            cli::decide(&db, &inv, &session_id, &cmd, &av, timeout)
+            cli::decide(&db, &inv, &session_id, &cmd, &av, timeout, auto_approve)
         })
         .await?
         .map_err(|e| anyhow::anyhow!(e))?;
@@ -98,6 +110,7 @@ impl McpToolRegistry {
                     &format!("Approve running this command?\n\n    {display}"),
                     &options,
                     &token,
+                    None,
                 )
                 .await?;
                 Ok(serde_json::json!({
@@ -122,7 +135,7 @@ mod tests {
     /// Seed a folder pointing at a real (temp) directory plus a session in it,
     /// and return a `ToolCallContext` scoped to that session/folder. The
     /// `TempDir` is returned so the caller keeps it alive for the test.
-    async fn ctx_with_folder() -> (ToolCallContext, tempfile::TempDir) {
+    async fn ctx_with_folder(is_worker: bool) -> (ToolCallContext, tempfile::TempDir) {
         use crate::db::models::{NewFolder, NewSession};
         let dir = tempfile::tempdir().unwrap();
         let db = Arc::new(crate::db::Db::in_memory().unwrap());
@@ -141,7 +154,7 @@ mod tests {
             folder_id: "f-1".into(),
             model: None,
             effort: None,
-            is_worker: false,
+            is_worker,
             project_id: None,
             card_id: None,
             conversation_id: None,
@@ -167,7 +180,7 @@ mod tests {
 
     #[tokio::test]
     async fn common_tools_write_read_list_roundtrip() {
-        let (ctx, _dir) = ctx_with_folder().await;
+        let (ctx, _dir) = ctx_with_folder(false).await;
         let reg = McpToolRegistry::new();
 
         // write_file
@@ -211,7 +224,7 @@ mod tests {
 
     #[tokio::test]
     async fn read_file_rejects_untargeted_large_reads() {
-        let (ctx, _dir) = ctx_with_folder().await;
+        let (ctx, _dir) = ctx_with_folder(false).await;
         let reg = McpToolRegistry::new();
 
         // 500 lines > the 400-line whole-file cap.
@@ -260,12 +273,45 @@ mod tests {
 
     #[tokio::test]
     async fn math_tool_through_handler() {
-        let (ctx, _dir) = ctx_with_folder().await;
+        let (ctx, _dir) = ctx_with_folder(false).await;
         let reg = McpToolRegistry::new();
         let out = reg
             .handle_common_tool("math", serde_json::json!({ "expression": "6*7" }), &ctx)
             .await
             .unwrap();
         assert_eq!(out["result"].as_f64().unwrap(), 42.0);
+    }
+
+    #[tokio::test]
+    async fn run_command_worker_session_runs_without_approval() {
+        let (ctx, _dir) = ctx_with_folder(true).await;
+        let reg = McpToolRegistry::new();
+        let out = reg
+            .handle_run_command(
+                serde_json::json!({ "command": "echo", "args": ["scoped"] }),
+                &ctx,
+            )
+            .await
+            .unwrap();
+        assert_eq!(out["approved_via"], "worker", "got: {out}");
+        assert_eq!(out["exit_code"], 0, "got: {out}");
+        assert!(
+            out["stdout"].as_str().unwrap().contains("scoped"),
+            "got: {out}"
+        );
+    }
+
+    #[tokio::test]
+    async fn run_command_chat_session_still_asks_for_approval() {
+        let (ctx, _dir) = ctx_with_folder(false).await;
+        let reg = McpToolRegistry::new();
+        let out = reg
+            .handle_run_command(
+                serde_json::json!({ "command": "echo", "args": ["scoped"] }),
+                &ctx,
+            )
+            .await
+            .unwrap();
+        assert_eq!(out["status"], "awaiting_approval", "got: {out}");
     }
 }

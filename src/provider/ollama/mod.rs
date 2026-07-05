@@ -482,6 +482,11 @@ impl AgentProvider for OllamaProvider {
         "ollama"
     }
 
+    fn model_price(&self, _model_id: &str) -> Option<(f64, f64)> {
+        // Local inference — no per-token billing.
+        Some((0.0, 0.0))
+    }
+
     async fn dynamic_models(&self) -> Option<Vec<ModelInfo>> {
         // The catalog the picker shows is, in order of preference:
         //   1. the models actually installed on the server (autodiscovery
