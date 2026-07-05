@@ -125,6 +125,7 @@ impl AgentProvider for MockProvider {
                 .send(ProcessCompletion {
                     session_id: sid.clone(),
                     completed,
+                    error: None,
                 })
                 .await;
         });

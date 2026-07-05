@@ -828,9 +828,13 @@ async fn abort_handover_keeps_model_and_context() {
         .await
         .unwrap();
 
-    peckboard::handover::abort_handover(&state, "s1")
-        .await
-        .unwrap();
+    peckboard::handover::abort_handover(
+        &state,
+        "s1",
+        Some("Failed to authenticate. API Error: 401 Invalid authentication credentials"),
+    )
+    .await
+    .unwrap();
 
     let s = state.db.get_session("s1").await.unwrap().unwrap();
     assert_eq!(s.handover_to_model, None, "parked target cleared");
@@ -841,9 +845,14 @@ async fn abort_handover_keeps_model_and_context() {
         "conversation preserved so context isn't lost"
     );
     let events = state.db.events_tail("s1", 50).await.unwrap();
+    let aborted = events
+        .iter()
+        .find(|e| e.kind == "handover-aborted")
+        .expect("an abort marker is recorded");
+    let data: serde_json::Value = serde_json::from_str(&aborted.data).unwrap();
     assert!(
-        events.iter().any(|e| e.kind == "handover-aborted"),
-        "an abort marker is recorded"
+        data["reason"].as_str().unwrap_or_default().contains("401"),
+        "the abort must record why the doc turn failed, got {data}"
     );
 }
 
@@ -853,7 +862,7 @@ async fn abort_handover_keeps_model_and_context() {
 async fn abort_handover_noop_without_parked_target() {
     let (state, _token) = build_state("mock:echo").await;
 
-    peckboard::handover::abort_handover(&state, "s1")
+    peckboard::handover::abort_handover(&state, "s1", None)
         .await
         .unwrap();
 
@@ -861,4 +870,50 @@ async fn abort_handover_noop_without_parked_target() {
     assert_eq!(s.model.as_deref(), Some("mock:echo"));
     let events = state.db.events_tail("s1", 50).await.unwrap();
     assert!(!events.iter().any(|e| e.kind == "handover-aborted"));
+}
+
+/// A compaction whose doc turn produced no text must ABORT, not finalize:
+/// there is nothing to inject, so dropping the conversation would destroy
+/// the context the compaction was meant to preserve. (Model switches keep
+/// the empty-doc fallback — there the user explicitly asked to switch —
+/// but a compaction with no doc is pure loss.)
+#[tokio::test]
+async fn finalize_compaction_with_empty_doc_aborts() {
+    let (state, _token) = build_state("mock:echo").await;
+    // Park a same-model handover (a compaction) with a live conversation,
+    // but record NO agent-text — the failed doc turn's shape.
+    state
+        .db
+        .update_session(
+            "s1",
+            UpdateSession {
+                conversation_id: Some(Some("conv-keep".into())),
+                handover_to_model: Some(Some("mock:echo".into())),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+
+    peckboard::handover::finalize_handover(&state, "s1")
+        .await
+        .unwrap();
+
+    let s = state.db.get_session("s1").await.unwrap().unwrap();
+    assert_eq!(s.handover_to_model, None, "parked target cleared");
+    assert_eq!(
+        s.conversation_id.as_deref(),
+        Some("conv-keep"),
+        "conversation preserved — no context lost"
+    );
+    assert_eq!(s.pending_handover_doc, None, "no doc stashed");
+    let events = state.db.events_tail("s1", 50).await.unwrap();
+    assert!(
+        events.iter().any(|e| e.kind == "handover-aborted"),
+        "the failed compaction must record an abort, not a handover"
+    );
+    assert!(
+        !events.iter().any(|e| e.kind == "handover"),
+        "no 'Context compacted' marker for a failed compaction"
+    );
 }

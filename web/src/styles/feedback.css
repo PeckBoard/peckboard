@@ -108,6 +108,33 @@
   flex-shrink: 0;
 }
 
+/* Failed handover/compaction marker: the doc-generation turn errored (e.g.
+   an expired login's 401) and the switch/compaction was rolled back. Red —
+   unlike the amber context prompt this is an error — with the way forward
+   inline: log in again from Settings, or give up the context. */
+.chat-handover-failed {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin: 6px auto 0;
+  max-width: 560px;
+  padding: 8px 14px;
+  background: var(--danger-bg, #e0464618);
+  border: 1px solid var(--danger);
+  border-radius: 8px;
+  color: var(--text2);
+  font-size: 13px;
+  text-align: center;
+}
+
+.chat-handover-failed-reason {
+  color: var(--danger);
+  font-weight: 600;
+}
+
+.chat-handover-failed a {
+  color: var(--accent);
+}
 .fetch-error-banner button {
   padding: 3px 12px;
   border: 1px solid var(--danger);

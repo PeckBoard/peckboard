@@ -247,6 +247,7 @@ impl AgentProvider for GrokProvider {
                 .send(ProcessCompletion {
                     session_id: sid,
                     completed,
+                    error: None,
                 })
                 .await;
         });

@@ -210,8 +210,12 @@ fn now_ms() -> u64 {
 /// synthesize a `Crashed { reason: "interrupted" | "exit-mid-turn"
 /// }` event so the UI doesn't show a hung spinner.
 ///
-/// Returns `true` if the process ended after a clean `Completed`
-/// (no mid-turn death), `false` otherwise.
+/// Returns a [`StreamOutcome`]: `completed` is `true` only if the process
+/// ended after a clean `Completed` — no mid-turn death AND no error
+/// `result` on the final turn. `error` carries the CLI-reported error text
+/// (e.g. an expired login's 401) so the handover/compaction completion
+/// listener can abort with a user-visible reason instead of finalizing a
+/// doc turn that produced no doc.
 pub async fn stream_events(
     mut process: ClaudeProcess,
     db: Db,
@@ -220,7 +224,7 @@ pub async fn stream_events(
     allowed_dir: String,
     cancel: Arc<Notify>,
     state: LoopState,
-) -> bool {
+) -> StreamOutcome {
     let session_id = process.session_id.clone();
 
     let stdout = match process.child.stdout.take() {
@@ -239,7 +243,10 @@ pub async fn stream_events(
             )
             .await;
             state.turn_active.store(false, Ordering::Release);
-            return false;
+            return StreamOutcome {
+                completed: false,
+                error: Some("no stdout handle".into()),
+            };
         }
     };
 
@@ -271,6 +278,14 @@ pub async fn stream_events(
 
     let mut was_cancelled = false;
     let mut saw_clean_completion = false;
+    // Error text from the most recent `result` event, when it reported a
+    // failure (`is_error: true` / non-"success" subtype — e.g. an expired
+    // login's 401). A result line still settles the turn (Completed is
+    // emitted, spinners stop), but the exit path must NOT report a clean
+    // completion for it: a handover/compaction doc turn that errored has
+    // produced no doc, and finalizing it would discard real context in
+    // exchange for an error message.
+    let mut last_result_error: Option<String> = None;
     // Set when a `ShutdownAfterTurn` arrives on `stdin_rx`. After the
     // current `result` event we break out of the select loop without
     // killing the child; dropping stdin gives it a clean EOF and the
@@ -611,6 +626,7 @@ pub async fn stream_events(
         // conversation_id; the parser already captured it into
         // `conversation_id` for us.
         if is_result_event {
+            last_result_error = result_error(&json);
             if !pending_file_changes.is_empty() {
                 flush_pending_file_changes(
                     &db,
@@ -778,7 +794,12 @@ pub async fn stream_events(
     }
 
     let is_completed = if shutdown_after_turn {
-        true
+        // Graceful exit — but only if the final turn's `result` reported
+        // success. An error result (expired login, API failure) means the
+        // turn did NOT do its work; reporting completed=false routes a
+        // handover/compaction doc turn to abort_handover instead of
+        // finalize_handover, keeping the conversation intact.
+        last_result_error.is_none()
     } else if was_cancelled {
         emit_event(
             &db,
@@ -831,9 +852,44 @@ pub async fn stream_events(
         true
     };
 
-    is_completed
+    StreamOutcome {
+        completed: is_completed,
+        error: last_result_error,
+    }
 }
 
+/// Outcome of one stream-loop run (one child-process lifetime).
+pub struct StreamOutcome {
+    /// Ended cleanly: no mid-turn death, no error result on the way out.
+    pub completed: bool,
+    /// Error text from the last turn's `result` event when it reported a
+    /// failure (`is_error: true` or a non-`"success"` subtype) — e.g.
+    /// "Failed to authenticate. API Error: 401 …" from an expired login.
+    pub error: Option<String>,
+}
+
+/// Error text of a `result` event; `None` when it reports success. The CLI
+/// flags a failed turn with `is_error: true` and/or a non-"success"
+/// subtype (e.g. `error_during_execution`), putting any human-readable
+/// message in `result`.
+fn result_error(json: &serde_json::Value) -> Option<String> {
+    let is_error = json
+        .get("is_error")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    let subtype = json.get("subtype").and_then(|v| v.as_str());
+    if !is_error && subtype.is_none_or(|s| s == "success") {
+        return None;
+    }
+    Some(
+        json.get("result")
+            .and_then(|v| v.as_str())
+            .filter(|s| !s.trim().is_empty())
+            .map(str::to_string)
+            .or_else(|| subtype.map(str::to_string))
+            .unwrap_or_else(|| "the model reported an error".into()),
+    )
+}
 enum EventSource {
     Stdout(String),
 }
@@ -1020,7 +1076,7 @@ mod tests {
         mpsc::Sender<StdinMsg>,
         Arc<Notify>,
         Arc<AtomicBool>,
-        tokio::task::JoinHandle<bool>,
+        tokio::task::JoinHandle<StreamOutcome>,
     ) {
         let db = Db::in_memory().unwrap();
         let ts = chrono::Utc::now().to_rfc3339();
@@ -1136,12 +1192,12 @@ mod tests {
             .await
             .unwrap();
 
-        let completed = timeout(std::time::Duration::from_secs(5), handle)
+        let outcome = timeout(std::time::Duration::from_secs(5), handle)
             .await
             .expect("stream loop must exit within 5s")
             .expect("task must not panic");
         assert!(
-            completed,
+            outcome.completed,
             "graceful shutdown after result must report completed=true"
         );
 
@@ -1167,6 +1223,56 @@ mod tests {
         }
     }
 
+    /// Synthetic error `result` frame — the shape the CLI emits when the
+    /// turn itself failed (here, the expired-login 401 that triggered the
+    /// compaction-finalized-on-auth-failure regression).
+    fn fake_error_result_frame(conv_id: &str) -> String {
+        serde_json::json!({
+            "type": "result",
+            "subtype": "error_during_execution",
+            "is_error": true,
+            "session_id": conv_id,
+            "result": "Failed to authenticate. API Error: 401 Invalid authentication credentials",
+        })
+        .to_string()
+    }
+
+    #[tokio::test]
+    async fn error_result_reports_not_completed_on_graceful_shutdown() {
+        // The compaction-401 regression: begin_handover dispatches the doc
+        // turn and schedules a graceful shutdown; the turn errors (the CLI
+        // emits an is_error result) and the child exits. The outcome must
+        // be completed=false carrying the CLI's error text, so the
+        // completion listener aborts the handover instead of finalizing a
+        // "compaction" whose doc is an error message.
+        let session = "loop-error-result";
+        let (_db, tx, _cancel, turn_active, handle) = spawn_cat_loop(session).await;
+
+        tx.send(StdinMsg::UserTurn(UserMessage::from_text("compact")))
+            .await
+            .unwrap();
+        wait_for_turn_active(&turn_active, true, 2_000).await;
+
+        tx.send(StdinMsg::ShutdownAfterTurn).await.unwrap();
+        tx.send(StdinMsg::RawLine(fake_error_result_frame("conv-e1")))
+            .await
+            .unwrap();
+
+        let outcome = timeout(std::time::Duration::from_secs(5), handle)
+            .await
+            .expect("stream loop must exit within 5s")
+            .expect("task must not panic");
+        assert!(
+            !outcome.completed,
+            "an error result must not count as a completed run"
+        );
+        assert!(
+            outcome.error.as_deref().unwrap_or("").contains("401"),
+            "outcome must carry the CLI's error text, got {:?}",
+            outcome.error
+        );
+    }
+
     #[tokio::test]
     async fn shutdown_after_turn_with_no_active_turn_exits_immediately() {
         // Edge case: a stray shutdown_after_turn while no turn is in
@@ -1181,11 +1287,14 @@ mod tests {
 
         tx.send(StdinMsg::ShutdownAfterTurn).await.unwrap();
 
-        let completed = timeout(std::time::Duration::from_secs(5), handle)
+        let outcome = timeout(std::time::Duration::from_secs(5), handle)
             .await
             .expect("stream loop must exit within 5s")
             .expect("task must not panic");
-        assert!(completed, "graceful exit must report completed=true");
+        assert!(
+            outcome.completed,
+            "graceful exit must report completed=true"
+        );
 
         // No Crashed event even though we never saw a clean completion.
         let events = db.list_events_by_session(session, None).await.unwrap();
@@ -1219,11 +1328,14 @@ mod tests {
 
         cancel.notify_one();
 
-        let completed = timeout(std::time::Duration::from_secs(5), handle)
+        let outcome = timeout(std::time::Duration::from_secs(5), handle)
             .await
             .expect("stream loop must exit within 5s")
             .expect("task must not panic");
-        assert!(!completed, "cancelled run must report completed=false");
+        assert!(
+            !outcome.completed,
+            "cancelled run must report completed=false"
+        );
 
         let events = db.list_events_by_session(session, None).await.unwrap();
         let crashed = events.iter().find(|e| {

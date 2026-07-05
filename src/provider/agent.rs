@@ -17,6 +17,13 @@ use crate::ws::broadcaster::{Broadcaster, WsEvent};
 pub struct ProcessCompletion {
     pub session_id: String,
     pub completed: bool,
+    /// Provider-reported error text when the run's final turn failed
+    /// (e.g. "Failed to authenticate. API Error: 401 …" from an expired
+    /// login). `None` for clean completions and for providers that don't
+    /// surface per-turn errors. The completion listener threads it into
+    /// `abort_handover` so a failed compaction/handover shows the user
+    /// WHY it was rolled back.
+    pub error: Option<String>,
 }
 
 /// Context handed to an `AgentProvider` when a new run is requested.

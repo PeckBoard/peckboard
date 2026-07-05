@@ -322,8 +322,12 @@ async fn main() -> anyhow::Result<()> {
                                     )
                                     .await
                                 } else {
-                                    peckboard::handover::abort_handover(&orchestrator_state, &sid)
-                                        .await
+                                    peckboard::handover::abort_handover(
+                                        &orchestrator_state,
+                                        &sid,
+                                        completion.error.as_deref(),
+                                    )
+                                    .await
                                 };
                                 if let Err(e) = res {
                                     tracing::error!(

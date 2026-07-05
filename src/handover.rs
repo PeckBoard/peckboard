@@ -439,6 +439,23 @@ pub async fn finalize_handover(state: &Arc<AppState>, session_id: &str) -> anyho
     let from_model = session.model.clone().unwrap_or_default();
 
     let doc = collect_handover_doc(state, session_id).await;
+    if doc.trim().is_empty() && from_model == to_model {
+        // A compaction that produced no summary must NOT finalize:
+        // dropping the conversation with nothing to inject would destroy
+        // the very context the compaction was meant to preserve. Roll it
+        // back instead — the session keeps its model and full history,
+        // and the user can retry (or log in again) and compact later.
+        tracing::warn!(
+            session_id = %session_id,
+            "Compaction doc turn produced no text; aborting instead of finalizing"
+        );
+        return abort_handover(
+            state,
+            session_id,
+            Some("the model produced no compaction summary"),
+        )
+        .await;
+    }
     let doc = if doc.trim().is_empty() {
         EMPTY_DOC_FALLBACK.to_string()
     } else {
@@ -522,7 +539,17 @@ pub async fn finalize_handover(state: &Arc<AppState>, session_id: &str) -> anyho
 /// so the transcript shows the switch didn't happen.
 ///
 /// No-op if no handover is parked, so a spurious completion can't misfire.
-pub async fn abort_handover(state: &Arc<AppState>, session_id: &str) -> anyhow::Result<()> {
+///
+/// `reason`: why the doc turn failed (the provider-reported error, e.g. a
+/// 401 from an expired login), recorded on the `handover-aborted` event so
+/// the UI can tell the user what went wrong — and, for a compaction, offer
+/// the way out (log in again, or clear the session and lose the context).
+/// `None` for a user-initiated interrupt.
+pub async fn abort_handover(
+    state: &Arc<AppState>,
+    session_id: &str,
+    reason: Option<&str>,
+) -> anyhow::Result<()> {
     let Some(session) = state.db.get_session(session_id).await? else {
         return Ok(());
     };
@@ -535,6 +562,7 @@ pub async fn abort_handover(state: &Arc<AppState>, session_id: &str) -> anyhow::
         "from": from_model,
         "to": to_model,
         "compaction": from_model == to_model,
+        "reason": reason,
     });
     if let Ok(ev) = state
         .db

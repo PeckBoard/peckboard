@@ -219,6 +219,7 @@ impl AgentProvider for CursorProvider {
                 .send(ProcessCompletion {
                     session_id: sid,
                     completed,
+                    error: None,
                 })
                 .await;
         });

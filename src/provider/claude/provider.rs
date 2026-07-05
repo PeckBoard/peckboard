@@ -270,7 +270,7 @@ impl AgentProvider for ClaudeProvider {
                     last_activity,
                 };
                 tokio::spawn(async move {
-                    let is_completed = process::stream_events(
+                    let outcome = process::stream_events(
                         process,
                         db,
                         broadcaster,
@@ -291,7 +291,8 @@ impl AgentProvider for ClaudeProvider {
                     let _ = completion_tx_clone
                         .send(ProcessCompletion {
                             session_id: sid,
-                            completed: is_completed,
+                            completed: outcome.completed,
+                            error: outcome.error,
                         })
                         .await;
                 });

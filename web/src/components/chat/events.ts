@@ -58,7 +58,17 @@ export type DisplayItem =
   | { type: 'step'; label: string; key: string }
   | { type: 'agent-start'; model: string; effort: string; ts: number; key: string }
   | { type: 'agent-crashed'; reason: string; ts: number; key: string }
-  | { type: 'handover-aborted'; from: string; compaction: boolean; ts: number; key: string }
+  | {
+      type: 'handover-aborted'
+      from: string
+      compaction: boolean
+      /** Why the doc turn failed (provider error, e.g. an expired login's
+       *  401); null for a user-initiated cancel. Drives the failed-
+       *  compaction prompt (log in again / change sessions). */
+      reason: string | null
+      ts: number
+      key: string
+    }
   | { type: 'handover-start'; to: string; compaction: boolean; ts: number; key: string }
   | {
       type: 'handover'
@@ -378,6 +388,8 @@ export function buildDisplayItems(events: Event[]): DisplayItem[] {
           type: 'handover-aborted',
           from: (ev.data.from as string) ?? '',
           compaction: (ev.data.compaction as boolean) ?? false,
+          reason:
+            typeof ev.data.reason === 'string' && ev.data.reason !== '' ? ev.data.reason : null,
           ts: ev.ts,
           key: ev.id,
         })

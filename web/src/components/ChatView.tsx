@@ -1019,12 +1019,25 @@ export default function ChatView({
                   </div>
                 </div>
               )
-            case 'handover-aborted':
+            case 'handover-aborted': {
+              // A reason means the doc turn FAILED (e.g. an expired login's
+              // 401) rather than being user-cancelled. The context is safe
+              // either way, but a failed compaction leaves the session
+              // stuck near the window limit — so spell out the ways
+              // forward: log in again from Settings and retry, or clear /
+              // switch sessions at the cost of this context.
+              const failed = item.reason !== null
               return (
                 <div key={item.key} className="chat-row chat-row-system">
                   <div className="chat-agent-start">
                     <span className="chat-agent-start-label">
-                      {item.compaction ? 'Compaction cancelled' : 'Switch cancelled'}
+                      {item.compaction
+                        ? failed
+                          ? 'Compaction failed'
+                          : 'Compaction cancelled'
+                        : failed
+                          ? 'Model switch failed'
+                          : 'Switch cancelled'}
                     </span>
                     <span className="chat-agent-start-detail">
                       {item.compaction
@@ -1033,8 +1046,27 @@ export default function ChatView({
                     </span>
                     <span className="chat-agent-start-time">{formatTime(item.ts)}</span>
                   </div>
+                  {failed && (
+                    <div
+                      className="chat-handover-failed"
+                      role="alert"
+                      data-testid="chat-handover-failed"
+                    >
+                      <span className="chat-handover-failed-reason">{item.reason}</span>
+                      <span>
+                        {item.compaction
+                          ? 'Nothing was compacted and no context was lost. If your login expired, '
+                          : 'The model was not switched. If your login expired, '}
+                        <a href="/settings">log in again from Settings</a>
+                        {item.compaction
+                          ? ' and retry the compaction — or clear / switch sessions, accepting that this context will be lost.'
+                          : ' and retry.'}
+                      </span>
+                    </div>
+                  )}
                 </div>
               )
+            }
             case 'handover':
               return (
                 <div key={item.key} className="chat-row chat-row-system">
