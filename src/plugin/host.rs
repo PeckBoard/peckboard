@@ -1460,6 +1460,18 @@ pub(crate) fn deliver_message_impl(
         return error_json("live dispatch unavailable");
     };
     live.deliver_user_message(req.session_id.trim().to_string(), req.text, data);
+    // Delivery is definitionally the END of a pre-hatch: once the final
+    // message lands on the chat session, the temp research session has no
+    // legitimate work left — but in practice its turn kept going and acted
+    // on the user's message content itself (edited files, ran releases).
+    // Kill its agent process here so nothing can run past the hand-off.
+    if let Some(caller_id) = inv.session_id.as_deref()
+        && let Ok(caller) = fetch_visible_session(db, caller_id, inv)
+        && caller.expert_kind.as_deref()
+            == Some(crate::service::mcp_server::PRE_HATCHER_EXPERT_KIND)
+    {
+        live.terminate_agent(caller.id);
+    }
     serde_json::json!({ "ok": true }).to_string()
 }
 

@@ -172,7 +172,20 @@ pub fn build_cli_args(config: &SpawnConfig, conversation_id: Option<&str>) -> Ve
                 || config.extra_allowed_tools.iter().any(|t| t == needed)
         })
     };
-    let disallowed = if has_file_tools {
+    // Pre-hatcher research sessions get a much longer denylist: every
+    // built-in that can mutate, execute, spawn subagents, or reach outside
+    // the MCP server's read-only, project-contained tools. The MCP server
+    // already hard-gates its own tools for these sessions
+    // (`pre_hatcher_allowed_tool_names`), but built-ins bypass that
+    // server-side check, and prompt-level read-only rules alone have been
+    // ignored in practice (runaway pre-hatcher turns edited files, ran
+    // releases, and hunted processes via Bash). ToolSearch stays available
+    // — it only loads MCP tool schemas.
+    let disallowed = if config.is_pre_hatcher {
+        "AskUserQuestion,Read,Write,Edit,MultiEdit,NotebookEdit,Bash,BashOutput,KillShell,\
+         Glob,Grep,Task,Agent,WebFetch,WebSearch,Skill,SlashCommand,ExitPlanMode,\
+         EnterWorktree,ExitWorktree,TodoWrite"
+    } else if has_file_tools {
         "AskUserQuestion,Read,Write,Edit,MultiEdit"
     } else {
         "AskUserQuestion"
@@ -217,10 +230,22 @@ pub fn build_cli_args(config: &SpawnConfig, conversation_id: Option<&str>) -> Ve
         // edit_file), threaded in through `SpawnConfig::extra_allowed_tools`.
         // In the default bypass mode this is advisory, but it keeps "prompt"
         // permission mode from stalling on a plugin file tool.
-        let mut names: Vec<String> = crate::service::mcp_server::tool_names();
-        for t in &config.extra_allowed_tools {
-            if !names.contains(t) {
-                names.push(t.clone());
+        // Pre-hatcher sessions advertise only their read-only allowlist
+        // (which already includes the plugin's own `pre_hatch_result`
+        // hand-off tool); everything else gets the full core + plugin set.
+        let mut names: Vec<String> = if config.is_pre_hatcher {
+            crate::service::mcp_server::pre_hatcher_allowed_tool_names()
+                .iter()
+                .map(|t| t.to_string())
+                .collect()
+        } else {
+            crate::service::mcp_server::tool_names()
+        };
+        if !config.is_pre_hatcher {
+            for t in &config.extra_allowed_tools {
+                if !names.contains(t) {
+                    names.push(t.clone());
+                }
             }
         }
         let allowed: Vec<String> = names
@@ -348,6 +373,7 @@ mod tests {
             system_prompt_override: None,
             extra_allowed_tools: Vec::new(),
             is_worker: false,
+            is_pre_hatcher: false,
         }
     }
 
@@ -476,6 +502,7 @@ mod tests {
             system_prompt_override: None,
             extra_allowed_tools: Vec::new(),
             is_worker: false,
+            is_pre_hatcher: false,
         };
 
         let args = build_cli_args(&config, Some("conv-123"));
@@ -485,6 +512,65 @@ mod tests {
         assert!(args.contains(&"--permission-prompt-tool=stdio".to_string()));
     }
 
+    #[test]
+    fn test_build_cli_args_pre_hatcher_locks_down_builtins() {
+        // A pre-hatcher research session must not get ANY built-in with side
+        // effects — the denylist is the real enforcement point (it overrides
+        // --dangerously-skip-permissions) — and its MCP allowlist is exactly
+        // the read-only pre-hatcher set, not the full tool surface.
+        let config = SpawnConfig {
+            mcp_config_path: Some("/tmp/mcp.json".into()),
+            is_pre_hatcher: true,
+            ..default_spawn("claude-haiku-4-5")
+        };
+        let args = build_cli_args(&config, None);
+        let disallowed = args
+            .iter()
+            .find(|a| a.starts_with("--disallowedTools="))
+            .expect("disallowedTools present");
+        for builtin in [
+            "Bash",
+            "BashOutput",
+            "KillShell",
+            "Write",
+            "Edit",
+            "MultiEdit",
+            "NotebookEdit",
+            "Read",
+            "Glob",
+            "Grep",
+            "Task",
+            "Agent",
+            "WebFetch",
+            "WebSearch",
+            "Skill",
+            "SlashCommand",
+        ] {
+            assert!(
+                disallowed
+                    .trim_start_matches("--disallowedTools=")
+                    .split(',')
+                    .any(|t| t == builtin),
+                "{builtin} must be denied for a pre-hatcher session"
+            );
+        }
+        let allowed = args
+            .iter()
+            .find(|a| a.starts_with("--allowedTools="))
+            .expect("allowedTools present");
+        let names: Vec<&str> = allowed
+            .trim_start_matches("--allowedTools=")
+            .split(',')
+            .collect();
+        assert_eq!(
+            names.len(),
+            crate::service::mcp_server::pre_hatcher_allowed_tool_names().len(),
+            "pre-hatcher allowlist should be exactly the read-only set"
+        );
+        assert!(names.contains(&"mcp__peckboard__read_file"));
+        assert!(names.contains(&"mcp__peckboard__pre_hatch_result"));
+        assert!(!names.iter().any(|n| n.contains("edit_file")));
+    }
     #[test]
     fn test_build_cli_args_plain_session_keeps_full_toolset() {
         let config = SpawnConfig {

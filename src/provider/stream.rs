@@ -233,6 +233,17 @@ pub struct SpawnConfig {
     /// instead (see `crate::handover`).
     #[serde(default)]
     pub is_worker: bool,
+    /// Whether the session being spawned is a pre-hatcher research session
+    /// (`expert_kind == "pre-hatcher"`). Set from the session row in
+    /// `SessionManager::final_config`, like `is_worker`. The Claude provider
+    /// turns this into a hard `--disallowedTools` denylist of every built-in
+    /// with side effects and narrows `--allowedTools` to the read-only
+    /// pre-hatcher MCP set: the MCP server already refuses mutating peckboard
+    /// tools from these sessions (`pre_hatcher_allowed_tool_names`), but the
+    /// CLI's built-ins (Bash, Write, Task, …) bypass that server-side gate,
+    /// and prompt-level read-only rules have been ignored in practice.
+    #[serde(default)]
+    pub is_pre_hatcher: bool,
 }
 
 /// Model info from a provider.

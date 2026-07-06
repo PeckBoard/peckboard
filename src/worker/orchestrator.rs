@@ -338,6 +338,7 @@ pub async fn check_and_spawn_workers(state: &Arc<AppState>) {
                     extra_allowed_tools: Vec::new(),
                     // Set from the session row in SessionManager::final_config.
                     is_worker: false,
+                    is_pre_hatcher: false,
                 };
 
                 if let Err(e) = state
@@ -659,6 +660,7 @@ async fn spawn_worker_for_card(
         extra_allowed_tools: Vec::new(),
         // Set from the session row in SessionManager::final_config.
         is_worker: false,
+        is_pre_hatcher: false,
     };
 
     // The lock is uncontested for a brand-new uuid; we acquire it anyway
@@ -1117,6 +1119,7 @@ pub async fn drain_queue_for_session(
         extra_allowed_tools: Vec::new(),
         // Set from the session row in SessionManager::final_config.
         is_worker: false,
+        is_pre_hatcher: false,
     };
 
     state

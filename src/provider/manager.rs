@@ -324,6 +324,10 @@ impl SessionManager {
             // through here, so providers can trust it over whatever the
             // construction sites filled in.
             is_worker: session.is_worker,
+            // Hard tool gate for pre-hatcher research sessions (see the
+            // field docs on SpawnConfig).
+            is_pre_hatcher: session.expert_kind.as_deref()
+                == Some(crate::service::mcp_server::PRE_HATCHER_EXPERT_KIND),
         };
 
         let ctx = SendMessageContext {

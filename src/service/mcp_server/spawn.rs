@@ -70,6 +70,7 @@ impl AppExpertDispatcher {
             extra_allowed_tools: Vec::new(),
             // Set from the session row in SessionManager::final_config.
             is_worker: false,
+            is_pre_hatcher: false,
         })
     }
 
