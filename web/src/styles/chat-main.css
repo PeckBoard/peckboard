@@ -797,6 +797,32 @@
   opacity: 0.8;
 }
 
+/* Cancel button inside the status row: stop the research, send the
+   original message untouched. */
+.chat-prehatch-cancel {
+  margin-left: auto;
+  font: inherit;
+  font-style: normal;
+  font-size: 11px;
+  padding: 2px 8px;
+  border: 1px solid currentColor;
+  border-radius: 4px;
+  background: transparent;
+  color: inherit;
+  cursor: pointer;
+  opacity: 0.9;
+}
+
+.chat-prehatch-cancel:hover:not(:disabled) {
+  opacity: 1;
+  background: rgba(255, 255, 255, 0.12);
+}
+
+.chat-prehatch-cancel:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
 .chat-prehatch-spinner {
   width: 10px;
   height: 10px;

@@ -289,6 +289,21 @@ pub const USER_ANSWER_HOOK: &str = "session.user.answer";
 /// and dispatch helper sessions in the caller's folder — see
 /// [`crate::plugin::manager::PluginManager::dispatch_scoped`].
 pub const MESSAGE_BEFORE_HOOK: &str = "session.message.before";
+
+/// Fired when the user cancels an in-flight pre-hatch (`POST
+/// /api/sessions/:id/prehatch-cancel`). By the time this fires, core has
+/// already terminated the temp research session's agent and dismissed the
+/// chat's pending question cards — the hook exists so the plugin that owns
+/// the pre-hatch can clear its pending records and deliver the parked
+/// original message through its normal path. Payload: `{ session_id,
+/// temp_session_id, text }` (`text` is the parked original message;
+/// `temp_session_id` is null on legacy `pre-ignite` events). Verdicts:
+/// `Cancel` means the plugin OWNED the cancel — it delivered the original
+/// (or knows it was already delivered), so core must not deliver again;
+/// `Allow`/`Skip` (or no listener at all) makes core fall back to
+/// delivering the original message itself. Fired under a **user-authority**
+/// context scoped to the chat session, like [`MESSAGE_BEFORE_HOOK`].
+pub const PREHATCH_CANCEL_HOOK: &str = "session.prehatch.cancel";
 /// The request a plugin receives for a plugin-served HTTP route.
 ///
 /// Serialized as the `payload` of the [`HTTP_REQUEST_HOOK`] hook call.

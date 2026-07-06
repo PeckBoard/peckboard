@@ -615,6 +615,204 @@ pub(super) async fn terminate_agent(
     Ok::<_, (StatusCode, Json<serde_json::Value>)>(StatusCode::NO_CONTENT)
 }
 
+/// POST /api/sessions/:id/prehatch-cancel -- cancel the pre-hatch parked on
+/// this chat session: kill the temp research session's agent, dismiss the
+/// pending question cards, and make sure the parked original message still
+/// reaches the main model. Delivery is routed through the plugin that owns
+/// the pre-hatch (`session.prehatch.cancel`) so its pending records are
+/// cleared with it; when no plugin handles the hook (uninstalled or disabled
+/// since the pre-hatch started) core delivers the original itself —
+/// cancelling must never eat the user's message.
+pub(super) async fn cancel_pre_hatch(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+    Extension(user): Extension<AuthUser>,
+) -> impl IntoResponse {
+    tracing::info!(session_id = %id, "Cancelling pre-hatch");
+    let session = state
+        .db
+        .get_session(&id)
+        .await
+        .map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({ "error": e.to_string() })),
+            )
+        })?
+        .ok_or_else(|| {
+            (
+                StatusCode::NOT_FOUND,
+                Json(serde_json::json!({ "error": "session not found" })),
+            )
+        })?;
+
+    // The pre-hatch in flight is the newest placeholder with no `user` event
+    // after it — delivery (or the user typing past a dead pre-hatch)
+    // supersedes the placeholder; same rule the chat UI renders by.
+    // `pre-ignite` is the legacy kind from before the pre-hatcher rename.
+    let events = state
+        .db
+        .list_events_by_session_before(&id, None, 200)
+        .await
+        .map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({ "error": e.to_string() })),
+            )
+        })?;
+    let parked = events
+        .iter()
+        .rev()
+        .find(|e| matches!(e.kind.as_str(), "user" | "pre-hatch" | "pre-ignite"))
+        .filter(|e| e.kind != "user");
+    let Some(parked) = parked else {
+        return Err((
+            StatusCode::CONFLICT,
+            Json(serde_json::json!({ "error": "no pre-hatch in flight" })),
+        ));
+    };
+    let parked_seq = parked.seq;
+    let parked_data: serde_json::Value = serde_json::from_str(&parked.data).unwrap_or_default();
+    let text = parked_data
+        .get("text")
+        .and_then(|v| v.as_str())
+        .unwrap_or_default()
+        .to_string();
+    let temp_session_id = parked_data
+        .get("temp_session_id")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string());
+    if text.is_empty() {
+        return Err((
+            StatusCode::CONFLICT,
+            Json(serde_json::json!({ "error": "pre-hatch event carries no text" })),
+        ));
+    }
+
+    // Kill the research agent FIRST so it can't race this cancel with a
+    // delivery of its own, then note the stop on its transcript.
+    if let Some(temp_id) = &temp_session_id {
+        crate::provider::manager::clear_queued_message(&state.db, &state.broadcaster, temp_id)
+            .await;
+        state.session_manager.cancel_and_wait(temp_id).await;
+        append_and_broadcast(
+            &state,
+            temp_id,
+            "system",
+            serde_json::json!({
+                "text": "Pre-hatch cancelled by the user; research agent terminated.",
+            }),
+        )
+        .await;
+    }
+
+    // The temp agent may have delivered in the window before the kill; a
+    // `user` event after the placeholder means there is nothing to cancel.
+    let delivered = state
+        .db
+        .list_events_by_session(&id, Some(parked_seq))
+        .await
+        .map(|evs| evs.iter().any(|e| e.kind == "user"))
+        .unwrap_or(false);
+    if delivered {
+        return Ok(Json(serde_json::json!({
+            "status": "already-delivered",
+            "session_id": id,
+        })));
+    }
+
+    // Any question card still up (opt-in, clarifying, approval) belongs to
+    // the pre-hatch being cancelled; its redirect target is now dead.
+    dismiss_pending_questions(&state, &id).await;
+
+    // A `Cancelled` verdict means the plugin delivered the original (or knew
+    // it was already delivered); anything else falls through to core's own
+    // delivery below.
+    let hook = crate::plugin::hooks::PREHATCH_CANCEL_HOOK;
+    let plugin_handled = state.plugins.has_listeners(hook).await
+        && state
+            .plugins
+            .dispatch_scoped(
+                hook,
+                &user.user_id,
+                Some(session.folder_id.clone()),
+                session.project_id.clone(),
+                Some(id.clone()),
+                serde_json::json!({
+                    "session_id": id,
+                    "temp_session_id": temp_session_id,
+                    "text": text,
+                }),
+            )
+            .await
+            .is_cancelled();
+
+    if !plugin_handled {
+        let mut pre_hatch = serde_json::json!({
+            "original": text,
+            "enriched": false,
+            "cancelled": true,
+        });
+        if let Some(temp_id) = &temp_session_id {
+            pre_hatch["temp_session_id"] = serde_json::json!(temp_id);
+        }
+        append_and_broadcast(
+            &state,
+            &id,
+            "user",
+            serde_json::json!({ "text": text, "pre_hatch": pre_hatch }),
+        )
+        .await;
+        // Resume exactly like the plugin's deliver path: run the main model
+        // on the original text without appending a second user event.
+        use crate::service::mcp_server::ExpertDispatcher;
+        if let Err(e) = crate::service::mcp_server::AppExpertDispatcher::new(state.clone())
+            .resume_session(&id, &text)
+            .await
+        {
+            tracing::warn!(session_id = %id, "pre-hatch cancel resume failed: {e}");
+        }
+    }
+
+    Ok::<_, (StatusCode, Json<serde_json::Value>)>(Json(serde_json::json!({
+        "status": "cancelled",
+        "session_id": id,
+        "delivered_by": if plugin_handled { "plugin" } else { "core" },
+    })))
+}
+
+/// Append an event and broadcast it — the persist+push pair the cancel path
+/// repeats. Failures log and drop: every caller is past the point where an
+/// event write should fail the user's action.
+async fn append_and_broadcast(
+    state: &Arc<AppState>,
+    session_id: &str,
+    kind: &str,
+    data: serde_json::Value,
+) {
+    match state.db.append_event(session_id, kind, data).await {
+        Ok(ev) => {
+            state
+                .broadcaster
+                .broadcast(crate::ws::broadcaster::WsEvent {
+                    event_type: "event".into(),
+                    session_id: session_id.to_string(),
+                    data: serde_json::json!({
+                        "id": ev.id,
+                        "seq": ev.seq,
+                        "ts": ev.ts,
+                        "kind": ev.kind,
+                        "data": serde_json::from_str::<serde_json::Value>(&ev.data)
+                            .unwrap_or_default(),
+                    }),
+                });
+        }
+        Err(e) => {
+            tracing::warn!(session_id = %session_id, kind = %kind, "Failed to append event: {e}");
+        }
+    }
+}
+
 /// Read every attachment referenced by the request into memory so the
 /// provider can build a multimodal envelope without a second round-trip
 /// through the data dir. A missing id drops with a warning — at

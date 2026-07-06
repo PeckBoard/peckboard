@@ -79,6 +79,7 @@ fn cfg(model: &str) -> SpawnConfig {
         system_prompt_override: None,
         extra_allowed_tools: Vec::new(),
         is_worker: false,
+        is_pre_hatcher: false,
     }
 }
 
@@ -531,6 +532,7 @@ mod midstream {
             system_prompt_override: None,
             extra_allowed_tools: Vec::new(),
             is_worker: false,
+            is_pre_hatcher: false,
         }
     }
 

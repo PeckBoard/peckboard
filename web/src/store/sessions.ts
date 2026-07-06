@@ -155,6 +155,10 @@ interface SessionsState {
   cancelSession: (id: string) => Promise<void>
   interruptSession: (id: string) => Promise<void>
   terminateAgent: (id: string) => Promise<void>
+  /** Cancel the pre-hatch parked on a chat session: the temp research
+   *  agent is killed server-side and the original message is delivered
+   *  to the main model untouched. */
+  cancelPreHatch: (id: string) => Promise<void>
   setDraft: (sessionId: string, text: string) => void
   getDraft: (sessionId: string) => string
   handleEvent: (event: Event) => void
@@ -514,6 +518,14 @@ export const useSessionsStore = create<SessionsState>((set, get) => ({
     if (!res.ok) {
       const err = await res.json().catch(() => ({ error: 'Failed to terminate agent' }))
       throw new Error(err.error || 'Failed to terminate agent')
+    }
+  },
+
+  cancelPreHatch: async (id: string) => {
+    const res = await authedFetch(`/api/sessions/${id}/prehatch-cancel`, { method: 'POST' })
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({ error: 'Failed to cancel pre-hatch' }))
+      throw new Error(err.error || 'Failed to cancel pre-hatch')
     }
   },
 

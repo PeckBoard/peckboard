@@ -97,6 +97,10 @@ pub fn router(state: Arc<AppState>) -> Router<Arc<AppState>> {
             post(dispatch::terminate_agent),
         )
         .route(
+            "/api/sessions/{id}/prehatch-cancel",
+            post(dispatch::cancel_pre_hatch),
+        )
+        .route(
             "/api/sessions/{id}/status",
             get(dispatch::get_session_status),
         )

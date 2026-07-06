@@ -986,7 +986,11 @@ export default function ChatView({
                     data-testid="chat-prehatch"
                   >
                     {item.text}
-                    <PreHatchActivity tempSessionId={item.tempSessionId} model={item.model} />
+                    <PreHatchActivity
+                      tempSessionId={item.tempSessionId}
+                      model={item.model}
+                      sessionId={sessionId}
+                    />
                     <div className="chat-time chat-time-user">{formatTime(item.ts)}</div>
                   </div>
                 </div>

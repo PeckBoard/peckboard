@@ -69,6 +69,7 @@ pub const ALLOWED_HOOKS: &[&str] = &[
     "mcp.tool.call.failed",
     "mcp.tool.invoke",
     "session.message.before",
+    "session.prehatch.cancel",
     "session.reference.resolve",
     "session.user.answer",
     "todo",
@@ -1840,6 +1841,7 @@ mod tests {
             "http.request.before",
             "mcp.tool.call.before",
             "session.message.before",
+            "session.prehatch.cancel",
             "session.reference.resolve",
             "todo",
         ] {

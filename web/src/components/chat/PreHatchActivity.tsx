@@ -1,4 +1,4 @@
-import { useEffect, useMemo } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import type { Event } from '../../types/api'
 import { useSessionsStore } from '../../store/sessions'
 import { useWsStore } from '../../store/ws'
@@ -76,6 +76,9 @@ interface Props {
   tempSessionId?: string
   /** The model the research session runs on. */
   model?: string
+  /** The chat session the pre-hatch is parked on — enables the cancel
+   *  button (kill the research, send the original message untouched). */
+  sessionId?: string
 }
 
 /**
@@ -84,7 +87,7 @@ interface Props {
  * happen, so the user sees exactly what the cheaper model is doing while
  * their message waits.
  */
-export default function PreHatchActivity({ tempSessionId, model }: Props) {
+export default function PreHatchActivity({ tempSessionId, model, sessionId }: Props) {
   const events = useSessionsStore((s) =>
     tempSessionId ? (s.eventsBySession[tempSessionId] ?? EMPTY_EVENTS) : EMPTY_EVENTS,
   )
@@ -94,6 +97,8 @@ export default function PreHatchActivity({ tempSessionId, model }: Props) {
   const unsubscribe = useWsStore((s) => s.unsubscribe)
   const addEventListener = useWsStore((s) => s.addEventListener)
   const removeEventListener = useWsStore((s) => s.removeEventListener)
+  const cancelPreHatch = useSessionsStore((s) => s.cancelPreHatch)
+  const [cancelling, setCancelling] = useState(false)
 
   useEffect(() => {
     if (!tempSessionId) return
@@ -117,6 +122,19 @@ export default function PreHatchActivity({ tempSessionId, model }: Props) {
     appendEvent,
   ])
 
+  const handleCancel = async () => {
+    if (!sessionId || cancelling) return
+    setCancelling(true)
+    try {
+      await cancelPreHatch(sessionId)
+      // The delivered `user` event arrives over WS and replaces the parked
+      // bubble; stay disabled until it does.
+    } catch (e) {
+      console.warn('pre-hatch cancel failed', e)
+      setCancelling(false)
+    }
+  }
+
   const lines = useMemo(() => deriveActionLines(events), [events])
   const hidden = Math.max(0, lines.length - MAX_VISIBLE)
   const visible = lines.slice(-MAX_VISIBLE)
@@ -126,6 +144,18 @@ export default function PreHatchActivity({ tempSessionId, model }: Props) {
       <div className="chat-prehatch-status">
         <span className="chat-prehatch-spinner" aria-hidden />
         Pre-hatching{model ? ` on ${model}` : ''} — a cheaper model is gathering context…
+        {sessionId && (
+          <button
+            type="button"
+            className="chat-prehatch-cancel"
+            data-testid="chat-prehatch-cancel"
+            onClick={handleCancel}
+            disabled={cancelling}
+            title="Stop the research and send your original message now"
+          >
+            {cancelling ? 'Cancelling…' : 'Cancel — send original'}
+          </button>
+        )}
       </div>
       {tempSessionId && (
         <div className="chat-prehatch-actions" data-testid="chat-prehatch-actions">
