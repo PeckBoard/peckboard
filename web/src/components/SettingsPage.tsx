@@ -7,6 +7,7 @@ import GrokAccountsSection from './GrokAccountsSection'
 import ApprovedCommandsSection from './ApprovedCommandsSection'
 import SoftwareUpdate from './SoftwareUpdate'
 import PluginSettingsForm from './PluginSettingsForm'
+import OllamaPullModel from './OllamaPullModel'
 
 const THEME_KEY = 'peckboard_theme'
 const HUE_KEY = 'peckboard_hue'
@@ -329,6 +330,7 @@ export default function SettingsPage({ onBack }: Props) {
               qwen2.5-coder@gpu-box).
             </p>
             <PluginSettingsForm pluginId="ollama" />
+            <OllamaPullModel />
           </section>
 
           <section className="settings-section" data-testid="cursor-settings-section">

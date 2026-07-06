@@ -61,6 +61,36 @@ pub fn chat_hidden_tool_names() -> &'static [&'static str] {
     ]
 }
 
+/// The `expert_kind` the pre-hatcher plugin stamps on its temp research
+/// sessions (`createSession({expert_kind: "pre-hatcher"})` in
+/// `peck-plugins/pre-hatcher/src/hatch.ts`).
+pub const PRE_HATCHER_EXPERT_KIND: &str = "pre-hatcher";
+
+/// The ONLY tools a pre-hatcher research session may call. Unlike the
+/// hidden-name lists above this is ENFORCED at dispatch — `routes/mcp.rs`
+/// rejects anything else — not just trimmed from advertisement: the
+/// pre-hatcher exists purely to gather read-only context for the main
+/// model, and a prompt-level "never edit files" rule alone has been
+/// ignored in practice. An allowlist rather than a denylist so any
+/// future mutating tool is blocked by default. `pre_hatch_result` is the
+/// plugin's own hand-off tool, not a core tool.
+pub fn pre_hatcher_allowed_tool_names() -> &'static [&'static str] {
+    &[
+        "search_files",
+        "list_files",
+        "read_file",
+        "file_outline",
+        "read_symbol",
+        "math",
+        "fetch_url",
+        "fetch_web",
+        "web_get_part",
+        "parse_web",
+        "search_web",
+        "pre_hatch_result",
+    ]
+}
+
 pub(super) fn tool_definitions() -> Vec<McpToolDef> {
     vec![
         McpToolDef {
@@ -1459,6 +1489,53 @@ mod tests {
             assert!(
                 !chat_hidden_tool_names().contains(&essential),
                 "essential chat tool {essential} must stay advertised"
+            );
+        }
+    }
+
+    #[test]
+    fn pre_hatcher_allowlist_is_read_only_and_real() {
+        for blocked in [
+            "write_file",
+            "edit_file",
+            "run_command",
+            "run_tests",
+            "git",
+            "create_card",
+            "update_card",
+            "delete_card",
+            "create_project",
+            "delete_project",
+            "upgrade_plugin",
+            "set_session_system_prompt",
+            "browser_act",
+            "write_report",
+            "send_worker_message",
+        ] {
+            assert!(
+                !pre_hatcher_allowed_tool_names().contains(&blocked),
+                "{blocked} must not be callable from a pre-hatcher session"
+            );
+        }
+        for allowed in [
+            "read_file",
+            "search_files",
+            "file_outline",
+            "read_symbol",
+            "pre_hatch_result",
+        ] {
+            assert!(
+                pre_hatcher_allowed_tool_names().contains(&allowed),
+                "{allowed} must be callable from a pre-hatcher session"
+            );
+        }
+        // Every allowlisted name is a real core tool (or the plugin's own
+        // pre_hatch_result) — a typo here would silently block a tool.
+        let core = tool_names();
+        for name in pre_hatcher_allowed_tool_names() {
+            assert!(
+                *name == "pre_hatch_result" || core.contains(&name.to_string()),
+                "{name} is not a core tool"
             );
         }
     }

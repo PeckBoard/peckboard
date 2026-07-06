@@ -183,25 +183,30 @@ async fn mcp_handler(
             // the admin tools, chats/experts lose the card-lifecycle and
             // worker-coordination tools — schemas they can never legitimately
             // use stop occupying context on every API call. Advertisement
-            // only; the per-handler scope checks remain the enforcement
-            // point.
-            let is_worker = state
-                .db
-                .get_session(&session_id)
-                .await
-                .ok()
-                .flatten()
-                .map(|s| s.is_worker)
-                .unwrap_or(false);
+            // only for those two lists; the per-handler scope checks remain
+            // their enforcement point. Pre-hatcher research sessions instead
+            // see ONLY the read-only allowlist — for them the same list is
+            // also hard-enforced in `tools/call` below.
+            let session_row = state.db.get_session(&session_id).await.ok().flatten();
+            let is_worker = session_row.as_ref().map(|s| s.is_worker).unwrap_or(false);
+            let pre_hatcher = session_row.as_ref().and_then(|s| s.expert_kind.as_deref())
+                == Some(crate::service::mcp_server::PRE_HATCHER_EXPERT_KIND);
             let hidden: &[&str] = if is_worker {
                 crate::service::mcp_server::worker_hidden_tool_names()
             } else {
                 crate::service::mcp_server::chat_hidden_tool_names()
             };
+            let advertised = |name: &str| {
+                if pre_hatcher {
+                    crate::service::mcp_server::pre_hatcher_allowed_tool_names().contains(&name)
+                } else {
+                    !hidden.contains(&name)
+                }
+            };
             let mut tools: Vec<Value> = registry
                 .tool_definitions()
                 .iter()
-                .filter(|t| !hidden.contains(&t.name.as_str()))
+                .filter(|t| advertised(t.name.as_str()))
                 .map(|t| {
                     serde_json::json!({
                         "name": t.name,
@@ -225,6 +230,9 @@ async fn mcp_handler(
                         plugin = %t.plugin, tool = %t.name,
                         "plugin mcp_tool collides with a core tool name; dropping"
                     );
+                    continue;
+                }
+                if !advertised(t.name.as_str()) {
                     continue;
                 }
                 tools.push(serde_json::json!({
@@ -279,6 +287,33 @@ async fn mcp_handler(
                     );
                 }
             };
+
+            // HARD gate, not advertisement: a pre-hatcher research session
+            // exists only to gather read-only context for the main model.
+            // Its prompt already forbids mutation, but a prompt is advisory —
+            // one pre-hatcher run ignored it and edited source files while
+            // the main session worked the same repo. Anything outside the
+            // read-only allowlist is refused here, whatever the model asks.
+            if session_row.expert_kind.as_deref()
+                == Some(crate::service::mcp_server::PRE_HATCHER_EXPERT_KIND)
+                && !crate::service::mcp_server::pre_hatcher_allowed_tool_names()
+                    .contains(&tool_name)
+            {
+                return (
+                    StatusCode::OK,
+                    rpc_json(JsonRpcResponse::error(
+                        id.clone(),
+                        -32000,
+                        format!(
+                            "tool '{tool_name}' is blocked: pre-hatcher sessions are \
+                             read-only context gatherers. Use the read tools \
+                             (read_file, search_files, file_outline, read_symbol, \
+                             list_files) and hand off with pre_hatch_result; code \
+                             changes are the main model's job."
+                        ),
+                    )),
+                );
+            }
             let card_id = session_row.card_id.clone();
             let folder_id = session_row.folder_id.clone();
 

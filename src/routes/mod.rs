@@ -7,6 +7,7 @@ pub mod mcp;
 pub mod me;
 pub mod misc;
 pub mod notifications;
+pub mod ollama;
 pub mod plugin_api;
 pub mod plugin_ui;
 pub mod plugins;
@@ -42,6 +43,7 @@ pub fn api_router(state: Arc<AppState>) -> Router<Arc<AppState>> {
         .merge(notifications::router(state.clone()))
         .merge(me::router(state.clone()))
         .merge(settings::router(state.clone()))
+        .merge(ollama::router(state.clone()))
         .merge(plugins::router(state.clone()))
         // Public, plugin-owned HTTP surface. Intentionally NOT behind the
         // `/api/*` auth middleware — the serving plugin owns its own auth.

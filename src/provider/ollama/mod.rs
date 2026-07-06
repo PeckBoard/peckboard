@@ -1046,6 +1046,37 @@ fn build_endpoint(base_url: &str, path: &str) -> anyhow::Result<String> {
     Ok(endpoint)
 }
 
+/// Start pulling `model_ref` (`name[@server]`) onto the Ollama server
+/// that hosts it, returning the raw streaming response from Ollama's
+/// `POST /api/pull` so the caller can proxy the NDJSON progress lines
+/// through to its own client. `name` may be anything `ollama pull`
+/// accepts: a registry model (`llama3.2`, `llama3.1:8b`) or a Hugging
+/// Face GGUF repo (`hf.co/<user>/<repo>[:quant]`).
+pub(crate) async fn start_pull(
+    settings: &HashMap<String, serde_json::Value>,
+    model_ref: &str,
+) -> anyhow::Result<reqwest::Response> {
+    let (name, base_url) = resolve_server(settings, model_ref)?;
+    let endpoint = build_endpoint(&base_url, "/api/pull")?;
+    // Same hardening as the chat client: refuse redirects (base_url is
+    // user-supplied — a 302 could repoint the request at an internal
+    // endpoint) and bound the connect wait. No overall timeout: a large
+    // model legitimately takes many minutes to download.
+    let client = reqwest::Client::builder()
+        .connect_timeout(Duration::from_secs(5))
+        .redirect(reqwest::redirect::Policy::none())
+        .build()?;
+    let mut req = client
+        .post(&endpoint)
+        // Newer Ollama documents `model`; older releases read `name`.
+        // Sending both keeps either version happy.
+        .json(&serde_json::json!({ "model": name, "name": name, "stream": true }));
+    for (key, value) in setting_headers(settings, "additional_headers") {
+        req = req.header(key, value);
+    }
+    Ok(req.send().await?)
+}
+
 /// Everything one `run_chat_stream` task needs. Bundled into a struct so the
 /// per-turn entry point stays a single argument instead of a dozen
 /// positional ones (and so adding a knob later doesn't reshuffle call sites).

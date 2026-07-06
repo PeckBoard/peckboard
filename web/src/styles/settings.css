@@ -868,3 +868,46 @@ a.wasm-plugin-repo:hover {
   font-size: var(--text-lg);
   color: var(--text3);
 }
+
+/* ── Ollama "Pull a Model" widget ─────────────────────────────────── */
+.ollama-pull {
+  margin-top: 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.ollama-pull h4 {
+  margin: 0;
+  font-size: var(--text-sm);
+}
+.ollama-pull-row {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+.ollama-pull-row .form-input {
+  flex: 1;
+}
+.ollama-pull-progress {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+.ollama-pull-progress-track {
+  flex: 1;
+  height: 6px;
+  border-radius: 3px;
+  background: var(--border);
+  overflow: hidden;
+}
+.ollama-pull-progress-fill {
+  height: 100%;
+  border-radius: 3px;
+  background: var(--accent);
+  transition: width 0.2s ease;
+}
+.ollama-pull-status {
+  font-size: var(--text-xs);
+  color: var(--text2);
+  white-space: nowrap;
+}
