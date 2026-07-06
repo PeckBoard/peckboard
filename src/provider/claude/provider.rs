@@ -142,7 +142,10 @@ impl ClaudeProvider {
                 env.insert("ANTHROPIC_API_KEY".into(), account.credential.clone());
             }
             "oauth_token" => {
-                env.insert("CLAUDE_CODE_OAUTH_TOKEN".into(), account.credential.clone());
+                // Short-lived browser-login tokens are renewed here so the
+                // spawned CLI never starts with an expired credential.
+                let token = super::token_refresh::fresh_credential(db, &account).await?;
+                env.insert("CLAUDE_CODE_OAUTH_TOKEN".into(), token);
             }
             other => return Err(anyhow::anyhow!("unknown claude account kind: {other}")),
         }
@@ -565,6 +568,8 @@ mod tests {
             critical_threshold: 0.95,
             created_at: 0,
             updated_at: 0,
+            refresh_token: None,
+            token_expires_at: None,
         }
     }
 

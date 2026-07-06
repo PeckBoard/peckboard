@@ -2442,6 +2442,8 @@ mod tests {
                 critical_threshold: 0.90,
                 created_at: 1_000,
                 updated_at: 1_000,
+                refresh_token: None,
+                token_expires_at: None,
             })
             .await
             .unwrap();

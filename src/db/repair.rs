@@ -38,6 +38,7 @@ pub fn ensure_schema(conn: &mut SqliteConnection) -> anyhow::Result<()> {
     ensure_usage_events_table(conn)?;
     ensure_usage_events_account_id_column(conn)?;
     ensure_claude_accounts_table(conn)?;
+    ensure_claude_accounts_token_columns(conn)?;
     ensure_grok_accounts_table(conn)?;
     ensure_user_tabs_check_constraint(conn)?;
     ensure_plugin_data_tables(conn)?;
@@ -91,10 +92,39 @@ fn ensure_claude_accounts_table(conn: &mut SqliteConnection) -> anyhow::Result<(
             warn_threshold      REAL    NOT NULL DEFAULT 0.75,
             critical_threshold  REAL    NOT NULL DEFAULT 0.90,
             created_at          BIGINT  NOT NULL,
-            updated_at          BIGINT  NOT NULL
+            updated_at          BIGINT  NOT NULL,
+            refresh_token       TEXT,
+            token_expires_at    BIGINT
         )",
     )
     .execute(conn)?;
+    Ok(())
+}
+
+/// Heal DBs that predate `1783600000_claude_account_token_refresh`. The
+/// migration's `ALTER TABLE … ADD COLUMN` is non-idempotent, so the two
+/// columns are detected-and-added here, mirroring the migration.
+fn ensure_claude_accounts_token_columns(conn: &mut SqliteConnection) -> anyhow::Result<()> {
+    let rows: Vec<PragmaColumn> = sql_query("PRAGMA table_info(claude_accounts)").load(conn)?;
+    let existing: Vec<String> = rows.into_iter().map(|r| r.name).collect();
+    if existing.is_empty() {
+        return Ok(());
+    }
+    for (col, ddl) in [
+        (
+            "refresh_token",
+            "ALTER TABLE claude_accounts ADD COLUMN refresh_token TEXT",
+        ),
+        (
+            "token_expires_at",
+            "ALTER TABLE claude_accounts ADD COLUMN token_expires_at BIGINT",
+        ),
+    ] {
+        if !existing.iter().any(|c| c == col) {
+            tracing::info!("Repairing schema: adding claude_accounts.{col}");
+            sql_query(ddl).execute(conn)?;
+        }
+    }
     Ok(())
 }
 

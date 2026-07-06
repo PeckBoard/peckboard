@@ -355,17 +355,18 @@ async fn create_account(
         return Err(bad_request("name is required"));
     }
     // The credential comes from one of two paths: a finished browser login
-    // (exchanged here, forcing an `oauth_token` account) or a pasted secret.
-    let (kind, credential) = match body.login {
+    // (exchanged here, forcing an `oauth_token` account) or a pasted secret
+    // (no refresh material — api keys and legacy setup tokens don't expire).
+    let (kind, minted) = match body.login {
         Some(login) => {
-            let token =
+            let minted =
                 match oauth::exchange(&http_client(), &login.code, &login.verifier, &login.state)
                     .await
                 {
                     Ok(t) => t,
                     Err(e) => return Err(bad_request(&format!("Claude login failed: {e}"))),
                 };
-            ("oauth_token".to_string(), token)
+            ("oauth_token".to_string(), minted)
         }
         None => {
             if !valid_kind(&body.kind) {
@@ -375,7 +376,14 @@ async fn create_account(
             if credential.is_empty() {
                 return Err(bad_request("credential is required"));
             }
-            (body.kind, credential)
+            (
+                body.kind,
+                oauth::MintedToken {
+                    access_token: credential,
+                    refresh_token: None,
+                    expires_at_ms: None,
+                },
+            )
         }
     };
     let (warn, critical) = match normalize_thresholds(body.warn_threshold, body.critical_threshold)
@@ -400,7 +408,9 @@ async fn create_account(
         id,
         name,
         kind,
-        credential,
+        credential: minted.access_token,
+        refresh_token: minted.refresh_token,
+        token_expires_at: minted.expires_at_ms,
         config_dir: Some(config_dir),
         budget_window_hours: body.budget_window_hours,
         budget_limit_usd: body.budget_limit_usd,
@@ -438,26 +448,40 @@ async fn update_account(
     // PUT semantics: the form always sends the full editable state, so
     // budgets are set verbatim (a `null` clears them). The credential is the
     // one exception — only replaced when a fresh browser login is exchanged or
-    // a non-empty secret is supplied; otherwise the stored secret is kept.
-    let credential = match body.login {
+    // a non-empty secret is supplied; otherwise the stored secret (and its
+    // refresh material) is kept. A pasted secret clears the refresh pair —
+    // api keys and legacy setup tokens have nothing to renew.
+    let (credential, refresh_token, token_expires_at) = match body.login {
         Some(login) => {
             match oauth::exchange(&http_client(), &login.code, &login.verifier, &login.state).await
             {
-                Ok(t) => Some(t),
+                Ok(t) => (
+                    Some(t.access_token),
+                    Some(t.refresh_token),
+                    Some(t.expires_at_ms),
+                ),
                 Err(e) => return Err(bad_request(&format!("Claude login failed: {e}"))),
             }
         }
-        None => body
-            .credential
-            .as_deref()
-            .map(str::trim)
-            .filter(|c| !c.is_empty())
-            .map(str::to_string),
+        None => {
+            let pasted = body
+                .credential
+                .as_deref()
+                .map(str::trim)
+                .filter(|c| !c.is_empty())
+                .map(str::to_string);
+            match pasted {
+                Some(c) => (Some(c), Some(None), Some(None)),
+                None => (None, None, None),
+            }
+        }
     };
 
     let changes = ClaudeAccountChanges {
         name: Some(name),
         credential,
+        refresh_token,
+        token_expires_at,
         budget_window_hours: Some(body.budget_window_hours),
         budget_limit_usd: Some(body.budget_limit_usd),
         budget_limit_tokens: Some(body.budget_limit_tokens),

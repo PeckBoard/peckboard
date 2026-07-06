@@ -657,6 +657,11 @@ pub struct ClaudeAccount {
     pub critical_threshold: f64,
     pub created_at: i64,
     pub updated_at: i64,
+    /// Refresh token for short-lived browser-login credentials; NULL for
+    /// `api_key` accounts and legacy long-lived setup tokens.
+    pub refresh_token: Option<String>,
+    /// ms epoch when `credential` expires; NULL = long-lived.
+    pub token_expires_at: Option<i64>,
 }
 
 #[derive(Insertable, Debug)]
@@ -674,6 +679,8 @@ pub struct NewClaudeAccount {
     pub critical_threshold: f64,
     pub created_at: i64,
     pub updated_at: i64,
+    pub refresh_token: Option<String>,
+    pub token_expires_at: Option<i64>,
 }
 
 /// Mutable fields of an account. `None` leaves a field unchanged.
@@ -692,6 +699,8 @@ pub struct ClaudeAccountChanges {
     pub warn_threshold: Option<f64>,
     pub critical_threshold: Option<f64>,
     pub updated_at: Option<i64>,
+    pub refresh_token: Option<Option<String>>,
+    pub token_expires_at: Option<Option<i64>>,
 }
 
 /// One Grok / xAI account the spawned `grok` CLI can run as. Mirrors

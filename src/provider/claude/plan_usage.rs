@@ -177,7 +177,17 @@ pub async fn refresh_once(db: &Db) {
         }
     };
     for acct in accounts.iter().filter(|a| a.kind == "oauth_token") {
-        match fetch(&client, &acct.credential).await {
+        // Renew a short-lived login token first — the buckets can't be
+        // read with an expired credential.
+        let token = match super::token_refresh::fresh_credential(db, acct).await {
+            Ok(t) => t,
+            Err(e) => {
+                tracing::warn!(account = %acct.name, "plan-usage: {e}");
+                record_err(&acct.id, e);
+                continue;
+            }
+        };
+        match fetch(&client, &token).await {
             Ok(usage) => record_ok(&acct.id, usage),
             Err(e) => {
                 tracing::warn!(account = %acct.name, "plan-usage: fetch failed: {e}");

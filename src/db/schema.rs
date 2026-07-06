@@ -297,6 +297,8 @@ diesel::table! {
         critical_threshold -> Double,
         created_at -> BigInt,
         updated_at -> BigInt,
+        refresh_token -> Nullable<Text>,
+        token_expires_at -> Nullable<BigInt>,
     }
 }
 
