@@ -130,7 +130,7 @@ pub trait LiveHost: Send + Sync {
     /// agent and resume — spawn if idle, queue/inject if running. The
     /// transcript-writing twin of [`Self::resume_session`]: the caller keeps
     /// the persisted `data` and the delivered `text` consistent (e.g. the
-    /// pre-igniter stores `{text, pre_ignite: {original}}` and delivers
+    /// pre-hatcher stores `{text, pre_hatch: {original}}` and delivers
     /// `text`). No-op default.
     fn deliver_user_message(&self, _session_id: String, _text: String, _data: serde_json::Value) {}
     /// Interrupt the in-flight turn on `session_id` (cancel the current run
@@ -154,7 +154,7 @@ pub trait LiveHost: Send + Sync {
     /// is an opaque correlation id stored on the question so the plugin can
     /// later resolve the answer (see `get_answer_impl`). When
     /// `redirect_session_id` is set, the user's answer resumes THAT session
-    /// instead of the asker — the pre-igniter's clarifying flow, where the
+    /// instead of the asker — the pre-hatcher's clarifying flow, where the
     /// question renders on the chat session but the answer must feed the temp
     /// research session. Fire-and-forget; a no-op in headless/test contexts.
     /// The caller has already authorized the target session(s).
@@ -1422,8 +1422,8 @@ struct DeliverMessageRequest {
     session_id: String,
     text: String,
     /// Optional extra fields persisted on the `user` event (a `text` field is
-    /// filled in from `text` when absent), e.g. the pre-igniter's
-    /// `pre_ignite: {original, enriched}` block.
+    /// filled in from `text` when absent), e.g. the pre-hatcher's
+    /// `pre_hatch: {original, enriched}` block.
     #[serde(default)]
     data: Option<serde_json::Value>,
 }
@@ -1431,7 +1431,7 @@ struct DeliverMessageRequest {
 /// `peckboard_deliver_message` — persist a `user` event on a session in the
 /// caller's scope, broadcast it, and resume the session with `text`: the
 /// transcript-writing twin of `peckboard_resume_session`. Used by the
-/// pre-igniter to land the final (possibly enriched) chat message so the UI
+/// pre-hatcher to land the final (possibly enriched) chat message so the UI
 /// shows exactly what the agent received.
 pub(crate) fn deliver_message_impl(
     db: &Db,
@@ -2055,7 +2055,7 @@ struct GetAnswerRequest {
 
 /// `peckboard_ask_user` — emit a prompt to the caller's session (or, with an
 /// explicit `session_id`, to another session visible to the caller — e.g. the
-/// pre-igniter asking a clarifying question on the chat session it is
+/// pre-hatcher asking a clarifying question on the chat session it is
 /// enriching). Returns `{"ok": true}` (fire-and-forget) or an error if there
 /// is no target session / no live host bound (headless).
 pub(crate) fn ask_user_impl(

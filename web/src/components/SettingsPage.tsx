@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react'
 import { useAuthStore, authedFetch } from '../store/auth'
+import { useResourcesStore } from '../store/resources'
 import { applyThemeColor, type Theme } from '../util/themeColor'
 import ClaudeAccountsSection from './ClaudeAccountsSection'
 import GrokAccountsSection from './GrokAccountsSection'
@@ -78,6 +79,10 @@ export default function SettingsPage({ onBack }: Props) {
   })
   const [serverConfig, setServerConfig] = useState<ServerConfig | null>(null)
   const [caveman, setCaveman] = useState<string>('off')
+  const [preHatchModel, setPreHatchModel] = useState<string>('')
+  const models = useResourcesStore((s) => s.models)
+  const providers = useResourcesStore((s) => s.providers)
+  const fetchModels = useResourcesStore((s) => s.fetchModels)
 
   useEffect(() => {
     authedFetch('/api/config')
@@ -97,6 +102,18 @@ export default function SettingsPage({ onBack }: Props) {
       .catch(() => {})
   }, [])
 
+  useEffect(() => {
+    fetchModels()
+  }, [fetchModels])
+
+  useEffect(() => {
+    authedFetch('/api/settings/pre-hatcher')
+      .then((res) => (res.ok ? res.json() : null))
+      .then((data: { model?: string } | null) => {
+        if (typeof data?.model === 'string') setPreHatchModel(data.model)
+      })
+      .catch(() => {})
+  }, [])
   const changeCaveman = (level: string) => {
     setCaveman(level)
     authedFetch('/api/settings/caveman', {
@@ -106,6 +123,14 @@ export default function SettingsPage({ onBack }: Props) {
     }).catch(() => {})
   }
 
+  const changePreHatchModel = (model: string) => {
+    setPreHatchModel(model)
+    authedFetch('/api/settings/pre-hatcher', {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ model }),
+    }).catch(() => {})
+  }
   const changeTheme = (t: Theme) => {
     setTheme(t)
     localStorage.setItem(THEME_KEY, t)
@@ -220,6 +245,40 @@ export default function SettingsPage({ onBack }: Props) {
         </div>
       </section>
 
+      <section className="settings-section" data-testid="prehatch-section">
+        <h3>Pre-hatcher Model</h3>
+        <p className="form-hint">
+          The model the pre-hatcher plugin researches on before a chat message reaches the main
+          model. Auto uses the session provider&apos;s cheapest priced model. Applies from the next
+          message.
+        </p>
+        <select
+          className="form-input"
+          value={preHatchModel}
+          onChange={(e) => changePreHatchModel(e.target.value)}
+          data-testid="prehatch-model-select"
+        >
+          <option value="">Auto — provider&apos;s cheapest model</option>
+          {preHatchModel !== '' && !models.some((m) => m.id === preHatchModel) && (
+            <option value={preHatchModel}>{preHatchModel}</option>
+          )}
+          {providers.length > 0
+            ? providers.map((p) => (
+                <optgroup key={p.id} label={p.display_name}>
+                  {p.models.map((m) => (
+                    <option key={m.id} value={m.id}>
+                      {m.display_name}
+                    </option>
+                  ))}
+                </optgroup>
+              ))
+            : models.map((m) => (
+                <option key={m.id} value={m.id}>
+                  {m.display_name}
+                </option>
+              ))}
+        </select>
+      </section>
       <section className="settings-section">
         <h3>Theme</h3>
         <div className="theme-toggle">

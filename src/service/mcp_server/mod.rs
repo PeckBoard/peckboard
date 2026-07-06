@@ -296,7 +296,7 @@ pub async fn dispatch_tool_call(
         )
         .await
     {
-        HookResult::Cancelled { plugin, reason } => {
+        HookResult::Cancelled { plugin, reason, .. } => {
             tracing::info!(plugin = %plugin, reason = %reason, "mcp.tool.call.before cancelled");
             anyhow::bail!("cancelled by plugin {plugin}: {reason}");
         }

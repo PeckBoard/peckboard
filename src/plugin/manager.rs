@@ -697,11 +697,12 @@ impl PluginManager {
                             current_payload = modified;
                         }
                     }
-                    Ok(Verdict::Cancel { reason }) => {
+                    Ok(Verdict::Cancel { reason, data }) => {
                         info!("Plugin '{name}' cancelled hook '{hook}': {reason}");
                         return HookResult::Cancelled {
                             plugin: name,
                             reason,
+                            data,
                         };
                     }
                     Ok(Verdict::Skip) => {
@@ -785,11 +786,12 @@ impl PluginManager {
                             current_payload = modified;
                         }
                     }
-                    Ok(Verdict::Cancel { reason }) => {
+                    Ok(Verdict::Cancel { reason, data }) => {
                         info!("Plugin '{name}' cancelled hook '{hook}': {reason}");
                         return HookResult::Cancelled {
                             plugin: name,
                             reason,
+                            data,
                         };
                     }
                     Ok(Verdict::Skip) => {}
@@ -944,7 +946,7 @@ impl PluginManager {
                         Verdict::Allow { payload } => {
                             return verdict_to_outcome(payload.unwrap_or_default(), &name);
                         }
-                        Verdict::Cancel { reason } => {
+                        Verdict::Cancel { reason, .. } => {
                             info!(
                                 "Plugin '{name}' cancelled http route '{method} {path}': {reason}"
                             );
@@ -1061,7 +1063,7 @@ impl PluginManager {
                     Ok(Verdict::Allow { payload }) => {
                         return verdict_to_outcome(payload.unwrap_or_default(), &name);
                     }
-                    Ok(Verdict::Cancel { reason }) => {
+                    Ok(Verdict::Cancel { reason, .. }) => {
                         info!("Plugin '{name}' cancelled authed route '{method} {path}': {reason}");
                         return error_outcome(500, &reason);
                     }
@@ -1583,7 +1585,7 @@ impl PluginManager {
         Some(match result {
             Ok(output) => match serde_json::from_str::<Verdict>(&output) {
                 Ok(Verdict::Allow { payload }) => Ok(payload.unwrap_or(serde_json::Value::Null)),
-                Ok(Verdict::Cancel { reason }) => Err(anyhow::anyhow!(
+                Ok(Verdict::Cancel { reason, .. }) => Err(anyhow::anyhow!(
                     "plugin '{name}' cancelled tool call: {reason}"
                 )),
                 Ok(Verdict::Skip) => Err(anyhow::anyhow!(

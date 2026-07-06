@@ -40,21 +40,27 @@ export type DisplayItem =
       key: string
       ts: number
       attachments?: MessageAttachment[]
-      /** Set when the pre-igniter delivered this message: the user's
+      /** Set when the pre-hatcher delivered this message: the user's
        *  original text (shown expandable under the enriched message). */
-      preIgniteOriginal?: string
+      preHatchOriginal?: string
       /** True when the delivered text was enriched (differs from the
-       *  original); false when the pre-igniter passed it through. */
-      preIgniteEnriched?: boolean
+       *  original); false when the pre-hatcher passed it through. */
+      preHatchEnriched?: boolean
     }
   | {
-      /** A message parked by the pre-igniter: shown as the user's bubble
-       *  with a "pre-igniting…" indicator until the final `user` event
-       *  (or any later user turn) supersedes it. */
-      type: 'pre-ignite'
+      /** A message parked by the pre-hatcher: shown as the user's bubble
+       *  with a live feed of the research session's actions until the
+       *  final `user` event (or any later user turn) supersedes it. */
+      type: 'pre-hatch'
       text: string
       key: string
       ts: number
+      /** The temp research session gathering context — the UI subscribes to
+       *  its events to show the live feed. Absent on legacy `pre-ignite`
+       *  events persisted before the pre-hatcher rename. */
+      tempSessionId?: string
+      /** The model the research session runs on. */
+      model?: string
     }
   | { type: 'assistant'; text: string; key: string; ts: number }
   | {
@@ -117,7 +123,7 @@ export function deriveAgentStatus(events: Event[]): AgentStatus {
   for (let i = events.length - 1; i >= 0; i--) {
     const kind = events[i].kind
     if (kind === 'agent-end') return 'idle'
-    if (kind === 'pre-ignite') return 'working'
+    if (kind === 'pre-hatch' || kind === 'pre-ignite') return 'working'
     if (kind === 'agent-error' || kind === 'error') return 'crashed'
     if (kind === 'question') {
       // Check if resolved later
@@ -284,9 +290,9 @@ export function buildDisplayItems(events: Event[]): DisplayItem[] {
   // looks like the agent broke instead of acknowledging the user's action.
   let pendingInterrupt = false
 
-  // A `pre-ignite` placeholder (a parked message being pre-warmed) is only
+  // A `pre-hatch` placeholder (a parked message being pre-warmed) is only
   // live while nothing later has been delivered: any later `user` event —
-  // the enriched delivery, or the user typing past a dead pre-ignite —
+  // the enriched delivery, or the user typing past a dead pre-hatch —
   // supersedes it.
   let lastUserIdx = -1
   events.forEach((e, i) => {
@@ -299,15 +305,17 @@ export function buildDisplayItems(events: Event[]): DisplayItem[] {
       case 'user': {
         flushAssistant()
         const text = (ev.data.text as string) ?? JSON.stringify(ev.data)
-        const pi = ev.data.pre_ignite as Record<string, unknown> | undefined
+        // `pre_ignite` is the legacy spelling from before the pre-hatcher
+        // rename — old transcripts keep rendering.
+        const pi = (ev.data.pre_hatch ?? ev.data.pre_ignite) as Record<string, unknown> | undefined
         items.push({
           type: 'user',
           text,
           key: ev.id,
           ts: ev.ts,
           attachments: readAttachments(ev),
-          preIgniteOriginal: typeof pi?.original === 'string' ? pi.original : undefined,
-          preIgniteEnriched: pi?.enriched === true,
+          preHatchOriginal: typeof pi?.original === 'string' ? pi.original : undefined,
+          preHatchEnriched: pi?.enriched === true,
         })
         break
       }
@@ -489,11 +497,22 @@ export function buildDisplayItems(events: Event[]): DisplayItem[] {
         }
         break
       }
+      // `pre-ignite` is the legacy event kind from before the pre-hatcher
+      // rename — old transcripts render identically (minus the live feed).
+      case 'pre-hatch':
       case 'pre-ignite': {
         flushAssistant()
         if (evIdx > lastUserIdx) {
           const text = (ev.data.text as string) ?? ''
-          items.push({ type: 'pre-ignite', text, key: ev.id, ts: ev.ts })
+          items.push({
+            type: 'pre-hatch',
+            text,
+            key: ev.id,
+            ts: ev.ts,
+            tempSessionId:
+              typeof ev.data.temp_session_id === 'string' ? ev.data.temp_session_id : undefined,
+            model: typeof ev.data.model === 'string' ? ev.data.model : undefined,
+          })
         }
         break
       }

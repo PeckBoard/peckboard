@@ -37,10 +37,11 @@ function clearMatchingPending(
   state: { pendingUserMessages: Record<string, PendingUserMessage[]> },
   event: Event,
 ): Partial<{ pendingUserMessages: Record<string, PendingUserMessage[]> }> {
-  // A `pre-ignite` event is the parked form of the just-sent message (same
+  // A `pre-hatch` event is the parked form of the just-sent message (same
   // text), so it resolves the optimistic bubble exactly like the real `user`
-  // event would.
-  if (event.kind !== 'user' && event.kind !== 'pre-ignite') return {}
+  // event would. (`pre-ignite` is the legacy kind from before the
+  // pre-hatcher rename.)
+  if (event.kind !== 'user' && event.kind !== 'pre-hatch' && event.kind !== 'pre-ignite') return {}
   const list = state.pendingUserMessages[event.session_id]
   if (!list || list.length === 0) return {}
   const text = (event.data.text as string) ?? ''

@@ -362,7 +362,7 @@ pub(super) async fn append_event(
         // current `result`. Spawned so the HTTP response returns
         // immediately.
         // A plugin question may redirect the answer to another session: the
-        // pre-igniter's clarifying question renders on the chat session, but
+        // pre-hatcher's clarifying question renders on the chat session, but
         // the answer must feed its temp research session — resuming the chat
         // agent with a bare answer would start the very turn the plugin is
         // still preparing. The target is read from the question event core

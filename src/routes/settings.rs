@@ -8,6 +8,9 @@
 //!   interactive sessions, stored in the same plugin-store KV under
 //!   [`SETTINGS_NS`]/[`SETTINGS_COLLECTION`] and read at dispatch time by
 //!   `SessionManager::send_message_locked`.
+//! - Pre-hatcher model: which model the pre-hatcher plugin researches on
+//!   (`{"model": ...}`; empty = auto, the provider's cheapest priced model),
+//!   read per turn by the `session.message.before` dispatch path.
 
 use axum::{
     Json, Router,
@@ -34,6 +37,11 @@ pub const SETTINGS_COLLECTION: &str = "app";
 
 const CAVEMAN_LEVELS: &[&str] = &["off", "lite", "full"];
 
+/// Plugin-store key for the pre-hatcher research-model override
+/// (`{"model": "provider:model"}`; empty/missing ⇒ auto — the provider's
+/// cheapest priced model).
+const PRE_HATCHER_MODEL_KEY: &str = "pre_hatcher_model";
+
 pub fn router(state: Arc<AppState>) -> Router<Arc<AppState>> {
     Router::new()
         .route("/api/settings/approved-commands", get(list_approved))
@@ -42,6 +50,10 @@ pub fn router(state: Arc<AppState>) -> Router<Arc<AppState>> {
             delete(delete_approved),
         )
         .route("/api/settings/caveman", get(get_caveman).put(set_caveman))
+        .route(
+            "/api/settings/pre-hatcher",
+            get(get_pre_hatcher).put(set_pre_hatcher),
+        )
         .route_layer(middleware::from_fn_with_state(state, require_auth))
 }
 
@@ -83,6 +95,74 @@ async fn set_caveman(
     let value = serde_json::json!({ "level": body.level }).to_string();
     let res = tokio::task::spawn_blocking(move || {
         db.plugin_store_put_blocking(SETTINGS_NS, SETTINGS_COLLECTION, "caveman_mode", &value)
+    })
+    .await;
+    match res {
+        Ok(Ok(_)) => Ok(StatusCode::NO_CONTENT),
+        Ok(Err(e)) => Err((
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({ "error": e.to_string() })),
+        )),
+        Err(e) => Err((
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({ "error": e.to_string() })),
+        )),
+    }
+}
+
+/// The pre-hatcher research-model override, or `None` when unset/empty
+/// (auto — dispatch falls back to the provider's cheapest priced model).
+/// Read per turn by the `session.message.before` dispatch path.
+pub async fn pre_hatcher_model(state: &Arc<AppState>) -> Option<String> {
+    let db = state.db.clone();
+    let raw = tokio::task::spawn_blocking(move || {
+        db.plugin_store_get_blocking(SETTINGS_NS, SETTINGS_COLLECTION, PRE_HATCHER_MODEL_KEY)
+    })
+    .await;
+    match raw {
+        Ok(Ok(Some(json))) => serde_json::from_str::<serde_json::Value>(&json)
+            .ok()
+            .and_then(|v| v.get("model").and_then(|m| m.as_str()).map(str::to_string))
+            .filter(|m| !m.trim().is_empty()),
+        _ => None,
+    }
+}
+
+/// GET /api/settings/pre-hatcher → `{"model": "provider:model" | ""}` ("" =
+/// auto: the session provider's cheapest priced model).
+async fn get_pre_hatcher(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+    let model = pre_hatcher_model(&state).await.unwrap_or_default();
+    Json(serde_json::json!({ "model": model }))
+}
+
+#[derive(serde::Deserialize)]
+struct PreHatcherBody {
+    model: String,
+}
+
+/// PUT /api/settings/pre-hatcher `{"model": "provider:model" | ""}` → 204.
+/// Empty clears the override (auto). Takes effect on each chat's next
+/// message.
+async fn set_pre_hatcher(
+    State(state): State<Arc<AppState>>,
+    Json(body): Json<PreHatcherBody>,
+) -> impl IntoResponse {
+    let model = body.model.trim().to_string();
+    if model.chars().count() > 200 {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({ "error": "model id too long" })),
+        ));
+    }
+    let db = state.db.clone();
+    let value = serde_json::json!({ "model": model }).to_string();
+    let res = tokio::task::spawn_blocking(move || {
+        db.plugin_store_put_blocking(
+            SETTINGS_NS,
+            SETTINGS_COLLECTION,
+            PRE_HATCHER_MODEL_KEY,
+            &value,
+        )
     })
     .await;
     match res {

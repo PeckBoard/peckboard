@@ -76,7 +76,7 @@ pub(super) async fn create_card(
             }),
         )
         .await;
-    if let crate::plugin::hooks::HookResult::Cancelled { plugin, reason } = &hook_result {
+    if let crate::plugin::hooks::HookResult::Cancelled { plugin, reason, .. } = &hook_result {
         tracing::info!(plugin = %plugin, reason = %reason, "card.create.before cancelled");
         return Err((
             StatusCode::FORBIDDEN,
@@ -301,7 +301,7 @@ pub(super) async fn update_card(
             }),
         )
         .await;
-    if let crate::plugin::hooks::HookResult::Cancelled { plugin, reason } = &hook_result {
+    if let crate::plugin::hooks::HookResult::Cancelled { plugin, reason, .. } = &hook_result {
         tracing::info!(plugin = %plugin, reason = %reason, "card.update.before cancelled");
         return Err((
             StatusCode::FORBIDDEN,

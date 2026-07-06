@@ -122,14 +122,16 @@ pub(super) async fn send_message(
     dismiss_pending_questions(&state, &id).await;
 
     // Pre-warm hook: let a plugin intercept an interactive chat message
-    // before it reaches the agent (e.g. the pre-igniter plugin enriches it
+    // before it reaches the agent (e.g. the pre-hatcher plugin enriches it
     // with context gathered by a cheaper model). Chats only — workers and
     // experts run orchestrated prompts — and only plain text turns
     // (attachments pass straight through). Allow-with-payload rewrites the
     // text inline; Cancel means the plugin took ownership of the turn: core
-    // appends a `pre-ignite` placeholder event (the UI renders it as the
-    // pending user bubble) and does NOT dispatch — the plugin appends the
-    // final `user` event and resumes the session when its enrichment lands.
+    // appends a `pre-hatch` placeholder event (the UI renders it as the
+    // pending user bubble with a live feed of the research session, keyed
+    // by the verdict data's `temp_session_id`) and does NOT dispatch — the
+    // plugin appends the final `user` event and resumes the session when
+    // its enrichment lands.
     if !session.is_worker
         && !session.is_expert
         && attachment_ids.as_deref().map_or(true, |a| a.is_empty())
@@ -142,11 +144,16 @@ pub(super) async fn send_message(
             &resolved_model,
             crate::provider::manager::DEFAULT_PROVIDER,
         );
-        let cheap_model = state
-            .provider_registry
-            .cheapest_model(&provider_id)
-            .await
-            .map(|m| format!("{provider_id}:{m}"));
+        // The model the pre-hatcher researches on: the user's Settings
+        // override when set, otherwise the provider's cheapest priced model.
+        let cheap_model = match crate::routes::settings::pre_hatcher_model(&state).await {
+            Some(m) => Some(m),
+            None => state
+                .provider_registry
+                .cheapest_model(&provider_id)
+                .await
+                .map(|m| format!("{provider_id}:{m}")),
+        };
         let hook_result = state
             .plugins
             .dispatch_scoped(
@@ -165,18 +172,32 @@ pub(super) async fn send_message(
             )
             .await;
         match hook_result {
-            crate::plugin::hooks::HookResult::Cancelled { plugin, reason } => {
+            crate::plugin::hooks::HookResult::Cancelled {
+                plugin,
+                reason,
+                data,
+            } => {
                 let ev = state
                     .db
-                    .append_event(
-                        &id,
-                        "pre-ignite",
-                        serde_json::json!({
+                    .append_event(&id, "pre-hatch", {
+                        let mut ev_data = serde_json::json!({
                             "text": resolved_text,
                             "plugin": plugin,
                             "reason": reason,
-                        }),
-                    )
+                        });
+                        // The pre-hatcher's cancel data carries
+                        // `temp_session_id` + `model` so the UI can
+                        // stream the research session's actions into
+                        // the parked bubble.
+                        if let Some(serde_json::Value::Object(extra)) = data {
+                            if let Some(obj) = ev_data.as_object_mut() {
+                                for (k, v) in extra {
+                                    obj.entry(k).or_insert(v);
+                                }
+                            }
+                        }
+                        ev_data
+                    })
                     .await
                     .map_err(|e| {
                         (
@@ -210,7 +231,7 @@ pub(super) async fn send_message(
                     )
                     .await;
                 return Ok(Json(serde_json::json!({
-                    "status": "pre-igniting",
+                    "status": "pre-hatching",
                     "session_id": id,
                     "plugin": plugin,
                 })));

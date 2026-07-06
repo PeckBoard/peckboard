@@ -13,6 +13,7 @@ import ConfirmDialog from './ConfirmDialog'
 import { MenuButton, type MenuItem } from './Dropdown'
 import ModelPicker from './ModelPicker'
 import TodoPanel from './TodoPanel'
+import PreHatchActivity from './chat/PreHatchActivity'
 import { parseTodoItems, latestTodoSnapshot, type TodoItem } from '../types/todo'
 import {
   EMPTY_EVENTS,
@@ -954,22 +955,22 @@ export default function ChatView({
               return (
                 <div key={item.key} className="chat-row chat-row-user">
                   <div className="chat-bubble chat-bubble-user">
-                    {item.preIgniteEnriched && (
+                    {item.preHatchEnriched && (
                       <div
-                        className="chat-preignite-badge"
-                        title="This message was enriched by the pre-igniter before dispatch"
+                        className="chat-prehatch-badge"
+                        title="This message was enriched by the pre-hatcher before dispatch"
                       >
-                        ⚡ pre-ignited
+                        ⚡ pre-hatched
                       </div>
                     )}
                     {item.text}
-                    {item.preIgniteEnriched && item.preIgniteOriginal && (
+                    {item.preHatchEnriched && item.preHatchOriginal && (
                       <details
-                        className="chat-preignite-original"
-                        data-testid="chat-preignite-original"
+                        className="chat-prehatch-original"
+                        data-testid="chat-prehatch-original"
                       >
                         <summary>Original message</summary>
-                        <div className="chat-preignite-original-text">{item.preIgniteOriginal}</div>
+                        <div className="chat-prehatch-original-text">{item.preHatchOriginal}</div>
                       </details>
                     )}
                     <MessageAttachments attachments={item.attachments} />
@@ -977,18 +978,15 @@ export default function ChatView({
                   </div>
                 </div>
               )
-            case 'pre-ignite':
+            case 'pre-hatch':
               return (
                 <div key={item.key} className="chat-row chat-row-user">
                   <div
-                    className="chat-bubble chat-bubble-user chat-bubble-preignite"
-                    data-testid="chat-preignite"
+                    className="chat-bubble chat-bubble-user chat-bubble-prehatch"
+                    data-testid="chat-prehatch"
                   >
                     {item.text}
-                    <div className="chat-preignite-indicator">
-                      <span className="chat-preignite-spinner" aria-hidden />
-                      Pre-igniting — a cheaper model is gathering context…
-                    </div>
+                    <PreHatchActivity tempSessionId={item.tempSessionId} model={item.model} />
                     <div className="chat-time chat-time-user">{formatTime(item.ts)}</div>
                   </div>
                 </div>

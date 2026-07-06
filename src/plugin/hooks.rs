@@ -9,8 +9,15 @@ pub enum Verdict {
         #[serde(skip_serializing_if = "Option::is_none")]
         payload: Option<serde_json::Value>,
     },
-    /// Cancel the operation with a reason.
-    Cancel { reason: String },
+    /// Cancel the operation with a reason. `data` optionally carries a
+    /// structured payload for the caller — e.g. the pre-hatcher attaches
+    /// `{temp_session_id, model}` so core can copy it onto the `pre-hatch`
+    /// placeholder event.
+    Cancel {
+        reason: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        data: Option<serde_json::Value>,
+    },
     /// This plugin has no opinion — pass through unchanged.
     Skip,
 }
@@ -29,6 +36,7 @@ impl Verdict {
     pub fn cancel(reason: impl Into<String>) -> Self {
         Verdict::Cancel {
             reason: reason.into(),
+            data: None,
         }
     }
 
@@ -42,8 +50,13 @@ impl Verdict {
 pub enum HookResult {
     /// All plugins allowed (or skipped). Contains the final payload (possibly modified).
     Allowed(serde_json::Value),
-    /// A plugin cancelled the operation.
-    Cancelled { plugin: String, reason: String },
+    /// A plugin cancelled the operation. `data` is the structured payload
+    /// the plugin attached to its cancel verdict, if any.
+    Cancelled {
+        plugin: String,
+        reason: String,
+        data: Option<serde_json::Value>,
+    },
 }
 
 impl HookResult {
@@ -262,13 +275,16 @@ pub const USER_ANSWER_HOOK: &str = "session.user.answer";
 /// (`POST /api/sessions/:id/message`) — chat sessions only, never workers or
 /// experts, and only for plain text turns (attachments pass straight
 /// through). Payload: `{ session_id, text, model, effort, cheap_model }`,
-/// where `cheap_model` is the session provider's cheapest priced model
-/// (`provider:model` form) or null when the provider prices nothing.
+/// where `cheap_model` is the pre-hatch model override from Settings when
+/// set, otherwise the session provider's cheapest priced model
+/// (`provider:model` form) — or null when neither exists.
 /// Verdicts: `Allow` with a modified `text` rewrites the message inline;
 /// `Cancel` means the plugin took ownership of the turn — core appends a
-/// `pre-ignite` placeholder event and does NOT dispatch, and the plugin is
-/// expected to append the final `user` event and resume the session when its
-/// enrichment finishes. Fired under a **user-authority** context scoped to
+/// `pre-hatch` placeholder event (merged with the verdict's `data`, e.g.
+/// `{temp_session_id, model}`, so the UI can follow the research session
+/// live) and does NOT dispatch, and the plugin is expected to append the
+/// final `user` event and resume the session when its enrichment finishes.
+/// Fired under a **user-authority** context scoped to
 /// the chat session (like [`HTTP_AUTHED_HOOK`]), so the handler may create
 /// and dispatch helper sessions in the caller's folder — see
 /// [`crate::plugin::manager::PluginManager::dispatch_scoped`].
