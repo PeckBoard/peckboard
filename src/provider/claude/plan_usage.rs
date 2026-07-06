@@ -11,6 +11,9 @@
 //! `GET /api/claude-accounts/plan-usage`.
 //!
 //! `api_key` accounts are skipped — pay-as-you-go keys have no plan buckets.
+//! The endpoint requires the `user:profile` scope. Accounts logged in
+//! before the login flow requested that scope get a 403; the cache entry
+//! then carries a re-login hint instead of buckets.
 //! The endpoint is unofficial and rate-limited upstream, so the cadence is
 //! deliberately lazy and a failed refresh keeps the last good snapshot.
 
@@ -178,7 +181,18 @@ pub async fn refresh_once(db: &Db) {
             Ok(usage) => record_ok(&acct.id, usage),
             Err(e) => {
                 tracing::warn!(account = %acct.name, "plan-usage: fetch failed: {e}");
-                record_err(&acct.id, e);
+                // The scope 403 is a permanent property of the stored token,
+                // not a transient failure — surface the fix instead.
+                let msg = e.to_string();
+                if msg.contains("user:profile") {
+                    record_err(
+                        &acct.id,
+                        "token lacks the user:profile scope — edit the account and redo \
+                         the browser login to enable plan usage",
+                    );
+                } else {
+                    record_err(&acct.id, msg);
+                }
             }
         }
     }

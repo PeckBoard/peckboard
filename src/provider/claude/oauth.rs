@@ -2,14 +2,16 @@
 //! accounts — the in-app equivalent of running `claude setup-token` in a
 //! terminal.
 //!
-//! It replicates the exact PKCE flow the `claude` CLI's `setup-token`
-//! command performs (verified against CLI v2.1.193), so the access token we
-//! mint is the same long-lived (≈1 year) credential the CLI would produce
-//! and is injected verbatim as `CLAUDE_CODE_OAUTH_TOKEN`. The crucial
-//! detail that makes the token long-lived is the `user:inference` scope —
-//! the interactive `/login` flow requests broader scopes and gets a token
-//! that expires within the hour, which would silently break a stored
-//! account.
+//! It replicates the PKCE flow of the `claude` CLI's `setup-token` command
+//! (verified against CLI v2.1.193), so the access token we mint is the same
+//! long-lived (≈1 year) credential the CLI would produce and is injected
+//! verbatim as `CLAUDE_CODE_OAUTH_TOKEN`. On top of the CLI's
+//! inference-only scope we also request `user:profile`, which
+//! `GET /api/oauth/usage` demands — without it per-account plan usage gets
+//! a scope 403 (anthropics/claude-code#13724). Broad-scope interactive
+//! `/login` tokens are known to expire within the hour, which would
+//! silently break a stored account, so [`exchange`] refuses any token the
+//! endpoint reports as short-lived instead of storing it.
 //!
 //! Flow:
 //!   1. [`start`] mints a PKCE `verifier`/`state` pair and returns the
@@ -27,8 +29,9 @@ const CLIENT_ID: &str = "9d1c250a-e61b-44d9-88ed-5944d1962f5e";
 const AUTHORIZE_URL: &str = "https://claude.com/cai/oauth/authorize";
 const TOKEN_URL: &str = "https://platform.claude.com/v1/oauth/token";
 const REDIRECT_URI: &str = "https://platform.claude.com/oauth/code/callback";
-/// Inference-only scope — this is what yields the long-lived token.
-const SCOPE: &str = "user:inference";
+/// Inference (what the CLI's setup-token requests — yields the long-lived
+/// token) plus profile, which the plan-usage endpoint requires.
+const SCOPE: &str = "user:inference user:profile";
 
 /// One started login: the authorize URL to send the user to, plus the PKCE
 /// `verifier` and `state` the caller must hand back to [`exchange`].
@@ -100,14 +103,38 @@ fn parse_code(pasted: &str) -> &str {
     pasted.trim().split('#').next().unwrap_or("").trim()
 }
 
+/// Reject tokens that expire sooner than this (seconds). The setup-token
+/// flow issues ≈1-year tokens; anything shorter is an interactive-style
+/// token that would lapse and silently break the stored account.
+const MIN_TOKEN_TTL_SECS: u64 = 30 * 24 * 3600;
+
+/// Guard for [`exchange`]: refuse short-lived tokens. An absent
+/// `expires_in` is accepted — the flow has historically omitted it for
+/// long-lived tokens.
+fn ensure_long_lived(expires_in: Option<u64>) -> anyhow::Result<()> {
+    match expires_in {
+        Some(secs) if secs < MIN_TOKEN_TTL_SECS => anyhow::bail!(
+            "Anthropic issued a short-lived token ({secs}s); refusing to store it because \
+             the account would break when it expires. The requested scopes ({SCOPE:?}) \
+             no longer yield a long-lived setup token — this needs refresh-token \
+             support or a scope change."
+        ),
+        _ => Ok(()),
+    }
+}
+
 #[derive(serde::Deserialize)]
 struct TokenResponse {
     access_token: String,
+    /// Token lifetime in seconds; absent for (long-lived) setup tokens.
+    #[serde(default)]
+    expires_in: Option<u64>,
 }
 
 /// Exchange a pasted `code#state` for the long-lived access token, using the
 /// `verifier`/`state` from the matching [`start`]. Returns the token to store
-/// as the account credential.
+/// as the account credential; short-lived tokens are rejected (see
+/// [`ensure_long_lived`]).
 pub async fn exchange(
     client: &reqwest::Client,
     pasted_code: &str,
@@ -142,6 +169,7 @@ pub async fn exchange(
     }
     let parsed: TokenResponse = serde_json::from_str(&body)
         .map_err(|e| anyhow::anyhow!("unexpected token response: {e}: {body}"))?;
+    ensure_long_lived(parsed.expires_in)?;
     Ok(parsed.access_token)
 }
 
@@ -186,7 +214,7 @@ mod tests {
                 "redirect_uri=https%3A%2F%2Fplatform.claude.com%2Foauth%2Fcode%2Fcallback"
             )
         );
-        assert!(url.contains("scope=user%3Ainference"));
+        assert!(url.contains("scope=user%3Ainference%20user%3Aprofile"));
     }
 
     #[test]
@@ -196,5 +224,24 @@ mod tests {
         assert_eq!(parse_code("abc#"), "abc");
         assert_eq!(parse_code("  "), "");
         assert_eq!(parse_code(""), "");
+    }
+
+    #[test]
+    fn token_response_parses_expires_in_when_present() {
+        let with: TokenResponse =
+            serde_json::from_str(r#"{"access_token":"tok","expires_in":31536000}"#).unwrap();
+        assert_eq!(with.expires_in, Some(31536000));
+        let without: TokenResponse = serde_json::from_str(r#"{"access_token":"tok"}"#).unwrap();
+        assert_eq!(without.expires_in, None);
+    }
+
+    #[test]
+    fn short_lived_tokens_are_rejected() {
+        // Interactive-login-style 1h/8h tokens must not be stored.
+        assert!(ensure_long_lived(Some(3600)).is_err());
+        assert!(ensure_long_lived(Some(8 * 3600)).is_err());
+        // Setup-token-style ≈1 year (or an absent field) is accepted.
+        assert!(ensure_long_lived(Some(365 * 24 * 3600)).is_ok());
+        assert!(ensure_long_lived(None).is_ok());
     }
 }

@@ -139,12 +139,20 @@ function AccountRow({
             {account.budget_window_hours ? ` in last ${account.budget_window_hours}h` : ' all-time'}
           </span>
         </div>
-        {accountPlanLine && (
+        {accountPlanLine ? (
           <div className="acct-row-sub acct-plan-row" data-testid={`acct-plan-${account.id}`}>
             <span className="acct-plan-label">Plan</span>
             <span>{accountPlanLine}</span>
           </div>
-        )}
+        ) : plan?.last_error && account.kind === 'oauth_token' ? (
+          <div
+            className="acct-row-sub acct-plan-row acct-plan-error"
+            data-testid={`acct-plan-error-${account.id}`}
+          >
+            <span className="acct-plan-label">Plan</span>
+            <span>{plan.last_error}</span>
+          </div>
+        ) : null}
       </div>
       <div className="acct-row-actions">
         <button
