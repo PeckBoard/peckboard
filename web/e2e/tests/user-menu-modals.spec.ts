@@ -62,17 +62,22 @@ test('user dropdown opens Settings page and Plugins modal; rail Settings icon is
   await expect(settingsPage).toBeVisible()
   // Settings is a full-page view at `/settings`.
   await expect(page).toHaveURL(/\/settings$/)
-  // Sanity: the page still carries the core sections.
+  // The hub view carries user info plus one nav card per sub-page.
   await expect(settingsPage).toContainText('User Info')
-  await expect(settingsPage).toContainText('Theme')
+  await expect(settingsPage.getByTestId('settings-nav-appearance')).toBeVisible()
+  await expect(settingsPage.getByTestId('settings-nav-server')).toBeVisible()
 
-  // A dedicated Provider Keep-Alive section reports the cadence and per-login
-  // (per account per provider) last-run status, sourced from GET /api/config.
+  // Provider Keep-Alive lives on the Providers & Accounts sub-page and
+  // reports the cadence and per-login (per account per provider)
+  // last-run status, sourced from GET /api/config.
+  await settingsPage.getByTestId('settings-nav-providers').click()
   const keepAlive = settingsPage.getByTestId('keepalive-section')
   await expect(keepAlive).toContainText('Provider Keep-Alive')
   await expect(keepAlive).toContainText(/Runs every hour|Runs every \d+ hours|disabled/)
 
-  // Back returns to the underlying view and unmounts the page.
+  // Back first returns to the hub, then to the underlying view.
+  await settingsPage.getByRole('button', { name: 'Back' }).click()
+  await expect(settingsPage.getByTestId('settings-nav-providers')).toBeVisible()
   await settingsPage.getByRole('button', { name: 'Back' }).click()
   await expect(settingsPage).toBeHidden()
 

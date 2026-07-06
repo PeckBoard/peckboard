@@ -49,6 +49,7 @@ fn test_schema() -> SettingsSchema {
             required: false,
             kind: FieldKind::KeyValueList {
                 secret_values: true,
+                url_values: false,
                 key_placeholder: None,
                 value_placeholder: None,
             },

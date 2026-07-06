@@ -96,6 +96,11 @@ pub enum FieldKind {
     KeyValueList {
         #[serde(default, skip_serializing_if = "is_false")]
         secret_values: bool,
+        /// When set, every value is validated as an http(s) URL at save
+        /// time — the Ollama "servers" setting uses this so a typo'd
+        /// scheme is caught in the form instead of at request time.
+        #[serde(default, skip_serializing_if = "is_false")]
+        url_values: bool,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         key_placeholder: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -240,7 +245,7 @@ pub fn validate_value(
             }
             Ok(serde_json::Value::String(s.to_string()))
         }
-        FieldKind::KeyValueList { .. } => {
+        FieldKind::KeyValueList { url_values, .. } => {
             // Accept either a JSON object ({"K": "V"}) or an array of
             // {key,value} pairs (the order-preserving form the UI uses).
             // Normalize to the array form on storage so insertion order
@@ -254,6 +259,9 @@ pub fn validate_value(
             }
             for (k, v) in &pairs {
                 validate_header_name(&field.key, k)?;
+                if *url_values {
+                    validate_http_url(&field.key, v)?;
+                }
                 if v.contains('\r') || v.contains('\n') {
                     // CRLF in a header value would let a hostile setting
                     // smuggle a second header. Disallow at validation time.
@@ -664,10 +672,50 @@ mod tests {
             required: false,
             kind: FieldKind::KeyValueList {
                 secret_values: true,
+                url_values: false,
                 key_placeholder: None,
                 value_placeholder: None,
             },
         }
+    }
+
+    fn servers_field() -> SettingField {
+        SettingField {
+            key: "servers".into(),
+            title: "Servers".into(),
+            description: None,
+            required: false,
+            kind: FieldKind::KeyValueList {
+                secret_values: false,
+                url_values: true,
+                key_placeholder: None,
+                value_placeholder: None,
+            },
+        }
+    }
+
+    #[test]
+    fn key_value_list_url_values_rejects_non_http_urls() {
+        let field = servers_field();
+        validate_value(
+            &field,
+            &serde_json::json!([{"key": "gpu-box", "value": "http://192.168.1.50:11434"}]),
+        )
+        .unwrap();
+        assert!(
+            validate_value(
+                &field,
+                &serde_json::json!([{"key": "gpu-box", "value": "file:///etc/passwd"}]),
+            )
+            .is_err()
+        );
+        assert!(
+            validate_value(
+                &field,
+                &serde_json::json!([{"key": "gpu-box", "value": "localhost:11434"}]),
+            )
+            .is_err()
+        );
     }
 
     #[test]

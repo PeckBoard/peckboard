@@ -416,7 +416,7 @@ function FieldRow({
             className="plugin-setting-kv-add"
             onClick={() => onChange([...pairs, emptyKvPair()])}
           >
-            + Add header
+            + Add
           </button>
           {secretHint}
         </div>
@@ -454,7 +454,7 @@ function FieldRow({
             className="plugin-setting-kv-add"
             onClick={() => onChange([...items, ''])}
           >
-            + Add model
+            + Add
           </button>
         </div>
       )

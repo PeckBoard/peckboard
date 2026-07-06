@@ -818,3 +818,53 @@ a.wasm-plugin-repo:hover {
   word-break: break-all;
   min-width: 0;
 }
+
+/* ═══════════════════════════════════════════════════
+   Settings hub navigation (sub-page cards)
+   ═══════════════════════════════════════════════════ */
+
+.settings-nav {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.settings-nav-item {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  grid-template-areas:
+    'title chevron'
+    'blurb chevron';
+  row-gap: 2px;
+  column-gap: 12px;
+  align-items: center;
+  text-align: left;
+  font: inherit;
+  padding: 14px 16px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  cursor: pointer;
+  transition:
+    border-color 0.15s,
+    background 0.15s;
+}
+.settings-nav-item:hover {
+  background: var(--surface2);
+  border-color: var(--primary);
+}
+.settings-nav-title {
+  grid-area: title;
+  font-size: var(--text-sm);
+  font-weight: 600;
+  color: var(--text);
+}
+.settings-nav-blurb {
+  grid-area: blurb;
+  font-size: var(--text-xs);
+  color: var(--text3);
+}
+.settings-nav-chevron {
+  grid-area: chevron;
+  font-size: var(--text-lg);
+  color: var(--text3);
+}

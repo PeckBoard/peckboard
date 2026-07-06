@@ -42,6 +42,8 @@ async function openSettings(page: Page) {
   await menu.getByRole('menuitem', { name: 'Settings' }).click()
   const settings = page.getByTestId('settings-page')
   await expect(settings).toBeVisible()
+  // Accounts live on the Providers & Accounts sub-page.
+  await settings.getByTestId('settings-nav-providers').click()
   return settings
 }
 

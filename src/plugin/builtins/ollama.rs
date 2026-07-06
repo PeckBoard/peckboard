@@ -3,32 +3,40 @@
 //!
 //! Settings exposed to the UI:
 //!
-//! * `base_url` (required URL) — where Ollama is listening. Defaults
-//!   to `http://localhost:11434`, the upstream default.
-//! * `default_model` (string) — model name to use when a session has no
-//!   explicit `ollama:<model>` selection. Optional; falls back to
-//!   `llama3.1` if neither setting nor session override is present.
+//! * `base_url` (required URL) — the default Ollama server. Defaults
+//!   to `http://localhost:11434`, the upstream default. Models on this
+//!   server appear under their bare name (`ollama:<model>`).
+//! * `servers` (key-value list) — additional named Ollama servers as
+//!   `name → base URL` pairs. Models on these servers are addressed as
+//!   `<model>@<name>` (`ollama:<model>@<name>`), both in the picker and
+//!   in a session's model selection.
+//! * `default_model` (string) — model reference used when a session has
+//!   no explicit `ollama:<model>` selection. May carry an `@<server>`
+//!   suffix. Optional; falls back to `llama3.1` if neither setting nor
+//!   session override is present.
 //! * `request_timeout_secs` (integer, 1–3600) — per-turn timeout for
 //!   the HTTP call. Defaults to 600s; Ollama on CPU can take a while
 //!   to load a fresh model on first use.
 //! * `discover_models` (boolean, default `true`) — when on, the provider
-//!   asks the server which models it has installed (via the OpenAI-
-//!   compatible `/v1/models` endpoint) and shows them in the picker
-//!   automatically. Turn off to fall back to the built-in seed plus
-//!   `additional_models` only.
+//!   asks every configured server which models it has installed (via the
+//!   OpenAI-compatible `/v1/models` endpoint) and shows them in the
+//!   picker automatically. Turn off to fall back to the built-in seed
+//!   plus `additional_models` only.
 //! * `enable_tools` (boolean, default `true`) — offer Peckboard's MCP tools
 //!   (core + active plugins) to the model and execute the tool calls it
 //!   makes. Turn off for models that don't support tools.
 //! * `additional_models` (string list) — extra model names to surface in
 //!   the model picker, merged on top of the autodiscovered (or seed)
 //!   list. Each is registered as `ollama:<name>` and may carry a tag
-//!   (`llama3.1:8b`). Useful for a model you haven't pulled yet or when
+//!   (`llama3.1:8b`) and/or an `@<server>` suffix targeting one of the
+//!   named servers. Useful for a model you haven't pulled yet or when
 //!   discovery is off. Reflected in `/api/models` live, without a
 //!   restart, via the provider's `dynamic_models` override.
 //! * `additional_headers` (key-value list, secret values) — extra HTTP
-//!   headers attached to every request. Use this for a remote Ollama
-//!   behind an auth proxy (`Authorization: Bearer …`); values are
-//!   masked when the settings are read back through the API.
+//!   headers attached to every request, to every configured server. Use
+//!   this for a remote Ollama behind an auth proxy (`Authorization:
+//!   Bearer …`); values are masked when the settings are read back
+//!   through the API.
 
 use async_trait::async_trait;
 use std::sync::Arc;
@@ -45,11 +53,12 @@ impl OllamaPlugin {
         SettingsSchema::new(vec![
             SettingField {
                 key: "base_url".into(),
-                title: "Base URL".into(),
+                title: "Default Server URL".into(),
                 description: Some(
-                    "Where your Ollama server is listening. Use http://localhost:11434 \
-                     for a local install, or https://ollama.example.com if you've put it \
-                     behind a proxy."
+                    "Where your default Ollama server is listening. Use \
+                     http://localhost:11434 for a local install, or \
+                     https://ollama.example.com if you've put it behind a proxy. \
+                     Models on this server appear under their bare name."
                         .into(),
                 ),
                 required: true,
@@ -59,11 +68,29 @@ impl OllamaPlugin {
                 },
             },
             SettingField {
+                key: "servers".into(),
+                title: "Additional Servers".into(),
+                description: Some(
+                    "More Ollama servers, as name → base URL pairs. Models on a \
+                     named server show up as model@name in the picker and can be \
+                     selected as ollama:<model>@<name>."
+                        .into(),
+                ),
+                required: false,
+                kind: FieldKind::KeyValueList {
+                    secret_values: false,
+                    url_values: true,
+                    key_placeholder: Some("gpu-box".into()),
+                    value_placeholder: Some("http://192.168.1.50:11434".into()),
+                },
+            },
+            SettingField {
                 key: "default_model".into(),
                 title: "Default Model".into(),
                 description: Some(
-                    "Model name used when a session doesn't specify ollama:<model>. \
-                     Must already be pulled on the Ollama server (e.g. llama3.1, qwen2.5-coder)."
+                    "Model used when a session doesn't specify ollama:<model>. \
+                     Must already be pulled on the server it targets (e.g. llama3.1, \
+                     qwen2.5-coder, or qwen2.5-coder@gpu-box for a named server)."
                         .into(),
                 ),
                 required: false,
@@ -92,10 +119,10 @@ impl OllamaPlugin {
                 key: "discover_models".into(),
                 title: "Auto-Discover Models".into(),
                 description: Some(
-                    "Ask the Ollama server which models it has installed (via the \
-                     OpenAI-compatible /v1/models endpoint) and list them in the model \
-                     picker automatically. Turn this off to show only the built-in \
-                     suggestions plus any models you add below."
+                    "Ask every configured Ollama server which models it has installed \
+                     (via the OpenAI-compatible /v1/models endpoint) and list them in \
+                     the model picker automatically. Turn this off to show only the \
+                     built-in suggestions plus any models you add below."
                         .into(),
                 ),
                 required: false,
@@ -120,8 +147,9 @@ impl OllamaPlugin {
                 description: Some(
                     "Extra model names to add to the picker on top of the auto-discovered \
                      list (or the built-in suggestions when discovery is off). Use the exact \
-                     name as pulled on your Ollama server, including any tag (e.g. \
-                     llama3.1:8b, mistral-small, me/custom-model). Each appears as \
+                     name as pulled on the server, including any tag (e.g. llama3.1:8b, \
+                     mistral-small, me/custom-model). Add @<server name> to target one of \
+                     the additional servers (e.g. llama3.1:8b@gpu-box). Each appears as \
                      ollama:<name>."
                         .into(),
                 ),
@@ -134,14 +162,16 @@ impl OllamaPlugin {
                 key: "additional_headers".into(),
                 title: "Additional HTTP Headers".into(),
                 description: Some(
-                    "Extra headers attached to every request. Use this for an auth proxy \
-                     (Authorization: Bearer …). Values are stored encrypted-at-rest only \
-                     in the sense that they're not echoed back through the API once saved."
+                    "Extra headers attached to every request, to every configured server. \
+                     Use this for an auth proxy (Authorization: Bearer …). Values are \
+                     stored encrypted-at-rest only in the sense that they're not echoed \
+                     back through the API once saved."
                         .into(),
                 ),
                 required: false,
                 kind: FieldKind::KeyValueList {
                     secret_values: true,
+                    url_values: false,
                     key_placeholder: Some("Authorization".into()),
                     value_placeholder: Some("Bearer …".into()),
                 },
@@ -165,7 +195,7 @@ impl BuiltinPlugin for OllamaPlugin {
 
     fn requested_permissions(&self) -> Vec<Permission> {
         // No subprocess, no filesystem, no DB writes — just outbound
-        // HTTP to wherever the user pointed `base_url`.
+        // HTTP to wherever the user pointed `base_url` and `servers`.
         vec![Permission::RegisterProvider, Permission::NetworkAccess]
     }
 

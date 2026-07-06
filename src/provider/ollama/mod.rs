@@ -27,12 +27,19 @@
 //! a conversation feel without involving the database. State is dropped
 //! on cancel (so a `/clear` restart begins fresh) and on shutdown.
 //!
-//! Configuration (base URL, default model, request timeout, optional
-//! HTTP headers) lives on the per-plugin [`PluginSettingsStore`] — the
-//! `OllamaPlugin` constructs the store from its schema, then hands the
-//! handle to this provider. The provider re-reads settings on every
-//! `send_message` so a UI change takes effect immediately, without
-//! requiring a restart.
+//! Configuration (default server URL, named additional servers, default
+//! model, request timeout, optional HTTP headers) lives on the per-plugin
+//! [`PluginSettingsStore`] — the `OllamaPlugin` constructs the store from
+//! its schema, then hands the handle to this provider. The provider
+//! re-reads settings on every `send_message` so a UI change takes effect
+//! immediately, without requiring a restart.
+//!
+//! More than one Ollama server can be configured: `base_url` is the
+//! default, and the `servers` setting maps `name → base URL` for the
+//! rest. A model on a named server is addressed as `<model>@<name>`
+//! everywhere a model id appears (`ollama:qwen2.5-coder@gpu-box`);
+//! discovery, capability probes and chat requests all route on that
+//! suffix.
 
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
@@ -261,13 +268,14 @@ pub struct OllamaProvider {
     /// provider has to replay the whole transcript on every turn. Dropped
     /// on cancel and shutdown.
     conversations: Arc<Mutex<HashMap<String, Vec<ChatMessage>>>>,
-    /// TTL cache for the `/v1/models` autodiscovery probe so the model
-    /// picker doesn't trigger a network round-trip on every render.
+    /// TTL cache for the `/v1/models` autodiscovery probe (all configured
+    /// servers combined) so the model picker doesn't trigger network
+    /// round-trips on every render.
     discovery_cache: Arc<Mutex<Option<DiscoveryCache>>>,
     /// TTL cache of per-model `/api/show` capability probes, keyed by the
-    /// bare model id. Lets both the model picker and the per-turn request
-    /// path know whether a model supports tools/vision without re-probing
-    /// the server every time.
+    /// model reference (`name[@server]`). Lets both the model picker and
+    /// the per-turn request path know whether a model supports
+    /// tools/vision without re-probing its server every time.
     capability_cache: Arc<Mutex<HashMap<String, CapabilityCacheEntry>>>,
     client: reqwest::Client,
 }
@@ -297,10 +305,12 @@ impl OllamaProvider {
         }
     }
 
-    /// Return the model ids installed on the server, going through the
-    /// TTL cache so the picker doesn't probe Ollama on every render.
+    /// Return the model ids installed across every configured server
+    /// (named-server models qualified as `model@name`), going through the
+    /// TTL cache so the picker doesn't probe the servers on every render.
     /// `Some(list)` on success (possibly empty), `None` when the last
-    /// probe failed and the caller should fall back to the static seed.
+    /// probe round failed entirely and the caller should fall back to the
+    /// static seed.
     async fn discovered_models(
         &self,
         settings: &HashMap<String, serde_json::Value>,
@@ -313,7 +323,7 @@ impl OllamaProvider {
                 return entry.models.clone();
             }
         }
-        let result = self.fetch_server_models(settings).await;
+        let result = self.fetch_all_server_models(settings).await;
         let mut cache = self.discovery_cache.lock().await;
         *cache = Some(DiscoveryCache {
             fetched_at: Instant::now(),
@@ -322,19 +332,52 @@ impl OllamaProvider {
         result
     }
 
-    /// Hit `<base_url>/v1/models` and return the parsed model ids. Returns
-    /// `None` (so the caller falls back to the static seed) on any
-    /// failure: no `base_url`, a bad URL, a network/HTTP error, or an
-    /// unparseable body. An empty-but-valid response is `Some(vec![])`.
-    async fn fetch_server_models(
+    /// Model ids installed across every configured server (default plus
+    /// named), with named-server models qualified as `model@name`.
+    /// Returns `None` when no server produced a list (so the caller falls
+    /// back to the static seed); a partial outage keeps the models from
+    /// the servers that did answer.
+    async fn fetch_all_server_models(
         &self,
         settings: &HashMap<String, serde_json::Value>,
     ) -> Option<Vec<String>> {
-        let base_url = setting_str(settings, "base_url")?;
-        let endpoint = match build_endpoint(&base_url, "/v1/models") {
+        let targets = server_targets(settings);
+        if targets.is_empty() {
+            return None;
+        }
+        // Probe every server concurrently — one slow or dead box must not
+        // stack its connect timeout onto the others'.
+        let probes = targets.iter().map(|(alias, url)| async move {
+            (alias, self.fetch_server_models(settings, url).await)
+        });
+        let mut any_ok = false;
+        let mut all = Vec::new();
+        for (alias, models) in futures_util::future::join_all(probes).await {
+            let Some(models) = models else { continue };
+            any_ok = true;
+            for model in models {
+                all.push(match alias {
+                    Some(name) => format!("{model}@{name}"),
+                    None => model,
+                });
+            }
+        }
+        any_ok.then_some(all)
+    }
+
+    /// Hit `<base_url>/v1/models` on one server and return the parsed
+    /// model ids. Returns `None` on any failure: a bad URL, a network/HTTP
+    /// error, or an unparseable body. An empty-but-valid response is
+    /// `Some(vec![])`.
+    async fn fetch_server_models(
+        &self,
+        settings: &HashMap<String, serde_json::Value>,
+        base_url: &str,
+    ) -> Option<Vec<String>> {
+        let endpoint = match build_endpoint(base_url, "/v1/models") {
             Ok(e) => e,
             Err(e) => {
-                tracing::warn!("ollama: bad base_url for model discovery: {e}");
+                tracing::warn!("ollama: bad server URL for model discovery: {e}");
                 return None;
             }
         };
@@ -379,12 +422,13 @@ impl OllamaProvider {
         parse_openai_models(&body)
     }
 
-    /// Capabilities Ollama reports for `model` via `/api/show`, e.g.
-    /// `["completion","tools","vision"]`. Goes through a per-model TTL
-    /// cache so neither the picker nor the chat path probes on every use.
-    /// `None` when the last probe failed; callers treat that as "unknown"
-    /// and fall back to permissive defaults so an unreachable `/api/show`
-    /// never breaks an otherwise-working setup.
+    /// Capabilities Ollama reports for the model reference `model`
+    /// (`name[@server]`) via `/api/show` on the server it targets, e.g.
+    /// `["completion","tools","vision"]`. Goes through a TTL cache keyed
+    /// by the full reference so neither the picker nor the chat path
+    /// probes on every use. `None` when the last probe failed; callers
+    /// treat that as "unknown" and fall back to permissive defaults so an
+    /// unreachable `/api/show` never breaks an otherwise-working setup.
     async fn model_capabilities(
         &self,
         settings: &HashMap<String, serde_json::Value>,
@@ -410,16 +454,22 @@ impl OllamaProvider {
         result
     }
 
-    /// Hit `<base_url>/api/show` for one model and return its reported
-    /// `capabilities`. Returns `None` (so the caller assumes nothing) on
-    /// any failure: no `base_url`, a bad URL, a network/HTTP error, or an
-    /// unparseable body.
+    /// Hit `/api/show` on the server the reference targets and return the
+    /// model's reported `capabilities`. Returns `None` (so the caller
+    /// assumes nothing) on any failure: an unknown server alias, a bad
+    /// URL, a network/HTTP error, or an unparseable body.
     async fn fetch_model_capabilities(
         &self,
         settings: &HashMap<String, serde_json::Value>,
         model: &str,
     ) -> Option<Vec<String>> {
-        let base_url = setting_str(settings, "base_url")?;
+        let (model, base_url) = match resolve_server(settings, model) {
+            Ok(resolved) => resolved,
+            Err(e) => {
+                tracing::warn!("ollama: capability probe: {e}");
+                return None;
+            }
+        };
         let endpoint = match build_endpoint(&base_url, "/api/show") {
             Ok(e) => e,
             Err(e) => {
@@ -556,8 +606,6 @@ impl AgentProvider for OllamaProvider {
         }
 
         let settings = self.settings.load().await?;
-        let base_url = setting_str(&settings, "base_url")
-            .ok_or_else(|| anyhow::anyhow!("ollama plugin: base_url is not configured"))?;
         let default_model = setting_str(&settings, "default_model");
         let timeout_secs = setting_int(&settings, "request_timeout_secs")
             .map(|n| n.max(1) as u64)
@@ -566,11 +614,15 @@ impl AgentProvider for OllamaProvider {
         let extra_headers = setting_headers(&settings, "additional_headers");
         let enable_tools = setting_bool(&settings, "enable_tools").unwrap_or(true);
 
-        let model = resolve_model(&config.model).unwrap_or_else(|| {
+        // The session's selection (or the configured default) is a model
+        // reference that may carry an `@<server>` suffix; resolve it to
+        // the bare model name plus the base URL of the server hosting it.
+        let model_ref = resolve_model(&config.model).unwrap_or_else(|| {
             default_model
                 .clone()
                 .unwrap_or_else(|| "llama3.1".to_string())
         });
+        let (model, base_url) = resolve_server(&settings, &model_ref)?;
 
         // Probe what this model actually supports before building the
         // request. Ollama 400s a `/api/chat` that carries `tools` for a
@@ -578,7 +630,7 @@ impl AgentProvider for OllamaProvider {
         // models), and a non-vision model has nowhere to put images. When
         // the probe itself fails we fall back to permissive defaults so an
         // unreachable `/api/show` never breaks an otherwise-working setup.
-        let capabilities = self.model_capabilities(&settings, &model).await;
+        let capabilities = self.model_capabilities(&settings, &model_ref).await;
         let supports_tools = capability_present(capabilities.as_deref(), "tools");
         let supports_vision = capability_present(capabilities.as_deref(), "vision");
         if enable_tools && !supports_tools {
@@ -751,6 +803,69 @@ fn resolve_model(raw: &str) -> Option<String> {
         return Some(rest.to_string());
     }
     None
+}
+
+/// Split a model reference `name[@server]` on its LAST `@` into the bare
+/// model name and the optional server alias. References without an `@`
+/// (or with an empty half) are all name.
+fn split_model_ref(model_ref: &str) -> (&str, Option<&str>) {
+    match model_ref.rsplit_once('@') {
+        Some((name, alias)) if !name.is_empty() && !alias.is_empty() => (name, Some(alias)),
+        _ => (model_ref, None),
+    }
+}
+
+/// `(alias, base_url)` pairs from the `servers` key-value setting. The
+/// default server (`base_url`) is not part of this list.
+fn setting_servers(settings: &HashMap<String, serde_json::Value>) -> Vec<(String, String)> {
+    setting_headers(settings, "servers")
+        .into_iter()
+        .map(|(name, url)| (name, url.trim().to_string()))
+        .filter(|(_, url)| !url.is_empty())
+        .collect()
+}
+
+/// Every server model discovery should probe: the default (`None`) plus
+/// each named server, as `(alias, base_url)`.
+fn server_targets(settings: &HashMap<String, serde_json::Value>) -> Vec<(Option<String>, String)> {
+    let mut targets = Vec::new();
+    if let Some(url) = setting_str(settings, "base_url") {
+        targets.push((None, url));
+    }
+    for (name, url) in setting_servers(settings) {
+        targets.push((Some(name), url));
+    }
+    targets
+}
+
+/// Resolve a model reference `name[@server]` to the bare model name plus
+/// the base URL of the server that hosts it. A bare reference targets the
+/// default `base_url`; `name@alias` targets the URL registered under
+/// `alias` in the `servers` setting. An alias that isn't configured is an
+/// error — silently sending `name@alias` to the default server would
+/// surface as a confusing model-not-found from Ollama instead.
+fn resolve_server(
+    settings: &HashMap<String, serde_json::Value>,
+    model_ref: &str,
+) -> anyhow::Result<(String, String)> {
+    let (name, alias) = split_model_ref(model_ref);
+    match alias {
+        None => {
+            let url = setting_str(settings, "base_url")
+                .ok_or_else(|| anyhow::anyhow!("ollama plugin: base_url is not configured"))?;
+            Ok((name.to_string(), url))
+        }
+        Some(alias) => setting_servers(settings)
+            .into_iter()
+            .find(|(n, _)| n == alias)
+            .map(|(_, url)| (name.to_string(), url))
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "ollama plugin: model '{model_ref}' references server '{alias}', which \
+                     is not configured under Additional Servers"
+                )
+            }),
+    }
 }
 
 /// Base64-encode the image attachments on a user turn into the bare-string
@@ -1549,6 +1664,46 @@ mod tests {
         assert_eq!(resolve_model("ollama:"), None);
         assert_eq!(resolve_model("llama3.1"), None);
         assert_eq!(resolve_model("claude:opus"), None);
+    }
+
+    #[test]
+    fn split_model_ref_splits_on_last_at_only() {
+        assert_eq!(split_model_ref("llama3.1"), ("llama3.1", None));
+        assert_eq!(
+            split_model_ref("qwen2.5-coder@gpu-box"),
+            ("qwen2.5-coder", Some("gpu-box"))
+        );
+        // Last `@` wins; empty halves mean "no alias".
+        assert_eq!(split_model_ref("odd@name@srv"), ("odd@name", Some("srv")));
+        assert_eq!(split_model_ref("@srv"), ("@srv", None));
+        assert_eq!(split_model_ref("model@"), ("model@", None));
+    }
+
+    #[test]
+    fn resolve_server_routes_by_alias_and_rejects_unknown() {
+        let mut settings = HashMap::new();
+        settings.insert(
+            "base_url".to_string(),
+            serde_json::json!("http://localhost:11434"),
+        );
+        settings.insert(
+            "servers".to_string(),
+            serde_json::json!([{ "key": "gpu-box", "value": "http://10.0.0.5:11434" }]),
+        );
+
+        assert_eq!(
+            resolve_server(&settings, "llama3.1").unwrap(),
+            ("llama3.1".to_string(), "http://localhost:11434".to_string())
+        );
+        assert_eq!(
+            resolve_server(&settings, "qwen2.5-coder@gpu-box").unwrap(),
+            (
+                "qwen2.5-coder".to_string(),
+                "http://10.0.0.5:11434".to_string()
+            )
+        );
+        // A typo'd alias errors instead of silently hitting the default server.
+        assert!(resolve_server(&settings, "qwen2.5-coder@gpu-bax").is_err());
     }
 
     #[test]
