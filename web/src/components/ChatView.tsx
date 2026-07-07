@@ -6,13 +6,12 @@ import type { Event, Session } from '../types/api'
 import { authedFetch } from '../store/auth'
 import { useWsStore } from '../store/ws'
 import { useSessionsStore, type PendingUserMessage } from '../store/sessions'
-import { effortOptionsForModel, type ProviderInfo } from '../store/resources'
+import { effortOptionsForModel, useResourcesStore, type ProviderInfo } from '../store/resources'
 import InputBar from './InputBar'
 import ToolUseBlock from './ToolUseBlock'
 import ConfirmDialog from './ConfirmDialog'
 import { MenuButton, type MenuItem } from './Dropdown'
 import ModelPicker from './ModelPicker'
-import SystemPromptPicker from './SystemPromptPicker'
 import TodoPanel from './TodoPanel'
 import PreHatchActivity from './chat/PreHatchActivity'
 import { parseTodoItems, latestTodoSnapshot, type TodoItem } from '../types/todo'
@@ -284,6 +283,8 @@ export default function ChatView({
   const [availableModels, setAvailableModels] = useState<ModelInfo[]>([])
   const [availableProviders, setAvailableProviders] = useState<ProviderInfo[]>([])
   const [modelsError, setModelsError] = useState(false)
+  const systemPrompts = useResourcesStore((s) => s.systemPrompts)
+  const fetchSystemPrompts = useResourcesStore((s) => s.fetchSystemPrompts)
   const [loadedTodos, setLoadedTodos] = useState<TodoItem[]>([])
   // Session id whose session-detail / todo-snapshot fetch failed. The
   // chat itself still works, so this only drives a retry banner rather
@@ -433,6 +434,11 @@ export default function ChatView({
       })
       .catch(() => setModelsError(true))
   }, [availableModels.length, modelsError])
+  // Load named system prompts once per mount so the 3-dot menu's
+  // "System prompt" submenu has options ready the first time it opens.
+  useEffect(() => {
+    fetchSystemPrompts()
+  }, [fetchSystemPrompts])
 
   // Fetch initial events
   useEffect(() => {
@@ -752,6 +758,24 @@ export default function ChatView({
           : [{ label: 'Loading models…', disabled: true }],
     },
     {
+      label: 'System prompt',
+      hint: sessionDetail?.system_prompt_name || '(none)',
+      searchable: true,
+      searchPlaceholder: 'Search system prompts…',
+      submenu: [
+        {
+          label: '(none)',
+          active: !sessionDetail?.system_prompt_name,
+          onSelect: () => patchSession({ system_prompt_name: '' }),
+        },
+        ...systemPrompts.map((p) => ({
+          label: p.name,
+          active: p.name === sessionDetail?.system_prompt_name,
+          onSelect: () => patchSession({ system_prompt_name: p.name }),
+        })),
+      ],
+    },
+    {
       label: 'Effort',
       hint: sessionDetail?.effort ?? 'default',
       submenu: effortOptions.map((o) => ({
@@ -845,11 +869,6 @@ export default function ChatView({
             if (modelsError) setModelsError(false)
           }}
           testId="chat-toolbar-model"
-        />
-        <SystemPromptPicker
-          value={sessionDetail?.system_prompt_name ?? null}
-          onChange={(name) => patchSession({ system_prompt_name: name ?? '' })}
-          testId="chat-toolbar-system-prompt"
         />
         <span className="chat-toolbar-status">
           <span className={getStatusDotClass(agentStatus)} />
