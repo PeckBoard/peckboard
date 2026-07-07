@@ -13,6 +13,58 @@ use crate::state::AppState;
 
 use super::resolve_references;
 
+/// Build a compact transcript of a chat session's prior turns for the
+/// pre-hatch hook payload: user messages and agent replies only, oldest-
+/// first, capped so a long conversation can't blow the cheap research
+/// model's context. Keeps the most RECENT turns within the char budget and
+/// drops the oldest; returns an empty string when there's nothing to send.
+async fn build_prehatch_history(state: &Arc<AppState>, session_id: &str) -> String {
+    const MAX_EVENTS: i64 = 200;
+    const MAX_CHARS: usize = 8000;
+    const MAX_TURN_CHARS: usize = 2000;
+    let events = match state.db.events_tail(session_id, MAX_EVENTS).await {
+        Ok(e) => e,
+        Err(_) => return String::new(),
+    };
+    let mut turns: Vec<String> = Vec::new();
+    for ev in &events {
+        let role = match ev.kind.as_str() {
+            "user" => "User",
+            "agent-text" => "Assistant",
+            _ => continue,
+        };
+        let data: serde_json::Value = serde_json::from_str(&ev.data).unwrap_or_default();
+        let text = data
+            .get("text")
+            .and_then(|t| t.as_str())
+            .unwrap_or("")
+            .trim();
+        if text.is_empty() {
+            continue;
+        }
+        let clipped = if text.chars().count() > MAX_TURN_CHARS {
+            format!(
+                "{}\u{2026}",
+                text.chars().take(MAX_TURN_CHARS).collect::<String>()
+            )
+        } else {
+            text.to_string()
+        };
+        turns.push(format!("{role}: {clipped}"));
+    }
+    let mut total = 0usize;
+    let mut kept: Vec<String> = Vec::new();
+    for turn in turns.iter().rev() {
+        total += turn.chars().count() + 2;
+        if total > MAX_CHARS {
+            break;
+        }
+        kept.push(turn.clone());
+    }
+    kept.reverse();
+    kept.join("\n\n")
+}
+
 #[derive(Deserialize)]
 pub(super) struct SendMessageRequest {
     text: String,
@@ -154,6 +206,17 @@ pub(super) async fn send_message(
                 .await
                 .map(|m| format!("{provider_id}:{m}")),
         };
+        // The chat's prior turns, so the pre-hatcher researches with the
+        // whole conversation in view, and the configurable research system
+        // prompt (a library name, default "fable 5") resolved to its body.
+        let history = build_prehatch_history(&state, &id).await;
+        let sp_name = crate::routes::settings::pre_hatcher_system_prompt_name(&state).await;
+        let system_prompt = state
+            .db
+            .resolve_system_prompt(Some(&sp_name))
+            .await
+            .ok()
+            .flatten();
         let hook_result = state
             .plugins
             .dispatch_scoped(
@@ -168,6 +231,9 @@ pub(super) async fn send_message(
                     "model": resolved_model,
                     "effort": resolved_effort,
                     "cheap_model": cheap_model,
+                    "history": history,
+                    "system_prompt": system_prompt.as_ref().map(|(_, body)| body.clone()),
+                    "system_prompt_name": system_prompt.as_ref().map(|(name, _)| name.clone()),
                 }),
             )
             .await;

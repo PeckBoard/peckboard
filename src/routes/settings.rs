@@ -42,6 +42,15 @@ const CAVEMAN_LEVELS: &[&str] = &["off", "lite", "full"];
 /// cheapest priced model).
 const PRE_HATCHER_MODEL_KEY: &str = "pre_hatcher_model";
 
+/// Plugin-store key for the pre-hatcher research system-prompt selection — a
+/// library prompt NAME (see `system_prompts`). Empty/missing ⇒ the default.
+const PRE_HATCHER_SYSTEM_PROMPT_KEY: &str = "pre_hatcher_system_prompt";
+
+/// The pre-hatcher's default research system prompt when none is configured.
+/// Resolved to its body at dispatch time; falls back to no override if the
+/// named prompt has been deleted from the library.
+pub const PRE_HATCHER_DEFAULT_SYSTEM_PROMPT: &str = "fable 5";
+
 pub fn router(state: Arc<AppState>) -> Router<Arc<AppState>> {
     Router::new()
         .route("/api/settings/approved-commands", get(list_approved))
@@ -53,6 +62,10 @@ pub fn router(state: Arc<AppState>) -> Router<Arc<AppState>> {
         .route(
             "/api/settings/pre-hatcher",
             get(get_pre_hatcher).put(set_pre_hatcher),
+        )
+        .route(
+            "/api/settings/pre-hatcher-prompt",
+            get(get_pre_hatcher_prompt).put(set_pre_hatcher_prompt),
         )
         .route_layer(middleware::from_fn_with_state(state, require_auth))
 }
@@ -161,6 +174,80 @@ async fn set_pre_hatcher(
             SETTINGS_NS,
             SETTINGS_COLLECTION,
             PRE_HATCHER_MODEL_KEY,
+            &value,
+        )
+    })
+    .await;
+    match res {
+        Ok(Ok(_)) => Ok(StatusCode::NO_CONTENT),
+        Ok(Err(e)) => Err((
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({ "error": e.to_string() })),
+        )),
+        Err(e) => Err((
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({ "error": e.to_string() })),
+        )),
+    }
+}
+
+/// The pre-hatcher research system-prompt NAME: the configured library name,
+/// or [`PRE_HATCHER_DEFAULT_SYSTEM_PROMPT`] when unset/empty. Read per turn by
+/// the `session.message.before` dispatch path, which resolves it to a body.
+pub async fn pre_hatcher_system_prompt_name(state: &Arc<AppState>) -> String {
+    let db = state.db.clone();
+    let raw = tokio::task::spawn_blocking(move || {
+        db.plugin_store_get_blocking(
+            SETTINGS_NS,
+            SETTINGS_COLLECTION,
+            PRE_HATCHER_SYSTEM_PROMPT_KEY,
+        )
+    })
+    .await;
+    let configured = match raw {
+        Ok(Ok(Some(json))) => serde_json::from_str::<serde_json::Value>(&json)
+            .ok()
+            .and_then(|v| v.get("name").and_then(|m| m.as_str()).map(str::to_string))
+            .filter(|m| !m.trim().is_empty()),
+        _ => None,
+    };
+    configured.unwrap_or_else(|| PRE_HATCHER_DEFAULT_SYSTEM_PROMPT.to_string())
+}
+
+/// GET /api/settings/pre-hatcher-prompt → `{"name": "fable 5"}` (the effective
+/// name, defaulting when unset).
+async fn get_pre_hatcher_prompt(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+    let name = pre_hatcher_system_prompt_name(&state).await;
+    Json(serde_json::json!({ "name": name }))
+}
+
+#[derive(serde::Deserialize)]
+struct PreHatcherPromptBody {
+    name: String,
+}
+
+/// PUT /api/settings/pre-hatcher-prompt `{"name": "fable 5"}` → 204. Empty
+/// clears the override (reverts to the default). Takes effect on each chat's
+/// next message. The name is validated at dispatch time — an unknown name
+/// simply resolves to no system-prompt override.
+async fn set_pre_hatcher_prompt(
+    State(state): State<Arc<AppState>>,
+    Json(body): Json<PreHatcherPromptBody>,
+) -> impl IntoResponse {
+    let name = body.name.trim().to_string();
+    if name.chars().count() > 200 {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({ "error": "name too long" })),
+        ));
+    }
+    let db = state.db.clone();
+    let value = serde_json::json!({ "name": name }).to_string();
+    let res = tokio::task::spawn_blocking(move || {
+        db.plugin_store_put_blocking(
+            SETTINGS_NS,
+            SETTINGS_COLLECTION,
+            PRE_HATCHER_SYSTEM_PROMPT_KEY,
             &value,
         )
     })

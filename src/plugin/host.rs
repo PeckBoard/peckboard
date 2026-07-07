@@ -695,6 +695,16 @@ struct CreateSessionRequest {
     is_expert: bool,
     #[serde(default)]
     expert_kind: Option<String>,
+    /// Optional system-prompt body to attach to the new session (appended
+    /// after the standing Peckboard prompt, like `set_session_system_prompt`).
+    /// The pre-hatcher uses this to run its research session under a
+    /// configurable named prompt (default "fable 5").
+    #[serde(default)]
+    system_prompt: Option<String>,
+    /// The library name the `system_prompt` body was resolved from, recorded
+    /// on the session for display/audit. Optional and independent of the body.
+    #[serde(default)]
+    system_prompt_name: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -769,6 +779,16 @@ pub(crate) fn create_session_impl(db: &Db, input: &str, inv: &InvocationContext)
     {
         return error_json(e);
     }
+    // Cap the optional system-prompt body so a runaway prompt can't bloat a
+    // session row (mirrors set_session_system_prompt's MAX_LEN).
+    if let Some(ref sp) = req.system_prompt
+        && sp.len() > 100_000
+    {
+        return error_json(format!(
+            "system_prompt too long ({} > 100000 chars)",
+            sp.len()
+        ));
+    }
     let now = chrono::Utc::now().to_rfc3339();
     let new = crate::db::models::NewSession {
         id: req.id.unwrap_or_else(|| uuid::Uuid::new_v4().to_string()),
@@ -789,7 +809,7 @@ pub(crate) fn create_session_impl(db: &Db, input: &str, inv: &InvocationContext)
         scope_path: None,
         is_permanent: false,
         repeating_task_id: None,
-        system_prompt: None,
+        system_prompt: req.system_prompt,
         handover_to_model: None,
         pending_handover_doc: None,
         worker_step: None,
@@ -798,7 +818,7 @@ pub(crate) fn create_session_impl(db: &Db, input: &str, inv: &InvocationContext)
         user_id: db.resolve_spawned_session_owner_blocking(inv.session_id.as_deref()),
         context_reset_ts: None,
         model_autoswitch: None,
-        system_prompt_name: None,
+        system_prompt_name: req.system_prompt_name,
     };
     match db.create_session_blocking(new) {
         Ok(session) => serde_json::json!({ "session": session }).to_string(),
