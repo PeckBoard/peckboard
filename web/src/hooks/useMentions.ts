@@ -103,8 +103,14 @@ export function useMentions(excludeSessionId?: string): MentionItem[] {
 
 /**
  * Filter mentions by a search string.
+ *
+ * The dropdown is scrollable (`max-height` + `overflow-y: auto`), so this cap
+ * only bounds the DOM nodes rendered per keystroke — it is not meant to hide
+ * results. 10 was too aggressive: with reports listed first, a bare `@` never
+ * reached sessions/cards once there were 10+ reports. 50 surfaces the full set
+ * in realistic use while still guarding the pathological 500-session case.
  */
-export function filterMentions(items: MentionItem[], query: string, limit = 10): MentionItem[] {
+export function filterMentions(items: MentionItem[], query: string, limit = 50): MentionItem[] {
   const q = query.toLowerCase()
   return items
     .filter((m) => m.label.toLowerCase().includes(q) || m.detail.toLowerCase().includes(q))
