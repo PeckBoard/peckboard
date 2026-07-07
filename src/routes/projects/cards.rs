@@ -30,6 +30,11 @@ pub(super) struct CreateCardRequest {
     /// Omitted / `null` = inherit the default (ON — cards spawn workers).
     #[serde(default)]
     model_autoswitch: Option<bool>,
+    /// Name of a library system prompt to attach to this card. Non-empty is
+    /// validated to exist; empty string / omitted = none. Applied to the
+    /// worker session's system prompt at spawn.
+    #[serde(default)]
+    system_prompt_name: Option<String>,
 }
 
 #[derive(Deserialize, serde::Serialize)]
@@ -46,6 +51,9 @@ pub(super) struct UpdateCardRequest {
     handoff_context: Option<Option<String>>,
     blocked: Option<bool>,
     block_reason: Option<Option<String>>,
+    /// Name of a library system prompt to attach. Non-empty is validated to
+    /// exist; empty string clears it.
+    system_prompt_name: Option<String>,
     model_autoswitch: Option<Option<bool>>,
     /// When present, replaces the card's full dependency set.
     depends_on: Option<Vec<String>>,
@@ -141,6 +149,21 @@ pub(super) async fn create_card(
         .map(|s| s.to_string());
     let blocked = body.blocked.unwrap_or(block_reason.is_some());
 
+    // Validate and canonicalize a selected library prompt name. Cards store
+    // only the name (resolved to a body at worker spawn); empty/omitted =
+    // none, an unknown name is a 400.
+    let system_prompt_name = state
+        .db
+        .resolve_system_prompt(body.system_prompt_name.as_deref())
+        .await
+        .map_err(|e| {
+            (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({ "error": e.to_string() })),
+            )
+        })?
+        .map(|(name, _body)| name);
+
     let card = state
         .db
         .create_card(NewCard {
@@ -157,6 +180,7 @@ pub(super) async fn create_card(
             block_reason,
             created_at: now.clone(),
             updated_at: now,
+            system_prompt_name,
         })
         .await
         .map_err(|e| {
@@ -360,6 +384,27 @@ pub(super) async fn update_card(
     // worker running on the old step, and the worker could then call
     // `complete_step` against a now-incorrect base step.
     let depends_on_present = depends_on.is_some();
+    // Resolve a selected library prompt name before the atomic closure (the
+    // closure is sync, and resolution is an async DB lookup). Present in the
+    // request => touch the column: Some(name) validates+canonicalizes and
+    // sets it, Some("") clears it; absent leaves it untouched. Unknown => 400.
+    let system_prompt_name_update: Option<Option<String>> = match &body.system_prompt_name {
+        None => None,
+        Some(name) => Some(
+            state
+                .db
+                .resolve_system_prompt(Some(name.as_str()))
+                .await
+                .map_err(|e| {
+                    (
+                        StatusCode::BAD_REQUEST,
+                        Json(serde_json::json!({ "error": e.to_string() })),
+                    )
+                })?
+                .map(|(n, _body)| n),
+        ),
+    };
+
     let stale_worker_cell = std::sync::Arc::new(std::sync::Mutex::new(None::<String>));
     let stale_worker_writer = stale_worker_cell.clone();
     let card = state
@@ -430,6 +475,7 @@ pub(super) async fn update_card(
                 blocked: body.blocked,
                 block_reason: body.block_reason,
                 model_autoswitch: body.model_autoswitch,
+                system_prompt_name: system_prompt_name_update,
                 updated_at: Some(chrono::Utc::now().to_rfc3339()),
                 // Leave to update_card_atomic's stamper — it knows the
                 // prev_step from the read it already did.

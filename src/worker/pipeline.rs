@@ -803,6 +803,7 @@ mod tests {
             updated_at: "2025-01-01T00:00:00Z".into(),
             model_autoswitch: None,
             completed_at: None,
+            system_prompt_name: None,
         }
     }
 

@@ -133,6 +133,7 @@ async fn seed_card_with_worker(
             block_reason: None,
             created_at: ts.clone(),
             updated_at: ts.clone(),
+            system_prompt_name: None,
         })
         .await
         .unwrap();
@@ -1233,6 +1234,7 @@ async fn seed_plain_card(state: &Arc<AppState>, id: &str, step: &str, descriptio
             block_reason: None,
             created_at: ts.clone(),
             updated_at: ts.clone(),
+            system_prompt_name: None,
         })
         .await
         .unwrap();

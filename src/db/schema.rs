@@ -37,6 +37,7 @@ diesel::table! {
         user_id -> Nullable<Text>,
         context_reset_ts -> Nullable<BigInt>,
         model_autoswitch -> Nullable<Bool>,
+        system_prompt_name -> Nullable<Text>,
     }
 }
 
@@ -99,6 +100,7 @@ diesel::table! {
         updated_at -> Text,
         completed_at -> Nullable<Text>,
         model_autoswitch -> Nullable<Bool>,
+        system_prompt_name -> Nullable<Text>,
     }
 }
 

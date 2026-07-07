@@ -518,6 +518,15 @@ impl McpToolRegistry {
         // follow-up update so the create path keeps one `NewCard` shape.
         let model_autoswitch = args.get("model_autoswitch").and_then(|v| v.as_bool());
 
+        // Optional named library system prompt. Cards store only the name
+        // (resolved to a body when a worker spawns). Non-empty is validated
+        // to exist; empty string / omitted = none; unknown name errors.
+        let system_prompt_name = ctx
+            .db
+            .resolve_system_prompt(args.get("system_prompt_name").and_then(|v| v.as_str()))
+            .await?
+            .map(|(name, _body)| name);
+
         let now = chrono::Utc::now().to_rfc3339();
         let card_id = uuid::Uuid::new_v4().to_string();
         let card = ctx
@@ -536,6 +545,7 @@ impl McpToolRegistry {
                 block_reason,
                 created_at: now.clone(),
                 updated_at: now,
+                system_prompt_name,
             })
             .await?;
         let card = match model_autoswitch {
@@ -873,6 +883,22 @@ impl McpToolRegistry {
 
         let updated_at = Some(chrono::Utc::now().to_rfc3339());
 
+        // Named library system prompt: present in args => touch the column.
+        // Some(name) validates+canonicalizes and sets it, empty string clears
+        // it; omitting the key leaves it untouched. Resolve before the sync
+        // closure since it's an async DB lookup; unknown name errors.
+        let system_prompt_name: Option<Option<String>> =
+            if let Some(v) = args.get("system_prompt_name") {
+                Some(
+                    ctx.db
+                        .resolve_system_prompt(v.as_str())
+                        .await?
+                        .map(|(name, _body)| name),
+                )
+            } else {
+                None
+            };
+
         // Capture the previously assigned worker if this update is going
         // to change the step out from under it. The cancel runs after the
         // DB write succeeds so a failed update doesn't kill a worker for
@@ -904,6 +930,7 @@ impl McpToolRegistry {
                     last_worker_session_id,
                     updated_at,
                     model_autoswitch,
+                    system_prompt_name,
                     ..Default::default()
                 })
             })

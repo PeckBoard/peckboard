@@ -59,18 +59,30 @@ export function effortOptionsForModel(
   return [DEFAULT_EFFORT_OPTION, ...levels.map((l) => ({ value: l.id, label: l.label }))]
 }
 
+export interface SystemPromptInfo {
+  id: string
+  name: string
+  body: string
+  source_url: string | null
+  created_at: string
+  updated_at: string
+}
+
 interface ResourcesState {
   workflows: WorkflowInfo[]
   models: ModelInfo[]
   providers: ProviderInfo[]
+  systemPrompts: SystemPromptInfo[]
   fetchWorkflows: () => Promise<void>
   fetchModels: () => Promise<void>
+  fetchSystemPrompts: () => Promise<void>
 }
 
 export const useResourcesStore = create<ResourcesState>((set) => ({
   workflows: [],
   models: [],
   providers: [],
+  systemPrompts: [],
 
   fetchWorkflows: async () => {
     try {
@@ -92,6 +104,17 @@ export const useResourcesStore = create<ResourcesState>((set) => ({
       if (data?.models) patch.models = data.models
       if (data?.providers) patch.providers = data.providers
       if (Object.keys(patch).length > 0) set(patch)
+    } catch {
+      /* ignore */
+    }
+  },
+
+  fetchSystemPrompts: async () => {
+    try {
+      const res = await authedFetch('/api/system-prompts')
+      if (!res.ok) return
+      const data = await res.json()
+      if (data?.prompts) set({ systemPrompts: data.prompts })
     } catch {
       /* ignore */
     }

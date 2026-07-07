@@ -32,6 +32,10 @@ struct CreateSessionRequest {
     /// resolves to OFF for chat sessions.
     #[serde(default)]
     model_autoswitch: Option<bool>,
+    /// Name of a library system prompt to attach. Non-empty resolves to a
+    /// body stored in `system_prompt`; empty string clears both.
+    #[serde(default)]
+    system_prompt_name: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -71,6 +75,7 @@ struct UpdateSessionRequest {
     card_id: Option<Option<String>>,
     conversation_id: Option<Option<String>>,
     last_activity: Option<String>,
+    system_prompt_name: Option<String>,
     model_autoswitch: Option<Option<bool>>,
 }
 
@@ -122,6 +127,24 @@ async fn create_session(
     let now = chrono::Utc::now().to_rfc3339();
     let id = uuid::Uuid::new_v4().to_string();
 
+    // Resolve a selected library prompt into (name, body). Empty/None clears
+    // both; an unknown name is a 400. Some => set both columns; None => leave
+    // the NewSession defaults (both NULL).
+    let resolved = state
+        .db
+        .resolve_system_prompt(body.system_prompt_name.as_deref())
+        .await
+        .map_err(|e| {
+            (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({ "error": e.to_string() })),
+            )
+        })?;
+    let (system_prompt_name, system_prompt) = match resolved {
+        Some((name, body)) => (Some(name), Some(body)),
+        None => (None, None),
+    };
+
     let session = state
         .db
         .create_session(NewSession {
@@ -138,6 +161,8 @@ async fn create_session(
             last_activity: now,
             user_id: Some(user.user_id),
             model_autoswitch: body.model_autoswitch,
+            system_prompt,
+            system_prompt_name,
             ..Default::default()
         })
         .await
@@ -299,6 +324,29 @@ async fn update_session(
     } else {
         body.model
     };
+    // Resolve a selected library prompt. Only touch the prompt columns when
+    // the request carried `system_prompt_name` at all: Some(name) sets both
+    // the resolved body and the reference; Some("") clears both; absent (None)
+    // leaves them untouched. An unknown name is a 400.
+    let (system_prompt_update, system_prompt_name_update) = match &body.system_prompt_name {
+        None => (None, None),
+        Some(name) => {
+            let resolved = state
+                .db
+                .resolve_system_prompt(Some(name.as_str()))
+                .await
+                .map_err(|e| {
+                    (
+                        StatusCode::BAD_REQUEST,
+                        Json(serde_json::json!({ "error": e.to_string() })),
+                    )
+                })?;
+            match resolved {
+                Some((n, b)) => (Some(Some(b)), Some(Some(n))),
+                None => (Some(None), Some(None)),
+            }
+        }
+    };
 
     let update = UpdateSession {
         name: body.name,
@@ -309,6 +357,8 @@ async fn update_session(
         conversation_id: body.conversation_id,
         model_autoswitch: body.model_autoswitch,
         last_activity: body.last_activity,
+        system_prompt: system_prompt_update,
+        system_prompt_name: system_prompt_name_update,
         ..Default::default()
     };
 
@@ -322,7 +372,9 @@ async fn update_session(
         || update.card_id.is_some()
         || update.conversation_id.is_some()
         || update.last_activity.is_some()
-        || update.model_autoswitch.is_some();
+        || update.model_autoswitch.is_some()
+        || update.system_prompt.is_some()
+        || update.system_prompt_name.is_some();
 
     let session = if has_updates {
         state.db.update_session(&id, update).await

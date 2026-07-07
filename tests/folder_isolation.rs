@@ -89,6 +89,7 @@ async fn seed_session(
         user_id: None,
         model_autoswitch: None,
         context_reset_ts: None,
+        system_prompt_name: None,
     })
     .await
     .unwrap();

@@ -58,8 +58,9 @@ async fn main() -> anyhow::Result<()> {
 
     let db = Db::open(&config.data_dir)?;
     tracing::info!("Database opened at {}", config.data_dir.display());
-
-    // First-run only: seed the built-in named system prompts the cost-aware
+    // Seed the built-in named system prompts the cost-aware auto-switch
+    // picks from. Per-name create-if-missing: backfills builtins added
+    // after first run, leaves user-edited prompts untouched.
     // auto-switch picks from. No-op once the library has any entry.
     match db.seed_default_system_prompts().await {
         Ok(n) if n > 0 => tracing::info!("Seeded {n} default system prompt(s)"),

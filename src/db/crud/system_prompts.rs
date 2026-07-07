@@ -52,6 +52,31 @@ impl Db {
         .await
     }
 
+    /// Resolve a selected library-prompt name into its stored `(name, body)`.
+    ///
+    /// Shared by the sessions/cards HTTP handlers, the MCP card tools, and
+    /// the card→worker spawn path so "select a named prompt" behaves the same
+    /// everywhere:
+    /// - `None` or `Some("")` (after trim) → `Ok(None)` — the caller clears
+    ///   both the name reference and any resolved body.
+    /// - a known name → `Ok(Some((canonical_name, body)))`.
+    /// - an unknown name → `Err` with the same message shape as
+    ///   `set_session_system_prompt`: "no system prompt named '{name}'".
+    pub async fn resolve_system_prompt(
+        &self,
+        name: Option<&str>,
+    ) -> anyhow::Result<Option<(String, String)>> {
+        let Some(name) = name else { return Ok(None) };
+        let trimmed = name.trim();
+        if trimmed.is_empty() {
+            return Ok(None);
+        }
+        match self.get_system_prompt_by_name(trimmed).await? {
+            Some(p) => Ok(Some((p.name, p.body))),
+            None => Err(anyhow::anyhow!("no system prompt named '{trimmed}'")),
+        }
+    }
+
     /// Create a prompt. Fails if the name is already taken (the column is
     /// UNIQUE) — callers that want update-on-conflict use
     /// [`upsert_system_prompt_by_name`](Self::upsert_system_prompt_by_name).
@@ -204,9 +229,6 @@ impl Db {
     /// library holds any entry, so a user who deletes a default won't have
     /// it resurrected on the next boot. Returns how many were inserted.
     pub async fn seed_default_system_prompts(&self) -> anyhow::Result<usize> {
-        if !self.list_system_prompts().await?.is_empty() {
-            return Ok(0);
-        }
         let defaults: &[(&str, &str)] = &[
             (
                 "implement",
@@ -296,6 +318,11 @@ impl Db {
         ];
         let mut inserted = 0;
         for (name, body) in defaults {
+            // Create-if-missing so builtins added after this DB was first
+            // seeded get backfilled, without clobbering user edits.
+            if self.get_system_prompt_by_name(name).await?.is_some() {
+                continue;
+            }
             self.create_system_prompt(name, body, None).await?;
             inserted += 1;
         }

@@ -620,6 +620,7 @@ async fn seed_worker(state: &Arc<AppState>) {
             block_reason: None,
             created_at: ts.clone(),
             updated_at: ts.clone(),
+            system_prompt_name: None,
         })
         .await
         .unwrap();

@@ -304,6 +304,7 @@ mod tests {
                 block_reason: None,
                 created_at: ts.clone(),
                 updated_at: ts.clone(),
+                system_prompt_name: None,
             })
             .await
             .unwrap();
@@ -393,6 +394,7 @@ mod tests {
             block_reason: None,
             created_at: ts.clone(),
             updated_at: ts.clone(),
+            system_prompt_name: None,
         })
         .await
         .unwrap();
@@ -484,6 +486,7 @@ mod tests {
             block_reason: None,
             created_at: ts.clone(),
             updated_at: ts.clone(),
+            system_prompt_name: None,
         };
         db.create_card(mk("a")).await.unwrap();
         db.create_card(mk("b")).await.unwrap();
@@ -914,6 +917,7 @@ mod tests {
             block_reason: None,
             created_at: ts.clone(),
             updated_at: ts.clone(),
+            system_prompt_name: None,
         })
         .await
         .unwrap();
@@ -1521,6 +1525,7 @@ mod tests {
                 block_reason: None,
                 created_at: ts.clone(),
                 updated_at: ts.clone(),
+                system_prompt_name: None,
             })
             .await
             .unwrap();
@@ -1742,6 +1747,7 @@ mod tests {
                 block_reason: None,
                 created_at: ts.clone(),
                 updated_at: ts.clone(),
+                system_prompt_name: None,
             })
             .await
             .unwrap();
@@ -2278,6 +2284,7 @@ mod tests {
             block_reason: None,
             created_at: ts.clone(),
             updated_at: ts.clone(),
+            system_prompt_name: None,
         })
         .await
         .unwrap();

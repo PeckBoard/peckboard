@@ -121,6 +121,7 @@ async fn seed_card_with_worker(state: &Arc<AppState>, card_id: &str, step: &str,
             block_reason: None,
             created_at: ts.clone(),
             updated_at: ts.clone(),
+            system_prompt_name: None,
         })
         .await
         .unwrap();
@@ -457,6 +458,7 @@ async fn seed_resumable_card(state: &Arc<AppState>, card_id: &str, step: &str, p
             block_reason: None,
             created_at: ts.clone(),
             updated_at: ts.clone(),
+            system_prompt_name: None,
         })
         .await
         .unwrap();

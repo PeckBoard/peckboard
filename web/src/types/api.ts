@@ -35,8 +35,12 @@ export interface Session {
   pending_handover_doc?: string | null
   /** Latest context-window occupancy (tokens) from the session's usage
    *  rows — present on GET /api/sessions/:id only; live updates arrive via
+  /** Latest context-window occupancy (tokens) from the session's usage
+   *  rows — present on GET /api/sessions/:id only; live updates arrive via
    *  streamed `agent-usage` events. */
   context_tokens?: number
+  /** Named system prompt to inject at the top of the context. */
+  system_prompt_name?: string | null
 }
 
 export type RepeatingScheduleKind = 'interval' | 'daily' | 'weekly'
@@ -106,6 +110,8 @@ export interface Card {
   created_at: string
   updated_at: string
   completed_at: string | null
+  /** Named system prompt to inject at the top of this card's worker context. */
+  system_prompt_name?: string | null
 }
 
 export interface Event {

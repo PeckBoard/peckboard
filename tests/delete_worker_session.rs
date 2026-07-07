@@ -141,6 +141,7 @@ async fn seed(state: &AppState) {
             block_reason: None,
             created_at: ts.clone(),
             updated_at: ts.clone(),
+            system_prompt_name: None,
         })
         .await
         .unwrap();

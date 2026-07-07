@@ -48,6 +48,7 @@ pub fn ensure_schema(conn: &mut SqliteConnection) -> anyhow::Result<()> {
     ensure_sessions_user_id_column(conn)?;
     ensure_sessions_context_reset_column(conn)?;
     ensure_model_autoswitch_columns(conn)?;
+    ensure_system_prompt_name_columns(conn)?;
     ensure_system_prompts_table(conn)?;
     backfill_session_owners(conn)?;
     Ok(())
@@ -558,6 +559,28 @@ fn ensure_model_autoswitch_columns(conn: &mut SqliteConnection) -> anyhow::Resul
     Ok(())
 }
 
+/// Heal DBs that predate `1783800000_system_prompt_name`. The migration's two
+/// `ALTER TABLE … ADD COLUMN system_prompt_name` statements are non-idempotent,
+/// so each is detected-and-added here. Nullable TEXT (NULL = no named library
+/// prompt selected), mirroring the migration.
+fn ensure_system_prompt_name_columns(conn: &mut SqliteConnection) -> anyhow::Result<()> {
+    for table in ["sessions", "cards"] {
+        let rows: Vec<PragmaColumn> =
+            sql_query(format!("PRAGMA table_info({table})")).load(conn)?;
+        let existing: Vec<String> = rows.into_iter().map(|r| r.name).collect();
+        if existing.is_empty() {
+            continue;
+        }
+        if !existing.iter().any(|c| c == "system_prompt_name") {
+            tracing::info!("Repairing schema: adding {table}.system_prompt_name");
+            sql_query(format!(
+                "ALTER TABLE {table} ADD COLUMN system_prompt_name TEXT"
+            ))
+            .execute(conn)?;
+        }
+    }
+    Ok(())
+}
 /// Heal DBs that predate `1783700001_system_prompts`. `CREATE TABLE IF NOT
 /// EXISTS` is idempotent so this is safe on a fully-migrated DB and only does
 /// work on one that lacks the table. DDL mirrors the migration.

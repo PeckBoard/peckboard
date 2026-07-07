@@ -6,6 +6,7 @@ import type { Card } from '../types/api'
 import DependencyPickerModal from './DependencyPickerModal'
 import Modal from './Modal'
 import ModelPicker from './ModelPicker'
+import SystemPromptPicker from './SystemPromptPicker'
 import WorkflowSelect from './WorkflowSelect'
 
 interface CardFormBaseProps {
@@ -49,6 +50,9 @@ export default function CardFormModal(props: CardFormProps) {
   const [blocked, setBlocked] = useState(card?.blocked ?? false)
   const [blockReason, setBlockReason] = useState(card?.block_reason ?? '')
   const [modelAutoswitch, setModelAutoswitch] = useState(card?.model_autoswitch ?? true)
+  const [systemPromptName, setSystemPromptName] = useState<string | null>(
+    card?.system_prompt_name ?? null,
+  )
   const [dependsOn, setDependsOn] = useState<string[]>(card?.depends_on ?? [])
   const [error, setError] = useState('')
   const [loading, setLoading] = useState(false)
@@ -118,6 +122,7 @@ export default function CardFormModal(props: CardFormProps) {
           blocked,
           block_reason: blocked ? blockReason.trim() || null : null,
           model_autoswitch: modelAutoswitch,
+          system_prompt_name: systemPromptName || null,
         } as Partial<Card>)
       } else {
         const updates: Partial<Card> = {
@@ -129,6 +134,7 @@ export default function CardFormModal(props: CardFormProps) {
           effort: effort || null,
           depends_on: dependsOn,
           model_autoswitch: modelAutoswitch,
+          system_prompt_name: systemPromptName ?? '',
         }
         if (isBacklog) {
           updates.description = description.trim()
@@ -246,6 +252,14 @@ export default function CardFormModal(props: CardFormProps) {
               onChange={handleModelChange}
               models={models as ModelInfo[]}
               testId="card-model"
+            />
+          </div>
+          <div className="form-field">
+            <label className="form-label">System prompt</label>
+            <SystemPromptPicker
+              value={systemPromptName}
+              onChange={setSystemPromptName}
+              testId="card-system-prompt"
             />
           </div>
           <div className="form-field">

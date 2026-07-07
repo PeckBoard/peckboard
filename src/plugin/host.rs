@@ -431,6 +431,7 @@ pub(crate) fn create_card_impl(db: &Db, input: &str) -> String {
         block_reason,
         created_at: now.clone(),
         updated_at: now,
+        system_prompt_name: None,
     };
 
     match db.create_card_blocking(&new) {
@@ -797,6 +798,7 @@ pub(crate) fn create_session_impl(db: &Db, input: &str, inv: &InvocationContext)
         user_id: db.resolve_spawned_session_owner_blocking(inv.session_id.as_deref()),
         context_reset_ts: None,
         model_autoswitch: None,
+        system_prompt_name: None,
     };
     match db.create_session_blocking(new) {
         Ok(session) => serde_json::json!({ "session": session }).to_string(),
@@ -869,6 +871,7 @@ pub(crate) fn update_session_impl(
         worker_step: None,
         context_reset_ts: None,
         model_autoswitch: None,
+        system_prompt_name: None,
     };
     match db.update_session_blocking(req.session_id.trim(), update) {
         Ok(Some(session)) => {

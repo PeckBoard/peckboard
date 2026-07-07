@@ -645,21 +645,23 @@ impl McpToolRegistry {
             .ok_or_else(|| anyhow::anyhow!("set_session_system_prompt requires 'session_id'"))?;
 
         // Resolve the prompt to set: an explicit `system_prompt` string
-        // wins; otherwise a library `name` resolves to that prompt's body;
-        // with neither, the custom prompt is cleared (the session reverts to
-        // the standing Peckboard prompt).
-        let prompt = if let Some(raw) = args.get("system_prompt").and_then(|v| v.as_str()) {
-            Some(raw.to_string())
-        } else if let Some(name) = args.get("name").and_then(|v| v.as_str()) {
-            let entry = ctx
-                .db
-                .get_system_prompt_by_name(name)
-                .await?
-                .ok_or_else(|| anyhow::anyhow!("no system prompt named '{name}'"))?;
-            Some(entry.body)
-        } else {
-            None
-        };
+        // wins (a raw body has no library name); otherwise a library `name`
+        // resolves to that prompt's body AND records the reference; with
+        // neither, the custom prompt is cleared (the session reverts to the
+        // standing Peckboard prompt) and the reference is cleared too.
+        let (prompt, prompt_name) =
+            if let Some(raw) = args.get("system_prompt").and_then(|v| v.as_str()) {
+                (Some(raw.to_string()), None)
+            } else if let Some(name) = args.get("name").and_then(|v| v.as_str()) {
+                let entry = ctx
+                    .db
+                    .get_system_prompt_by_name(name)
+                    .await?
+                    .ok_or_else(|| anyhow::anyhow!("no system prompt named '{name}'"))?;
+                (Some(entry.body), Some(entry.name))
+            } else {
+                (None, None)
+            };
         if let Some(ref p) = prompt
             && p.len() > MAX_LEN
         {
@@ -680,7 +682,7 @@ impl McpToolRegistry {
 
         let updated = ctx
             .db
-            .set_session_system_prompt(target_session_id, prompt.clone())
+            .set_session_system_prompt(target_session_id, prompt.clone(), prompt_name)
             .await?
             .ok_or_else(|| anyhow::anyhow!("session not found: {target_session_id}"))?;
 

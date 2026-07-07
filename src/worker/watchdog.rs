@@ -431,6 +431,7 @@ mod tests {
             block_reason: None,
             created_at: ts.clone(),
             updated_at: ts.clone(),
+            system_prompt_name: None,
         })
         .await
         .unwrap();
@@ -523,6 +524,7 @@ mod tests {
             block_reason: None,
             created_at: ts.clone(),
             updated_at: ts.clone(),
+            system_prompt_name: None,
         })
         .await
         .unwrap();
@@ -584,6 +586,7 @@ mod tests {
             block_reason: None,
             created_at: ts.clone(),
             updated_at: ts,
+            system_prompt_name: None,
         })
         .await
         .unwrap();

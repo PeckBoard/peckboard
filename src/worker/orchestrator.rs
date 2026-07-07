@@ -437,6 +437,26 @@ async fn spawn_worker_for_card(
             (prev, true)
         }
         None => {
+            // Resolve the card's selected library prompt (if any) into a body
+            // and stamp both the body and the reference onto the fresh worker
+            // session. Card selection is applied here, at spawn. A stale name
+            // (prompt since deleted) shouldn't block the whole card, so log
+            // and fall through with no prompt rather than erroring out.
+            let (worker_system_prompt, worker_system_prompt_name) = match state
+                .db
+                .resolve_system_prompt(card.system_prompt_name.as_deref())
+                .await
+            {
+                Ok(Some((name, body))) => (Some(body), Some(name)),
+                Ok(None) => (None, None),
+                Err(e) => {
+                    tracing::warn!(
+                        card_id = %card.id,
+                        "Card system prompt could not be resolved, spawning worker without it: {e}"
+                    );
+                    (None, None)
+                }
+            };
             let session = state
                 .db
                 .create_session(NewSession {
@@ -466,6 +486,8 @@ async fn spawn_worker_for_card(
                     // worker row. NULL inherits the worker default (ON), so we
                     // only need to propagate a card-level override.
                     model_autoswitch: card.model_autoswitch,
+                    system_prompt: worker_system_prompt,
+                    system_prompt_name: worker_system_prompt_name,
                     user_id: state.db.resolve_spawned_session_owner(None).await,
                     ..Default::default()
                 })
@@ -1570,6 +1592,7 @@ mod auto_pause_tests {
             block_reason: None,
             created_at: ts.clone(),
             updated_at: ts.clone(),
+            system_prompt_name: None,
         })
         .await
         .unwrap();

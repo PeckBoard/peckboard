@@ -246,10 +246,14 @@ impl McpToolRegistry {
         };
 
         // Write the new model (and prompt, if chosen) onto the session row.
-        // The child is wound down below so the resume reads these.
+        // The child is wound down below so the resume reads these. When a
+        // library prompt was chosen, record its name alongside the body so
+        // the reference column stays consistent; leave both untouched when no
+        // prompt was selected (this tool only sets a focusing prompt).
         let update = crate::db::models::UpdateSession {
             model: Some(Some(target_full.clone())),
             system_prompt: prompt_body.clone().map(Some),
+            system_prompt_name: system_prompt_name.clone().map(Some),
             ..Default::default()
         };
         ctx.db.update_session(&ctx.session_id, update).await?;

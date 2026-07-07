@@ -4,6 +4,7 @@ import { useFoldersStore } from '../store/folders'
 import { effortOptionsForModel, useResourcesStore } from '../store/resources'
 import Modal from './Modal'
 import ModelPicker from './ModelPicker'
+import SystemPromptPicker from './SystemPromptPicker'
 
 interface Props {
   onClose: () => void
@@ -28,6 +29,7 @@ export default function NewSessionModal({ onClose }: Props) {
   // Chat sessions default OFF (workers default ON); a NULL column inherits
   // that, so an unchecked box just leaves auto-switch off.
   const [modelAutoswitch, setModelAutoswitch] = useState(false)
+  const [systemPromptName, setSystemPromptName] = useState<string | null>(null)
   const [newFolderName, setNewFolderName] = useState('')
   const [newFolderPath, setNewFolderPath] = useState('')
   const [showNewFolder, setShowNewFolder] = useState(false)
@@ -80,6 +82,7 @@ export default function NewSessionModal({ onClose }: Props) {
         model || undefined,
         effort || undefined,
         modelAutoswitch,
+        systemPromptName,
       )
       setActiveSession(session.id)
       onClose()
@@ -176,6 +179,14 @@ export default function NewSessionModal({ onClose }: Props) {
               </option>
             ))}
           </select>
+        </div>
+        <div className="form-field">
+          <label className="form-label">System prompt</label>
+          <SystemPromptPicker
+            value={systemPromptName}
+            onChange={setSystemPromptName}
+            testId="new-session-system-prompt"
+          />
         </div>
         <div className="form-field">
           <label className="form-checkbox-label">

@@ -141,6 +141,7 @@ interface SessionsState {
     model?: string,
     effort?: string,
     modelAutoswitch?: boolean,
+    systemPromptName?: string | null,
   ) => Promise<Session>
   deleteSession: (id: string) => Promise<void>
   /** Apply the local cleanup for a session that's been deleted on the
@@ -405,11 +406,13 @@ export const useSessionsStore = create<SessionsState>((set, get) => ({
     model?: string,
     effort?: string,
     modelAutoswitch?: boolean,
+    systemPromptName?: string | null,
   ) => {
     const body: Record<string, unknown> = { name, folder_id: folderId }
     if (model) body.model = model
     if (effort && effort !== 'default') body.effort = effort
     if (modelAutoswitch !== undefined) body.model_autoswitch = modelAutoswitch
+    if (systemPromptName !== undefined) body.system_prompt_name = systemPromptName || null
     const res = await authedFetch('/api/sessions', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },

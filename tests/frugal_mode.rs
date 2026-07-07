@@ -146,18 +146,46 @@ async fn system_prompt_crud_and_upsert() {
 }
 
 #[tokio::test]
-async fn seed_defaults_is_first_run_only() {
+async fn seed_defaults_backfills_missing_without_clobbering() {
     let state = build_state().await;
     let db = &state.db;
     let n = db.seed_default_system_prompts().await.unwrap();
-    assert!(n >= 5, "seeds implement/research/debug/review/docs");
-    // Second call is a no-op once the library is non-empty.
+    assert!(n >= 6, "seeds implement/research/debug/review/docs/fable 5");
+    // Re-running with the full library present inserts nothing.
     assert_eq!(db.seed_default_system_prompts().await.unwrap(), 0);
+
+    // A user edit to a builtin survives re-seeding (create-if-missing).
+    let impl_prompt = db
+        .get_system_prompt_by_name("implement")
+        .await
+        .unwrap()
+        .unwrap();
+    db.update_system_prompt(&impl_prompt.id, None, Some("edited"), None)
+        .await
+        .unwrap();
+
+    // Deleting a builtin and re-seeding backfills only that one.
+    let fable = db
+        .get_system_prompt_by_name("fable 5")
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(db.delete_system_prompt(&fable.id).await.unwrap());
+    assert_eq!(db.seed_default_system_prompts().await.unwrap(), 1);
+
     assert!(
-        db.get_system_prompt_by_name("implement")
+        db.get_system_prompt_by_name("fable 5")
             .await
             .unwrap()
             .is_some()
+    );
+    assert_eq!(
+        db.get_system_prompt_by_name("implement")
+            .await
+            .unwrap()
+            .unwrap()
+            .body,
+        "edited"
     );
 }
 
@@ -293,4 +321,38 @@ async fn switch_cap_blocks_flip_flopping() {
         .await
         .unwrap_err();
     assert!(err.to_string().contains("cap"), "got: {err}");
+}
+
+#[tokio::test]
+async fn resolve_system_prompt_semantics() {
+    let state = build_state().await;
+    let db = &state.db;
+    db.seed_default_system_prompts().await.unwrap();
+
+    // None / empty / whitespace => no prompt. This is the signal the
+    // create/edit forms send to clear a selection (empty string over HTTP).
+    assert!(db.resolve_system_prompt(None).await.unwrap().is_none());
+    assert!(db.resolve_system_prompt(Some("")).await.unwrap().is_none());
+    assert!(
+        db.resolve_system_prompt(Some("   "))
+            .await
+            .unwrap()
+            .is_none()
+    );
+
+    // Unknown non-empty name is an error (surfaced as a 400 by the routes).
+    assert!(
+        db.resolve_system_prompt(Some("does-not-exist"))
+            .await
+            .is_err()
+    );
+
+    // Known name resolves to (name, body) — both move together onto a row.
+    let (name, body) = db
+        .resolve_system_prompt(Some("fable 5"))
+        .await
+        .unwrap()
+        .expect("fable 5 resolves");
+    assert_eq!(name, "fable 5");
+    assert!(!body.is_empty());
 }

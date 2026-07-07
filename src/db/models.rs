@@ -84,6 +84,10 @@ pub struct Session {
     /// forces it. Gates the model-control MCP tools. See the frugal-mode
     /// plan and `crate::service::mcp_server::handlers::model_control`.
     pub model_autoswitch: Option<bool>,
+    /// Name of the library system prompt (`system_prompts.name`) selected
+    /// for this session, if any. Reference/display only; the resolved body
+    /// lives in `system_prompt`. `None` = no named prompt selected.
+    pub system_prompt_name: Option<String>,
 }
 
 #[derive(Insertable, Deserialize, Debug, Default)]
@@ -113,6 +117,7 @@ pub struct NewSession {
     pub worker_step: Option<String>,
     pub user_id: Option<String>,
     pub context_reset_ts: Option<i64>,
+    pub system_prompt_name: Option<String>,
     pub model_autoswitch: Option<bool>,
 }
 #[derive(AsChangeset, Deserialize, Debug, Default)]
@@ -134,6 +139,7 @@ pub struct UpdateSession {
     pub system_prompt: Option<Option<String>>,
     pub handover_to_model: Option<Option<String>>,
     pub pending_handover_doc: Option<Option<String>>,
+    pub system_prompt_name: Option<Option<String>>,
     pub worker_step: Option<Option<String>>,
     pub context_reset_ts: Option<Option<i64>>,
     pub model_autoswitch: Option<Option<bool>>,
@@ -279,6 +285,10 @@ pub struct Card {
     /// Copied onto the spawned worker session's own `model_autoswitch`.
     pub model_autoswitch: Option<bool>,
     pub completed_at: Option<String>,
+    /// Name of the library system prompt (`system_prompts.name`) attached to
+    /// this card, if any. Resolved to a body and applied to the worker
+    /// session's `system_prompt` at spawn. `None` = none attached.
+    pub system_prompt_name: Option<String>,
 }
 
 #[derive(Insertable, Deserialize, Debug)]
@@ -297,6 +307,7 @@ pub struct NewCard {
     pub block_reason: Option<String>,
     pub created_at: String,
     pub updated_at: String,
+    pub system_prompt_name: Option<String>,
 }
 
 #[derive(AsChangeset, Deserialize, Debug, Default)]
@@ -316,6 +327,7 @@ pub struct UpdateCard {
     pub block_reason: Option<Option<String>>,
     pub updated_at: Option<String>,
     pub completed_at: Option<Option<String>>,
+    pub system_prompt_name: Option<Option<String>>,
     pub model_autoswitch: Option<Option<bool>>,
 }
 

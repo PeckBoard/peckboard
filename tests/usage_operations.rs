@@ -193,6 +193,7 @@ async fn seed(db: &Db) {
             block_reason: None,
             created_at: now.clone(),
             updated_at: now.clone(),
+            system_prompt_name: None,
         })
         .await
         .unwrap();

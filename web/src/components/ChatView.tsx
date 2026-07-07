@@ -12,6 +12,7 @@ import ToolUseBlock from './ToolUseBlock'
 import ConfirmDialog from './ConfirmDialog'
 import { MenuButton, type MenuItem } from './Dropdown'
 import ModelPicker from './ModelPicker'
+import SystemPromptPicker from './SystemPromptPicker'
 import TodoPanel from './TodoPanel'
 import PreHatchActivity from './chat/PreHatchActivity'
 import { parseTodoItems, latestTodoSnapshot, type TodoItem } from '../types/todo'
@@ -844,6 +845,11 @@ export default function ChatView({
             if (modelsError) setModelsError(false)
           }}
           testId="chat-toolbar-model"
+        />
+        <SystemPromptPicker
+          value={sessionDetail?.system_prompt_name ?? null}
+          onChange={(name) => patchSession({ system_prompt_name: name ?? '' })}
+          testId="chat-toolbar-system-prompt"
         />
         <span className="chat-toolbar-status">
           <span className={getStatusDotClass(agentStatus)} />

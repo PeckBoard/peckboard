@@ -298,15 +298,24 @@ impl Db {
 
     /// Set (or clear, with `None`) a session's custom system prompt. Returns
     /// the updated session, or `None` if no session has that id.
+    /// Set (or clear) a session's custom system prompt body, plus the
+    /// name of the library prompt it came from. Pass `name = Some(_)` when the
+    /// body was resolved from a named library prompt, or `None` when the body
+    /// is a raw string or is being cleared — the reference column stays
+    /// consistent with the resolved body either way.
     pub async fn set_session_system_prompt(
         &self,
         id: &str,
         prompt: Option<String>,
+        name: Option<String>,
     ) -> anyhow::Result<Option<Session>> {
         let id = id.to_string();
         self.with_conn(move |conn| {
             diesel::update(sessions::table.find(&id))
-                .set(sessions::system_prompt.eq(prompt))
+                .set((
+                    sessions::system_prompt.eq(prompt),
+                    sessions::system_prompt_name.eq(name),
+                ))
                 .returning(Session::as_returning())
                 .get_result(conn)
                 .optional()

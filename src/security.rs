@@ -457,6 +457,7 @@ mod tests {
             block_reason: None,
             created_at: ts.clone(),
             updated_at: ts.clone(),
+            system_prompt_name: None,
         };
         db.create_card(new_card("c1", "doing", false))
             .await

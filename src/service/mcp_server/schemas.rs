@@ -222,6 +222,10 @@ pub(super) fn tool_definitions() -> Vec<McpToolDef> {
                     "model_autoswitch": {
                         "type": "boolean",
                         "description": "Cost-aware model auto-switch opt-in for workers on this card. Omit to inherit the default (ON — cards spawn workers)."
+                    },
+                    "system_prompt_name": {
+                        "type": "string",
+                        "description": "Name of a library system prompt to attach (empty string clears)."
                     }
                 },
                 "required": ["title", "description"],
@@ -414,6 +418,10 @@ pub(super) fn tool_definitions() -> Vec<McpToolDef> {
                     "model_autoswitch": {
                         "type": ["boolean", "null"],
                         "description": "Cost-aware model auto-switch opt-in: true/false to force, null to reset to inherit the default."
+                    },
+                    "system_prompt_name": {
+                        "type": "string",
+                        "description": "Name of a library system prompt to attach (empty string clears)."
                     }
                 },
                 "required": ["card_id"],
