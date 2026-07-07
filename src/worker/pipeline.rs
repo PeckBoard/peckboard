@@ -556,7 +556,14 @@ pub fn build_worker_prompt(
              Push harder toward downgrading when a plan-usage bucket is high. \
              After switching, wrap up this turn — it takes effect when the \
              session resumes on the new model. You may switch UP later if the \
-             cheaper model hits a wall.\n\n",
+             cheaper model hits a wall.\n\
+             5. WHEN THE CHEAPER MODEL FINISHES the work, before finishing the \
+             card: call `switch_session_model` back UP to the model you \
+             started on with `compact: true` and a `review` \
+             `system_prompt_name`. That compacts the session — the cheaper \
+             model writes a summary and the stronger model resumes on that \
+             smaller context — then reviews the work on resume, and only then \
+             finishes the card (or fixes what the review finds).\n\n",
         );
     }
     if let Some(step_text) = step_instructions {

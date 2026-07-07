@@ -178,6 +178,10 @@ impl McpToolRegistry {
             .map(str::trim)
             .filter(|s| !s.is_empty())
             .map(|s| s.to_string());
+        let compact = args
+            .get("compact")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
 
         tracing::info!(
             session_id = %ctx.session_id,
@@ -245,21 +249,9 @@ impl McpToolRegistry {
             None => None,
         };
 
-        // Write the new model (and prompt, if chosen) onto the session row.
-        // The child is wound down below so the resume reads these. When a
-        // library prompt was chosen, record its name alongside the body so
-        // the reference column stays consistent; leave both untouched when no
-        // prompt was selected (this tool only sets a focusing prompt).
-        let update = crate::db::models::UpdateSession {
-            model: Some(Some(target_full.clone())),
-            system_prompt: prompt_body.clone().map(Some),
-            system_prompt_name: system_prompt_name.clone().map(Some),
-            ..Default::default()
-        };
-        ctx.db.update_session(&ctx.session_id, update).await?;
-
-        // Record the switch as a first-class event (drives the report and
-        // the per-session cap). Broadcast so the live stream shows it.
+        // Record the switch as a first-class event up front (drives the
+        // report and the per-session cap). Broadcast so the live stream
+        // shows it. Shared by both the plain and compacting paths.
         let data = serde_json::json!({
             "from": current_full,
             "to": target_full,
@@ -267,6 +259,7 @@ impl McpToolRegistry {
             "to_tier": to_tier,
             "rationale": rationale,
             "system_prompt_name": system_prompt_name,
+            "compact": compact,
         });
         if let Ok(ev) = ctx
             .db
@@ -285,6 +278,51 @@ impl McpToolRegistry {
                 }),
             });
         }
+
+        if compact {
+            // Faithful "finish → compact → upgrade" hop. Apply the focusing
+            // prompt now (finalize_handover flips the model but preserves
+            // system_prompt), then hand the ACTUAL model change to a
+            // compacting handover: the outgoing model summarizes and the
+            // incoming one resumes on that compacted context instead of the
+            // full transcript. The handover needs the AppState/session
+            // manager the mcp route holds, so we signal it with a
+            // `_begin_handover` marker (mirrors the `_image_base64`
+            // convention the route already unwraps).
+            if prompt_body.is_some() {
+                let update = crate::db::models::UpdateSession {
+                    system_prompt: prompt_body.clone().map(Some),
+                    system_prompt_name: system_prompt_name.clone().map(Some),
+                    ..Default::default()
+                };
+                ctx.db.update_session(&ctx.session_id, update).await?;
+            }
+            return Ok(serde_json::json!({
+                "status": "ok",
+                "from": current_full,
+                "to": target_full,
+                "system_prompt_name": system_prompt_name,
+                "switches_used": switches_used + 1,
+                "switch_cap": SWITCH_CAP,
+                "compact": true,
+                "_begin_handover": { "from": current_full, "to": target_full },
+                "note": "Compacting handover dispatched. Wrap up this turn — the outgoing model writes a summary, then the session resumes on the new model with that compacted context.",
+            }));
+        }
+
+        // Plain path: write the new model (and prompt, if chosen) onto the
+        // session row. The child is wound down below so the resume reads
+        // these. When a library prompt was chosen, record its name alongside
+        // the body so the reference column stays consistent; leave both
+        // untouched when no prompt was selected (this tool only sets a
+        // focusing prompt).
+        let update = crate::db::models::UpdateSession {
+            model: Some(Some(target_full.clone())),
+            system_prompt: prompt_body.clone().map(Some),
+            system_prompt_name: system_prompt_name.clone().map(Some),
+            ..Default::default()
+        };
+        ctx.db.update_session(&ctx.session_id, update).await?;
 
         // Wind the current child down after this turn; the orchestrator
         // resumes the same session on the new model (and prompt).

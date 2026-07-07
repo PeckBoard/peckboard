@@ -356,3 +356,52 @@ async fn resolve_system_prompt_semantics() {
     assert_eq!(name, "fable 5");
     assert!(!body.is_empty());
 }
+
+#[tokio::test]
+async fn switch_compact_signals_handover_and_defers_model() {
+    let state = build_state().await;
+    state
+        .db
+        .create_system_prompt("review", "Review it.", None)
+        .await
+        .unwrap();
+    // Cheaper model finished; upgrade back UP to the stronger one to review.
+    let sid = seed_worker(&state, "mock:echo", true, None).await;
+    let reg = McpToolRegistry::new();
+
+    let out = reg
+        .handle_tool_call(
+            "switch_session_model",
+            serde_json::json!({
+                "model": "mock:happy-path",
+                "rationale": "cheap model finished; upgrade for review",
+                "system_prompt_name": "review",
+                "compact": true
+            }),
+            &ctx(&state, &sid),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(out["status"], "ok");
+    assert_eq!(out["compact"], true);
+    // The handler signals the route to run a compacting handover rather
+    // than writing the model itself.
+    assert_eq!(out["_begin_handover"]["from"], "mock:echo");
+    assert_eq!(out["_begin_handover"]["to"], "mock:happy-path");
+
+    // Model is NOT flipped here — finalize_handover does that once the
+    // compaction doc lands. The focusing review prompt IS applied now, so
+    // the stronger model resumes in review mode.
+    let s = state.db.get_session(&sid).await.unwrap().unwrap();
+    assert_eq!(s.model.as_deref(), Some("mock:echo"));
+    assert_eq!(s.system_prompt.as_deref(), Some("Review it."));
+
+    // The switch is still recorded (drives the per-session cap + report),
+    // tagged as a compacting switch.
+    let events = state.db.list_events_by_session(&sid, None).await.unwrap();
+    let sw = events.iter().find(|e| e.kind == "model-switch").unwrap();
+    let data: serde_json::Value = serde_json::from_str(&sw.data).unwrap();
+    assert_eq!(data["compact"], true);
+    assert_eq!(data["to"], "mock:happy-path");
+}

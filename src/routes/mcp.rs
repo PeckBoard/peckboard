@@ -390,6 +390,34 @@ async fn mcp_handler(
                             .unwrap_or_else(|| "image/png".into());
                         Some((data, mime))
                     });
+                    // `_begin_handover` (switch_session_model with
+                    // compact:true): run the compacting handover to the new
+                    // model here, where the AppState/session_manager it needs
+                    // is in hand. The outgoing model writes a summary, the
+                    // incoming one resumes on that compacted context. The
+                    // marker is stripped so it never reaches the model.
+                    if let Some((from, to)) = result.as_object_mut().and_then(|o| {
+                        let hand = o.remove("_begin_handover")?;
+                        let from = hand.get("from").and_then(|v| v.as_str())?.to_string();
+                        let to = hand.get("to").and_then(|v| v.as_str())?.to_string();
+                        Some((from, to))
+                    }) {
+                        if let Err(e) = crate::handover::begin_handover(
+                            &state,
+                            &ctx.session_id,
+                            &from,
+                            &to,
+                            None,
+                        )
+                        .await
+                        {
+                            tracing::warn!(
+                                session_id = %ctx.session_id,
+                                error = %e,
+                                "compacting handover dispatch failed"
+                            );
+                        }
+                    }
                     let text_block = serde_json::json!({
                         "type": "text",
                         "text": serde_json::to_string(&result).unwrap_or_default(),

@@ -793,13 +793,14 @@ pub(super) fn tool_definitions() -> Vec<McpToolDef> {
         },
         McpToolDef {
             name: "switch_session_model".into(),
-            description: "Switch THIS session to another model of the SAME provider+account (from get_model_guidance's candidates). Downgrade when the plan is simple enough for the cheaper model to implement without problems; you may also switch UP if the cheap model hits a wall. Requires a `rationale`. Optionally apply a focusing `system_prompt_name` from the library. Takes effect when the session resumes on the new model — wrap up your turn after calling it. Capped per session.".into(),
+            description: "Switch THIS session to another model of the SAME provider+account (from get_model_guidance's candidates). Downgrade when the plan is simple enough for the cheaper model to implement without problems; you may also switch UP if the cheap model hits a wall. Requires a `rationale`. Optionally apply a focusing `system_prompt_name` from the library. Set `compact: true` when switching UP after finishing the work: instead of a plain resume, the outgoing model writes a summary and the incoming model resumes on a compacted context (use it with a `review` system_prompt_name so the stronger model reviews the work). Takes effect when the session resumes on the new model — wrap up your turn after calling it. Capped per session.".into(),
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
                     "model": { "type": "string", "description": "Target model id (provider:model[@account]), same provider+account as now." },
                     "rationale": { "type": "string", "description": "Why this switch is safe/needed (recorded in the event log and the report)." },
-                    "system_prompt_name": { "type": "string", "description": "Optional: a named library prompt matching the work type (implement/research/debug/review/docs)." }
+                    "system_prompt_name": { "type": "string", "description": "Optional: a named library prompt matching the work type (implement/research/debug/review/docs)." },
+                    "compact": { "type": "boolean", "description": "Optional (default false). If true, compact before switching: the outgoing model writes a summary and the new model resumes on that compacted context instead of the full transcript. Use when upgrading back for a review after the work is done." }
                 },
                 "required": ["model", "rationale"],
                 "additionalProperties": false
