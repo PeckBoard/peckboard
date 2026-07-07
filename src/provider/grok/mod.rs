@@ -636,13 +636,17 @@ fn build_cli_args(
     if let Some(effort) = effort.map(str::trim).filter(|e| !e.is_empty()) {
         args.push(format!("--effort={effort}"));
     }
-    // Grok's flag fully REPLACES its system prompt, so this mirrors Claude's
-    // override semantics: a non-empty override wins outright; otherwise every
-    // session ships the shared working-style rules.
-    let system_prompt = system_prompt_override
+    // Grok's flag takes its whole system prompt, so this mirrors Claude's
+    // extend semantics: every session ships the shared working-style rules,
+    // with any per-session custom prompt appended after them.
+    let mut system_prompt = crate::provider::WORKING_STYLE.to_string();
+    if let Some(custom) = system_prompt_override
         .map(str::trim)
         .filter(|s| !s.is_empty())
-        .unwrap_or(crate::provider::WORKING_STYLE);
+    {
+        system_prompt.push('\n');
+        system_prompt.push_str(custom);
+    }
     args.push(format!("--system-prompt-override={system_prompt}"));
     args
 }
@@ -680,7 +684,8 @@ mod tests {
 
     #[test]
     fn build_args_includes_session_effort_and_system_prompt() {
-        // An override fully replaces the system prompt (mirrors Claude).
+        // A custom prompt EXTENDS the system prompt: the shared working-style
+        // rules stay and the override is appended after them (mirrors Claude).
         let args = build_cli_args(
             "grok-build",
             "hi",
@@ -690,7 +695,10 @@ mod tests {
         );
         assert!(args.contains(&"--session-id=sess-7".to_string()));
         assert!(args.contains(&"--effort=high".to_string()));
-        assert!(args.contains(&"--system-prompt-override=be terse".to_string()));
+        assert!(args.contains(&format!(
+            "--system-prompt-override={}\nbe terse",
+            crate::provider::WORKING_STYLE
+        )));
     }
 
     #[test]

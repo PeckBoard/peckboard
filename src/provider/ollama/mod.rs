@@ -679,15 +679,19 @@ impl AgentProvider for OllamaProvider {
         let client = self.client.clone();
         let sid = session_id.clone();
         let model_label = config.model.clone();
-        // The per-session override fully replaces the system prompt; with no
-        // override, every session ships the shared working-style rules.
-        let system_prompt = config
+        // The per-session override EXTENDS the system prompt: every session
+        // ships the shared working-style rules, with any custom prompt
+        // appended after them rather than replacing them.
+        let mut system_prompt = crate::provider::WORKING_STYLE.to_string();
+        if let Some(custom) = config
             .system_prompt_override
             .as_deref()
             .map(str::trim)
             .filter(|s| !s.is_empty())
-            .unwrap_or(crate::provider::WORKING_STYLE)
-            .to_string();
+        {
+            system_prompt.push('\n');
+            system_prompt.push_str(custom);
+        }
 
         let handle = tokio::spawn(async move {
             let completed = run_chat_stream(ChatStreamArgs {

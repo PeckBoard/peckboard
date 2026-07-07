@@ -46,9 +46,10 @@ pub struct Session {
     pub scope_path: Option<String>,
     pub is_permanent: bool,
     pub repeating_task_id: Option<String>,
-    /// Custom system prompt. When non-empty, it fully replaces the standing
-    /// Peckboard system prompt for this session's agent runs. Editable
-    /// across sessions via the `set_session_system_prompt` MCP tool.
+    /// Custom system prompt. When non-empty, it extends the standing
+    /// Peckboard system prompt for this session's agent runs (appended after
+    /// it, not replacing it). Editable across sessions via the
+    /// `set_session_system_prompt` MCP tool.
     pub system_prompt: Option<String>,
     /// Target model id while a model-switch handover is mid-flight. Set when
     /// the user switches to a model whose (provider, account) differs from

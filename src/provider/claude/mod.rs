@@ -135,18 +135,16 @@ pub(crate) fn discover_models() -> Vec<ModelInfo> {
 /// properties are exercised by the regression tests below.
 pub fn build_cli_args(config: &SpawnConfig, conversation_id: Option<&str>) -> Vec<String> {
     // Build the single --append-system-prompt value. Claude's CLI takes only
-    // one such flag, so we fold two sources into it: the standing Peckboard
-    // prompt and any per-spawn suffix (e.g. repeating tasks).
-    // A per-session custom prompt (set via set_session_system_prompt) FULLY
-    // replaces the standing Peckboard prompt and any suffix — the operator
-    // who set it owns the whole system prompt for this session.
-    let combined_system_prompt = if let Some(override_prompt) = config
-        .system_prompt_override
-        .as_deref()
-        .filter(|p| !p.is_empty())
-    {
-        override_prompt.to_string()
-    } else {
+    // one such flag, so we fold several sources into it: the standing
+    // Peckboard prompt, the shared working-style rules, any per-spawn suffix
+    // (e.g. repeating tasks), and — last — any per-session custom prompt set
+    // via set_session_system_prompt.
+    //
+    // A per-session custom prompt EXTENDS the standing Peckboard prompt: it is
+    // appended after the base guidance and suffix rather than replacing them,
+    // so the operator's text layers on top of (not instead of) Peckboard's
+    // own instructions.
+    let combined_system_prompt = {
         // The shared working-style rules live in one place
         // (crate::provider::WORKING_STYLE) so every provider ships the same
         // guidance; append them to the standing Peckboard prompt.
@@ -157,6 +155,14 @@ pub fn build_cli_args(config: &SpawnConfig, conversation_id: Option<&str>) -> Ve
         {
             prompt.push('\n');
             prompt.push_str(suffix);
+        }
+        if let Some(custom) = config
+            .system_prompt_override
+            .as_deref()
+            .filter(|p| !p.is_empty())
+        {
+            prompt.push('\n');
+            prompt.push_str(custom);
         }
         prompt
     };
@@ -425,10 +431,11 @@ mod tests {
     }
 
     #[test]
-    fn test_build_cli_args_system_prompt_override_fully_replaces() {
+    fn test_build_cli_args_system_prompt_override_extends_base() {
         let mut config = default_spawn("claude-opus-4-8");
-        // A suffix is set too, to prove the override wins over both the base
-        // Peckboard prompt AND the suffix.
+        // A suffix is set too, to prove the custom prompt layers on top of
+        // both the base Peckboard prompt AND the suffix rather than replacing
+        // them.
         config.system_prompt_suffix = Some("# Repeating Task Context".to_string());
         config.system_prompt_override = Some("You are a pirate. Only say arrr.".to_string());
 
@@ -437,13 +444,10 @@ mod tests {
             .iter()
             .find(|a| a.starts_with("--append-system-prompt="))
             .expect("append-system-prompt flag present");
-        // The override IS the entire value — base prompt and suffix are gone.
-        assert_eq!(
-            append,
-            "--append-system-prompt=You are a pirate. Only say arrr."
-        );
-        assert!(!append.contains("Asking the user questions"));
-        assert!(!append.contains("Repeating Task Context"));
+        // The custom prompt is appended — the base prompt and suffix survive.
+        assert!(append.contains("Asking the user questions"));
+        assert!(append.contains("Repeating Task Context"));
+        assert!(append.contains("You are a pirate. Only say arrr."));
     }
 
     #[test]

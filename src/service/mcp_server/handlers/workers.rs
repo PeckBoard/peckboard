@@ -691,7 +691,7 @@ impl McpToolRegistry {
             "session_id": updated.id,
             "session_name": updated.name,
             "system_prompt_set": prompt.is_some(),
-            "note": "Fully replaces this session's system prompt; takes effect on its next agent run.",
+            "note": "Extends this session's system prompt (appended after the standing Peckboard prompt); takes effect on its next agent run.",
         }))
     }
 
