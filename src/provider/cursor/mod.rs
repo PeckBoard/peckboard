@@ -669,6 +669,7 @@ fn model_info(name: String) -> ModelInfo {
         display_name: format!("{name} (Cursor)"),
         id: name,
         capabilities: vec!["code".into()],
+        tier: 0,
     }
 }
 
@@ -700,6 +701,7 @@ pub fn default_models() -> Vec<ModelInfo> {
         id: id.into(),
         display_name: name.into(),
         capabilities: vec!["code".into()],
+        tier: 0,
     })
     .collect()
 }

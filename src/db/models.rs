@@ -79,6 +79,11 @@ pub struct Session {
     /// pre-reset conversation's occupancy (usage rows are billing history
     /// and are never deleted). `None` = never reset.
     pub context_reset_ts: Option<i64>,
+    /// Cost-aware auto-switch opt-in for this session. `None` inherits the
+    /// default (ON for worker sessions, OFF for chats); `Some(true/false)`
+    /// forces it. Gates the model-control MCP tools. See the frugal-mode
+    /// plan and `crate::service::mcp_server::handlers::model_control`.
+    pub model_autoswitch: Option<bool>,
 }
 
 #[derive(Insertable, Deserialize, Debug, Default)]
@@ -108,6 +113,7 @@ pub struct NewSession {
     pub worker_step: Option<String>,
     pub user_id: Option<String>,
     pub context_reset_ts: Option<i64>,
+    pub model_autoswitch: Option<bool>,
 }
 #[derive(AsChangeset, Deserialize, Debug, Default)]
 #[diesel(table_name = sessions)]
@@ -130,6 +136,7 @@ pub struct UpdateSession {
     pub pending_handover_doc: Option<Option<String>>,
     pub worker_step: Option<Option<String>>,
     pub context_reset_ts: Option<Option<i64>>,
+    pub model_autoswitch: Option<Option<bool>>,
 }
 // ── Repeating Tasks ──────────────────────────────────────────────────
 
@@ -267,6 +274,10 @@ pub struct Card {
     pub block_reason: Option<String>,
     pub created_at: String,
     pub updated_at: String,
+    /// Cost-aware auto-switch opt-in for workers on this card. `None`
+    /// inherits the default (ON — cards spawn workers); `Some` forces it.
+    /// Copied onto the spawned worker session's own `model_autoswitch`.
+    pub model_autoswitch: Option<bool>,
     pub completed_at: Option<String>,
 }
 
@@ -305,6 +316,7 @@ pub struct UpdateCard {
     pub block_reason: Option<Option<String>>,
     pub updated_at: Option<String>,
     pub completed_at: Option<Option<String>>,
+    pub model_autoswitch: Option<Option<bool>>,
 }
 
 // ── Card dependencies ────────────────────────────────────────────────
@@ -756,4 +768,31 @@ pub struct GrokAccountChanges {
     pub warn_threshold: Option<f64>,
     pub critical_threshold: Option<f64>,
     pub updated_at: Option<i64>,
+}
+
+// ── System Prompts ────────────────────────────────────
+
+/// A named, reusable system prompt in the library. `name` is the stable
+/// handle callers reference (unique); `source_url` records where an
+/// imported prompt came from, `None` for hand-written ones.
+#[derive(Queryable, Selectable, Serialize, Debug, Clone)]
+#[diesel(table_name = system_prompts)]
+pub struct SystemPrompt {
+    pub id: String,
+    pub name: String,
+    pub body: String,
+    pub source_url: Option<String>,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+#[derive(Insertable)]
+#[diesel(table_name = system_prompts)]
+pub struct NewSystemPrompt {
+    pub id: String,
+    pub name: String,
+    pub body: String,
+    pub source_url: Option<String>,
+    pub created_at: String,
+    pub updated_at: String,
 }

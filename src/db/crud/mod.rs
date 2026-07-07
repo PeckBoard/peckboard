@@ -19,6 +19,7 @@ mod push;
 mod queued;
 mod repeating_tasks;
 mod sessions;
+mod system_prompts;
 mod tabs;
 mod todos;
 mod usage;

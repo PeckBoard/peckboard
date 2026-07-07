@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use crate::db::models::{Card, NewSession, Project, UpdateCard, UpdateProject};
+use crate::db::models::{Card, NewSession, Project, Session, UpdateCard, UpdateProject};
 use crate::provider::stream::SpawnConfig;
 use crate::service::mcp_server;
 use crate::state::AppState;
@@ -462,6 +462,10 @@ async fn spawn_worker_for_card(
                     worker_step: Some(effective_step.clone()),
                     // Owner: workers have no authed user in scope; inherit the
                     // sole-user fallback (multi-user installs stay NULL).
+                    // Carry the card's explicit auto-switch choice onto the
+                    // worker row. NULL inherits the worker default (ON), so we
+                    // only need to propagate a card-level override.
+                    model_autoswitch: card.model_autoswitch,
                     user_id: state.db.resolve_spawned_session_owner(None).await,
                     ..Default::default()
                 })
@@ -983,6 +987,10 @@ pub async fn handle_worker_done(state: &Arc<AppState>, session_id: &str) {
     // Broadcast card update to project page
     broadcast_card_update(state, &card_id, &project_id);
 
+    // Frugal-mode accountability: if this worker used a top-tier model,
+    // leave a report documenting the cost, the switches, and the plan usage.
+    maybe_write_expensive_model_report(state, &session, &card).await;
+
     // Clean up MCP config and revoke tokens
     mcp_server::delete_mcp_config(&state.config.data_dir, session_id);
     state
@@ -1260,6 +1268,230 @@ fn format_pause_reason(card_title: &str, crash_count: u32, stderr: Option<&str>)
         ),
         None => format!("Worker for \"{card_title}\" crashed {crash_count} times in a row."),
     }
+}
+
+/// Frugal-mode accountability report. When a worker used a **top-tier**
+/// model (the highest tier its provider offers, e.g. Fable for Claude), write
+/// a deterministic, zero-extra-token report documenting: which models were
+/// used with per-model tokens + estimated cost, every `model-switch` event's
+/// rationale and chosen system prompt, and the account's plan usage. No-op
+/// when only lower-tier models were used, so ordinary runs stay quiet.
+async fn maybe_write_expensive_model_report(state: &Arc<AppState>, session: &Session, card: &Card) {
+    use crate::provider::registry::{ProviderRegistry, split_model_account};
+    use crate::routes::usage::cost::usage_cost;
+
+    let catalog = state.provider_registry.list_all_models().await;
+    // provider -> its highest advertised tier (0 = single-tier provider).
+    let mut max_tier: std::collections::HashMap<String, i32> = std::collections::HashMap::new();
+    for (id, m) in &catalog {
+        let (prov, _) = ProviderRegistry::parse_model_id(id, "claude");
+        let e = max_tier.entry(prov).or_insert(0);
+        if m.tier > *e {
+            *e = m.tier;
+        }
+    }
+    // Base full id (provider:model, account stripped) -> tier, for lookups.
+    let tier_of = |model: &str| -> Option<i32> {
+        let (prov, rest) = ProviderRegistry::parse_model_id(model, "claude");
+        let (base, _) = split_model_account(&rest);
+        let base_full = format!("{prov}:{base}");
+        catalog.iter().find_map(|(id, m)| {
+            let (p, r) = ProviderRegistry::parse_model_id(id, "claude");
+            let (b, _) = split_model_account(&r);
+            (format!("{p}:{b}") == base_full).then_some(m.tier)
+        })
+    };
+
+    let rows = state
+        .db
+        .usage_rollup_for_session(&session.id)
+        .await
+        .unwrap_or_default();
+    if rows.is_empty() {
+        return;
+    }
+
+    // Did any used model sit at its provider's top tier?
+    let used_top = rows.iter().any(|r| {
+        let Some(model) = r.model.as_deref() else {
+            return false;
+        };
+        let (prov, _) = ProviderRegistry::parse_model_id(model, "claude");
+        let maxt = max_tier.get(&prov).copied().unwrap_or(0);
+        maxt > 0 && tier_of(model) == Some(maxt)
+    });
+    if !used_top {
+        return;
+    }
+
+    // ── Build the report body ──────────────────────────────────────────
+    let mut body = String::new();
+    body.push_str(&format!(
+        "Worker session `{}` used a top-tier model on this card.\n\n",
+        session.id
+    ));
+
+    body.push_str("## Models Used\n\n");
+    body.push_str("| Model | Tier | Input | Output | Cache rd | Cache wr | Total | Est. cost |\n");
+    body.push_str("| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |\n");
+    let mut total_cost = 0.0_f64;
+    for r in &rows {
+        let model = r.model.as_deref().unwrap_or("(unknown)");
+        let cost = usage_cost(
+            r.model.as_deref(),
+            r.input_tokens,
+            r.output_tokens,
+            r.cache_read_tokens,
+            r.cache_creation_tokens,
+        );
+        total_cost += cost;
+        body.push_str(&format!(
+            "| {} | {} | {} | {} | {} | {} | {} | ${:.4} |\n",
+            model,
+            tier_of(model).map(|t| t.to_string()).unwrap_or_default(),
+            r.input_tokens,
+            r.output_tokens,
+            r.cache_read_tokens,
+            r.cache_creation_tokens,
+            r.total_tokens,
+            cost,
+        ));
+    }
+    body.push_str(&format!("\n**Estimated total cost:** ${total_cost:.4}\n\n"));
+
+    // ── Model switches ────────────────────────────────────────────────
+    let events = state
+        .db
+        .list_events_by_session(&session.id, None)
+        .await
+        .unwrap_or_default();
+    let switches: Vec<&crate::db::models::Event> =
+        events.iter().filter(|e| e.kind == "model-switch").collect();
+    body.push_str("## Model Switches\n\n");
+    if switches.is_empty() {
+        body.push_str("_None — the worker stayed on its starting model._\n\n");
+    } else {
+        for e in &switches {
+            let d: serde_json::Value = serde_json::from_str(&e.data).unwrap_or_default();
+            let from = d.get("from").and_then(|v| v.as_str()).unwrap_or("?");
+            let to = d.get("to").and_then(|v| v.as_str()).unwrap_or("?");
+            let rationale = d.get("rationale").and_then(|v| v.as_str()).unwrap_or("");
+            let prompt = d
+                .get("system_prompt_name")
+                .and_then(|v| v.as_str())
+                .map(|p| format!(" [prompt: {p}]"))
+                .unwrap_or_default();
+            body.push_str(&format!("- `{from}` → `{to}`{prompt}: {rationale}\n"));
+        }
+        body.push('\n');
+    }
+
+    // ── Plan usage (Claude only) ──────────────────────────────────────
+    if let Some(model) = session.model.as_deref() {
+        let (prov, rest) = ProviderRegistry::parse_model_id(model, "claude");
+        if prov == "claude" {
+            let (_, acct) = split_model_account(&rest);
+            let key = acct
+                .map(str::to_string)
+                .unwrap_or_else(|| crate::provider::claude::plan_usage::DEFAULT_KEY.to_string());
+            if let Some(entry) = crate::provider::claude::plan_usage::snapshot().get(&key)
+                && let Some(usage) = &entry.usage
+            {
+                body.push_str("## Plan Usage at Report Time\n\n");
+                let mut push_bucket =
+                    |label: &str, b: &Option<crate::provider::claude::plan_usage::PlanBucket>| {
+                        if let Some(b) = b {
+                            body.push_str(&format!("- {label}: {:.0}%\n", b.utilization));
+                        }
+                    };
+                push_bucket("5-hour", &usage.five_hour);
+                push_bucket("7-day (all)", &usage.seven_day);
+                push_bucket("7-day Sonnet", &usage.seven_day_sonnet);
+                push_bucket("7-day Opus", &usage.seven_day_opus);
+                body.push('\n');
+            }
+        }
+    }
+
+    // ── Write the report file (same shape as write_report) ────────────
+    let now = chrono::Utc::now();
+    let date_folder = now.format("%Y-%m-%d").to_string();
+    let reports_dir = state.config.data_dir.join("reports").join(&date_folder);
+    if let Err(e) = std::fs::create_dir_all(&reports_dir) {
+        tracing::warn!("expensive-model report: mkdir failed: {e}");
+        return;
+    }
+    let title = format!("Top-Tier Model Usage — {}", card.title);
+    let sanitized: String = title
+        .chars()
+        .map(|c| {
+            if c.is_alphanumeric() || c == '-' || c == '_' || c == ' ' {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect::<String>()
+        .replace(' ', "-")
+        .to_lowercase();
+    let sanitized = if sanitized.is_empty() {
+        "top-tier-model-usage".to_string()
+    } else {
+        sanitized
+    };
+    let mut filename = format!("{sanitized}.md");
+    let mut path = reports_dir.join(&filename);
+    let mut counter = 1;
+    while path.exists() {
+        filename = format!("{sanitized}-{counter}.md");
+        path = reports_dir.join(&filename);
+        counter += 1;
+    }
+    let project_name = match &session.project_id {
+        Some(pid) => state
+            .db
+            .get_project(pid)
+            .await
+            .ok()
+            .flatten()
+            .map(|p| p.name),
+        None => None,
+    };
+    let mut content = format!(
+        "---\ntitle: \"{title}\"\ndate: \"{}\"\nsessionId: \"{}\"",
+        now.to_rfc3339(),
+        session.id
+    );
+    if let Some(pn) = &project_name {
+        content.push_str(&format!("\nprojectName: \"{pn}\""));
+    }
+    content.push_str(&format!("\ncardId: \"{}\"", card.id));
+    content.push_str("\n---\n\n");
+    content.push_str(&body);
+    if let Err(e) = std::fs::write(&path, &content) {
+        tracing::warn!("expensive-model report: write failed: {e}");
+        return;
+    }
+
+    // Surface it in the session stream and refresh the card's report list.
+    let _ = state
+        .db
+        .append_event(
+            &session.id,
+            "system",
+            serde_json::json!({
+                "text": format!("Report written: {title}"),
+                "reportFolder": date_folder,
+                "reportFile": filename,
+                "cardId": card.id,
+            }),
+        )
+        .await;
+    state.broadcaster.broadcast(WsEvent {
+        event_type: "card-update".into(),
+        session_id: card.project_id.clone(),
+        data: serde_json::json!({ "card": card }),
+    });
 }
 
 #[cfg(test)]

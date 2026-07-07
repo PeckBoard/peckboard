@@ -69,6 +69,7 @@ async fn list_models(State(state): State<Arc<AppState>>) -> impl IntoResponse {
                 "id": format!("{}:{}", p.id, m.id),
                 "display_name": m.display_name,
                 "capabilities": m.capabilities,
+                "tier": m.tier,
             })).collect::<Vec<_>>(),
             "effort_levels": p.effort_levels.iter().map(|e| serde_json::json!({
                 "id": e.id,
@@ -79,6 +80,7 @@ async fn list_models(State(state): State<Arc<AppState>>) -> impl IntoResponse {
             "id": format!("{}:{}", p.id, m.id),
             "display_name": m.display_name,
             "capabilities": m.capabilities,
+            "tier": m.tier,
         }))).collect::<Vec<_>>(),
     }))
 }

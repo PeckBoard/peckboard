@@ -47,39 +47,45 @@ pub(crate) fn discover_models() -> Vec<ModelInfo> {
             id: "claude-fable-5".into(),
             display_name: "Claude Fable 5".into(),
             capabilities: vec!["code".into(), "reasoning".into(), "vision".into()],
+            tier: 4,
         },
         ModelInfo {
             id: "claude-opus-4-8".into(),
             display_name: "Claude Opus 4.8".into(),
             capabilities: vec!["code".into(), "reasoning".into(), "vision".into()],
+            tier: 3,
         },
         ModelInfo {
             id: "claude-opus-4-7".into(),
             display_name: "Claude Opus 4.7".into(),
             capabilities: vec!["code".into(), "reasoning".into(), "vision".into()],
+            tier: 3,
         },
         ModelInfo {
             id: "claude-opus-4-6".into(),
             display_name: "Claude Opus 4.6".into(),
             capabilities: vec!["code".into(), "reasoning".into(), "vision".into()],
+            tier: 3,
         },
         ModelInfo {
             id: "claude-sonnet-4-6".into(),
             display_name: "Claude Sonnet 4.6".into(),
             capabilities: vec!["code".into(), "vision".into()],
+            tier: 2,
         },
         ModelInfo {
             id: "claude-haiku-4-5".into(),
             display_name: "Claude Haiku 4.5".into(),
             capabilities: vec!["code".into()],
+            tier: 1,
         },
     ];
 
     // Check for Bedrock ARNs in environment
-    for env_var in &[
-        "ANTHROPIC_DEFAULT_OPUS_MODEL",
-        "ANTHROPIC_DEFAULT_SONNET_MODEL",
-        "ANTHROPIC_DEFAULT_HAIKU_MODEL",
+    for (env_var, tier) in &[
+        ("ANTHROPIC_DEFAULT_OPUS_MODEL", 3),
+        ("ANTHROPIC_DEFAULT_SONNET_MODEL", 2),
+        ("ANTHROPIC_DEFAULT_HAIKU_MODEL", 1),
     ] {
         if let Ok(arn) = std::env::var(env_var) {
             if !models.iter().any(|m| m.id == arn) {
@@ -87,6 +93,7 @@ pub(crate) fn discover_models() -> Vec<ModelInfo> {
                     id: arn.clone(),
                     display_name: format!("Bedrock: {}", arn.split('/').last().unwrap_or(&arn)),
                     capabilities: vec!["code".into()],
+                    tier: *tier,
                 });
             }
         }

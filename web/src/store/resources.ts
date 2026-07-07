@@ -13,10 +13,12 @@ export interface WorkflowInfo {
   priority: number
   steps: (string | WorkflowStepInfo)[]
 }
-
 export interface ModelInfo {
   id: string
   display_name: string
+  /** Capability tier within the provider (higher = more capable). Single-
+   *  tier providers report 0. Only comparable within one provider+account. */
+  tier?: number
 }
 
 /** One selectable reasoning-effort level, as served per-provider by

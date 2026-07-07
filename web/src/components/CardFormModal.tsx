@@ -48,6 +48,7 @@ export default function CardFormModal(props: CardFormProps) {
   const [effort, setEffort] = useState(card?.effort ?? '')
   const [blocked, setBlocked] = useState(card?.blocked ?? false)
   const [blockReason, setBlockReason] = useState(card?.block_reason ?? '')
+  const [modelAutoswitch, setModelAutoswitch] = useState(card?.model_autoswitch ?? true)
   const [dependsOn, setDependsOn] = useState<string[]>(card?.depends_on ?? [])
   const [error, setError] = useState('')
   const [loading, setLoading] = useState(false)
@@ -116,6 +117,7 @@ export default function CardFormModal(props: CardFormProps) {
           depends_on: dependsOn.length > 0 ? dependsOn : undefined,
           blocked,
           block_reason: blocked ? blockReason.trim() || null : null,
+          model_autoswitch: modelAutoswitch,
         } as Partial<Card>)
       } else {
         const updates: Partial<Card> = {
@@ -126,6 +128,7 @@ export default function CardFormModal(props: CardFormProps) {
           model: model || null,
           effort: effort || null,
           depends_on: dependsOn,
+          model_autoswitch: modelAutoswitch,
         }
         if (isBacklog) {
           updates.description = description.trim()
@@ -258,6 +261,21 @@ export default function CardFormModal(props: CardFormProps) {
                 </option>
               ))}
             </select>
+          </div>
+          <div className="form-field">
+            <label className="form-checkbox-label">
+              <input
+                type="checkbox"
+                checked={modelAutoswitch}
+                onChange={(e) => setModelAutoswitch(e.target.checked)}
+                data-testid="card-autoswitch"
+              />
+              <span>Auto-switch to a cheaper model when the plan allows</span>
+            </label>
+            <p className="form-hint" style={{ marginTop: 4 }}>
+              The worker plans first on the configured model, then may downgrade itself for simple
+              work.
+            </p>
           </div>
           <div className="form-field">
             <label className="form-checkbox-label">

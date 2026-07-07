@@ -7,6 +7,7 @@ import GrokAccountsSection from './GrokAccountsSection'
 import ApprovedCommandsSection from './ApprovedCommandsSection'
 import SoftwareUpdate from './SoftwareUpdate'
 import PluginSettingsForm from './PluginSettingsForm'
+import SystemPromptsSection from './SystemPromptsSection'
 import OllamaPullModel from './OllamaPullModel'
 
 const THEME_KEY = 'peckboard_theme'
@@ -67,7 +68,7 @@ function applyHue(hue: number) {
   document.documentElement.style.setProperty('--primary-hue', String(hue))
 }
 
-type SubPage = 'appearance' | 'chat' | 'providers' | 'server'
+type SubPage = 'appearance' | 'chat' | 'prompts' | 'providers' | 'server'
 
 /**
  * The settings hub lists these sub-pages; each groups related sections
@@ -78,6 +79,11 @@ type SubPage = 'appearance' | 'chat' | 'providers' | 'server'
 const SUB_PAGES: { id: SubPage; title: string; blurb: string }[] = [
   { id: 'appearance', title: 'Appearance', blurb: 'Theme and accent color' },
   { id: 'chat', title: 'Chat', blurb: 'Caveman mode and the pre-hatcher model' },
+  {
+    id: 'prompts',
+    title: 'System Prompts',
+    blurb: 'Named prompts the cost-aware auto-switch picks from',
+  },
   {
     id: 'providers',
     title: 'Providers & Accounts',
@@ -402,6 +408,8 @@ export default function SettingsPage({ onBack }: Props) {
           <SoftwareUpdate />
         </>
       )}
+
+      {subPage === 'prompts' && <SystemPromptsSection />}
     </div>
   )
 }

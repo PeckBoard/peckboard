@@ -47,6 +47,8 @@ pub fn ensure_schema(conn: &mut SqliteConnection) -> anyhow::Result<()> {
     ensure_sessions_worker_step_column(conn)?;
     ensure_sessions_user_id_column(conn)?;
     ensure_sessions_context_reset_column(conn)?;
+    ensure_model_autoswitch_columns(conn)?;
+    ensure_system_prompts_table(conn)?;
     backfill_session_owners(conn)?;
     Ok(())
 }
@@ -530,6 +532,48 @@ fn ensure_sessions_context_reset_column(conn: &mut SqliteConnection) -> anyhow::
         tracing::info!("Repairing schema: adding sessions.context_reset_ts");
         sql_query("ALTER TABLE sessions ADD COLUMN context_reset_ts BIGINT").execute(conn)?;
     }
+    Ok(())
+}
+
+/// Heal DBs that predate `1783700000_model_autoswitch`. The migration's two
+/// `ALTER TABLE … ADD COLUMN model_autoswitch` statements are non-idempotent,
+/// so each is detected-and-added here. Nullable BOOLEAN (NULL = inherit the
+/// per-session default), mirroring the migration.
+fn ensure_model_autoswitch_columns(conn: &mut SqliteConnection) -> anyhow::Result<()> {
+    for table in ["sessions", "cards"] {
+        let rows: Vec<PragmaColumn> =
+            sql_query(format!("PRAGMA table_info({table})")).load(conn)?;
+        let existing: Vec<String> = rows.into_iter().map(|r| r.name).collect();
+        if existing.is_empty() {
+            continue;
+        }
+        if !existing.iter().any(|c| c == "model_autoswitch") {
+            tracing::info!("Repairing schema: adding {table}.model_autoswitch");
+            sql_query(format!(
+                "ALTER TABLE {table} ADD COLUMN model_autoswitch BOOLEAN"
+            ))
+            .execute(conn)?;
+        }
+    }
+    Ok(())
+}
+
+/// Heal DBs that predate `1783700001_system_prompts`. `CREATE TABLE IF NOT
+/// EXISTS` is idempotent so this is safe on a fully-migrated DB and only does
+/// work on one that lacks the table. DDL mirrors the migration.
+fn ensure_system_prompts_table(conn: &mut SqliteConnection) -> anyhow::Result<()> {
+    log_if_healing_table(conn, "system_prompts")?;
+    sql_query(
+        "CREATE TABLE IF NOT EXISTS system_prompts (
+            id          TEXT PRIMARY KEY NOT NULL,
+            name        TEXT NOT NULL UNIQUE,
+            body        TEXT NOT NULL,
+            source_url  TEXT,
+            created_at  TEXT NOT NULL,
+            updated_at  TEXT NOT NULL
+        )",
+    )
+    .execute(conn)?;
     Ok(())
 }
 /// Backfill session ownership for single-operator installs: when the DB holds

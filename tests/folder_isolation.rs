@@ -87,6 +87,7 @@ async fn seed_session(
         pending_handover_doc: None,
         worker_step: None,
         user_id: None,
+        model_autoswitch: None,
         context_reset_ts: None,
     })
     .await

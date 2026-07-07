@@ -530,6 +530,35 @@ pub fn build_worker_prompt(
          `complete_step` (one step forward; include handoff_context). Cannot \
          complete → `wont_do_card` with reason.\n\n",
     );
+    // Cost-aware model selection. Only on the FIRST workflow step (the
+    // planning entry) and only when auto-switch is ON for this card (NULL
+    // inherits ON — cards spawn workers). The capability judgment stays with
+    // the expensive model; the server only supplies tiers, usage, and the
+    // prompt library via `get_model_guidance`.
+    let autoswitch_on = card.model_autoswitch.unwrap_or(true);
+    let is_first_step = workflow_steps.first().map(|s| s == step).unwrap_or(true);
+    if autoswitch_on && is_first_step {
+        prompt.push_str(
+            "### Cost-Aware Model Selection — Do This First\n\n\
+             Auto-switch is ON for this card. Before implementing:\n\
+             1. Write a brief implementation plan for this card.\n\
+             2. Classify the type of work (implement / research / debug / \
+             review / docs / …).\n\
+             3. Call `get_model_guidance` — it returns your current model + \
+             tier, cheaper same-provider+account candidates, the account's \
+             plan-usage snapshot with a recommendation, and the named system \
+             prompts.\n\
+             4. Call `switch_session_model` ONLY IF the plan is simple enough \
+             for the cheaper model to implement without problems — pass a \
+             `rationale` and the matching `system_prompt_name` for the work \
+             type. Otherwise stay put and say why (you may still focus the \
+             model with `set_session_system_prompt` using a library `name`).\n\
+             Push harder toward downgrading when a plan-usage bucket is high. \
+             After switching, wrap up this turn — it takes effect when the \
+             session resumes on the new model. You may switch UP later if the \
+             cheaper model hits a wall.\n\n",
+        );
+    }
     if let Some(step_text) = step_instructions {
         prompt.push_str("### Step-Specific Instructions\n\n");
         prompt.push_str(step_text);
@@ -772,6 +801,7 @@ mod tests {
             block_reason: None,
             created_at: "2025-01-01T00:00:00Z".into(),
             updated_at: "2025-01-01T00:00:00Z".into(),
+            model_autoswitch: None,
             completed_at: None,
         }
     }

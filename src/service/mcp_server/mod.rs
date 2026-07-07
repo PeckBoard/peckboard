@@ -15,6 +15,7 @@ mod spawn;
 pub use auth::McpTokenRegistry;
 pub use config::{delete_mcp_config, write_mcp_config};
 pub use context::{ExpertDispatcher, McpToolDef, ScopedFolderId, ScopedProjectId, ToolCallContext};
+pub use handlers::autoswitch_enabled;
 pub use schemas::{
     PRE_HATCHER_EXPERT_KIND, chat_hidden_tool_names, pre_hatcher_allowed_tool_names, tool_names,
     worker_hidden_tool_names,
@@ -95,6 +96,9 @@ impl McpToolRegistry {
             "search_sessions" => self.handle_search_sessions(args, ctx).await,
             "list_sessions" => self.handle_list_sessions(ctx).await,
             "set_session_system_prompt" => self.handle_set_session_system_prompt(args, ctx).await,
+            "list_system_prompts" => self.handle_list_system_prompts(ctx).await,
+            "get_model_guidance" => self.handle_get_model_guidance(ctx).await,
+            "switch_session_model" => self.handle_switch_session_model(args, ctx).await,
             "list_worker_sessions" => self.handle_list_worker_sessions(ctx).await,
             "share_finding" => self.handle_share_finding(args, ctx).await,
             "get_finding_details" => self.handle_get_finding_details(args, ctx).await,
@@ -456,7 +460,11 @@ mod tests {
         assert!(names.contains(&"browser_screenshot"));
         assert!(names.contains(&"browser_close"));
         assert!(names.contains(&"browser_pages"));
-        assert_eq!(names.len(), 64);
+        // Cost-aware model auto-switch + system-prompt library.
+        assert!(names.contains(&"list_system_prompts"));
+        assert!(names.contains(&"get_model_guidance"));
+        assert!(names.contains(&"switch_session_model"));
+        assert_eq!(names.len(), 67);
     }
 
     #[test]

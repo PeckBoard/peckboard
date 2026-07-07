@@ -558,6 +558,7 @@ mod midstream {
                         id: "any".into(),
                         display_name: "Any".into(),
                         capabilities: vec![],
+                        tier: 0,
                     }],
                     effort_levels: vec![],
                 },

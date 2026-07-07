@@ -384,6 +384,29 @@ impl McpToolRegistry {
         }))
     }
 
+    pub(crate) async fn handle_list_system_prompts(
+        &self,
+        ctx: &ToolCallContext,
+    ) -> anyhow::Result<Value> {
+        tracing::info!(session_id = %ctx.session_id, "MCP tool: list_system_prompts");
+        let prompts = ctx.db.list_system_prompts().await?;
+        let items: Vec<Value> = prompts
+            .iter()
+            .map(|p| {
+                // A one-line summary: collapse whitespace and cap length so the
+                // list stays scannable without dumping full bodies.
+                let summary: String = p.body.split_whitespace().collect::<Vec<_>>().join(" ");
+                let summary: String = summary.chars().take(140).collect();
+                serde_json::json!({
+                    "name": p.name,
+                    "summary": summary,
+                    "source_url": p.source_url,
+                })
+            })
+            .collect();
+        Ok(serde_json::json!({ "prompts": items, "total": items.len() }))
+    }
+
     pub(crate) async fn handle_list_models(&self, ctx: &ToolCallContext) -> anyhow::Result<Value> {
         tracing::info!(session_id = %ctx.session_id, "MCP tool: list_models");
 
@@ -405,11 +428,11 @@ impl McpToolRegistry {
                         "model_id": model.id,
                         "display_name": model.display_name,
                         "capabilities": model.capabilities,
+                        "tier": model.tier,
                     })
                 })
             })
             .collect();
-
         let provider_list: Vec<Value> = providers
             .iter()
             .map(|p| {

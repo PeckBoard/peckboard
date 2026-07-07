@@ -245,6 +245,7 @@ function App() {
   const setActiveSession = useSessionsStore((s) => s.setActiveSession)
   const deleteSession = useSessionsStore((s) => s.deleteSession)
   const renameSession = useSessionsStore((s) => s.renameSession)
+  const setSessionAutoswitch = useSessionsStore((s) => s.setSessionAutoswitch)
   const clearSession = useSessionsStore((s) => s.clearSession)
   const terminateAgent = useSessionsStore((s) => s.terminateAgent)
   const fetchEvents = useSessionsStore((s) => s.fetchEvents)
@@ -272,6 +273,10 @@ function App() {
   // TabBar's registry handlers can close over them without paying
   // for a fresh `new Map(...)` per row.
   const sessionMap = useMemo(() => new Map(sessions.map((s) => [s.id, s])), [sessions])
+  const sessionAutoswitchOn = (id: string) => {
+    const s = sessionMap.get(id)
+    return s?.model_autoswitch ?? !!s?.is_worker
+  }
   const projectMap = useMemo(() => new Map(projects.map((p) => [p.id, p])), [projects])
 
   // Defense-in-depth: experts must never appear in the chat session
@@ -846,6 +851,13 @@ function App() {
     },
     getMenuItems: (tab) => [
       { label: 'Rename', onSelect: () => handleRenameItem('session', tab.itemId) },
+      {
+        label: 'Auto-switch model',
+        hint: sessionAutoswitchOn(tab.itemId) ? 'On' : 'Off',
+        active: sessionAutoswitchOn(tab.itemId),
+        onSelect: () => void setSessionAutoswitch(tab.itemId, !sessionAutoswitchOn(tab.itemId)),
+        testId: 'session-menu-autoswitch',
+      },
       // Worker sessions are owned by their card and repeating-task
       // sessions are a schedule's run history. Both have their
       // transcript guarded server-side (POST /clear → 409); hide the

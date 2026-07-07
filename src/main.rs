@@ -59,6 +59,14 @@ async fn main() -> anyhow::Result<()> {
     let db = Db::open(&config.data_dir)?;
     tracing::info!("Database opened at {}", config.data_dir.display());
 
+    // First-run only: seed the built-in named system prompts the cost-aware
+    // auto-switch picks from. No-op once the library has any entry.
+    match db.seed_default_system_prompts().await {
+        Ok(n) if n > 0 => tracing::info!("Seeded {n} default system prompt(s)"),
+        Ok(_) => {}
+        Err(e) => tracing::warn!("Failed to seed default system prompts: {e}"),
+    }
+
     // First-run bootstrap: create the sole admin user if the DB is empty.
     // Peckboard does not expose self-service registration — operators
     // get one auto-generated admin and can mint additional users from

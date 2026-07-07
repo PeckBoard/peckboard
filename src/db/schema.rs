@@ -36,6 +36,7 @@ diesel::table! {
         worker_step -> Nullable<Text>,
         user_id -> Nullable<Text>,
         context_reset_ts -> Nullable<BigInt>,
+        model_autoswitch -> Nullable<Bool>,
     }
 }
 
@@ -97,6 +98,7 @@ diesel::table! {
         created_at -> Text,
         updated_at -> Text,
         completed_at -> Nullable<Text>,
+        model_autoswitch -> Nullable<Bool>,
     }
 }
 
@@ -318,6 +320,16 @@ diesel::table! {
         updated_at -> BigInt,
     }
 }
+diesel::table! {
+    system_prompts (id) {
+        id -> Text,
+        name -> Text,
+        body -> Text,
+        source_url -> Nullable<Text>,
+        created_at -> Text,
+        updated_at -> Text,
+    }
+}
 
 diesel::joinable!(sessions -> folders (folder_id));
 diesel::joinable!(sessions -> projects (project_id));
@@ -358,4 +370,5 @@ diesel::allow_tables_to_appear_in_same_query!(
     usage_events,
     claude_accounts,
     grok_accounts,
+    system_prompts,
 );

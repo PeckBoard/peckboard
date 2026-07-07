@@ -196,9 +196,20 @@ async fn mcp_handler(
             } else {
                 crate::service::mcp_server::chat_hidden_tool_names()
             };
+            // The cost-aware auto-switch tools are advertised only when this
+            // session's resolved toggle is ON (matching the hard gate in
+            // tools/call below).
+            let autoswitch_on = session_row
+                .as_ref()
+                .map(|s| {
+                    crate::service::mcp_server::autoswitch_enabled(s.model_autoswitch, s.is_worker)
+                })
+                .unwrap_or(false);
             let advertised = |name: &str| {
                 if pre_hatcher {
                     crate::service::mcp_server::pre_hatcher_allowed_tool_names().contains(&name)
+                } else if matches!(name, "get_model_guidance" | "switch_session_model") {
+                    autoswitch_on
                 } else {
                     !hidden.contains(&name)
                 }
@@ -310,6 +321,29 @@ async fn mcp_handler(
                              (read_file, search_files, file_outline, read_symbol, \
                              list_files) and hand off with pre_hatch_result; code \
                              changes are the main model's job."
+                        ),
+                    )),
+                );
+            }
+
+            // HARD gate, not advertisement: the cost-aware auto-switch tools
+            // are usable only by sessions whose resolved toggle is ON (ON for
+            // workers, OFF for chats, unless overridden). Copy the pre-hatcher
+            // shape — refuse by name at dispatch, since trimming the
+            // advertisement alone wouldn't stop a session calling by name.
+            if matches!(tool_name, "get_model_guidance" | "switch_session_model")
+                && !crate::service::mcp_server::autoswitch_enabled(
+                    session_row.model_autoswitch,
+                    session_row.is_worker,
+                )
+            {
+                return (
+                    StatusCode::OK,
+                    rpc_json(JsonRpcResponse::error(
+                        id.clone(),
+                        -32000,
+                        format!(
+                            "tool '{tool_name}' is unavailable: model auto-switch is off for this session."
                         ),
                     )),
                 );

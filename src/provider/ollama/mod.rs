@@ -945,6 +945,7 @@ fn model_info(name: String) -> ModelInfo {
         display_name: format!("{name} (Ollama)"),
         id: name,
         capabilities: vec!["code".into()],
+        tier: 0,
     }
 }
 
@@ -978,6 +979,7 @@ fn model_info_with_caps(name: String, caps: Option<Vec<String>>) -> ModelInfo {
         display_name: format!("{name} (Ollama)"),
         id: name,
         capabilities,
+        tier: 0,
     }
 }
 
@@ -1671,16 +1673,19 @@ pub fn default_models() -> Vec<ModelInfo> {
             id: "llama3.1".into(),
             display_name: "Llama 3.1 (Ollama)".into(),
             capabilities: vec!["code".into()],
+            tier: 0,
         },
         ModelInfo {
             id: "llama3.2".into(),
             display_name: "Llama 3.2 (Ollama)".into(),
             capabilities: vec!["code".into()],
+            tier: 0,
         },
         ModelInfo {
             id: "qwen2.5-coder".into(),
             display_name: "Qwen 2.5 Coder (Ollama)".into(),
             capabilities: vec!["code".into()],
+            tier: 0,
         },
     ]
 }

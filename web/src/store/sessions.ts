@@ -140,6 +140,7 @@ interface SessionsState {
     folderId: string,
     model?: string,
     effort?: string,
+    modelAutoswitch?: boolean,
   ) => Promise<Session>
   deleteSession: (id: string) => Promise<void>
   /** Apply the local cleanup for a session that's been deleted on the
@@ -151,6 +152,7 @@ interface SessionsState {
   applySessionDeleted: (id: string) => void
   setActiveSession: (id: string | null) => void
   renameSession: (id: string, name: string) => Promise<void>
+  setSessionAutoswitch: (id: string, value: boolean) => Promise<void>
   clearSession: (id: string) => Promise<void>
   cancelSession: (id: string) => Promise<void>
   interruptSession: (id: string) => Promise<void>
@@ -397,10 +399,17 @@ export const useSessionsStore = create<SessionsState>((set, get) => ({
     })
   },
 
-  createSession: async (name: string, folderId: string, model?: string, effort?: string) => {
-    const body: Record<string, string> = { name, folder_id: folderId }
+  createSession: async (
+    name: string,
+    folderId: string,
+    model?: string,
+    effort?: string,
+    modelAutoswitch?: boolean,
+  ) => {
+    const body: Record<string, unknown> = { name, folder_id: folderId }
     if (model) body.model = model
     if (effort && effort !== 'default') body.effort = effort
+    if (modelAutoswitch !== undefined) body.model_autoswitch = modelAutoswitch
     const res = await authedFetch('/api/sessions', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -478,6 +487,22 @@ export const useSessionsStore = create<SessionsState>((set, get) => ({
     }
     set((s) => ({
       sessions: s.sessions.map((sess) => (sess.id === id ? { ...sess, name } : sess)),
+    }))
+  },
+  setSessionAutoswitch: async (id: string, value: boolean) => {
+    const res = await authedFetch(`/api/sessions/${id}`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ model_autoswitch: value }),
+    })
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({ error: 'Failed to update session' }))
+      throw new Error(err.error || 'Failed to update session')
+    }
+    set((s) => ({
+      sessions: s.sessions.map((sess) =>
+        sess.id === id ? { ...sess, model_autoswitch: value } : sess,
+      ),
     }))
   },
 

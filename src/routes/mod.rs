@@ -16,6 +16,7 @@ pub mod repeating_tasks;
 pub mod reports;
 pub mod sessions;
 pub mod settings;
+pub mod system_prompts;
 pub mod update;
 pub mod usage;
 
@@ -43,6 +44,7 @@ pub fn api_router(state: Arc<AppState>) -> Router<Arc<AppState>> {
         .merge(notifications::router(state.clone()))
         .merge(me::router(state.clone()))
         .merge(settings::router(state.clone()))
+        .merge(system_prompts::router(state.clone()))
         .merge(ollama::router(state.clone()))
         .merge(plugins::router(state.clone()))
         // Public, plugin-owned HTTP surface. Intentionally NOT behind the

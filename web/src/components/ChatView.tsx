@@ -710,6 +710,7 @@ export default function ChatView({
     }
   }
 
+  const autoswitchOn = sessionDetail?.model_autoswitch ?? !!sessionDetail?.is_worker
   const sessionMenuItems: MenuItem[] = [
     { label: 'Rename', onSelect: handleRename, testId: 'chat-menu-rename' },
     { divider: true },
@@ -757,6 +758,13 @@ export default function ChatView({
         active: (sessionDetail?.effort ?? '') === o.value,
         onSelect: () => patchSession({ effort: o.value || null }),
       })),
+    },
+    {
+      label: 'Auto-switch model',
+      hint: autoswitchOn ? 'On' : 'Off',
+      active: autoswitchOn,
+      onSelect: () => patchSession({ model_autoswitch: !autoswitchOn }),
+      testId: 'chat-menu-autoswitch',
     },
     { divider: true },
     {

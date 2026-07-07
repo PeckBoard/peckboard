@@ -796,6 +796,7 @@ pub(crate) fn create_session_impl(db: &Db, input: &str, inv: &InvocationContext)
         // falls back to the sole user, else NULL on multi-user installs.
         user_id: db.resolve_spawned_session_owner_blocking(inv.session_id.as_deref()),
         context_reset_ts: None,
+        model_autoswitch: None,
     };
     match db.create_session_blocking(new) {
         Ok(session) => serde_json::json!({ "session": session }).to_string(),
@@ -867,6 +868,7 @@ pub(crate) fn update_session_impl(
         pending_handover_doc: None,
         worker_step: None,
         context_reset_ts: None,
+        model_autoswitch: None,
     };
     match db.update_session_blocking(req.session_id.trim(), update) {
         Ok(Some(session)) => {

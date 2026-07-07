@@ -644,12 +644,22 @@ impl McpToolRegistry {
             .and_then(|v| v.as_str())
             .ok_or_else(|| anyhow::anyhow!("set_session_system_prompt requires 'session_id'"))?;
 
-        // `system_prompt` absent or null clears the custom prompt (the
-        // session reverts to the standing Peckboard prompt); a string sets it.
-        let prompt = args
-            .get("system_prompt")
-            .and_then(|v| v.as_str())
-            .map(|s| s.to_string());
+        // Resolve the prompt to set: an explicit `system_prompt` string
+        // wins; otherwise a library `name` resolves to that prompt's body;
+        // with neither, the custom prompt is cleared (the session reverts to
+        // the standing Peckboard prompt).
+        let prompt = if let Some(raw) = args.get("system_prompt").and_then(|v| v.as_str()) {
+            Some(raw.to_string())
+        } else if let Some(name) = args.get("name").and_then(|v| v.as_str()) {
+            let entry = ctx
+                .db
+                .get_system_prompt_by_name(name)
+                .await?
+                .ok_or_else(|| anyhow::anyhow!("no system prompt named '{name}'"))?;
+            Some(entry.body)
+        } else {
+            None
+        };
         if let Some(ref p) = prompt
             && p.len() > MAX_LEN
         {

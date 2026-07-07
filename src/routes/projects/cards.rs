@@ -26,6 +26,10 @@ pub(super) struct CreateCardRequest {
     blocked: Option<bool>,
     #[serde(default)]
     block_reason: Option<String>,
+    /// Cost-aware model auto-switch opt-in for workers on this card.
+    /// Omitted / `null` = inherit the default (ON — cards spawn workers).
+    #[serde(default)]
+    model_autoswitch: Option<bool>,
 }
 
 #[derive(Deserialize, serde::Serialize)]
@@ -42,6 +46,7 @@ pub(super) struct UpdateCardRequest {
     handoff_context: Option<Option<String>>,
     blocked: Option<bool>,
     block_reason: Option<Option<String>>,
+    model_autoswitch: Option<Option<bool>>,
     /// When present, replaces the card's full dependency set.
     depends_on: Option<Vec<String>>,
 }
@@ -160,6 +165,30 @@ pub(super) async fn create_card(
                 Json(serde_json::json!({ "error": e.to_string() })),
             )
         })?;
+
+    // An explicit auto-switch choice is applied as a follow-up update so the
+    // create path keeps its single `NewCard` shape; omitted leaves the
+    // column NULL (inherit the worker default).
+    let card = match body.model_autoswitch {
+        Some(v) => state
+            .db
+            .update_card(
+                &card.id,
+                UpdateCard {
+                    model_autoswitch: Some(Some(v)),
+                    ..Default::default()
+                },
+            )
+            .await
+            .map_err(|e| {
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(serde_json::json!({ "error": e.to_string() })),
+                )
+            })?
+            .unwrap_or(card),
+        None => card,
+    };
 
     // Persist dependencies if requested. On validation failure roll the
     // card back so we don't leave a half-created card behind.
@@ -400,6 +429,7 @@ pub(super) async fn update_card(
                 handoff_context: body.handoff_context,
                 blocked: body.blocked,
                 block_reason: body.block_reason,
+                model_autoswitch: body.model_autoswitch,
                 updated_at: Some(chrono::Utc::now().to_rfc3339()),
                 // Leave to update_card_atomic's stamper — it knows the
                 // prev_step from the read it already did.

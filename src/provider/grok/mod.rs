@@ -139,6 +139,7 @@ impl GrokProvider {
                     id: format!("{}@{}", m.id, acct.id),
                     display_name: format!("[{}] {}", acct.name, m.display_name),
                     capabilities: m.capabilities.clone(),
+                    tier: m.tier,
                 });
             }
         }
@@ -657,6 +658,7 @@ pub fn default_models() -> Vec<ModelInfo> {
         id: DEFAULT_MODEL.into(),
         display_name: "Grok Build".into(),
         capabilities: vec!["code".into(), "reasoning".into()],
+        tier: 0,
     }]
 }
 

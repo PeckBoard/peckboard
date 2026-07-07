@@ -253,6 +253,13 @@ pub struct ModelInfo {
     pub display_name: String,
     #[serde(default)]
     pub capabilities: Vec<String>,
+    /// Capability tier within this provider — higher is more capable.
+    /// Used by the cost-aware auto-switch to find a "cheaper but capable"
+    /// model (a lower tier, same provider + account). Providers with a
+    /// single tier leave this at `0`; Claude ranks haiku < sonnet < opus
+    /// < fable. Never compare tiers across providers.
+    #[serde(default)]
+    pub tier: i32,
 }
 
 #[cfg(test)]

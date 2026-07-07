@@ -25,6 +25,9 @@ export default function NewSessionModal({ onClose }: Props) {
   const folderId = chosenFolderId ?? folders[0]?.id ?? ''
   const [model, setModel] = useState('')
   const [effort, setEffort] = useState('')
+  // Chat sessions default OFF (workers default ON); a NULL column inherits
+  // that, so an unchecked box just leaves auto-switch off.
+  const [modelAutoswitch, setModelAutoswitch] = useState(false)
   const [newFolderName, setNewFolderName] = useState('')
   const [newFolderPath, setNewFolderPath] = useState('')
   const [showNewFolder, setShowNewFolder] = useState(false)
@@ -76,6 +79,7 @@ export default function NewSessionModal({ onClose }: Props) {
         folderId,
         model || undefined,
         effort || undefined,
+        modelAutoswitch,
       )
       setActiveSession(session.id)
       onClose()
@@ -172,6 +176,17 @@ export default function NewSessionModal({ onClose }: Props) {
               </option>
             ))}
           </select>
+        </div>
+        <div className="form-field">
+          <label className="form-checkbox-label">
+            <input
+              type="checkbox"
+              checked={modelAutoswitch}
+              onChange={(e) => setModelAutoswitch(e.target.checked)}
+              data-testid="new-session-autoswitch"
+            />
+            <span>Allow auto-switching to a cheaper model</span>
+          </label>
         </div>
         {error && <p className="form-error">{error}</p>}
         <div className="form-actions">

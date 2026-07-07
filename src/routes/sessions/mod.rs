@@ -28,6 +28,10 @@ struct CreateSessionRequest {
     folder_id: String,
     model: Option<String>,
     effort: Option<String>,
+    /// Cost-aware auto-switch opt-in. Omitted leaves the column NULL, which
+    /// resolves to OFF for chat sessions.
+    #[serde(default)]
+    model_autoswitch: Option<bool>,
 }
 
 #[derive(Deserialize)]
@@ -67,6 +71,7 @@ struct UpdateSessionRequest {
     card_id: Option<Option<String>>,
     conversation_id: Option<Option<String>>,
     last_activity: Option<String>,
+    model_autoswitch: Option<Option<bool>>,
 }
 
 pub fn router(state: Arc<AppState>) -> Router<Arc<AppState>> {
@@ -132,6 +137,7 @@ async fn create_session(
             created_at: now.clone(),
             last_activity: now,
             user_id: Some(user.user_id),
+            model_autoswitch: body.model_autoswitch,
             ..Default::default()
         })
         .await
@@ -301,6 +307,7 @@ async fn update_session(
         project_id: body.project_id,
         card_id: body.card_id,
         conversation_id: body.conversation_id,
+        model_autoswitch: body.model_autoswitch,
         last_activity: body.last_activity,
         ..Default::default()
     };
@@ -308,14 +315,14 @@ async fn update_session(
     // Stripping the model for a handover can leave an all-`None` changeset
     // (the common "switch model" PATCH carries only `model`). Diesel rejects
     // an empty changeset, so skip the write and just read the row back — the
-    // handover branch below does the meaningful state change.
     let has_updates = update.name.is_some()
         || update.model.is_some()
         || update.effort.is_some()
         || update.project_id.is_some()
         || update.card_id.is_some()
         || update.conversation_id.is_some()
-        || update.last_activity.is_some();
+        || update.last_activity.is_some()
+        || update.model_autoswitch.is_some();
 
     let session = if has_updates {
         state.db.update_session(&id, update).await

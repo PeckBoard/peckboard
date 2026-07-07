@@ -513,6 +513,11 @@ impl McpToolRegistry {
             .and_then(|v| v.as_bool())
             .unwrap_or(block_reason.is_some());
 
+        // Optional cost-aware auto-switch opt-in. Omitted leaves the column
+        // NULL (inherit the worker default, ON) and is applied as a
+        // follow-up update so the create path keeps one `NewCard` shape.
+        let model_autoswitch = args.get("model_autoswitch").and_then(|v| v.as_bool());
+
         let now = chrono::Utc::now().to_rfc3339();
         let card_id = uuid::Uuid::new_v4().to_string();
         let card = ctx
@@ -533,6 +538,20 @@ impl McpToolRegistry {
                 updated_at: now,
             })
             .await?;
+        let card = match model_autoswitch {
+            Some(v) => ctx
+                .db
+                .update_card(
+                    &card_id,
+                    crate::db::models::UpdateCard {
+                        model_autoswitch: Some(Some(v)),
+                        ..Default::default()
+                    },
+                )
+                .await?
+                .unwrap_or(card),
+            None => card,
+        };
 
         if !depends_on.is_empty() {
             let project_cards = ctx.db.list_cards_by_project(project_id).await?;
@@ -819,6 +838,13 @@ impl McpToolRegistry {
         if let Some(Some(e)) = &effort {
             validate_effort(Some(e))?;
         }
+        // Cost-aware auto-switch: a bool sets it, an explicit null clears it
+        // back to inherit, and omitting the key leaves it untouched.
+        let model_autoswitch: Option<Option<bool>> = if args.get("model_autoswitch").is_some() {
+            Some(args.get("model_autoswitch").and_then(|v| v.as_bool()))
+        } else {
+            None
+        };
 
         // A present `depends_on` array replaces the card's dependency set
         // (empty clears it); omitting the key leaves dependencies alone.
@@ -877,6 +903,7 @@ impl McpToolRegistry {
                     worker_session_id,
                     last_worker_session_id,
                     updated_at,
+                    model_autoswitch,
                     ..Default::default()
                 })
             })

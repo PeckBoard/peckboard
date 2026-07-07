@@ -24,6 +24,9 @@ export interface Session {
   knowledge_summary: string | null
   knowledge_area: string | null
   scope_path: string | null
+  /** Cost-aware model auto-switch opt-in. null = inherit the default (ON
+   *  for worker sessions, OFF for chats); true/false forces it. */
+  model_autoswitch?: boolean | null
   is_permanent: boolean
   repeating_task_id: string | null
   /** Target model while a provider/account handover is mid-flight; null otherwise. */
@@ -96,6 +99,9 @@ export interface Card {
    *  seeded by the cards fetch; live updates ride the streamed `agent-usage`
    *  events. Absent for terminal cards and cards without a worker session. */
   context_tokens?: number
+  /** Cost-aware model auto-switch opt-in for this card's workers. null =
+   *  inherit the default (ON — cards spawn workers); true/false forces it. */
+  model_autoswitch?: boolean | null
   depends_on?: string[]
   created_at: string
   updated_at: string

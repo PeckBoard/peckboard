@@ -8,7 +8,10 @@ mod cards;
 mod common_tools;
 mod folders;
 mod misc;
+mod model_control;
 mod projects;
 mod repeating_tasks;
 mod reports;
 mod workers;
+
+pub use model_control::autoswitch_enabled;

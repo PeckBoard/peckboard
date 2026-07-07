@@ -218,6 +218,10 @@ pub(super) fn tool_definitions() -> Vec<McpToolDef> {
                     "block_reason": {
                         "type": "string",
                         "description": "Reason blocked at creation (e.g. 'needs human triage'). Implies blocked=true unless `blocked` is set explicitly."
+                    },
+                    "model_autoswitch": {
+                        "type": "boolean",
+                        "description": "Cost-aware model auto-switch opt-in for workers on this card. Omit to inherit the default (ON — cards spawn workers)."
                     }
                 },
                 "required": ["title", "description"],
@@ -406,6 +410,10 @@ pub(super) fn tool_definitions() -> Vec<McpToolDef> {
                     "block_reason": {
                         "type": "string",
                         "description": "Reason the card is blocked"
+                    },
+                    "model_autoswitch": {
+                        "type": ["boolean", "null"],
+                        "description": "Cost-aware model auto-switch opt-in: true/false to force, null to reset to inherit the default."
                     }
                 },
                 "required": ["card_id"],
@@ -750,9 +758,42 @@ pub(super) fn tool_definitions() -> Vec<McpToolDef> {
                 "type": "object",
                 "properties": {
                     "session_id": { "type": "string", "description": "Session whose prompt to edit." },
-                    "system_prompt": { "type": "string", "description": "Full prompt text. Omit or pass null to clear to the default." }
+                    "system_prompt": { "type": "string", "description": "Full prompt text. Omit or pass null to clear to the default." },
+                    "name": { "type": "string", "description": "Name of a saved prompt from the system-prompt library to apply instead of raw text (use list_system_prompts to see options). Ignored when system_prompt is given." }
                 },
                 "required": ["session_id"],
+                "additionalProperties": false
+            }),
+        },
+        McpToolDef {
+            name: "list_system_prompts".into(),
+            description: "List the named system prompts in the library (name + a one-line summary of each). Use a name with set_session_system_prompt or switch_session_model to steer a session toward a kind of work (implement / research / debug / review / docs / …).".into(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {},
+                "additionalProperties": false
+            }),
+        },
+        McpToolDef {
+            name: "get_model_guidance".into(),
+            description: "Cost-aware auto-switch guidance for THIS session: your current model + tier, the cheaper same-provider+account candidates you may downgrade to, the account's plan-usage snapshot with a recommendation, the named system prompts, and how many switches you've used. Call it after writing your implementation plan to decide whether a cheaper model can handle the work.".into(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {},
+                "additionalProperties": false
+            }),
+        },
+        McpToolDef {
+            name: "switch_session_model".into(),
+            description: "Switch THIS session to another model of the SAME provider+account (from get_model_guidance's candidates). Downgrade when the plan is simple enough for the cheaper model to implement without problems; you may also switch UP if the cheap model hits a wall. Requires a `rationale`. Optionally apply a focusing `system_prompt_name` from the library. Takes effect when the session resumes on the new model — wrap up your turn after calling it. Capped per session.".into(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "model": { "type": "string", "description": "Target model id (provider:model[@account]), same provider+account as now." },
+                    "rationale": { "type": "string", "description": "Why this switch is safe/needed (recorded in the event log and the report)." },
+                    "system_prompt_name": { "type": "string", "description": "Optional: a named library prompt matching the work type (implement/research/debug/review/docs)." }
+                },
+                "required": ["model", "rationale"],
                 "additionalProperties": false
             }),
         },

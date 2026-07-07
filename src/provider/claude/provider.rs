@@ -182,6 +182,7 @@ impl ClaudeProvider {
                     id: format!("{}@{}", m.id, acct.id),
                     display_name: format!("[{}] {}", acct.name, m.display_name),
                     capabilities: m.capabilities.clone(),
+                    tier: m.tier,
                 });
             }
         }

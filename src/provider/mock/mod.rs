@@ -933,51 +933,61 @@ pub fn mock_model_infos() -> Vec<ModelInfo> {
             id: "echo".into(),
             display_name: "Mock: echo".into(),
             capabilities: vec!["mock".into()],
+            tier: 1,
         },
         ModelInfo {
             id: "happy-path".into(),
             display_name: "Mock: happy path".into(),
             capabilities: vec!["mock".into(), "tools".into()],
+            tier: 3,
         },
         ModelInfo {
             id: "tool-use".into(),
             display_name: "Mock: tool use".into(),
             capabilities: vec!["mock".into(), "tools".into()],
+            tier: 2,
         },
         ModelInfo {
             id: "usage".into(),
             display_name: "Mock: usage".into(),
             capabilities: vec!["mock".into(), "tools".into()],
+            tier: 2,
         },
         ModelInfo {
             id: "crash".into(),
             display_name: "Mock: crash".into(),
             capabilities: vec!["mock".into()],
+            tier: 1,
         },
         ModelInfo {
             id: "tool-orphan-crash".into(),
             display_name: "Mock: tool start without end then crash".into(),
             capabilities: vec!["mock".into(), "tools".into()],
+            tier: 2,
         },
         ModelInfo {
             id: "ask".into(),
             display_name: "Mock: ask".into(),
             capabilities: vec!["mock".into(), "interactive".into()],
+            tier: 2,
         },
         ModelInfo {
             id: "markdown".into(),
             display_name: "Mock: markdown".into(),
             capabilities: vec!["mock".into(), "markdown".into()],
+            tier: 1,
         },
         ModelInfo {
             id: "ctx".into(),
             display_name: "Mock: context".into(),
             capabilities: vec!["mock".into()],
+            tier: 1,
         },
         ModelInfo {
             id: "block".into(),
             display_name: "Mock: block".into(),
             capabilities: vec!["mock".into(), "interactive".into()],
+            tier: 2,
         },
     ]
 }

@@ -820,6 +820,61 @@ a.wasm-plugin-repo:hover {
 }
 
 /* ═══════════════════════════════════════════════════
+   System prompts library (Settings → System Prompts)
+   ═══════════════════════════════════════════════════ */
+
+.system-prompts-list {
+  list-style: none;
+  margin: 10px 0 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.system-prompt-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--surface);
+}
+.system-prompt-meta {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 0;
+  flex: 1;
+}
+.system-prompt-name {
+  font-weight: 600;
+  color: var(--text);
+}
+.system-prompt-source {
+  align-self: flex-start;
+  font-size: var(--text-xs);
+  color: var(--text2);
+  background: var(--surface2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: 1px 6px;
+}
+.system-prompt-preview {
+  font-size: var(--text-sm);
+  color: var(--text3);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.system-prompt-actions {
+  display: flex;
+  gap: 6px;
+  flex-shrink: 0;
+}
+
+/* ═══════════════════════════════════════════════════
    Settings hub navigation (sub-page cards)
    ═══════════════════════════════════════════════════ */
 
