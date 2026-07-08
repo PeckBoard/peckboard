@@ -1,13 +1,13 @@
 import { test, expect, type APIRequestContext, type Page } from '@playwright/test'
 
 /**
- * UI e2e for the Plugins modal (opened from the user-icon dropdown).
+ * UI e2e for the Plugins settings sub-page (Settings → Plugins).
  *
- * The Plugins modal renders directly from `GET /api/plugins`, so this
+ * The Plugins sub-page renders directly from `GET /api/plugins`, so this
  * is the user-visible counterpart to `tests/plugins_endpoint.rs`. We
  * verify:
  *
- * 1. The `/plugins` deep-link auto-opens the Plugins modal.
+ * 1. The `/plugins` deep-link opens Settings → Plugins.
  * 2. The two built-in plugins (`claude-code`, `mock`) show up with their
  *    display names, "Built-in · always enabled" tag, and Active badge.
  * 3. Each plugin lists the permissions it was granted (the wire shape
@@ -33,7 +33,7 @@ async function loadAppAt(page: Page, token: string, route: string) {
   await page.goto(route)
 }
 
-test('Plugins modal lists built-in plugins with their permissions', async ({
+test('Plugins settings page lists built-in plugins with their permissions', async ({
   request,
   page,
   baseURL,
@@ -42,11 +42,10 @@ test('Plugins modal lists built-in plugins with their permissions', async ({
 
   const token = await authenticate(request)
   await loadAppAt(page, token, '/plugins')
-
-  // The /plugins deep-link auto-opens the Plugins modal; the section
-  // it wraps still owns the data-testid.
-  await expect(page.getByTestId('plugins-modal')).toBeVisible({ timeout: 10_000 })
+  // The /plugins deep-link opens Settings → Plugins; the plugins section
+  // renders inside the settings page.
   const section = page.getByTestId('plugins-section')
+  await expect(section).toBeVisible({ timeout: 10_000 })
   await expect(section).toBeVisible({ timeout: 10_000 })
 
   // Two built-in plugins are registered (`claude-code` and `mock`); the

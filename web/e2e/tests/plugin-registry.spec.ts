@@ -117,7 +117,7 @@ test('browse → search → install from the registry page', async ({ request, p
   const state = await mockRegistry(page)
 
   await loadAppAt(page, token, '/plugins')
-  await expect(page.getByTestId('plugins-modal')).toBeVisible({ timeout: 10_000 })
+  await expect(page.getByTestId('plugins-section')).toBeVisible({ timeout: 10_000 })
 
   // Available plugins is its OWN page now — not duplicated in the modal.
   await expect(page.getByTestId('registry-plugin-demo')).toHaveCount(0)
@@ -143,26 +143,24 @@ test('browse → search → install from the registry page', async ({ request, p
   expect(state.lastInstall?.id).toBe('demo')
   expect(state.lastInstall?.repository).toBe(REPO_URL)
 })
-
-test('back to plugins returns to the Plugins modal', async ({ request, page, baseURL }) => {
+test('back to plugins returns to the Plugins settings page', async ({ request, page, baseURL }) => {
   expect(baseURL).toBeTruthy()
   const token = await authenticate(request)
   await mockRegistry(page)
 
   await loadAppAt(page, token, '/plugins')
-  await expect(page.getByTestId('plugins-modal')).toBeVisible({ timeout: 10_000 })
+  const section = page.getByTestId('plugins-section')
+  await expect(section).toBeVisible({ timeout: 10_000 })
 
-  // Open the registry page from the Plugins modal.
+  // Open the registry page from the Plugins settings page.
   await page.getByTestId('browse-plugins').click()
   await expect(page.getByTestId('plugin-registry-modal')).toBeVisible()
-  await expect(page.getByTestId('plugins-modal')).toHaveCount(0)
 
-  // "Back to plugins" closes the registry and re-opens the Plugins modal.
+  // "Back to plugins" closes the registry and returns to Settings → Plugins.
   await page.getByTestId('registry-back-to-plugins').click()
   await expect(page.getByTestId('plugin-registry-modal')).toHaveCount(0)
-  await expect(page.getByTestId('plugins-modal')).toBeVisible()
+  await expect(section).toBeVisible()
 })
-
 /**
  * Mock a registry with two already-installed plugins that each have a newer
  * version on offer: one the running Peckboard is compatible with (upgradable),

@@ -45,7 +45,7 @@ test('Ollama plugin renders its settings form and round-trips saves', async ({
   const token = await authenticate(request)
   await loadAppAt(page, token, '/plugins')
 
-  await expect(page.getByTestId('plugins-modal')).toBeVisible({ timeout: 10_000 })
+  await expect(page.getByTestId('plugins-section')).toBeVisible({ timeout: 10_000 })
   const ollamaCard = page.getByTestId('plugin-card-ollama')
   await expect(ollamaCard).toBeVisible({ timeout: 10_000 })
   await expect(ollamaCard).toContainText('Ollama')
@@ -127,7 +127,7 @@ test('additional models registered in settings appear in the model catalog', asy
   const token = await authenticate(request)
   await loadAppAt(page, token, '/plugins')
 
-  await expect(page.getByTestId('plugins-modal')).toBeVisible({ timeout: 10_000 })
+  await expect(page.getByTestId('plugins-section')).toBeVisible({ timeout: 10_000 })
   const ollamaCard = page.getByTestId('plugin-card-ollama')
   await expect(ollamaCard).toBeVisible({ timeout: 10_000 })
   await ollamaCard.getByTestId('plugin-settings-open-ollama').click()

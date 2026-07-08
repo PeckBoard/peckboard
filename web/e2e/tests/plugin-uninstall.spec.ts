@@ -77,7 +77,7 @@ test('removes an installed plugin from the Plugins modal', async ({ request, pag
   })
 
   await loadAppAt(page, token, '/plugins')
-  await expect(page.getByTestId('plugins-modal')).toBeVisible({ timeout: 10_000 })
+  await expect(page.getByTestId('plugins-section')).toBeVisible({ timeout: 10_000 })
 
   // The installed plugin row is listed with a Remove control.
   const row = page.getByTestId('wasm-plugin-demo')

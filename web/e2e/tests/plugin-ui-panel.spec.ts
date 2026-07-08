@@ -77,10 +77,10 @@ test('plugin UI panel opens its plugin-served page in a sandboxed iframe', async
   await page.addInitScript((injectedToken) => {
     localStorage.setItem('peckboard_token', injectedToken)
   }, token)
-  // The /plugins deep-link auto-opens the Plugins modal.
+  // The /plugins deep-link opens Settings → Plugins.
   await page.goto('/plugins')
 
-  await expect(page.getByTestId('plugins-modal')).toBeVisible({ timeout: 10_000 })
+  await expect(page.getByTestId('plugins-section')).toBeVisible({ timeout: 10_000 })
 
   // The plugin's declared sidebar_item renders as a button in the left rail
   // (generic; opens the plugin page in the same iframe panel when clicked).

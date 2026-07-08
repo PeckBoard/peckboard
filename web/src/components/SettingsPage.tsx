@@ -9,6 +9,7 @@ import SoftwareUpdate from './SoftwareUpdate'
 import PluginSettingsForm from './PluginSettingsForm'
 import SystemPromptsSection from './SystemPromptsSection'
 import OllamaPullModel from './OllamaPullModel'
+import PluginsSection from './PluginsSection'
 
 const THEME_KEY = 'peckboard_theme'
 const HUE_KEY = 'peckboard_hue'
@@ -68,13 +69,13 @@ function applyHue(hue: number) {
   document.documentElement.style.setProperty('--primary-hue', String(hue))
 }
 
-type SubPage = 'appearance' | 'chat' | 'prompts' | 'providers' | 'server'
+type SubPage = 'appearance' | 'chat' | 'prompts' | 'plugins' | 'providers' | 'server'
 
 /**
  * The settings hub lists these sub-pages; each groups related sections
- * that used to be stacked on one long page. Providers is where the
- * Ollama and Cursor plugin settings now live (they're also reachable
- * from the Plugins modal, same form either way).
+ * that used to be stacked on one long page. Plugins (installed plugins,
+ * approvals, the registry) is its own sub-page; the Ollama and Cursor
+ * plugin settings also live under Providers, same form either way.
  */
 const SUB_PAGES: { id: SubPage; title: string; blurb: string }[] = [
   { id: 'appearance', title: 'Appearance', blurb: 'Theme and accent color' },
@@ -90,6 +91,11 @@ const SUB_PAGES: { id: SubPage; title: string; blurb: string }[] = [
     blurb: 'Claude and Grok accounts, Ollama servers, Cursor CLI, keep-alive',
   },
   {
+    id: 'plugins',
+    title: 'Plugins',
+    blurb: 'Installed plugins, approvals, and the plugin registry',
+  },
+  {
     id: 'server',
     title: 'Server',
     blurb: 'Ports, data directory, approved commands, software updates',
@@ -98,11 +104,15 @@ const SUB_PAGES: { id: SubPage; title: string; blurb: string }[] = [
 
 interface Props {
   onBack: () => void
+  /** Sub-page to open on mount (e.g. 'plugins' when deep-linked from /plugins). */
+  initialSubPage?: SubPage | null
+  /** Open the Plugin Registry (Browse plugins) modal. */
+  onBrowseRegistry: () => void
 }
 
-export default function SettingsPage({ onBack }: Props) {
+export default function SettingsPage({ onBack, initialSubPage = null, onBrowseRegistry }: Props) {
   const user = useAuthStore((s) => s.user)
-  const [subPage, setSubPage] = useState<SubPage | null>(null)
+  const [subPage, setSubPage] = useState<SubPage | null>(initialSubPage)
   const [theme, setTheme] = useState<Theme>(getStoredTheme)
   const [hue, setHue] = useState<number>(() => {
     const stored = getStoredHue()
@@ -409,6 +419,7 @@ export default function SettingsPage({ onBack }: Props) {
         </>
       )}
 
+      {subPage === 'plugins' && <PluginsSection onBrowseRegistry={onBrowseRegistry} />}
       {subPage === 'prompts' && <SystemPromptsSection />}
     </div>
   )

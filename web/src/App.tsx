@@ -16,7 +16,6 @@ import KanbanBoard from './components/KanbanBoard'
 import ProjectTodosView from './components/ProjectTodosView'
 import SettingsPage from './components/SettingsPage'
 import { applyThemeColor } from './util/themeColor'
-import PluginsModal from './components/PluginsModal'
 import PluginPanelModal from './components/PluginPanelModal'
 import PluginFullPage from './components/PluginFullPage'
 import PluginApprovalPrompt from './components/PluginApprovalPrompt'
@@ -60,7 +59,7 @@ type View =
  *  to opening one of these on mount so bookmarks and the existing e2e
  *  routes still land somewhere useful. (Settings is a full-page view, not
  *  a modal — see the `'settings'` `View`.) */
-type DropdownModal = 'plugins' | 'plugin-registry' | null
+type DropdownModal = 'plugin-registry' | null
 
 /** A UI page a loaded plugin contributes, surfaced as a user-menu link.
  * Generic: the host renders whatever panels a plugin declares (from the
@@ -101,7 +100,7 @@ function pluginSubItemId(sub: SessionSub): string | null {
 /** Parse the current URL pathname into a view, optional active ID, an
  *  optional sub-view (only meaningful when `view` is 'sessions' or
  *  'projects'), and an optional dropdown-modal hint for the few routes
- *  that map straight to a modal (`/plugins`).
+ *  that map straight to a modal (`/plugin-registry`).
  *
  *  For the reports view, `activeId` is the encoded `<folder>/<file>`
  *  pair the user is reading (the same id used as the report tab's
@@ -111,6 +110,7 @@ function parseRoute(): {
   activeId: string | null
   sub: SessionSub
   modal: DropdownModal
+  settingsSub?: 'plugins' | null
 } {
   const path = window.location.pathname
   const segments = path.split('/').filter(Boolean)
@@ -150,7 +150,7 @@ function parseRoute(): {
     case 'settings':
       return { view: 'settings', activeId: null, sub: 'chat', modal: null }
     case 'plugins':
-      return { view: 'sessions', activeId: null, sub: 'chat', modal: 'plugins' }
+      return { view: 'settings', activeId: null, sub: 'chat', modal: null, settingsSub: 'plugins' }
     case 'plugin-registry':
       return { view: 'sessions', activeId: null, sub: 'chat', modal: 'plugin-registry' }
     case 'reports': {
@@ -316,6 +316,11 @@ function App() {
   const [userMenuOpen, setUserMenuOpen] = useState(false)
   const [showChangePassword, setShowChangePassword] = useState(false)
   const [dropdownModal, setDropdownModal] = useState<DropdownModal>(initialRoute.modal)
+  // Which Settings sub-page to open on mount. `/plugins` deep-links
+  // straight to Settings → Plugins; null lands on the Settings hub.
+  const [settingsSub, setSettingsSub] = useState<'plugins' | null>(
+    initialRoute.settingsSub ?? null,
+  )
   // Plugin-contributed user-menu links (generic; populated from /api/plugins).
   const [uiPanels, setUiPanels] = useState<UiPanel[]>([])
   // Plugin-contributed left-rail entries (generic; same /api/plugins catalog).
@@ -438,6 +443,7 @@ function App() {
       setViewRaw(route.view)
       setSessionSub(route.sub)
       setDropdownModal(route.modal)
+      setSettingsSub(route.settingsSub ?? null)
       if (route.view === 'sessions') {
         setActiveSession(route.activeId)
       } else if (route.view === 'projects') {
@@ -1178,20 +1184,11 @@ function App() {
                   role="menuitem"
                   onClick={() => {
                     setUserMenuOpen(false)
+                    setSettingsSub(null)
                     navigate('settings')
                   }}
                 >
                   Settings
-                </button>
-                <button
-                  type="button"
-                  role="menuitem"
-                  onClick={() => {
-                    setUserMenuOpen(false)
-                    openDropdownModal('plugins')
-                  }}
-                >
-                  Plugins
                 </button>
                 {uiPanels.map((panel) => (
                   <button
@@ -1454,7 +1451,14 @@ function App() {
               />
             ))}
           {view === 'users' && <UserManagement />}
-          {view === 'settings' && <SettingsPage onBack={() => navigate('sessions')} />}
+          {view === 'settings' && (
+            <SettingsPage
+              key={settingsSub ?? 'root'}
+              onBack={() => navigate('sessions')}
+              initialSubPage={settingsSub}
+              onBrowseRegistry={() => openDropdownModal('plugin-registry')}
+            />
+          )}
         </ErrorBoundary>
       </main>
 
@@ -1463,16 +1467,10 @@ function App() {
       {showChangePassword && (
         <ChangePasswordModal mode={{ kind: 'self' }} onClose={() => setShowChangePassword(false)} />
       )}
-      {dropdownModal === 'plugins' && (
-        <PluginsModal
-          onClose={closeDropdownModal}
-          onBrowseRegistry={() => openDropdownModal('plugin-registry')}
-        />
-      )}
       {dropdownModal === 'plugin-registry' && (
         <PluginRegistryModal
           onClose={closeDropdownModal}
-          onBack={() => openDropdownModal('plugins')}
+          onBack={closeDropdownModal}
         />
       )}
       {openPanel && (

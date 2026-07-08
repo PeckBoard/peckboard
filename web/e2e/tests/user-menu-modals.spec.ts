@@ -1,20 +1,20 @@
 import { test, expect, type APIRequestContext, type Page } from '@playwright/test'
 
 /**
- * UI e2e for the Settings page + Plugins modal reached through the
- * user-icon dropdown in the nav rail.
+ * UI e2e for the Settings page reached through the user-icon dropdown
+ * in the nav rail, including its Plugins sub-page.
  *
- * The nav rail no longer carries a dedicated Settings icon — both
- * Settings and Plugins are reached from the avatar dropdown at the
- * bottom of the rail. This covers:
+ * The nav rail no longer carries a dedicated Settings icon — Settings is
+ * reached from the avatar dropdown at the bottom of the rail; Plugins is
+ * a sub-page inside it. This covers:
  *
  * 1. The Settings rail icon is gone (no button titled "Settings" on the
  *    rail).
- * 2. Clicking the avatar reveals a menu with Settings and Plugins
- *    options.
+ * 2. Clicking the avatar reveals a menu with a Settings option (no
+ *    dedicated Plugins entry).
  * 3. Settings opens a full-page view (not a modal); its Back button
- *    returns to the underlying view. Plugins opens a modal; closing it
- *    returns to the underlying view.
+ *    returns to the underlying view. The Plugins sub-page renders the
+ *    plugins section; Back returns to the Settings hub.
  */
 
 const E2E_USER = 'e2e-user'
@@ -36,7 +36,7 @@ async function loadAppAt(page: Page, token: string, route: string) {
   await page.goto(route)
 }
 
-test('user dropdown opens Settings page and Plugins modal; rail Settings icon is gone', async ({
+test('user dropdown opens Settings page with a Plugins sub-page; rail Settings icon is gone', async ({
   request,
   page,
   baseURL,
@@ -81,17 +81,16 @@ test('user dropdown opens Settings page and Plugins modal; rail Settings icon is
   await settingsPage.getByRole('button', { name: 'Back' }).click()
   await expect(settingsPage).toBeHidden()
 
-  // Open the dropdown again and pick Plugins.
+  // Open the dropdown again, go to Settings, and open the Plugins sub-page.
   await page.locator('.rail-avatar').click()
   await expect(menu).toBeVisible()
-  await menu.getByRole('menuitem', { name: 'Plugins' }).click()
+  await menu.getByRole('menuitem', { name: 'Settings' }).click()
+  await expect(settingsPage).toBeVisible()
 
-  const pluginsModal = page.getByTestId('plugins-modal')
-  await expect(pluginsModal).toBeVisible()
-  // The wrapped section continues to expose its testid so existing
-  // plugin tests keep working.
-  await expect(pluginsModal.getByTestId('plugins-section')).toBeVisible()
+  await settingsPage.getByTestId('settings-nav-plugins').click()
+  await expect(settingsPage.getByTestId('plugins-section')).toBeVisible()
 
-  await pluginsModal.getByRole('button', { name: 'Close' }).click()
-  await expect(pluginsModal).toBeHidden()
+  // Back returns to the Settings hub.
+  await settingsPage.getByRole('button', { name: 'Back' }).click()
+  await expect(settingsPage.getByTestId('settings-nav-plugins')).toBeVisible()
 })
