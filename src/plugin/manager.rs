@@ -69,6 +69,7 @@ pub const ALLOWED_HOOKS: &[&str] = &[
     "mcp.tool.call.failed",
     "mcp.tool.invoke",
     "session.message.before",
+    "session.prehatch.answer",
     "session.prehatch.cancel",
     "session.reference.resolve",
     "session.user.answer",

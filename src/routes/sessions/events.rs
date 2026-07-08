@@ -367,7 +367,9 @@ pub(super) async fn append_event(
         // agent with a bare answer would start the very turn the plugin is
         // still preparing. The target is read from the question event core
         // itself persisted (host-side), never from the client request.
-        let redirect_target = if question_id.is_empty() {
+        // The question event core persisted carries both the redirect target
+        // and the plugin's correlation token (`approval_token`).
+        let q_event_data: Option<serde_json::Value> = if question_id.is_empty() {
             None
         } else {
             state
@@ -377,15 +379,76 @@ pub(super) async fn append_event(
                 .ok()
                 .flatten()
                 .and_then(|q| serde_json::from_str::<serde_json::Value>(&q.data).ok())
-                .and_then(|d| {
-                    d.get("redirectSessionId")
-                        .and_then(|v| v.as_str())
-                        .map(|s| s.to_string())
-                })
         };
+        let redirect_target = q_event_data.as_ref().and_then(|d| {
+            d.get("redirectSessionId")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string())
+        });
+        let approval_token = q_event_data
+            .as_ref()
+            .and_then(|d| d.get("approval_token").and_then(|v| v.as_str()))
+            .unwrap_or("")
+            .to_string();
+        // The single selected option label (these plugin cards are one
+        // question); empty when the user dismissed the card.
+        let answer_label = event_data
+            .get("answers")
+            .and_then(|a| a.as_object())
+            .and_then(|o| o.values().next())
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
         let state_clone = state.clone();
-        let id_clone = redirect_target.unwrap_or_else(|| id.clone());
+        let id_clone = redirect_target.clone().unwrap_or_else(|| id.clone());
+        let chat_id = id.clone();
+        let hook_user_id = user.user_id.clone();
+        let redirect_for_hook = redirect_target.clone();
+        let answer_rejected = rejected;
         tokio::spawn(async move {
+            // A pre-hatcher question (opt-in / enriched-message approval) is
+            // resolved in the plugin's CODE, not by resuming the cheap model:
+            // fire the answer hook and, when the plugin owns the outcome
+            // (delivered the message, or dispatched the read-only research
+            // turn), skip resuming the temp agent with the raw answer. A
+            // non-owning verdict (e.g. a clarifying-question continuation the
+            // research agent must read) falls through to the normal resume.
+            if let Some(ref temp_id) = redirect_for_hook {
+                let is_pre_hatcher = state_clone
+                    .db
+                    .get_session(temp_id)
+                    .await
+                    .ok()
+                    .flatten()
+                    .and_then(|s| s.expert_kind)
+                    .as_deref()
+                    == Some(crate::service::mcp_server::PRE_HATCHER_EXPERT_KIND);
+                if is_pre_hatcher {
+                    let chat_sess = state_clone.db.get_session(&chat_id).await.ok().flatten();
+                    let folder = chat_sess.as_ref().map(|s| s.folder_id.clone());
+                    let project = chat_sess.as_ref().and_then(|s| s.project_id.clone());
+                    let res = state_clone
+                        .plugins
+                        .dispatch_scoped(
+                            crate::plugin::hooks::PREHATCH_ANSWER_HOOK,
+                            &hook_user_id,
+                            folder,
+                            project,
+                            Some(chat_id.clone()),
+                            serde_json::json!({
+                                "chat_session_id": chat_id,
+                                "temp_session_id": temp_id,
+                                "token": approval_token,
+                                "answer": answer_label,
+                                "rejected": answer_rejected,
+                            }),
+                        )
+                        .await;
+                    if res.is_cancelled() {
+                        return;
+                    }
+                }
+            }
             // Append the user event up front so the conversation log
             // reflects the typed order regardless of mid-turn vs. idle.
             if let Ok(user_ev) = state_clone

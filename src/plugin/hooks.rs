@@ -304,6 +304,20 @@ pub const MESSAGE_BEFORE_HOOK: &str = "session.message.before";
 /// delivering the original message itself. Fired under a **user-authority**
 /// context scoped to the chat session, like [`MESSAGE_BEFORE_HOOK`].
 pub const PREHATCH_CANCEL_HOOK: &str = "session.prehatch.cancel";
+
+/// Fired when the user answers a pre-hatcher question (the opt-in card or the
+/// enriched-message approval card) that carries a `redirectSessionId` to the
+/// temp research session. Lets the plugin resolve the outcome in CODE — deliver
+/// the message, or dispatch the read-only research turn — instead of handing the
+/// yes/no decision to the cheap model. Payload: `{ chat_session_id,
+/// temp_session_id, token, answer, rejected }` (`answer` is the selected option
+/// label, empty when `rejected`). Verdicts: `Cancel` means the plugin OWNED the
+/// answer (delivered or dispatched) and core must NOT resume the temp agent with
+/// the raw answer; `Allow`/`Skip` (or no listener) makes core fall back to
+/// resuming the redirect target as today — e.g. a clarifying-question
+/// continuation the research agent must read. Fired under a **user-authority**
+/// context scoped to the chat session, like [`PREHATCH_CANCEL_HOOK`].
+pub const PREHATCH_ANSWER_HOOK: &str = "session.prehatch.answer";
 /// The request a plugin receives for a plugin-served HTTP route.
 ///
 /// Serialized as the `payload` of the [`HTTP_REQUEST_HOOK`] hook call.
