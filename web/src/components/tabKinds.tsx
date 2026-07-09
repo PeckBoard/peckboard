@@ -34,6 +34,12 @@ export interface TabKindHandler {
    *  document, …). Sessions return `null` to keep the chip compact. */
   getIcon: (tab: Tab) => ReactNode
   /** Click / Enter handler — navigate to the tab's target view. */
+  /** Called when the tab's close affordance is used. Lets the kind
+   *  clear its active id + navigate away when the closed tab is the
+   *  currently-active one — otherwise the URL still points at the item
+   *  and App.tsx's open-on-active effect immediately re-opens the tab.
+   *  No-op when a background (non-active) tab is closed. */
+  onClose: (tab: Tab) => void
   onActivate: (tab: Tab) => void
   /** Right-click + 3-dot menu items for this tab. The "Close tab" entry
    *  is layered in by the TabBar itself so every kind shares the same

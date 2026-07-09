@@ -49,6 +49,12 @@ interface TabsState {
    *  Same as closeTab but kept as a separate entry point for clarity
    *  at call sites that own session/project deletion. */
   removeTabsForItem: (itemType: TabType, itemId: string) => void
+  /** Reorder the strip locally by moving the tab at `fromIndex` to
+   *  `toIndex` (clamped to the strip bounds). Frontend-only: the new
+   *  order survives focus / poll refetches (fetchTabs preserves local
+   *  order) but resets to server MRU on a full reload, since the
+   *  backend has no per-tab position column. */
+  moveTab: (fromIndex: number, toIndex: number) => void
 }
 
 interface ApiTab {
@@ -224,6 +230,18 @@ export const useTabsStore = create<TabsState>((set, get) => ({
     set((s) => ({
       tabs: s.tabs.filter((t) => !(t.itemType === itemType && t.itemId === itemId)),
     }))
+  },
+
+  moveTab: (fromIndex, toIndex) => {
+    set((s) => {
+      if (fromIndex < 0 || fromIndex >= s.tabs.length) return {}
+      const to = Math.max(0, Math.min(toIndex, s.tabs.length - 1))
+      if (to === fromIndex) return {}
+      const next = [...s.tabs]
+      const [moved] = next.splice(fromIndex, 1)
+      next.splice(to, 0, moved)
+      return { tabs: next }
+    })
   },
 }))
 
