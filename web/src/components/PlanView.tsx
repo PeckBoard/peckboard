@@ -172,74 +172,90 @@ export default function PlanView({ planId, onBack, onOpenSession }: PlanViewProp
   return (
     <div className="plan-view" data-testid="plan-view">
       <header className="plan-view__header">
-        <button className="btn" onClick={onBack} data-testid="plan-back">
+        <button className="plan-view__back" onClick={onBack} data-testid="plan-back">
           ← Back
         </button>
-        <h1 className="plan-view__title" data-testid="plan-title">
-          {plan.title}
-        </h1>
-        <span className="plan-view__meta">
-          v{plan.version} · {plan.status}
-        </span>
+        <div className="plan-view__titlebar">
+          <h1 className="plan-view__title" data-testid="plan-title">
+            {plan.title}
+          </h1>
+          <span className={`plan-view__badge plan-view__badge--${plan.status}`}>{plan.status}</span>
+          <span className="plan-view__version">v{plan.version}</span>
+        </div>
         <div className="plan-view__spacer" />
-        <div className="plan-view__tabs">
+        <div className="plan-view__tabs" role="tablist">
           <button
-            className={`btn ${mode === 'read' ? 'btn--active' : ''}`}
+            className={`plan-view__tab ${mode === 'read' ? 'plan-view__tab--active' : ''}`}
             onClick={() => setMode('read')}
             data-testid="plan-tab-read"
           >
             Rendered
           </button>
           <button
-            className={`btn ${mode === 'review' ? 'btn--active' : ''}`}
+            className={`plan-view__tab ${mode === 'review' ? 'plan-view__tab--active' : ''}`}
             onClick={() => setMode('review')}
             data-testid="plan-tab-review"
           >
-            Review ({comments.length})
+            Review
+            {comments.length > 0 && <span className="plan-view__tab-count">{comments.length}</span>}
           </button>
         </div>
-        {comments.length > 0 && (
+      </header>
+      <div className="plan-view__toolbar">
+        <div className="plan-view__toolbar-group">
+          <label className="plan-view__impl-label">
+            <span>Implement with</span>
+            <select
+              className="plan-view__impl-model"
+              value={implModel}
+              onChange={(e) => setImplModel(e.target.value)}
+              data-testid="plan-impl-model"
+            >
+              <option value="">same model</option>
+              {models.map((m) => (
+                <option key={m.id} value={m.id}>
+                  {m.display_name}
+                </option>
+              ))}
+            </select>
+          </label>
           <button
             className="btn btn--primary"
-            onClick={reviewComplete}
+            onClick={() => void implementDirect()}
             disabled={submitting}
-            data-testid="plan-review-complete"
+            data-testid="plan-implement"
           >
-            Mark review complete
+            Implement
           </button>
-        )}
-      </header>
-      <select
-        className="plan-view__impl-model"
-        value={implModel}
-        onChange={(e) => setImplModel(e.target.value)}
-        data-testid="plan-impl-model"
-      >
-        <option value="">Same model</option>
-        {models.map((m) => (
-          <option key={m.id} value={m.id}>
-            {m.display_name}
-          </option>
-        ))}
-      </select>
-      <button
-        className="btn"
-        onClick={() => void implementDirect()}
-        disabled={submitting}
-        data-testid="plan-implement"
-      >
-        Implement
-      </button>
-      <button className="btn" onClick={() => setShowWizard(true)} data-testid="plan-create-cards">
-        Create cards…
-      </button>
-      <button
-        className="btn danger"
-        onClick={() => setConfirmDelete(true)}
-        data-testid="plan-delete"
-      >
-        Delete
-      </button>
+          <button
+            className="btn"
+            onClick={() => setShowWizard(true)}
+            data-testid="plan-create-cards"
+          >
+            Create cards…
+          </button>
+        </div>
+        <div className="plan-view__spacer" />
+        <div className="plan-view__toolbar-group">
+          {comments.length > 0 && (
+            <button
+              className="btn btn--primary"
+              onClick={reviewComplete}
+              disabled={submitting}
+              data-testid="plan-review-complete"
+            >
+              Mark review complete
+            </button>
+          )}
+          <button
+            className="btn danger"
+            onClick={() => setConfirmDelete(true)}
+            data-testid="plan-delete"
+          >
+            Delete
+          </button>
+        </div>
+      </div>
 
       {mode === 'read' ? (
         <div className="plan-view__rendered" data-testid="plan-rendered">
