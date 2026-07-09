@@ -8,6 +8,8 @@ export interface ReportEntry {
   date: string
   session_id?: string
   project_name?: string
+  session_name?: string
+  session_created_at?: string
 }
 
 export type ReportSortOrder = 'newest' | 'oldest'
@@ -45,7 +47,7 @@ export function filterAndSortReports(
     if (sessionId && r.session_id !== sessionId) return false
     if (projectName && r.project_name !== projectName) return false
     if (!q) return true
-    const hay = [r.title, r.file, r.project_name, r.session_id, r.folder]
+    const hay = [r.title, r.file, r.project_name, r.session_name, r.session_id, r.folder]
       .filter(Boolean)
       .join(' ')
       .toLowerCase()

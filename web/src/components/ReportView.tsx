@@ -19,6 +19,8 @@ interface ReportMeta {
   date: string
   session_id?: string
   project_name?: string
+  session_name?: string
+  session_created_at?: string
 }
 
 /** Discriminated union for the report fetch lifecycle. Single state
@@ -64,6 +66,8 @@ export default function ReportView({ folder, file, onBack, onOpenSession }: Repo
             date: data.date,
             session_id: data.session_id,
             project_name: data.project_name,
+            session_name: data.session_name,
+            session_created_at: data.session_created_at,
           },
           body: data.body ?? data.content ?? '',
         })
@@ -129,6 +133,14 @@ export default function ReportView({ folder, file, onBack, onOpenSession }: Repo
             <span>{folder}</span>
             {meta?.project_name && (
               <span className="report-viewer-project">{meta.project_name}</span>
+            )}
+            {meta?.session_name && (
+              <span className="report-viewer-session">{meta.session_name}</span>
+            )}
+            {meta?.session_created_at && (
+              <span className="report-viewer-session-created">
+                Session created {new Date(meta.session_created_at).toLocaleString()}
+              </span>
             )}
             {meta?.session_id && (
               <button

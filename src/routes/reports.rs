@@ -21,6 +21,8 @@ struct ReportMeta {
     title: String,
     date: String,
     session_id: Option<String>,
+    session_name: Option<String>,
+    session_created_at: Option<String>,
     project_name: Option<String>,
 }
 
@@ -252,6 +254,8 @@ fn parse_frontmatter(content: &str, folder: &str, file: &str) -> ReportMeta {
     let mut date = folder.to_string();
     let mut session_id = None;
     let mut project_name = None;
+    let mut session_name = None;
+    let mut session_created_at = None;
 
     if let Some(fm) = extract_frontmatter(content) {
         for line in fm.lines() {
@@ -263,6 +267,10 @@ fn parse_frontmatter(content: &str, folder: &str, file: &str) -> ReportMeta {
                 session_id = Some(val.trim().trim_matches('"').to_string());
             } else if let Some(val) = line.strip_prefix("projectName:") {
                 project_name = Some(val.trim().trim_matches('"').to_string());
+            } else if let Some(val) = line.strip_prefix("sessionName:") {
+                session_name = Some(val.trim().trim_matches('"').to_string());
+            } else if let Some(val) = line.strip_prefix("sessionCreatedAt:") {
+                session_created_at = Some(val.trim().trim_matches('"').to_string());
             }
         }
     }
@@ -274,6 +282,8 @@ fn parse_frontmatter(content: &str, folder: &str, file: &str) -> ReportMeta {
         date,
         session_id,
         project_name,
+        session_name,
+        session_created_at,
     }
 }
 
@@ -347,6 +357,8 @@ mod tests {
             title: String::new(),
             date: date.to_string(),
             session_id: None,
+            session_name: None,
+            session_created_at: None,
             project_name: None,
         }
     }

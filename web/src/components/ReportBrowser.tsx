@@ -210,7 +210,13 @@ export default function ReportBrowser({ onOpenReport }: ReportBrowserProps) {
                     <span className="list-view-name">{r.title || r.file}</span>
                     <span className="list-view-meta">
                       {r.project_name && <span className="list-view-tag">{r.project_name}</span>}
+                      {r.session_name && <span className="list-view-tag">{r.session_name}</span>}
                       <span className="list-view-time">{formatReportDate(r.date)}</span>
+                      {r.session_created_at && (
+                        <span className="list-view-time">
+                          Session created {formatReportDate(r.session_created_at)}
+                        </span>
+                      )}
                     </span>
                   </>
                 )}

@@ -75,16 +75,15 @@ impl McpToolRegistry {
             None
         };
 
+        // Fetch the session once; used both for the card_id fallback and
+        // for the session name / creation date recorded in the frontmatter.
+        let session = ctx.db.get_session(&ctx.session_id).await.ok().flatten();
+
         // Resolve card_id
         let resolved_card_id = if ctx.card_id.is_some() {
             ctx.card_id.clone()
         } else {
-            ctx.db
-                .get_session(&ctx.session_id)
-                .await
-                .ok()
-                .flatten()
-                .and_then(|s| s.card_id)
+            session.as_ref().and_then(|s| s.card_id.clone())
         };
 
         // Build markdown with YAML frontmatter
@@ -98,6 +97,10 @@ impl McpToolRegistry {
         }
         if let Some(ref cid) = resolved_card_id {
             content.push_str(&format!("\ncardId: \"{cid}\""));
+        }
+        if let Some(ref s) = session {
+            content.push_str(&format!("\nsessionName: \"{}\"", s.name));
+            content.push_str(&format!("\nsessionCreatedAt: \"{}\"", s.created_at));
         }
         content.push_str("\n---\n\n");
         content.push_str(body);
@@ -272,6 +275,8 @@ impl McpToolRegistry {
                                 let mut title = file_name.clone();
                                 let mut session_id = None;
                                 let mut report_project = None;
+                                let mut session_name = None;
+                                let mut session_created_at = None;
 
                                 if content.starts_with("---") {
                                     if let Some(fm) = content.splitn(3, "---").nth(1) {
@@ -284,6 +289,15 @@ impl McpToolRegistry {
                                             }
                                             if let Some(v) = line.strip_prefix("projectName: ") {
                                                 report_project =
+                                                    Some(v.trim_matches('"').to_string());
+                                            }
+                                            if let Some(v) = line.strip_prefix("sessionName: ") {
+                                                session_name =
+                                                    Some(v.trim_matches('"').to_string());
+                                            }
+                                            if let Some(v) = line.strip_prefix("sessionCreatedAt: ")
+                                            {
+                                                session_created_at =
                                                     Some(v.trim_matches('"').to_string());
                                             }
                                         }
@@ -316,6 +330,8 @@ impl McpToolRegistry {
                                         "title": title,
                                         "sessionId": session_id,
                                         "projectName": report_project,
+                                        "sessionName": session_name,
+                                        "sessionCreatedAt": session_created_at,
                                     }));
                                 }
                             }
