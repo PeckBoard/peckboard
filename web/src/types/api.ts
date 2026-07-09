@@ -84,6 +84,30 @@ export interface Project {
   pause_reason: string | null
 }
 
+export interface Plan {
+  id: string
+  session_id: string
+  card_id: string | null
+  project_id: string | null
+  title: string
+  markdown: string
+  /** proposed | commenting | revising | approved | implementing | implemented | reviewed */
+  status: string
+  version: number
+  created_at: string
+  updated_at: string
+}
+
+export interface PlanComment {
+  id: string
+  plan_id: string
+  /** 1-based source-markdown line the comment is attached to. */
+  anchor: number
+  body: string
+  resolved: boolean
+  created_at: string
+}
+
 export interface Card {
   id: string
   project_id: string

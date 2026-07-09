@@ -541,7 +541,10 @@ pub fn build_worker_prompt(
         prompt.push_str(
             "### Cost-Aware Model Selection — Do This First\n\n\
              Auto-switch is ON for this card. Before implementing:\n\
-             1. Write a brief implementation plan for this card.\n\
+             1. Write a brief implementation plan for this card, then save \n\
+             it with `propose_plan` (Markdown; add ```mermaid diagrams where \n\
+             useful) so it persists across model switches, termination, and \n\
+             session clears and is reviewable from the 3-dots menu.\n\
              2. Classify the type of work (implement / research / debug / \
              review / docs / …).\n\
              3. Call `get_model_guidance` — it returns your current model + \

@@ -50,6 +50,8 @@ pub fn ensure_schema(conn: &mut SqliteConnection) -> anyhow::Result<()> {
     ensure_model_autoswitch_columns(conn)?;
     ensure_system_prompt_name_columns(conn)?;
     ensure_system_prompts_table(conn)?;
+    ensure_plans_tables(conn)?;
+    ensure_sessions_pending_plan_review_column(conn)?;
     backfill_session_owners(conn)?;
     Ok(())
 }
@@ -597,6 +599,60 @@ fn ensure_system_prompts_table(conn: &mut SqliteConnection) -> anyhow::Result<()
         )",
     )
     .execute(conn)?;
+    Ok(())
+}
+
+/// Heal DBs that predate `1783900000_plans`. Idempotent CREATE TABLE IF NOT
+/// EXISTS + indexes for the plan store; DDL mirrors the migration.
+fn ensure_plans_tables(conn: &mut SqliteConnection) -> anyhow::Result<()> {
+    log_if_healing_table(conn, "plans")?;
+    sql_query(
+        "CREATE TABLE IF NOT EXISTS plans (
+            id          TEXT PRIMARY KEY NOT NULL,
+            session_id  TEXT NOT NULL,
+            card_id     TEXT,
+            project_id  TEXT,
+            title       TEXT NOT NULL,
+            markdown    TEXT NOT NULL,
+            status      TEXT NOT NULL DEFAULT 'proposed',
+            version     INTEGER NOT NULL DEFAULT 1,
+            created_at  TEXT NOT NULL,
+            updated_at  TEXT NOT NULL
+        )",
+    )
+    .execute(conn)?;
+    sql_query("CREATE INDEX IF NOT EXISTS idx_plans_session ON plans (session_id)")
+        .execute(conn)?;
+    sql_query("CREATE INDEX IF NOT EXISTS idx_plans_card ON plans (card_id)").execute(conn)?;
+    sql_query(
+        "CREATE TABLE IF NOT EXISTS plan_comments (
+            id          TEXT PRIMARY KEY NOT NULL,
+            plan_id     TEXT NOT NULL,
+            anchor      INTEGER NOT NULL,
+            body        TEXT NOT NULL,
+            resolved    BOOLEAN NOT NULL DEFAULT 0,
+            created_at  TEXT NOT NULL
+        )",
+    )
+    .execute(conn)?;
+    sql_query("CREATE INDEX IF NOT EXISTS idx_plan_comments_plan ON plan_comments (plan_id)")
+        .execute(conn)?;
+    Ok(())
+}
+
+/// Heal DBs that predate `1783900000_plans`: the one-shot review-injection
+/// flag on sessions. NOT NULL DEFAULT 0 mirrors the migration.
+fn ensure_sessions_pending_plan_review_column(conn: &mut SqliteConnection) -> anyhow::Result<()> {
+    let rows: Vec<PragmaColumn> = sql_query("PRAGMA table_info(sessions)").load(conn)?;
+    let existing: Vec<String> = rows.into_iter().map(|r| r.name).collect();
+    if existing.is_empty() {
+        return Ok(());
+    }
+    if !existing.iter().any(|c| c == "pending_plan_review") {
+        tracing::info!("Repairing schema: adding sessions.pending_plan_review");
+        sql_query("ALTER TABLE sessions ADD COLUMN pending_plan_review BOOLEAN NOT NULL DEFAULT 0")
+            .execute(conn)?;
+    }
     Ok(())
 }
 /// Backfill session ownership for single-operator installs: when the DB holds

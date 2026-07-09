@@ -89,6 +89,11 @@ pub struct Session {
     /// for this session, if any. Reference/display only; the resolved body
     /// lives in `system_prompt`. `None` = no named prompt selected.
     pub system_prompt_name: Option<String>,
+    /// One-shot flag: when true, the session's next turn injects the saved
+    /// plan ahead of the user message so the (thinking) model reviews the
+    /// completed work against it. Set by the review model-switch, cleared
+    /// after a single injection. See [`crate::handover`].
+    pub pending_plan_review: bool,
 }
 
 #[derive(Insertable, Deserialize, Debug, Default)]
@@ -144,6 +149,7 @@ pub struct UpdateSession {
     pub worker_step: Option<Option<String>>,
     pub context_reset_ts: Option<Option<i64>>,
     pub model_autoswitch: Option<Option<bool>>,
+    pub pending_plan_review: Option<bool>,
 }
 // ── Repeating Tasks ──────────────────────────────────────────────────
 
@@ -808,4 +814,66 @@ pub struct NewSystemPrompt {
     pub source_url: Option<String>,
     pub created_at: String,
     pub updated_at: String,
+}
+
+// ── Plans ────────────────────────────────────────
+
+/// A durable plan authored by a session. Survives model switches,
+/// termination, and clear_session because it lives in its own table.
+#[derive(Queryable, Selectable, Serialize, Debug, Clone)]
+#[diesel(table_name = plans)]
+pub struct Plan {
+    pub id: String,
+    /// Creator session (worker or chat).
+    pub session_id: String,
+    /// Set when the creator is a worker on a card.
+    pub card_id: Option<String>,
+    pub project_id: Option<String>,
+    pub title: String,
+    pub markdown: String,
+    /// proposed | commenting | revising | approved | implementing |
+    /// implemented | reviewed
+    pub status: String,
+    pub version: i32,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+#[derive(Insertable, Debug, Default)]
+#[diesel(table_name = plans)]
+pub struct NewPlan {
+    pub id: String,
+    pub session_id: String,
+    pub card_id: Option<String>,
+    pub project_id: Option<String>,
+    pub title: String,
+    pub markdown: String,
+    pub status: String,
+    pub version: i32,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+/// A per-line human review comment on a proposed plan.
+#[derive(Queryable, Selectable, Serialize, Debug, Clone)]
+#[diesel(table_name = plan_comments)]
+pub struct PlanComment {
+    pub id: String,
+    pub plan_id: String,
+    /// 1-based source-markdown line the comment is attached to.
+    pub anchor: i32,
+    pub body: String,
+    pub resolved: bool,
+    pub created_at: String,
+}
+
+#[derive(Insertable, Debug, Default)]
+#[diesel(table_name = plan_comments)]
+pub struct NewPlanComment {
+    pub id: String,
+    pub plan_id: String,
+    pub anchor: i32,
+    pub body: String,
+    pub resolved: bool,
+    pub created_at: String,
 }

@@ -173,6 +173,25 @@ pub(super) fn tool_definitions() -> Vec<McpToolDef> {
             }),
         },
         McpToolDef {
+            name: "propose_plan".into(),
+            description: "Save (or revise) your plan for the current work as Markdown (may include ```mermaid diagrams and other visuals). Restricted to thinking models. The plan persists across model switches, termination, and session clears, and is viewable from the 3-dots menu. Call again to revise it (bumps the version).".into(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "title": {
+                        "type": "string",
+                        "description": "Short plan title (optional; defaults to 'Plan')."
+                    },
+                    "markdown": {
+                        "type": "string",
+                        "description": "The plan body in Markdown. Include diagrams as ```mermaid fenced blocks and other visuals for human review."
+                    }
+                },
+                "required": ["markdown"],
+                "additionalProperties": false
+            }),
+        },
+        McpToolDef {
             name: "create_card".into(),
             description: "Create a card. Uses current project context, or pass project_id explicitly.".into(),
             input_schema: serde_json::json!({

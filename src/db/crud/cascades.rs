@@ -72,6 +72,11 @@ impl Db {
                 .select(sessions::id)
                 .load(conn)?;
 
+            let plan_ids: Vec<String> = plans::table
+                .filter(plans::session_id.eq_any(session_ids.clone()))
+                .select(plans::id)
+                .load(conn)?;
+            purge_plans(conn, plan_ids)?;
             let mut events_deleted = 0usize;
             for sid in &session_ids {
                 events_deleted += diesel::delete(events::table.filter(events::session_id.eq(sid)))
@@ -135,6 +140,17 @@ impl Db {
                 ))
                 .execute(conn)?;
 
+            let card_ids: Vec<String> = cards_in_project.iter().map(|c| c.id.clone()).collect();
+            let plan_ids: Vec<String> = plans::table
+                .filter(
+                    plans::project_id
+                        .eq(&id)
+                        .or(plans::session_id.eq_any(session_ids.clone()))
+                        .or(plans::card_id.eq_any(card_ids)),
+                )
+                .select(plans::id)
+                .load(conn)?;
+            purge_plans(conn, plan_ids)?;
             let mut events_deleted = 0usize;
             for sid in &session_ids {
                 events_deleted += diesel::delete(events::table.filter(events::session_id.eq(sid)))
@@ -192,6 +208,15 @@ impl Db {
                 ))
                 .execute(conn)?;
 
+            let plan_ids: Vec<String> = plans::table
+                .filter(
+                    plans::card_id
+                        .eq(&id)
+                        .or(plans::session_id.eq_any(session_ids.clone())),
+                )
+                .select(plans::id)
+                .load(conn)?;
+            purge_plans(conn, plan_ids)?;
             let mut events_deleted = 0usize;
             for sid in &session_ids {
                 events_deleted += diesel::delete(events::table.filter(events::session_id.eq(sid)))
@@ -215,4 +240,17 @@ impl Db {
         })
         .await
     }
+}
+
+/// Delete the given plans and their per-line comments. Plans carry no FK
+/// constraints, so cascade callers purge them explicitly.
+fn purge_plans(conn: &mut SqliteConnection, plan_ids: Vec<String>) -> anyhow::Result<()> {
+    for pid in &plan_ids {
+        diesel::delete(plan_comments::table.filter(plan_comments::plan_id.eq(pid)))
+            .execute(conn)?;
+    }
+    if !plan_ids.is_empty() {
+        diesel::delete(plans::table.filter(plans::id.eq_any(plan_ids))).execute(conn)?;
+    }
+    Ok(())
 }

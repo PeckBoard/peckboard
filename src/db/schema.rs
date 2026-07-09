@@ -38,6 +38,7 @@ diesel::table! {
         context_reset_ts -> Nullable<BigInt>,
         model_autoswitch -> Nullable<Bool>,
         system_prompt_name -> Nullable<Text>,
+        pending_plan_review -> Bool,
     }
 }
 
@@ -333,6 +334,32 @@ diesel::table! {
     }
 }
 
+diesel::table! {
+    plans (id) {
+        id -> Text,
+        session_id -> Text,
+        card_id -> Nullable<Text>,
+        project_id -> Nullable<Text>,
+        title -> Text,
+        markdown -> Text,
+        status -> Text,
+        version -> Integer,
+        created_at -> Text,
+        updated_at -> Text,
+    }
+}
+
+diesel::table! {
+    plan_comments (id) {
+        id -> Text,
+        plan_id -> Text,
+        anchor -> Integer,
+        body -> Text,
+        resolved -> Bool,
+        created_at -> Text,
+    }
+}
+
 diesel::joinable!(sessions -> folders (folder_id));
 diesel::joinable!(sessions -> projects (project_id));
 diesel::joinable!(sessions -> repeating_tasks (repeating_task_id));
@@ -373,4 +400,6 @@ diesel::allow_tables_to_appear_in_same_query!(
     claude_accounts,
     grok_accounts,
     system_prompts,
+    plans,
+    plan_comments,
 );

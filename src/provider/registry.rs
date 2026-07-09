@@ -147,6 +147,24 @@ impl ProviderRegistry {
         }
         models
     }
+
+    /// Whether the given model id resolves to a thinking (reasoning) model.
+    /// Gates planning. Unknown models return `false` (planning is refused
+    /// rather than risked). Accepts `provider:model`, bare `model`, and an
+    /// optional `@account` suffix.
+    pub async fn is_thinking_model(&self, model_id: &str) -> bool {
+        let (base, _account) = split_model_account(model_id);
+        let (provider, model) = Self::parse_model_id(base, "claude");
+        for info in self.list_providers_with_models().await {
+            if info.id != provider {
+                continue;
+            }
+            if let Some(m) = info.models.iter().find(|m| m.id == model) {
+                return m.is_thinking();
+            }
+        }
+        false
+    }
     /// The cheapest model `provider_id` offers, ranked by the provider's own
     /// published price (input + output USD per million tokens, via
     /// `AgentProvider::model_price`). `None` when the provider is unknown or

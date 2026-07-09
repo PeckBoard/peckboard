@@ -10,6 +10,7 @@ mod dependencies;
 mod events;
 mod folders;
 mod grok_accounts;
+mod plans;
 mod plugin_approvals;
 mod plugin_data;
 mod plugin_repositories;

@@ -14,6 +14,7 @@ import { MenuButton, type MenuItem } from './Dropdown'
 import ModelPicker from './ModelPicker'
 import TodoPanel from './TodoPanel'
 import PreHatchActivity from './chat/PreHatchActivity'
+import { fetchPlanId, openPlan } from '../lib/plan'
 import { parseTodoItems, latestTodoSnapshot, type TodoItem } from '../types/todo'
 import {
   EMPTY_EVENTS,
@@ -275,6 +276,16 @@ export default function ChatView({
   )
   const prunePendingUserMessages = useSessionsStore((s) => s.prunePendingUserMessages)
   const [sessionDetail, setSessionDetail] = useState<Session | null>(null)
+  const [planId, setPlanId] = useState<string | null>(null)
+  useEffect(() => {
+    let cancelled = false
+    void fetchPlanId({ sessionId }).then((id) => {
+      if (!cancelled) setPlanId(id)
+    })
+    return () => {
+      cancelled = true
+    }
+  }, [sessionId, events.length])
   const [confirmAction, setConfirmAction] = useState<{
     title: string
     message: string
@@ -730,6 +741,12 @@ export default function ChatView({
       onSelect: onOpenTodos,
       hidden: !onOpenTodos,
       testId: 'chat-menu-tasks',
+    },
+    {
+      label: 'Plan',
+      onSelect: () => planId && openPlan(planId),
+      disabled: !planId,
+      testId: 'chat-menu-plan',
     },
     ...(onOpenPlugin
       ? (pluginItems ?? []).map((item) => ({

@@ -262,6 +262,20 @@ pub struct ModelInfo {
     pub tier: i32,
 }
 
+impl ModelInfo {
+    /// Whether this model supports extended reasoning ("thinking"). Planning
+    /// is gated to thinking models to avoid hallucinated designs. Detection
+    /// is best-effort across providers: Claude/Grok tag reasoning models with
+    /// a `reasoning` capability, Ollama reports `thinking`, and Cursor encodes
+    /// it in the model id (e.g. `claude-opus-4-8-thinking-high`).
+    pub fn is_thinking(&self) -> bool {
+        self.capabilities
+            .iter()
+            .any(|c| c.eq_ignore_ascii_case("reasoning") || c.eq_ignore_ascii_case("thinking"))
+            || self.id.to_ascii_lowercase().contains("thinking")
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

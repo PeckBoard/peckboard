@@ -280,6 +280,27 @@ impl McpToolRegistry {
         }
 
         if compact {
+            // When switching UP to review (the parent-model review), arm a
+            // one-shot flag so the resumed turn gets the saved plan injected
+            // and reviews the completed work against it. Prefer the card's
+            // plan (worker), else the session's own (chat).
+            if system_prompt_name.as_deref() == Some("review") {
+                let plan = match session.card_id.as_deref() {
+                    Some(card_id) => ctx.db.get_plan_for_card(card_id).await?,
+                    None => ctx.db.get_plan_for_session(&ctx.session_id).await?,
+                };
+                if plan.is_some() {
+                    ctx.db
+                        .update_session(
+                            &ctx.session_id,
+                            crate::db::models::UpdateSession {
+                                pending_plan_review: Some(true),
+                                ..Default::default()
+                            },
+                        )
+                        .await?;
+                }
+            }
             // Faithful "finish → compact → upgrade" hop. Apply the focusing
             // prompt now (finalize_handover flips the model but preserves
             // system_prompt), then hand the ACTUAL model change to a

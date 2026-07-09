@@ -1,0 +1,180 @@
+.plan-view {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  overflow: hidden;
+}
+
+.plan-view--loading,
+.plan-view--error {
+  padding: 24px;
+}
+
+.plan-view__header {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 12px 20px;
+  border-bottom: 1px solid var(--border, #2a2a2a);
+  flex-wrap: wrap;
+}
+
+.plan-view__title {
+  font-size: 18px;
+  margin: 0;
+}
+
+.plan-view__meta {
+  font-size: 12px;
+  opacity: 0.7;
+  text-transform: capitalize;
+}
+
+.plan-view__spacer {
+  flex: 1;
+}
+
+.plan-view__tabs {
+  display: flex;
+  gap: 4px;
+}
+
+.plan-view__impl-model {
+  max-width: 180px;
+}
+
+.plan-view__rendered {
+  padding: 20px 28px;
+  overflow: auto;
+  line-height: 1.6;
+}
+
+.plan-view__rendered pre {
+  overflow: auto;
+}
+
+.plan-mermaid {
+  display: flex;
+  justify-content: center;
+  margin: 16px 0;
+}
+
+.plan-mermaid-error {
+  border-left: 3px solid var(--danger, #d9534f);
+  padding-left: 8px;
+}
+
+.plan-view__source {
+  padding: 12px 20px;
+  overflow: auto;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 13px;
+}
+
+.plan-line__row {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+}
+
+.plan-line__row:hover {
+  background: var(--hover, rgba(255, 255, 255, 0.04));
+}
+
+.plan-line__num {
+  width: 34px;
+  text-align: right;
+  opacity: 0.4;
+  user-select: none;
+  flex-shrink: 0;
+}
+
+.plan-line__text {
+  white-space: pre-wrap;
+  flex: 1;
+  background: none;
+}
+
+.plan-line__add {
+  opacity: 0;
+  border: none;
+  background: none;
+  cursor: pointer;
+  color: var(--accent, #4a9eff);
+}
+
+.plan-line__row:hover .plan-line__add {
+  opacity: 1;
+}
+
+.plan-line__comment {
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+  margin: 4px 0 4px 44px;
+  padding: 6px 10px;
+  border-left: 3px solid var(--accent, #4a9eff);
+  background: var(--panel, rgba(255, 255, 255, 0.03));
+  border-radius: 4px;
+  font-family: system-ui, sans-serif;
+}
+
+.plan-line__comment-del {
+  border: none;
+  background: none;
+  cursor: pointer;
+  opacity: 0.6;
+}
+
+.plan-line__editor {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin: 6px 0 8px 44px;
+}
+
+.plan-line__editor textarea {
+  width: 100%;
+  resize: vertical;
+  font-family: system-ui, sans-serif;
+}
+
+.plan-view .btn--active {
+  font-weight: 600;
+  text-decoration: underline;
+}
+
+.plan-wizard {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  padding: 20px;
+}
+
+.plan-wizard h2 {
+  margin: 0;
+  font-size: 16px;
+}
+
+.plan-wizard__field {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 13px;
+}
+
+.plan-wizard__field select {
+  padding: 6px 8px;
+}
+
+.plan-wizard__hint {
+  font-size: 12px;
+  opacity: 0.7;
+  margin: 0;
+}
+
+.plan-wizard__actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+}

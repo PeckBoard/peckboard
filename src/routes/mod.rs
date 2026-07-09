@@ -8,6 +8,7 @@ pub mod me;
 pub mod misc;
 pub mod notifications;
 pub mod ollama;
+pub mod plans;
 pub mod plugin_api;
 pub mod plugin_ui;
 pub mod plugins;
@@ -38,6 +39,7 @@ pub fn api_router(state: Arc<AppState>) -> Router<Arc<AppState>> {
         .merge(folders::router(state.clone()))
         .merge(sessions::router(state.clone()))
         .merge(projects::router(state.clone()))
+        .merge(plans::router(state.clone()))
         .merge(repeating_tasks::router(state.clone()))
         .merge(reports::router(state.clone()))
         .merge(attachments::router(state.clone()))

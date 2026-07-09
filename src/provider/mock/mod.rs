@@ -702,6 +702,65 @@ async fn run_scenario(
             .await;
             return false;
         }
+        "plan-review" => {
+            // Drives the real plan-persistence path (the same `upsert_plan`
+            // the `propose_plan` MCP tool uses) so e2e can verify a saved
+            // plan survives clears/switches without a real model. Links the
+            // plan to the session's card/project when it's a worker.
+            let (card_id, project_id) = match db.get_session(session_id).await {
+                Ok(Some(s)) => (s.card_id, s.project_id),
+                _ => (None, None),
+            };
+            emit_event(
+                db,
+                broadcaster,
+                session_id,
+                ProviderEvent::Text {
+                    text: "Writing the plan…".into(),
+                },
+            )
+            .await;
+            tick().await;
+            let markdown = "# Widget plan\n\nImplement the widget end to end.\n\n\
+```mermaid\nflowchart TD\n    A[Start] --> B[Build]\n    B --> C[Done]\n```\n\n\
+- Step 1: scaffold\n- Step 2: wire it up\n";
+            let _ = db
+                .upsert_plan(
+                    session_id,
+                    card_id.as_deref(),
+                    project_id.as_deref(),
+                    "Widget plan",
+                    markdown,
+                )
+                .await;
+            if let Ok(ev) = db
+                .append_event(
+                    session_id,
+                    "plan-proposed",
+                    serde_json::json!({ "title": "Widget plan", "version": 1 }),
+                )
+                .await
+            {
+                broadcaster.broadcast(crate::ws::broadcaster::WsEvent {
+                    event_type: "event".into(),
+                    session_id: session_id.to_string(),
+                    data: serde_json::json!({
+                        "id": ev.id, "seq": ev.seq, "ts": ev.ts,
+                        "kind": "plan-proposed",
+                        "data": { "title": "Widget plan", "version": 1 },
+                    }),
+                });
+            }
+            emit_event(
+                db,
+                broadcaster,
+                session_id,
+                ProviderEvent::Text {
+                    text: "Plan saved via propose_plan.".into(),
+                },
+            )
+            .await;
+        }
         "todo" => {
             // Emit a TodoWrite tool call exactly as Claude would, then run it
             // through the same `snapshot_from_tool_call` seam the real provider
@@ -934,6 +993,12 @@ pub fn mock_model_infos() -> Vec<ModelInfo> {
             display_name: "Mock: echo".into(),
             capabilities: vec!["mock".into()],
             tier: 1,
+        },
+        ModelInfo {
+            id: "plan-review".into(),
+            display_name: "Mock: plan review (thinking)".into(),
+            capabilities: vec!["mock".into(), "reasoning".into()],
+            tier: 3,
         },
         ModelInfo {
             id: "happy-path".into(),

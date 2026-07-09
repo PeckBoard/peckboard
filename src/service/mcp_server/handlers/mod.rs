@@ -9,6 +9,7 @@ mod common_tools;
 mod folders;
 mod misc;
 mod model_control;
+mod plans;
 mod projects;
 mod repeating_tasks;
 mod reports;

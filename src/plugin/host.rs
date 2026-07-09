@@ -891,6 +891,7 @@ pub(crate) fn update_session_impl(
         worker_step: None,
         context_reset_ts: None,
         model_autoswitch: None,
+        pending_plan_review: None,
         system_prompt_name: None,
     };
     match db.update_session_blocking(req.session_id.trim(), update) {

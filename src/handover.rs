@@ -664,27 +664,66 @@ pub async fn take_pending_injection(db: &crate::db::Db, session_id: &str, text: 
         Ok(Some(s)) => s,
         _ => return text.to_string(),
     };
-    let doc = match session.pending_handover_doc {
-        Some(d) if !d.trim().is_empty() => d,
-        _ => return text.to_string(),
-    };
 
-    // Consume it so it's injected exactly once.
-    let _ = db
-        .update_session(
-            session_id,
-            UpdateSession {
-                pending_handover_doc: Some(None),
-                ..Default::default()
-            },
-        )
-        .await;
-
-    match latest_handover_meta(db, session_id).await {
-        Some((_, true)) => build_compaction_injection(&doc, text),
-        Some((from, false)) => build_injection(&from, &doc, text),
-        None => build_injection("a previous model", &doc, text),
+    // 1. Handover / compaction doc (consumed exactly once).
+    let mut out = text.to_string();
+    if let Some(doc) = session
+        .pending_handover_doc
+        .filter(|d| !d.trim().is_empty())
+    {
+        let _ = db
+            .update_session(
+                session_id,
+                UpdateSession {
+                    pending_handover_doc: Some(None),
+                    ..Default::default()
+                },
+            )
+            .await;
+        out = match latest_handover_meta(db, session_id).await {
+            Some((_, true)) => build_compaction_injection(&doc, text),
+            Some((from, false)) => build_injection(&from, &doc, text),
+            None => build_injection("a previous model", &doc, text),
+        };
     }
+
+    // 2. Parent-model review: when a review switch armed `pending_plan_review`,
+    //    prepend the saved plan + a "review the work against this plan"
+    //    directive to the resumed turn. One-shot — clear the flag whether or
+    //    not a plan is found so it can't get stuck.
+    if session.pending_plan_review {
+        let _ = db
+            .update_session(
+                session_id,
+                UpdateSession {
+                    pending_plan_review: Some(false),
+                    ..Default::default()
+                },
+            )
+            .await;
+        let plan = match session.card_id.as_deref() {
+            Some(card_id) => db.get_plan_for_card(card_id).await.ok().flatten(),
+            None => db.get_plan_for_session(session_id).await.ok().flatten(),
+        };
+        if let Some(plan) = plan {
+            out = build_plan_review_injection(&plan.markdown, &out);
+        }
+    }
+
+    out
+}
+
+/// Wrap the (already-injected) turn text with a parent-model review
+/// directive and the saved plan, so the resumed thinking model reviews the
+/// completed work against the plan before finishing.
+fn build_plan_review_injection(plan_markdown: &str, following: &str) -> String {
+    format!(
+        "[Plan review — you are the original (thinking) model resuming to REVIEW the work done \
+         while you were switched away. Below is the plan that was saved for this work. Verify the \
+         wrong, and only then finish. Once the work aligns with the plan, ask the user via \
+         `ask_user` whether to commit and push, and run git commit/push (through `run_command`) \
+         only after they explicitly confirm.]\n\n<plan>\n{plan_markdown}\n</plan>\n\n---\n\n{following}"
+    )
 }
 
 /// `(from_model, is_compaction)` of the most recent `handover` event, if any.

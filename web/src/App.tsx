@@ -26,6 +26,7 @@ import FoldersPage from './components/ManageFoldersModal'
 import ConfirmDialog from './components/ConfirmDialog'
 import ReportBrowser from './components/ReportBrowser'
 import ReportView from './components/ReportView'
+import PlanView from './components/PlanView'
 import RepeatingTasksView from './components/RepeatingTasksView'
 import UsageDashboard from './components/UsageDashboard'
 import UserManagement from './components/UserManagement'
@@ -54,6 +55,7 @@ type View =
   | 'users'
   | 'settings'
   | 'pluginPage'
+  | 'plan'
 
 /** Modals reachable from the user-icon dropdown. The URL maps `/plugins`
  *  to opening one of these on mount so bookmarks and the existing e2e
@@ -162,6 +164,8 @@ function parseRoute(): {
       const activeId = folder && file ? `${folder}/${file}` : null
       return { view: 'reports', activeId, sub: 'chat', modal: null }
     }
+    case 'plan':
+      return { view: 'plan', activeId: id, sub: 'chat', modal: null }
     case 'users':
       return { view: 'users', activeId: null, sub: 'chat', modal: null }
     case 'plugin-page':
@@ -318,9 +322,7 @@ function App() {
   const [dropdownModal, setDropdownModal] = useState<DropdownModal>(initialRoute.modal)
   // Which Settings sub-page to open on mount. `/plugins` deep-links
   // straight to Settings → Plugins; null lands on the Settings hub.
-  const [settingsSub, setSettingsSub] = useState<'plugins' | null>(
-    initialRoute.settingsSub ?? null,
-  )
+  const [settingsSub, setSettingsSub] = useState<'plugins' | null>(initialRoute.settingsSub ?? null)
   // Plugin-contributed user-menu links (generic; populated from /api/plugins).
   const [uiPanels, setUiPanels] = useState<UiPanel[]>([])
   // Plugin-contributed left-rail entries (generic; same /api/plugins catalog).
@@ -1450,6 +1452,16 @@ function App() {
                 }}
               />
             ))}
+          {view === 'plan' && (
+            <PlanView
+              planId={parseRoute().activeId}
+              onBack={() => window.history.back()}
+              onOpenSession={(sid) => {
+                setActiveSession(sid)
+                navigate('sessions', sid)
+              }}
+            />
+          )}
           {view === 'users' && <UserManagement />}
           {view === 'settings' && (
             <SettingsPage
@@ -1468,10 +1480,7 @@ function App() {
         <ChangePasswordModal mode={{ kind: 'self' }} onClose={() => setShowChangePassword(false)} />
       )}
       {dropdownModal === 'plugin-registry' && (
-        <PluginRegistryModal
-          onClose={closeDropdownModal}
-          onBack={closeDropdownModal}
-        />
+        <PluginRegistryModal onClose={closeDropdownModal} onBack={closeDropdownModal} />
       )}
       {openPanel && (
         <PluginPanelModal

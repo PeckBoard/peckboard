@@ -12,6 +12,7 @@ import Modal from './Modal'
 import WorkerComms from './WorkerComms'
 import ProjectTodoSummary from './ProjectTodoSummary'
 import SafeMarkdown from './SafeMarkdown'
+import { fetchPlanId, openPlan } from '../lib/plan'
 import { useProjectTodos } from '../hooks/useProjectTodos'
 import {
   EMPTY_QUESTIONS,
@@ -72,9 +73,11 @@ export default function KanbanBoard({
   // position the fixed dropdown so it can escape any clipping ancestor
   // (modal, scroll container) and align under the trigger.
   const [cardMenuRect, setCardMenuRect] = useState<DOMRect | null>(null)
+  const [cardMenuPlanId, setCardMenuPlanId] = useState<string | null>(null)
   const closeCardMenu = () => {
     setCardMenuId(null)
     setCardMenuRect(null)
+    setCardMenuPlanId(null)
   }
   const openCardMenu = (cardId: string, btn: HTMLElement) => {
     if (cardMenuId === cardId) {
@@ -82,6 +85,8 @@ export default function KanbanBoard({
     } else {
       setCardMenuId(cardId)
       setCardMenuRect(btn.getBoundingClientRect())
+      setCardMenuPlanId(null)
+      void fetchPlanId({ cardId }).then(setCardMenuPlanId)
     }
   }
   const [editingCard, setEditingCard] = useState<Card | null>(null)
@@ -1036,6 +1041,17 @@ export default function KanbanBoard({
                                   }}
                                 >
                                   View
+                                </button>
+                                <button
+                                  disabled={!cardMenuPlanId}
+                                  onClick={() => {
+                                    if (!cardMenuPlanId) return
+                                    closeCardMenu()
+                                    openPlan(cardMenuPlanId)
+                                  }}
+                                  data-testid="card-menu-plan"
+                                >
+                                  Plan
                                 </button>
                                 {sessionVisible && (
                                   <button onClick={() => handleViewSession(sessionForCard!)}>
