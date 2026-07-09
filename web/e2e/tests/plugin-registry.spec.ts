@@ -123,7 +123,7 @@ test('browse → search → install from the registry page', async ({ request, p
   await expect(page.getByTestId('registry-plugin-demo')).toHaveCount(0)
 
   await page.getByTestId('browse-plugins').click()
-  await expect(page.getByTestId('plugin-registry-modal')).toBeVisible()
+  await expect(page.getByTestId('plugin-registry-panel')).toBeVisible()
 
   // Plugins tab is default; the entry is listed.
   const row = page.getByTestId('registry-plugin-demo')
@@ -143,7 +143,11 @@ test('browse → search → install from the registry page', async ({ request, p
   expect(state.lastInstall?.id).toBe('demo')
   expect(state.lastInstall?.repository).toBe(REPO_URL)
 })
-test('back to plugins returns to the Plugins settings page', async ({ request, page, baseURL }) => {
+test('back from the registry tab returns to the settings hub', async ({
+  request,
+  page,
+  baseURL,
+}) => {
   expect(baseURL).toBeTruthy()
   const token = await authenticate(request)
   await mockRegistry(page)
@@ -152,14 +156,16 @@ test('back to plugins returns to the Plugins settings page', async ({ request, p
   const section = page.getByTestId('plugins-section')
   await expect(section).toBeVisible({ timeout: 10_000 })
 
-  // Open the registry page from the Plugins settings page.
+  // Open the registry tab from the Plugins settings page.
   await page.getByTestId('browse-plugins').click()
-  await expect(page.getByTestId('plugin-registry-modal')).toBeVisible()
+  await expect(page.getByTestId('plugin-registry-panel')).toBeVisible()
 
-  // "Back to plugins" closes the registry and returns to Settings → Plugins.
-  await page.getByTestId('registry-back-to-plugins').click()
-  await expect(page.getByTestId('plugin-registry-modal')).toHaveCount(0)
-  await expect(section).toBeVisible()
+  // The Settings back button leaves the registry tab for the settings hub,
+  // where the Plugins and Plugin Registry entries are listed.
+  await page.locator('.settings-back').click()
+  await expect(page.getByTestId('plugin-registry-panel')).toHaveCount(0)
+  await expect(page.getByTestId('settings-nav-plugins')).toBeVisible()
+  await expect(page.getByTestId('settings-nav-registry')).toBeVisible()
 })
 /**
  * Mock a registry with two already-installed plugins that each have a newer
@@ -248,7 +254,7 @@ test('upgrades a compatible plugin and blocks an incompatible one', async ({
   const state = await mockUpgradeRegistry(page)
 
   await loadAppAt(page, token, '/plugin-registry')
-  await expect(page.getByTestId('plugin-registry-modal')).toBeVisible({ timeout: 10_000 })
+  await expect(page.getByTestId('plugin-registry-panel')).toBeVisible({ timeout: 10_000 })
 
   // Compatible newer version → an enabled "Upgrade to vX" + "Update available".
   const upgradeBtn = page.getByTestId('registry-install-upgradable')
@@ -278,7 +284,7 @@ test('repositories tab adds and removes a repository', async ({ request, page, b
   const state = await mockRegistry(page)
 
   await loadAppAt(page, token, '/plugin-registry')
-  await expect(page.getByTestId('plugin-registry-modal')).toBeVisible({ timeout: 10_000 })
+  await expect(page.getByTestId('plugin-registry-panel')).toBeVisible({ timeout: 10_000 })
 
   await page.getByTestId('registry-tab-repositories').click()
   // Seeded default repo is present.

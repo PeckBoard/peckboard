@@ -1,5 +1,4 @@
 import { useCallback, useEffect, useState } from 'react'
-import Modal from './Modal'
 import HookList from './HookList'
 import {
   addRepository,
@@ -14,21 +13,14 @@ import {
 type Tab = 'plugins' | 'repositories'
 
 /**
- * The Plugin Registry page (its own modal, reached from Settings →
- * Plugins → "Browse plugins"). Two tabs: **Plugins** — every plugin
- * aggregated across all configured repositories, searchable, with an
- * Install button — and **Repositories** — manage the registry sources.
- * One `/api/plugins/registry` call powers both tabs (it returns the
- * repositories with reachability AND the merged plugin list).
+ * The Plugin Registry Settings sub-page. Two tabs: **Plugins** — every plugin
+ * aggregated across all configured repositories, searchable, with an Install
+ * button — and **Repositories** — manage the registry sources. One
+ * `/api/plugins/registry` call powers both tabs (it returns the repositories
+ * with reachability AND the merged plugin list). Rendered inline by
+ * SettingsPage; the old "Browse plugins" modal was folded into this tab.
  */
-export default function PluginRegistryModal({
-  onClose,
-  onBack,
-}: {
-  onClose: () => void
-  /** Navigate back to the Plugins modal this page was opened from. */
-  onBack: () => void
-}) {
+export default function PluginRegistryPanel() {
   const [tab, setTab] = useState<Tab>('plugins')
   const [data, setData] = useState<RegistryData | null>(null)
   const [error, setError] = useState<string | null>(null)
@@ -51,13 +43,7 @@ export default function PluginRegistryModal({
   }, [load])
 
   return (
-    <Modal
-      onClose={onClose}
-      className="plugins-modal"
-      maxWidth={760}
-      data-testid="plugin-registry-modal"
-    >
-      <h2>Plugin Registry</h2>
+    <div className="registry-panel-page" data-testid="plugin-registry-panel">
       <div className="registry-tabs" role="tablist">
         <button
           type="button"
@@ -88,21 +74,7 @@ export default function PluginRegistryModal({
         <PluginsTab data={data} query={query} setQuery={setQuery} onChanged={load} />
       )}
       {data && tab === 'repositories' && <RepositoriesTab data={data} onChanged={load} />}
-
-      <div className="form-actions">
-        <button
-          type="button"
-          className="btn-secondary"
-          data-testid="registry-back-to-plugins"
-          onClick={onBack}
-        >
-          ← Back to plugins
-        </button>
-        <button type="button" className="btn-secondary" onClick={onClose}>
-          Close
-        </button>
-      </div>
-    </Modal>
+    </div>
   )
 }
 

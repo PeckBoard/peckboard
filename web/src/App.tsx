@@ -19,7 +19,6 @@ import { applyThemeColor } from './util/themeColor'
 import PluginPanelModal from './components/PluginPanelModal'
 import PluginFullPage from './components/PluginFullPage'
 import PluginApprovalPrompt from './components/PluginApprovalPrompt'
-import PluginRegistryModal from './components/PluginRegistryModal'
 import NewSessionModal from './components/NewSessionModal'
 import NewProjectModal from './components/NewProjectModal'
 import FoldersPage from './components/ManageFoldersModal'
@@ -56,12 +55,6 @@ type View =
   | 'settings'
   | 'pluginPage'
   | 'plan'
-
-/** Modals reachable from the user-icon dropdown. The URL maps `/plugins`
- *  to opening one of these on mount so bookmarks and the existing e2e
- *  routes still land somewhere useful. (Settings is a full-page view, not
- *  a modal — see the `'settings'` `View`.) */
-type DropdownModal = 'plugin-registry' | null
 
 /** A UI page a loaded plugin contributes, surfaced as a user-menu link.
  * Generic: the host renders whatever panels a plugin declares (from the
@@ -101,8 +94,8 @@ function pluginSubItemId(sub: SessionSub): string | null {
 
 /** Parse the current URL pathname into a view, optional active ID, an
  *  optional sub-view (only meaningful when `view` is 'sessions' or
- *  'projects'), and an optional dropdown-modal hint for the few routes
- *  that map straight to a modal (`/plugin-registry`).
+ *  'projects'), and an optional Settings sub-page hint for the routes
+ *  that deep-link into Settings (`/plugins`, `/plugin-registry`).
  *
  *  For the reports view, `activeId` is the encoded `<folder>/<file>`
  *  pair the user is reading (the same id used as the report tab's
@@ -111,8 +104,7 @@ function parseRoute(): {
   view: View
   activeId: string | null
   sub: SessionSub
-  modal: DropdownModal
-  settingsSub?: 'plugins' | null
+  settingsSub?: 'plugins' | 'registry' | null
 } {
   const path = window.location.pathname
   const segments = path.split('/').filter(Boolean)
@@ -134,27 +126,25 @@ function parseRoute(): {
         view: 'sessions',
         activeId: id,
         sub: subFor(),
-        modal: null,
       }
     case 'projects':
       return {
         view: 'projects',
         activeId: id,
         sub: subFor(),
-        modal: null,
       }
     case 'usage':
-      return { view: 'usage', activeId: null, sub: 'chat', modal: null }
+      return { view: 'usage', activeId: null, sub: 'chat' }
     case 'repeating-tasks':
-      return { view: 'repeatingTasks', activeId: id, sub: 'chat', modal: null }
+      return { view: 'repeatingTasks', activeId: id, sub: 'chat' }
     case 'folders':
-      return { view: 'folders', activeId: null, sub: 'chat', modal: null }
+      return { view: 'folders', activeId: null, sub: 'chat' }
     case 'settings':
-      return { view: 'settings', activeId: null, sub: 'chat', modal: null }
+      return { view: 'settings', activeId: null, sub: 'chat' }
     case 'plugins':
-      return { view: 'settings', activeId: null, sub: 'chat', modal: null, settingsSub: 'plugins' }
+      return { view: 'settings', activeId: null, sub: 'chat', settingsSub: 'plugins' }
     case 'plugin-registry':
-      return { view: 'sessions', activeId: null, sub: 'chat', modal: 'plugin-registry' }
+      return { view: 'settings', activeId: null, sub: 'chat', settingsSub: 'registry' }
     case 'reports': {
       // `/reports` — index; `/reports/<folder>/<file>` — single report
       // viewer. We compose the same `<folder>/<file>` id the tab strip
@@ -162,21 +152,20 @@ function parseRoute(): {
       const folder = segments[1]
       const file = segments[2]
       const activeId = folder && file ? `${folder}/${file}` : null
-      return { view: 'reports', activeId, sub: 'chat', modal: null }
+      return { view: 'reports', activeId, sub: 'chat' }
     }
     case 'plan':
-      return { view: 'plan', activeId: id, sub: 'chat', modal: null }
+      return { view: 'plan', activeId: id, sub: 'chat' }
     case 'users':
-      return { view: 'users', activeId: null, sub: 'chat', modal: null }
+      return { view: 'users', activeId: null, sub: 'chat' }
     case 'plugin-page':
       return {
         view: 'pluginPage',
         activeId: id && third ? `${id}:${third}` : null,
         sub: 'chat',
-        modal: null,
       }
     default:
-      return { view: 'sessions', activeId: null, sub: 'chat', modal: null }
+      return { view: 'sessions', activeId: null, sub: 'chat' }
   }
 }
 
@@ -319,10 +308,11 @@ function App() {
   const [announcement, setAnnouncement] = useState<Announcement | null>(null)
   const [userMenuOpen, setUserMenuOpen] = useState(false)
   const [showChangePassword, setShowChangePassword] = useState(false)
-  const [dropdownModal, setDropdownModal] = useState<DropdownModal>(initialRoute.modal)
   // Which Settings sub-page to open on mount. `/plugins` deep-links
   // straight to Settings → Plugins; null lands on the Settings hub.
-  const [settingsSub, setSettingsSub] = useState<'plugins' | null>(initialRoute.settingsSub ?? null)
+  const [settingsSub, setSettingsSub] = useState<'plugins' | 'registry' | null>(
+    initialRoute.settingsSub ?? null,
+  )
   // Plugin-contributed user-menu links (generic; populated from /api/plugins).
   const [uiPanels, setUiPanels] = useState<UiPanel[]>([])
   // Plugin-contributed left-rail entries (generic; same /api/plugins catalog).
@@ -407,26 +397,6 @@ function App() {
     [],
   )
 
-  // Open one of the dropdown-modal targets (Plugins) and reflect it in the
-  // URL so the modal is bookmarkable and survives a reload. The
-  // close handler simply navigates back, which pops the entry off history
-  // and clears `dropdownModal` via popstate.
-  const openDropdownModal = useCallback((target: Exclude<DropdownModal, null>) => {
-    setDropdownModal(target)
-    const path = `/${target}`
-    if (window.location.pathname !== path) {
-      history.pushState(null, '', path)
-    }
-  }, [])
-
-  const closeDropdownModal = useCallback(() => {
-    // Just clear modal state. The URL-sync effect notices `dropdownModal`
-    // went null and pushes the underlying view's path (typically `/`),
-    // which moves us off `/plugins` so a Back press re-enters the modal
-    // — natural Back/Forward UX.
-    setDropdownModal(null)
-  }, [])
-
   // Sync active IDs from initial URL once authenticated
   useEffect(() => {
     if (authenticated && initialRoute.activeId) {
@@ -444,7 +414,6 @@ function App() {
       const route = parseRoute()
       setViewRaw(route.view)
       setSessionSub(route.sub)
-      setDropdownModal(route.modal)
       setSettingsSub(route.settingsSub ?? null)
       if (route.view === 'sessions') {
         setActiveSession(route.activeId)
@@ -462,53 +431,45 @@ function App() {
     return () => window.removeEventListener('popstate', onPopState)
   }, [setActiveSession, setActiveProject])
 
-  // When activeSessionId changes, update URL — unless we're sitting on a
-  // dropdown-modal route (`/plugins`). That route maps to
-  // `view: 'sessions'` but must keep its pathname so a reload still
-  // lands on the same modal; without this guard the sync rewrites
-  // `/plugins` back to `/` on first render and the modal vanishes.
+  // When activeSessionId changes, update URL.
   useEffect(() => {
-    if (dropdownModal) return
     if (view === 'sessions') {
       const path = buildPath('sessions', activeSessionId, activeSessionId ? sessionSub : 'chat')
       if (window.location.pathname !== path) {
         history.pushState(null, '', path)
       }
     }
-  }, [view, activeSessionId, sessionSub, dropdownModal])
+  }, [view, activeSessionId, sessionSub])
 
   // When activeProjectId changes, update URL.
   useEffect(() => {
-    if (dropdownModal) return
     if (view === 'projects') {
       const path = buildPath('projects', activeProjectId, activeProjectId ? sessionSub : 'chat')
       if (window.location.pathname !== path) {
         history.pushState(null, '', path)
       }
     }
-  }, [view, activeProjectId, sessionSub, dropdownModal])
+  }, [view, activeProjectId, sessionSub])
 
   // When the active repeating task changes, update URL.
   useEffect(() => {
-    if (dropdownModal) return
     if (view === 'repeatingTasks') {
       const path = buildPath('repeatingTasks', activeRepeatingTaskId)
       if (window.location.pathname !== path) {
         history.pushState(null, '', path)
       }
     }
-  }, [view, activeRepeatingTaskId, dropdownModal])
+  }, [view, activeRepeatingTaskId])
 
   // When the active report changes, update URL.
   useEffect(() => {
-    if (dropdownModal) return
     if (view === 'reports') {
       const path = buildPath('reports', activeReportId)
       if (window.location.pathname !== path) {
         history.pushState(null, '', path)
       }
     }
-  }, [view, activeReportId, dropdownModal])
+  }, [view, activeReportId])
 
   useEffect(() => {
     const saved = localStorage.getItem('peckboard_theme')
@@ -857,6 +818,12 @@ function App() {
       setActiveSession(tab.itemId)
       navigate('sessions', tab.itemId)
     },
+    onClose: (tab) => {
+      if (activeSessionId === tab.itemId) {
+        setActiveSession(null)
+        navigate('sessions', null)
+      }
+    },
     getMenuItems: (tab) => [
       { label: 'Rename', onSelect: () => handleRenameItem('session', tab.itemId) },
       {
@@ -897,6 +864,12 @@ function App() {
       setActiveProject(tab.itemId)
       navigate('projects', tab.itemId)
     },
+    onClose: (tab) => {
+      if (activeProjectId === tab.itemId) {
+        setActiveProject(null)
+        navigate('projects', null)
+      }
+    },
     getMenuItems: (tab) => [
       { label: 'Rename', onSelect: () => handleRenameItem('project', tab.itemId) },
       {
@@ -915,6 +888,12 @@ function App() {
       setActiveRepeatingTaskId(tab.itemId)
       navigate('repeatingTasks', tab.itemId)
     },
+    onClose: (tab) => {
+      if (activeRepeatingTaskId === tab.itemId) {
+        setActiveRepeatingTaskId(null)
+        navigate('repeatingTasks', null)
+      }
+    },
     getMenuItems: (tab) => [
       { label: 'Rename', onSelect: () => handleRenameItem('repeating_task', tab.itemId) },
       {
@@ -932,6 +911,12 @@ function App() {
     onActivate: (tab) => {
       setActiveReportId(tab.itemId)
       navigate('reports', tab.itemId)
+    },
+    onClose: (tab) => {
+      if (activeReportId === tab.itemId) {
+        setActiveReportId(null)
+        navigate('reports', null)
+      }
     },
     // Reports have no delete endpoint and no rename, so the kind-
     // specific menu is empty. The TabBar still layers in "Close tab"
@@ -1468,7 +1453,6 @@ function App() {
               key={settingsSub ?? 'root'}
               onBack={() => navigate('sessions')}
               initialSubPage={settingsSub}
-              onBrowseRegistry={() => openDropdownModal('plugin-registry')}
             />
           )}
         </ErrorBoundary>
@@ -1478,9 +1462,6 @@ function App() {
       {showNewProject && <NewProjectModal onClose={() => setShowNewProject(false)} />}
       {showChangePassword && (
         <ChangePasswordModal mode={{ kind: 'self' }} onClose={() => setShowChangePassword(false)} />
-      )}
-      {dropdownModal === 'plugin-registry' && (
-        <PluginRegistryModal onClose={closeDropdownModal} onBack={closeDropdownModal} />
       )}
       {openPanel && (
         <PluginPanelModal

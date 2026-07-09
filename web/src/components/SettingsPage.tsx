@@ -10,6 +10,7 @@ import PluginSettingsForm from './PluginSettingsForm'
 import SystemPromptsSection from './SystemPromptsSection'
 import OllamaPullModel from './OllamaPullModel'
 import PluginsSection from './PluginsSection'
+import PluginRegistryPanel from './PluginRegistryPanel'
 
 const THEME_KEY = 'peckboard_theme'
 const HUE_KEY = 'peckboard_hue'
@@ -69,7 +70,7 @@ function applyHue(hue: number) {
   document.documentElement.style.setProperty('--primary-hue', String(hue))
 }
 
-type SubPage = 'appearance' | 'chat' | 'prompts' | 'plugins' | 'providers' | 'server'
+type SubPage = 'appearance' | 'chat' | 'prompts' | 'plugins' | 'providers' | 'registry' | 'server'
 
 /**
  * The settings hub lists these sub-pages; each groups related sections
@@ -93,7 +94,12 @@ const SUB_PAGES: { id: SubPage; title: string; blurb: string }[] = [
   {
     id: 'plugins',
     title: 'Plugins',
-    blurb: 'Installed plugins, approvals, and the plugin registry',
+    blurb: 'Installed plugins and approvals',
+  },
+  {
+    id: 'registry',
+    title: 'Plugin Registry',
+    blurb: 'Browse and install plugins, manage registry repositories',
   },
   {
     id: 'server',
@@ -106,11 +112,9 @@ interface Props {
   onBack: () => void
   /** Sub-page to open on mount (e.g. 'plugins' when deep-linked from /plugins). */
   initialSubPage?: SubPage | null
-  /** Open the Plugin Registry (Browse plugins) modal. */
-  onBrowseRegistry: () => void
 }
 
-export default function SettingsPage({ onBack, initialSubPage = null, onBrowseRegistry }: Props) {
+export default function SettingsPage({ onBack, initialSubPage = null }: Props) {
   const user = useAuthStore((s) => s.user)
   const [subPage, setSubPage] = useState<SubPage | null>(initialSubPage)
   const [theme, setTheme] = useState<Theme>(getStoredTheme)
@@ -419,7 +423,8 @@ export default function SettingsPage({ onBack, initialSubPage = null, onBrowseRe
         </>
       )}
 
-      {subPage === 'plugins' && <PluginsSection onBrowseRegistry={onBrowseRegistry} />}
+      {subPage === 'plugins' && <PluginsSection onBrowseRegistry={() => setSubPage('registry')} />}
+      {subPage === 'registry' && <PluginRegistryPanel />}
       {subPage === 'prompts' && <SystemPromptsSection />}
     </div>
   )
