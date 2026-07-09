@@ -79,6 +79,7 @@ async fn list_reports(State(state): State<Arc<AppState>>) -> impl IntoResponse {
             }
         }
     }
+    sort_reports(&mut reports);
 
     Json(serde_json::json!({ "reports": reports }))
 }
@@ -314,5 +315,64 @@ fn strip_frontmatter(content: &str) -> String {
     match rest.find("\n---") {
         Some(end) => rest[end + 4..].trim_start().to_string(),
         None => content.to_string(),
+    }
+}
+
+/// Sort reports newest-first by their frontmatter `date` (RFC3339).
+/// Unparseable dates fall back to a lexical (folder, file) comparison and
+/// sort after every report whose date parsed.
+fn sort_reports(reports: &mut [ReportMeta]) {
+    reports.sort_by(|a, b| {
+        let da = chrono::DateTime::parse_from_rfc3339(&a.date).ok();
+        let db = chrono::DateTime::parse_from_rfc3339(&b.date).ok();
+        match (da, db) {
+            (Some(x), Some(y)) => y.cmp(&x),
+            (Some(_), None) => std::cmp::Ordering::Less,
+            (None, Some(_)) => std::cmp::Ordering::Greater,
+            (None, None) => {
+                (b.folder.as_str(), b.file.as_str()).cmp(&(a.folder.as_str(), a.file.as_str()))
+            }
+        }
+    });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn meta(folder: &str, file: &str, date: &str) -> ReportMeta {
+        ReportMeta {
+            folder: folder.to_string(),
+            file: file.to_string(),
+            title: String::new(),
+            date: date.to_string(),
+            session_id: None,
+            project_name: None,
+        }
+    }
+
+    #[test]
+    fn sorts_newest_first_unparseable_last() {
+        let mut v = vec![
+            meta("2026-07-01", "a.md", "2026-07-01T10:00:00+00:00"),
+            meta("2026-07-09", "b.md", "2026-07-09T08:00:00+00:00"),
+            meta("zzz", "bad.md", "not-a-date"),
+            meta("2026-07-05", "c.md", "2026-07-05T23:00:00+00:00"),
+        ];
+        sort_reports(&mut v);
+        let order: Vec<&str> = v.iter().map(|m| m.file.as_str()).collect();
+        assert_eq!(order, vec!["b.md", "c.md", "a.md", "bad.md"]);
+    }
+
+    #[test]
+    fn respects_timezone_offsets() {
+        // 12:00+02:00 == 10:00Z is earlier than 11:00Z.
+        let mut v = vec![
+            meta("d", "tz.md", "2026-07-09T12:00:00+02:00"),
+            meta("d", "utc.md", "2026-07-09T11:00:00+00:00"),
+        ];
+        sort_reports(&mut v);
+        let order: Vec<&str> = v.iter().map(|m| m.file.as_str()).collect();
+        assert_eq!(order, vec!["utc.md", "tz.md"]);
     }
 }

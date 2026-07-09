@@ -1,6 +1,11 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import { authedFetch } from '../store/auth'
-import { useReportsStore, type ReportEntry } from '../store/reports'
+import {
+  useReportsStore,
+  filterAndSortReports,
+  type ReportEntry,
+  type ReportSortOrder,
+} from '../store/reports'
 import List from './List'
 import ListViewHeader from './ListViewHeader'
 
@@ -11,12 +16,24 @@ interface ReportBrowserProps {
   onOpenReport: (folder: string, file: string) => void
 }
 
+/** RFC3339 → locale string; falls back to the raw value when unparseable
+ *  so a malformed date still shows *something*. */
+function formatReportDate(date: string): string {
+  const d = new Date(date)
+  return Number.isNaN(d.getTime()) ? date : d.toLocaleString()
+}
+
 /**
  * List / index of report markdown files. Clicking a row hands off to
  * [[App]] via `onOpenReport`, which navigates to `/reports/:folder/:file`
  * (opens a tab and mounts [[ReportView]]). The browser itself never
  * holds the active-report state — that lives in the URL so the report
  * can be deep-linked and persists in the tab strip across devices.
+ *
+ * The toolbar (search box, session/project filters, sort toggle) filters
+ * and sorts client-side over the already-fetched metadata via
+ * [[filterAndSortReports]]; the visible rows are then grouped by their
+ * date folder in the resulting (sorted) order.
  */
 export default function ReportBrowser({ onOpenReport }: ReportBrowserProps) {
   const reports = useReportsStore((s) => s.reports)
@@ -24,15 +41,33 @@ export default function ReportBrowser({ onOpenReport }: ReportBrowserProps) {
   const error = useReportsStore((s) => s.error)
   const fetchReports = useReportsStore((s) => s.fetchReports)
 
+  const [query, setQuery] = useState('')
+  const [sessionId, setSessionId] = useState('')
+  const [projectName, setProjectName] = useState('')
+  const [order, setOrder] = useState<ReportSortOrder>('newest')
+
   // Folders expanded by default once reports load; track which the user
   // has explicitly collapsed so a re-fetch doesn't undo their action.
   const [collapsedFolders, setCollapsedFolders] = useState<Set<string>>(new Set())
-  const allFolders = new Set(reports.map((r) => r.folder))
-  const expandedFolders = new Set([...allFolders].filter((f) => !collapsedFolders.has(f)))
 
   useEffect(() => {
     fetchReports()
   }, [fetchReports])
+
+  // Distinct sessions / projects present, for the filter dropdowns.
+  const sessionOptions = useMemo(
+    () => [...new Set(reports.map((r) => r.session_id).filter((s): s is string => !!s))].sort(),
+    [reports],
+  )
+  const projectOptions = useMemo(
+    () => [...new Set(reports.map((r) => r.project_name).filter((p): p is string => !!p))].sort(),
+    [reports],
+  )
+
+  const visible = useMemo(
+    () => filterAndSortReports(reports, { query, sessionId, projectName, order }),
+    [reports, query, sessionId, projectName, order],
+  )
 
   const toggleFolder = (folder: string) => {
     setCollapsedFolders((prev) => {
@@ -57,15 +92,73 @@ export default function ReportBrowser({ onOpenReport }: ReportBrowserProps) {
     URL.revokeObjectURL(url)
   }
 
+  // Group the visible (already filtered + sorted) reports by date folder.
+  // Insertion order follows the sorted list, so folders render newest-first
+  // (or oldest-first) to match the chosen sort order.
   const grouped: Record<string, ReportEntry[]> = {}
-  for (const r of reports) {
+  for (const r of visible) {
     if (!grouped[r.folder]) grouped[r.folder] = []
     grouped[r.folder].push(r)
   }
+  const folderOrder = Object.keys(grouped)
+  const expandedFolders = new Set(folderOrder.filter((f) => !collapsedFolders.has(f)))
+
+  const hasFilter = query.trim() !== '' || sessionId !== '' || projectName !== ''
+
+  const toolbar = (
+    <div className="report-toolbar">
+      <input
+        type="search"
+        className="report-search"
+        placeholder="Search reports…"
+        value={query}
+        onChange={(e) => setQuery(e.target.value)}
+        aria-label="Search reports"
+      />
+      {sessionOptions.length > 0 && (
+        <select
+          className="report-filter"
+          value={sessionId}
+          onChange={(e) => setSessionId(e.target.value)}
+          aria-label="Filter by session"
+        >
+          <option value="">All sessions</option>
+          {sessionOptions.map((s) => (
+            <option key={s} value={s}>
+              {s.slice(0, 8)}
+            </option>
+          ))}
+        </select>
+      )}
+      {projectOptions.length > 0 && (
+        <select
+          className="report-filter"
+          value={projectName}
+          onChange={(e) => setProjectName(e.target.value)}
+          aria-label="Filter by project"
+        >
+          <option value="">All projects</option>
+          {projectOptions.map((p) => (
+            <option key={p} value={p}>
+              {p}
+            </option>
+          ))}
+        </select>
+      )}
+      <button
+        type="button"
+        className="report-sort-toggle"
+        onClick={() => setOrder((o) => (o === 'newest' ? 'oldest' : 'newest'))}
+        title={order === 'newest' ? 'Newest first' : 'Oldest first'}
+      >
+        {order === 'newest' ? 'Newest ↓' : 'Oldest ↑'}
+      </button>
+    </div>
+  )
 
   return (
     <div className="list-view">
-      <ListViewHeader title="Reports" />
+      <ListViewHeader title="Reports" extras={toolbar} />
       <div className="list-view-body">
         {loading && (
           <div className="chat-loading">
@@ -80,7 +173,13 @@ export default function ReportBrowser({ onOpenReport }: ReportBrowserProps) {
           </div>
         )}
 
-        {Object.keys(grouped).map((folder) => (
+        {!loading && reports.length > 0 && visible.length === 0 && (
+          <div className="list-view-empty">
+            <p>{hasFilter ? 'No reports match your filters' : 'No reports found'}</p>
+          </div>
+        )}
+
+        {folderOrder.map((folder) => (
           <section key={folder} className="report-group">
             <button
               type="button"
@@ -110,8 +209,8 @@ export default function ReportBrowser({ onOpenReport }: ReportBrowserProps) {
                   <>
                     <span className="list-view-name">{r.title || r.file}</span>
                     <span className="list-view-meta">
-                      {r.projectName && <span className="list-view-tag">{r.projectName}</span>}
-                      <span className="list-view-time">{r.date}</span>
+                      {r.project_name && <span className="list-view-tag">{r.project_name}</span>}
+                      <span className="list-view-time">{formatReportDate(r.date)}</span>
                     </span>
                   </>
                 )}

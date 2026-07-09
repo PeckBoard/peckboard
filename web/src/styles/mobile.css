@@ -579,6 +579,44 @@
   font-family: inherit;
   cursor: pointer;
 }
+.report-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+}
+.report-search {
+  padding: 5px 10px;
+  background: var(--surface2, var(--surface));
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  font-size: var(--text-sm);
+  font-family: inherit;
+  min-width: 160px;
+}
+.report-filter {
+  padding: 5px 8px;
+  background: var(--surface2, var(--surface));
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  font-size: var(--text-sm);
+  font-family: inherit;
+  cursor: pointer;
+}
+.report-sort-toggle {
+  padding: 5px 10px;
+  background: transparent;
+  color: var(--text2, var(--text));
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  font-size: var(--text-sm);
+  font-family: inherit;
+  cursor: pointer;
+  white-space: nowrap;
+}
 .list-view-body {
   flex: 1;
   overflow-y: auto;
