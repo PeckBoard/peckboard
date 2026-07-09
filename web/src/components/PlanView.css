@@ -173,28 +173,15 @@
   gap: var(--space-2);
 }
 
-.plan-view__impl-label {
-  display: inline-flex;
+.plan-view__toolbar .plan-view__impl-field {
+  flex-direction: row;
   align-items: center;
   gap: var(--space-2);
-  font-size: var(--text-sm);
-  color: var(--text2);
 }
 
-.plan-view__impl-model {
-  max-width: 200px;
-  padding: 6px 10px;
-  border: 1px solid var(--border);
-  border-radius: var(--radius);
-  background: var(--surface);
-  color: var(--text);
-  font-size: var(--text-sm);
-}
-
-.plan-view__impl-model:focus-visible {
-  outline: none;
-  border-color: var(--accent);
-  box-shadow: 0 0 0 3px var(--ring);
+.plan-view__toolbar .plan-view__impl-field .form-label {
+  margin: 0;
+  white-space: nowrap;
 }
 
 /* ─── Rendered plan ─── */
@@ -412,31 +399,4 @@
 .plan-wizard h2 {
   margin: 0;
   font-size: var(--text-lg);
-}
-
-.plan-wizard__field {
-  display: flex;
-  flex-direction: column;
-  gap: var(--space-1);
-  font-size: var(--text-sm);
-}
-
-.plan-wizard__field select {
-  padding: 6px 8px;
-  border: 1px solid var(--border);
-  border-radius: var(--radius);
-  background: var(--surface);
-  color: var(--text);
-}
-
-.plan-wizard__hint {
-  font-size: var(--text-xs);
-  color: var(--text2);
-  margin: 0;
-}
-
-.plan-wizard__actions {
-  display: flex;
-  justify-content: flex-end;
-  gap: var(--space-2);
 }

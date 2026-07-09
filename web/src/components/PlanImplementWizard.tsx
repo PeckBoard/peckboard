@@ -102,9 +102,16 @@ export default function PlanImplementWizard({
       <div className="plan-wizard">
         <h2>Create cards from this plan</h2>
 
-        <label className="plan-wizard__field">
-          <span>Project</span>
-          <select value={projectId} onChange={(e) => setProjectId(e.target.value)}>
+        <div className="form-field">
+          <label className="form-label" htmlFor="plan-wizard-project">
+            Project
+          </label>
+          <select
+            className="form-input"
+            id="plan-wizard-project"
+            value={projectId}
+            onChange={(e) => setProjectId(e.target.value)}
+          >
             <option value="">Select a project…</option>
             {projects.map((p) => (
               <option key={p.id} value={p.id}>
@@ -112,11 +119,18 @@ export default function PlanImplementWizard({
               </option>
             ))}
           </select>
-        </label>
+        </div>
 
-        <label className="plan-wizard__field">
-          <span>Provider</span>
-          <select value={providerId} onChange={(e) => setProviderId(e.target.value)}>
+        <div className="form-field">
+          <label className="form-label" htmlFor="plan-wizard-provider">
+            Provider
+          </label>
+          <select
+            className="form-input"
+            id="plan-wizard-provider"
+            value={providerId}
+            onChange={(e) => setProviderId(e.target.value)}
+          >
             <option value="">Select a provider…</option>
             {providers.map((p) => (
               <option key={p.id} value={p.id}>
@@ -124,11 +138,18 @@ export default function PlanImplementWizard({
               </option>
             ))}
           </select>
-        </label>
+        </div>
 
-        <label className="plan-wizard__field">
-          <span>Account</span>
-          <select value={accountId} onChange={(e) => setAccountId(e.target.value)}>
+        <div className="form-field">
+          <label className="form-label" htmlFor="plan-wizard-account">
+            Account
+          </label>
+          <select
+            className="form-input"
+            id="plan-wizard-account"
+            value={accountId}
+            onChange={(e) => setAccountId(e.target.value)}
+          >
             <option value="">Default</option>
             {accounts.map((a) => (
               <option key={a.id} value={a.id}>
@@ -136,19 +157,19 @@ export default function PlanImplementWizard({
               </option>
             ))}
           </select>
-        </label>
+        </div>
 
-        <p className="plan-wizard__hint">
+        <p className="form-help">
           The session picks the best model and system prompt for each card within the chosen
           provider and account.
         </p>
 
-        <div className="plan-wizard__actions">
-          <button className="btn" onClick={onClose}>
+        <div className="form-actions">
+          <button className="btn-secondary" onClick={onClose}>
             Cancel
           </button>
           <button
-            className="btn btn--primary"
+            className="btn-primary"
             disabled={busy || !projectId || !providerId}
             onClick={() => void submit()}
             data-testid="plan-wizard-create"

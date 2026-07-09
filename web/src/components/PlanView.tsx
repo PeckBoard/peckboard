@@ -7,6 +7,7 @@ import SafeMarkdown from './SafeMarkdown'
 import MermaidBlock from './MermaidBlock'
 import ConfirmDialog from './ConfirmDialog'
 import PlanImplementWizard from './PlanImplementWizard'
+import ModelPicker from './ModelPicker'
 import { useResourcesStore } from '../store/resources'
 import './PlanView.css'
 
@@ -126,7 +127,7 @@ export default function PlanView({ planId, onBack, onOpenSession }: PlanViewProp
   if (error || !plan)
     return (
       <div className="plan-view plan-view--error">
-        <button className="btn" onClick={onBack}>
+        <button className="btn-secondary" onClick={onBack}>
           ← Back
         </button>
         <p>Could not load plan: {error ?? 'unknown error'}</p>
@@ -203,24 +204,21 @@ export default function PlanView({ planId, onBack, onOpenSession }: PlanViewProp
       </header>
       <div className="plan-view__toolbar">
         <div className="plan-view__toolbar-group">
-          <label className="plan-view__impl-label">
-            <span>Implement with</span>
-            <select
-              className="plan-view__impl-model"
+          <div className="form-field plan-view__impl-field">
+            <label className="form-label" htmlFor="plan-impl-model">
+              Implement with
+            </label>
+            <ModelPicker
+              id="plan-impl-model"
               value={implModel}
-              onChange={(e) => setImplModel(e.target.value)}
-              data-testid="plan-impl-model"
-            >
-              <option value="">same model</option>
-              {models.map((m) => (
-                <option key={m.id} value={m.id}>
-                  {m.display_name}
-                </option>
-              ))}
-            </select>
-          </label>
+              onChange={setImplModel}
+              models={models}
+              defaultLabel="Same model"
+              testId="plan-impl-model"
+            />
+          </div>
           <button
-            className="btn btn--primary"
+            className="btn-primary"
             onClick={() => void implementDirect()}
             disabled={submitting}
             data-testid="plan-implement"
@@ -228,7 +226,7 @@ export default function PlanView({ planId, onBack, onOpenSession }: PlanViewProp
             Implement
           </button>
           <button
-            className="btn"
+            className="btn-secondary"
             onClick={() => setShowWizard(true)}
             data-testid="plan-create-cards"
           >
@@ -239,7 +237,7 @@ export default function PlanView({ planId, onBack, onOpenSession }: PlanViewProp
         <div className="plan-view__toolbar-group">
           {comments.length > 0 && (
             <button
-              className="btn btn--primary"
+              className="btn-primary"
               onClick={reviewComplete}
               disabled={submitting}
               data-testid="plan-review-complete"
@@ -248,7 +246,7 @@ export default function PlanView({ planId, onBack, onOpenSession }: PlanViewProp
             </button>
           )}
           <button
-            className="btn danger"
+            className="btn-danger"
             onClick={() => setConfirmDelete(true)}
             data-testid="plan-delete"
           >
@@ -305,7 +303,7 @@ export default function PlanView({ planId, onBack, onOpenSession }: PlanViewProp
                       rows={2}
                     />
                     <button
-                      className="btn btn--primary"
+                      className="btn-primary"
                       disabled={submitting || !draft.trim()}
                       onClick={() => void addComment(anchor)}
                       data-testid="plan-comment-save"
