@@ -6,6 +6,7 @@ import {
   type ReportEntry,
   type ReportSortOrder,
 } from '../store/reports'
+import { MenuButton, type MenuItem } from './Dropdown'
 import List from './List'
 import ListViewHeader from './ListViewHeader'
 
@@ -54,11 +55,29 @@ export default function ReportBrowser({ onOpenReport }: ReportBrowserProps) {
     fetchReports()
   }, [fetchReports])
 
-  // Distinct sessions / projects present, for the filter dropdowns.
-  const sessionOptions = useMemo(
-    () => [...new Set(reports.map((r) => r.session_id).filter((s): s is string => !!s))].sort(),
-    [reports],
-  )
+  // Distinct sessions / projects present, for the filter dropdowns. Sessions
+  // carry the name + creation date when the report frontmatter has them
+  // (older reports fall back to the bare id), sorted newest-first.
+  const sessionOptions = useMemo(() => {
+    const byId = new Map<string, { name?: string; createdAt?: string }>()
+    for (const r of reports) {
+      if (!r.session_id) continue
+      const cur = byId.get(r.session_id) ?? {}
+      byId.set(r.session_id, {
+        name: cur.name || r.session_name || undefined,
+        createdAt: cur.createdAt || r.session_created_at || undefined,
+      })
+    }
+    return [...byId.entries()]
+      .map(([id, info]) => ({ id, ...info }))
+      .sort((a, b) => {
+        const ta = a.createdAt ? Date.parse(a.createdAt) : Number.NaN
+        const tb = b.createdAt ? Date.parse(b.createdAt) : Number.NaN
+        if (!Number.isNaN(ta) && !Number.isNaN(tb) && ta !== tb) return tb - ta
+        if (Number.isNaN(ta) !== Number.isNaN(tb)) return Number.isNaN(ta) ? 1 : -1
+        return a.id.localeCompare(b.id)
+      })
+  }, [reports])
   const projectOptions = useMemo(
     () => [...new Set(reports.map((r) => r.project_name).filter((p): p is string => !!p))].sort(),
     [reports],
@@ -105,6 +124,24 @@ export default function ReportBrowser({ onOpenReport }: ReportBrowserProps) {
 
   const hasFilter = query.trim() !== '' || sessionId !== '' || projectName !== ''
 
+  // The session filter is a searchable MenuButton rather than a native
+  // <select>: options show the session name with the creation date + id
+  // prefix underneath, and the filter also matches the full id via
+  // `searchText` so a pasted session id still finds its entry.
+  const selectedSession = sessionOptions.find((s) => s.id === sessionId)
+  const sessionLabel = (s: { id: string; name?: string }) => s.name || s.id.slice(0, 8)
+  const sessionMenuItems: MenuItem[] = [
+    { label: 'All sessions', active: sessionId === '', onSelect: () => setSessionId('') },
+    ...sessionOptions.map((s) => ({
+      label: sessionLabel(s),
+      description: [s.createdAt && formatReportDate(s.createdAt), s.name && s.id.slice(0, 8)]
+        .filter(Boolean)
+        .join(' · '),
+      active: sessionId === s.id,
+      searchText: `${s.id} ${s.createdAt ? formatReportDate(s.createdAt) : ''}`,
+      onSelect: () => setSessionId(s.id),
+    })),
+  ]
   const toolbar = (
     <div className="report-toolbar">
       <input
@@ -116,19 +153,21 @@ export default function ReportBrowser({ onOpenReport }: ReportBrowserProps) {
         aria-label="Search reports"
       />
       {sessionOptions.length > 0 && (
-        <select
-          className="report-filter"
-          value={sessionId}
-          onChange={(e) => setSessionId(e.target.value)}
-          aria-label="Filter by session"
+        <MenuButton
+          items={sessionMenuItems}
+          ariaLabel="Filter by session"
+          triggerClassName="report-filter report-filter-menu"
+          align="left"
+          searchable
+          searchPlaceholder="Search sessions…"
         >
-          <option value="">All sessions</option>
-          {sessionOptions.map((s) => (
-            <option key={s} value={s}>
-              {s.slice(0, 8)}
-            </option>
-          ))}
-        </select>
+          <span className="report-filter-value">
+            {selectedSession ? sessionLabel(selectedSession) : 'All sessions'}
+          </span>
+          <span className="report-filter-caret" aria-hidden="true">
+            ▾
+          </span>
+        </MenuButton>
       )}
       {projectOptions.length > 0 && (
         <select

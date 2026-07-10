@@ -313,6 +313,11 @@ interface MenuButtonProps {
   testId?: string
   /** Optional alignment override. Defaults to 'right' (menu opens leftward). */
   align?: 'left' | 'right'
+  /** Render a filter input above the popup items and make the list
+   *  scrollable — same behaviour as a `searchable` submenu. */
+  searchable?: boolean
+  /** Placeholder for the searchable popup's filter input. */
+  searchPlaceholder?: string
   /** Trigger glyph. Defaults to the 3-dot SVG. */
   children?: ReactNode
 }
@@ -329,6 +334,8 @@ export function MenuButton({
   title,
   testId,
   align = 'right',
+  searchable,
+  searchPlaceholder,
   children,
 }: MenuButtonProps) {
   const [anchor, setAnchor] = useState<{ x: number; y: number } | null>(null)
@@ -362,7 +369,16 @@ export function MenuButton({
           </svg>
         )}
       </button>
-      {anchor && <Dropdown anchor={anchor} items={items} onClose={close} align={align} />}
+      {anchor && (
+        <Dropdown
+          anchor={anchor}
+          items={items}
+          onClose={close}
+          align={align}
+          searchable={searchable}
+          searchPlaceholder={searchPlaceholder}
+        />
+      )}
     </>
   )
 }

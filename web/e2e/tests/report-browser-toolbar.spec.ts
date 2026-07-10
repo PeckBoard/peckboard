@@ -18,6 +18,8 @@ const E2E_PASS = 'e2e-password-1234'
 const PROJECT = 'ReportToolbarE2E'
 const SESSION_A = 'sess-aaaa1111-toolbar'
 const SESSION_B = 'sess-bbbb2222-toolbar'
+const SESSION_B_NAME = 'Beta Toolbar Session'
+const SESSION_B_CREATED = '2026-07-09T09:30:00Z'
 
 async function authenticate(request: APIRequestContext): Promise<{ token: string }> {
   const res = await request.post('/api/auth/login', {
@@ -42,13 +44,16 @@ function writeReport(
   title: string,
   date: string,
   sessionId: string,
+  session?: { name?: string; createdAt?: string },
 ): string {
   const dataDir = process.env.PECKBOARD_E2E_DATA_DIR
   if (!dataDir) throw new Error('PECKBOARD_E2E_DATA_DIR must be set (see playwright.config.ts)')
   const dir = path.join(dataDir, 'reports', folder)
   mkdirSync(dir, { recursive: true })
   const filePath = path.join(dir, file)
-  const fm = `title: "${title}"\ndate: "${date}"\nsessionId: "${sessionId}"\nprojectName: "${PROJECT}"`
+  let fm = `title: "${title}"\ndate: "${date}"\nsessionId: "${sessionId}"\nprojectName: "${PROJECT}"`
+  if (session?.name) fm += `\nsessionName: "${session.name}"`
+  if (session?.createdAt) fm += `\nsessionCreatedAt: "${session.createdAt}"`
   writeFileSync(filePath, `---\n${fm}\n---\n\n# ${title}\n\nbody\n`)
   return filePath
 }
@@ -65,14 +70,17 @@ test.describe('reports index toolbar', () => {
     const seeded = [
       writeReport('2026-07-01', 'older-toolbar.md', 'Older Report', '2026-07-01', SESSION_A),
       writeReport('2026-07-05', 'middle-toolbar.md', 'Middle Report', '2026-07-05', SESSION_A),
-      writeReport('2026-07-09', 'newer-toolbar.md', 'Newer Report', '2026-07-09', SESSION_B),
+      writeReport('2026-07-09', 'newer-toolbar.md', 'Newer Report', '2026-07-09', SESSION_B, {
+        name: SESSION_B_NAME,
+        createdAt: SESSION_B_CREATED,
+      }),
     ]
 
     try {
       await loadReports(page, token)
 
       const projectFilter = page.locator('select[aria-label="Filter by project"]')
-      const sessionFilter = page.locator('select[aria-label="Filter by session"]')
+      const sessionFilter = page.locator('button[aria-label="Filter by session"]')
       const search = page.locator('input.report-search')
       const sortToggle = page.locator('.report-sort-toggle')
       const names = page.locator('.list-view-name')
@@ -90,12 +98,33 @@ test.describe('reports index toolbar', () => {
       await sortToggle.click()
       await expect(names).toHaveText(['Newer Report', 'Middle Report', 'Older Report'])
 
-      // Session filter narrows to the two SESSION_A reports.
-      await sessionFilter.selectOption(SESSION_A)
+      // Session filter: searchable dropdown. SESSION_B carries a name +
+      // creation date; SESSION_A (no metadata) falls back to its id prefix.
+      const sessionMenu = page.locator('.dropdown-menu')
+      await expect(sessionFilter).toContainText('All sessions')
+      await sessionFilter.click()
+      const betaItem = sessionMenu.locator('.dropdown-item', { hasText: SESSION_B_NAME })
+      await expect(betaItem).toContainText('2026') // created date rendered
+      await expect(betaItem).toContainText(SESSION_B.slice(0, 8))
+
+      // The filter input matches the full session id via `searchText`.
+      await sessionMenu.locator('.model-picker-search').fill(SESSION_A)
+      await expect(sessionMenu.locator('.dropdown-item')).toHaveCount(1)
+      await sessionMenu.locator('.dropdown-item', { hasText: SESSION_A.slice(0, 8) }).click()
       await expect(names).toHaveText(['Middle Report', 'Older Report'])
-      await sessionFilter.selectOption(SESSION_B)
+      await expect(sessionFilter).toContainText(SESSION_A.slice(0, 8))
+
+      // …and matches the session name.
+      await sessionFilter.click()
+      await sessionMenu.locator('.model-picker-search').fill('beta toolbar')
+      await sessionMenu.locator('.dropdown-item', { hasText: SESSION_B_NAME }).click()
       await expect(names).toHaveText(['Newer Report'])
-      await sessionFilter.selectOption('')
+      await expect(sessionFilter).toContainText(SESSION_B_NAME)
+
+      // "All sessions" resets the filter.
+      await sessionFilter.click()
+      await sessionMenu.locator('.dropdown-item', { hasText: 'All sessions' }).click()
+      await expect(names).toHaveCount(3)
 
       // Text search matches title substrings (case-insensitive).
       await search.fill('middle')
