@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react'
 import { useProjectsStore } from '../store/projects'
+import { useTabsStore } from '../store/tabs'
 import ConfirmDialog from './ConfirmDialog'
 import EditProjectModal from './EditProjectModal'
 import List from './List'
@@ -71,7 +72,10 @@ export default function ProjectList({ onNewProject }: ProjectListProps) {
         items={projects}
         getKey={(p) => p.id}
         activeId={activeProjectId}
-        onActivate={(p) => setActiveProject(p.id)}
+        onActivate={(p) => {
+          setActiveProject(p.id)
+          useTabsStore.getState().openTab('project', p.id)
+        }}
         getMenuItems={buildMenu}
         renderItem={(project) => (
           <>

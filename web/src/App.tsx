@@ -851,10 +851,9 @@ function App() {
       navigate('sessions', tab.itemId)
     },
     onClose: (tab) => {
-      if (activeSessionId === tab.itemId) {
-        setActiveSession(null)
-        navigate('sessions', null)
-      }
+      if (activeSessionId !== tab.itemId) return
+      setActiveSession(null)
+      if (view === 'sessions') navigate('sessions', null)
     },
     getMenuItems: (tab) => [
       { label: 'Rename', onSelect: () => handleRenameItem('session', tab.itemId) },
@@ -897,10 +896,9 @@ function App() {
       navigate('projects', tab.itemId)
     },
     onClose: (tab) => {
-      if (activeProjectId === tab.itemId) {
-        setActiveProject(null)
-        navigate('projects', null)
-      }
+      if (activeProjectId !== tab.itemId) return
+      setActiveProject(null)
+      if (view === 'projects') navigate('projects', null)
     },
     getMenuItems: (tab) => [
       { label: 'Rename', onSelect: () => handleRenameItem('project', tab.itemId) },
@@ -921,10 +919,9 @@ function App() {
       navigate('repeatingTasks', tab.itemId)
     },
     onClose: (tab) => {
-      if (activeRepeatingTaskId === tab.itemId) {
-        setActiveRepeatingTaskId(null)
-        navigate('repeatingTasks', null)
-      }
+      if (activeRepeatingTaskId !== tab.itemId) return
+      setActiveRepeatingTaskId(null)
+      if (view === 'repeatingTasks') navigate('repeatingTasks', null)
     },
     getMenuItems: (tab) => [
       { label: 'Rename', onSelect: () => handleRenameItem('repeating_task', tab.itemId) },
@@ -945,10 +942,9 @@ function App() {
       navigate('reports', tab.itemId)
     },
     onClose: (tab) => {
-      if (activeReportId === tab.itemId) {
-        setActiveReportId(null)
-        navigate('reports', null)
-      }
+      if (activeReportId !== tab.itemId) return
+      setActiveReportId(null)
+      if (view === 'reports') navigate('reports', null)
     },
     // Reports have no delete endpoint and no rename, so the kind-
     // specific menu is empty. The TabBar still layers in "Close tab"
@@ -1309,7 +1305,10 @@ function App() {
                   items={chatSessions}
                   getKey={(s) => s.id}
                   activeId={activeSessionId}
-                  onActivate={(s) => setActiveSession(s.id)}
+                  onActivate={(s) => {
+                    setActiveSession(s.id)
+                    useTabsStore.getState().openTab('session', s.id)
+                  }}
                   selectedIds={selectedSessions}
                   onToggleSelected={(s) => toggleSessionSelected(s.id)}
                   onClearSelection={() => setSelectedSessions(new Set())}
@@ -1411,10 +1410,12 @@ function App() {
               onNavigate={(id) => {
                 setActiveRepeatingTaskId(id)
                 navigate('repeatingTasks', id)
+                if (id) useTabsStore.getState().openTab('repeating_task', id)
               }}
               onOpenSession={(id) => {
                 setActiveSession(id)
                 navigate('sessions', id)
+                useTabsStore.getState().openTab('session', id)
               }}
             />
           )}
@@ -1456,6 +1457,7 @@ function App() {
                     onOpenSession={(id) => {
                       setActiveSession(id)
                       navigate('sessions', id)
+                      useTabsStore.getState().openTab('session', id)
                     }}
                   />
                 )
@@ -1466,6 +1468,7 @@ function App() {
                   const id = reportTabId(folder, file)
                   setActiveReportId(id)
                   navigate('reports', id)
+                  useTabsStore.getState().openTab('report', id)
                 }}
               />
             ))}
@@ -1476,6 +1479,7 @@ function App() {
               onOpenSession={(sid) => {
                 setActiveSession(sid)
                 navigate('sessions', sid)
+                useTabsStore.getState().openTab('session', sid)
               }}
             />
           )}
