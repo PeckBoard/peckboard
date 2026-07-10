@@ -47,16 +47,11 @@ export default function PlanImplementWizard({
       .catch(() => setProjects([]))
   }, [fetchModels])
 
-  // Accounts for the chosen provider (claude/grok expose account lists; every
-  // provider offers the implicit host "Default").
-  useEffect(() => {
+  const handleProviderChange = (pid: string) => {
+    setProviderId(pid)
     setAccountId('')
     const endpoint =
-      providerId === 'claude'
-        ? '/api/claude-accounts'
-        : providerId === 'grok'
-          ? '/api/grok-accounts'
-          : null
+      pid === 'claude' ? '/api/claude-accounts' : pid === 'grok' ? '/api/grok-accounts' : null
     if (!endpoint) {
       setAccounts([])
       return
@@ -65,7 +60,7 @@ export default function PlanImplementWizard({
       .then((r) => (r.ok ? r.json() : []))
       .then((data) => setAccounts(Array.isArray(data) ? data : (data.accounts ?? [])))
       .catch(() => setAccounts([]))
-  }, [providerId])
+  }
 
   const projectName = useMemo(
     () => projects.find((p) => p.id === projectId)?.name ?? '',
@@ -129,7 +124,7 @@ export default function PlanImplementWizard({
             className="form-input"
             id="plan-wizard-provider"
             value={providerId}
-            onChange={(e) => setProviderId(e.target.value)}
+            onChange={(e) => handleProviderChange(e.target.value)}
           >
             <option value="">Select a provider…</option>
             {providers.map((p) => (

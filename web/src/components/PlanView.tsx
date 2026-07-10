@@ -53,7 +53,6 @@ export default function PlanView({ planId, onBack, onOpenSession }: PlanViewProp
 
   const load = useCallback(async () => {
     if (!planId) return
-    setLoading(true)
     try {
       const res = await authedFetch(`/api/plans/${planId}`)
       if (!res.ok) throw new Error(`plan not found (${res.status})`)
@@ -69,8 +68,29 @@ export default function PlanView({ planId, onBack, onOpenSession }: PlanViewProp
   }, [planId])
 
   useEffect(() => {
-    void load()
-  }, [load])
+    if (!planId) return
+    let cancelled = false
+    void authedFetch(`/api/plans/${planId}`)
+      .then((r) => {
+        if (!r.ok) throw new Error(`plan not found (${r.status})`)
+        return r.json() as Promise<{ plan: Plan; comments: PlanComment[] }>
+      })
+      .then((data) => {
+        if (cancelled) return
+        setPlan(data.plan)
+        setComments(data.comments ?? [])
+        setError(null)
+        setLoading(false)
+      })
+      .catch((e: Error) => {
+        if (cancelled) return
+        setError(String((e as Error).message ?? e))
+        setLoading(false)
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [planId])
 
   const addComment = useCallback(
     async (anchor: number) => {
