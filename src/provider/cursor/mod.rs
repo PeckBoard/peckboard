@@ -147,8 +147,10 @@ impl AgentProvider for CursorProvider {
             config,
             conversation_id,
             completion_tx,
-            // cursor-agent runs its own tool loop; the plugin host (MCP
-            // tool execution) isn't wired in for v1.
+            // cursor-agent runs its own tool loop and exposes no per-invocation
+            // MCP config mechanism (no `--mcp-config` flag or env var; only the
+            // global ~/.cursor/mcp.json — see the "cursor-agent CLI recon"
+            // report), so the plugin host is intentionally not wired in.
             plugins: _,
         } = ctx;
 
@@ -694,7 +696,7 @@ pub fn default_models() -> Vec<ModelInfo> {
         ("gpt-5.5-high", "GPT-5.5 High (Cursor)"),
         ("gpt-5.3-codex", "Codex 5.3 (Cursor)"),
         ("gemini-3.1-pro", "Gemini 3.1 Pro (Cursor)"),
-        ("grok-4.3", "Grok 4.3 (Cursor)"),
+        ("grok-4.5-high", "Grok 4.5 High (Cursor)"),
     ]
     .into_iter()
     .map(|(id, name)| ModelInfo {
@@ -822,5 +824,17 @@ mod tests {
         for m in default_models() {
             assert!(!m.id.contains(':'), "id {} should be prefix-free", m.id);
         }
+    }
+
+    #[test]
+    fn default_models_drops_stale_grok_and_seeds_current() {
+        let models = default_models();
+        let ids: Vec<&str> = models.iter().map(|m| m.id.as_str()).collect();
+        // grok-4.3 was retired upstream, replaced by the grok-4.5 family.
+        assert!(
+            !ids.contains(&"grok-4.3"),
+            "stale grok-4.3 must not be seeded"
+        );
+        assert!(ids.contains(&"grok-4.5-high"));
     }
 }

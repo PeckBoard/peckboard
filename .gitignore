@@ -4,6 +4,7 @@ node_modules/
 web/dist/
 .idea/
 web/test-results/
+web/e2e/test-results/
 web/playwright-report/
 docs/_site/
 docs/.jekyll-cache/

@@ -31,6 +31,12 @@ interface ServerConfig {
   keepalive_last_runs: KeepAliveRun[]
 }
 
+interface ProviderInfo {
+  id: string
+  display_name: string
+  hidden: boolean
+}
+
 function formatInterval(hours: number): string {
   if (hours === 0) return 'Keep-alive is disabled.'
   return hours === 1 ? 'Runs every hour.' : `Runs every ${hours} hours.`
@@ -129,6 +135,7 @@ export default function SettingsPage({ onBack, initialSubPage = null }: Props) {
   const models = useResourcesStore((s) => s.models)
   const providers = useResourcesStore((s) => s.providers)
   const fetchModels = useResourcesStore((s) => s.fetchModels)
+  const [providerVisibility, setProviderVisibility] = useState<ProviderInfo[]>([])
 
   useEffect(() => {
     authedFetch('/api/config')
@@ -160,6 +167,15 @@ export default function SettingsPage({ onBack, initialSubPage = null }: Props) {
       })
       .catch(() => {})
   }, [])
+
+  useEffect(() => {
+    authedFetch('/api/settings/providers')
+      .then((res) => (res.ok ? res.json() : null))
+      .then((data: { providers?: ProviderInfo[] } | null) => {
+        if (data?.providers) setProviderVisibility(data.providers)
+      })
+      .catch(() => {})
+  }, [])
   const changeCaveman = (level: string) => {
     setCaveman(level)
     authedFetch('/api/settings/caveman', {
@@ -187,6 +203,25 @@ export default function SettingsPage({ onBack, initialSubPage = null }: Props) {
     setHue(newHue)
     localStorage.setItem(HUE_KEY, String(newHue))
     applyHue(newHue)
+  }
+
+  const toggleProvider = (id: string, hidden: boolean) => {
+    authedFetch(`/api/settings/providers/${id}`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ hidden }),
+    })
+      .then((res) => {
+        if (!res.ok) return
+        authedFetch('/api/settings/providers')
+          .then((r) => (r.ok ? r.json() : null))
+          .then((data: { providers?: ProviderInfo[] } | null) => {
+            if (data?.providers) setProviderVisibility(data.providers)
+          })
+          .catch(() => {})
+        fetchModels()
+      })
+      .catch(() => {})
   }
 
   const current = SUB_PAGES.find((p) => p.id === subPage)
@@ -338,28 +373,61 @@ export default function SettingsPage({ onBack, initialSubPage = null }: Props) {
 
       {subPage === 'providers' && (
         <>
-          <ClaudeAccountsSection />
-
-          <GrokAccountsSection />
-
-          <section className="settings-section" data-testid="ollama-settings-section">
-            <h3>Ollama</h3>
+          <section className="settings-section">
+            <h3>Providers</h3>
             <p className="form-hint">
-              Local and remote Ollama servers. Models on the default server appear under their bare
-              name; models on additional named servers appear as model@server (e.g.
-              qwen2.5-coder@gpu-box).
+              Toggle providers on or off. Hidden providers are removed from model pickers and
+              account settings.
             </p>
-            <PluginSettingsForm pluginId="ollama" />
-            <OllamaPullModel />
+            {providerVisibility.length === 0 ? (
+              <p className="settings-loading">Loading providers...</p>
+            ) : (
+              <div className="settings-info-grid">
+                {providerVisibility.map((p) => (
+                  <div className="settings-row" key={p.id}>
+                    <span className="settings-label">{p.display_name}</span>
+                    <input
+                      type="checkbox"
+                      checked={!p.hidden}
+                      data-testid={`provider-toggle-${p.id}`}
+                      onChange={(e) => toggleProvider(p.id, !e.target.checked)}
+                    />
+                  </div>
+                ))}
+              </div>
+            )}
           </section>
 
-          <section className="settings-section" data-testid="cursor-settings-section">
-            <h3>Cursor</h3>
-            <p className="form-hint">
-              The cursor-agent CLI provider: binary path, default model, and model discovery.
-            </p>
-            <PluginSettingsForm pluginId="cursor" />
-          </section>
+          {providerVisibility.find((p) => p.id === 'claude')?.hidden !== true && (
+            <ClaudeAccountsSection />
+          )}
+
+          {providerVisibility.find((p) => p.id === 'grok')?.hidden !== true && (
+            <GrokAccountsSection />
+          )}
+
+          {providerVisibility.find((p) => p.id === 'ollama')?.hidden !== true && (
+            <section className="settings-section" data-testid="ollama-settings-section">
+              <h3>Ollama</h3>
+              <p className="form-hint">
+                Local and remote Ollama servers. Models on the default server appear under their
+                bare name; models on additional named servers appear as model@server (e.g.
+                qwen2.5-coder@gpu-box).
+              </p>
+              <PluginSettingsForm pluginId="ollama" />
+              <OllamaPullModel />
+            </section>
+          )}
+
+          {providerVisibility.find((p) => p.id === 'cursor')?.hidden !== true && (
+            <section className="settings-section" data-testid="cursor-settings-section">
+              <h3>Cursor</h3>
+              <p className="form-hint">
+                The cursor-agent CLI provider: binary path, default model, and model discovery.
+              </p>
+              <PluginSettingsForm pluginId="cursor" />
+            </section>
+          )}
 
           <section className="settings-section" data-testid="keepalive-section">
             <h3>Provider Keep-Alive</h3>
