@@ -4,6 +4,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use crate::auth::middleware::require_auth;
+use crate::routes::settings::hidden_providers;
 use crate::state::AppState;
 
 /// State machine for the macOS `caffeinate` keep-awake feature.
@@ -60,6 +61,11 @@ async fn list_models(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     // lists once, then derive the flat list from the same snapshot so a
     // provider's `dynamic_models` is only computed a single time per call.
     let providers = state.provider_registry.list_providers_with_models().await;
+    let hidden = hidden_providers(&state).await;
+    let providers: Vec<_> = providers
+        .into_iter()
+        .filter(|p| !hidden.contains(&p.id))
+        .collect();
 
     Json(serde_json::json!({
         "providers": providers.iter().map(|p| serde_json::json!({

@@ -18,11 +18,13 @@ use axum::{
     http::StatusCode,
     middleware,
     response::IntoResponse,
-    routing::{delete, get},
+    routing::{delete, get, put},
 };
+use std::collections::HashSet;
 use std::sync::Arc;
 
 use crate::auth::middleware::require_auth;
+use crate::db::Db;
 use crate::state::AppState;
 
 /// Plugin id / collection the native `run_command` tool records "always"
@@ -50,6 +52,7 @@ const PRE_HATCHER_SYSTEM_PROMPT_KEY: &str = "pre_hatcher_system_prompt";
 /// Resolved to its body at dispatch time; falls back to no override if the
 /// named prompt has been deleted from the library.
 pub const PRE_HATCHER_DEFAULT_SYSTEM_PROMPT: &str = "fable 5";
+const HIDDEN_PROVIDERS_KEY: &str = "hidden_providers";
 
 pub fn router(state: Arc<AppState>) -> Router<Arc<AppState>> {
     Router::new()
@@ -67,6 +70,8 @@ pub fn router(state: Arc<AppState>) -> Router<Arc<AppState>> {
             "/api/settings/pre-hatcher-prompt",
             get(get_pre_hatcher_prompt).put(set_pre_hatcher_prompt),
         )
+        .route("/api/settings/providers", get(get_providers))
+        .route("/api/settings/providers/{id}", put(set_provider_hidden))
         .route_layer(middleware::from_fn_with_state(state, require_auth))
 }
 
@@ -303,6 +308,111 @@ async fn delete_approved(
     })
     .await;
 
+    match res {
+        Ok(Ok(_)) => Ok(StatusCode::NO_CONTENT),
+        Ok(Err(e)) => Err((
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({ "error": e.to_string() })),
+        )),
+        Err(e) => Err((
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({ "error": e.to_string() })),
+        )),
+    }
+}
+
+/// Read the hidden provider ids from the plugin store.
+/// Returns an empty set on missing/parse error (nothing hidden by default).
+pub(crate) async fn hidden_providers_for_db(db: Db) -> HashSet<String> {
+    let raw = tokio::task::spawn_blocking(move || {
+        db.plugin_store_get_blocking(SETTINGS_NS, SETTINGS_COLLECTION, HIDDEN_PROVIDERS_KEY)
+    })
+    .await;
+    match raw {
+        Ok(Ok(Some(json))) => serde_json::from_str::<serde_json::Value>(&json)
+            .ok()
+            .and_then(|v| {
+                v.get("ids").and_then(|ids| ids.as_array()).map(|arr| {
+                    arr.iter()
+                        .filter_map(|id| id.as_str().map(str::to_string))
+                        .collect()
+                })
+            })
+            .unwrap_or_default(),
+        _ => HashSet::new(),
+    }
+}
+
+/// Returns the set of hidden provider ids. Empty → nothing hidden (default).
+pub async fn hidden_providers(state: &Arc<AppState>) -> HashSet<String> {
+    hidden_providers_for_db(state.db.clone()).await
+}
+
+/// GET /api/settings/providers → `{"providers":[{"id","display_name","hidden"}]}`
+/// All registered providers (static list), sorted by display_name.
+async fn get_providers(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+    let hidden = hidden_providers(&state).await;
+    let mut providers = state.provider_registry.list_providers().await;
+    providers.sort_by(|a, b| a.display_name.cmp(&b.display_name));
+    Json(serde_json::json!({
+        "providers": providers.iter().map(|p| serde_json::json!({
+            "id": p.id,
+            "display_name": p.display_name,
+            "hidden": hidden.contains(&p.id),
+        })).collect::<Vec<_>>(),
+    }))
+}
+
+#[derive(serde::Deserialize)]
+struct ProviderHiddenBody {
+    hidden: bool,
+}
+
+/// PUT /api/settings/providers/{id} `{"hidden": bool}` → 204.
+/// 404 if the provider id is not in the registry.
+async fn set_provider_hidden(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+    Json(body): Json<ProviderHiddenBody>,
+) -> impl IntoResponse {
+    if state.provider_registry.get_info(&id).await.is_none() {
+        return Err((
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({ "error": "unknown provider" })),
+        ));
+    }
+    let db = state.db.clone();
+    let hidden = body.hidden;
+    let res = tokio::task::spawn_blocking(move || {
+        let current_json =
+            db.plugin_store_get_blocking(SETTINGS_NS, SETTINGS_COLLECTION, HIDDEN_PROVIDERS_KEY)?;
+        let mut ids: HashSet<String> = current_json
+            .as_deref()
+            .and_then(|j| serde_json::from_str::<serde_json::Value>(j).ok())
+            .and_then(|v| {
+                v.get("ids").and_then(|arr| arr.as_array()).map(|arr| {
+                    arr.iter()
+                        .filter_map(|x| x.as_str().map(str::to_string))
+                        .collect()
+                })
+            })
+            .unwrap_or_default();
+        if hidden {
+            ids.insert(id);
+        } else {
+            ids.remove(&id);
+        }
+        let mut sorted: Vec<String> = ids.into_iter().collect();
+        sorted.sort();
+        let value = serde_json::json!({ "ids": sorted }).to_string();
+        db.plugin_store_put_blocking(
+            SETTINGS_NS,
+            SETTINGS_COLLECTION,
+            HIDDEN_PROVIDERS_KEY,
+            &value,
+        )
+    })
+    .await;
     match res {
         Ok(Ok(_)) => Ok(StatusCode::NO_CONTENT),
         Ok(Err(e)) => Err((
