@@ -86,20 +86,35 @@ function sortByMru(tabs: Tab[]): Tab[] {
 }
 
 /** Build a stable key for a (type, id) pair so we can intern it in a
- *  Set. Used by the tombstone logic below to avoid re-inserting a tab
- *  whose underlying item was deleted while its openTab POST was in
- *  flight. */
+ *  Map. Used by the recently-closed guard below. */
 function tabKey(itemType: TabType, itemId: string): string {
   return `${itemType}:${itemId}`
 }
 
-/** Items whose tab was just removed by `removeTabsForItem` while an
- *  `openTab` POST for the same id is still in flight. Without this set,
- *  the POST response handler unconditionally re-inserts the tab — which
- *  resurrects a chip for a session that was just deleted on another
- *  device. The set is process-global (not in zustand state) because it's
- *  a transient race guard, not user-visible state. */
-const recentTombstones = new Set<string>()
+/** Tabs the user just closed (or whose underlying item was just
+ *  deleted), keyed by tabKey → epoch-ms of the close. While an entry
+ *  is fresh, the resurrection paths are blocked:
+ *    1. an in-flight `openTab` POST response re-inserting the chip,
+ *    2. a stale `fetchTabs` GET (focus / 60s poll issued before the
+ *       DELETE landed server-side) re-adding it as a "new" tab.
+ *  A fresh `openTab` clears the entry — closing must only stick until
+ *  the user deliberately re-opens the item. Entries expire after a TTL
+ *  so a DELETE that genuinely failed server-side eventually reconciles
+ *  back instead of hiding the server's truth forever. Process-global
+ *  (not in zustand state) because it's a transient race guard, not
+ *  user-visible state. */
+const recentlyClosed = new Map<string, number>()
+const RECENTLY_CLOSED_TTL_MS = 30_000
+
+function isRecentlyClosed(key: string): boolean {
+  const closedAt = recentlyClosed.get(key)
+  if (closedAt === undefined) return false
+  if (Date.now() - closedAt > RECENTLY_CLOSED_TTL_MS) {
+    recentlyClosed.delete(key)
+    return false
+  }
+  return true
+}
 
 export const useTabsStore = create<TabsState>((set, get) => ({
   tabs: [],
@@ -110,7 +125,12 @@ export const useTabsStore = create<TabsState>((set, get) => ({
       const res = await authedFetch('/api/me/tabs')
       if (!res.ok) return
       const data = (await res.json()) as ApiTab[]
-      const incoming = data.map(fromApi)
+      const incoming = data
+        .map(fromApi)
+        // A response snapshotted before a just-issued DELETE landed
+        // still contains the closed tab; without this filter the merge
+        // below re-adds it as a "new" tab and the close doesn't stick.
+        .filter((t) => !isRecentlyClosed(tabKey(t.itemType, t.itemId)))
       // First load: take server order verbatim (MRU). Subsequent
       // refetches (focus / 60s poll): preserve the local order the
       // user is looking at — add any new tabs at the end, drop any
@@ -137,6 +157,9 @@ export const useTabsStore = create<TabsState>((set, get) => ({
   },
 
   openTab: async (itemType, itemId) => {
+    // A deliberate open lifts the recently-closed guard: the user
+    // clicked the item again, so storing its tab is allowed from here.
+    recentlyClosed.delete(tabKey(itemType, itemId))
     const existing = get().tabs.find((t) => t.itemType === itemType && t.itemId === itemId)
     if (existing) {
       // Tab already open — selecting it should not move it. Don't
@@ -173,14 +196,12 @@ export const useTabsStore = create<TabsState>((set, get) => ({
         // Replace the optimistic entry in place. If a concurrent
         // `fetchTabs` happened to wipe it before our POST returned
         // (race during initial auth), re-insert at the front so the
-        // tab isn't silently lost. EXCEPT when the wipe came from an
-        // explicit `removeTabsForItem` (the session was deleted on
-        // another device while our POST was in flight) — the
-        // tombstone tells us not to resurrect a chip for an item
-        // that no longer exists.
+        // tab isn't silently lost. EXCEPT when the wipe came from the
+        // user closing the tab (`closeTab`) or the item being deleted
+        // (`removeTabsForItem`) while our POST was in flight — the
+        // recently-closed guard tells us not to resurrect the chip.
         const key = tabKey(tab.itemType, tab.itemId)
-        const tombstoned = recentTombstones.has(key)
-        if (tombstoned) recentTombstones.delete(key)
+        const tombstoned = isRecentlyClosed(key)
         set((s) => {
           const exists = s.tabs.some((t) => t.itemType === tab.itemType && t.itemId === tab.itemId)
           if (exists) {
@@ -211,22 +232,30 @@ export const useTabsStore = create<TabsState>((set, get) => ({
   },
 
   closeTab: async (itemType, itemId) => {
-    // Optimistic remove.
+    // Guard before the optimistic remove so an in-flight `openTab`
+    // POST or a stale `fetchTabs` GET can't re-insert the chip. Only a
+    // fresh `openTab` (the user clicking the item again) lifts it.
+    recentlyClosed.set(tabKey(itemType, itemId), Date.now())
     set((s) => ({
       tabs: s.tabs.filter((t) => !(t.itemType === itemType && t.itemId === itemId)),
     }))
     try {
-      await authedFetch(`/api/me/tabs/${itemType}/${itemId}`, { method: 'DELETE' })
+      // Report ids embed a `/` (`<folder>/<file>`); unencoded it adds
+      // a path segment, `/api/me/tabs/{item_type}/{item_id}` never
+      // matches, and the server keeps the row — i.e. a tab that won't
+      // stay closed. Encoding is a no-op for UUID ids.
+      await authedFetch(`/api/me/tabs/${itemType}/${encodeURIComponent(itemId)}`, {
+        method: 'DELETE',
+      })
     } catch {
       // ditto — focus refetch reconciles
     }
   },
 
   removeTabsForItem: (itemType, itemId) => {
-    // Tombstone the id so an in-flight `openTab` POST response can't
-    // re-insert the chip after we drop it here. The set is cleared as
-    // soon as the response is processed or the next openTab succeeds.
-    recentTombstones.add(tabKey(itemType, itemId))
+    // Guard the id so an in-flight `openTab` POST response or a stale
+    // `fetchTabs` GET can't re-insert the chip after we drop it here.
+    recentlyClosed.set(tabKey(itemType, itemId), Date.now())
     set((s) => ({
       tabs: s.tabs.filter((t) => !(t.itemType === itemType && t.itemId === itemId)),
     }))

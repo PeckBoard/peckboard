@@ -613,16 +613,38 @@ function App() {
   // because every navigation goes through these state changes (whether
   // it came from a tab click, the rail, a URL load, or back/forward).
   //
-  // Gate on the store being loaded and the item actually existing.
-  // Without that guard, a stale URL like `/sessions/<deleted-id>` (a
-  // bookmark, browser history, or another device that just deleted
-  // the session) would write a phantom `user_tabs` row that the strip
-  // then renders as a chip labelled "Session". If the id is unknown
-  // after loading, clear the active id so the URL drops back to the
-  // list view.
+  // Two guards:
+  //
+  // 1. The store must be loaded and the item must exist. Without that,
+  //    a stale URL like `/sessions/<deleted-id>` (a bookmark, browser
+  //    history, or another device that just deleted the session) would
+  //    write a phantom `user_tabs` row that the strip then renders as
+  //    a chip labelled "Session". If the id is unknown after loading,
+  //    clear the active id so the URL drops back to the list view.
+  //
+  // 2. Store the tab only on an activation EDGE (the active id
+  //    changing), tracked in lastOpenedSessionTab / lastOpenedProjectTab.
+  //    The effects also re-run whenever the sessions/projects arrays
+  //    refetch; without the edge guard, a window still sitting on the
+  //    item silently re-inserted a tab the user had just closed (here
+  //    or on another device) on the next poll. A closed tab must stay
+  //    closed until the user deliberately activates the item again —
+  //    every activation path (rail → list → click, tab chip, URL load,
+  //    back/forward) passes through a null or different active id
+  //    first, which re-arms the edge below.
+  const lastOpenedSessionTab = useRef<string | null>(null)
   useEffect(() => {
-    if (!authenticated || !activeSessionId || !sessionsLoaded) return
+    if (!authenticated) return
+    if (!activeSessionId) {
+      // Deactivation (including closing the active tab) re-arms the
+      // edge: re-selecting the same item later stores its tab again.
+      lastOpenedSessionTab.current = null
+      return
+    }
+    if (!sessionsLoaded) return
+    if (lastOpenedSessionTab.current === activeSessionId) return
     if (sessions.some((s) => s.id === activeSessionId)) {
+      lastOpenedSessionTab.current = activeSessionId
       useTabsStore.getState().openTab('session', activeSessionId)
       return
     }
@@ -636,6 +658,7 @@ function App() {
       .then((res) => {
         if (cancelled) return
         if (res.ok) {
+          lastOpenedSessionTab.current = activeSessionId
           useTabsStore.getState().openTab('session', activeSessionId)
         } else {
           setActiveSession(null)
@@ -648,10 +671,19 @@ function App() {
       cancelled = true
     }
   }, [authenticated, activeSessionId, sessionsLoaded, sessions, setActiveSession])
+  const lastOpenedProjectTab = useRef<string | null>(null)
   useEffect(() => {
-    if (!authenticated || !activeProjectId || !projectsLoaded) return
+    if (!authenticated) return
+    if (!activeProjectId) {
+      lastOpenedProjectTab.current = null
+      return
+    }
+    if (!projectsLoaded) return
     if (projects.some((p) => p.id === activeProjectId)) {
-      useTabsStore.getState().openTab('project', activeProjectId)
+      if (lastOpenedProjectTab.current !== activeProjectId) {
+        lastOpenedProjectTab.current = activeProjectId
+        useTabsStore.getState().openTab('project', activeProjectId)
+      }
     } else {
       setActiveProject(null)
     }

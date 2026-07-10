@@ -275,6 +275,64 @@ test.describe('tabs for reports and repeating tasks', () => {
     }
   })
 
+  test('closing a report tab sticks — the close DELETE reaches the server row', async ({
+    request,
+    page,
+    baseURL,
+  }) => {
+    // Regression test: the close DELETE used to send the report id
+    // (`<folder>/<file>`) unencoded, so the extra `/` added a path
+    // segment, `/api/me/tabs/{item_type}/{item_id}` never matched, the
+    // server kept the row, and the "closed" chip resurrected on the
+    // next refetch or reload. Closing must stick until the user opens
+    // the report again — and opening it again must store a fresh tab.
+    expect(baseURL).toBeTruthy()
+    const { token, auth } = await authenticate(request)
+    await clearTabs(request, auth)
+
+    const folder = '2026-06-11'
+    const file = 'tab-report-closeable.md'
+    const reportPath = writeReportFile(folder, file, 'title: "Closeable Report"', '# close me\n')
+
+    try {
+      await loadAt(page, token, `/reports/${folder}/${file}`)
+      const tab = page.locator('.tab-opened', { hasText: 'Closeable Report' })
+      await expect(tab).toBeVisible({ timeout: 5_000 })
+
+      await tab.click({ button: 'right' })
+      const closeBtn = page.locator('.context-menu button', { hasText: 'Close tab' })
+      await expect(closeBtn).toBeVisible()
+      await closeBtn.click()
+      await expect(tab).toHaveCount(0)
+
+      // Server-side the row must be gone — this is what used to fail.
+      await page.waitForTimeout(200)
+      const listed = await request.get('/api/me/tabs', { headers: auth })
+      expect(listed.ok()).toBeTruthy()
+      const tabs = (await listed.json()) as Array<{ item_type: string; item_id: string }>
+      expect(tabs.find((t) => t.item_type === 'report')).toBeUndefined()
+
+      // A reload must not resurrect the chip…
+      await page.reload()
+      await expect(page.locator('.rail')).toBeVisible({ timeout: 10_000 })
+      await expect(page.locator('.tab-opened', { hasText: 'Closeable Report' })).toHaveCount(0)
+
+      // …but deliberately opening the report again stores it again.
+      await page.evaluate(
+        ([f, fl]) => {
+          history.pushState(null, '', `/reports/${f}/${fl}`)
+          window.dispatchEvent(new PopStateEvent('popstate'))
+        },
+        [folder, file],
+      )
+      await expect(page.locator('.tab-opened', { hasText: 'Closeable Report' })).toBeVisible({
+        timeout: 5_000,
+      })
+    } finally {
+      rmSync(reportPath, { force: true })
+    }
+  })
+
   test('mixed-kind tab strip: session + repeating task + report all coexist', async ({
     request,
     page,
