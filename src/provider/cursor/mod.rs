@@ -24,6 +24,7 @@
 //! are written defensively and the CLI path / flags are configurable via
 //! plugin settings; validate against your installed `cursor-agent` version.
 
+mod mcp;
 mod parser;
 
 use std::collections::HashMap;
@@ -147,10 +148,9 @@ impl AgentProvider for CursorProvider {
             config,
             conversation_id,
             completion_tx,
-            // cursor-agent runs its own tool loop and exposes no per-invocation
-            // MCP config mechanism (no `--mcp-config` flag or env var; only the
-            // global ~/.cursor/mcp.json — see the "cursor-agent CLI recon"
-            // report), so the plugin host is intentionally not wired in.
+            // cursor-agent runs its own tool loop, so the plugin host stays
+            // unwired; peckboard MCP tools reach it via the workspace
+            // `.cursor/mcp.json` + a per-spawn token env var (see `mcp`).
             plugins: _,
         } = ctx;
 
@@ -184,6 +184,18 @@ impl AgentProvider for CursorProvider {
             );
         }
 
+        // Per-session MCP wiring: a static env-reference entry in the
+        // workspace `.cursor/mcp.json`, the real token via env var at spawn.
+        let mcp_token = config.mcp_config_path.as_deref().and_then(|path| {
+            let wiring = mcp::parse_worker_mcp_config(path)?;
+            match mcp::ensure_workspace_mcp_config(&config.working_dir, &wiring.url) {
+                Ok(_) => Some(wiring.token),
+                Err(e) => {
+                    tracing::warn!(session_id = %session_id, "cursor: MCP wiring skipped: {e}");
+                    None
+                }
+            }
+        });
         // cursor has no override concept plumbed, so the shared working-style
         // rules are the system prompt (used only on the first turn).
         let args = build_cli_args(
@@ -202,6 +214,12 @@ impl AgentProvider for CursorProvider {
         let working_dir = config.working_dir.clone();
 
         let handle = tokio::spawn(async move {
+            // Approval is sticky per server config but cheap to re-assert.
+            // The token env var must match the turn's — approval hashes the
+            // env-interpolated config.
+            if let Some(token) = mcp_token.as_deref() {
+                mcp::approve_workspace_server(&cli_path, &working_dir, token).await;
+            }
             let completed = run_turn(TurnArgs {
                 cli_path: &cli_path,
                 args: &args,
@@ -212,6 +230,7 @@ impl AgentProvider for CursorProvider {
                 broadcaster: broadcaster.as_ref(),
                 timeout_secs,
                 cancel: cancel_for_task,
+                mcp_token: mcp_token.as_deref(),
             })
             .await;
 
@@ -303,6 +322,8 @@ struct TurnArgs<'a> {
     broadcaster: &'a crate::ws::broadcaster::Broadcaster,
     timeout_secs: u64,
     cancel: Arc<Notify>,
+    /// Per-session MCP bearer token, exported as [`mcp::TOKEN_ENV_VAR`].
+    mcp_token: Option<&'a str>,
 }
 
 /// Spawn `cursor-agent` for one turn, stream its stdout into provider
@@ -319,6 +340,7 @@ async fn run_turn(args: TurnArgs<'_>) -> bool {
         broadcaster,
         timeout_secs,
         cancel,
+        mcp_token,
     } = args;
 
     tracing::info!(
@@ -335,6 +357,9 @@ async fn run_turn(args: TurnArgs<'_>) -> bool {
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .kill_on_drop(true);
+    if let Some(token) = mcp_token {
+        cmd.env(mcp::TOKEN_ENV_VAR, token);
+    }
 
     let mut child = match cmd.spawn() {
         Ok(c) => c,
@@ -590,6 +615,9 @@ fn build_cli_args(
     if auto_approve {
         // Non-interactive auto-approval of tool actions in headless mode.
         args.push("--force".to_string());
+        // Untrusted workspaces (e.g. under /tmp) silently drop MCP servers;
+        // trusting matches the auto-approve intent for headless runs.
+        args.push("--trust".to_string());
     }
     args.push("--".to_string());
     // `cursor-agent` has no system-prompt / rules flag (its rules are an
@@ -767,6 +795,7 @@ mod tests {
         assert!(args.contains(&"--print".to_string()));
         assert!(args.contains(&"stream-json".to_string()));
         assert!(args.contains(&"--force".to_string()));
+        assert!(args.contains(&"--trust".to_string()));
         // Prompt is the final positional, after `--`.
         assert_eq!(args.last().unwrap(), "hello");
         let dd = args.iter().position(|a| a == "--").unwrap();
@@ -781,6 +810,7 @@ mod tests {
         let r = args.iter().position(|a| a == "--resume").unwrap();
         assert_eq!(args[r + 1], "chat-7");
         assert!(!args.iter().any(|a| a == "--force"));
+        assert!(!args.iter().any(|a| a == "--trust"));
     }
 
     #[test]

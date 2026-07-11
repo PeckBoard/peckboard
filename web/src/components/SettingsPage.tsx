@@ -1,7 +1,15 @@
 import { useEffect, useState } from 'react'
 import { useAuthStore, authedFetch } from '../store/auth'
 import { useResourcesStore } from '../store/resources'
-import { applyThemeColor, type Theme } from '../util/themeColor'
+import type { Theme } from '../util/themeColor'
+import {
+  THEME_KEY,
+  HUE_KEY,
+  getStoredTheme,
+  applyTheme,
+  getStoredHue,
+  applyHue,
+} from '../util/appearance'
 import ClaudeAccountsSection from './ClaudeAccountsSection'
 import GrokAccountsSection from './GrokAccountsSection'
 import ApprovedCommandsSection from './ApprovedCommandsSection'
@@ -11,9 +19,6 @@ import SystemPromptsSection from './SystemPromptsSection'
 import OllamaPullModel from './OllamaPullModel'
 import PluginsSection from './PluginsSection'
 import PluginRegistryPanel from './PluginRegistryPanel'
-
-const THEME_KEY = 'peckboard_theme'
-const HUE_KEY = 'peckboard_hue'
 
 interface KeepAliveRun {
   provider: string
@@ -45,35 +50,6 @@ function formatInterval(hours: number): string {
 function formatWhen(at: string): string {
   const d = new Date(at)
   return isNaN(d.getTime()) ? at : d.toLocaleString()
-}
-
-function getStoredTheme(): Theme {
-  const stored = localStorage.getItem(THEME_KEY)
-  if (stored === 'light' || stored === 'dark' || stored === 'auto') return stored
-  return 'auto'
-}
-
-function applyTheme(theme: Theme) {
-  const root = document.documentElement
-  if (theme === 'auto') {
-    root.removeAttribute('data-theme')
-  } else {
-    root.setAttribute('data-theme', theme)
-  }
-  applyThemeColor(theme)
-}
-
-function getStoredHue(): number {
-  const stored = localStorage.getItem(HUE_KEY)
-  if (stored !== null) {
-    const n = parseInt(stored, 10)
-    if (!isNaN(n) && n >= 0 && n <= 360) return n
-  }
-  return 220
-}
-
-function applyHue(hue: number) {
-  document.documentElement.style.setProperty('--primary-hue', String(hue))
 }
 
 type SubPage = 'appearance' | 'chat' | 'prompts' | 'plugins' | 'providers' | 'registry' | 'server'
@@ -124,11 +100,7 @@ export default function SettingsPage({ onBack, initialSubPage = null }: Props) {
   const user = useAuthStore((s) => s.user)
   const [subPage, setSubPage] = useState<SubPage | null>(initialSubPage)
   const [theme, setTheme] = useState<Theme>(getStoredTheme)
-  const [hue, setHue] = useState<number>(() => {
-    const stored = getStoredHue()
-    applyHue(stored)
-    return stored
-  })
+  const [hue, setHue] = useState<number>(getStoredHue)
   const [serverConfig, setServerConfig] = useState<ServerConfig | null>(null)
   const [caveman, setCaveman] = useState<string>('off')
   const [preHatchModel, setPreHatchModel] = useState<string>('')

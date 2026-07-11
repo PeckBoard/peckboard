@@ -15,7 +15,6 @@ import ProjectList from './components/ProjectList'
 import KanbanBoard from './components/KanbanBoard'
 import ProjectTodosView from './components/ProjectTodosView'
 import SettingsPage from './components/SettingsPage'
-import { applyThemeColor } from './util/themeColor'
 import PluginPanelModal from './components/PluginPanelModal'
 import PluginFullPage from './components/PluginFullPage'
 import PluginApprovalPrompt from './components/PluginApprovalPrompt'
@@ -470,16 +469,6 @@ function App() {
       }
     }
   }, [view, activeReportId])
-
-  useEffect(() => {
-    const saved = localStorage.getItem('peckboard_theme')
-    if (saved === 'dark' || saved === 'light') {
-      document.documentElement.setAttribute('data-theme', saved)
-      applyThemeColor(saved)
-    } else {
-      applyThemeColor('auto')
-    }
-  }, [])
 
   // Track the on-screen keyboard via `visualViewport` and shrink the app
   // to the visible region so the top of the UI doesn't scroll off when

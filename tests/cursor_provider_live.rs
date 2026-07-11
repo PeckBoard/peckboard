@@ -277,3 +277,224 @@ async fn cursor_models_surface_through_catalog_api() {
         assert_eq!(id.matches(':').count(), 1, "malformed catalog id {id}");
     }
 }
+
+/// Full MCP round-trip through the workspace wiring: the provider writes a
+/// secret-free `.cursor/mcp.json` (env-reference header), re-asserts server
+/// approval, exports the per-session token as an env var, and the real
+/// cursor-agent then calls a tool on a mock peckboard `/mcp` endpoint that
+/// mirrors `routes/mcp.rs` conventions (plain JSON POST, 202 notifications).
+#[tokio::test]
+#[ignore = "requires an authenticated cursor-agent CLI + network; run with --ignored"]
+async fn cursor_mcp_tool_roundtrip() {
+    use axum::{Json, Router, http::HeaderMap, http::StatusCode, routing::post};
+
+    // Surface the provider's tracing (MCP wiring warns etc.) in --nocapture.
+    let _ = tracing_subscriber::fmt()
+        .with_max_level(tracing::Level::DEBUG)
+        .try_init();
+
+    const MAGIC: &str = "PECK-MAGIC-8241";
+    const TOKEN: &str = "live-test-token-1234";
+
+    // Authorization header of every request, to prove env interpolation.
+    let auth_seen: Arc<tokio::sync::Mutex<Vec<String>>> =
+        Arc::new(tokio::sync::Mutex::new(Vec::new()));
+    let auth_rec = auth_seen.clone();
+
+    let app = Router::new().route(
+        "/mcp",
+        post(
+            move |headers: HeaderMap, Json(body): Json<serde_json::Value>| {
+                let auth_rec = auth_rec.clone();
+                async move {
+                    if let Some(a) = headers.get("authorization").and_then(|v| v.to_str().ok()) {
+                        auth_rec.lock().await.push(a.to_string());
+                    }
+                    // Notifications (no id) expect a bare 202, like routes/mcp.rs.
+                    let Some(id) = body.get("id").cloned() else {
+                        return (StatusCode::ACCEPTED, Json(serde_json::json!({})));
+                    };
+                    let result = match body.get("method").and_then(|m| m.as_str()).unwrap_or("") {
+                        "initialize" => serde_json::json!({
+                            "protocolVersion": body["params"]["protocolVersion"]
+                                .as_str()
+                                .unwrap_or("2024-11-05"),
+                            "serverInfo": { "name": "peckboard", "version": "1.0.0" },
+                            "capabilities": { "tools": {} },
+                        }),
+                        "tools/list" => serde_json::json!({
+                            "tools": [{
+                                "name": "peck_ping",
+                                "description": "Returns the magic word. Call with no arguments.",
+                                "inputSchema": { "type": "object", "properties": {} },
+                            }]
+                        }),
+                        "tools/call" => serde_json::json!({
+                            "content": [{ "type": "text", "text": MAGIC }]
+                        }),
+                        _ => serde_json::json!({}),
+                    };
+                    (
+                        StatusCode::OK,
+                        Json(serde_json::json!({ "jsonrpc": "2.0", "id": id, "result": result })),
+                    )
+                }
+            },
+        ),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+
+    // Session workspace + the per-session worker-mcp config the dispatcher
+    // would have written (same shape as `write_mcp_config`).
+    // cursor-agent silently drops MCP servers in untrusted workspaces, and
+    // /tmp is untrusted by default — anchor the workspace under $HOME (the
+    // verified-trusted zone; the turn also passes --trust via auto_approve).
+    let home = std::env::var("HOME").expect("HOME set");
+    let ws = tempfile::Builder::new()
+        .prefix(".pb-cursor-mcp-live-")
+        .tempdir_in(home)
+        .unwrap();
+    eprintln!("live ws = {}", ws.path().display());
+    let mcp_cfg = ws.path().join("worker-mcp.json");
+    std::fs::write(
+        &mcp_cfg,
+        serde_json::json!({
+            "mcpServers": { "peckboard": {
+                "type": "http",
+                "url": format!("http://127.0.0.1:{port}/mcp"),
+                "headers": { "Authorization": format!("Bearer {TOKEN}") },
+            }}
+        })
+        .to_string(),
+    )
+    .unwrap();
+
+    let registry = Arc::new(ProviderRegistry::new());
+    let db = Db::in_memory().unwrap();
+    let provider = Arc::new(CursorProvider::new(cursor_settings_store(db.clone())));
+    registry
+        .register(
+            provider,
+            ProviderInfo {
+                id: "cursor".into(),
+                display_name: "Cursor".into(),
+                models: default_models(),
+                effort_levels: vec![],
+            },
+        )
+        .await;
+    let manager = SessionManager::new(registry);
+
+    let broadcaster = Broadcaster::new();
+    let ts = chrono::Utc::now().to_rfc3339();
+    db.create_folder(NewFolder {
+        id: "f-mcp".into(),
+        name: "F".into(),
+        path: ws.path().to_string_lossy().to_string(),
+        created_at: ts.clone(),
+    })
+    .await
+    .unwrap();
+    db.create_session(NewSession {
+        id: "s-mcp".into(),
+        name: "Cursor MCP Live".into(),
+        folder_id: "f-mcp".into(),
+        model: None,
+        effort: None,
+        is_worker: false,
+        project_id: None,
+        card_id: None,
+        conversation_id: None,
+        created_at: ts.clone(),
+        last_activity: ts,
+        ..Default::default()
+    })
+    .await
+    .unwrap();
+
+    let mut completion_rx = manager
+        .take_completion_rx()
+        .await
+        .expect("completion rx available");
+
+    let config = SpawnConfig {
+        model: "cursor:auto".into(),
+        effort: None,
+        working_dir: ws.path().to_string_lossy().to_string(),
+        mcp_config_path: Some(mcp_cfg.to_string_lossy().to_string()),
+        env: Default::default(),
+        permission_mode: None,
+        timeout_ms: None,
+        metadata: serde_json::Value::Null,
+        system_prompt_suffix: None,
+        system_prompt_override: None,
+        extra_allowed_tools: Vec::new(),
+        is_worker: false,
+        is_pre_hatcher: false,
+    };
+
+    manager
+        .send_or_queue(
+            "s-mcp",
+            UserMessage::from_text(
+                "Call the MCP tool peck_ping from the peckboard server, then reply \
+                 with exactly the text it returns.",
+            ),
+            &db,
+            &broadcaster,
+            config,
+        )
+        .await
+        .expect("dispatch succeeds");
+
+    let completion = tokio::time::timeout(Duration::from_secs(180), completion_rx.recv())
+        .await
+        .expect("turn completed before timeout")
+        .expect("completion channel still open");
+    assert_eq!(completion.session_id, "s-mcp");
+    assert!(
+        completion.completed,
+        "cursor MCP turn should report success"
+    );
+
+    // Debug: what the agent actually said, before the assertions below.
+    for e in db.events_tail("s-mcp", 200).await.unwrap() {
+        if e.kind == "agent-text" || e.kind == "agent-end" {
+            eprintln!(
+                "[{}] {}",
+                e.kind,
+                e.data.chars().take(400).collect::<String>()
+            );
+        }
+    }
+    let written = std::fs::read_to_string(ws.path().join(".cursor/mcp.json")).unwrap();
+    assert!(
+        written.contains("${env:PECKBOARD_MCP_TOKEN}"),
+        "workspace config should reference the env var: {written}",
+    );
+    assert!(
+        !written.contains(TOKEN),
+        "workspace config must never contain the raw token: {written}",
+    );
+
+    // cursor-agent reached the endpoint with the interpolated session token.
+    let seen = auth_seen.lock().await;
+    assert!(
+        !seen.is_empty(),
+        "cursor-agent never called the MCP endpoint"
+    );
+    assert!(
+        seen.iter().all(|a| a == &format!("Bearer {TOKEN}")),
+        "unexpected Authorization values: {seen:?}",
+    );
+    drop(seen);
+
+    // And the model surfaced the tool's output back into the event log.
+    let events = db.events_tail("s-mcp", 200).await.unwrap();
+    assert!(
+        events.iter().any(|e| e.data.contains(MAGIC)),
+        "expected the tool's magic word in the event log",
+    );
+}
