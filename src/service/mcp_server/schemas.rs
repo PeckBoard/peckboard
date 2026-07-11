@@ -192,6 +192,15 @@ pub(super) fn tool_definitions() -> Vec<McpToolDef> {
             }),
         },
         McpToolDef {
+            name: "delete_plan".into(),
+            description: "Delete the calling session's plan. Use ONLY once the plan has served its purpose — you verified the implementation covers every plan item — or the user asks to discard it. Errors if the session has no plan.".into(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {},
+                "additionalProperties": false
+            }),
+        },
+        McpToolDef {
             name: "create_card".into(),
             description: "Create a card. Uses current project context, or pass project_id explicitly.".into(),
             input_schema: serde_json::json!({

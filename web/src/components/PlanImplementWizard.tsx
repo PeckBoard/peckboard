@@ -23,8 +23,10 @@ interface PlanImplementWizardProps {
 /** Multi-step wizard that turns a proposed plan into worker cards: pick the
  *  target project, provider, and account, then hand the authoring session an
  *  instruction to create the cards — the AI chooses the best model and system
- *  prompt per card (no non-thinking model for the planning). No new backend
- *  is needed: the session already has `create_card`. */
+ *  prompt per card (no non-thinking model for the planning) — and then to
+ *  SUPERVISE: sleep-then-check the cards until they finish, verify the
+ *  implementation against the plan, delete the plan (`delete_plan`) on pass,
+ *  or file gap cards and repeat. */
 export default function PlanImplementWizard({
   sessionId,
   onClose,
@@ -79,7 +81,15 @@ export default function PlanImplementWizard({
       `use a thinking model for anything non-trivial — never a non-thinking model for planning),\n` +
       `- set the correct system_prompt_name (implement / research / debug / review / docs) for the work,\n` +
       `- give a clear title + description and set depends_on where order matters.\n` +
-      `Create the cards with create_card, then summarize what you created.`
+      `Create the cards with create_card and summarize what you created. Then SUPERVISE until the plan is fully implemented:\n` +
+      `1. MONITOR with a sleep-then-check loop: run_command sleep 60 (re-call it once approved if gated), then list_cards to ` +
+      `check the cards you created; repeat until every one of them is done or wont-do.\n` +
+      `2. VERIFY: re-read your plan and inspect the ACTUAL implementation (read the changed files; read_worker_session / ` +
+      `read_report where useful). Confirm EVERY plan item was fully implemented.\n` +
+      `3. If verification passes: delete the plan with delete_plan.\n` +
+      `4. If there are gaps (missing, incomplete, or wont-do items): create new cards covering exactly the gaps under the ` +
+      `SAME rules above (best model, system_prompt_name, depends_on), then return to step 1. Repeat monitor → verify ` +
+      `until verification passes and the plan is deleted.`
     try {
       await authedFetch(`/api/sessions/${sessionId}/message`, {
         method: 'POST',

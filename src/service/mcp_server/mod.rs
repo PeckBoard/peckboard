@@ -69,6 +69,7 @@ impl McpToolRegistry {
             "ask_user" => self.handle_ask_user(args, ctx).await,
             "create_card" => self.handle_create_card(args, ctx).await,
             "propose_plan" => self.handle_propose_plan(args, ctx).await,
+            "delete_plan" => self.handle_delete_plan(args, ctx).await,
             "list_cards" => self.handle_list_cards(args, ctx).await,
             "list_card_dependencies" => self.handle_list_card_dependencies(args, ctx).await,
             "get_card_dependency_tree" => self.handle_get_card_dependency_tree(args, ctx).await,
@@ -466,7 +467,8 @@ mod tests {
         assert!(names.contains(&"get_model_guidance"));
         assert!(names.contains(&"switch_session_model"));
         assert!(names.contains(&"propose_plan"));
-        assert_eq!(names.len(), 68);
+        assert!(names.contains(&"delete_plan"));
+        assert_eq!(names.len(), 69);
     }
 
     #[test]
