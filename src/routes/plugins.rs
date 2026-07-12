@@ -185,6 +185,20 @@ async fn uninstall_plugin(
     }
 }
 
+/// Resolve the settings schema for a plugin id: built-in plugins first,
+/// then the manifest-declared schema of a loaded WASM plugin. Both store
+/// values in the same `plugin_settings` rows, so everything downstream
+/// (validation, redaction, storage) is shared.
+async fn settings_schema_for(
+    state: &AppState,
+    plugin_id: &str,
+) -> Option<crate::plugin::settings::SettingsSchema> {
+    if let Some(schema) = state.builtin_plugins.settings_schema_for(plugin_id).await {
+        return Some(schema);
+    }
+    state.plugins.settings_schema_for(plugin_id).await
+}
+
 /// GET /api/plugins/:plugin_id/settings — current values, redacted for
 /// wire transmission. Always returns 200 with `settings: []` when the
 /// plugin exists but has no schema, so the UI can render an empty form
@@ -193,7 +207,7 @@ async fn get_settings(
     State(state): State<Arc<AppState>>,
     Path(plugin_id): Path<String>,
 ) -> impl IntoResponse {
-    let Some(schema) = state.builtin_plugins.settings_schema_for(&plugin_id).await else {
+    let Some(schema) = settings_schema_for(&state, &plugin_id).await else {
         return Err((
             StatusCode::NOT_FOUND,
             Json(serde_json::json!({ "error": "unknown plugin" })),
@@ -225,7 +239,7 @@ async fn update_settings(
     Path(plugin_id): Path<String>,
     Json(body): Json<serde_json::Value>,
 ) -> impl IntoResponse {
-    let Some(schema) = state.builtin_plugins.settings_schema_for(&plugin_id).await else {
+    let Some(schema) = settings_schema_for(&state, &plugin_id).await else {
         return Err((
             StatusCode::NOT_FOUND,
             Json(serde_json::json!({ "error": "unknown plugin" })),

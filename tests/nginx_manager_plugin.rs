@@ -294,6 +294,18 @@ async fn nginx_manager_plugin_bridges_a_mock_npm_end_to_end() {
         .expect("nginx-manager plugin should be loaded");
     assert_eq!(info.status, "approved", "plugin must be active: {info:?}");
 
+    // The manifest-declared settings surface: the catalog entry carries the
+    // schema (URL + secret token) and the manager resolves it by id — the
+    // same lookup the /api/plugins settings routes use.
+    assert_eq!(info.settings_schema.fields.len(), 2);
+    let schema = plugins
+        .settings_schema_for(PLUGIN_ID)
+        .await
+        .expect("loaded plugin must expose its settings schema");
+    assert_eq!(schema.fields[0].key, "base_url");
+    assert_eq!(schema.fields[1].key, "api_key");
+    assert!(plugins.settings_schema_for("nope").await.is_none());
+
     let ctx = json!({ "sessionId": "chat-1" });
 
     // Unconfigured status is a diagnosis, not an error.

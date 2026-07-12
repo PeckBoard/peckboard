@@ -16,6 +16,7 @@ use super::hooks::{
 };
 use crate::db::Db;
 use crate::db::crud::{APPROVAL_APPROVED, APPROVAL_DENIED};
+use crate::plugin::settings::{FieldKind, SettingsSchema};
 
 const MEMORY_LIMIT_PAGES: u32 = 2048; // 128 MB (64 KB per page)
 
@@ -187,6 +188,7 @@ impl LoadedPlugin {
             repository: self.manifest.repository.clone(),
             hooks: self.manifest.hooks.clone(),
             permissions: self.manifest.permissions.clone(),
+            settings_schema: SettingsSchema::new(self.manifest.settings.clone()),
             status: self.status_label(),
             error: self.init_error.clone(),
         }
@@ -241,6 +243,10 @@ pub struct WasmPluginInfo {
     pub hooks: Vec<String>,
     /// Host permissions the plugin requests — also part of the approval.
     pub permissions: Vec<String>,
+    /// Operator-editable settings the plugin declares (possibly empty), so
+    /// the catalog carries the schema in the one request the UI already
+    /// makes — same shape as a built-in plugin's `settings_schema`.
+    pub settings_schema: SettingsSchema,
     pub status: &'static str,
     /// Present only when `status` is `init_failed`.
     pub error: Option<String>,
@@ -348,6 +354,55 @@ fn validate_mcp_tools(name: &str, manifest: &PluginManifest) -> anyhow::Result<(
     Ok(())
 }
 
+/// Ceiling on manifest-declared settings fields. No realistic plugin needs
+/// more, and the cap keeps a hostile manifest from bloating the catalog
+/// payload and the settings form.
+const MAX_SETTINGS_FIELDS: usize = 32;
+
+/// Validate a plugin's declared `settings` at load time: a bounded field
+/// count, safe snake_case keys (same shape as MCP tool names — they are
+/// storage keys and wire identifiers), unique keys, non-empty titles, and
+/// enum fields with at least one option. Returns an error naming the first
+/// problem; `Ok(())` when there are no settings.
+fn validate_settings(name: &str, manifest: &PluginManifest) -> anyhow::Result<()> {
+    if manifest.settings.is_empty() {
+        return Ok(());
+    }
+    if manifest.settings.len() > MAX_SETTINGS_FIELDS {
+        anyhow::bail!(
+            "plugin '{name}' declares {} settings fields (max {MAX_SETTINGS_FIELDS})",
+            manifest.settings.len(),
+        );
+    }
+    let mut seen = std::collections::HashSet::new();
+    for field in &manifest.settings {
+        if !is_safe_mcp_tool_name(&field.key) {
+            anyhow::bail!(
+                "plugin '{name}' declares setting with invalid key '{}' \
+                 (expected ^[a-z0-9_]+$)",
+                field.key,
+            );
+        }
+        if !seen.insert(field.key.as_str()) {
+            anyhow::bail!(
+                "plugin '{name}' declares duplicate setting key '{}'",
+                field.key,
+            );
+        }
+        if field.title.trim().is_empty() {
+            anyhow::bail!("plugin '{name}' setting '{}' has an empty title", field.key);
+        }
+        if let FieldKind::Enum { options, .. } = &field.kind
+            && options.is_empty()
+        {
+            anyhow::bail!(
+                "plugin '{name}' enum setting '{}' has no options",
+                field.key
+            );
+        }
+    }
+    Ok(())
+}
 /// Run a plugin's `init` export with its per-plugin config block. Returns
 /// the error string (for surfacing as `init_failed`) on failure.
 fn run_init(plugin: &mut Plugin, config: String) -> Result<(), String> {
@@ -586,6 +641,7 @@ impl PluginManager {
         }
 
         validate_mcp_tools(&name, &plugin_manifest)?;
+        validate_settings(&name, &plugin_manifest)?;
 
         // A plugin contributing sidebar / project / session items must hold
         // `contribute_sidebar`; per-item path validity is enforced when the
@@ -1163,6 +1219,19 @@ impl PluginManager {
     pub async fn wasm_plugins(&self) -> Vec<WasmPluginInfo> {
         let plugins = self.plugins.lock().await;
         plugins.iter().map(|p| p.to_info()).collect()
+    }
+
+    /// The manifest-declared settings schema of a loaded WASM plugin, or
+    /// `None` when no plugin with that id is loaded. Exposed regardless of
+    /// approval status — editing settings is safe while a plugin is inert
+    /// (plugin code that reads them doesn't run until approval), and
+    /// configuring before approving is a natural order.
+    pub async fn settings_schema_for(&self, plugin_id: &str) -> Option<SettingsSchema> {
+        let plugins = self.plugins.lock().await;
+        plugins
+            .iter()
+            .find(|p| p.name == plugin_id)
+            .map(|p| SettingsSchema::new(p.manifest.settings.clone()))
     }
 
     /// Record an operator's approve/deny decision for a plugin's declared
@@ -2015,6 +2084,7 @@ mod tests {
             session_items: Vec::new(),
             permissions,
             call_timeout_secs: None,
+            settings: Vec::new(),
         }
     }
 
@@ -2068,6 +2138,65 @@ mod tests {
         m.permissions.clear();
         let err = validate_mcp_tools("p", &m).unwrap_err().to_string();
         assert!(err.contains("provide_mcp_tools"), "got: {err}");
+    }
+
+    fn setting(key: &str) -> crate::plugin::settings::SettingField {
+        crate::plugin::settings::SettingField {
+            key: key.into(),
+            title: "A setting".into(),
+            description: None,
+            required: false,
+            kind: FieldKind::String {
+                secret: false,
+                default: None,
+                placeholder: None,
+            },
+        }
+    }
+
+    #[test]
+    fn validate_settings_accepts_well_formed_and_empty() {
+        let mut m = manifest_with(&[], vec![]);
+        assert!(validate_settings("p", &m).is_ok());
+        m.settings = vec![setting("base_url"), setting("api_key")];
+        assert!(validate_settings("p", &m).is_ok());
+    }
+
+    #[test]
+    fn validate_settings_rejects_bad_key_dup_key_and_blank_title() {
+        let mut m = manifest_with(&[], vec![]);
+        m.settings = vec![setting("Bad-Key")];
+        let err = validate_settings("p", &m).unwrap_err().to_string();
+        assert!(err.contains("invalid key"), "got: {err}");
+
+        m.settings = vec![setting("api_key"), setting("api_key")];
+        let err = validate_settings("p", &m).unwrap_err().to_string();
+        assert!(err.contains("duplicate setting key"), "got: {err}");
+
+        let mut blank = setting("ok_key");
+        blank.title = "  ".into();
+        m.settings = vec![blank];
+        let err = validate_settings("p", &m).unwrap_err().to_string();
+        assert!(err.contains("empty title"), "got: {err}");
+    }
+
+    #[test]
+    fn validate_settings_rejects_optionless_enum_and_field_flood() {
+        let mut m = manifest_with(&[], vec![]);
+        let mut e = setting("mode");
+        e.kind = FieldKind::Enum {
+            options: vec![],
+            default: None,
+        };
+        m.settings = vec![e];
+        let err = validate_settings("p", &m).unwrap_err().to_string();
+        assert!(err.contains("no options"), "got: {err}");
+
+        m.settings = (0..MAX_SETTINGS_FIELDS + 1)
+            .map(|i| setting(&format!("k{i}")))
+            .collect();
+        let err = validate_settings("p", &m).unwrap_err().to_string();
+        assert!(err.contains("max"), "got: {err}");
     }
 
     #[test]

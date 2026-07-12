@@ -137,6 +137,7 @@ function WasmPluginList({
 }) {
   const [busy, setBusy] = useState<string | null>(null)
   const [confirmRemove, setConfirmRemove] = useState<string | null>(null)
+  const [settingsFor, setSettingsFor] = useState<WasmPlugin | null>(null)
 
   const decide = (pluginId: string, decision: 'approve' | 'deny') => {
     setBusy(pluginId)
@@ -195,6 +196,16 @@ function WasmPluginList({
               <p className="plugin-card-error">{p.error}</p>
             )}
             <div className="wasm-plugin-actions">
+              {(p.settings_schema?.fields?.length ?? 0) > 0 && (
+                <button
+                  type="button"
+                  className="plugin-settings-open"
+                  data-testid={`wasm-plugin-settings-${p.name}`}
+                  onClick={() => setSettingsFor(p)}
+                >
+                  Settings
+                </button>
+              )}
               {p.status !== 'approved' && (
                 <button
                   type="button"
@@ -230,6 +241,13 @@ function WasmPluginList({
           </li>
         ))}
       </ul>
+      {settingsFor && (
+        <PluginSettingsModal
+          pluginId={settingsFor.name}
+          pluginName={settingsFor.name}
+          onClose={() => setSettingsFor(null)}
+        />
+      )}
       {confirmRemove && (
         <ConfirmDialog
           title="Remove plugin"

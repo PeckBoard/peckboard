@@ -1,5 +1,7 @@
 use serde::{Deserialize, Serialize};
 
+use crate::plugin::settings::SettingField;
+
 /// Verdict returned by a plugin for a hook call.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "verdict", rename_all = "snake_case")]
@@ -156,6 +158,15 @@ pub struct PluginManifest {
     /// hooks on hot paths (message dispatch) should keep the default.
     #[serde(default)]
     pub call_timeout_secs: Option<u64>,
+    /// Operator-editable settings this plugin declares, rendered by the
+    /// Settings UI exactly like a built-in plugin's schema and stored in the
+    /// same `plugin_settings` rows the plugin reads back through
+    /// `peckboard_get_plugin_setting` — so a value saved in the form is what
+    /// the plugin's next call sees. Validated at load (key shape, uniqueness,
+    /// bounded count); an invalid block fails the load rather than surfacing
+    /// a broken form.
+    #[serde(default)]
+    pub settings: Vec<SettingField>,
 }
 
 /// One MCP tool a plugin contributes, declared in the manifest's `mcp_tools`.
@@ -430,6 +441,38 @@ mod tests {
         assert_eq!(m.mcp_tools.len(), 1);
         assert_eq!(m.mcp_tools[0].name, "do_thing");
         assert!(m.mcp_tools[0].input_schema.is_object());
+    }
+    #[test]
+    fn manifest_parses_settings_and_defaults_empty() {
+        // settings is optional and defaults to empty.
+        let m: PluginManifest = serde_json::from_str(
+            r#"{ "description":"d","version":"1","repository":"r","hooks":[] }"#,
+        )
+        .unwrap();
+        assert!(m.settings.is_empty());
+        // When present, the settings-module field vocabulary parses through:
+        // a url field and a secret string, exactly what nginx-manager declares.
+        let m: PluginManifest = serde_json::from_str(
+            r#"{ "description":"d","version":"1","repository":"r","hooks":[],
+                 "settings":[
+                   {"key":"base_url","title":"URL","required":true,
+                    "type":"url","placeholder":"http://npm:81"},
+                   {"key":"api_key","title":"API key","required":true,
+                    "type":"string","secret":true}
+                 ] }"#,
+        )
+        .unwrap();
+        assert_eq!(m.settings.len(), 2);
+        assert_eq!(m.settings[0].key, "base_url");
+        assert!(m.settings[0].required);
+        assert!(matches!(
+            m.settings[0].kind,
+            crate::plugin::settings::FieldKind::Url { .. }
+        ));
+        assert!(matches!(
+            m.settings[1].kind,
+            crate::plugin::settings::FieldKind::String { secret: true, .. }
+        ));
     }
 
     #[test]

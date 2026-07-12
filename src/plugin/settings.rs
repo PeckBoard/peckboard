@@ -122,14 +122,14 @@ pub struct EnumOption {
     pub label: String,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SettingField {
     /// Storage key. Stable across renames in the UI; treat as snake_case.
     pub key: String,
     /// Human-readable label shown above the input.
     pub title: String,
     /// Help text rendered under the label.
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
     /// Whether the value must be present and non-empty for the plugin
     /// to function. Surfaced as a validation requirement on PUT.
@@ -145,7 +145,7 @@ fn is_false(b: &bool) -> bool {
 
 /// Per-plugin settings schema. Empty means the plugin has no
 /// configurable surface.
-#[derive(Debug, Clone, Default, Serialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct SettingsSchema {
     pub fields: Vec<SettingField>,
 }

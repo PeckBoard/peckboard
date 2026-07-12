@@ -344,6 +344,103 @@ async fn put_settings_round_trips_and_masks_secret_values() {
     assert_eq!(raw_arr[0]["value"], "Bearer SECRET_TOKEN");
 }
 
+/// A WASM plugin's manifest-declared settings ride the exact same routes as
+/// a built-in plugin's: schema from the manifest, values validated + stored
+/// in `plugin_settings`, secrets masked on the wire. Skips when the
+/// nginx-manager wasm isn't built (same policy as the e2e bridge test).
+#[tokio::test]
+async fn wasm_plugin_settings_round_trip_via_routes() {
+    let wasm = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(
+        "../peck-plugins/nginx-manager/target/wasm32-unknown-unknown/release/\
+         peckboard_nginx_manager_plugin.wasm",
+    );
+    if !wasm.exists() {
+        eprintln!("SKIP wasm_plugin_settings_round_trip_via_routes: plugin wasm not built");
+        return;
+    }
+
+    let (state, token) = build_state().await;
+    let plugins_dir = state.config.data_dir.join("plugins");
+    std::fs::create_dir_all(&plugins_dir).unwrap();
+    std::fs::copy(&wasm, plugins_dir.join("nginx-manager.wasm")).unwrap();
+    state.plugins.load_all().await.unwrap();
+
+    let app = router(state.clone()).with_state(state.clone());
+
+    // GET: the manifest-declared schema (url + secret string), no values yet.
+    let req = Request::builder()
+        .uri("/api/plugins/nginx-manager/settings")
+        .header(header::AUTHORIZATION, format!("Bearer {token}"))
+        .body(Body::empty())
+        .unwrap();
+    let res = app.clone().oneshot(req).await.unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(res.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let json: Value = serde_json::from_slice(&body).unwrap();
+    let fields = json["schema"]["fields"].as_array().unwrap();
+    assert_eq!(fields.len(), 2, "schema: {json}");
+    assert_eq!(fields[0]["key"], "base_url");
+    assert_eq!(fields[0]["type"], "url");
+    assert_eq!(fields[1]["key"], "api_key");
+    assert_eq!(fields[1]["secret"], true);
+
+    // PUT url + token; the secret comes back masked but is stored raw.
+    let req = Request::builder()
+        .uri("/api/plugins/nginx-manager/settings")
+        .method("PUT")
+        .header(header::AUTHORIZATION, format!("Bearer {token}"))
+        .header("content-type", "application/json")
+        .body(Body::from(
+            serde_json::json!({
+                "updates": {
+                    "base_url": "http://192.168.1.10:81",
+                    "api_key": "npm_super_secret_key"
+                }
+            })
+            .to_string(),
+        ))
+        .unwrap();
+    let res = app.clone().oneshot(req).await.unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(res.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let json: Value = serde_json::from_slice(&body).unwrap();
+    let settings = json["settings"].as_array().unwrap();
+    let base_url = settings.iter().find(|s| s["key"] == "base_url").unwrap();
+    assert_eq!(base_url["value"], "http://192.168.1.10:81");
+    let api_key = settings.iter().find(|s| s["key"] == "api_key").unwrap();
+    assert_eq!(api_key["masked"], true);
+    assert!(
+        api_key["value"].is_null(),
+        "secret must not echo: {api_key}"
+    );
+    assert_eq!(api_key["has_value"], true);
+
+    // A bad URL is rejected by the shared validator.
+    let req = Request::builder()
+        .uri("/api/plugins/nginx-manager/settings")
+        .method("PUT")
+        .header(header::AUTHORIZATION, format!("Bearer {token}"))
+        .header("content-type", "application/json")
+        .body(Body::from(
+            serde_json::json!({ "updates": { "base_url": "file:///etc/passwd" } }).to_string(),
+        ))
+        .unwrap();
+    let res = app.oneshot(req).await.unwrap();
+    assert_eq!(res.status(), StatusCode::BAD_REQUEST);
+
+    // The stored row holds the raw key — exactly what the plugin's
+    // `peckboard_get_plugin_setting` host read returns at tool-call time.
+    let raw = state
+        .db
+        .list_plugin_settings("nginx-manager")
+        .await
+        .unwrap();
+    assert_eq!(raw.get("api_key").unwrap(), "npm_super_secret_key");
+}
 #[tokio::test]
 async fn put_settings_rejects_invalid_url() {
     let (state, token) = build_state().await;

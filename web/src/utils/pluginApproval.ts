@@ -11,6 +11,9 @@ export interface WasmPlugin {
   /** Host permissions the plugin requests — approved alongside its hooks. */
   permissions: string[]
   status: 'pending' | 'approved' | 'denied' | 'init_failed'
+  /** Manifest-declared settings schema (may be empty) — same shape as a
+   *  built-in plugin's, rendered by the shared settings form. */
+  settings_schema?: { fields: { key: string }[] }
   error?: string | null
 }
 
