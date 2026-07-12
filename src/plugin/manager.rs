@@ -60,6 +60,7 @@ const MAX_CALL_TIMEOUT: Duration = Duration::from_secs(180);
 /// you forget.
 pub const ALLOWED_HOOKS: &[&str] = &[
     "card.create.before",
+    "card.step.after",
     "card.update.before",
     "card.priorities.list",
     "http.request.authed",
@@ -74,14 +75,17 @@ pub const ALLOWED_HOOKS: &[&str] = &[
     "mcp.tool.call.before",
     "mcp.tool.call.failed",
     "mcp.tool.invoke",
+    "project.paused",
+    "question.pending",
+    "session.agent.ended",
     "session.message.before",
     "session.prehatch.answer",
     "session.prehatch.cancel",
     "session.reference.resolve",
     "session.user.answer",
     "todo",
+    "worker.blocked",
 ];
-
 /// The complete set of host capabilities a WASM plugin may request in its
 /// manifest `permissions`. Like [`ALLOWED_HOOKS`] this is pinned in code:
 /// a plugin declaring anything outside it fails to load, so only
@@ -410,6 +414,29 @@ fn run_init(plugin: &mut Plugin, config: String) -> Result<(), String> {
         .call::<String, String>("init", config)
         .map(|_| ())
         .map_err(|e| e.to_string())
+}
+
+/// Process-global plugin manager for fire-and-forget notification hooks.
+///
+/// Set once from `main.rs` after the `PluginManager` is built; sites that
+/// don't hold an `Arc<PluginManager>` (e.g. `emit_event`) call [`notify`]
+/// which no-ops when the global is unset (tests, watchdog).
+static NOTIFY_GLOBAL: std::sync::OnceLock<Arc<PluginManager>> = std::sync::OnceLock::new();
+
+/// Register the process-wide plugin manager for [`notify`]. Called once from
+/// `main.rs` after the manager is created.
+pub fn set_notify_global(mgr: Arc<PluginManager>) {
+    let _ = NOTIFY_GLOBAL.set(mgr);
+}
+
+/// Fire a notification hook on the global plugin manager. No-op when the
+/// global has not been set (tests, watchdog). The dispatch is
+/// fire-and-forget: this function returns immediately and plugin work runs
+/// in a background `tokio::spawn` task.
+pub fn notify(hook: &str, payload: serde_json::Value) {
+    if let Some(mgr) = NOTIFY_GLOBAL.get() {
+        mgr.dispatch_notify(hook, payload);
+    }
 }
 
 /// Manages all loaded plugins and dispatches hook calls.
@@ -944,6 +971,41 @@ impl PluginManager {
         }
     }
 
+    /// Fire a **notification** hook with no user-authority context and no
+    /// cancel semantics. Modeled on [`dispatch_authed`] but lighter:
+    /// payloads are never threaded between plugins, verdicts are ignored,
+    /// and the caller **never waits** — the entire dispatch is wrapped in
+    /// `tokio::spawn` so it runs concurrently with the caller's work.
+    ///
+    /// Use this for lifecycle events (card step changes, agent completion,
+    /// project pause, …) where the triggering operation has already
+    /// committed and a plugin can only react, not cancel.
+    ///
+    /// [`dispatch_authed`]: PluginManager::dispatch_authed
+    pub fn dispatch_notify(&self, hook: &str, payload: serde_json::Value) {
+        let plugins_ref = self.plugins.clone();
+        let hook = hook.to_string();
+        let call_input = serde_json::json!({ "hook": hook, "payload": payload }).to_string();
+        tokio::spawn(async move {
+            let targets: Vec<(String, Arc<Mutex<Plugin>>)> = {
+                let plugins = plugins_ref.lock().await;
+                plugins
+                    .iter()
+                    .filter(|p| p.is_active() && p.manifest.hooks.iter().any(|h| h == &hook))
+                    .map(|p| (p.name.clone(), p.plugin.clone()))
+                    .collect()
+            };
+            for (name, plugin) in targets {
+                let result = {
+                    let mut guard = plugin.lock().await;
+                    guard.call::<String, String>("handle", call_input.clone())
+                };
+                if let Err(e) = result {
+                    warn!("Plugin '{name}' failed on notify hook '{hook}': {e}");
+                }
+            }
+        });
+    }
     /// Dispatch a public HTTP request to whichever loaded plugin owns
     /// the route, returning the plugin's complete HTTP response.
     ///
@@ -1934,14 +1996,19 @@ mod tests {
         // Hooks the codebase dispatches must be present.
         for required in [
             "card.create.before",
+            "card.step.after",
             "card.update.before",
             "card.priorities.list",
             "http.request.before",
             "mcp.tool.call.before",
+            "project.paused",
+            "question.pending",
+            "session.agent.ended",
             "session.message.before",
             "session.prehatch.cancel",
             "session.reference.resolve",
             "todo",
+            "worker.blocked",
         ] {
             assert!(
                 ALLOWED_HOOKS.contains(&required),

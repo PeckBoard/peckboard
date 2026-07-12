@@ -513,6 +513,13 @@ async fn pause_project(
             session_id: id,
             data: serde_json::json!({ "project": &project }),
         });
+    let paused_payload = crate::plugin::notify::project_paused_payload(
+        &project.id,
+        &project.name,
+        project.pause_reason.as_deref(),
+        "manual",
+    );
+    crate::plugin::manager::notify(crate::plugin::hooks::PROJECT_PAUSED_HOOK, paused_payload);
     Ok::<_, (StatusCode, Json<serde_json::Value>)>(Json(serde_json::json!(project)))
 }
 

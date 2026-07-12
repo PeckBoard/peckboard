@@ -1182,6 +1182,31 @@ pub async fn maybe_auto_pause_after_crash(
         // card/project missing) there's nothing for the UI to render.
         if let Ok(Some(card)) = state.db.get_card(card_id).await {
             broadcast_project_update(state, &card.project_id);
+            if let Ok(Some(project)) = state.db.get_project(&card.project_id).await {
+                let reason = project
+                    .pause_reason
+                    .as_deref()
+                    .unwrap_or("repeated worker crashes");
+                crate::plugin::manager::notify(
+                    crate::plugin::hooks::WORKER_BLOCKED_HOOK,
+                    crate::plugin::notify::worker_blocked_payload(
+                        &card.id,
+                        &card.title,
+                        &project.id,
+                        &project.name,
+                        reason,
+                    ),
+                );
+                crate::plugin::manager::notify(
+                    crate::plugin::hooks::PROJECT_PAUSED_HOOK,
+                    crate::plugin::notify::project_paused_payload(
+                        &project.id,
+                        &project.name,
+                        Some(reason),
+                        "crash",
+                    ),
+                );
+            }
         }
     }
 }

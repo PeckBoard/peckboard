@@ -3,6 +3,7 @@ pub mod builtins;
 pub mod hooks;
 pub mod host;
 pub mod manager;
+pub mod notify;
 pub mod registry;
 pub mod settings;
 pub mod todo_hook;

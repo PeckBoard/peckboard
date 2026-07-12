@@ -91,7 +91,7 @@ async fn main() -> anyhow::Result<()> {
 
     let plugins = Arc::new(PluginManager::new(&config.data_dir, db.clone()));
     plugins.load_all().await?;
-
+    peckboard::plugin::manager::set_notify_global(plugins.clone());
     let jwt_secret = load_or_create_jwt_secret(&config.data_dir)?;
     // 60/min is plenty for a single-tenant LAN server; the previous 5
     // was so aggressive that even a normal user with a few tabs open

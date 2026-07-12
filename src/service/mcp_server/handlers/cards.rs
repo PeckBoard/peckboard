@@ -257,6 +257,15 @@ impl McpToolRegistry {
         let prev_step = prev_step_cell.lock().unwrap().clone().unwrap_or_default();
 
         append_step_change(ctx, card_id, &prev_step, &card.step).await?;
+        crate::plugin::notify::fire_card_step_after(
+            &ctx.db,
+            card_id,
+            &card.title,
+            &card.project_id,
+            &prev_step,
+            &card.step,
+        )
+        .await;
         broadcast_card_update(ctx, &card);
         // Reaching a terminal step from `complete_step` (no next step
         // in the workflow) makes the todo snapshot stale the same way
@@ -342,6 +351,15 @@ impl McpToolRegistry {
         let prev_step = prev_step_cell.lock().unwrap().clone().unwrap_or_default();
 
         append_step_change(ctx, card_id, &prev_step, "done").await?;
+        crate::plugin::notify::fire_card_step_after(
+            &ctx.db,
+            card_id,
+            &card.title,
+            &card.project_id,
+            &prev_step,
+            "done",
+        )
+        .await;
         broadcast_card_update(ctx, &card);
         crate::worker::orchestrator::clear_session_todos(
             &ctx.db,
@@ -414,6 +432,15 @@ impl McpToolRegistry {
         let prev_step = prev_step_cell.lock().unwrap().clone().unwrap_or_default();
 
         append_step_change(ctx, card_id, &prev_step, "wont_do").await?;
+        crate::plugin::notify::fire_card_step_after(
+            &ctx.db,
+            card_id,
+            &card.title,
+            &card.project_id,
+            &prev_step,
+            "wont_do",
+        )
+        .await;
         broadcast_card_update(ctx, &card);
         crate::worker::orchestrator::clear_session_todos(
             &ctx.db,
@@ -1067,6 +1094,8 @@ async fn move_card_to_terminal_step(
 ) -> anyhow::Result<Value> {
     let stale_worker_cell = std::sync::Arc::new(std::sync::Mutex::new(None::<String>));
     let stale_worker_writer = stale_worker_cell.clone();
+    let prev_step_cell = std::sync::Arc::new(std::sync::Mutex::new(None::<String>));
+    let prev_step_writer = prev_step_cell.clone();
     let target_step_owned = target_step.to_string();
     let target_for_closure = target_step_owned.clone();
 
@@ -1076,6 +1105,9 @@ async fn move_card_to_terminal_step(
             // Idempotent re-move is a no-op; the closure's UpdateCard
             // returned below still applies, but we skip the cancel.
             let step_changing = existing.step != target_for_closure;
+            if step_changing {
+                *prev_step_writer.lock().unwrap() = Some(existing.step.clone());
+            }
             let (worker_session_id, last_worker_session_id) =
                 if step_changing && let Some(sid) = existing.worker_session_id.clone() {
                     *stale_worker_writer.lock().unwrap() = Some(sid.clone());
@@ -1115,6 +1147,19 @@ async fn move_card_to_terminal_step(
     }
     if let Some(sid) = stale_sid {
         cancel_stale_worker(ctx, &sid);
+    }
+
+    let prev_step = prev_step_cell.lock().unwrap().take();
+    if let Some(old_step) = prev_step {
+        crate::plugin::notify::fire_card_step_after(
+            &ctx.db,
+            card_id,
+            &card.title,
+            &card.project_id,
+            &old_step,
+            &card.step,
+        )
+        .await;
     }
 
     Ok(serde_json::json!({

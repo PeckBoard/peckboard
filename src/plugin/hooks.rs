@@ -337,6 +337,37 @@ pub const PREHATCH_CANCEL_HOOK: &str = "session.prehatch.cancel";
 /// continuation the research agent must read. Fired under a **user-authority**
 /// context scoped to the chat session, like [`PREHATCH_CANCEL_HOOK`].
 pub const PREHATCH_ANSWER_HOOK: &str = "session.prehatch.answer";
+
+/// Fired after a card's step changes (complete_step, finish_card, move to
+/// done/wont_do, or a user drag on the kanban). Notification only — the step
+/// has already been written. Payload: `{ card_id, card_title, project_id,
+/// project_name, old_step, new_step, terminal }` where `terminal` is `true`
+/// when `new_step` is `"done"` or `"wont_do"`.
+pub const CARD_STEP_AFTER_HOOK: &str = "card.step.after";
+
+/// Fired after an agent run ends (normally or by crash). Notification only.
+/// Payload: `{ session_id, session_name, is_worker, outcome, reason? }` where
+/// `outcome` is `"completed"` or `"crashed"` and `reason` is present on
+/// crashes.
+pub const SESSION_AGENT_ENDED_HOOK: &str = "session.agent.ended";
+
+/// Fired when a project is auto-paused due to repeated worker crashes. Pairs
+/// with `project.paused` (source `"crash"`) — both fire together, letting a
+/// plugin react to the specific card that triggered the pause.
+/// Payload: `{ card_id, card_title, project_id, project_name, reason }`.
+pub const WORKER_BLOCKED_HOOK: &str = "worker.blocked";
+
+/// Fired after a project is paused, whether manually (source `"manual"`) or
+/// by the auto-pause crash guard (source `"crash"`). The `source` field is
+/// designed for future extension (e.g. `"budget"`). Payload:
+/// `{ project_id, project_name, reason, source }`.
+pub const PROJECT_PAUSED_HOOK: &str = "project.paused";
+
+/// Fired when a worker or chat session surfaces a pending question that needs
+/// user input. Notification only. Payload:
+/// `{ session_id, session_name, preview }` where `preview` is the first
+/// 200 characters of the question text.
+pub const QUESTION_PENDING_HOOK: &str = "question.pending";
 /// The request a plugin receives for a plugin-served HTTP route.
 ///
 /// Serialized as the `payload` of the [`HTTP_REQUEST_HOOK`] hook call.

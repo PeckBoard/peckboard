@@ -316,6 +316,55 @@ pub async fn emit_event(
                     "data": serde_json::from_str::<serde_json::Value>(&db_event.data).unwrap_or_default(),
                 }),
             });
+
+            // Lifecycle notification hooks — fire-and-forget after the event
+            // is persisted and broadcast. No cancel semantics; plugin work
+            // runs in a background task via `dispatch_notify`.
+            match &event {
+                ProviderEvent::Completed { .. } => {
+                    crate::plugin::notify::fire_session_agent_ended(
+                        db,
+                        session_id,
+                        "completed",
+                        None,
+                    )
+                    .await;
+                }
+                ProviderEvent::Crashed { reason, .. } => {
+                    crate::plugin::notify::fire_session_agent_ended(
+                        db,
+                        session_id,
+                        "crashed",
+                        Some(reason.as_str()),
+                    )
+                    .await;
+                }
+                ProviderEvent::ControlRequest {
+                    request_type,
+                    payload,
+                    ..
+                } if request_type == "question" => {
+                    let preview: String = payload
+                        .get("text")
+                        .or_else(|| payload.get("question"))
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("")
+                        .chars()
+                        .take(200)
+                        .collect();
+                    let (session_name, _) = match db.get_session(session_id).await {
+                        Ok(Some(s)) => (s.name, s.is_worker),
+                        _ => (session_id.to_string(), false),
+                    };
+                    let p = crate::plugin::notify::question_pending_payload(
+                        session_id,
+                        &session_name,
+                        &preview,
+                    );
+                    crate::plugin::manager::notify(crate::plugin::hooks::QUESTION_PENDING_HOOK, p);
+                }
+                _ => {}
+            }
         }
         Err(e) => {
             tracing::error!(

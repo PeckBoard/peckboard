@@ -407,6 +407,8 @@ pub(super) async fn update_card(
 
     let stale_worker_cell = std::sync::Arc::new(std::sync::Mutex::new(None::<String>));
     let stale_worker_writer = stale_worker_cell.clone();
+    let prev_step_cell = std::sync::Arc::new(std::sync::Mutex::new(None::<String>));
+    let prev_step_writer = prev_step_cell.clone();
     let card = state
         .db
         .update_card_atomic(&card_id, move |existing| {
@@ -452,6 +454,9 @@ pub(super) async fn update_card(
             let mut worker_session_id = body.worker_session_id.clone();
             let mut last_worker_session_id = body.last_worker_session_id.clone();
             let step_changing = body.step.as_deref().is_some_and(|s| s != existing.step);
+            if step_changing {
+                *prev_step_writer.lock().unwrap() = Some(existing.step.clone());
+            }
             if step_changing
                 && worker_session_id.is_none()
                 && let Some(sid) = existing.worker_session_id.clone()
@@ -528,6 +533,18 @@ pub(super) async fn update_card(
             data: serde_json::json!({ "card": card_value }),
         });
 
+    let prev_step = prev_step_cell.lock().unwrap().take();
+    if let Some(old_step) = prev_step {
+        crate::plugin::notify::fire_card_step_after(
+            &state.db,
+            &card_id,
+            &c.title,
+            &c.project_id,
+            &old_step,
+            &c.step,
+        )
+        .await;
+    }
     // If the user dragged the card to a terminal step, clear the prior
     // worker's todos so the chat session view, the standalone session
     // todos view, and the project todos panel all stop showing what is

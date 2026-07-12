@@ -74,86 +74,96 @@ Every hookable operation follows the same pattern:
 
 ### Session Hooks
 
-| Hook                   | When                                                               | Payload                               | Can cancel | Can modify                     |
-| ---------------------- | ------------------------------------------------------------------ | ------------------------------------- | ---------- | ------------------------------ |
-| session.create.before  | Before creating a session                                          | session fields, user ID               | Yes        | Yes (name, dir, model, effort) |
-| session.create.after   | After session created                                              | session record                        | No         | No                             |
-| session.create.failed  | After session creation failure                                     | fields, reason                        | No         | No                             |
-| session.update.before  | Before updating a session                                          | session ID, changed fields            | Yes        | Yes (fields)                   |
-| session.update.after   | After session updated                                              | session record                        | No         | No                             |
-| session.update.failed  | After session update failure                                       | session ID, reason                    | No         | No                             |
-| session.delete.before  | Before deleting a session                                          | session ID                            | Yes        | No                             |
-| session.delete.after   | After session deleted                                              | session ID                            | No         | No                             |
-| session.delete.failed  | After session deletion failure                                     | session ID, reason                    | No         | No                             |
-| session.clear.before   | Before clearing a session                                          | session ID                            | Yes        | No                             |
-| session.clear.after    | After session cleared                                              | session ID                            | No         | No                             |
-| session.message.before | Before sending a message to Claude                                 | session ID, message text, attachments | Yes        | Yes (message text)             |
-| session.message.after  | After agent responds                                               | session ID, response                  | No         | No                             |
-| session.message.failed | After message send failure                                         | session ID, reason                    | No         | No                             |
-| session.read.after     | After session marked as read                                       | session ID, user ID                   | No         | No                             |
-| session.user.answer    | After a user answers a worker's `ask_user` question (notification) | asker_session_id, project_id, qa_text | No         | No                             |
+| Hook                   | When                                                               | Payload                                               | Can cancel | Can modify                     |
+| ---------------------- | ------------------------------------------------------------------ | ----------------------------------------------------- | ---------- | ------------------------------ |
+| session.create.before  | Before creating a session                                          | session fields, user ID                               | Yes        | Yes (name, dir, model, effort) |
+| session.create.after   | After session created                                              | session record                                        | No         | No                             |
+| session.create.failed  | After session creation failure                                     | fields, reason                                        | No         | No                             |
+| session.update.before  | Before updating a session                                          | session ID, changed fields                            | Yes        | Yes (fields)                   |
+| session.update.after   | After session updated                                              | session record                                        | No         | No                             |
+| session.update.failed  | After session update failure                                       | session ID, reason                                    | No         | No                             |
+| session.delete.before  | Before deleting a session                                          | session ID                                            | Yes        | No                             |
+| session.delete.after   | After session deleted                                              | session ID                                            | No         | No                             |
+| session.delete.failed  | After session deletion failure                                     | session ID, reason                                    | No         | No                             |
+| session.clear.before   | Before clearing a session                                          | session ID                                            | Yes        | No                             |
+| session.clear.after    | After session cleared                                              | session ID                                            | No         | No                             |
+| session.message.before | Before sending a message to Claude                                 | session ID, message text, attachments                 | Yes        | Yes (message text)             |
+| session.message.after  | After agent responds                                               | session ID, response                                  | No         | No                             |
+| session.message.failed | After message send failure                                         | session ID, reason                                    | No         | No                             |
+| session.read.after     | After session marked as read                                       | session ID, user ID                                   | No         | No                             |
+| session.user.answer    | After a user answers a worker's `ask_user` question (notification) | asker_session_id, project_id, qa_text                 | No         | No                             |
+| session.agent.ended    | After an agent run ends (completed or crashed)                     | session_id, session_name, is_worker, outcome, reason? | No         | No                             |
+| question.pending       | When a session surfaces a pending question needing user input      | session_id, session_name, preview                     | No         | No                             |
 
 > `session.user.answer` is a **notification**, not a transform: the operation has already happened, so the verdict is ignored and a plugin cannot cancel it — it can only react. Core fires it under a **user-authority** context (the answering user) via `PluginManager::dispatch_authed` — the same context `serve_http_authed` lands for authed routes — so the handler may act on the user's behalf, reaching the user's sessions with whatever host-fn permissions it holds (the experts plugin feeds the `{asker_session_id, project_id, qa_text}` Q&A to its question expert via `session_dispatch`). The fire site is `src/routes/sessions/events.rs`; core itself knows nothing about experts.
 
+> `session.agent.ended` and `question.pending` are **notifications** dispatched via `PluginManager::dispatch_notify` — fire-and-forget, no user-authority context, verdicts ignored. `session.agent.ended` fires on both `Completed` and `Crashed` provider events; `outcome` is `"completed"` or `"crashed"` and `reason` is present on crashes. `question.pending.preview` is the first 200 characters of the question text. Both fire from `src/provider/agent.rs::emit_event`.
+
 ### Card Hooks
 
-| Hook                  | When                        | Payload                     | Can cancel | Can modify                                   |
-| --------------------- | --------------------------- | --------------------------- | ---------- | -------------------------------------------- |
-| card.create.before    | Before creating a card      | card fields                 | Yes        | Yes (title, description, priority, workflow) |
-| card.create.after     | After card created          | card record                 | No         | No                                           |
-| card.create.failed    | After card creation failure | fields, reason              | No         | No                                           |
-| card.update.before    | Before updating a card      | card ID, changed fields     | Yes        | Yes (fields)                                 |
-| card.update.after     | After card updated          | card record                 | No         | No                                           |
-| card.update.failed    | After card update failure   | card ID, reason             | No         | No                                           |
-| card.delete.before    | Before deleting a card      | card ID                     | Yes        | No                                           |
-| card.delete.after     | After card deleted          | card ID                     | No         | No                                           |
-| card.delete.failed    | After card deletion failure | card ID, reason             | No         | No                                           |
-| card.step.before      | Before advancing a step     | card ID, from step, to step | Yes        | No                                           |
-| card.step.after       | After step advanced         | card ID, from step, to step | No         | No                                           |
-| card.step.failed      | After step advance failure  | card ID, reason             | No         | No                                           |
-| card.done             | Card reached done           | card record                 | No         | No                                           |
-| card.wont_do          | Card reached wont-do        | card record, reason         | No         | No                                           |
-| card.blocked.before   | Before blocking a card      | card ID, reason             | Yes        | Yes (reason)                                 |
-| card.blocked.after    | After card blocked          | card record, reason         | No         | No                                           |
-| card.unblocked.before | Before unblocking a card    | card ID                     | Yes        | No                                           |
-| card.unblocked.after  | After card unblocked        | card record                 | No         | No                                           |
+| Hook                  | When                        | Payload                                                                     | Can cancel | Can modify                                   |
+| --------------------- | --------------------------- | --------------------------------------------------------------------------- | ---------- | -------------------------------------------- |
+| card.create.before    | Before creating a card      | card fields                                                                 | Yes        | Yes (title, description, priority, workflow) |
+| card.create.after     | After card created          | card record                                                                 | No         | No                                           |
+| card.create.failed    | After card creation failure | fields, reason                                                              | No         | No                                           |
+| card.update.before    | Before updating a card      | card ID, changed fields                                                     | Yes        | Yes (fields)                                 |
+| card.update.after     | After card updated          | card record                                                                 | No         | No                                           |
+| card.update.failed    | After card update failure   | card ID, reason                                                             | No         | No                                           |
+| card.delete.before    | Before deleting a card      | card ID                                                                     | Yes        | No                                           |
+| card.delete.after     | After card deleted          | card ID                                                                     | No         | No                                           |
+| card.delete.failed    | After card deletion failure | card ID, reason                                                             | No         | No                                           |
+| card.step.before      | Before advancing a step     | card ID, from step, to step                                                 | Yes        | No                                           |
+| card.step.after       | After step advanced         | card_id, card_title, project_id, project_name, old_step, new_step, terminal | No         | No                                           |
+| card.step.failed      | After step advance failure  | card ID, reason                                                             | No         | No                                           |
+| card.done             | Card reached done           | card record                                                                 | No         | No                                           |
+| card.wont_do          | Card reached wont-do        | card record, reason                                                         | No         | No                                           |
+| card.blocked.before   | Before blocking a card      | card ID, reason                                                             | Yes        | Yes (reason)                                 |
+| card.blocked.after    | After card blocked          | card record, reason                                                         | No         | No                                           |
+| card.unblocked.before | Before unblocking a card    | card ID                                                                     | Yes        | No                                           |
+| card.unblocked.after  | After card unblocked        | card record                                                                 | No         | No                                           |
 
 ### Worker Hooks
 
-| Hook                   | When                                  | Payload                            | Can cancel | Can modify          |
-| ---------------------- | ------------------------------------- | ---------------------------------- | ---------- | ------------------- |
-| worker.spawn.before    | Before spawning a worker              | card ID, session ID, model, effort | Yes        | Yes (model, effort) |
-| worker.spawn.after     | After worker spawned                  | session ID, PID                    | No         | No                  |
-| worker.spawn.failed    | After spawn failure                   | card ID, reason                    | No         | No                  |
-| worker.prompt.before   | Before sending prompt to Claude       | session ID, card ID, prompt text   | Yes        | Yes (prompt text)   |
-| worker.prompt.after    | After prompt sent                     | session ID, card ID                | No         | No                  |
-| worker.done            | Worker finished normally              | session ID, card ID, intent        | No         | No                  |
-| worker.error           | Worker crashed                        | session ID, card ID, error reason  | No         | No                  |
-| worker.recovery.before | Before recovery spawn                 | session ID, crash count            | Yes        | No                  |
-| worker.recovery.after  | After recovery spawn                  | session ID                         | No         | No                  |
-| worker.recovery.failed | After recovery denied (loop detected) | session ID, crash count            | No         | No                  |
-| worker.stop.before     | Before stopping a worker              | session ID, card ID                | Yes        | No                  |
-| worker.stop.after      | After worker stopped                  | session ID, card ID                | No         | No                  |
-| worker.restart.before  | Before restarting a worker            | card ID                            | Yes        | No                  |
-| worker.restart.after   | After worker restarted                | session ID, card ID                | No         | No                  |
+| Hook                   | When                                                                                           | Payload                                               | Can cancel | Can modify          |
+| ---------------------- | ---------------------------------------------------------------------------------------------- | ----------------------------------------------------- | ---------- | ------------------- |
+| worker.spawn.before    | Before spawning a worker                                                                       | card ID, session ID, model, effort                    | Yes        | Yes (model, effort) |
+| worker.spawn.after     | After worker spawned                                                                           | session ID, PID                                       | No         | No                  |
+| worker.spawn.failed    | After spawn failure                                                                            | card ID, reason                                       | No         | No                  |
+| worker.prompt.before   | Before sending prompt to Claude                                                                | session ID, card ID, prompt text                      | Yes        | Yes (prompt text)   |
+| worker.prompt.after    | After prompt sent                                                                              | session ID, card ID                                   | No         | No                  |
+| worker.done            | Worker finished normally                                                                       | session ID, card ID, intent                           | No         | No                  |
+| worker.error           | Worker crashed                                                                                 | session ID, card ID, error reason                     | No         | No                  |
+| worker.recovery.before | Before recovery spawn                                                                          | session ID, crash count                               | Yes        | No                  |
+| worker.recovery.after  | After recovery spawn                                                                           | session ID                                            | No         | No                  |
+| worker.recovery.failed | After recovery denied (loop detected)                                                          | session ID, crash count                               | No         | No                  |
+| worker.stop.before     | Before stopping a worker                                                                       | session ID, card ID                                   | Yes        | No                  |
+| worker.stop.after      | After worker stopped                                                                           | session ID, card ID                                   | No         | No                  |
+| worker.restart.before  | Before restarting a worker                                                                     | card ID                                               | Yes        | No                  |
+| worker.restart.after   | After worker restarted                                                                         | session ID, card ID                                   | No         | No                  |
+| worker.blocked         | After a project is auto-paused due to repeated crashes (identifies the card that triggered it) | card_id, card_title, project_id, project_name, reason | No         | No                  |
+
+> `worker.blocked` is a **notification** dispatched via `PluginManager::dispatch_notify`. It fires together with `project.paused` (source `"crash"`) from `src/worker/orchestrator.rs::maybe_auto_pause_after_crash` on every crash-triggered pause transition.
 
 ### Project Hooks
 
-| Hook                  | When                           | Payload                    | Can cancel | Can modify                        |
-| --------------------- | ------------------------------ | -------------------------- | ---------- | --------------------------------- |
-| project.create.before | Before creating a project      | project fields             | Yes        | Yes (name, context, worker_count) |
-| project.create.after  | After project created          | project record             | No         | No                                |
-| project.create.failed | After project creation failure | fields, reason             | No         | No                                |
-| project.update.before | Before updating a project      | project ID, changed fields | Yes        | Yes (fields)                      |
-| project.update.after  | After project updated          | project record             | No         | No                                |
-| project.update.failed | After project update failure   | project ID, reason         | No         | No                                |
-| project.delete.before | Before deleting a project      | project ID                 | Yes        | No                                |
-| project.delete.after  | After project deleted          | project ID                 | No         | No                                |
-| project.delete.failed | After project deletion failure | project ID, reason         | No         | No                                |
-| project.pause.before  | Before pausing a project       | project ID                 | Yes        | No                                |
-| project.pause.after   | After project paused           | project ID                 | No         | No                                |
-| project.resume.before | Before resuming a project      | project ID                 | Yes        | No                                |
-| project.resume.after  | After project resumed          | project ID                 | No         | No                                |
+| Hook                  | When                                             | Payload                                  | Can cancel | Can modify                        |
+| --------------------- | ------------------------------------------------ | ---------------------------------------- | ---------- | --------------------------------- |
+| project.create.before | Before creating a project                        | project fields                           | Yes        | Yes (name, context, worker_count) |
+| project.create.after  | After project created                            | project record                           | No         | No                                |
+| project.create.failed | After project creation failure                   | fields, reason                           | No         | No                                |
+| project.update.before | Before updating a project                        | project ID, changed fields               | Yes        | Yes (fields)                      |
+| project.update.after  | After project updated                            | project record                           | No         | No                                |
+| project.update.failed | After project update failure                     | project ID, reason                       | No         | No                                |
+| project.delete.before | Before deleting a project                        | project ID                               | Yes        | No                                |
+| project.delete.after  | After project deleted                            | project ID                               | No         | No                                |
+| project.delete.failed | After project deletion failure                   | project ID, reason                       | No         | No                                |
+| project.pause.before  | Before pausing a project                         | project ID                               | Yes        | No                                |
+| project.pause.after   | After project paused                             | project ID                               | No         | No                                |
+| project.resume.before | Before resuming a project                        | project ID                               | Yes        | No                                |
+| project.resume.after  | After project resumed                            | project ID                               | No         | No                                |
+| project.paused        | After a project is paused (manual or auto-crash) | project_id, project_name, reason, source | No         | No                                |
+
+> `project.paused` is a **notification** dispatched via `PluginManager::dispatch_notify`. The `source` field is `"manual"` (user called pause) or `"crash"` (auto-pause from repeated worker crashes). It is designed for future extension — a `"budget"` source can be added without breaking existing handlers. Fire sites: `src/routes/projects/mod.rs::pause_project` (manual) and `src/worker/orchestrator.rs::maybe_auto_pause_after_crash` (crash).
 
 ### MCP Hooks
 
