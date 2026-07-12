@@ -270,6 +270,28 @@ struct CreateCardRequest {
     block_reason: Option<String>,
 }
 
+/// JSON request for `peckboard_update_card`.
+#[derive(Deserialize)]
+struct UpdateCardRequest {
+    card_id: String,
+    #[serde(default)]
+    title: Option<String>,
+    #[serde(default)]
+    description: Option<String>,
+    #[serde(default)]
+    step: Option<String>,
+    #[serde(default)]
+    priority: Option<i32>,
+    #[serde(default)]
+    model: Option<String>,
+    #[serde(default)]
+    effort: Option<String>,
+    #[serde(default)]
+    blocked: Option<bool>,
+    #[serde(default)]
+    block_reason: Option<String>,
+}
+
 /// JSON request for `peckboard_get_plugin_setting` and (the key half of)
 /// `peckboard_set_plugin_setting`.
 #[derive(Deserialize)]
@@ -460,6 +482,85 @@ pub(crate) fn get_plugin_setting_impl(db: &Db, plugin_id: &str, input: &str) -> 
     }
 }
 
+/// `peckboard_update_card` — update fields on an existing card (write).
+///
+/// Performs the same validation as the HTTP update route for priority and
+/// effort. Does NOT fire hooks or broadcast — that is the calling plugin's
+/// responsibility. Gated by the **`cards_write`** permission.
+pub(crate) fn update_card_impl(db: &Db, input: &str) -> String {
+    let req: UpdateCardRequest = match serde_json::from_str(input) {
+        Ok(r) => r,
+        Err(e) => return error_json(format!("invalid request: {e}")),
+    };
+
+    let card_id = req.card_id.trim();
+    if card_id.is_empty() {
+        return error_json("card_id is required");
+    }
+
+    if let Some(p) = req.priority {
+        if !crate::routes::misc::is_valid_priority(p) {
+            return error_json(format!(
+                "invalid priority: {p} (allowed: 0=Critical, 1=High, 2=Medium, 3=Low)"
+            ));
+        }
+    }
+
+    if let Some(e) = req.effort.as_deref() {
+        if !crate::provider::registry::standard_effort_levels()
+            .iter()
+            .any(|l| l.id == e)
+        {
+            return error_json(format!(
+                "invalid effort `{e}` — use one of low|medium|high|xhigh|max (or omit it)"
+            ));
+        }
+    }
+
+    let now = chrono::Utc::now().to_rfc3339();
+
+    // A non-empty block_reason implicitly blocks the card (matching the route).
+    let block_reason = req
+        .block_reason
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(|s| s.to_string());
+    let blocked = req.blocked.or_else(|| block_reason.as_ref().map(|_| true));
+
+    let update = crate::db::models::UpdateCard {
+        title: req
+            .title
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty()),
+        description: req.description,
+        step: req
+            .step
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(|s| s.to_string()),
+        priority: req.priority,
+        workflow: None,
+        model: req.model.map(Some),
+        effort: req.effort.map(Some),
+        worker_session_id: None,
+        last_worker_session_id: None,
+        handoff_context: None,
+        blocked,
+        block_reason: block_reason.map(Some),
+        updated_at: Some(now),
+        completed_at: None,
+        system_prompt_name: None,
+        model_autoswitch: None,
+    };
+
+    match db.update_card_blocking(card_id, update) {
+        Ok(Some(card)) => serde_json::json!({ "card": card }).to_string(),
+        Ok(None) => error_json("card not found"),
+        Err(e) => error_json(e),
+    }
+}
 /// `peckboard_set_plugin_setting` — write one of the calling plugin's own
 /// stored settings (write, namespaced to `plugin_id`).
 ///
@@ -2468,6 +2569,12 @@ host_fn!(peckboard_create_card(user_data: HostState; input: String) -> String {
     Ok(create_card_impl(&db, &input))
 });
 
+host_fn!(peckboard_update_card(user_data: HostState; input: String) -> String {
+    let (db, _plugin_id, ok) = state_and_permission(&user_data, "cards_write")?;
+    if !ok { return Ok(error_json("plugin lacks the 'cards_write' permission")); }
+    Ok(update_card_impl(&db, &input))
+});
+
 host_fn!(peckboard_get_plugin_setting(user_data: HostState; input: String) -> String {
     let (db, plugin_id) = state_from(&user_data)?;
     Ok(get_plugin_setting_impl(&db, &plugin_id, &input))
@@ -2802,6 +2909,13 @@ pub(crate) fn host_functions(
             [PTR],
             ud.clone(),
             peckboard_create_card,
+        ),
+        Function::new(
+            "peckboard_update_card",
+            [PTR],
+            [PTR],
+            ud.clone(),
+            peckboard_update_card,
         ),
         Function::new(
             "peckboard_get_plugin_setting",
@@ -4350,5 +4464,94 @@ mod tests {
             )
             .contains("value too large")
         );
+    }
+
+    #[tokio::test]
+    async fn update_card_succeeds_and_partial_leaves_other_fields() {
+        let db = setup().await;
+
+        // Create a card to update.
+        let created = create_card_impl(
+            &db,
+            &serde_json::json!({
+                "project_id": "p1",
+                "title": "Original",
+                "priority": 2,
+                "step": "backlog"
+            })
+            .to_string(),
+        );
+        let cv: serde_json::Value = serde_json::from_str(&created).unwrap();
+        assert!(cv.get("error").is_none(), "create error: {created}");
+        let card_id = cv["card"]["id"].as_str().unwrap().to_string();
+
+        // Update only the title; other fields must remain unchanged.
+        let out = update_card_impl(
+            &db,
+            &serde_json::json!({ "card_id": card_id, "title": "Updated" }).to_string(),
+        );
+        let v: serde_json::Value = serde_json::from_str(&out).unwrap();
+        assert!(v.get("error").is_none(), "update error: {out}");
+        assert_eq!(v["card"]["title"], "Updated");
+        assert_eq!(v["card"]["priority"], 2, "priority changed unexpectedly");
+        assert_eq!(v["card"]["step"], "backlog", "step changed unexpectedly");
+
+        // Update multiple fields at once.
+        let out2 = update_card_impl(
+            &db,
+            &serde_json::json!({ "card_id": card_id, "priority": 1, "step": "in_progress" })
+                .to_string(),
+        );
+        let v2: serde_json::Value = serde_json::from_str(&out2).unwrap();
+        assert!(
+            v2.get("error").is_none(),
+            "multi-field update error: {out2}"
+        );
+        assert_eq!(v2["card"]["priority"], 1);
+        assert_eq!(v2["card"]["step"], "in_progress");
+        // Title was not touched in this call.
+        assert_eq!(v2["card"]["title"], "Updated");
+    }
+
+    #[tokio::test]
+    async fn update_card_unknown_id_is_error() {
+        let db = setup().await;
+        let out = update_card_impl(
+            &db,
+            &serde_json::json!({ "card_id": "no-such-card" }).to_string(),
+        );
+        let v: serde_json::Value = serde_json::from_str(&out).unwrap();
+        assert_eq!(v["error"], "card not found");
+    }
+
+    #[tokio::test]
+    async fn update_card_invalid_priority_and_effort_are_errors() {
+        let db = setup().await;
+        let created = create_card_impl(
+            &db,
+            &serde_json::json!({ "project_id": "p1", "title": "x" }).to_string(),
+        );
+        let card_id = serde_json::from_str::<serde_json::Value>(&created).unwrap()["card"]["id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+
+        let bad_prio = update_card_impl(
+            &db,
+            &serde_json::json!({ "card_id": card_id, "priority": 99 }).to_string(),
+        );
+        assert!(bad_prio.contains("invalid priority"), "got: {bad_prio}");
+
+        let bad_effort = update_card_impl(
+            &db,
+            &serde_json::json!({ "card_id": card_id, "effort": "very high" }).to_string(),
+        );
+        assert!(bad_effort.contains("invalid effort"), "got: {bad_effort}");
+    }
+
+    #[tokio::test]
+    async fn update_card_malformed_json_is_error() {
+        let db = setup().await;
+        assert!(update_card_impl(&db, "not json").contains("invalid request"));
     }
 }

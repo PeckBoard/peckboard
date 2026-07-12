@@ -137,6 +137,40 @@ impl Db {
         }
     }
 
+    /// Synchronous twin of [`Db::update_card`] for plugin host functions.
+    pub(crate) fn update_card_blocking(
+        &self,
+        id: &str,
+        update: UpdateCard,
+    ) -> anyhow::Result<Option<Card>> {
+        let id = id.to_string();
+        self.with_conn_blocking(move |conn| {
+            let mut update = update;
+            let mut prev_step: Option<String> = None;
+            if update.step.is_some() {
+                prev_step = cards::table
+                    .find(&id)
+                    .select(cards::step)
+                    .first::<String>(conn)
+                    .optional()?;
+                if let Some(ref prev) = prev_step
+                    && update.completed_at.is_none()
+                {
+                    stamp_completed_at(prev, &mut update);
+                }
+            }
+            let card: Option<Card> = diesel::update(cards::table.find(&id))
+                .set(&update)
+                .returning(Card::as_returning())
+                .get_result(conn)
+                .optional()?;
+            if let (Some(card), Some(prev)) = (card.as_ref(), prev_step.as_deref()) {
+                sever_worker_resume_link(conn, prev, card)?;
+            }
+            Ok(card)
+        })
+    }
+
     pub async fn update_card(&self, id: &str, update: UpdateCard) -> anyhow::Result<Option<Card>> {
         let id = id.to_string();
         self.with_conn(move |conn| {
