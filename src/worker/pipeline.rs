@@ -505,7 +505,8 @@ pub fn build_worker_prompt(
          - `finish_card` — ENTIRE card done: jump to terminal step from any \
          step, unblock dependents.\n\
          - `wont_do_card` — card impossible or should not happen (give reason).\n\
-         - `ask_user` — question to user; blocks until answered.\n\
+         - `ask_user` — question to user; blocks until answered. NEVER \
+         about git actions.\n\
          - `create_card` / `list_cards` — cards in this project.\n\
          - `write_report` — report for human review.\n\
          - `share_finding` — discovery for other workers (summary + detail + \
@@ -529,6 +530,16 @@ pub fn build_worker_prompt(
          unblocks dependents). Only this step done, real work remains → \
          `complete_step` (one step forward; include handoff_context). Cannot \
          complete → `wont_do_card` with reason.\n\n",
+    );
+    // Workers are autonomous — a worker parked on "may I commit?" stalls the
+    // card. Git intent comes from the card/step/project instructions, never
+    // from a mid-run question to the user.
+    prompt.push_str(
+        "**Git — NEVER ask.** Never ask the user about git actions — no \
+         `ask_user` (or any other question) about committing, pushing, \
+         branching, merging, or anything git. Instructions call for git → do \
+         it with the `git` tool, no confirmation. Instructions silent on git \
+         → skip git entirely. Either way, never ask.\n\n",
     );
     // Cost-aware model selection. Only on the FIRST workflow step (the
     // planning entry) and only when auto-switch is ON for this card (NULL
@@ -661,7 +672,8 @@ pub fn build_worker_resume_prompt(card: &Card, step: &str) -> String {
          As before, finish by calling exactly one of: `complete_step` (this \
          step done, hand off to the next step's worker), `finish_card` (the \
          ENTIRE card is done), `wont_do_card` (cannot or should not be \
-         done), or `ask_user` if you are blocked on the user.\n",
+         done), or `ask_user` if you are blocked on the user — never about \
+         git actions.\n",
     );
     prompt
 }
@@ -852,6 +864,22 @@ mod tests {
         assert!(prompt.contains("Implement auth"));
         assert!(prompt.contains("in-progress"));
         assert!(prompt.contains("Build a web app with Rust."));
+    }
+
+    #[test]
+    fn test_build_worker_prompt_forbids_asking_about_git() {
+        let prompt = build_worker_prompt(
+            &sample_project(),
+            &sample_card(),
+            "in-progress",
+            &sample_steps(),
+            None,
+            None,
+            None,
+        );
+        assert!(prompt.contains("Never ask the user about git actions"));
+        let resume = build_worker_resume_prompt(&sample_card(), "in-progress");
+        assert!(resume.contains("never about git"));
     }
 
     #[test]
