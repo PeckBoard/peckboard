@@ -148,6 +148,14 @@ pub struct PluginManifest {
     /// whenever any plugin code runs, every declared permission is granted.
     #[serde(default)]
     pub permissions: Vec<String>,
+    /// Wall-clock budget for one call into this plugin, in seconds. The
+    /// Extism call timeout includes time spent inside host functions, so a
+    /// plugin whose tools legitimately wait on slow host-side work (e.g.
+    /// `peckboard_http_request` driving a certificate issuance) declares a
+    /// larger budget here. Clamped at load to core's [2 s default, 180 s max];
+    /// hooks on hot paths (message dispatch) should keep the default.
+    #[serde(default)]
+    pub call_timeout_secs: Option<u64>,
 }
 
 /// One MCP tool a plugin contributes, declared in the manifest's `mcp_tools`.

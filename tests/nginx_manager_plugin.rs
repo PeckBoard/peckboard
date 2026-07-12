@@ -1,0 +1,380 @@
+//! End-to-end test of the **nginx-manager WASM plugin** against the real core
+//! host functions, talking to a mock Nginx Proxy Manager MCP endpoint on
+//! loopback (which is exactly what the `peckboard_http_request` host function
+//! exists to permit).
+//!
+//! Covers the full chain: `mcp.tool.invoke` dispatch → plugin → host fn →
+//! Streamable HTTP handshake (`initialize` + `Mcp-Session-Id` +
+//! `notifications/initialized`) → `tools/list` (SSE-framed) and `tools/call`
+//! (JSON-framed) → session-expiry recovery → a deliberately slow (3 s) call to
+//! prove long host-function work survives the plugin call timeout.
+//!
+//! The wasm is built out-of-tree (`peck-plugins/nginx-manager/build.sh`) and
+//! this repo's `cargo test` has no `wasm32` toolchain, so the test **skips**
+//! with a note when the artifact is absent.
+
+use std::collections::HashMap;
+use std::io::{Read, Write};
+use std::net::TcpListener;
+use std::path::PathBuf;
+use std::sync::{Arc, Mutex};
+
+use peckboard::db::Db;
+use peckboard::plugin::manager::PluginManager;
+use serde_json::{Value, json};
+
+const PLUGIN_ID: &str = "nginx-manager";
+const API_KEY: &str = "npm_test_key_0123456789";
+const SESSION_ID: &str = "mock-sess-1";
+
+fn plugin_wasm() -> Option<PathBuf> {
+    let p = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(
+        "../peck-plugins/nginx-manager/target/wasm32-unknown-unknown/release/\
+         peckboard_nginx_manager_plugin.wasm",
+    );
+    p.exists().then_some(p)
+}
+
+/// What the mock NPM endpoint has seen / should do next.
+#[derive(Default)]
+struct MockState {
+    initialize_count: usize,
+    /// When set, the next non-initialize request is answered with the SDK's
+    /// "Unknown or expired MCP session" 404 (and the flag clears).
+    forget_session_once: bool,
+}
+
+/// A minimal Streamable HTTP MCP server shaped like the NPM one: Bearer-key
+/// auth, mandatory initialize + `Mcp-Session-Id`, JSON *or* SSE response
+/// framing, in-memory session that can be told to "forget".
+fn spawn_mock_npm(state: Arc<Mutex<MockState>>) -> u16 {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    std::thread::spawn(move || {
+        for stream in listener.incoming() {
+            let Ok(mut sock) = stream else { continue };
+            let state = state.clone();
+            std::thread::spawn(move || {
+                let Some((method, path, headers, body)) = read_http_request(&mut sock) else {
+                    return;
+                };
+                let response = respond(&state, &method, &path, &headers, &body);
+                let _ = sock.write_all(response.as_bytes());
+            });
+        }
+    });
+    port
+}
+
+/// Parse one HTTP/1.1 request: request line, headers (lowercased names), and
+/// a Content-Length-delimited body.
+fn read_http_request(
+    sock: &mut std::net::TcpStream,
+) -> Option<(String, String, HashMap<String, String>, String)> {
+    let mut data = Vec::new();
+    let mut buf = [0u8; 4096];
+    let header_end = loop {
+        let n = sock.read(&mut buf).ok()?;
+        if n == 0 {
+            return None;
+        }
+        data.extend_from_slice(&buf[..n]);
+        if let Some(pos) = data.windows(4).position(|w| w == b"\r\n\r\n") {
+            break pos + 4;
+        }
+        if data.len() > 1 << 20 {
+            return None;
+        }
+    };
+    let head = String::from_utf8_lossy(&data[..header_end]).into_owned();
+    let mut lines = head.lines();
+    let request_line = lines.next()?;
+    let mut parts = request_line.split_whitespace();
+    let method = parts.next()?.to_string();
+    let path = parts.next()?.to_string();
+    let mut headers = HashMap::new();
+    for line in lines {
+        if let Some((k, v)) = line.split_once(':') {
+            headers.insert(k.trim().to_ascii_lowercase(), v.trim().to_string());
+        }
+    }
+    let content_length: usize = headers
+        .get("content-length")
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(0);
+    while data.len() < header_end + content_length {
+        let n = sock.read(&mut buf).ok()?;
+        if n == 0 {
+            break;
+        }
+        data.extend_from_slice(&buf[..n]);
+    }
+    let body = String::from_utf8_lossy(&data[header_end..]).into_owned();
+    Some((method, path, headers, body))
+}
+
+fn http_response(status: &str, extra_headers: &str, body: &str) -> String {
+    format!(
+        "HTTP/1.1 {status}\r\ncontent-length: {}\r\nconnection: close\r\n{extra_headers}\r\n{body}",
+        body.len()
+    )
+}
+
+fn json_response(status: &str, extra_headers: &str, v: &Value) -> String {
+    http_response(
+        status,
+        &format!("content-type: application/json\r\n{extra_headers}"),
+        &v.to_string(),
+    )
+}
+
+/// The two tools the mock registers.
+fn mock_tools() -> Value {
+    json!([
+        {
+            "name": "npm_list_proxy_hosts",
+            "description": "List proxy hosts",
+            "inputSchema": { "type": "object", "properties": {}, "additionalProperties": false },
+            "annotations": { "readOnlyHint": true }
+        },
+        {
+            "name": "npm_slow_op",
+            "description": "Takes seconds, like a certificate issuance",
+            "inputSchema": { "type": "object", "properties": {}, "additionalProperties": false },
+            "annotations": { "destructiveHint": false }
+        }
+    ])
+}
+
+fn respond(
+    state: &Arc<Mutex<MockState>>,
+    method: &str,
+    path: &str,
+    headers: &HashMap<String, String>,
+    body: &str,
+) -> String {
+    if path != "/api/mcp" {
+        return http_response("404 Not Found", "", "no such path");
+    }
+    if headers.get("authorization").map(String::as_str) != Some(&format!("Bearer {API_KEY}")[..]) {
+        return json_response(
+            "401 Unauthorized",
+            "",
+            &json!({ "jsonrpc": "2.0", "error": { "code": -32001, "message": "Unauthorized" }, "id": null }),
+        );
+    }
+    if method == "DELETE" {
+        return http_response("200 OK", "", "");
+    }
+    let msg: Value = serde_json::from_str(body).unwrap_or(Value::Null);
+    let rpc_method = msg.get("method").and_then(|m| m.as_str()).unwrap_or("");
+    let id = msg.get("id").cloned().unwrap_or(Value::Null);
+
+    if rpc_method == "initialize" {
+        let mut st = state.lock().unwrap();
+        st.initialize_count += 1;
+        let result = json!({
+            "protocolVersion": "2025-03-26",
+            "serverInfo": { "name": "nginx-proxy-manager-mcp", "version": "0.1.0" },
+            "capabilities": { "tools": {} },
+            "instructions": "Tools to manage an Nginx Proxy Manager instance.",
+        });
+        return json_response(
+            "200 OK",
+            &format!("mcp-session-id: {SESSION_ID}\r\n"),
+            &json!({ "jsonrpc": "2.0", "id": id, "result": result }),
+        );
+    }
+
+    // Everything else needs the session header — and can be told to forget it
+    // once, to exercise the client's re-initialise path.
+    let session_ok = headers.get("mcp-session-id").map(String::as_str) == Some(SESSION_ID);
+    let forget = {
+        let mut st = state.lock().unwrap();
+        std::mem::take(&mut st.forget_session_once)
+    };
+    if !session_ok || forget {
+        return json_response(
+            "404 Not Found",
+            "",
+            &json!({ "jsonrpc": "2.0", "error": { "code": -32001, "message": "Unknown or expired MCP session" }, "id": null }),
+        );
+    }
+
+    match rpc_method {
+        "notifications/initialized" => http_response("202 Accepted", "", ""),
+        // SSE-framed on purpose: the SDK often answers this way.
+        "tools/list" => {
+            let msg = json!({ "jsonrpc": "2.0", "id": id, "result": { "tools": mock_tools() } });
+            let body = format!("event: message\ndata: {msg}\n\n");
+            http_response("200 OK", "content-type: text/event-stream\r\n", &body)
+        }
+        "tools/call" => {
+            let name = msg
+                .pointer("/params/name")
+                .and_then(|n| n.as_str())
+                .unwrap_or("");
+            match name {
+                "npm_list_proxy_hosts" => {
+                    let text =
+                        "[{\"id\":1,\"domain_names\":[\"app.example.com\"],\"enabled\":true}]";
+                    json_response(
+                        "200 OK",
+                        "",
+                        &json!({ "jsonrpc": "2.0", "id": id, "result": {
+                            "content": [{ "type": "text", "text": text }], "isError": false
+                        } }),
+                    )
+                }
+                "npm_slow_op" => {
+                    // Longer than the 2 s Extism plugin-call timeout: proves
+                    // time spent inside a host function doesn't kill the call.
+                    std::thread::sleep(std::time::Duration::from_secs(3));
+                    json_response(
+                        "200 OK",
+                        "",
+                        &json!({ "jsonrpc": "2.0", "id": id, "result": {
+                            "content": [{ "type": "text", "text": "{\"done\":true}" }], "isError": false
+                        } }),
+                    )
+                }
+                other => json_response(
+                    "200 OK",
+                    "",
+                    &json!({ "jsonrpc": "2.0", "id": id, "result": {
+                        "content": [{ "type": "text", "text": format!("Error: tool {other} not found") }],
+                        "isError": true
+                    } }),
+                ),
+            }
+        }
+        _ => json_response(
+            "400 Bad Request",
+            "",
+            &json!({ "jsonrpc": "2.0", "error": { "code": -32600, "message": "unsupported method" }, "id": id }),
+        ),
+    }
+}
+
+async fn invoke(plugins: &PluginManager, tool: &str, args: Value, ctx: &Value) -> Value {
+    plugins
+        .invoke_mcp_tool(tool, args, ctx.clone())
+        .await
+        .expect("plugin should own this tool")
+        .unwrap_or_else(|e| panic!("{tool} failed: {e}"))
+}
+
+#[tokio::test]
+async fn nginx_manager_plugin_bridges_a_mock_npm_end_to_end() {
+    let Some(wasm) = plugin_wasm() else {
+        eprintln!(
+            "SKIP nginx_manager_plugin_bridges_a_mock_npm_end_to_end: plugin wasm not built \
+             (run peck-plugins/nginx-manager/build.sh)"
+        );
+        return;
+    };
+
+    let state = Arc::new(Mutex::new(MockState::default()));
+    let port = spawn_mock_npm(state.clone());
+    let base_url = format!("http://127.0.0.1:{port}");
+
+    let dir = tempfile::tempdir().unwrap();
+    let data_dir = dir.path();
+    let plugins_dir = data_dir.join("plugins");
+    std::fs::create_dir_all(&plugins_dir).unwrap();
+    std::fs::copy(&wasm, plugins_dir.join(format!("{PLUGIN_ID}.wasm"))).unwrap();
+
+    let db = Db::open(data_dir).unwrap();
+    let plugins = PluginManager::new(data_dir, db.clone());
+    plugins.load_all().await.unwrap();
+    let info = plugins
+        .decide(PLUGIN_ID, true)
+        .await
+        .unwrap()
+        .expect("nginx-manager plugin should be loaded");
+    assert_eq!(info.status, "approved", "plugin must be active: {info:?}");
+
+    let ctx = json!({ "sessionId": "chat-1" });
+
+    // Unconfigured status is a diagnosis, not an error.
+    let res = invoke(&plugins, "npm_status", json!({}), &ctx).await;
+    assert_eq!(res["configured"], json!(false), "status: {res}");
+
+    // Configure + verify: full handshake against the mock.
+    let res = invoke(
+        &plugins,
+        "npm_configure",
+        json!({ "base_url": base_url, "api_key": API_KEY }),
+        &ctx,
+    )
+    .await;
+    assert_eq!(res["saved"], json!(true), "configure: {res}");
+    assert_eq!(res["verified"], json!(true), "configure: {res}");
+    assert_eq!(res["server"]["name"], json!("nginx-proxy-manager-mcp"));
+    assert_eq!(res["tool_count"], json!(2));
+    assert!(
+        !res["api_key"].as_str().unwrap().contains("0123456789"),
+        "key must be masked: {res}"
+    );
+
+    // Status now handshakes and reports the catalog.
+    let res = invoke(&plugins, "npm_status", json!({}), &ctx).await;
+    assert_eq!(res["connected"], json!(true), "status: {res}");
+    assert_eq!(res["tools"][0], json!("npm_list_proxy_hosts"));
+
+    // Compact catalog (SSE-framed tools/list on the wire) + full schema fetch.
+    let res = invoke(&plugins, "npm_list_tools", json!({}), &ctx).await;
+    assert_eq!(res["count"], json!(2), "list: {res}");
+    assert_eq!(res["tools"][0]["read_only"], json!(true));
+    let res = invoke(
+        &plugins,
+        "npm_list_tools",
+        json!({ "names": ["npm_list_proxy_hosts", "npm_nonexistent"] }),
+        &ctx,
+    )
+    .await;
+    assert_eq!(res["tools"][0]["inputSchema"]["type"], json!("object"));
+    assert_eq!(res["missing"]["names"][0], json!("npm_nonexistent"));
+
+    // Proxy a call; JSON text content comes back as JSON.
+    let res = invoke(
+        &plugins,
+        "npm_call",
+        json!({ "name": "npm_list_proxy_hosts" }),
+        &ctx,
+    )
+    .await;
+    assert_eq!(res[0]["id"], json!(1), "call: {res}");
+    assert_eq!(res[0]["domain_names"][0], json!("app.example.com"));
+
+    // isError from the remote surfaces as a tool error, not a payload.
+    let err = plugins
+        .invoke_mcp_tool("npm_call", json!({ "name": "npm_bogus" }), ctx.clone())
+        .await
+        .expect("owned")
+        .expect_err("remote isError must become a tool error");
+    assert!(err.to_string().contains("not found"), "{err}");
+
+    // Server forgets the session → client re-initialises once and succeeds.
+    let inits_before = state.lock().unwrap().initialize_count;
+    state.lock().unwrap().forget_session_once = true;
+    let res = invoke(
+        &plugins,
+        "npm_call",
+        json!({ "name": "npm_list_proxy_hosts" }),
+        &ctx,
+    )
+    .await;
+    assert_eq!(res[0]["id"], json!(1), "recovered call: {res}");
+    let inits_after = state.lock().unwrap().initialize_count;
+    assert_eq!(
+        inits_after,
+        inits_before + 1,
+        "expiry must trigger exactly one re-initialise"
+    );
+
+    // A 3 s remote operation (certificate-issuance-shaped) survives the 2 s
+    // Extism plugin-call timeout because the wait happens host-side.
+    let res = invoke(&plugins, "npm_call", json!({ "name": "npm_slow_op" }), &ctx).await;
+    assert_eq!(res["done"], json!(true), "slow call: {res}");
+}

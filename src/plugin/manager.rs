@@ -37,6 +37,11 @@ const MEMORY_LIMIT_PAGES: u32 = 2048; // 128 MB (64 KB per page)
 /// untouched (it only overrides epoch/fuel/exceptions/cache).
 const MEMORY_RESERVATION_BYTES: u64 = MEMORY_LIMIT_PAGES as u64 * 64 * 1024; // 128 MB
 const CALL_TIMEOUT: Duration = Duration::from_secs(2);
+/// Ceiling for a manifest-declared `call_timeout_secs`. Bounds how long a
+/// misbehaving plugin can pin one of its per-plugin mutexes, while leaving
+/// room for genuinely slow tool work (e.g. a certificate issuance driven
+/// through an outbound HTTP host call).
+const MAX_CALL_TIMEOUT: Duration = Duration::from_secs(180);
 
 /// The complete set of hook names Peckboard actually dispatches. A
 /// plugin manifest may only register handlers for hooks in this list;
@@ -91,6 +96,7 @@ pub const ALLOWED_PERMISSIONS: &[&str] = &[
     "event_append", // peckboard_append_event
     "http_fetch", // peckboard_http_fetch — outbound public-web GET/HEAD
     "process_exec", // peckboard_exec — run an allowlisted command in the caller's folder
+    "http_request", // peckboard_http_request — outbound HTTP, any method, LAN/loopback allowed (integrating self-hosted services)
     "process_exec_any", // peckboard_exec_any — run ANY folder-contained command (after approval)
     "project_files_read", // peckboard_list_project_files / read_file / read_file_base64
     "project_files_write", // peckboard_write_file
@@ -456,10 +462,6 @@ impl PluginManager {
     /// (its `.wasm` file stem) — host-function namespacing, config lookup,
     /// and approval are all keyed by it.
     fn load_plugin_from(&self, name: String, wasm: Wasm) -> anyhow::Result<LoadedPlugin> {
-        let manifest = ExtismManifest::new([wasm])
-            .with_timeout(CALL_TIMEOUT)
-            .with_memory_max(MEMORY_LIMIT_PAGES);
-
         // Wire the data-access host functions into the plugin so it can read
         // and write Peckboard data through the sandbox. `empty()` managers have
         // no `Db` and never reach here, so they register nothing.
@@ -481,39 +483,52 @@ impl PluginManager {
         // per authenticated request (see `LoadedPlugin::user`).
         let user: Arc<std::sync::RwLock<Option<super::host::UserContext>>> =
             Arc::new(std::sync::RwLock::new(None));
-        let functions = match &self.db {
-            // `name` is the plugin's id (its `.wasm` file stem), the same id
-            // its `plugin_settings` rows are keyed by — so the self-storage
-            // host functions stay scoped to this plugin's own namespace.
-            Some(db) => super::host::host_functions(
-                db,
-                &name,
-                granted_permissions.clone(),
-                invocation.clone(),
-                self.live.clone(),
-                user.clone(),
-                // plugins_dir is `<data_dir>/plugins`; the browser-run host
-                // functions need the data dir itself.
-                self.plugins_dir
-                    .parent()
-                    .map(std::path::Path::to_path_buf)
-                    .unwrap_or_else(|| self.plugins_dir.clone()),
-            ),
-            None => Vec::new(),
-        };
-        // Shrink wasmtime's per-memory address-space reservation from the 4 GiB
-        // default down to our growth cap (see `MEMORY_RESERVATION_BYTES`). Built
-        // via `PluginBuilder` so we can hand wasmtime a custom `Config`;
-        // `Plugin::new(manifest, functions, true)` is just this chain without the
-        // config override.
-        let mut wasmtime_config = wasmtime::Config::new();
-        wasmtime_config.memory_reservation(MEMORY_RESERVATION_BYTES);
-        let mut plugin = PluginBuilder::new(manifest)
-            .with_functions(functions)
-            .with_wasi(true)
-            .with_wasmtime_config(wasmtime_config)
-            .build()?;
 
+        // Building the sandboxed instance is repeatable: the manifest export
+        // may declare a larger `call_timeout_secs`, and Extism pins the call
+        // timeout at construction — so the plugin is rebuilt further down with
+        // the clamped budget when one was declared. The shared slots above are
+        // captured by the closure, so a rebuilt instance keeps the exact same
+        // permission/invocation/user state the host functions read.
+        let build_plugin = |call_timeout: Duration| -> anyhow::Result<Plugin> {
+            let manifest = ExtismManifest::new([wasm.clone()])
+                .with_timeout(call_timeout)
+                .with_memory_max(MEMORY_LIMIT_PAGES);
+            let functions = match &self.db {
+                // `name` is the plugin's id (its `.wasm` file stem), the same id
+                // its `plugin_settings` rows are keyed by — so the self-storage
+                // host functions stay scoped to this plugin's own namespace.
+                Some(db) => super::host::host_functions(
+                    db,
+                    &name,
+                    granted_permissions.clone(),
+                    invocation.clone(),
+                    self.live.clone(),
+                    user.clone(),
+                    // plugins_dir is `<data_dir>/plugins`; the browser-run host
+                    // functions need the data dir itself.
+                    self.plugins_dir
+                        .parent()
+                        .map(std::path::Path::to_path_buf)
+                        .unwrap_or_else(|| self.plugins_dir.clone()),
+                ),
+                None => Vec::new(),
+            };
+            // Shrink wasmtime's per-memory address-space reservation from the 4 GiB
+            // default down to our growth cap (see `MEMORY_RESERVATION_BYTES`). Built
+            // via `PluginBuilder` so we can hand wasmtime a custom `Config`;
+            // `Plugin::new(manifest, functions, true)` is just this chain without the
+            // config override.
+            let mut wasmtime_config = wasmtime::Config::new();
+            wasmtime_config.memory_reservation(MEMORY_RESERVATION_BYTES);
+            PluginBuilder::new(manifest)
+                .with_functions(functions)
+                .with_wasi(true)
+                .with_wasmtime_config(wasmtime_config)
+                .build()
+                .map_err(Into::into)
+        };
+        let mut plugin = build_plugin(CALL_TIMEOUT)?;
         // Call manifest export to get hook declarations.
         let manifest_json = plugin.call::<&str, String>("manifest", "")?;
         let plugin_manifest: PluginManifest = serde_json::from_str(&manifest_json)?;
@@ -613,6 +628,18 @@ impl PluginManager {
         }
 
         // Resolve the operator's stored approval for this exact hook set.
+        // A plugin may declare a larger per-call budget than the 2 s default
+        // for slow host-side tool work (see `PluginManifest::call_timeout_secs`).
+        // Extism fixes the timeout at construction, so rebuild the instance
+        // with the clamped budget when one was declared. Not part of the
+        // approval grant: a timeout is not a capability — the ceiling bounds it.
+        let call_timeout = plugin_manifest
+            .call_timeout_secs
+            .map(|s| Duration::from_secs(s).clamp(CALL_TIMEOUT, MAX_CALL_TIMEOUT))
+            .unwrap_or(CALL_TIMEOUT);
+        if call_timeout != CALL_TIMEOUT {
+            plugin = build_plugin(call_timeout)?;
+        }
         // A plugin is inert until approved (the user requires permission
         // for every hook), so a missing decision — or one made against a
         // different hook set — leaves it `Pending`, not active.
@@ -669,7 +696,8 @@ impl PluginManager {
     /// mutex, so two dispatches for different hooks (or the same hook
     /// against disjoint plugin sets) don't serialise on a single
     /// PluginManager-wide lock — important because each `plugin.call`
-    /// can take up to `CALL_TIMEOUT` (2s).
+    /// can take up to its call timeout (2 s default; a manifest may raise it
+    /// via `call_timeout_secs`, clamped to `MAX_CALL_TIMEOUT`).
     pub async fn dispatch(&self, hook: &str, payload: serde_json::Value) -> HookResult {
         let targets: Vec<(String, Arc<Mutex<Plugin>>)> = {
             let plugins = self.plugins.lock().await;
@@ -1986,6 +2014,7 @@ mod tests {
             project_items: Vec::new(),
             session_items: Vec::new(),
             permissions,
+            call_timeout_secs: None,
         }
     }
 

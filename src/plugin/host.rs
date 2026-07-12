@@ -1763,62 +1763,26 @@ fn is_blocked_fetch_ip(ip: &IpAddr) -> bool {
     }
 }
 
-/// `peckboard_http_fetch` — fetch a public-web URL on the plugin's behalf.
-/// Input: `{"url", "method"?: "GET"|"HEAD", "headers"?: {..}}`. Output:
-/// `{"status", "headers": {..}, "body", "truncated", "final_url"}` or an
-/// `{"error"}` envelope. SSRF-contained: private/loopback targets, non-http
-/// schemes, and non-GET/HEAD methods are refused.
-pub(crate) fn http_fetch_impl(input: &str) -> String {
-    let req: HttpFetchRequest = match serde_json::from_str(input) {
-        Ok(r) => r,
-        Err(e) => return error_json(format!("invalid request: {e}")),
-    };
+/// What [`perform_outbound_http`] sends: a validated URL with its resolved,
+/// pinned address, plus everything request-shaped the two callers
+/// (`http_fetch_impl`, `http_request_impl`) are allowed to vary.
+struct OutboundHttp {
+    url: reqwest::Url,
+    host: String,
+    pinned: SocketAddr,
+    method: reqwest::Method,
+    headers: BTreeMap<String, String>,
+    body: Option<String>,
+    timeout_secs: u64,
+    user_agent: &'static str,
+}
 
-    let method = req.method.as_deref().unwrap_or("GET").to_ascii_uppercase();
-    if method != "GET" && method != "HEAD" {
-        return error_json("only GET and HEAD are permitted");
-    }
-
-    let url = match reqwest::Url::parse(req.url.trim()) {
-        Ok(u) => u,
-        Err(e) => return error_json(format!("invalid url: {e}")),
-    };
-    if url.scheme() != "http" && url.scheme() != "https" {
-        return error_json("only http and https urls are permitted");
-    }
-    let host = match url.host_str() {
-        Some(h) => h.to_string(),
-        None => return error_json("url has no host"),
-    };
-    let port = url.port_or_known_default().unwrap_or(0);
-
-    // Resolve and pick the first globally-routable address; pin it so reqwest
-    // connects only to the address we validated (defeats DNS rebinding).
-    let pinned: SocketAddr = match (host.as_str(), port).to_socket_addrs() {
-        Ok(addrs) => {
-            let mut chosen = None;
-            for a in addrs {
-                if !is_blocked_fetch_ip(&a.ip()) {
-                    chosen = Some(a);
-                    break;
-                }
-            }
-            match chosen {
-                Some(a) => a,
-                None => {
-                    return error_json(
-                        "host does not resolve to a public address (private/loopback blocked)",
-                    );
-                }
-            }
-        }
-        Err(e) => return error_json(format!("dns resolution failed: {e}")),
-    };
-
-    let extra_headers = req.headers.unwrap_or_default();
-
-    // Run the request off the host's async worker thread on a dedicated
-    // current-thread runtime, so no tokio runtime is nested.
+/// Run one pinned, redirect-less HTTP exchange and shape the response as the
+/// host-fn JSON (`{"status","headers","body","truncated","final_url"}`).
+/// Policy (methods, IP ranges, timeouts) is the caller's job — this owns only
+/// the mechanics: a dedicated `std::thread` with its own current-thread
+/// runtime (never nested in the host's tokio worker) and the 5 MiB body cap.
+fn perform_outbound_http(req: OutboundHttp) -> Result<serde_json::Value, String> {
     let handle = std::thread::spawn(move || -> Result<serde_json::Value, String> {
         let rt = tokio::runtime::Builder::new_current_thread()
             .enable_all()
@@ -1827,19 +1791,17 @@ pub(crate) fn http_fetch_impl(input: &str) -> String {
         rt.block_on(async move {
             let client = reqwest::Client::builder()
                 .redirect(reqwest::redirect::Policy::none())
-                .timeout(Duration::from_secs(HTTP_FETCH_TIMEOUT_SECS))
-                .user_agent("Peckboard-common-tools/0.1")
-                .resolve(&host, pinned)
+                .timeout(Duration::from_secs(req.timeout_secs))
+                .user_agent(req.user_agent)
+                .resolve(&req.host, req.pinned)
                 .build()
                 .map_err(|e| format!("client: {e}"))?;
-            let m = if method == "HEAD" {
-                reqwest::Method::HEAD
-            } else {
-                reqwest::Method::GET
-            };
-            let mut rb = client.request(m, url.clone());
-            for (k, v) in &extra_headers {
+            let mut rb = client.request(req.method, req.url);
+            for (k, v) in &req.headers {
                 rb = rb.header(k.as_str(), v.as_str());
+            }
+            if let Some(b) = req.body {
+                rb = rb.body(b);
             }
             let mut resp = rb
                 .send()
@@ -1884,11 +1846,160 @@ pub(crate) fn http_fetch_impl(input: &str) -> String {
             }))
         })
     });
-
     match handle.join() {
-        Ok(Ok(v)) => v.to_string(),
-        Ok(Err(e)) => error_json(e),
-        Err(_) => error_json("http fetch thread panicked"),
+        Ok(v) => v,
+        Err(_) => Err("http thread panicked".into()),
+    }
+}
+
+/// Parse + validate the URL shared by both outbound host functions: http/https
+/// only, a host present, resolved via [`ToSocketAddrs`] and pinned. With
+/// `require_public` the candidates are filtered through
+/// [`is_blocked_fetch_ip`] (the `http_fetch` policy); without it the first
+/// resolved address is taken as-is (the `http_request` policy).
+fn validate_outbound_url(
+    raw: &str,
+    require_public: bool,
+) -> Result<(reqwest::Url, String, SocketAddr), String> {
+    let url = reqwest::Url::parse(raw.trim()).map_err(|e| format!("invalid url: {e}"))?;
+    if url.scheme() != "http" && url.scheme() != "https" {
+        return Err("only http and https urls are permitted".into());
+    }
+    let host = url
+        .host_str()
+        .ok_or_else(|| "url has no host".to_string())?
+        .to_string();
+    let port = url.port_or_known_default().unwrap_or(0);
+    let mut addrs = (host.as_str(), port)
+        .to_socket_addrs()
+        .map_err(|e| format!("dns resolution failed: {e}"))?;
+    let pinned = if require_public {
+        addrs
+            .find(|a| !is_blocked_fetch_ip(&a.ip()))
+            .ok_or_else(|| {
+                "host does not resolve to a public address (private/loopback blocked)".to_string()
+            })?
+    } else {
+        addrs
+            .next()
+            .ok_or_else(|| "host resolved to no addresses".to_string())?
+    };
+    Ok((url, host, pinned))
+}
+
+/// `peckboard_http_fetch` — fetch a public-web URL on the plugin's behalf.
+/// Input: `{"url", "method"?: "GET"|"HEAD", "headers"?: {..}}`. Output:
+/// `{"status", "headers": {..}, "body", "truncated", "final_url"}` or an
+/// `{"error"}` envelope. SSRF-contained: private/loopback targets, non-http
+/// schemes, and non-GET/HEAD methods are refused.
+pub(crate) fn http_fetch_impl(input: &str) -> String {
+    let req: HttpFetchRequest = match serde_json::from_str(input) {
+        Ok(r) => r,
+        Err(e) => return error_json(format!("invalid request: {e}")),
+    };
+
+    let method = req.method.as_deref().unwrap_or("GET").to_ascii_uppercase();
+    if method != "GET" && method != "HEAD" {
+        return error_json("only GET and HEAD are permitted");
+    }
+    let method = if method == "HEAD" {
+        reqwest::Method::HEAD
+    } else {
+        reqwest::Method::GET
+    };
+
+    let (url, host, pinned) = match validate_outbound_url(&req.url, true) {
+        Ok(v) => v,
+        Err(e) => return error_json(e),
+    };
+
+    match perform_outbound_http(OutboundHttp {
+        url,
+        host,
+        pinned,
+        method,
+        headers: req.headers.unwrap_or_default(),
+        body: None,
+        timeout_secs: HTTP_FETCH_TIMEOUT_SECS,
+        user_agent: "Peckboard-common-tools/0.1",
+    }) {
+        Ok(v) => v.to_string(),
+        Err(e) => error_json(e),
+    }
+}
+
+// ── Outbound HTTP request (gated, full-method, LAN-capable) ───────────
+//
+// `peckboard_http_request` is `http_fetch`'s wider sibling for plugins that
+// integrate self-hosted services (an nginx-proxy-manager MCP endpoint on the
+// LAN, a homelab API): every standard method, a request body, and — the whole
+// point — private/loopback targets are allowed. That is server-side request
+// forgery by design, so it sits behind its own `http_request` permission the
+// operator must approve at install instead of silently widening `http_fetch`.
+// The rest of the fetch containment stays: http/https schemes only, the
+// resolved address is pinned for the exchange, redirects are returned
+// verbatim, and the body shares the 5 MiB cap.
+
+const HTTP_REQUEST_DEFAULT_TIMEOUT_SECS: u64 = 30;
+const HTTP_REQUEST_MAX_TIMEOUT_SECS: u64 = 120;
+
+#[derive(Deserialize)]
+struct HttpRequestRequest {
+    url: String,
+    #[serde(default)]
+    method: Option<String>,
+    #[serde(default)]
+    headers: Option<BTreeMap<String, String>>,
+    #[serde(default)]
+    body: Option<String>,
+    #[serde(default)]
+    timeout_secs: Option<u64>,
+}
+
+/// `peckboard_http_request` — perform an HTTP request on the plugin's behalf,
+/// private/loopback targets included. Input: `{"url", "method"?: "GET"|"HEAD"
+/// |"POST"|"PUT"|"PATCH"|"DELETE", "headers"?: {..}, "body"?,
+/// "timeout_secs"?: 1..=120 (default 30)}`. Output: `{"status", "headers":
+/// {..}, "body", "truncated", "final_url"}` or an `{"error"}` envelope.
+pub(crate) fn http_request_impl(input: &str) -> String {
+    let req: HttpRequestRequest = match serde_json::from_str(input) {
+        Ok(r) => r,
+        Err(e) => return error_json(format!("invalid request: {e}")),
+    };
+
+    let method = req.method.as_deref().unwrap_or("GET").to_ascii_uppercase();
+    let method = match method.as_str() {
+        "GET" => reqwest::Method::GET,
+        "HEAD" => reqwest::Method::HEAD,
+        "POST" => reqwest::Method::POST,
+        "PUT" => reqwest::Method::PUT,
+        "PATCH" => reqwest::Method::PATCH,
+        "DELETE" => reqwest::Method::DELETE,
+        other => return error_json(format!("method '{other}' is not permitted")),
+    };
+
+    let (url, host, pinned) = match validate_outbound_url(&req.url, false) {
+        Ok(v) => v,
+        Err(e) => return error_json(e),
+    };
+
+    let timeout_secs = req
+        .timeout_secs
+        .unwrap_or(HTTP_REQUEST_DEFAULT_TIMEOUT_SECS)
+        .clamp(1, HTTP_REQUEST_MAX_TIMEOUT_SECS);
+
+    match perform_outbound_http(OutboundHttp {
+        url,
+        host,
+        pinned,
+        method,
+        headers: req.headers.unwrap_or_default(),
+        body: req.body,
+        timeout_secs,
+        user_agent: "Peckboard-plugin/0.1",
+    }) {
+        Ok(v) => v.to_string(),
+        Err(e) => error_json(e),
     }
 }
 
@@ -2536,6 +2647,11 @@ host_fn!(peckboard_http_fetch(user_data: HostState; input: String) -> String {
     Ok(http_fetch_impl(&input))
 });
 
+host_fn!(peckboard_http_request(user_data: HostState; input: String) -> String {
+    let (_db, _plugin_id, ok) = state_and_permission(&user_data, "http_request")?;
+    if !ok { return Ok(error_json("plugin lacks the 'http_request' permission")); }
+    Ok(http_request_impl(&input))
+});
 host_fn!(peckboard_exec(user_data: HostState; input: String) -> String {
     let (db, _plugin_id, ok, inv) = state_permission_and_invocation(&user_data, "process_exec")?;
     if !ok { return Ok(error_json("plugin lacks the 'process_exec' permission")); }
@@ -2875,6 +2991,13 @@ pub(crate) fn host_functions(
             [PTR],
             ud.clone(),
             peckboard_http_fetch,
+        ),
+        Function::new(
+            "peckboard_http_request",
+            [PTR],
+            [PTR],
+            ud.clone(),
+            peckboard_http_request,
         ),
         Function::new("peckboard_exec", [PTR], [PTR], ud.clone(), peckboard_exec),
         Function::new(
@@ -3532,6 +3655,59 @@ mod tests {
         assert!(
             r.contains("public address") || r.contains("dns resolution"),
             "localhost: {r}"
+        );
+    }
+
+    #[test]
+    fn http_request_validates_method_and_reaches_local_targets() {
+        // Non-http scheme refused.
+        let r = http_request_impl(r#"{"url":"file:///etc/passwd"}"#);
+        assert!(r.contains("http and https"), "scheme: {r}");
+        // Unsupported method refused.
+        let r = http_request_impl(r#"{"url":"http://example.com","method":"TRACE"}"#);
+        assert!(r.contains("not permitted"), "method: {r}");
+        // Loopback is the point of this host fn: a POST to a local listener
+        // round-trips, response headers included.
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = std::thread::spawn(move || {
+            use std::io::{Read, Write};
+            let (mut sock, _) = listener.accept().unwrap();
+            let mut data = Vec::new();
+            let mut buf = [0u8; 1024];
+            loop {
+                let n = sock.read(&mut buf).unwrap();
+                if n == 0 {
+                    break;
+                }
+                data.extend_from_slice(&buf[..n]);
+                if String::from_utf8_lossy(&data).contains("\"jsonrpc\"") {
+                    break;
+                }
+            }
+            sock.write_all(
+                b"HTTP/1.1 200 OK\r\ncontent-length: 2\r\nmcp-session-id: s-1\r\nconnection: close\r\n\r\nok",
+            )
+            .unwrap();
+            String::from_utf8_lossy(&data).into_owned()
+        });
+        let input = serde_json::json!({
+            "url": format!("http://127.0.0.1:{}/api/mcp", addr.port()),
+            "method": "POST",
+            "headers": {"content-type": "application/json"},
+            "body": "{\"jsonrpc\":\"2.0\"}",
+            "timeout_secs": 5,
+        });
+        let r = http_request_impl(&input.to_string());
+        let v: serde_json::Value = serde_json::from_str(&r).unwrap();
+        assert_eq!(v["status"], 200, "response: {r}");
+        assert_eq!(v["body"], "ok");
+        assert_eq!(v["headers"]["mcp-session-id"], "s-1");
+        let seen = server.join().unwrap();
+        assert!(seen.starts_with("POST /api/mcp"), "server saw: {seen}");
+        assert!(
+            seen.contains("{\"jsonrpc\":\"2.0\"}"),
+            "body forwarded: {seen}"
         );
     }
 
