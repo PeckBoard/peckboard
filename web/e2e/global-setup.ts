@@ -1,5 +1,4 @@
 import { execSync } from 'node:child_process'
-import fs from 'node:fs'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 
@@ -15,25 +14,39 @@ export default async function globalSetup() {
   const webDir = path.resolve(here, '..')
   const repoRoot = path.resolve(here, '..', '..')
 
-  // Copy built WASM plugins into the e2e data dir so the server can load
-  // them on startup. This runs regardless of PECKBOARD_E2E_SKIP_BUILD so
-  // the plugin tests always have the latest WASM available.
-  const dataDir = process.env.PECKBOARD_E2E_DATA_DIR
-  if (dataDir) {
-    const pluginsDir = path.join(dataDir, 'plugins')
-    fs.mkdirSync(pluginsDir, { recursive: true })
-    const openaiCompatWasm = path.resolve(
-      repoRoot,
-      '..',
-      'peck-plugins',
-      'openai-compat',
-      'dist',
-      'plugin.wasm',
-    )
-    if (fs.existsSync(openaiCompatWasm)) {
-      fs.copyFileSync(openaiCompatWasm, path.join(pluginsDir, 'openai-compat.wasm'))
-      console.log('[e2e] Copied openai-compat.wasm to e2e data dir')
+  // NOTE: the openai-compat wasm copy lives in playwright.config.ts, not
+  // here — Playwright launches the webServer BEFORE globalSetup, so any
+  // copy made here lands after the server's plugin load_all and is never
+  // loaded. Config evaluation is the only pre-boot hook.
+  //
+  // The flip side: the server is already up NOW, so approve the copied
+  // plugin immediately. Left pending, its approval prompt overlays every
+  // page and times out unrelated UI tests. Approval without settings
+  // registers no provider (the plugin skips — no base_url yet); the
+  // openai-compat spec re-approves after configuring settings, which
+  // re-dispatches provider.register with the stub config.
+  const port = process.env.PECKBOARD_E2E_PORT ?? '4444'
+  const baseURL = `http://127.0.0.1:${port}`
+  try {
+    const login = await fetch(`${baseURL}/api/auth/login`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        username: process.env.PECKBOARD_E2E_USER ?? 'e2e-user',
+        password: process.env.PECKBOARD_E2E_PASS ?? 'e2e-password-1234',
+      }),
+    })
+    if (login.ok) {
+      const { token } = (await login.json()) as { token: string }
+      await fetch(`${baseURL}/api/plugins/openai-compat/approval`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+        body: JSON.stringify({ decision: 'approve' }),
+      })
+      console.log('[e2e] Approved openai-compat plugin (if present)')
     }
+  } catch {
+    // Server not reachable yet — plugin tests will self-skip.
   }
 
   // Escape hatch for machines where the release re-link is slow: set

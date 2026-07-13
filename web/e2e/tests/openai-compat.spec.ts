@@ -29,7 +29,6 @@ const WASM_PATH = path.resolve(
   '..',
   '..',
   '..',
-  '..',
   'peck-plugins',
   'openai-compat',
   'dist',
@@ -252,19 +251,23 @@ test('openai-compat plugin completes a chat turn via stub endpoint', async ({
 
   const baseUrl = `http://127.0.0.1:${stubPort}/v1`
 
-  await request.put(`/api/plugins/${encodeURIComponent('openai-compat')}/settings`, {
-    headers: { ...authHeader, 'Content-Type': 'application/json' },
-    data: {
-      updates: {
-        base_url: baseUrl,
-        models: ['stub-chat-model'],
-        display_name: 'E2E Stub',
-        api_key: '',
+  const settingsRes = await request.put(
+    `/api/plugins/${encodeURIComponent('openai-compat')}/settings`,
+    {
+      headers: { ...authHeader, 'Content-Type': 'application/json' },
+      data: {
+        updates: {
+          base_url: baseUrl,
+          models: ['stub-chat-model'],
+          display_name: 'E2E Stub',
+          api_key: '',
+        },
       },
     },
-  })
+  )
+  expect(settingsRes.ok(), `settings failed: ${await settingsRes.text()}`).toBeTruthy()
 
-  const approveRes = await request.post('/api/plugins/openai-compat/decision', {
+  const approveRes = await request.post('/api/plugins/openai-compat/approval', {
     headers: { ...authHeader, 'Content-Type': 'application/json' },
     data: { decision: 'approve' },
   })

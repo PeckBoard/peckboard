@@ -59,7 +59,7 @@ test('model picker filters the catalogue as you type', async ({ request, page, b
   const trigger = page.getByTestId('new-session-model')
   await expect(trigger).toBeVisible({ timeout: 10_000 })
   // Nothing chosen yet → shows the default label.
-  await expect(trigger).toContainText('Server default')
+  await expect(trigger).toContainText('Auto')
 
   await trigger.click()
   const search = page.getByTestId('new-session-model-search')

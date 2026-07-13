@@ -1,7 +1,8 @@
 import { defineConfig } from '@playwright/test'
-import { mkdtempSync } from 'node:fs'
+import { copyFileSync, existsSync, mkdirSync, mkdtempSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
+import { fileURLToPath } from 'node:url'
 
 /**
  * Playwright config for peckboard end-to-end tests.
@@ -39,6 +40,28 @@ process.env.PECKBOARD_E2E_PASS = E2E_PASS
 const DATA_DIR =
   process.env.PECKBOARD_E2E_DATA_DIR ?? mkdtempSync(path.join(tmpdir(), 'peckboard-e2e-'))
 process.env.PECKBOARD_E2E_DATA_DIR = DATA_DIR
+
+// Copy built WASM plugins into the fresh data dir NOW, at config-eval time:
+// Playwright launches the webServer BEFORE globalSetup runs, so a copy made
+// there lands after the server's plugin load_all and is never loaded.
+// Config evaluation happens first (it defines the webServer), making this
+// the only reliable pre-boot hook. Idempotent — worker processes re-eval
+// this file against the same DATA_DIR.
+const openaiCompatWasm = path.resolve(
+  path.dirname(fileURLToPath(import.meta.url)),
+  '..',
+  '..',
+  '..',
+  'peck-plugins',
+  'openai-compat',
+  'dist',
+  'plugin.wasm',
+)
+if (existsSync(openaiCompatWasm)) {
+  const pluginsDir = path.join(DATA_DIR, 'plugins')
+  mkdirSync(pluginsDir, { recursive: true })
+  copyFileSync(openaiCompatWasm, path.join(pluginsDir, 'openai-compat.wasm'))
+}
 
 export default defineConfig({
   testDir: './tests',
