@@ -201,18 +201,22 @@ async fn cursor_auto_turn_completes_end_to_end() {
         "agent-end status should be complete: {end_data}",
     );
 
-    // The assistant's reply should contain "pong".
-    let said_pong = events.iter().filter(|e| e.kind == "agent-text").any(|e| {
-        serde_json::from_str::<serde_json::Value>(&e.data)
-            .ok()
-            .and_then(|d| {
-                d["text"]
-                    .as_str()
-                    .map(|s| s.to_lowercase().contains("pong"))
-            })
-            .unwrap_or(false)
-    });
-    assert!(said_pong, "expected an assistant reply containing 'pong'");
+    // The assistant's reply should contain "pong". With
+    // --stream-partial-output the reply arrives as multiple delta events,
+    // so match on the concatenation rather than any single event.
+    let full_text: String = events
+        .iter()
+        .filter(|e| e.kind == "agent-text")
+        .filter_map(|e| {
+            serde_json::from_str::<serde_json::Value>(&e.data)
+                .ok()
+                .and_then(|d| d["text"].as_str().map(str::to_string))
+        })
+        .collect();
+    assert!(
+        full_text.to_lowercase().contains("pong"),
+        "expected an assistant reply containing 'pong', got {full_text:?}",
+    );
 
     // Cursor's chat id must be persisted so the next turn can `--resume`.
     let session = db.get_session("s1").await.unwrap().unwrap();
@@ -491,10 +495,21 @@ async fn cursor_mcp_tool_roundtrip() {
     );
     drop(seen);
 
-    // And the model surfaced the tool's output back into the event log.
+    // And the model surfaced the tool's output back into the event log —
+    // either whole in one event (the MCP tool_call result) or split across
+    // streamed text deltas, so also match the concatenated reply.
     let events = db.events_tail("s-mcp", 200).await.unwrap();
+    let full_text: String = events
+        .iter()
+        .filter(|e| e.kind == "agent-text")
+        .filter_map(|e| {
+            serde_json::from_str::<serde_json::Value>(&e.data)
+                .ok()
+                .and_then(|d| d["text"].as_str().map(str::to_string))
+        })
+        .collect();
     assert!(
-        events.iter().any(|e| e.data.contains(MAGIC)),
-        "expected the tool's magic word in the event log",
+        events.iter().any(|e| e.data.contains(MAGIC)) || full_text.contains(MAGIC),
+        "expected the tool's magic word in the event log, got {full_text:?}",
     );
 }

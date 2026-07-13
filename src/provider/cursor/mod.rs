@@ -5,12 +5,13 @@
 //! `cursor-agent` is invoked **once per turn** in print mode:
 //!
 //! ```text
-//! cursor-agent --print --output-format stream-json [--model M] \
-//!     [--resume CHAT_ID] [--force] -- "<prompt>"
+//! cursor-agent --print --output-format stream-json --stream-partial-output \
+//!     [--model M] [--resume CHAT_ID] [--force --trust] -- "<prompt>"
 //! ```
 //!
-//! Each invocation streams newline-delimited JSON (Claude Code-compatible:
-//! `system`/`assistant`/`user`/`result`) which [`parser`] turns into the
+//! Each invocation streams newline-delimited JSON (`system` init, streamed
+//! `assistant` text deltas, `tool_call` started/completed, `result` — see
+//! [`parser`] docs) which [`parser`] turns into the
 //! unified [`ProviderEvent`] stream. Cursor's `session_id` (chat id) is
 //! captured from the stream and emitted on `Completed` so the next turn can
 //! `--resume` the same conversation.
@@ -398,12 +399,9 @@ async fn run_turn(args: TurnArgs<'_>) -> bool {
         })
     });
 
-    let mut conversation_id: Option<String> = None;
-    let mut model_name: Option<String> = None;
-    let mut emitted_start = false;
-    // Terminal-tool calls denied at parse time; ids tracked so the CLI's real
-    // tool_result frame can be dropped (see cursor parser).
-    let mut denied_tool_ids: std::collections::HashSet<String> = std::collections::HashSet::new();
+    // Per-turn parser state: chat id, model, Started guard, terminal-tool
+    // denials, and the delta/snapshot text dedup (see `parser::TurnState`).
+    let mut turn = parser::TurnState::default();
     let mut saw_any = false;
 
     let mut lines = BufReader::new(stdout).lines();
@@ -432,13 +430,7 @@ async fn run_turn(args: TurnArgs<'_>) -> bool {
                             tracing::debug!(session_id = %session_id, "cursor: non-JSON stdout line ignored");
                             continue;
                         };
-                        let events = parser::parse_stream_json(
-                            &json,
-                            &mut conversation_id,
-                            &mut model_name,
-                            &mut emitted_start,
-                            &mut denied_tool_ids,
-                        );
+                        let events = parser::parse_stream_json(&json, &mut turn);
                         for event in events {
                             saw_any = true;
                             emit_event(db, broadcaster, session_id, event).await;
@@ -466,19 +458,21 @@ async fn run_turn(args: TurnArgs<'_>) -> bool {
         TurnOutcome::Eof => {
             let ok = status.map(|s| s.success()).unwrap_or(false);
             if ok || saw_any {
-                if !emitted_start {
+                if !turn.emitted_start {
                     emit_started(db, broadcaster, session_id, model_label).await;
                 }
                 emit_event(
                     db,
                     broadcaster,
                     session_id,
-                    ProviderEvent::Completed { conversation_id },
+                    ProviderEvent::Completed {
+                        conversation_id: turn.conversation_id.take(),
+                    },
                 )
                 .await;
                 true
             } else {
-                if !emitted_start {
+                if !turn.emitted_start {
                     emit_started(db, broadcaster, session_id, model_label).await;
                 }
                 let reason = if stderr_text.is_empty() {
@@ -494,20 +488,22 @@ async fn run_turn(args: TurnArgs<'_>) -> bool {
             // The interrupt route appends its own `interrupt` event; emit a
             // Completed so any in-flight tool spinner closes and the
             // orchestrator sees a clean end.
-            if !emitted_start {
+            if !turn.emitted_start {
                 emit_started(db, broadcaster, session_id, model_label).await;
             }
             emit_event(
                 db,
                 broadcaster,
                 session_id,
-                ProviderEvent::Completed { conversation_id },
+                ProviderEvent::Completed {
+                    conversation_id: turn.conversation_id.take(),
+                },
             )
             .await;
             false
         }
         TurnOutcome::Timeout => {
-            if !emitted_start {
+            if !turn.emitted_start {
                 emit_started(db, broadcaster, session_id, model_label).await;
             }
             crash(
@@ -521,7 +517,7 @@ async fn run_turn(args: TurnArgs<'_>) -> bool {
             false
         }
         TurnOutcome::ReadError(e) => {
-            if !emitted_start {
+            if !turn.emitted_start {
                 emit_started(db, broadcaster, session_id, model_label).await;
             }
             crash(
@@ -592,6 +588,8 @@ async fn crash(
 /// The prompt is passed as a positional argument after `--` so a prompt
 /// that begins with `-` isn't mistaken for a flag. `auto` (or an empty
 /// model) means "let Cursor choose", so `--model` is omitted.
+/// `--stream-partial-output` streams text as live deltas; the parser
+/// swallows the cumulative segment snapshots the CLI emits alongside them.
 fn build_cli_args(
     model: &str,
     prompt: &str,
@@ -603,6 +601,7 @@ fn build_cli_args(
         "--print".to_string(),
         "--output-format".to_string(),
         "stream-json".to_string(),
+        "--stream-partial-output".to_string(),
     ];
     if !model.is_empty() && model != "auto" {
         args.push("--model".to_string());
@@ -794,6 +793,7 @@ mod tests {
         assert!(!args.iter().any(|a| a == "--model"));
         assert!(args.contains(&"--print".to_string()));
         assert!(args.contains(&"stream-json".to_string()));
+        assert!(args.contains(&"--stream-partial-output".to_string()));
         assert!(args.contains(&"--force".to_string()));
         assert!(args.contains(&"--trust".to_string()));
         // Prompt is the final positional, after `--`.
