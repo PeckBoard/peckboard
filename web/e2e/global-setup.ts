@@ -1,4 +1,5 @@
 import { execSync } from 'node:child_process'
+import fs from 'node:fs'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 
@@ -10,6 +11,31 @@ import { fileURLToPath } from 'node:url'
  * incremental — repeated runs are fast.
  */
 export default async function globalSetup() {
+  const here = path.dirname(fileURLToPath(import.meta.url))
+  const webDir = path.resolve(here, '..')
+  const repoRoot = path.resolve(here, '..', '..')
+
+  // Copy built WASM plugins into the e2e data dir so the server can load
+  // them on startup. This runs regardless of PECKBOARD_E2E_SKIP_BUILD so
+  // the plugin tests always have the latest WASM available.
+  const dataDir = process.env.PECKBOARD_E2E_DATA_DIR
+  if (dataDir) {
+    const pluginsDir = path.join(dataDir, 'plugins')
+    fs.mkdirSync(pluginsDir, { recursive: true })
+    const openaiCompatWasm = path.resolve(
+      repoRoot,
+      '..',
+      'peck-plugins',
+      'openai-compat',
+      'dist',
+      'plugin.wasm',
+    )
+    if (fs.existsSync(openaiCompatWasm)) {
+      fs.copyFileSync(openaiCompatWasm, path.join(pluginsDir, 'openai-compat.wasm'))
+      console.log('[e2e] Copied openai-compat.wasm to e2e data dir')
+    }
+  }
+
   // Escape hatch for machines where the release re-link is slow: set
   // PECKBOARD_E2E_SKIP_BUILD=1 when you've just built the frontend AND
   // the release binary yourself (in that order — the binary embeds the
@@ -18,9 +44,6 @@ export default async function globalSetup() {
     console.log('[e2e] PECKBOARD_E2E_SKIP_BUILD=1 — using existing frontend + binary')
     return
   }
-  const here = path.dirname(fileURLToPath(import.meta.url))
-  const webDir = path.resolve(here, '..')
-  const repoRoot = path.resolve(here, '..', '..')
 
   console.log('[e2e] Building frontend...')
   execSync('npm run build', { cwd: webDir, stdio: 'inherit' })
