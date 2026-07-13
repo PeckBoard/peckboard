@@ -205,8 +205,7 @@ impl PluginProviderRuntime {
     /// Remove the turn and report the terminal event it emitted (if any).
     fn end_turn(&self, session_id: &str) -> Option<Terminal> {
         let turn = self.turns.lock().ok()?.remove(session_id)?;
-        let terminal = turn.terminal.lock().ok()?.clone();
-        terminal
+        turn.terminal.lock().ok()?.clone()
     }
 
     pub fn is_active(&self, session_id: &str) -> bool {

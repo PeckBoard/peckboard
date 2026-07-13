@@ -52,6 +52,12 @@ const MAX_CALL_TIMEOUT: Duration = Duration::from_secs(180);
 /// (see [`PluginManager::with_provider_send_timeout`]).
 const DEFAULT_PROVIDER_SEND_TIMEOUT: Duration = Duration::from_secs(300);
 
+/// A provider plugin's registration staging slot: written by its
+/// `peckboard_register_provider` host function, drained by
+/// `sync_plugin_providers` after a `provider.register` dispatch.
+type PendingProviderSlot =
+    Arc<std::sync::RwLock<Option<crate::provider::plugin_provider::ProviderRegistration>>>;
+
 /// The complete set of hook names Peckboard actually dispatches. A
 /// plugin manifest may only register handlers for hooks in this list;
 /// anything else is rejected at load time.
@@ -181,8 +187,7 @@ struct LoadedPlugin {
     /// Staging slot the `peckboard_register_provider` host function writes
     /// into. `sync_plugin_providers` clears it, dispatches the plugin's
     /// `provider.register` hook, then applies whatever the plugin staged.
-    pending_provider:
-        Arc<std::sync::RwLock<Option<crate::provider::plugin_provider::ProviderRegistration>>>,
+    pending_provider: PendingProviderSlot,
 }
 
 impl LoadedPlugin {
@@ -643,9 +648,7 @@ impl PluginManager {
             Arc::new(std::sync::RwLock::new(None));
         // Staging slot `peckboard_register_provider` writes into; applied by
         // `sync_plugin_providers` after a `provider.register` dispatch.
-        let pending_provider: Arc<
-            std::sync::RwLock<Option<crate::provider::plugin_provider::ProviderRegistration>>,
-        > = Arc::new(std::sync::RwLock::new(None));
+        let pending_provider: PendingProviderSlot = Arc::new(std::sync::RwLock::new(None));
 
         // Building the sandboxed instance is repeatable: the manifest export
         // may declare a larger `call_timeout_secs`, and Extism pins the call
@@ -1242,11 +1245,7 @@ impl PluginManager {
         };
 
         // Plugins currently active and declaring the register hook.
-        let mut targets: Vec<(
-            String,
-            Arc<Mutex<Plugin>>,
-            Arc<std::sync::RwLock<Option<crate::provider::plugin_provider::ProviderRegistration>>>,
-        )> = {
+        let mut targets: Vec<(String, Arc<Mutex<Plugin>>, PendingProviderSlot)> = {
             let plugins = self.plugins.lock().await;
             plugins
                 .iter()
