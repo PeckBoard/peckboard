@@ -119,8 +119,13 @@ export default function Dropdown({
     if (left < MENU_MARGIN) left = MENU_MARGIN
     if (top + rect.height > vh - MENU_MARGIN)
       top = Math.max(MENU_MARGIN, vh - rect.height - MENU_MARGIN)
-    if (left !== pos.left || top !== pos.top) setPos({ left, top })
-  }, [anchor.x, anchor.y, align, pos.left, pos.top])
+    // Functional update, and `pos` deliberately NOT in the deps: a fixed
+    // element with no explicit width shrink-to-fits against the viewport
+    // edge, so getBoundingClientRect() can return a (fractionally) different
+    // width after every reposition — feeding `pos` back into the effect then
+    // oscillates forever and trips React's update-depth limit (#185).
+    setPos((p) => (p.left === left && p.top === top ? p : { left, top }))
+  }, [anchor.x, anchor.y, align])
 
   useEffect(() => {
     const onDown = (e: MouseEvent) => {
@@ -179,7 +184,12 @@ export default function Dropdown({
       ref={ref}
       className={`dropdown-menu${searchable ? ' model-picker-popup' : ''}${className ? ` ${className}` : ''}`}
       role="menu"
-      style={{ position: 'fixed', left: pos.left, top: pos.top }}
+      style={{
+        position: 'fixed',
+        left: pos.left,
+        top: pos.top,
+        maxWidth: `calc(100vw - ${MENU_MARGIN * 2}px)`,
+      }}
     >
       {searchable ? (
         <>
