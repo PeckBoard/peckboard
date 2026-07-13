@@ -60,8 +60,8 @@ test('worktree_isolation toggle persists on create and update', async ({ request
   expect(found, 'project not found in list').toBeDefined()
   expect(found!.worktree_isolation).toBe(true)
 
-  // Update to false and verify
-  const updateRes = await request.patch(`/api/projects/${created.id}`, {
+  // Update to false and verify (route is PUT, not PATCH)
+  const updateRes = await request.put(`/api/projects/${created.id}`, {
     headers: auth,
     data: { worktree_isolation: false },
   })
