@@ -101,6 +101,8 @@ async fn experts_plugin_drives_all_three_tools_end_to_end() {
         workflow: "task".into(),
         model: None,
         effort: None,
+        budget_usd_cents: None,
+        budget_period: None,
         parallel_instructions: false,
         auto_notify_changes: false,
         worker_communication: false,

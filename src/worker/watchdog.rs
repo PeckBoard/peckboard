@@ -333,6 +333,8 @@ mod tests {
             worker_communication: false,
             created_at: ts.clone(),
             last_accessed_at: ts.clone(),
+            budget_usd_cents: None,
+            budget_period: None,
         })
         .await
         .unwrap();

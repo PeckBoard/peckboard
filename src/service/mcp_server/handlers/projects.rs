@@ -119,6 +119,8 @@ impl McpToolRegistry {
                 worker_communication: false,
                 created_at: now.clone(),
                 last_accessed_at: now,
+                budget_usd_cents: None,
+                budget_period: None,
             })
             .await?;
 

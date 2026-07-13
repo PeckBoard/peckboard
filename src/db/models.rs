@@ -228,6 +228,8 @@ pub struct Project {
     pub created_at: String,
     pub last_accessed_at: String,
     pub pause_reason: Option<String>,
+    pub budget_usd_cents: Option<i32>,
+    pub budget_period: Option<String>,
 }
 
 #[derive(Insertable, Deserialize, Debug)]
@@ -247,6 +249,8 @@ pub struct NewProject {
     pub worker_communication: bool,
     pub created_at: String,
     pub last_accessed_at: String,
+    pub budget_usd_cents: Option<i32>,
+    pub budget_period: Option<String>,
 }
 
 #[derive(AsChangeset, Deserialize, Debug, Default)]
@@ -264,6 +268,8 @@ pub struct UpdateProject {
     pub worker_communication: Option<bool>,
     pub last_accessed_at: Option<String>,
     pub pause_reason: Option<Option<String>>,
+    pub budget_usd_cents: Option<Option<i32>>,
+    pub budget_period: Option<Option<String>>,
 }
 
 // ── Cards ────────────────────────────────────────────────────────────

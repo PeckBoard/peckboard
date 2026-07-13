@@ -802,6 +802,8 @@ mod tests {
             created_at: "2025-01-01T00:00:00Z".into(),
             last_accessed_at: "2025-01-01T00:00:00Z".into(),
             pause_reason: None,
+            budget_usd_cents: None,
+            budget_period: None,
         }
     }
 

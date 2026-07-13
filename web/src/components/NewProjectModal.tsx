@@ -38,7 +38,8 @@ export default function NewProjectModal({ onClose }: Props) {
   const [parallelInstructions, setParallelInstructions] = useState(false)
   const [autoNotifyChanges, setAutoNotifyChanges] = useState(false)
   const [workerCommunication, setWorkerCommunication] = useState(false)
-  const [showAdvanced, setShowAdvanced] = useState(false)
+  const [budgetDollars, setBudgetDollars] = useState('')
+  const [budgetPeriod, setBudgetPeriod] = useState('')
   const [error, setError] = useState('')
   const [loading, setLoading] = useState(false)
   // Per-workflow staged drafts: { workflowId: { step: text } }. Survives
@@ -81,7 +82,6 @@ export default function NewProjectModal({ onClose }: Props) {
     setError('')
     try {
       const project = await createProject({
-        name: name.trim(),
         folder_id: folderId,
         context: context.trim(),
         worker_count: workerCount,
@@ -91,6 +91,9 @@ export default function NewProjectModal({ onClose }: Props) {
         parallel_instructions: parallelInstructions,
         auto_notify_changes: autoNotifyChanges,
         worker_communication: workerCommunication,
+        budget_usd_cents:
+          budgetDollars && budgetPeriod ? Math.round(parseFloat(budgetDollars) * 100) : undefined,
+        budget_period: budgetPeriod || undefined,
       } as Record<string, unknown>)
       // After the project exists, persist any staged per-step
       // instructions the user added across ANY workflow they touched.
@@ -229,6 +232,35 @@ export default function NewProjectModal({ onClose }: Props) {
                 <p className="form-hint">
                   Number of parallel workers. Keep at 1 unless the repo is set up for parallel work
                   (git worktrees).
+                </p>
+              </div>
+              <div className="form-field">
+                <label className="form-label">Spend budget</label>
+                <div style={{ display: 'flex', gap: '8px', alignItems: 'center' }}>
+                  <input
+                    className="form-input"
+                    type="number"
+                    min={0}
+                    step={0.01}
+                    placeholder="No limit"
+                    value={budgetDollars}
+                    onChange={(e) => setBudgetDollars(e.target.value)}
+                    style={{ width: '120px' }}
+                  />
+                  <select
+                    className="form-input"
+                    value={budgetPeriod}
+                    onChange={(e) => setBudgetPeriod(e.target.value)}
+                    style={{ flex: 1 }}
+                  >
+                    <option value="">No budget</option>
+                    <option value="daily">Daily</option>
+                    <option value="weekly">Weekly</option>
+                    <option value="monthly">Monthly</option>
+                  </select>
+                </div>
+                <p className="form-hint">
+                  Auto-pauses the project when spend in the current window exceeds this amount.
                 </p>
               </div>
               <div className="form-field">

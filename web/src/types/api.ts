@@ -82,6 +82,8 @@ export interface Project {
    *  a card's worker keeps crashing. Null when the project was paused
    *  manually or is active. Cleared on resume. */
   pause_reason: string | null
+  budget_usd_cents: number | null
+  budget_period: 'daily' | 'weekly' | 'monthly' | null
 }
 
 export interface Plan {

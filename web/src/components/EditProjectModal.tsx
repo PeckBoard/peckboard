@@ -28,9 +28,11 @@ export default function EditProjectModal({ project, onClose }: Props) {
   const [model, setModel] = useState(project.model ?? '')
   const [effort, setEffort] = useState(project.effort ?? '')
   const [parallelInstructions, setParallelInstructions] = useState(project.parallel_instructions)
-  const [autoNotifyChanges, setAutoNotifyChanges] = useState(project.auto_notify_changes)
   const [workerCommunication, setWorkerCommunication] = useState(project.worker_communication)
-  const [error, setError] = useState('')
+  const [budgetDollars, setBudgetDollars] = useState(
+    project.budget_usd_cents != null ? String(project.budget_usd_cents / 100) : '',
+  )
+  const [budgetPeriod, setBudgetPeriod] = useState<string>(project.budget_period ?? '')
   const [loading, setLoading] = useState(false)
   const [showInstructions, setShowInstructions] = useState(false)
 
@@ -80,6 +82,9 @@ export default function EditProjectModal({ project, onClose }: Props) {
         parallel_instructions: parallelInstructions,
         auto_notify_changes: autoNotifyChanges,
         worker_communication: workerCommunication,
+        budget_usd_cents:
+          budgetDollars && budgetPeriod ? Math.round(parseFloat(budgetDollars) * 100) : null,
+        budget_period: budgetPeriod || null,
       } as Partial<Project>)
       onClose()
     } catch (err) {
@@ -189,6 +194,35 @@ export default function EditProjectModal({ project, onClose }: Props) {
               />
               <span>Auto-notify file changes</span>
             </label>
+            <div className="form-field">
+              <label className="form-label">Spend budget</label>
+              <div style={{ display: 'flex', gap: '8px', alignItems: 'center' }}>
+                <input
+                  className="form-input"
+                  type="number"
+                  min={0}
+                  step={0.01}
+                  placeholder="No limit"
+                  value={budgetDollars}
+                  onChange={(e) => setBudgetDollars(e.target.value)}
+                  style={{ width: '120px' }}
+                />
+                <select
+                  className="form-input"
+                  value={budgetPeriod}
+                  onChange={(e) => setBudgetPeriod(e.target.value)}
+                  style={{ flex: 1 }}
+                >
+                  <option value="">No budget</option>
+                  <option value="daily">Daily</option>
+                  <option value="weekly">Weekly</option>
+                  <option value="monthly">Monthly</option>
+                </select>
+              </div>
+              <p className="form-hint">
+                Auto-pauses the project when spend in the current window exceeds this amount.
+              </p>
+            </div>
             <p className="form-hint">
               Automatically notify other workers when files are modified. Prevents merge conflicts.
             </p>

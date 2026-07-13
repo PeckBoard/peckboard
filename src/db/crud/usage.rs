@@ -285,4 +285,57 @@ impl Db {
         })
         .await
     }
+
+    /// Total USD cost of all usage for `project_id` with `ts >= start_ts_millis`.
+    /// Groups by model and prices each group separately so mixed-model projects
+    /// are priced correctly. Returns 0.0 when there are no matching events.
+    pub async fn project_cost_in_window(
+        &self,
+        project_id: &str,
+        start_ts_millis: i64,
+    ) -> anyhow::Result<f64> {
+        #[derive(diesel::QueryableByName)]
+        struct WindowRow {
+            #[diesel(sql_type = Nullable<Text>)]
+            model: Option<String>,
+            #[diesel(sql_type = BigInt)]
+            input_tokens: i64,
+            #[diesel(sql_type = BigInt)]
+            output_tokens: i64,
+            #[diesel(sql_type = BigInt)]
+            cache_read_tokens: i64,
+            #[diesel(sql_type = BigInt)]
+            cache_creation_tokens: i64,
+        }
+        let project_id = project_id.to_string();
+        let rows = self
+            .with_conn(move |conn| {
+                diesel::sql_query(
+                    "SELECT u.model AS model, \
+                     COALESCE(SUM(u.input_tokens), 0) AS input_tokens, \
+                     COALESCE(SUM(u.output_tokens), 0) AS output_tokens, \
+                     COALESCE(SUM(u.cache_read_tokens), 0) AS cache_read_tokens, \
+                     COALESCE(SUM(u.cache_creation_tokens), 0) AS cache_creation_tokens \
+                     FROM usage_events u \
+                     JOIN sessions s ON s.id = u.session_id \
+                     WHERE s.project_id = ? AND u.ts >= ? \
+                     GROUP BY u.model",
+                )
+                .bind::<Text, _>(project_id)
+                .bind::<BigInt, _>(start_ts_millis)
+                .load::<WindowRow>(conn)
+                .map_err(anyhow::Error::from)
+            })
+            .await?;
+        let total = rows.iter().fold(0.0_f64, |acc, r| {
+            acc + crate::routes::usage::cost::usage_cost(
+                r.model.as_deref(),
+                r.input_tokens,
+                r.output_tokens,
+                r.cache_read_tokens,
+                r.cache_creation_tokens,
+            )
+        });
+        Ok(total)
+    }
 }

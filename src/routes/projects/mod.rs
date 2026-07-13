@@ -40,8 +40,9 @@ struct CreateProjectRequest {
     auto_notify_changes: bool,
     #[serde(default)]
     worker_communication: bool,
+    budget_usd_cents: Option<i32>,
+    budget_period: Option<String>,
 }
-
 fn default_worker_count() -> i32 {
     1
 }
@@ -63,8 +64,18 @@ struct UpdateProjectRequest {
     parallel_instructions: Option<bool>,
     auto_notify_changes: Option<bool>,
     worker_communication: Option<bool>,
+    budget_usd_cents: Option<Option<i32>>,
+    budget_period: Option<Option<String>>,
 }
 
+fn validate_budget_period(period: &str) -> Result<(), RouteError> {
+    match period {
+        "daily" | "weekly" | "monthly" => Ok(()),
+        _ => Err(bad_request(format!(
+            "invalid budget_period '{period}'; must be daily, weekly, or monthly"
+        ))),
+    }
+}
 // ── Shared error type + helpers ─────────────────────────────────────
 
 pub(super) type RouteError = (StatusCode, Json<serde_json::Value>);
@@ -197,6 +208,7 @@ pub fn router(state: Arc<AppState>) -> Router<Arc<AppState>> {
         )
         .route("/api/projects/{id}/pause", post(pause_project))
         .route("/api/projects/{id}/resume", post(resume_project))
+        .route("/api/projects/{id}/spend", get(get_project_spend))
         .route(
             "/api/projects/{id}/cards",
             post(cards::create_card).get(cards::list_cards),
@@ -251,7 +263,9 @@ async fn create_project(
     if crate::workflow::workflow_by_id(&workflow_id).is_none() {
         return Err(bad_request(format!("unknown workflow id '{workflow_id}'")));
     }
-
+    if let Some(ref p) = body.budget_period {
+        validate_budget_period(p)?;
+    }
     let now = chrono::Utc::now().to_rfc3339();
     let id = uuid::Uuid::new_v4().to_string();
 
@@ -272,6 +286,8 @@ async fn create_project(
             worker_communication: body.worker_communication,
             created_at: now.clone(),
             last_accessed_at: now,
+            budget_usd_cents: body.budget_usd_cents,
+            budget_period: body.budget_period,
         })
         .await
         .map_err(|e| {
@@ -355,7 +371,6 @@ async fn update_project(
 
     // A project's workflow is required (NOT NULL). Omitting the field
     // is fine — other updates can land without touching the workflow.
-    // An explicit empty string or unknown id is rejected.
     let workflow = match body.workflow {
         Some(s) => {
             let trimmed = s.trim();
@@ -369,6 +384,9 @@ async fn update_project(
         }
         None => None,
     };
+    if let Some(Some(p)) = &body.budget_period {
+        validate_budget_period(p)?;
+    }
 
     // Generic PUT is also the path the KanbanBoard's "Resume" menu hits
     // (it sends `{status: "active"}`). Treat any status flip to active as
@@ -389,6 +407,8 @@ async fn update_project(
         worker_communication: body.worker_communication,
         last_accessed_at: Some(chrono::Utc::now().to_rfc3339()),
         pause_reason: if clear_pause_reason { Some(None) } else { None },
+        budget_usd_cents: body.budget_usd_cents,
+        budget_period: body.budget_period,
     };
 
     let project = state.db.update_project(&id, update).await.map_err(|e| {
@@ -440,60 +460,33 @@ async fn delete_project(
     Ok::<_, (StatusCode, Json<serde_json::Value>)>(StatusCode::NO_CONTENT)
 }
 
-/// POST /api/projects/:id/pause
-async fn pause_project(
-    State(state): State<Arc<AppState>>,
-    Path(id): Path<String>,
-) -> impl IntoResponse {
-    tracing::info!(project_id = %id, "Pausing project");
-    // Flip status first so the orchestrator's 5s tick won't immediately
-    // re-spawn workers in the window between cancel and the user
-    // noticing.
+/// Shared pause logic used by both the manual route and the budget evaluator.
+/// Sets status=paused, sets pause_reason, cancels in-flight workers, clears
+/// queued messages, broadcasts a project-update, and fires the project.paused hook.
+/// Returns `Ok(None)` when the project doesn't exist.
+pub(crate) async fn pause_project_inner(
+    state: &Arc<AppState>,
+    id: &str,
+    pause_reason: Option<String>,
+    source: &str,
+) -> anyhow::Result<Option<crate::db::models::Project>> {
     let update = UpdateProject {
         status: Some("paused".to_string()),
         last_accessed_at: Some(chrono::Utc::now().to_rfc3339()),
+        pause_reason: Some(pause_reason),
         ..Default::default()
     };
 
-    let project = state.db.update_project(&id, update).await.map_err(|e| {
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(serde_json::json!({ "error": e.to_string() })),
-        )
-    })?;
-
+    let project = state.db.update_project(id, update).await?;
     let project = match project {
         Some(p) => p,
-        None => {
-            return Err((
-                StatusCode::NOT_FOUND,
-                Json(serde_json::json!({ "error": "project not found" })),
-            ));
-        }
+        None => return Ok(None),
     };
 
-    // Cancel any worker sessions that are currently in flight on this
-    // project. Without this, a worker mid-turn would keep running,
-    // advance its card on completion, and leave the project in an
-    // inconsistent state (paused on the kanban; cards still moving).
-    //
-    // Three things have to happen for pause to mean "stop":
-    //   1. Drop every persisted queued message belonging to a worker on
-    //      this project, so the cancel's completion listener can't drain
-    //      a buffered message into a fresh agent run.
-    //   2. Cancel every running worker. We do NOT block on
-    //      `cancel_and_wait` here because the HTTP response time would
-    //      then be bounded by the slowest CLI's shutdown; the
-    //      `clear_card_worker_if_matches` guard in the completion
-    //      listener makes the unblocked path race-safe.
-    //   3. (Implicit) `check_and_spawn_workers` already filters out
-    //      paused projects, and `drain_queue_for_session` now bails on
-    //      paused projects too, so no listener pass can resurrect a
-    //      worker we just killed.
-    if let Err(e) = state.db.delete_queued_messages_for_project(&id).await {
+    if let Err(e) = state.db.delete_queued_messages_for_project(id).await {
         tracing::warn!(project_id = %id, "Failed to clear queued messages on pause: {e}");
     }
-    if let Ok(workers) = state.db.list_worker_sessions_by_project(&id).await {
+    if let Ok(workers) = state.db.list_worker_sessions_by_project(id).await {
         let mut cancelled = 0u32;
         for ws in &workers {
             if state.session_manager.is_running(&ws.id).await {
@@ -510,26 +503,44 @@ async fn pause_project(
         .broadcaster
         .broadcast(crate::ws::broadcaster::WsEvent {
             event_type: "project-update".into(),
-            session_id: id,
+            session_id: id.to_string(),
             data: serde_json::json!({ "project": &project }),
         });
     let paused_payload = crate::plugin::notify::project_paused_payload(
         &project.id,
         &project.name,
         project.pause_reason.as_deref(),
-        "manual",
+        source,
     );
     crate::plugin::manager::notify(crate::plugin::hooks::PROJECT_PAUSED_HOOK, paused_payload);
-    Ok::<_, (StatusCode, Json<serde_json::Value>)>(Json(serde_json::json!(project)))
+    Ok(Some(project))
 }
 
+/// POST /api/projects/:id/pause
+async fn pause_project(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> impl IntoResponse {
+    tracing::info!(project_id = %id, "Pausing project");
+    match pause_project_inner(&state, &id, None, "manual").await {
+        Ok(Some(project)) => {
+            Ok::<_, (StatusCode, Json<serde_json::Value>)>(Json(serde_json::json!(project)))
+        }
+        Ok(None) => Err((
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({ "error": "project not found" })),
+        )),
+        Err(e) => Err((
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({ "error": e.to_string() })),
+        )),
+    }
+}
 /// POST /api/projects/:id/resume
 async fn resume_project(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
 ) -> impl IntoResponse {
-    tracing::info!(project_id = %id, "Resuming project");
-    // Clearing `pause_reason` on resume is required for the auto-pause
     // path: it only fires when `project.status == "active"`, so a stale
     // reason left behind from an earlier auto-pause would still show in
     // the UI even after the user resumed.
@@ -808,4 +819,47 @@ mod tests {
         let e = edges(&[("a", "z"), ("b", "z")]);
         assert!(!would_create_cycle(&e, "a", &["b".to_string()]));
     }
+}
+
+/// GET /api/projects/:id/spend
+/// Returns current window spend and budget info for a budgeted project.
+async fn get_project_spend(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> impl IntoResponse {
+    let project = state
+        .db
+        .get_project(&id)
+        .await
+        .map_err(internal_error)?
+        .ok_or_else(|| {
+            (
+                StatusCode::NOT_FOUND,
+                Json(serde_json::json!({ "error": "project not found" })),
+            )
+        })?;
+
+    let (spend_usd_cents, window_reset) =
+        if let (Some(cents), Some(period)) = (project.budget_usd_cents, &project.budget_period) {
+            let now = chrono::Utc::now();
+            let start = crate::worker::budget::budget_window_start(now, period);
+            let reset = crate::worker::budget::budget_window_reset(now, period);
+            let spend_usd = state
+                .db
+                .project_cost_in_window(&id, start.timestamp_millis())
+                .await
+                .unwrap_or(0.0);
+            let spend_cents = (spend_usd * 100.0).round() as i64;
+            let _ = cents;
+            (Some(spend_cents), Some(reset.to_rfc3339()))
+        } else {
+            (None, None)
+        };
+
+    Ok::<_, (StatusCode, Json<serde_json::Value>)>(Json(serde_json::json!({
+        "spend_usd_cents": spend_usd_cents,
+        "budget_usd_cents": project.budget_usd_cents,
+        "budget_period": project.budget_period,
+        "window_reset": window_reset,
+    })))
 }

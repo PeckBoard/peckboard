@@ -157,11 +157,63 @@ static SPAWN_GATE: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 pub async fn check_and_spawn_workers(state: &Arc<AppState>) {
     let _gate = SPAWN_GATE.lock().await;
     let projects = state.db.list_projects().await.unwrap_or_default();
+    let now = chrono::Utc::now();
     for project in &projects {
         if project.status != "active" {
             continue;
         }
 
+        // Budget gate: if the project has a spend cap, compute window cost
+        // and auto-pause before spawning any new workers.
+        if let (Some(budget_cents), Some(period)) =
+            (project.budget_usd_cents, &project.budget_period)
+        {
+            let start_millis =
+                crate::worker::budget::budget_window_start(now, period).timestamp_millis();
+            match state
+                .db
+                .project_cost_in_window(&project.id, start_millis)
+                .await
+            {
+                Ok(spend_usd) if spend_usd * 100.0 >= budget_cents as f64 => {
+                    let reset = crate::worker::budget::budget_window_reset(now, period);
+                    let reason = format!(
+                        "budget: ${:.2} of ${:.2} ({} — resets {})",
+                        spend_usd,
+                        budget_cents as f64 / 100.0,
+                        period,
+                        reset.format("%Y-%m-%d UTC"),
+                    );
+                    tracing::info!(
+                        project_id = %project.id,
+                        spend_usd,
+                        budget_usd = budget_cents as f64 / 100.0,
+                        "Budget exceeded — pausing project"
+                    );
+                    if let Err(e) = crate::routes::projects::pause_project_inner(
+                        state,
+                        &project.id,
+                        Some(reason),
+                        "budget",
+                    )
+                    .await
+                    {
+                        tracing::warn!(
+                            project_id = %project.id,
+                            "Failed to auto-pause project on budget: {e}"
+                        );
+                    }
+                    continue;
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        project_id = %project.id,
+                        "Failed to compute project window cost: {e}"
+                    );
+                }
+                _ => {}
+            }
+        }
         let cards = state
             .db
             .list_cards_by_project(&project.id)
@@ -1600,6 +1652,8 @@ mod auto_pause_tests {
             worker_communication: false,
             created_at: ts.clone(),
             last_accessed_at: ts.clone(),
+            budget_usd_cents: None,
+            budget_period: None,
         })
         .await
         .unwrap();

@@ -78,6 +78,8 @@ diesel::table! {
         created_at -> Text,
         last_accessed_at -> Text,
         pause_reason -> Nullable<Text>,
+        budget_usd_cents -> Nullable<Integer>,
+        budget_period -> Nullable<Text>,
     }
 }
 

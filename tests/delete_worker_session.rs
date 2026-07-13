@@ -117,6 +117,8 @@ async fn seed(state: &AppState) {
             workflow: "task".into(),
             model: None,
             effort: None,
+            budget_usd_cents: None,
+            budget_period: None,
             parallel_instructions: false,
             auto_notify_changes: true,
             worker_communication: false,

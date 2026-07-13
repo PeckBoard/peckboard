@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import { useProjectsStore, type PendingQuestion } from '../store/projects'
 import { useResourcesStore } from '../store/resources'
 import { useWsStore } from '../store/ws'
@@ -57,7 +57,24 @@ export default function KanbanBoard({
   const deleteCard = useProjectsStore((s) => s.deleteCard)
 
   const project = projects.find((p) => p.id === projectId)
-  // cardId -> latest todo snapshot for that card's worker session.
+  // Spend chip: fetched once on mount + refreshed on project-update events.
+  const [spendInfo, setSpendInfo] = useState<{
+    spend_usd_cents: number | null
+    budget_usd_cents: number | null
+    budget_period: string | null
+    window_reset: string | null
+  } | null>(null)
+  const fetchSpend = useCallback(() => {
+    authedFetch(`/api/projects/${projectId}/spend`)
+      .then((r) => (r.ok ? r.json() : null))
+      .then((d) => {
+        if (d) setSpendInfo(d)
+      })
+      .catch(() => {})
+  }, [projectId])
+  useEffect(() => {
+    fetchSpend()
+  }, [fetchSpend])
   const todosByCard = useProjectTodos(cards)
   const [selectedCard, setSelectedCard] = useState<Card | null>(null)
   const [showAddForm, setShowAddForm] = useState(false)
@@ -212,10 +229,11 @@ export default function KanbanBoard({
       useProjectsStore.setState((s) => ({
         projects: s.projects.map((p) => (p.id === project.id ? project : p)),
       }))
+      fetchSpend()
     }
     window.addEventListener('peckboard:project-update', handler)
     return () => window.removeEventListener('peckboard:project-update', handler)
-  }, [projectId])
+  }, [projectId, fetchSpend])
 
   // Listen for card-delete WebSocket events
   useEffect(() => {
@@ -651,7 +669,17 @@ export default function KanbanBoard({
         {project && project.status !== 'active' && (
           <span className={`status-badge status-${project.status}`}>{project.status}</span>
         )}
-        <span className="chat-toolbar-spacer" />
+        {project?.budget_usd_cents != null &&
+          spendInfo?.spend_usd_cents != null &&
+          spendInfo.budget_usd_cents != null && (
+            <span
+              className="kanban-budget-chip"
+              title={`Budget resets ${spendInfo.window_reset ?? ''}`}
+            >
+              ${(spendInfo.spend_usd_cents / 100).toFixed(2)} / $
+              {(spendInfo.budget_usd_cents / 100).toFixed(2)} ({spendInfo.budget_period})
+            </span>
+          )}
         <button
           type="button"
           className="kanban-header-icon-btn"

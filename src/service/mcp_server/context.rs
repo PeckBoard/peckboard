@@ -328,6 +328,8 @@ mod tests {
                 auto_notify_changes: true,
                 worker_communication: false,
                 created_at: ts.clone(),
+                budget_usd_cents: None,
+                budget_period: None,
                 last_accessed_at: ts.clone(),
             })
             .await;
@@ -526,6 +528,8 @@ mod tests {
             auto_notify_changes: true,
             worker_communication: false,
             created_at: ts.clone(),
+            budget_usd_cents: None,
+            budget_period: None,
             last_accessed_at: ts.clone(),
         })
         .await

@@ -1,3 +1,4 @@
+pub mod budget;
 pub mod orchestrator;
 pub mod pipeline;
 pub mod scheduler;
