@@ -261,7 +261,6 @@ async fn main() -> anyhow::Result<()> {
     // weekly quotas) for the host login and every stored oauth account, so
     // Settings → Claude Accounts always shows current subscription usage.
     peckboard::provider::claude::plan_usage::spawn(state.clone());
-    peckboard::provider::claude::plan_usage::spawn(state.clone());
 
     // Scheduled backups: write tar.gz snapshots on a configured interval.
     // No-op unless backupIntervalHours + backupDir are set in config.json.

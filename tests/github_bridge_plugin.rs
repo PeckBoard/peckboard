@@ -39,6 +39,8 @@ fn plugin_wasm() -> Option<PathBuf> {
 struct CapturedRequest {
     method: String,
     path: String,
+    // Captured for {:?} diagnostics on assertion failures, not asserted on.
+    #[allow(dead_code)]
     body: String,
 }
 
@@ -156,6 +158,28 @@ fn respond_github(method: &str, path: &str) -> String {
         );
     }
 
+    // Single-issue fetch (gh_sync_card pulls latest title/body/state).
+    if method == "GET"
+        && bare.starts_with(&format!("/repos/{REPO}/issues/"))
+        && !bare.ends_with("/comments")
+    {
+        let number: u64 = bare
+            .rsplit('/')
+            .next()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(1);
+        return json_resp(
+            "200 OK",
+            &json!({
+                "number": number,
+                "title": "Fix the bug",
+                "body": "Something is very wrong.",
+                "state": "open",
+                "html_url": format!("https://github.com/{REPO}/issues/{number}")
+            }),
+        );
+    }
+
     if method == "POST"
         && bare.starts_with(&format!("/repos/{REPO}/issues/"))
         && bare.ends_with("/comments")
@@ -167,7 +191,7 @@ fn respond_github(method: &str, path: &str) -> String {
         return json_resp("200 OK", &json!({ "number": 1, "state": "closed" }));
     }
 
-    format!("HTTP/1.1 404 Not Found\r\ncontent-length: 0\r\nconnection: close\r\n\r\n")
+    "HTTP/1.1 404 Not Found\r\ncontent-length: 0\r\nconnection: close\r\n\r\n".to_string()
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────────

@@ -311,6 +311,16 @@ pub fn restore_from(archive_path: &Path, data_dir: &Path, force: bool) -> anyhow
         {
             bail!("archive contains unsafe path: {}", path.display());
         }
+        // Only regular files and directories. A symlink entry could point
+        // outside the data dir and redirect later entries through it; our
+        // own snapshots never contain one (build_tar_gz follows symlinks).
+        let kind = entry.header().entry_type();
+        if !matches!(kind, tar::EntryType::Regular | tar::EntryType::Directory) {
+            bail!(
+                "archive contains unsupported entry type {kind:?} at {}",
+                path.display()
+            );
+        }
 
         // peckboard-backup.db → peckboard.db
         let dest = if path == Path::new("peckboard-backup.db") {

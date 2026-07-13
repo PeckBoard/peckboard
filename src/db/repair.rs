@@ -52,6 +52,7 @@ pub fn ensure_schema(conn: &mut SqliteConnection) -> anyhow::Result<()> {
     ensure_system_prompts_table(conn)?;
     ensure_plans_tables(conn)?;
     ensure_projects_worktree_isolation_column(conn)?;
+    ensure_projects_budget_columns(conn)?;
     ensure_sessions_pending_plan_review_column(conn)?;
     backfill_session_owners(conn)?;
     Ok(())
@@ -971,6 +972,22 @@ fn ensure_projects_worktree_isolation_column(conn: &mut SqliteConnection) -> any
         tracing::info!("Repairing schema: adding projects.worktree_isolation");
         sql_query("ALTER TABLE projects ADD COLUMN worktree_isolation BOOLEAN NOT NULL DEFAULT 0")
             .execute(conn)?;
+    }
+    Ok(())
+}
+
+/// Heal DBs where `1783950000_project_budgets` was skipped or half-applied
+/// (e.g. a duplicate-version collision): both columns are nullable, so
+/// adding them here is always safe.
+fn ensure_projects_budget_columns(conn: &mut SqliteConnection) -> anyhow::Result<()> {
+    let existing = project_columns(conn)?;
+    if !existing.iter().any(|c| c == "budget_usd_cents") {
+        tracing::info!("Repairing schema: adding projects.budget_usd_cents");
+        sql_query("ALTER TABLE projects ADD COLUMN budget_usd_cents INTEGER").execute(conn)?;
+    }
+    if !existing.iter().any(|c| c == "budget_period") {
+        tracing::info!("Repairing schema: adding projects.budget_period");
+        sql_query("ALTER TABLE projects ADD COLUMN budget_period TEXT").execute(conn)?;
     }
     Ok(())
 }

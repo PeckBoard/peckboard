@@ -357,9 +357,9 @@ pub const SESSION_AGENT_ENDED_HOOK: &str = "session.agent.ended";
 /// Payload: `{ card_id, card_title, project_id, project_name, reason }`.
 pub const WORKER_BLOCKED_HOOK: &str = "worker.blocked";
 
-/// Fired after a project is paused, whether manually (source `"manual"`) or
-/// by the auto-pause crash guard (source `"crash"`). The `source` field is
-/// designed for future extension (e.g. `"budget"`). Payload:
+/// Fired after a project is paused: manually (source `"manual"`), by the
+/// auto-pause crash guard (source `"crash"`), or by the spend-budget gate
+/// (source `"budget"`). Payload:
 /// `{ project_id, project_name, reason, source }`.
 pub const PROJECT_PAUSED_HOOK: &str = "project.paused";
 
