@@ -38,6 +38,18 @@ async fn main() -> anyhow::Result<()> {
     let args = CliArgs::parse();
 
     // Short-circuit CLI maintenance flows before any server startup.
+    if let Some(archive_path) = args.restore_from.clone() {
+        let force = args.force;
+        let config = Config::from_args(args);
+        peckboard::service::backup::restore_from(&archive_path, &config.data_dir, force)?;
+        eprintln!(
+            "Restored backup from {} into {}",
+            archive_path.display(),
+            config.data_dir.display()
+        );
+        return Ok(());
+    }
+
     if args.reset_password {
         let username = args.user.clone();
         let config = Config::from_args(args);
@@ -236,7 +248,11 @@ async fn main() -> anyhow::Result<()> {
     // weekly quotas) for the host login and every stored oauth account, so
     // Settings → Claude Accounts always shows current subscription usage.
     peckboard::provider::claude::plan_usage::spawn(state.clone());
+    peckboard::provider::claude::plan_usage::spawn(state.clone());
 
+    // Scheduled backups: write tar.gz snapshots on a configured interval.
+    // No-op unless backupIntervalHours + backupDir are set in config.json.
+    peckboard::service::backup::spawn_scheduler(state.db.clone(), state.config.data_dir.clone());
     let app = api_router(state.clone())
         .layer(axum::extract::DefaultBodyLimit::max(20 * 1024 * 1024))
         .layer(middleware::from_fn(security_headers))

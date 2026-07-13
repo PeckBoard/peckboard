@@ -804,6 +804,7 @@ mod tests {
             pause_reason: None,
             budget_usd_cents: None,
             budget_period: None,
+            worktree_isolation: false,
         }
     }
 

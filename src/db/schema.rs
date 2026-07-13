@@ -75,6 +75,7 @@ diesel::table! {
         parallel_instructions -> Bool,
         auto_notify_changes -> Bool,
         worker_communication -> Bool,
+        worktree_isolation -> Bool,
         created_at -> Text,
         last_accessed_at -> Text,
         pause_reason -> Nullable<Text>,

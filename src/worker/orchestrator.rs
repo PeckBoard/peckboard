@@ -348,7 +348,7 @@ pub async fn check_and_spawn_workers(state: &Arc<AppState>) {
                     .mcp_tokens
                     .issue_token(ws.id.clone(), session_project_id)
                     .await;
-                let working_dir = state
+                let folder_path = state
                     .db
                     .get_folder(&ws.folder_id)
                     .await
@@ -356,6 +356,28 @@ pub async fn check_and_spawn_workers(state: &Arc<AppState>) {
                     .flatten()
                     .map(|f| f.path)
                     .unwrap_or_default();
+                // Reuse the card's existing worktree if isolation is on.
+                let working_dir =
+                    if let (Some(proj_id), Some(card_id)) = (&ws.project_id, &ws.card_id) {
+                        let isolation = state
+                            .db
+                            .get_project(proj_id)
+                            .await
+                            .ok()
+                            .flatten()
+                            .map(|p| p.worktree_isolation)
+                            .unwrap_or(false);
+                        crate::worker::worktree::ensure_worktree(
+                            &folder_path,
+                            card_id,
+                            isolation,
+                            &ws.id,
+                            &state.db,
+                        )
+                        .await
+                    } else {
+                        folder_path
+                    };
                 let mcp_config_path = mcp_server::write_mcp_config(
                     &state.config.data_dir,
                     &ws.id,
@@ -722,7 +744,14 @@ async fn spawn_worker_for_card(
     let config = SpawnConfig {
         model: session.model.clone().unwrap_or_else(|| "default".into()),
         effort: session.effort.clone(),
-        working_dir: folder.path.clone(),
+        working_dir: crate::worker::worktree::ensure_worktree(
+            &folder.path,
+            &card.id,
+            project.worktree_isolation,
+            &session_id,
+            &state.db,
+        )
+        .await,
         mcp_config_path: Some(mcp_config_path.to_string_lossy().to_string()),
         env: Default::default(),
         permission_mode: Some("bypass".into()),
@@ -1654,6 +1683,7 @@ mod auto_pause_tests {
             last_accessed_at: ts.clone(),
             budget_usd_cents: None,
             budget_period: None,
+            worktree_isolation: false,
         })
         .await
         .unwrap();

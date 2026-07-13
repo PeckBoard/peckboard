@@ -29,11 +29,14 @@ export default function EditProjectModal({ project, onClose }: Props) {
   const [effort, setEffort] = useState(project.effort ?? '')
   const [parallelInstructions, setParallelInstructions] = useState(project.parallel_instructions)
   const [workerCommunication, setWorkerCommunication] = useState(project.worker_communication)
+  const [autoNotifyChanges, setAutoNotifyChanges] = useState(project.auto_notify_changes)
+  const [worktreeIsolation, setWorktreeIsolation] = useState(project.worktree_isolation)
   const [budgetDollars, setBudgetDollars] = useState(
     project.budget_usd_cents != null ? String(project.budget_usd_cents / 100) : '',
   )
   const [budgetPeriod, setBudgetPeriod] = useState<string>(project.budget_period ?? '')
   const [loading, setLoading] = useState(false)
+  const [error, setError] = useState('')
   const [showInstructions, setShowInstructions] = useState(false)
 
   const [models, setModels] = useState<ModelInfo[]>([])
@@ -85,6 +88,7 @@ export default function EditProjectModal({ project, onClose }: Props) {
         budget_usd_cents:
           budgetDollars && budgetPeriod ? Math.round(parseFloat(budgetDollars) * 100) : null,
         budget_period: budgetPeriod || null,
+        worktree_isolation: worktreeIsolation,
       } as Partial<Project>)
       onClose()
     } catch (err) {
@@ -241,6 +245,20 @@ export default function EditProjectModal({ project, onClose }: Props) {
             </p>
           </div>
           {error && <p className="form-error">{error}</p>}
+          <div className="form-field">
+            <label className="form-checkbox-label">
+              <input
+                type="checkbox"
+                checked={worktreeIsolation}
+                onChange={(e) => setWorktreeIsolation(e.target.checked)}
+              />
+              <span>Worktree isolation</span>
+            </label>
+            <p className="form-hint">
+              Give each card its own git worktree so parallel workers cannot race each other&apos;s
+              uncommitted state. Requires a git repository.
+            </p>
+          </div>
           <div className="form-actions">
             <button type="button" className="btn-secondary" onClick={onClose}>
               Cancel

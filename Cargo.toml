@@ -72,6 +72,8 @@ async-trait = "0.1"
 regex = "1.12.3"
 reqwest = { version = "0.13.4", features = ["json", "stream"] }
 urlencoding = "2"
+tar = "0.4"
+flate2 = "1"
 
 [dev-dependencies]
 rustls = "0.23.40"

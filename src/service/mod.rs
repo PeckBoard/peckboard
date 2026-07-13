@@ -1,3 +1,4 @@
+pub mod backup;
 pub mod browser;
 pub mod browser_runs;
 pub mod mcp_server;

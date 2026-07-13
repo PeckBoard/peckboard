@@ -44,6 +44,16 @@ pub struct CliArgs {
     /// throwaway "hi" so tokens don't go stale. `0` disables it.
     #[arg(long, env = "PECKBOARD_KEEPALIVE_HOURS", default_value = "1")]
     pub keep_alive_hours: u64,
+
+    /// Restore a backup archive into the data directory and exit.
+    /// Validate gzip magic + manifest.json, then unpack. Refuses if
+    /// peckboard.db already exists unless --force is also given.
+    #[arg(long, value_name = "FILE")]
+    pub restore_from: Option<PathBuf>,
+
+    /// Allow --restore-from to overwrite an existing peckboard.db.
+    #[arg(long, requires = "restore_from")]
+    pub force: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -96,6 +106,8 @@ mod tests {
             user: None,
             mdns: false,
             keep_alive_hours: 1,
+            restore_from: None,
+            force: false,
         }
     }
 

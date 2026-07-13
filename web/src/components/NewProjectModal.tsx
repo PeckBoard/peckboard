@@ -38,6 +38,7 @@ export default function NewProjectModal({ onClose }: Props) {
   const [parallelInstructions, setParallelInstructions] = useState(false)
   const [autoNotifyChanges, setAutoNotifyChanges] = useState(false)
   const [workerCommunication, setWorkerCommunication] = useState(false)
+  const [worktreeIsolation, setWorktreeIsolation] = useState(false)
   const [budgetDollars, setBudgetDollars] = useState('')
   const [budgetPeriod, setBudgetPeriod] = useState('')
   const [error, setError] = useState('')
@@ -47,6 +48,7 @@ export default function NewProjectModal({ onClose }: Props) {
   // between workflows inside the instructions modal.
   const [instructionDrafts, setInstructionDrafts] = useState<WorkflowInstructionsDraft>({})
   const [showInstructions, setShowInstructions] = useState(false)
+  const [showAdvanced, setShowAdvanced] = useState(false)
 
   useEffect(() => {
     fetchFolders()
@@ -91,6 +93,7 @@ export default function NewProjectModal({ onClose }: Props) {
         parallel_instructions: parallelInstructions,
         auto_notify_changes: autoNotifyChanges,
         worker_communication: workerCommunication,
+        worktree_isolation: worktreeIsolation,
         budget_usd_cents:
           budgetDollars && budgetPeriod ? Math.round(parseFloat(budgetDollars) * 100) : undefined,
         budget_period: budgetPeriod || undefined,
@@ -331,6 +334,20 @@ export default function NewProjectModal({ onClose }: Props) {
                 </label>
                 <p className="form-hint">
                   Allow workers to share findings and send messages to each other.
+                </p>
+              </div>
+              <div className="form-field">
+                <label className="form-checkbox-label">
+                  <input
+                    type="checkbox"
+                    checked={worktreeIsolation}
+                    onChange={(e) => setWorktreeIsolation(e.target.checked)}
+                  />
+                  <span>Worktree isolation</span>
+                </label>
+                <p className="form-hint">
+                  Give each card its own git worktree so parallel workers cannot race each
+                  other&apos;s uncommitted state. Requires a git repository.
                 </p>
               </div>
             </div>

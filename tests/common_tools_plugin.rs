@@ -108,6 +108,7 @@ async fn common_tools_plugin_drives_tools_end_to_end() {
         effort: None,
         budget_usd_cents: None,
         budget_period: None,
+        worktree_isolation: false,
         parallel_instructions: false,
         auto_notify_changes: false,
         worker_communication: false,

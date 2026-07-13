@@ -131,6 +131,7 @@ async fn seed(state: &AppState) {
             effort: None,
             budget_usd_cents: None,
             budget_period: None,
+            worktree_isolation: false,
             parallel_instructions: false,
             auto_notify_changes: true,
             worker_communication: false,

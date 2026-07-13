@@ -3337,6 +3337,7 @@ mod tests {
             last_accessed_at: ts,
             budget_usd_cents: None,
             budget_period: None,
+            worktree_isolation: false,
         })
         .await
         .unwrap();
@@ -3436,6 +3437,7 @@ mod tests {
             last_accessed_at: ts,
             budget_usd_cents: None,
             budget_period: None,
+            worktree_isolation: false,
         })
         .await
         .unwrap();
@@ -4211,6 +4213,7 @@ mod tests {
             last_accessed_at: ts,
             budget_usd_cents: None,
             budget_period: None,
+            worktree_isolation: false,
         })
         .await
         .unwrap();
@@ -4277,6 +4280,7 @@ mod tests {
             last_accessed_at: ts,
             budget_usd_cents: None,
             budget_period: None,
+            worktree_isolation: false,
         })
         .await
         .unwrap();

@@ -155,6 +155,7 @@ async fn diff_viewer_plugin_multi_repo_end_to_end() {
         effort: None,
         budget_usd_cents: None,
         budget_period: None,
+        worktree_isolation: false,
         parallel_instructions: false,
         auto_notify_changes: false,
         worker_communication: false,

@@ -76,6 +76,7 @@ export interface Project {
   parallel_instructions: boolean
   auto_notify_changes: boolean
   worker_communication: boolean
+  worktree_isolation: boolean
   created_at: string
   last_accessed_at: string
   /** Human-readable reason the project is paused, set automatically when

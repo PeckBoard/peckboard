@@ -1,5 +1,6 @@
 pub mod attachments;
 pub mod auth;
+pub mod backup;
 pub mod claude_accounts;
 pub mod folders;
 pub mod grok_accounts;
@@ -49,6 +50,7 @@ pub fn api_router(state: Arc<AppState>) -> Router<Arc<AppState>> {
         .merge(system_prompts::router(state.clone()))
         .merge(ollama::router(state.clone()))
         .merge(plugins::router(state.clone()))
+        .merge(backup::router(state.clone()))
         // Public, plugin-owned HTTP surface. Intentionally NOT behind the
         // `/api/*` auth middleware — the serving plugin owns its own auth.
         .merge(plugin_api::router(state.clone()))

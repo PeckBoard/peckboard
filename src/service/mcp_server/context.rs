@@ -331,6 +331,7 @@ mod tests {
                 budget_usd_cents: None,
                 budget_period: None,
                 last_accessed_at: ts.clone(),
+                worktree_isolation: false,
             })
             .await;
     }
@@ -531,6 +532,7 @@ mod tests {
             budget_usd_cents: None,
             budget_period: None,
             last_accessed_at: ts.clone(),
+            worktree_isolation: false,
         })
         .await
         .unwrap();

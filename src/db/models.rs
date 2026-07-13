@@ -225,6 +225,7 @@ pub struct Project {
     pub parallel_instructions: bool,
     pub auto_notify_changes: bool,
     pub worker_communication: bool,
+    pub worktree_isolation: bool,
     pub created_at: String,
     pub last_accessed_at: String,
     pub pause_reason: Option<String>,
@@ -248,6 +249,7 @@ pub struct NewProject {
     pub auto_notify_changes: bool,
     pub worker_communication: bool,
     pub created_at: String,
+    pub worktree_isolation: bool,
     pub last_accessed_at: String,
     pub budget_usd_cents: Option<i32>,
     pub budget_period: Option<String>,
@@ -269,6 +271,7 @@ pub struct UpdateProject {
     pub last_accessed_at: Option<String>,
     pub pause_reason: Option<Option<String>>,
     pub budget_usd_cents: Option<Option<i32>>,
+    pub worktree_isolation: Option<bool>,
     pub budget_period: Option<Option<String>>,
 }
 

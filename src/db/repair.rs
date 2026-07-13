@@ -51,6 +51,7 @@ pub fn ensure_schema(conn: &mut SqliteConnection) -> anyhow::Result<()> {
     ensure_system_prompt_name_columns(conn)?;
     ensure_system_prompts_table(conn)?;
     ensure_plans_tables(conn)?;
+    ensure_projects_worktree_isolation_column(conn)?;
     ensure_sessions_pending_plan_review_column(conn)?;
     backfill_session_owners(conn)?;
     Ok(())
@@ -961,6 +962,15 @@ fn ensure_projects_worker_communication_columns(conn: &mut SqliteConnection) -> 
             "ALTER TABLE projects ADD COLUMN worker_communication BOOLEAN NOT NULL DEFAULT 1",
         )
         .execute(conn)?;
+    }
+    Ok(())
+}
+fn ensure_projects_worktree_isolation_column(conn: &mut SqliteConnection) -> anyhow::Result<()> {
+    let existing = project_columns(conn)?;
+    if !existing.iter().any(|c| c == "worktree_isolation") {
+        tracing::info!("Repairing schema: adding projects.worktree_isolation");
+        sql_query("ALTER TABLE projects ADD COLUMN worktree_isolation BOOLEAN NOT NULL DEFAULT 0")
+            .execute(conn)?;
     }
     Ok(())
 }

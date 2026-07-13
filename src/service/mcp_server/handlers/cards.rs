@@ -277,6 +277,17 @@ impl McpToolRegistry {
                 &ctx.session_id,
             )
             .await;
+            if let Some(ref cid) = ctx.card_id {
+                if let Ok(Some(folder)) = ctx.db.get_folder(&ctx.folder_id).await {
+                    crate::worker::worktree::finalize_worktree(
+                        &folder.path,
+                        cid,
+                        &ctx.session_id,
+                        &ctx.db,
+                    )
+                    .await;
+                }
+            }
         }
         shutdown_worker_after_turn(ctx).await;
 
@@ -367,6 +378,17 @@ impl McpToolRegistry {
             &ctx.session_id,
         )
         .await;
+        if let Some(ref cid) = ctx.card_id {
+            if let Ok(Some(folder)) = ctx.db.get_folder(&ctx.folder_id).await {
+                crate::worker::worktree::finalize_worktree(
+                    &folder.path,
+                    cid,
+                    &ctx.session_id,
+                    &ctx.db,
+                )
+                .await;
+            }
+        }
         shutdown_worker_after_turn(ctx).await;
 
         Ok(serde_json::json!({
@@ -448,16 +470,26 @@ impl McpToolRegistry {
             &ctx.session_id,
         )
         .await;
+        if let Some(ref cid) = ctx.card_id {
+            if let Ok(Some(folder)) = ctx.db.get_folder(&ctx.folder_id).await {
+                crate::worker::worktree::finalize_worktree(
+                    &folder.path,
+                    cid,
+                    &ctx.session_id,
+                    &ctx.db,
+                )
+                .await;
+            }
+        }
         shutdown_worker_after_turn(ctx).await;
 
         Ok(serde_json::json!({
             "status": "ok",
-            "message": "Card marked won't-do",
+            "message": "Card marked wont_do",
             "from": prev_step,
             "to": "wont_do",
         }))
     }
-
     pub(crate) async fn handle_create_card(
         &self,
         args: Value,
@@ -1142,8 +1174,11 @@ async fn move_card_to_terminal_step(
     let cleanup_sid = stale_sid
         .clone()
         .or_else(|| card.last_worker_session_id.clone());
-    if let Some(sid) = cleanup_sid {
-        crate::worker::orchestrator::clear_session_todos(&ctx.db, &ctx.broadcaster, &sid).await;
+    if let Some(ref sid) = cleanup_sid {
+        crate::worker::orchestrator::clear_session_todos(&ctx.db, &ctx.broadcaster, sid).await;
+        if let Ok(Some(folder)) = ctx.db.get_folder(&ctx.folder_id).await {
+            crate::worker::worktree::finalize_worktree(&folder.path, card_id, sid, &ctx.db).await;
+        }
     }
     if let Some(sid) = stale_sid {
         cancel_stale_worker(ctx, &sid);

@@ -36,6 +36,13 @@ interface ServerConfig {
   keepalive_last_runs: KeepAliveRun[]
 }
 
+interface BackupStatus {
+  scheduled: boolean
+  intervalHours: number | null
+  dir: string | null
+  retention: number | null
+}
+
 interface ProviderInfo {
   id: string
   display_name: string
@@ -108,6 +115,7 @@ export default function SettingsPage({ onBack, initialSubPage = null }: Props) {
   const providers = useResourcesStore((s) => s.providers)
   const fetchModels = useResourcesStore((s) => s.fetchModels)
   const [providerVisibility, setProviderVisibility] = useState<ProviderInfo[]>([])
+  const [backupStatus, setBackupStatus] = useState<BackupStatus | null>(null)
 
   useEffect(() => {
     authedFetch('/api/config')
@@ -148,6 +156,16 @@ export default function SettingsPage({ onBack, initialSubPage = null }: Props) {
       })
       .catch(() => {})
   }, [])
+
+  useEffect(() => {
+    if (user?.role !== 'admin') return
+    authedFetch('/api/admin/backup/status')
+      .then((res) => (res.ok ? res.json() : null))
+      .then((data: BackupStatus | null) => {
+        if (data) setBackupStatus(data)
+      })
+      .catch(() => {})
+  }, [user])
   const changeCaveman = (level: string) => {
     setCaveman(level)
     authedFetch('/api/settings/caveman', {
@@ -194,6 +212,24 @@ export default function SettingsPage({ onBack, initialSubPage = null }: Props) {
         fetchModels()
       })
       .catch(() => {})
+  }
+
+  const downloadBackup = async () => {
+    try {
+      const res = await authedFetch('/api/admin/backup')
+      if (!res.ok) return
+      const blob = await res.blob()
+      const url = URL.createObjectURL(blob)
+      const a = document.createElement('a')
+      a.href = url
+      a.download = `peckboard-backup-${Date.now()}.tar.gz`
+      document.body.appendChild(a)
+      a.click()
+      document.body.removeChild(a)
+      URL.revokeObjectURL(url)
+    } catch {
+      // silently ignore
+    }
   }
 
   const current = SUB_PAGES.find((p) => p.id === subPage)
@@ -460,6 +496,32 @@ export default function SettingsPage({ onBack, initialSubPage = null }: Props) {
           <ApprovedCommandsSection />
 
           <SoftwareUpdate />
+
+          {user?.role === 'admin' && (
+            <section className="settings-section" data-testid="backup-section">
+              <h3>Backup</h3>
+              <p className="form-hint">
+                Download a consistent snapshot of your database, config, reports, attachments, and
+                plugins.
+              </p>
+              <div className="settings-row">
+                <button
+                  type="button"
+                  className="btn-secondary"
+                  data-testid="backup-download-btn"
+                  onClick={downloadBackup}
+                >
+                  Download backup
+                </button>
+              </div>
+              {backupStatus?.scheduled && (
+                <p className="form-hint">
+                  Scheduled: every {backupStatus.intervalHours}h → {backupStatus.dir} (keep{' '}
+                  {backupStatus.retention})
+                </p>
+              )}
+            </section>
+          )}
         </>
       )}
 

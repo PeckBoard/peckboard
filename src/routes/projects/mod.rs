@@ -40,6 +40,8 @@ struct CreateProjectRequest {
     auto_notify_changes: bool,
     #[serde(default)]
     worker_communication: bool,
+    #[serde(default)]
+    worktree_isolation: bool,
     budget_usd_cents: Option<i32>,
     budget_period: Option<String>,
 }
@@ -65,6 +67,7 @@ struct UpdateProjectRequest {
     auto_notify_changes: Option<bool>,
     worker_communication: Option<bool>,
     budget_usd_cents: Option<Option<i32>>,
+    worktree_isolation: Option<bool>,
     budget_period: Option<Option<String>>,
 }
 
@@ -284,6 +287,7 @@ async fn create_project(
             parallel_instructions: body.parallel_instructions,
             auto_notify_changes: body.auto_notify_changes,
             worker_communication: body.worker_communication,
+            worktree_isolation: body.worktree_isolation,
             created_at: now.clone(),
             last_accessed_at: now,
             budget_usd_cents: body.budget_usd_cents,
@@ -405,6 +409,7 @@ async fn update_project(
         parallel_instructions: body.parallel_instructions,
         auto_notify_changes: body.auto_notify_changes,
         worker_communication: body.worker_communication,
+        worktree_isolation: body.worktree_isolation,
         last_accessed_at: Some(chrono::Utc::now().to_rfc3339()),
         pause_reason: if clear_pause_reason { Some(None) } else { None },
         budget_usd_cents: body.budget_usd_cents,

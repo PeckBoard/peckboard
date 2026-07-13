@@ -121,6 +121,7 @@ impl McpToolRegistry {
                 last_accessed_at: now,
                 budget_usd_cents: None,
                 budget_period: None,
+                worktree_isolation: false,
             })
             .await?;
 

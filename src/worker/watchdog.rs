@@ -32,6 +32,7 @@ pub async fn start_watchdog(
         interval.tick().await;
         sweep_orphans(&db, &session_manager).await;
         sweep_stale_card_refs(&db, &session_manager).await;
+        sweep_worktrees(&db).await;
     }
 }
 
@@ -300,6 +301,42 @@ fn seconds_since(rfc3339: &str) -> Option<i64> {
     )
 }
 
+/// Prune stale git worktrees for all projects that have worktree isolation
+/// enabled. Runs `git worktree prune` on each git-repo folder, then removes
+/// clean worktrees whose card is terminal or deleted.
+async fn sweep_worktrees(db: &Db) {
+    let projects = match db.list_projects().await {
+        Ok(p) => p,
+        Err(e) => {
+            tracing::warn!("Watchdog: sweep_worktrees: list_projects failed: {e}");
+            return;
+        }
+    };
+
+    for project in &projects {
+        if !project.worktree_isolation {
+            continue;
+        }
+        let folder = match db.get_folder(&project.folder_id).await {
+            Ok(Some(f)) => f,
+            _ => continue,
+        };
+        if !std::path::Path::new(&folder.path).join(".git").exists() {
+            continue;
+        }
+        let cards = match db.list_cards_by_project(&project.id).await {
+            Ok(c) => c,
+            Err(_) => continue,
+        };
+        let terminal_id8s: Vec<String> = cards
+            .iter()
+            .filter(|c| c.step == "done" || c.step == "wont_do")
+            .map(|c| crate::worker::worktree::card_id8(&c.id))
+            .collect();
+        crate::worker::worktree::prune_worktrees(&folder.path, &terminal_id8s).await;
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -335,6 +372,7 @@ mod tests {
             last_accessed_at: ts.clone(),
             budget_usd_cents: None,
             budget_period: None,
+            worktree_isolation: false,
         })
         .await
         .unwrap();

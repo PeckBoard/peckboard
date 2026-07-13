@@ -98,6 +98,16 @@ Pure function over the session's event log tail (bounded, default 64 events):
 - Spawn-phase timeout also blocks immediately
 - Strictly safer than loop-forever
 
+## Worker Watchdog (sweepOrphanWorkers)
+
+Runs every 60 seconds. Handles four cases:
+
+1. **Orphan sessions** — worker session no card claims → tear down
+2. **Stale refs** — card claims deleted session → clear ref
+3. **Dead-but-claimed** — card claims session but process is dead and silent for 2x timeout → tear down and re-fill
+4. **Unclaimed pipeline cards** — active project with spare capacity and unassigned cards → kick spawn
+5. **Stale worktrees** — prune git worktrees for terminal/deleted cards (`git worktree prune` + remove clean branches)
+
 ### Wake Grace Window
 
 - 30-second window after detected sleep/wake
@@ -157,4 +167,29 @@ Runs every 60 seconds. Handles four cases:
 3. Handoff context
 4. Shorter than initial (no need to re-explain splitting/bailing)
 
+## Git Worktree Isolation
+
+Opt-in per project (`worktree_isolation` toggle in the project modal). When on and the project folder is a git repository root (`.git` exists):
+
+- Each card worker runs in a linked worktree at `<folder>/.peckboard/worktrees/<id8>` on branch `card/<id8>`, where `id8` = first 8 hex chars of the card UUID.
+- `.peckboard/` is appended to `.git/info/exclude` (repo-local, never touches the user's `.gitignore`).
+- On any git failure, the worker falls back to the shared folder silently (a `worktree-downgrade` session event is appended).
+- Non-git folders or folders that are not a repo root always run in shared mode.
+
+### Terminal Merge Policy (auto-merge-when-clean)
+
+When a card reaches a terminal step (`done` or `wont_do`), after clearing session todos:
+
+| Worktree state                                 | Outcome                                                                                                        |
+| ---------------------------------------------- | -------------------------------------------------------------------------------------------------------------- |
+| No worktree                                    | no-op                                                                                                          |
+| Dirty (uncommitted changes)                    | leave worktree + branch; `worktree-done {merged:false, reason:"dirty"}` event                                  |
+| Clean, no conflict                             | fast-forward merge into main folder HEAD; remove worktree + delete branch; `worktree-done {merged:true}` event |
+| Clean but main folder dirty, or merge conflict | `git merge --abort`; leave worktree + branch; `worktree-done {merged:false, reason:"conflict"}` event          |
+
+Force-push and remote operations are never performed.
+
+### Janitor
+
+The 60-second watchdog tick also runs `git worktree prune` on every isolation-enabled project folder and removes clean worktrees whose card is terminal or deleted.
 The worker does NOT know about pipelines, workflows, or step names. From its perspective: here's a project, here's a card, here's what to do.
