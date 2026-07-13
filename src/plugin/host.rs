@@ -93,6 +93,18 @@ struct HostState {
     /// (gated by the `user_authority` permission). `None` outside an
     /// authenticated request.
     user: Arc<std::sync::RwLock<Option<UserContext>>>,
+    /// Host-side state of in-flight plugin-provider turns (stop flags,
+    /// event guard, trusted session snapshots). Shared with every
+    /// [`crate::provider::plugin_provider::PluginProviderAdapter`] the
+    /// manager registers; the `peckboard_emit_provider_event` /
+    /// `_provider_should_stop` / `_provider_get_*` host functions act on it.
+    provider_runtime: Arc<crate::provider::plugin_provider::PluginProviderRuntime>,
+    /// Staging slot for `peckboard_register_provider`: the host function
+    /// shape-validates and parks the registration here; the manager applies
+    /// it to the `ProviderRegistry` right after dispatching the plugin's
+    /// `provider.register` hook (see `PluginManager::sync_plugin_providers`).
+    pending_provider:
+        Arc<std::sync::RwLock<Option<crate::provider::plugin_provider::ProviderRegistration>>>,
 }
 
 /// Live-application capabilities a plugin host function may invoke that need
@@ -2787,6 +2799,93 @@ host_fn!(peckboard_get_answer(user_data: HostState; input: String) -> String {
     Ok(get_answer_impl(&db, &inv, &input))
 });
 
+// ── Plugin-provider host functions (gated by `register_provider`) ─────
+
+/// Shared accessor for the plugin-provider host functions: permission check
+/// plus the provider runtime and this plugin's registration staging slot.
+#[allow(clippy::type_complexity)]
+fn state_permission_and_provider(
+    user_data: &UserData<HostState>,
+    permission: &str,
+) -> Result<
+    (
+        String,
+        bool,
+        Arc<crate::provider::plugin_provider::PluginProviderRuntime>,
+        Arc<std::sync::RwLock<Option<crate::provider::plugin_provider::ProviderRegistration>>>,
+    ),
+    Error,
+> {
+    let state = user_data.get()?;
+    let state = state
+        .lock()
+        .map_err(|_| anyhow::anyhow!("plugin host state mutex poisoned"))?;
+    let ok = state
+        .permissions
+        .read()
+        .map(|p| p.contains(permission))
+        .unwrap_or(false);
+    Ok((
+        state.plugin_id.clone(),
+        ok,
+        state.provider_runtime.clone(),
+        state.pending_provider.clone(),
+    ))
+}
+
+/// Backend for `peckboard_register_provider`: shape-validate and stage the
+/// registration for the manager to apply after the `provider.register`
+/// dispatch returns. Collision checks against the live registry happen at
+/// apply time (`PluginManager::sync_plugin_providers`).
+pub(crate) fn register_provider_impl(
+    pending: &std::sync::RwLock<Option<crate::provider::plugin_provider::ProviderRegistration>>,
+    input: &str,
+) -> String {
+    let reg: crate::provider::plugin_provider::ProviderRegistration =
+        match serde_json::from_str(input) {
+            Ok(r) => r,
+            Err(e) => return error_json(format!("invalid provider registration: {e}")),
+        };
+    if let Err(e) = crate::provider::plugin_provider::validate_registration(&reg) {
+        return error_json(e);
+    }
+    let Ok(mut slot) = pending.write() else {
+        return error_json("provider registration slot poisoned");
+    };
+    *slot = Some(reg);
+    serde_json::json!({ "ok": true }).to_string()
+}
+
+host_fn!(peckboard_register_provider(user_data: HostState; input: String) -> String {
+    let (_plugin_id, ok, _runtime, pending) = state_permission_and_provider(&user_data, "register_provider")?;
+    if !ok { return Ok(error_json("plugin lacks the 'register_provider' permission")); }
+    Ok(register_provider_impl(&pending, &input))
+});
+
+host_fn!(peckboard_emit_provider_event(user_data: HostState; input: String) -> String {
+    let (plugin_id, ok, runtime, _pending) = state_permission_and_provider(&user_data, "register_provider")?;
+    if !ok { return Ok(error_json("plugin lacks the 'register_provider' permission")); }
+    Ok(runtime.emit_from_plugin(&plugin_id, &input))
+});
+
+host_fn!(peckboard_provider_should_stop(user_data: HostState; input: String) -> String {
+    let (plugin_id, ok, runtime, _pending) = state_permission_and_provider(&user_data, "register_provider")?;
+    if !ok { return Ok(error_json("plugin lacks the 'register_provider' permission")); }
+    Ok(runtime.should_stop_json(&plugin_id, &input))
+});
+
+host_fn!(peckboard_provider_get_session(user_data: HostState; input: String) -> String {
+    let (plugin_id, ok, runtime, _pending) = state_permission_and_provider(&user_data, "register_provider")?;
+    if !ok { return Ok(error_json("plugin lacks the 'register_provider' permission")); }
+    Ok(runtime.get_session_json(&plugin_id, &input))
+});
+
+host_fn!(peckboard_provider_get_mcp_config(user_data: HostState; input: String) -> String {
+    let (plugin_id, ok, runtime, _pending) = state_permission_and_provider(&user_data, "register_provider")?;
+    if !ok { return Ok(error_json("plugin lacks the 'register_provider' permission")); }
+    Ok(runtime.get_mcp_config_json(&plugin_id, &input))
+});
+
 /// Shared accessor for the browser-run host functions: permission check +
 /// the app data dir where `service::browser_runs` records runs.
 fn state_permission_and_data_dir(
@@ -2857,6 +2956,10 @@ pub(crate) fn host_functions(
     live: Arc<std::sync::RwLock<Option<Arc<dyn LiveHost>>>>,
     user: Arc<std::sync::RwLock<Option<UserContext>>>,
     data_dir: std::path::PathBuf,
+    provider_runtime: Arc<crate::provider::plugin_provider::PluginProviderRuntime>,
+    pending_provider: Arc<
+        std::sync::RwLock<Option<crate::provider::plugin_provider::ProviderRegistration>>,
+    >,
 ) -> Vec<Function> {
     let ud = UserData::new(HostState {
         db: db.clone(),
@@ -2866,8 +2969,45 @@ pub(crate) fn host_functions(
         invocation,
         live,
         user,
+        provider_runtime,
+        pending_provider,
     });
     vec![
+        Function::new(
+            "peckboard_register_provider",
+            [PTR],
+            [PTR],
+            ud.clone(),
+            peckboard_register_provider,
+        ),
+        Function::new(
+            "peckboard_emit_provider_event",
+            [PTR],
+            [PTR],
+            ud.clone(),
+            peckboard_emit_provider_event,
+        ),
+        Function::new(
+            "peckboard_provider_should_stop",
+            [PTR],
+            [PTR],
+            ud.clone(),
+            peckboard_provider_should_stop,
+        ),
+        Function::new(
+            "peckboard_provider_get_session",
+            [PTR],
+            [PTR],
+            ud.clone(),
+            peckboard_provider_get_session,
+        ),
+        Function::new(
+            "peckboard_provider_get_mcp_config",
+            [PTR],
+            [PTR],
+            ud.clone(),
+            peckboard_provider_get_mcp_config,
+        ),
         Function::new(
             "peckboard_browser_runs",
             [PTR],

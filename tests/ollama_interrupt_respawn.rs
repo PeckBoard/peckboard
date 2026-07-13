@@ -115,6 +115,7 @@ async fn build_state(base_url: String) -> (Arc<AppState>, String) {
         data_dir: tmp.path().to_path_buf(),
         mdns: false,
         keep_alive_hours: 0,
+        provider_send_timeout_secs: 300,
     };
     let db = Db::in_memory().unwrap();
     let plugins = Arc::new(PluginManager::new(&cfg.data_dir, db.clone()));

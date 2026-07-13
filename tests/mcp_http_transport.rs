@@ -46,6 +46,7 @@ async fn build_state() -> Arc<AppState> {
             data_dir,
             mdns: false,
             keep_alive_hours: 0,
+            provider_send_timeout_secs: 300,
         },
         db,
         plugins,

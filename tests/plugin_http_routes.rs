@@ -47,6 +47,7 @@ async fn build_state() -> Arc<AppState> {
         data_dir: tmp.path().to_path_buf(),
         mdns: false,
         keep_alive_hours: 0,
+        provider_send_timeout_secs: 300,
     };
 
     let db = Db::in_memory().unwrap();

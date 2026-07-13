@@ -368,6 +368,24 @@ pub const PROJECT_PAUSED_HOOK: &str = "project.paused";
 /// `{ session_id, session_name, preview }` where `preview` is the first
 /// 200 characters of the question text.
 pub const QUESTION_PENDING_HOOK: &str = "question.pending";
+
+/// Dispatched (per declaring plugin) when core wants the plugin to register
+/// its AI provider: at startup after plugins load, and again whenever the
+/// plugin set changes (approve/deny, install, uninstall). The plugin responds
+/// by calling the `peckboard_register_provider` host function with its
+/// provider id + model catalog; core applies the staged registration to the
+/// `ProviderRegistry` when the dispatch returns. Payload: `{}`.
+pub const PROVIDER_REGISTER_HOOK: &str = "provider.register";
+
+/// Dispatched to run ONE agent turn on a plugin-registered provider. The
+/// call runs on a dedicated blocking thread with the provider-send budget
+/// (default 300s) rather than the normal 2–180s hook clamp; while it is in
+/// flight the plugin streams `ProviderEvent`s via
+/// `peckboard_emit_provider_event` and polls `peckboard_provider_should_stop`
+/// between chunks. Payload:
+/// `{ session_id, provider_id, spawn_config, message: { text, attachments },
+/// conversation_id }`.
+pub const PROVIDER_SEND_HOOK: &str = "provider.send";
 /// The request a plugin receives for a plugin-served HTTP route.
 ///
 /// Serialized as the `payload` of the [`HTTP_REQUEST_HOOK`] hook call.

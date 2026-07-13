@@ -141,6 +141,7 @@ mod tests {
                 data_dir: dir.to_path_buf(),
                 mdns: false,
                 keep_alive_hours: 0,
+                provider_send_timeout_secs: 300,
             },
             db: Db::in_memory().unwrap(),
             plugins: Arc::new(crate::plugin::manager::PluginManager::empty()),

@@ -6,6 +6,7 @@ pub mod manager;
 pub mod message;
 pub mod mock;
 pub mod ollama;
+pub mod plugin_provider;
 pub mod registry;
 pub mod stream;
 

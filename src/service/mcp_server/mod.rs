@@ -385,6 +385,9 @@ async fn handle_upgrade_plugin(
     tracing::info!(session_id = %ctx.session_id, plugin_id = %id, "MCP tool: upgrade_plugin");
 
     let info = plugins.install_from_registry(id, repository).await?;
+    // The install replaces the loaded instance — reconcile any AI provider
+    // it (or its previous version) registers, mirroring the HTTP routes.
+    plugins.sync_plugin_providers().await;
 
     // Refresh the plugin's card / approval state in the UI in real time,
     // mirroring the HTTP install route.

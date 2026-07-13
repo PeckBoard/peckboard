@@ -129,6 +129,9 @@ async fn decide_approval(
 
     match state.plugins.decide(&plugin_id, approve).await {
         Ok(Some(info)) => {
+            // The decision may have activated (or deactivated) a plugin AI
+            // provider — reconcile the registry.
+            state.plugins.sync_plugin_providers().await;
             // Tell every connected client the decision so any open approval
             // prompt updates (and other tabs drop the plugin from theirs).
             state
@@ -163,6 +166,8 @@ async fn uninstall_plugin(
 ) -> impl IntoResponse {
     match state.plugins.uninstall(&plugin_id).await {
         Ok(true) => {
+            // Drop any AI provider the uninstalled plugin had registered.
+            state.plugins.sync_plugin_providers().await;
             // Tell every connected client so any open Plugins view drops the
             // plugin (reusing the generic "plugin state changed" signal).
             state
@@ -533,6 +538,9 @@ async fn install_registry(
 
     match state.plugins.install(&entry.id, &bytes).await {
         Ok(info) => {
+            // An install replaces the loaded instance — reconcile any AI
+            // provider it (or its previous version) registers.
+            state.plugins.sync_plugin_providers().await;
             state
                 .broadcaster
                 .broadcast(crate::ws::broadcaster::WsEvent {

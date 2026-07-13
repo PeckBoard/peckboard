@@ -45,6 +45,17 @@ pub struct CliArgs {
     #[arg(long, env = "PECKBOARD_KEEPALIVE_HOURS", default_value = "1")]
     pub keep_alive_hours: u64,
 
+    /// Per-call budget (seconds) for a plugin provider's `provider.send`
+    /// hook — one full agent turn, HTTP round-trips included. Sits above
+    /// the normal 2–180s plugin hook clamp; a plugin declaring
+    /// `provider.send` is built with at least this call timeout.
+    #[arg(
+        long,
+        env = "PECKBOARD_PROVIDER_SEND_TIMEOUT_SECS",
+        default_value = "300"
+    )]
+    pub provider_send_timeout_secs: u64,
+
     /// Restore a backup archive into the data directory and exit.
     /// Validate gzip magic + manifest.json, then unpack. Refuses if
     /// peckboard.db already exists unless --force is also given.
@@ -64,6 +75,7 @@ pub struct Config {
     pub data_dir: PathBuf,
     pub mdns: bool,
     pub keep_alive_hours: u64,
+    pub provider_send_timeout_secs: u64,
 }
 
 impl Config {
@@ -85,6 +97,7 @@ impl Config {
             data_dir,
             mdns: args.mdns,
             keep_alive_hours: args.keep_alive_hours,
+            provider_send_timeout_secs: args.provider_send_timeout_secs,
         }
     }
 }
@@ -106,6 +119,7 @@ mod tests {
             user: None,
             mdns: false,
             keep_alive_hours: 1,
+            provider_send_timeout_secs: 300,
             restore_from: None,
             force: false,
         }

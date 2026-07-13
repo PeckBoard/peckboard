@@ -101,7 +101,11 @@ async fn main() -> anyhow::Result<()> {
         tracing::info!("Purged {purged} expired auth session(s)");
     }
 
-    let plugins = Arc::new(PluginManager::new(&config.data_dir, db.clone()));
+    let plugins = Arc::new(
+        PluginManager::new(&config.data_dir, db.clone()).with_provider_send_timeout(
+            std::time::Duration::from_secs(config.provider_send_timeout_secs),
+        ),
+    );
     plugins.load_all().await?;
     peckboard::plugin::manager::set_notify_global(plugins.clone());
     let jwt_secret = load_or_create_jwt_secret(&config.data_dir)?;
@@ -160,6 +164,15 @@ async fn main() -> anyhow::Result<()> {
             &state,
             tokio::runtime::Handle::current(),
         )));
+
+    // Bind the provider registry and apply any plugin-registered AI
+    // providers (plugins declaring the `provider.register` hook). Runs after
+    // `set_live_host` so a registering plugin's host functions are fully
+    // wired; models registered here appear in /api/models like native ones.
+    state
+        .plugins
+        .set_provider_registry(&state.provider_registry);
+    state.plugins.sync_plugin_providers().await;
 
     // Resume any in-flight worker sessions after startup repair
     peckboard::worker::orchestrator::check_and_spawn_workers(&state).await;

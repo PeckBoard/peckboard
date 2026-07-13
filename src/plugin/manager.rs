@@ -10,9 +10,9 @@ use tracing::{error, info, warn};
 use serde::Serialize;
 
 use super::hooks::{
-    HTTP_AUTHED_HOOK, HTTP_REQUEST_HOOK, HookResult, MCP_TOOL_INVOKE_HOOK, PluginHttpOutcome,
-    PluginHttpResponse, PluginManifest, PluginMcpToolEntry, SidebarItem, SidebarItemEntry,
-    UiPanelEntry, Verdict,
+    HTTP_AUTHED_HOOK, HTTP_REQUEST_HOOK, HookResult, MCP_TOOL_INVOKE_HOOK, PROVIDER_REGISTER_HOOK,
+    PROVIDER_SEND_HOOK, PluginHttpOutcome, PluginHttpResponse, PluginManifest, PluginMcpToolEntry,
+    SidebarItem, SidebarItemEntry, UiPanelEntry, Verdict,
 };
 use crate::db::Db;
 use crate::db::crud::{APPROVAL_APPROVED, APPROVAL_DENIED};
@@ -43,6 +43,14 @@ const CALL_TIMEOUT: Duration = Duration::from_secs(2);
 /// room for genuinely slow tool work (e.g. a certificate issuance driven
 /// through an outbound HTTP host call).
 const MAX_CALL_TIMEOUT: Duration = Duration::from_secs(180);
+/// Default per-call budget for a `provider.send` dispatch (one full agent
+/// turn, HTTP round-trips included). Deliberately ABOVE the normal
+/// 2–180s hook clamp: extism pins the call timeout per instance, so a plugin
+/// declaring `provider.send` is built with at least this budget — which also
+/// raises the ceiling for its ordinary hook calls. Overridable via
+/// `--provider-send-timeout-secs` / `PECKBOARD_PROVIDER_SEND_TIMEOUT_SECS`
+/// (see [`PluginManager::with_provider_send_timeout`]).
+const DEFAULT_PROVIDER_SEND_TIMEOUT: Duration = Duration::from_secs(300);
 
 /// The complete set of hook names Peckboard actually dispatches. A
 /// plugin manifest may only register handlers for hooks in this list;
@@ -76,6 +84,8 @@ pub const ALLOWED_HOOKS: &[&str] = &[
     "mcp.tool.call.failed",
     "mcp.tool.invoke",
     "project.paused",
+    "provider.register",
+    "provider.send",
     "question.pending",
     "session.agent.ended",
     "session.message.before",
@@ -107,7 +117,8 @@ pub const ALLOWED_PERMISSIONS: &[&str] = &[
     "project_files_read", // peckboard_list_project_files / read_file / read_file_base64
     "project_files_write", // peckboard_write_file
     "provide_mcp_tools", // declare mcp_tools (mcp.tool.invoke)
-    "session_dispatch", // peckboard_dispatch_capture / resume_session
+    "register_provider", // peckboard_register_provider / _emit_provider_event / _provider_should_stop / _provider_get_session / _provider_get_mcp_config — register an AI provider and drive its turns
+    "session_dispatch",  // peckboard_dispatch_capture / resume_session
     "session_control", // peckboard_interrupt_session / terminate_agent / clear_session / send_message — full cross-folder control of any session
     "session_read",    // peckboard_get_session / list_sessions
     "session_write",   // peckboard_create_session / update_session
@@ -167,6 +178,11 @@ struct LoadedPlugin {
     /// (or `None`). `serve_http_authed` sets it from the `require_auth`-verified
     /// user around the dispatch and clears it after.
     user: Arc<std::sync::RwLock<Option<super::host::UserContext>>>,
+    /// Staging slot the `peckboard_register_provider` host function writes
+    /// into. `sync_plugin_providers` clears it, dispatches the plugin's
+    /// `provider.register` hook, then applies whatever the plugin staged.
+    pending_provider:
+        Arc<std::sync::RwLock<Option<crate::provider::plugin_provider::ProviderRegistration>>>,
 }
 
 impl LoadedPlugin {
@@ -454,6 +470,26 @@ pub struct PluginManager {
     /// until then, so the live host functions refuse rather than act — and
     /// always `None` for `empty()`/headless managers.
     live: Arc<std::sync::RwLock<Option<Arc<dyn super::host::LiveHost>>>>,
+    /// Shared host-side state of in-flight plugin-provider turns; wired into
+    /// every plugin's provider host functions and into each
+    /// [`crate::provider::plugin_provider::PluginProviderAdapter`] this
+    /// manager registers.
+    provider_runtime: Arc<crate::provider::plugin_provider::PluginProviderRuntime>,
+    /// Late-bound registry plugin providers are applied to (see
+    /// [`PluginManager::set_provider_registry`]). `Weak` because the registry
+    /// (via a registered adapter) holds an `Arc` back to this manager.
+    provider_registry:
+        std::sync::RwLock<Option<std::sync::Weak<crate::provider::registry::ProviderRegistry>>>,
+    /// `Weak` self-reference, bound with the registry — lets
+    /// `sync_plugin_providers` hand each adapter the `Arc<PluginManager>` it
+    /// dispatches through while callers only hold `&PluginManager`.
+    self_weak: std::sync::RwLock<Option<std::sync::Weak<PluginManager>>>,
+    /// provider id → owning plugin id, for every provider this manager has
+    /// registered — what `sync_plugin_providers` reconciles against.
+    plugin_providers: Mutex<HashMap<String, String>>,
+    /// Per-call budget for `provider.send` dispatches; also the floor for a
+    /// provider plugin's extism instance timeout (set at load).
+    provider_send_timeout: Duration,
 }
 
 impl PluginManager {
@@ -465,6 +501,38 @@ impl PluginManager {
             plugins_dir: data_dir.join("plugins"),
             db: Some(db),
             live: Arc::new(std::sync::RwLock::new(None)),
+            provider_runtime: Arc::new(
+                crate::provider::plugin_provider::PluginProviderRuntime::new(),
+            ),
+            provider_registry: std::sync::RwLock::new(None),
+            self_weak: std::sync::RwLock::new(None),
+            plugin_providers: Mutex::new(HashMap::new()),
+            provider_send_timeout: DEFAULT_PROVIDER_SEND_TIMEOUT,
+        }
+    }
+
+    /// Override the `provider.send` per-call budget (default 300s). Must be
+    /// called before `load_all`: the budget is baked into each provider
+    /// plugin's extism instance timeout at load time.
+    pub fn with_provider_send_timeout(mut self, timeout: Duration) -> Self {
+        self.provider_send_timeout = timeout.max(CALL_TIMEOUT);
+        self
+    }
+
+    /// Bind the provider registry that `sync_plugin_providers` applies
+    /// plugin-registered providers to. Called once from `main.rs` alongside
+    /// `set_live_host`. Both sides are stored weakly: a registered adapter
+    /// holds an `Arc` back to this manager, so strong references here would
+    /// cycle.
+    pub fn set_provider_registry(
+        self: &Arc<Self>,
+        registry: &Arc<crate::provider::registry::ProviderRegistry>,
+    ) {
+        if let Ok(mut guard) = self.provider_registry.write() {
+            *guard = Some(Arc::downgrade(registry));
+        }
+        if let Ok(mut guard) = self.self_weak.write() {
+            *guard = Some(Arc::downgrade(self));
         }
     }
 
@@ -489,6 +557,13 @@ impl PluginManager {
             plugins_dir: PathBuf::new(),
             db: None,
             live: Arc::new(std::sync::RwLock::new(None)),
+            provider_runtime: Arc::new(
+                crate::provider::plugin_provider::PluginProviderRuntime::new(),
+            ),
+            provider_registry: std::sync::RwLock::new(None),
+            self_weak: std::sync::RwLock::new(None),
+            plugin_providers: Mutex::new(HashMap::new()),
+            provider_send_timeout: DEFAULT_PROVIDER_SEND_TIMEOUT,
         }
     }
 
@@ -566,6 +641,11 @@ impl PluginManager {
         // per authenticated request (see `LoadedPlugin::user`).
         let user: Arc<std::sync::RwLock<Option<super::host::UserContext>>> =
             Arc::new(std::sync::RwLock::new(None));
+        // Staging slot `peckboard_register_provider` writes into; applied by
+        // `sync_plugin_providers` after a `provider.register` dispatch.
+        let pending_provider: Arc<
+            std::sync::RwLock<Option<crate::provider::plugin_provider::ProviderRegistration>>,
+        > = Arc::new(std::sync::RwLock::new(None));
 
         // Building the sandboxed instance is repeatable: the manifest export
         // may declare a larger `call_timeout_secs`, and Extism pins the call
@@ -594,6 +674,8 @@ impl PluginManager {
                         .parent()
                         .map(std::path::Path::to_path_buf)
                         .unwrap_or_else(|| self.plugins_dir.clone()),
+                    self.provider_runtime.clone(),
+                    pending_provider.clone(),
                 ),
                 None => Vec::new(),
             };
@@ -711,20 +793,67 @@ impl PluginManager {
             }
         }
 
+        // A provider plugin needs all three legs to function: the register
+        // hook (so core asks it for its catalog), the send hook (so turns can
+        // be dispatched), and the `register_provider` permission (which gates
+        // the provider host functions). Require them together so a
+        // half-declared provider fails at load, not silently at runtime.
+        if plugin_manifest
+            .hooks
+            .iter()
+            .any(|h| h == PROVIDER_REGISTER_HOOK)
+        {
+            if !plugin_manifest
+                .permissions
+                .iter()
+                .any(|p| p == "register_provider")
+            {
+                return Err(anyhow::anyhow!(
+                    "plugin '{name}' declares {PROVIDER_REGISTER_HOOK} but not the \
+                     'register_provider' permission",
+                ));
+            }
+            if !plugin_manifest
+                .hooks
+                .iter()
+                .any(|h| h == PROVIDER_SEND_HOOK)
+            {
+                return Err(anyhow::anyhow!(
+                    "plugin '{name}' declares {PROVIDER_REGISTER_HOOK} but not the \
+                     '{PROVIDER_SEND_HOOK}' hook",
+                ));
+            }
+        }
+
+        // Resolve the operator's stored approval for this exact hook set.
         // Resolve the operator's stored approval for this exact hook set.
         // A plugin may declare a larger per-call budget than the 2 s default
         // for slow host-side tool work (see `PluginManifest::call_timeout_secs`).
         // Extism fixes the timeout at construction, so rebuild the instance
         // with the clamped budget when one was declared. Not part of the
         // approval grant: a timeout is not a capability — the ceiling bounds it.
-        let call_timeout = plugin_manifest
+        //
+        // A plugin handling `provider.send` gets at least the provider-send
+        // budget (default 300s): one dispatch of that hook runs a FULL agent
+        // turn, HTTP round-trips included, which the normal 2–180s clamp
+        // would cut short. The raised instance timeout necessarily also
+        // applies to the plugin's ordinary hook calls — extism has one
+        // timeout per instance — which is acceptable because dispatch
+        // serialises per plugin anyway.
+        let mut call_timeout = plugin_manifest
             .call_timeout_secs
             .map(|s| Duration::from_secs(s).clamp(CALL_TIMEOUT, MAX_CALL_TIMEOUT))
             .unwrap_or(CALL_TIMEOUT);
+        if plugin_manifest
+            .hooks
+            .iter()
+            .any(|h| h == PROVIDER_SEND_HOOK)
+        {
+            call_timeout = call_timeout.max(self.provider_send_timeout);
+        }
         if call_timeout != CALL_TIMEOUT {
             plugin = build_plugin(call_timeout)?;
         }
-        // A plugin is inert until approved (the user requires permission
         // for every hook), so a missing decision — or one made against a
         // different hook set — leaves it `Pending`, not active.
         let hooks_canonical = canonical_grant(&plugin_manifest.hooks, &plugin_manifest.permissions);
@@ -766,6 +895,7 @@ impl PluginManager {
             init_error,
             invocation,
             user,
+            pending_provider,
         })
     }
 
@@ -1006,6 +1136,214 @@ impl PluginManager {
                 }
             }
         });
+    }
+
+    /// Run one agent turn on `plugin_id`'s provider by dispatching the
+    /// `provider.send` hook. The extism call runs on a dedicated blocking
+    /// thread with the provider-send budget (default 300s — deliberately
+    /// above the normal 2–180s hook clamp; the plugin's instance timeout was
+    /// raised to match at load). Holding the per-plugin mutex for the whole
+    /// turn serialises every other dispatch to that plugin — one turn at a
+    /// time per plugin (v1).
+    ///
+    /// While the call is in flight the plugin streams events through the
+    /// `peckboard_emit_provider_event` host function; this method only
+    /// reports how the CALL ended. `Err` on inactive plugin, trap, timeout,
+    /// or an explicit `Verdict::Cancel`.
+    pub async fn dispatch_provider_send(
+        &self,
+        plugin_id: &str,
+        payload: serde_json::Value,
+    ) -> Result<(), String> {
+        let target: Option<Arc<Mutex<Plugin>>> = {
+            let plugins = self.plugins.lock().await;
+            plugins
+                .iter()
+                .find(|p| {
+                    p.name == plugin_id
+                        && p.is_active()
+                        && p.manifest.hooks.iter().any(|h| h == PROVIDER_SEND_HOOK)
+                })
+                .map(|p| p.plugin.clone())
+        };
+        let Some(plugin) = target else {
+            return Err(format!(
+                "plugin '{plugin_id}' is not active or does not handle {PROVIDER_SEND_HOOK}"
+            ));
+        };
+        let call_input =
+            serde_json::json!({ "hook": PROVIDER_SEND_HOOK, "payload": payload }).to_string();
+        let call = tokio::task::spawn_blocking(move || {
+            // A blocking-pool thread, never an async worker — safe to block
+            // on the plugin mutex and safe for the provider host functions
+            // to `block_on` the runtime while the wasm call is executing.
+            let mut guard = plugin.blocking_lock();
+            guard.call::<String, String>("handle", call_input)
+        });
+        // The extism instance timeout traps the wasm at the provider-send
+        // budget; this outer window is only a backstop for that trap
+        // failing to fire (e.g. the plugin stuck inside a host call).
+        let budget = self.provider_send_timeout + Duration::from_secs(15);
+        let joined = tokio::time::timeout(budget, call)
+            .await
+            .map_err(|_| {
+                format!(
+                    "{PROVIDER_SEND_HOOK} exceeded its {}s budget",
+                    self.provider_send_timeout.as_secs()
+                )
+            })?
+            .map_err(|e| format!("{PROVIDER_SEND_HOOK} task failed: {e}"))?;
+        let output = joined.map_err(|e| format!("{PROVIDER_SEND_HOOK} failed: {e}"))?;
+        match serde_json::from_str::<Verdict>(&output) {
+            Ok(Verdict::Cancel { reason, .. }) => Err(reason),
+            _ => Ok(()),
+        }
+    }
+
+    /// Reconcile plugin-registered AI providers against the current plugin
+    /// set. Called after startup `load_all` and after any change to the set
+    /// (approve/deny, install, uninstall):
+    ///
+    /// 1. Unregister providers whose owning plugin is gone or inactive (and
+    ///    flag its in-flight turns to stop).
+    /// 2. Dispatch `provider.register` to every active declaring plugin that
+    ///    doesn't already own a provider; the plugin stages a registration
+    ///    via `peckboard_register_provider`, which is validated (id charset,
+    ///    collision — a plugin can never displace a provider it doesn't own,
+    ///    native ones included) and applied to the bound registry as a
+    ///    [`crate::provider::plugin_provider::PluginProviderAdapter`].
+    ///
+    /// Plugins that already own a provider are not re-dispatched — their
+    /// catalog is fixed for the life of the loaded instance (a reinstall
+    /// reloads it), and re-dispatching would block behind any in-flight
+    /// `provider.send` turn on the per-plugin mutex.
+    ///
+    /// No-op until [`PluginManager::set_provider_registry`] binds a registry
+    /// (which also stores the `Weak` self-reference the adapters dispatch
+    /// through).
+    pub async fn sync_plugin_providers(&self) {
+        let Some(registry) = self
+            .provider_registry
+            .read()
+            .ok()
+            .and_then(|g| g.clone())
+            .and_then(|w| w.upgrade())
+        else {
+            return;
+        };
+        let Some(self_arc) = self
+            .self_weak
+            .read()
+            .ok()
+            .and_then(|g| g.clone())
+            .and_then(|w| w.upgrade())
+        else {
+            return;
+        };
+
+        // Plugins currently active and declaring the register hook.
+        let mut targets: Vec<(
+            String,
+            Arc<Mutex<Plugin>>,
+            Arc<std::sync::RwLock<Option<crate::provider::plugin_provider::ProviderRegistration>>>,
+        )> = {
+            let plugins = self.plugins.lock().await;
+            plugins
+                .iter()
+                .filter(|p| {
+                    p.is_active() && p.manifest.hooks.iter().any(|h| h == PROVIDER_REGISTER_HOOK)
+                })
+                .map(|p| (p.name.clone(), p.plugin.clone(), p.pending_provider.clone()))
+                .collect()
+        };
+
+        {
+            let mut owned = self.plugin_providers.lock().await;
+            // 1. Providers of plugins that are gone or inactive.
+            let active: std::collections::HashSet<&str> =
+                targets.iter().map(|(n, ..)| n.as_str()).collect();
+            let stale: Vec<(String, String)> = owned
+                .iter()
+                .filter(|(_, plugin)| !active.contains(plugin.as_str()))
+                .map(|(prov, plug)| (prov.clone(), plug.clone()))
+                .collect();
+            for (provider_id, plugin_id) in stale {
+                registry.unregister(&provider_id).await;
+                self.provider_runtime.request_stop_for_plugin(&plugin_id);
+                owned.remove(&provider_id);
+            }
+            // 2. Only dispatch to plugins that don't already own a provider.
+            let registered: std::collections::HashSet<String> = owned.values().cloned().collect();
+            targets.retain(|(n, ..)| !registered.contains(n));
+        }
+
+        for (name, plugin, slot) in targets {
+            if let Ok(mut staged) = slot.write() {
+                *staged = None;
+            }
+            let call_input =
+                serde_json::json!({ "hook": PROVIDER_REGISTER_HOOK, "payload": {} }).to_string();
+            let result = tokio::task::spawn_blocking(move || {
+                let mut guard = plugin.blocking_lock();
+                guard.call::<String, String>("handle", call_input)
+            })
+            .await;
+            match result {
+                Ok(Ok(_)) => {}
+                Ok(Err(e)) => {
+                    warn!("Plugin '{name}' failed on {PROVIDER_REGISTER_HOOK}: {e}");
+                    continue;
+                }
+                Err(e) => {
+                    warn!("Plugin '{name}' {PROVIDER_REGISTER_HOOK} task failed: {e}");
+                    continue;
+                }
+            }
+            let Some(reg) = slot.read().ok().and_then(|s| s.clone()) else {
+                info!("Plugin '{name}' handled {PROVIDER_REGISTER_HOOK} without registering");
+                continue;
+            };
+            // The host function already shape-validated; re-check so a
+            // bypassed slot write can't smuggle a bad id in.
+            if let Err(e) = crate::provider::plugin_provider::validate_registration(&reg) {
+                warn!("Plugin '{name}' provider registration invalid: {e}");
+                continue;
+            }
+            let mut owned = self.plugin_providers.lock().await;
+            // A plugin may never displace a provider it doesn't own —
+            // native providers and other plugins' providers included.
+            if !owned.contains_key(&reg.id) && registry.get_info(&reg.id).await.is_some() {
+                warn!(
+                    "Plugin '{name}' tried to register provider '{}', which already exists — skipped",
+                    reg.id
+                );
+                continue;
+            }
+            if owned.get(&reg.id).is_some_and(|p| p != &name) {
+                warn!(
+                    "Plugin '{name}' tried to register provider '{}', owned by another plugin — skipped",
+                    reg.id
+                );
+                continue;
+            }
+            let adapter = Arc::new(
+                crate::provider::plugin_provider::PluginProviderAdapter::new(
+                    &reg,
+                    name.clone(),
+                    self_arc.clone(),
+                    self.provider_runtime.clone(),
+                ),
+            );
+            let info = crate::provider::registry::ProviderInfo {
+                id: reg.id.clone(),
+                display_name: reg.display_name.clone(),
+                models: reg.models.clone(),
+                effort_levels: reg.effort_levels.clone(),
+            };
+            registry.register(adapter, info).await;
+            owned.insert(reg.id.clone(), name.clone());
+            info!("Plugin '{name}' registered provider '{}'", reg.id);
+        }
     }
     /// Dispatch a public HTTP request to whichever loaded plugin owns
     /// the route, returning the plugin's complete HTTP response.
@@ -2002,7 +2340,9 @@ mod tests {
             "card.priorities.list",
             "http.request.before",
             "mcp.tool.call.before",
-            "project.paused",
+            "mcp.tool.call.before",
+            "provider.register",
+            "provider.send",
             "question.pending",
             "session.agent.ended",
             "session.message.before",
@@ -2016,8 +2356,10 @@ mod tests {
                 "ALLOWED_HOOKS is missing dispatched hook '{required}'"
             );
         }
-        // The HTTP serving hook constant and the allowlist agree.
+        // The hook constants and the allowlist agree.
         assert!(ALLOWED_HOOKS.contains(&HTTP_REQUEST_HOOK));
+        assert!(ALLOWED_HOOKS.contains(&PROVIDER_REGISTER_HOOK));
+        assert!(ALLOWED_HOOKS.contains(&PROVIDER_SEND_HOOK));
     }
 
     #[test]

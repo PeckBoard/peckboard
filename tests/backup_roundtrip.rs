@@ -33,6 +33,7 @@ async fn build_state_with_dir(dir: &std::path::Path, role: &str) -> (Arc<AppStat
         data_dir: dir.to_path_buf(),
         mdns: false,
         keep_alive_hours: 0,
+        provider_send_timeout_secs: 300,
     };
 
     let db = Db::open(dir).unwrap();

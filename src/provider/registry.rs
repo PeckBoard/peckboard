@@ -86,6 +86,18 @@ impl ProviderRegistry {
         providers.insert(info.id.clone(), RegisteredProvider { info, provider });
     }
 
+    /// Remove a provider by ID (e.g. a plugin-registered provider whose
+    /// plugin was unloaded, denied, or uninstalled). Returns whether an
+    /// entry existed. In-flight runs keep their `Arc<dyn AgentProvider>`
+    /// alive; only new lookups stop resolving.
+    pub async fn unregister(&self, id: &str) -> bool {
+        let mut providers = self.providers.lock().await;
+        let removed = providers.remove(id).is_some();
+        if removed {
+            tracing::info!("Unregistered provider '{id}'");
+        }
+        removed
+    }
     /// Get provider metadata by ID.
     pub async fn get_info(&self, id: &str) -> Option<ProviderInfo> {
         let providers = self.providers.lock().await;
