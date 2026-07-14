@@ -28,6 +28,9 @@ export interface Session {
    *  for worker sessions, OFF for chats); true/false forces it. */
   model_autoswitch?: boolean | null
   is_permanent: boolean
+  /** Temporary session — deleted automatically when the last tab pointing
+   *  at it is closed. Cleared by the "Keep session" action. */
+  is_temp: boolean
   repeating_task_id: string | null
   /** Target model while a provider/account handover is mid-flight; null otherwise. */
   handover_to_model?: string | null

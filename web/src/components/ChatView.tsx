@@ -830,6 +830,21 @@ export default function ChatView({
       testId: 'chat-toolbar-terminate',
     },
     {
+      label: 'Keep session',
+      // Temp sessions delete themselves when their last tab closes;
+      // keeping clears the flag. The store action also syncs the
+      // sessions list row and the tab chip's temp marker.
+      hidden: !sessionDetail?.is_temp,
+      testId: 'chat-menu-keep',
+      onSelect: () => {
+        void useSessionsStore
+          .getState()
+          .keepSession(sessionId)
+          .then(() => setSessionDetail((d) => (d ? { ...d, is_temp: false } : d)))
+          .catch(() => setPatchError('Failed to keep session'))
+      },
+    },
+    {
       label: 'Delete',
       danger: true,
       // Worker sessions are owned by their card; the backend refuses

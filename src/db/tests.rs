@@ -1159,6 +1159,125 @@ mod tests {
         );
     }
 
+    // ── temp sessions ────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn test_count_user_tabs_for_item_counts_across_users() {
+        let db = test_db();
+        let ts = now();
+
+        db.create_folder(NewFolder {
+            id: "f".into(),
+            name: "F".into(),
+            path: "/tmp/f".into(),
+            created_at: ts.clone(),
+        })
+        .await
+        .unwrap();
+        for u in ["u1", "u2"] {
+            db.create_user(NewUser {
+                id: u.into(),
+                username: u.into(),
+                email: None,
+                password_hash: "h".into(),
+                role: "user".into(),
+                created_at: ts.clone(),
+                updated_at: ts.clone(),
+            })
+            .await
+            .unwrap();
+        }
+        db.create_session(NewSession {
+            id: "s".into(),
+            name: "S".into(),
+            folder_id: "f".into(),
+            created_at: ts.clone(),
+            last_activity: ts.clone(),
+            is_temp: true,
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+
+        assert_eq!(
+            db.count_user_tabs_for_item("session", "s").await.unwrap(),
+            0
+        );
+        db.upsert_user_tab("u1", "session", "s").await.unwrap();
+        db.upsert_user_tab("u2", "session", "s").await.unwrap();
+        assert_eq!(
+            db.count_user_tabs_for_item("session", "s").await.unwrap(),
+            2
+        );
+
+        // Closing one user's tab leaves the other's counted — the temp
+        // delete rule (delete at zero) must not fire while a second user
+        // still has the session open.
+        assert!(db.delete_user_tab("u1", "session", "s").await.unwrap());
+        assert_eq!(
+            db.count_user_tabs_for_item("session", "s").await.unwrap(),
+            1
+        );
+        assert!(db.delete_user_tab("u2", "session", "s").await.unwrap());
+        assert_eq!(
+            db.count_user_tabs_for_item("session", "s").await.unwrap(),
+            0
+        );
+    }
+
+    #[tokio::test]
+    async fn test_list_orphan_temp_session_ids() {
+        let db = test_db();
+        let ts = now();
+
+        db.create_folder(NewFolder {
+            id: "f".into(),
+            name: "F".into(),
+            path: "/tmp/f".into(),
+            created_at: ts.clone(),
+        })
+        .await
+        .unwrap();
+        db.create_user(NewUser {
+            id: "u".into(),
+            username: "u".into(),
+            email: None,
+            password_hash: "h".into(),
+            role: "user".into(),
+            created_at: ts.clone(),
+            updated_at: ts.clone(),
+        })
+        .await
+        .unwrap();
+
+        // Four sessions: temp with a tab (kept), temp without a tab (the
+        // orphan), regular without a tab (kept — not temp), temp worker
+        // without a tab (kept — workers are excluded defensively).
+        for (id, is_temp, is_worker) in [
+            ("tabbed", true, false),
+            ("orphan", true, false),
+            ("regular", false, false),
+            ("worker", true, true),
+        ] {
+            db.create_session(NewSession {
+                id: id.into(),
+                name: id.into(),
+                folder_id: "f".into(),
+                is_worker,
+                created_at: ts.clone(),
+                last_activity: ts.clone(),
+                is_temp,
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        }
+        db.upsert_user_tab("u", "session", "tabbed").await.unwrap();
+
+        let orphans = db.list_orphan_temp_session_ids().await.unwrap();
+        assert_eq!(orphans, vec!["orphan".to_string()]);
+    }
+
     // ── repeating-task tabs are a first-class kind ──────────────────
 
     #[tokio::test]

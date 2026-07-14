@@ -453,7 +453,8 @@
   color: var(--warning);
 }
 .tab-icon-report,
-.tab-icon-repeating-task {
+.tab-icon-repeating-task,
+.tab-icon-temp-session {
   /* SVG icons inherit `currentColor`; sit them on the muted text colour
      so the kind glyph reads as chrome, not a status indicator. */
   display: inline-flex;

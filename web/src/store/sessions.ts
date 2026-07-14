@@ -142,6 +142,7 @@ interface SessionsState {
     effort?: string,
     modelAutoswitch?: boolean,
     systemPromptName?: string | null,
+    isTemp?: boolean,
   ) => Promise<Session>
   deleteSession: (id: string) => Promise<void>
   /** Apply the local cleanup for a session that's been deleted on the
@@ -153,6 +154,9 @@ interface SessionsState {
   applySessionDeleted: (id: string) => void
   setActiveSession: (id: string | null) => void
   renameSession: (id: string, name: string) => Promise<void>
+  /** Clear the temp flag — the "Keep session" action. Updates the local
+   *  row and refreshes the tab strip so its temp marker clears. */
+  keepSession: (id: string) => Promise<void>
   setSessionAutoswitch: (id: string, value: boolean) => Promise<void>
   clearSession: (id: string) => Promise<void>
   cancelSession: (id: string) => Promise<void>
@@ -407,12 +411,14 @@ export const useSessionsStore = create<SessionsState>((set, get) => ({
     effort?: string,
     modelAutoswitch?: boolean,
     systemPromptName?: string | null,
+    isTemp?: boolean,
   ) => {
     const body: Record<string, unknown> = { name, folder_id: folderId }
     if (model) body.model = model
     if (effort && effort !== 'default') body.effort = effort
     if (modelAutoswitch !== undefined) body.model_autoswitch = modelAutoswitch
     if (systemPromptName !== undefined) body.system_prompt_name = systemPromptName || null
+    if (isTemp) body.is_temp = true
     const res = await authedFetch('/api/sessions', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -491,6 +497,23 @@ export const useSessionsStore = create<SessionsState>((set, get) => ({
     set((s) => ({
       sessions: s.sessions.map((sess) => (sess.id === id ? { ...sess, name } : sess)),
     }))
+  },
+  keepSession: async (id: string) => {
+    const res = await authedFetch(`/api/sessions/${id}`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ is_temp: false }),
+    })
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({ error: 'Failed to keep session' }))
+      throw new Error(err.error || 'Failed to keep session')
+    }
+    set((s) => ({
+      sessions: s.sessions.map((sess) => (sess.id === id ? { ...sess, is_temp: false } : sess)),
+    }))
+    // The tab chip renders a temp marker from the denormalized
+    // `tab.isTemp`; refetch so it clears without waiting for the poll.
+    void useTabsStore.getState().fetchTabs()
   },
   setSessionAutoswitch: async (id: string, value: boolean) => {
     const res = await authedFetch(`/api/sessions/${id}`, {

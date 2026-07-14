@@ -236,6 +236,7 @@ function App() {
   const fetchSessions = useSessionsStore((s) => s.fetchSessions)
   const setActiveSession = useSessionsStore((s) => s.setActiveSession)
   const deleteSession = useSessionsStore((s) => s.deleteSession)
+  const keepSession = useSessionsStore((s) => s.keepSession)
   const renameSession = useSessionsStore((s) => s.renameSession)
   const setSessionAutoswitch = useSessionsStore((s) => s.setSessionAutoswitch)
   const clearSession = useSessionsStore((s) => s.clearSession)
@@ -834,7 +835,10 @@ function App() {
       running: processing.has(tab.itemId),
       unread: !active && unreadSessions.has(tab.itemId),
     }),
-    getIcon: () => null,
+    getIcon: (tab) => (tab.isTemp ? tabIcons.tempSession : null),
+    // Signpost the destructive close: for temp sessions the × deletes
+    // the session, not just the chip.
+    getCloseTitle: (tab) => (tab.isTemp ? 'Close tab & delete session' : null),
     onActivate: (tab) => {
       setActiveSession(tab.itemId)
       navigate('sessions', tab.itemId)
@@ -852,6 +856,14 @@ function App() {
         active: sessionAutoswitchOn(tab.itemId),
         onSelect: () => void setSessionAutoswitch(tab.itemId, !sessionAutoswitchOn(tab.itemId)),
         testId: 'session-menu-autoswitch',
+      },
+      // Temp sessions delete themselves when their last tab closes;
+      // "Keep session" clears the flag so the session outlives its tab.
+      {
+        label: 'Keep session',
+        onSelect: () => void keepSession(tab.itemId),
+        hidden: !tab.isTemp,
+        testId: 'session-menu-keep',
       },
       // Worker sessions are owned by their card and repeating-task
       // sessions are a schedule's run history. Both have their
@@ -1322,6 +1334,7 @@ function App() {
                       )}
                       <span className="list-view-name">{s.name}</span>
                       <span className="list-view-meta">
+                        {s.is_temp && <span className="list-view-tag">temp</span>}
                         {folderMap.get(s.folder_id) && (
                           <span className="list-view-tag">{folderMap.get(s.folder_id)}</span>
                         )}

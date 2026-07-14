@@ -39,6 +39,7 @@ diesel::table! {
         model_autoswitch -> Nullable<Bool>,
         system_prompt_name -> Nullable<Text>,
         pending_plan_review -> Bool,
+        is_temp -> Bool,
     }
 }
 

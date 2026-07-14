@@ -77,6 +77,7 @@ export default function TabBar({ kinds, onNewSession }: TabBarProps) {
         const label = live || t.name || tabDefaultLabel[t.itemType]
         const active = kind.isActive(t)
         const badges = kind.getBadges(t, active)
+        const closeTitle = kind.getCloseTitle?.(t) ?? 'Close tab'
         // Reorder without a pointer drag — the only way to reorder on
         // touch. Layered before the kind's items; "Close tab" is
         // prepended inside OpenedTab.
@@ -93,6 +94,7 @@ export default function TabBar({ kinds, onNewSession }: TabBarProps) {
             key={`${t.itemType}:${t.itemId}`}
             label={label}
             active={active}
+            closeTitle={closeTitle}
             running={badges.running}
             unread={badges.unread}
             icon={kind.getIcon(t)}
@@ -135,6 +137,7 @@ export default function TabBar({ kinds, onNewSession }: TabBarProps) {
 
 interface OpenedTabProps {
   label: string
+  closeTitle: string
   active: boolean
   running: boolean
   unread: boolean
@@ -152,6 +155,7 @@ interface OpenedTabProps {
 
 function OpenedTab({
   label,
+  closeTitle,
   active,
   running,
   unread,
@@ -223,7 +227,7 @@ function OpenedTab({
       <button
         className="tab-close"
         aria-label={`Close ${label}`}
-        title="Close tab"
+        title={closeTitle}
         onClick={(e) => {
           e.stopPropagation()
           onClose()

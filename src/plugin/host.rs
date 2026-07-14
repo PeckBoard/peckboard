@@ -932,6 +932,7 @@ pub(crate) fn create_session_impl(db: &Db, input: &str, inv: &InvocationContext)
         context_reset_ts: None,
         model_autoswitch: None,
         system_prompt_name: req.system_prompt_name,
+        is_temp: false,
     };
     match db.create_session_blocking(new) {
         Ok(session) => serde_json::json!({ "session": session }).to_string(),
@@ -1005,6 +1006,7 @@ pub(crate) fn update_session_impl(
         context_reset_ts: None,
         model_autoswitch: None,
         pending_plan_review: None,
+        is_temp: None,
         system_prompt_name: None,
     };
     match db.update_session_blocking(req.session_id.trim(), update) {

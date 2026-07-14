@@ -93,6 +93,7 @@ async fn seed_session(
         model_autoswitch: None,
         context_reset_ts: None,
         system_prompt_name: None,
+        is_temp: false,
     })
     .await
     .unwrap();

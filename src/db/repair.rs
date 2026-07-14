@@ -54,6 +54,7 @@ pub fn ensure_schema(conn: &mut SqliteConnection) -> anyhow::Result<()> {
     ensure_projects_worktree_isolation_column(conn)?;
     ensure_projects_budget_columns(conn)?;
     ensure_sessions_pending_plan_review_column(conn)?;
+    ensure_sessions_is_temp_column(conn)?;
     backfill_session_owners(conn)?;
     Ok(())
 }
@@ -653,6 +654,21 @@ fn ensure_sessions_pending_plan_review_column(conn: &mut SqliteConnection) -> an
     if !existing.iter().any(|c| c == "pending_plan_review") {
         tracing::info!("Repairing schema: adding sessions.pending_plan_review");
         sql_query("ALTER TABLE sessions ADD COLUMN pending_plan_review BOOLEAN NOT NULL DEFAULT 0")
+            .execute(conn)?;
+    }
+    Ok(())
+}
+/// Heal DBs that predate `1784100000_temp_sessions`: the auto-delete-on-
+/// last-tab-close flag on sessions. NOT NULL DEFAULT 0 mirrors the migration.
+fn ensure_sessions_is_temp_column(conn: &mut SqliteConnection) -> anyhow::Result<()> {
+    let rows: Vec<PragmaColumn> = sql_query("PRAGMA table_info(sessions)").load(conn)?;
+    let existing: Vec<String> = rows.into_iter().map(|r| r.name).collect();
+    if existing.is_empty() {
+        return Ok(());
+    }
+    if !existing.iter().any(|c| c == "is_temp") {
+        tracing::info!("Repairing schema: adding sessions.is_temp");
+        sql_query("ALTER TABLE sessions ADD COLUMN is_temp BOOLEAN NOT NULL DEFAULT 0")
             .execute(conn)?;
     }
     Ok(())

@@ -132,4 +132,26 @@ impl Db {
         })
         .await
     }
+
+    /// Count `user_tabs` rows (across ALL users) pointing at the given
+    /// (item_type, item_id). Powers the temp-session rule: the session is
+    /// deleted only when the LAST tab pointing at it goes away, so another
+    /// user who still has the tab open keeps the session alive.
+    pub async fn count_user_tabs_for_item(
+        &self,
+        item_type: &str,
+        item_id: &str,
+    ) -> anyhow::Result<i64> {
+        let item_type = item_type.to_string();
+        let item_id = item_id.to_string();
+        self.with_conn(move |conn| {
+            user_tabs::table
+                .filter(user_tabs::item_type.eq(&item_type))
+                .filter(user_tabs::item_id.eq(&item_id))
+                .count()
+                .get_result(conn)
+                .map_err(Into::into)
+        })
+        .await
+    }
 }

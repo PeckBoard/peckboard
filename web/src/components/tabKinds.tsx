@@ -45,6 +45,10 @@ export interface TabKindHandler {
    *  is layered in by the TabBar itself so every kind shares the same
    *  top item without having to remember to add it. */
   getMenuItems: (tab: Tab) => MenuItem[]
+  /** Optional override for the close (×) button's tooltip. Return null
+   *  to keep the default "Close tab". Temp sessions use this to warn
+   *  that closing the tab deletes the session. */
+  getCloseTitle?: (tab: Tab) => string | null
 }
 
 export type TabKindRegistry = Record<TabType, TabKindHandler>
@@ -99,10 +103,33 @@ const repeatingTaskIcon: ReactNode = (
   </span>
 )
 
+// Temp-session marker: an hourglass on the chip warns that closing this
+// tab deletes the session (server-side, on last-tab-close).
+const tempSessionIcon: ReactNode = (
+  <span className="tab-icon tab-icon-temp-session" aria-hidden="true">
+    <svg
+      width="14"
+      height="14"
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="2"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+    >
+      <path d="M5 2h14" />
+      <path d="M5 22h14" />
+      <path d="M17 22v-4.172a2 2 0 0 0-.586-1.414L12 12l-4.414 4.414A2 2 0 0 0 7 17.828V22" />
+      <path d="M7 2v4.172a2 2 0 0 0 .586 1.414L12 12l4.414-4.414A2 2 0 0 0 17 6.172V2" />
+    </svg>
+  </span>
+)
+
 export const tabIcons = {
   project: projectIcon,
   report: reportIcon,
   repeating_task: repeatingTaskIcon,
+  tempSession: tempSessionIcon,
 }
 
 /** The default fallback label used when the live store has no name and

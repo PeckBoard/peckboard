@@ -345,6 +345,29 @@ impl Db {
         .await
     }
 
+    /// Ids of temp sessions with no `user_tabs` row pointing at them —
+    /// orphans left by a client that died between creating the session and
+    /// opening its tab, or by a tab-close whose session delete failed
+    /// mid-way. The startup sweep runs these through the full
+    /// delete-session cleanup. Worker sessions are excluded defensively
+    /// (nothing sets `is_temp` on workers, but their lifecycle belongs to
+    /// the orchestrator either way).
+    pub async fn list_orphan_temp_session_ids(&self) -> anyhow::Result<Vec<String>> {
+        self.with_conn(move |conn| {
+            let has_tab = user_tabs::table
+                .filter(user_tabs::item_type.eq("session"))
+                .filter(user_tabs::item_id.eq(sessions::id));
+            sessions::table
+                .filter(sessions::is_temp.eq(true))
+                .filter(sessions::is_worker.eq(false))
+                .filter(diesel::dsl::not(diesel::dsl::exists(has_tab)))
+                .select(sessions::id)
+                .load(conn)
+                .map_err(Into::into)
+        })
+        .await
+    }
+
     /// Synchronous twin of [`create_session`], for WASM plugin host
     /// functions that run inside a blocking extism call. Same insert +
     /// return-the-row logic.

@@ -36,6 +36,10 @@ struct CreateSessionRequest {
     /// body stored in `system_prompt`; empty string clears both.
     #[serde(default)]
     system_prompt_name: Option<String>,
+    /// Temporary session: deleted automatically when the last tab pointing
+    /// at it is closed. Omitted/false creates a regular session.
+    #[serde(default)]
+    is_temp: bool,
 }
 
 #[derive(Deserialize)]
@@ -77,6 +81,9 @@ struct UpdateSessionRequest {
     last_activity: Option<String>,
     system_prompt_name: Option<String>,
     model_autoswitch: Option<Option<bool>>,
+    /// Set/clear the temp flag. `Some(false)` is the "Keep session" action —
+    /// it converts a temp session into a regular one that outlives its tab.
+    is_temp: Option<bool>,
 }
 
 pub fn router(state: Arc<AppState>) -> Router<Arc<AppState>> {
@@ -163,6 +170,7 @@ async fn create_session(
             model_autoswitch: body.model_autoswitch,
             system_prompt,
             system_prompt_name,
+            is_temp: body.is_temp,
             ..Default::default()
         })
         .await
@@ -359,6 +367,7 @@ async fn update_session(
         last_activity: body.last_activity,
         system_prompt: system_prompt_update,
         system_prompt_name: system_prompt_name_update,
+        is_temp: body.is_temp,
         ..Default::default()
     };
 
@@ -374,7 +383,8 @@ async fn update_session(
         || update.last_activity.is_some()
         || update.model_autoswitch.is_some()
         || update.system_prompt.is_some()
-        || update.system_prompt_name.is_some();
+        || update.system_prompt_name.is_some()
+        || update.is_temp.is_some();
 
     let session = if has_updates {
         state.db.update_session(&id, update).await
@@ -590,31 +600,7 @@ async fn delete_session(
         ));
     }
 
-    // Delete associated events first
-    state.db.delete_events_by_session(&id).await.map_err(|e| {
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(serde_json::json!({ "error": e.to_string() })),
-        )
-    })?;
-
-    // Remove attachments directory for this session
-    let attachments_dir = state.config.data_dir.join("attachments").join(&id);
-    if attachments_dir.exists()
-        && let Err(e) = std::fs::remove_dir_all(&attachments_dir)
-    {
-        tracing::warn!(
-            session_id = %id,
-            dir = %attachments_dir.display(),
-            "Failed to remove attachments dir during session delete: {e}"
-        );
-    }
-
-    // Clean up MCP config and tokens
-    crate::service::mcp_server::delete_mcp_config(&state.config.data_dir, &id);
-    state.mcp_tokens.revoke_by_session(&id).await;
-
-    let deleted = state.db.delete_session(&id).await.map_err(|e| {
+    let deleted = delete_session_core(&state, &id).await.map_err(|e| {
         (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(serde_json::json!({ "error": e.to_string() })),
@@ -628,6 +614,43 @@ async fn delete_session(
         ));
     }
 
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// Full session-delete cleanup, shared by DELETE /api/sessions/:id, the
+/// temp-session last-tab-close hook in `routes::me::delete_tab`, and the
+/// startup orphan sweep [`sweep_orphan_temp_sessions`]. Deletes the
+/// session's events, its attachments directory, its MCP config + tokens,
+/// then the row itself (which also drops its `user_tabs` entries), and
+/// broadcasts `session-deleted` so every connected client closes the tab
+/// strip entry and unmounts ChatView. Returns `Ok(false)` when the session
+/// row didn't exist. Policy checks (e.g. the worker refusal above) are the
+/// caller's job.
+pub async fn delete_session_core(state: &AppState, id: &str) -> anyhow::Result<bool> {
+    // Delete associated events first
+    state.db.delete_events_by_session(id).await?;
+
+    // Remove attachments directory for this session
+    let attachments_dir = state.config.data_dir.join("attachments").join(id);
+    if attachments_dir.exists()
+        && let Err(e) = std::fs::remove_dir_all(&attachments_dir)
+    {
+        tracing::warn!(
+            session_id = %id,
+            dir = %attachments_dir.display(),
+            "Failed to remove attachments dir during session delete: {e}"
+        );
+    }
+
+    // Clean up MCP config and tokens
+    crate::service::mcp_server::delete_mcp_config(&state.config.data_dir, id);
+    state.mcp_tokens.revoke_by_session(id).await;
+
+    let deleted = state.db.delete_session(id).await?;
+    if !deleted {
+        return Ok(false);
+    }
+
     // Tell every connected client the session is gone so other devices
     // (or other tabs on the same device) drop their tab strip entry,
     // wipe any cached events, and switch the body off the now-deleted
@@ -638,11 +661,35 @@ async fn delete_session(
         .broadcaster
         .broadcast(crate::ws::broadcaster::WsEvent {
             event_type: "session-deleted".into(),
-            session_id: id.clone(),
+            session_id: id.to_string(),
             data: serde_json::json!({ "session_id": id }),
         });
 
-    Ok(StatusCode::NO_CONTENT)
+    Ok(true)
+}
+
+/// Startup sweep: run the full delete cleanup over temp sessions that no
+/// tab points at anymore — orphans left by a client that died between
+/// creating the session and opening its tab, or by a last-tab-close whose
+/// delete failed mid-way. Failures are logged and retried on the next boot.
+pub async fn sweep_orphan_temp_sessions(state: &AppState) {
+    let ids = match state.db.list_orphan_temp_session_ids().await {
+        Ok(ids) => ids,
+        Err(e) => {
+            tracing::warn!("Temp-session sweep: listing orphans failed: {e}");
+            return;
+        }
+    };
+    for id in ids {
+        match delete_session_core(state, &id).await {
+            Ok(_) => {
+                tracing::info!(session_id = %id, "Temp-session sweep: deleted orphaned temp session");
+            }
+            Err(e) => {
+                tracing::warn!(session_id = %id, "Temp-session sweep: delete failed: {e}");
+            }
+        }
+    }
 }
 
 /// POST /api/sessions/:id/read -- mark session as read

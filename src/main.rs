@@ -265,6 +265,12 @@ async fn main() -> anyhow::Result<()> {
     // Scheduled backups: write tar.gz snapshots on a configured interval.
     // No-op unless backupIntervalHours + backupDir are set in config.json.
     peckboard::service::backup::spawn_scheduler(state.db.clone(), state.config.data_dir.clone());
+
+    // Temp-session orphan sweep: delete temp sessions no tab points at
+    // anymore (a client died between create and tab-open, or a
+    // last-tab-close delete failed mid-way). One-shot at boot; failures
+    // are retried on the next boot.
+    peckboard::routes::sessions::sweep_orphan_temp_sessions(&state).await;
     let app = api_router(state.clone())
         .layer(axum::extract::DefaultBodyLimit::max(20 * 1024 * 1024))
         .layer(middleware::from_fn(security_headers))

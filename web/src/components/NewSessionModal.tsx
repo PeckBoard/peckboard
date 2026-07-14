@@ -29,6 +29,8 @@ export default function NewSessionModal({ onClose }: Props) {
   // Chat sessions default OFF (workers default ON); a NULL column inherits
   // that, so an unchecked box just leaves auto-switch off.
   const [modelAutoswitch, setModelAutoswitch] = useState(false)
+  // Temp sessions are deleted server-side when their last tab is closed.
+  const [isTemp, setIsTemp] = useState(false)
   const [systemPromptName, setSystemPromptName] = useState<string | null>(null)
   const [newFolderName, setNewFolderName] = useState('')
   const [newFolderPath, setNewFolderPath] = useState('')
@@ -83,6 +85,7 @@ export default function NewSessionModal({ onClose }: Props) {
         effort || undefined,
         modelAutoswitch,
         systemPromptName,
+        isTemp,
       )
       setActiveSession(session.id)
       onClose()
@@ -197,6 +200,17 @@ export default function NewSessionModal({ onClose }: Props) {
               data-testid="new-session-autoswitch"
             />
             <span>Allow auto-switching to a cheaper model</span>
+          </label>
+        </div>
+        <div className="form-field">
+          <label className="form-checkbox-label">
+            <input
+              type="checkbox"
+              checked={isTemp}
+              onChange={(e) => setIsTemp(e.target.checked)}
+              data-testid="new-session-temp"
+            />
+            <span>Temporary — delete this session when its tab is closed</span>
           </label>
         </div>
         {error && <p className="form-error">{error}</p>}

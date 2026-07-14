@@ -94,6 +94,11 @@ pub struct Session {
     /// completed work against it. Set by the review model-switch, cleared
     /// after a single injection. See [`crate::handover`].
     pub pending_plan_review: bool,
+    /// Temporary session: deleted automatically (full delete-session
+    /// cleanup) when the last `user_tabs` row pointing at it is closed —
+    /// see `routes::me::delete_tab` and the startup sweep in
+    /// `routes::sessions`. Cleared by the "Keep session" action.
+    pub is_temp: bool,
 }
 
 #[derive(Insertable, Deserialize, Debug, Default)]
@@ -125,6 +130,7 @@ pub struct NewSession {
     pub context_reset_ts: Option<i64>,
     pub system_prompt_name: Option<String>,
     pub model_autoswitch: Option<bool>,
+    pub is_temp: bool,
 }
 #[derive(AsChangeset, Deserialize, Debug, Default)]
 #[diesel(table_name = sessions)]
@@ -150,6 +156,7 @@ pub struct UpdateSession {
     pub context_reset_ts: Option<Option<i64>>,
     pub model_autoswitch: Option<Option<bool>>,
     pub pending_plan_review: Option<bool>,
+    pub is_temp: Option<bool>,
 }
 // ── Repeating Tasks ──────────────────────────────────────────────────
 

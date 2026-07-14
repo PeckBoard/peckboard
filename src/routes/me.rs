@@ -48,6 +48,11 @@ pub struct TabView {
     /// enforces the policy via POST /clear → 409. Always false for
     /// project / report / repeating-task tabs.
     pub is_repeating_task_session: bool,
+    /// True iff this tab refers to a temp session — one deleted outright
+    /// when its last tab (across all users) is closed. The strip marks the
+    /// chip and offers a "Keep session" action. Always false for
+    /// non-session tabs.
+    pub is_temp: bool,
 }
 
 #[derive(Deserialize)]
@@ -136,10 +141,15 @@ async fn list_tabs(State(state): State<Arc<AppState>>, req: Request<Body>) -> im
 
     let mut out: Vec<TabView> = Vec::with_capacity(tabs.len());
     for t in tabs {
-        let (name, is_worker, is_repeating_task_session) = match t.item_type.as_str() {
+        let (name, is_worker, is_repeating_task_session, is_temp) = match t.item_type.as_str() {
             "session" => match state.db.get_session(&t.item_id).await.ok().flatten() {
-                Some(s) => (Some(s.name), s.is_worker, s.repeating_task_id.is_some()),
-                None => (None, false, false),
+                Some(s) => (
+                    Some(s.name),
+                    s.is_worker,
+                    s.repeating_task_id.is_some(),
+                    s.is_temp,
+                ),
+                None => (None, false, false, false),
             },
             "project" => (
                 state
@@ -149,6 +159,7 @@ async fn list_tabs(State(state): State<Arc<AppState>>, req: Request<Body>) -> im
                     .ok()
                     .flatten()
                     .map(|p| p.name),
+                false,
                 false,
                 false,
             ),
@@ -162,14 +173,16 @@ async fn list_tabs(State(state): State<Arc<AppState>>, req: Request<Body>) -> im
                     .map(|task| task.name),
                 false,
                 false,
+                false,
             ),
             "report" => (
                 split_report_id(&t.item_id)
                     .and_then(|(folder, file)| report_label(&state, &folder, &file)),
                 false,
                 false,
+                false,
             ),
-            _ => (None, false, false),
+            _ => (None, false, false, false),
         };
         if let Some(name) = name {
             out.push(TabView {
@@ -179,6 +192,7 @@ async fn list_tabs(State(state): State<Arc<AppState>>, req: Request<Body>) -> im
                 name,
                 is_worker,
                 is_repeating_task_session,
+                is_temp,
             });
         }
     }
@@ -243,10 +257,16 @@ async fn upsert_tab(State(state): State<Arc<AppState>>, req: Request<Body>) -> i
             // upsert path has already verified the item exists, so a
             // missing name here would be a TOCTOU race — fall back to
             // empty rather than 500ing.
-            let (name, is_worker, is_repeating_task_session) = match tab.item_type.as_str() {
+            let (name, is_worker, is_repeating_task_session, is_temp) = match tab.item_type.as_str()
+            {
                 "session" => match state.db.get_session(&tab.item_id).await.ok().flatten() {
-                    Some(s) => (s.name, s.is_worker, s.repeating_task_id.is_some()),
-                    None => (String::new(), false, false),
+                    Some(s) => (
+                        s.name,
+                        s.is_worker,
+                        s.repeating_task_id.is_some(),
+                        s.is_temp,
+                    ),
+                    None => (String::new(), false, false, false),
                 },
                 "project" => (
                     state
@@ -257,6 +277,7 @@ async fn upsert_tab(State(state): State<Arc<AppState>>, req: Request<Body>) -> i
                         .flatten()
                         .map(|p| p.name)
                         .unwrap_or_default(),
+                    false,
                     false,
                     false,
                 ),
@@ -271,6 +292,7 @@ async fn upsert_tab(State(state): State<Arc<AppState>>, req: Request<Body>) -> i
                         .unwrap_or_default(),
                     false,
                     false,
+                    false,
                 ),
                 "report" => (
                     split_report_id(&tab.item_id)
@@ -278,8 +300,9 @@ async fn upsert_tab(State(state): State<Arc<AppState>>, req: Request<Body>) -> i
                         .unwrap_or_default(),
                     false,
                     false,
+                    false,
                 ),
-                _ => (String::new(), false, false),
+                _ => (String::new(), false, false, false),
             };
             Ok(Json(TabView {
                 item_type: tab.item_type,
@@ -288,6 +311,7 @@ async fn upsert_tab(State(state): State<Arc<AppState>>, req: Request<Body>) -> i
                 name,
                 is_worker,
                 is_repeating_task_session,
+                is_temp,
             }))
         }
         // Item doesn't exist — refuse to create the tab. Stops phantom
@@ -304,8 +328,9 @@ async fn upsert_tab(State(state): State<Arc<AppState>>, req: Request<Body>) -> i
     }
 }
 
-/// DELETE /api/me/tabs/:item_type/:item_id — close a tab (without
-/// touching the underlying session/project).
+/// DELETE /api/me/tabs/:item_type/:item_id — close a tab. Does not touch
+/// the underlying item — EXCEPT for temp sessions, which are deleted
+/// outright when their last tab (across all users) goes away.
 async fn delete_tab(
     State(state): State<Arc<AppState>>,
     Path((item_type, item_id)): Path<(String, String)>,
@@ -314,15 +339,64 @@ async fn delete_tab(
     let user_id = auth_user(&req).user_id.clone();
     validate_item_type(&item_type)?;
 
-    match state
+    if let Err(e) = state
         .db
         .delete_user_tab(&user_id, &item_type, &item_id)
         .await
     {
-        Ok(_) => Ok(StatusCode::NO_CONTENT),
-        Err(e) => Err((
+        return Err((
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(serde_json::json!({ "error": e.to_string() })),
-        )),
+        ));
+    }
+
+    // Temp sessions live only as long as some tab points at them: when the
+    // last tab closes, delete the session — same cleanup +
+    // `session-deleted` broadcast as DELETE /api/sessions/:id. Failures are
+    // logged, never surfaced: closing a tab must succeed even when the temp
+    // cleanup can't run (the startup sweep in `routes::sessions` converges
+    // leftovers on the next boot).
+    if item_type == "session" {
+        maybe_delete_temp_session(&state, &item_id).await;
+    }
+
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// Delete `session_id` iff it is a temp, non-worker session with zero
+/// remaining tabs. Part of the tab-close path — see [`delete_tab`].
+async fn maybe_delete_temp_session(state: &AppState, session_id: &str) {
+    let session = match state.db.get_session(session_id).await {
+        Ok(Some(s)) => s,
+        // Already gone (double-close race) — nothing to do.
+        Ok(None) => return,
+        Err(e) => {
+            tracing::warn!(session_id = %session_id, "Temp-session check failed: {e}");
+            return;
+        }
+    };
+    // No creation path sets is_temp on a worker, but a worker must never be
+    // deleted from a tab close — check defensively, mirroring the refusal
+    // in DELETE /api/sessions/:id.
+    if !session.is_temp || session.is_worker {
+        return;
+    }
+    match state
+        .db
+        .count_user_tabs_for_item("session", session_id)
+        .await
+    {
+        Ok(0) => match crate::routes::sessions::delete_session_core(state, session_id).await {
+            Ok(_) => {
+                tracing::info!(session_id = %session_id, "Deleted temp session on last tab close");
+            }
+            Err(e) => {
+                tracing::warn!(session_id = %session_id, "Failed to delete temp session on last tab close: {e}");
+            }
+        },
+        Ok(_) => {}
+        Err(e) => {
+            tracing::warn!(session_id = %session_id, "Temp-session tab count failed: {e}");
+        }
     }
 }

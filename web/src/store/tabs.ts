@@ -31,6 +31,12 @@ export interface Tab {
    *  keep firing past. Backend enforces via POST /clear → 409. Always
    *  false for non-session tabs. */
   isRepeatingTaskSession: boolean
+  /** Denormalized `sessions.is_temp` for session tabs (always false for
+   *  other kinds). Temp sessions are deleted server-side — full cleanup +
+   *  `session-deleted` broadcast — when their last tab (across all users)
+   *  is closed. The strip marks the chip with an hourglass icon and the
+   *  context menu offers "Keep session" to clear the flag. */
+  isTemp: boolean
 }
 
 interface TabsState {
@@ -64,6 +70,7 @@ interface ApiTab {
   name?: string
   is_worker?: boolean
   is_repeating_task_session?: boolean
+  is_temp?: boolean
 }
 
 function fromApi(t: ApiTab): Tab {
@@ -74,6 +81,7 @@ function fromApi(t: ApiTab): Tab {
     name: t.name ?? '',
     isWorker: t.is_worker ?? false,
     isRepeatingTaskSession: t.is_repeating_task_session ?? false,
+    isTemp: t.is_temp ?? false,
   }
 }
 
@@ -180,6 +188,7 @@ export const useTabsStore = create<TabsState>((set, get) => ({
           name: '',
           isWorker: false,
           isRepeatingTaskSession: false,
+          isTemp: false,
         },
         ...s.tabs,
       ],
