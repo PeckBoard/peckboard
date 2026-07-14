@@ -371,3 +371,106 @@ async fn ssh_fleet_plugin_end_to_end() {
         );
     }
 }
+
+/// One failed `handle` call must not poison the extism instance.
+///
+/// Live incident 2026-07-14: ssh-fleet's first slow SSH call blew the extism
+/// call budget, the epoch deadline trapped the wasm, and every subsequent
+/// call on the poisoned instance failed instantly (0–1ms) — all routes
+/// answered "plugin did not produce a response" until a core restart. Core
+/// now heals a failed call by resetting the instance and re-running `init`
+/// (`call_handle_healing` in src/plugin/manager.rs).
+///
+/// Reproduce the real failure: shrink the call-budget ceiling to 2s
+/// (`with_max_call_timeout`), point a probe at a TCP listener that accepts
+/// but never speaks SSH, and give it a 6s connect timeout — the wasm resumes
+/// past its epoch deadline and traps, exactly like production. The next call
+/// must then answer instead of failing instantly.
+#[tokio::test]
+async fn ssh_fleet_plugin_heals_after_failed_call() {
+    let Some(wasm) = plugin_wasm() else {
+        eprintln!(
+            "SKIP ssh_fleet_plugin_heals_after_failed_call: plugin wasm not built \
+             (run peck-plugins/ssh-fleet/build.sh)"
+        );
+        return;
+    };
+
+    let dir = tempfile::tempdir().unwrap();
+    let data_dir = dir.path();
+    let plugins_dir = data_dir.join("plugins");
+    std::fs::create_dir_all(&plugins_dir).unwrap();
+    std::fs::copy(&wasm, plugins_dir.join(format!("{PLUGIN_ID}.wasm"))).unwrap();
+
+    let db = Db::open(data_dir).unwrap();
+    let ts = chrono::Utc::now().to_rfc3339();
+    db.create_folder(NewFolder {
+        id: "f1".into(),
+        name: "Test folder".into(),
+        path: data_dir.to_string_lossy().to_string(),
+        created_at: ts.clone(),
+    })
+    .await
+    .unwrap();
+    db.create_session(NewSession {
+        id: "caller-1".into(),
+        name: "Caller".into(),
+        folder_id: "f1".into(),
+        project_id: None,
+        is_worker: true,
+        created_at: ts.clone(),
+        last_activity: ts,
+        ..Default::default()
+    })
+    .await
+    .unwrap();
+
+    // Make the SSH connect attempt (6s) outlive the call budget (2s) so the
+    // epoch deadline fires while the probe is still inside the host call.
+    db.set_plugin_setting(PLUGIN_ID, "connect_timeout_secs", &json!(6))
+        .await
+        .unwrap();
+
+    let plugins =
+        PluginManager::new(data_dir, db.clone()).with_max_call_timeout(Duration::from_secs(2));
+    plugins.load_all().await.unwrap();
+    let info = plugins
+        .decide(PLUGIN_ID, true)
+        .await
+        .unwrap()
+        .expect("ssh-fleet plugin should be loaded");
+    assert_eq!(info.status, "approved", "plugin must be active: {info:?}");
+
+    let ctx = json!({ "sessionId": "caller-1", "folderId": "f1" });
+
+    // A TCP endpoint that accepts the connection but never sends the SSH
+    // version banner — the russh handshake hangs until its connect timeout.
+    let hang = TcpListener::bind("127.0.0.1:0").unwrap();
+    let hang_port = hang.local_addr().unwrap().port();
+
+    let add = invoke(
+        &plugins,
+        "ssh_host_add",
+        json!({"label": "hang", "hostname": "127.0.0.1", "port": hang_port,
+               "username": "u", "password": "p"}),
+        &ctx,
+    )
+    .await;
+    assert_eq!(add["host"]["label"], json!("hang"), "add: {add}");
+
+    // Poison: the probe overruns the 2s budget → real epoch-timeout trap.
+    let poisoned = plugins
+        .invoke_mcp_tool("ssh_probe", json!({"host": "hang"}), ctx.clone())
+        .await
+        .expect("plugin owns ssh_probe");
+    assert!(
+        poisoned.is_err(),
+        "probe past the call budget must fail the call: {poisoned:?}"
+    );
+
+    // Healed: the very next call must answer normally — without the healing
+    // fix it fails instantly on the poisoned instance.
+    let res = invoke(&plugins, "ssh_host_list", json!({}), &ctx).await;
+    assert_eq!(res["count"], json!(1), "post-trap list must answer: {res}");
+    drop(hang);
+}

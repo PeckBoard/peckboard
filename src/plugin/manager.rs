@@ -41,8 +41,9 @@ const CALL_TIMEOUT: Duration = Duration::from_secs(2);
 /// Ceiling for a manifest-declared `call_timeout_secs`. Bounds how long a
 /// misbehaving plugin can pin one of its per-plugin mutexes, while leaving
 /// room for genuinely slow tool work (e.g. a certificate issuance driven
-/// through an outbound HTTP host call).
-const MAX_CALL_TIMEOUT: Duration = Duration::from_secs(180);
+/// through an outbound HTTP host call, or an `ssh_run` command running up
+/// to its 600s tool-side cap).
+const MAX_CALL_TIMEOUT: Duration = Duration::from_secs(610);
 /// Default per-call budget for a `provider.send` dispatch (one full agent
 /// turn, HTTP round-trips included). Deliberately ABOVE the normal
 /// 2–180s hook clamp: extism pins the call timeout per instance, so a plugin
@@ -165,7 +166,7 @@ enum ApprovalState {
 struct LoadedPlugin {
     name: String,
     manifest: PluginManifest,
-    plugin: Arc<Mutex<Plugin>>,
+    plugin: Arc<Mutex<PluginCell>>,
     /// Canonical (sorted, newline-joined) form of `manifest.hooks` — the
     /// exact string an approval decision is stored and compared against.
     hooks_canonical: String,
@@ -438,6 +439,57 @@ fn run_init(plugin: &mut Plugin, config: String) -> Result<(), String> {
         .map(|_| ())
         .map_err(|e| e.to_string())
 }
+/// A live extism instance plus everything needed to rebuild it in place.
+///
+/// extism never reinstantiates a non-WASI guest after a failed call — a trap
+/// or epoch timeout leaves the guest (QuickJS) state poisoned and every later
+/// call fails instantly (live incident 2026-07-14: one slow SSH call bricked
+/// ssh-fleet until a core restart). `Plugin::reset` doesn't help: it only
+/// clears kernel memory, not the trapped guest. Healing means dropping the
+/// instance and building a fresh one from the same wasm + host wiring.
+struct PluginCell {
+    plugin: Plugin,
+    /// Plugin id — config lookup + log labels for the healing path.
+    name: String,
+    /// For re-reading `plugins.<name>.config` when re-running `init`.
+    plugins_dir: PathBuf,
+    /// Rebuild a fresh instance: same wasm, host functions, shared slots,
+    /// and call budget as the one it replaces.
+    rebuild: Box<dyn Fn() -> anyhow::Result<Plugin> + Send + Sync>,
+}
+
+impl PluginCell {
+    /// Call the plugin's `handle` export; on failure rebuild the instance and
+    /// re-run `init` (config is the only per-instance state core feeds a
+    /// plugin) so the failure can't poison later calls. Returns the original
+    /// error either way.
+    fn call_handle(&mut self, input: String) -> Result<String, extism::Error> {
+        let result = self.plugin.call::<String, String>("handle", input);
+        if result.is_err() {
+            match (self.rebuild)() {
+                Ok(fresh) => {
+                    self.plugin = fresh;
+                    let config = read_plugin_config(&self.plugins_dir, &self.name);
+                    if let Err(e) = run_init(&mut self.plugin, config) {
+                        warn!(
+                            "Plugin '{}': re-init after instance rebuild failed: {e}",
+                            self.name
+                        );
+                    } else {
+                        info!("Plugin '{}': instance rebuilt after failed call", self.name);
+                    }
+                }
+                Err(e) => {
+                    warn!(
+                        "Plugin '{}': rebuild after failed call failed: {e}",
+                        self.name
+                    );
+                }
+            }
+        }
+        result
+    }
+}
 
 /// Process-global plugin manager for fire-and-forget notification hooks.
 ///
@@ -496,6 +548,10 @@ pub struct PluginManager {
     /// Per-call budget for `provider.send` dispatches; also the floor for a
     /// provider plugin's extism instance timeout (set at load).
     provider_send_timeout: Duration,
+    /// Ceiling applied to a manifest-declared `call_timeout_secs` (default
+    /// [`MAX_CALL_TIMEOUT`]). Tests shrink it to provoke real epoch-timeout
+    /// traps in seconds instead of minutes.
+    max_call_timeout: Duration,
 }
 
 impl PluginManager {
@@ -514,6 +570,7 @@ impl PluginManager {
             self_weak: std::sync::RwLock::new(None),
             plugin_providers: Mutex::new(HashMap::new()),
             provider_send_timeout: DEFAULT_PROVIDER_SEND_TIMEOUT,
+            max_call_timeout: MAX_CALL_TIMEOUT,
         }
     }
 
@@ -522,6 +579,15 @@ impl PluginManager {
     /// plugin's extism instance timeout at load time.
     pub fn with_provider_send_timeout(mut self, timeout: Duration) -> Self {
         self.provider_send_timeout = timeout.max(CALL_TIMEOUT);
+        self
+    }
+
+    /// Override the ceiling for a manifest-declared `call_timeout_secs`
+    /// (default 610s). Must be called before `load_all`: the clamped budget
+    /// is baked into each plugin's extism instance timeout at load time.
+    /// Primarily a test hook — a tiny ceiling makes a hung call trap fast.
+    pub fn with_max_call_timeout(mut self, ceiling: Duration) -> Self {
+        self.max_call_timeout = ceiling.max(CALL_TIMEOUT);
         self
     }
 
@@ -570,6 +636,7 @@ impl PluginManager {
             self_weak: std::sync::RwLock::new(None),
             plugin_providers: Mutex::new(HashMap::new()),
             provider_send_timeout: DEFAULT_PROVIDER_SEND_TIMEOUT,
+            max_call_timeout: MAX_CALL_TIMEOUT,
         }
     }
 
@@ -652,50 +719,64 @@ impl PluginManager {
         let pending_provider: PendingProviderSlot = Arc::new(std::sync::RwLock::new(None));
 
         // Building the sandboxed instance is repeatable: the manifest export
-        // may declare a larger `call_timeout_secs`, and Extism pins the call
-        // timeout at construction — so the plugin is rebuilt further down with
-        // the clamped budget when one was declared. The shared slots above are
-        // captured by the closure, so a rebuilt instance keeps the exact same
-        // permission/invocation/user state the host functions read.
-        let build_plugin = |call_timeout: Duration| -> anyhow::Result<Plugin> {
-            let manifest = ExtismManifest::new([wasm.clone()])
-                .with_timeout(call_timeout)
-                .with_memory_max(MEMORY_LIMIT_PAGES);
-            let functions = match &self.db {
-                // `name` is the plugin's id (its `.wasm` file stem), the same id
-                // its `plugin_settings` rows are keyed by — so the self-storage
-                // host functions stay scoped to this plugin's own namespace.
-                Some(db) => super::host::host_functions(
-                    db,
-                    &name,
-                    granted_permissions.clone(),
-                    invocation.clone(),
-                    self.live.clone(),
-                    user.clone(),
-                    // plugins_dir is `<data_dir>/plugins`; the browser-run host
-                    // functions need the data dir itself.
-                    self.plugins_dir
-                        .parent()
-                        .map(std::path::Path::to_path_buf)
-                        .unwrap_or_else(|| self.plugins_dir.clone()),
-                    self.provider_runtime.clone(),
-                    pending_provider.clone(),
-                ),
-                None => Vec::new(),
-            };
-            // Shrink wasmtime's per-memory address-space reservation from the 4 GiB
-            // default down to our growth cap (see `MEMORY_RESERVATION_BYTES`). Built
-            // via `PluginBuilder` so we can hand wasmtime a custom `Config`;
-            // `Plugin::new(manifest, functions, true)` is just this chain without the
-            // config override.
-            let mut wasmtime_config = wasmtime::Config::new();
-            wasmtime_config.memory_reservation(MEMORY_RESERVATION_BYTES);
-            PluginBuilder::new(manifest)
-                .with_functions(functions)
-                .with_wasi(true)
-                .with_wasmtime_config(wasmtime_config)
-                .build()
-                .map_err(Into::into)
+        // may declare a larger `call_timeout_secs` (Extism pins the call
+        // timeout at construction), and a failed call heals by rebuilding the
+        // instance (see `PluginCell`). The closure owns clones of everything
+        // it needs so the cell can keep it for the plugin's whole life; the
+        // shared slots are captured by Arc, so a rebuilt instance keeps the
+        // exact same permission/invocation/user state the host functions read.
+        let build_plugin: Arc<dyn Fn(Duration) -> anyhow::Result<Plugin> + Send + Sync> = {
+            let wasm = wasm;
+            let db = self.db.clone();
+            let name = name.clone();
+            let granted_permissions = granted_permissions.clone();
+            let invocation = invocation.clone();
+            let live = self.live.clone();
+            let user = user.clone();
+            // plugins_dir is `<data_dir>/plugins`; the browser-run host
+            // functions need the data dir itself.
+            let data_dir = self
+                .plugins_dir
+                .parent()
+                .map(std::path::Path::to_path_buf)
+                .unwrap_or_else(|| self.plugins_dir.clone());
+            let provider_runtime = self.provider_runtime.clone();
+            let pending_provider = pending_provider.clone();
+            Arc::new(move |call_timeout: Duration| -> anyhow::Result<Plugin> {
+                let manifest = ExtismManifest::new([wasm.clone()])
+                    .with_timeout(call_timeout)
+                    .with_memory_max(MEMORY_LIMIT_PAGES);
+                let functions = match &db {
+                    // `name` is the plugin's id (its `.wasm` file stem), the same id
+                    // its `plugin_settings` rows are keyed by — so the self-storage
+                    // host functions stay scoped to this plugin's own namespace.
+                    Some(db) => super::host::host_functions(
+                        db,
+                        &name,
+                        granted_permissions.clone(),
+                        invocation.clone(),
+                        live.clone(),
+                        user.clone(),
+                        data_dir.clone(),
+                        provider_runtime.clone(),
+                        pending_provider.clone(),
+                    ),
+                    None => Vec::new(),
+                };
+                // Shrink wasmtime's per-memory address-space reservation from the 4 GiB
+                // default down to our growth cap (see `MEMORY_RESERVATION_BYTES`). Built
+                // via `PluginBuilder` so we can hand wasmtime a custom `Config`;
+                // `Plugin::new(manifest, functions, true)` is just this chain without the
+                // config override.
+                let mut wasmtime_config = wasmtime::Config::new();
+                wasmtime_config.memory_reservation(MEMORY_RESERVATION_BYTES);
+                PluginBuilder::new(manifest)
+                    .with_functions(functions)
+                    .with_wasi(true)
+                    .with_wasmtime_config(wasmtime_config)
+                    .build()
+                    .map_err(Into::into)
+            })
         };
         let mut plugin = build_plugin(CALL_TIMEOUT)?;
         // Call manifest export to get hook declarations.
@@ -846,7 +927,7 @@ impl PluginManager {
         // serialises per plugin anyway.
         let mut call_timeout = plugin_manifest
             .call_timeout_secs
-            .map(|s| Duration::from_secs(s).clamp(CALL_TIMEOUT, MAX_CALL_TIMEOUT))
+            .map(|s| Duration::from_secs(s).clamp(CALL_TIMEOUT, self.max_call_timeout))
             .unwrap_or(CALL_TIMEOUT);
         if plugin_manifest
             .hooks
@@ -890,10 +971,19 @@ impl PluginManager {
             info!("Plugin '{name}' loaded but inert — awaiting hook approval");
         }
 
+        let cell = {
+            let rebuild = build_plugin.clone();
+            PluginCell {
+                plugin,
+                name: name.clone(),
+                plugins_dir: self.plugins_dir.clone(),
+                rebuild: Box::new(move || rebuild(call_timeout)),
+            }
+        };
         Ok(LoadedPlugin {
             name,
             manifest: plugin_manifest,
-            plugin: Arc::new(Mutex::new(plugin)),
+            plugin: Arc::new(Mutex::new(cell)),
             hooks_canonical,
             approval,
             init_error,
@@ -917,7 +1007,7 @@ impl PluginManager {
     /// can take up to its call timeout (2 s default; a manifest may raise it
     /// via `call_timeout_secs`, clamped to `MAX_CALL_TIMEOUT`).
     pub async fn dispatch(&self, hook: &str, payload: serde_json::Value) -> HookResult {
-        let targets: Vec<(String, Arc<Mutex<Plugin>>)> = {
+        let targets: Vec<(String, Arc<Mutex<PluginCell>>)> = {
             let plugins = self.plugins.lock().await;
             plugins
                 .iter()
@@ -935,7 +1025,7 @@ impl PluginManager {
 
             let result = {
                 let mut guard = plugin.lock().await;
-                guard.call::<String, String>("handle".to_string(), call_input.to_string())
+                guard.call_handle(call_input.to_string())
             };
 
             match result {
@@ -993,7 +1083,7 @@ impl PluginManager {
     ) -> HookResult {
         type ScopedTarget = (
             String,
-            Arc<Mutex<Plugin>>,
+            Arc<Mutex<PluginCell>>,
             Arc<std::sync::RwLock<Option<super::host::UserContext>>>,
         );
         let targets: Vec<ScopedTarget> = {
@@ -1022,7 +1112,7 @@ impl PluginManager {
             }
             let result = {
                 let mut guard = plugin.lock().await;
-                guard.call::<String, String>("handle".to_string(), call_input.to_string())
+                guard.call_handle(call_input.to_string())
             };
             if let Ok(mut slot) = user_slot.write() {
                 *slot = None;
@@ -1069,7 +1159,7 @@ impl PluginManager {
     pub async fn dispatch_authed(&self, hook: &str, user_id: &str, payload: serde_json::Value) {
         type AuthedTarget = (
             String,
-            Arc<Mutex<Plugin>>,
+            Arc<Mutex<PluginCell>>,
             Arc<std::sync::RwLock<Option<super::host::UserContext>>>,
         );
         let targets: Vec<AuthedTarget> = {
@@ -1095,7 +1185,7 @@ impl PluginManager {
             }
             let result = {
                 let mut guard = plugin.lock().await;
-                guard.call::<String, String>("handle", call_input.clone())
+                guard.call_handle(call_input.clone())
             };
             if let Ok(mut slot) = user_slot.write() {
                 *slot = None;
@@ -1122,7 +1212,7 @@ impl PluginManager {
         let hook = hook.to_string();
         let call_input = serde_json::json!({ "hook": hook, "payload": payload }).to_string();
         tokio::spawn(async move {
-            let targets: Vec<(String, Arc<Mutex<Plugin>>)> = {
+            let targets: Vec<(String, Arc<Mutex<PluginCell>>)> = {
                 let plugins = plugins_ref.lock().await;
                 plugins
                     .iter()
@@ -1133,7 +1223,7 @@ impl PluginManager {
             for (name, plugin) in targets {
                 let result = {
                     let mut guard = plugin.lock().await;
-                    guard.call::<String, String>("handle", call_input.clone())
+                    guard.call_handle(call_input.clone())
                 };
                 if let Err(e) = result {
                     warn!("Plugin '{name}' failed on notify hook '{hook}': {e}");
@@ -1159,7 +1249,7 @@ impl PluginManager {
         plugin_id: &str,
         payload: serde_json::Value,
     ) -> Result<(), String> {
-        let target: Option<Arc<Mutex<Plugin>>> = {
+        let target: Option<Arc<Mutex<PluginCell>>> = {
             let plugins = self.plugins.lock().await;
             plugins
                 .iter()
@@ -1182,7 +1272,7 @@ impl PluginManager {
             // on the plugin mutex and safe for the provider host functions
             // to `block_on` the runtime while the wasm call is executing.
             let mut guard = plugin.blocking_lock();
-            guard.call::<String, String>("handle", call_input)
+            guard.call_handle(call_input)
         });
         // The extism instance timeout traps the wasm at the provider-send
         // budget; this outer window is only a backstop for that trap
@@ -1246,7 +1336,7 @@ impl PluginManager {
         };
 
         // Plugins currently active and declaring the register hook.
-        let mut targets: Vec<(String, Arc<Mutex<Plugin>>, PendingProviderSlot)> = {
+        let mut targets: Vec<(String, Arc<Mutex<PluginCell>>, PendingProviderSlot)> = {
             let plugins = self.plugins.lock().await;
             plugins
                 .iter()
@@ -1285,7 +1375,7 @@ impl PluginManager {
                 serde_json::json!({ "hook": PROVIDER_REGISTER_HOOK, "payload": {} }).to_string();
             let result = tokio::task::spawn_blocking(move || {
                 let mut guard = plugin.blocking_lock();
-                guard.call::<String, String>("handle", call_input)
+                guard.call_handle(call_input)
             })
             .await;
             match result {
@@ -1384,7 +1474,7 @@ impl PluginManager {
         // only long enough to clone the per-plugin Arc<Mutex<Plugin>>.
         // (plugin name, plugin handle, captured path params) for each
         // plugin whose declared routes match this request.
-        type HttpTarget = (String, Arc<Mutex<Plugin>>, BTreeMap<String, String>);
+        type HttpTarget = (String, Arc<Mutex<PluginCell>>, BTreeMap<String, String>);
         let targets: Vec<HttpTarget> = {
             let plugins = self.plugins.lock().await;
             plugins
@@ -1424,7 +1514,7 @@ impl PluginManager {
 
             let result = {
                 let mut guard = plugin.lock().await;
-                guard.call::<String, String>("handle", call_input.to_string())
+                guard.call_handle(call_input.to_string())
             };
 
             match result {
@@ -1477,7 +1567,7 @@ impl PluginManager {
     ) -> PluginHttpOutcome {
         type AuthedTarget = (
             String,
-            Arc<Mutex<Plugin>>,
+            Arc<Mutex<PluginCell>>,
             BTreeMap<String, String>,
             Arc<std::sync::RwLock<Option<super::host::UserContext>>>,
         );
@@ -1539,7 +1629,7 @@ impl PluginManager {
             }
             let result = {
                 let mut guard = plugin.lock().await;
-                guard.call::<String, String>("handle", call_input.to_string())
+                guard.call_handle(call_input.to_string())
             };
             if let Ok(mut slot) = user_slot.write() {
                 *slot = None;
@@ -1677,7 +1767,7 @@ impl PluginManager {
         let new_state = if approve {
             let init_config = read_plugin_config(&self.plugins_dir, plugin_id);
             let mut guard = plugin.lock().await;
-            if let Err(e) = run_init(&mut guard, init_config) {
+            if let Err(e) = run_init(&mut guard.plugin, init_config) {
                 warn!("Plugin '{plugin_id}' init failed on approval: {e}");
                 init_error = Some(e);
             }
@@ -1738,7 +1828,7 @@ impl PluginManager {
             if let Some(pos) = plugins.iter().position(|p| p.name == loaded.name) {
                 let old = plugins.remove(pos);
                 let mut guard = old.plugin.lock().await;
-                if let Err(e) = guard.call::<&str, String>("shutdown", "") {
+                if let Err(e) = guard.plugin.call::<&str, String>("shutdown", "") {
                     warn!("Plugin '{}' shutdown on upgrade failed: {e}", loaded.name);
                 }
             }
@@ -1843,7 +1933,7 @@ impl PluginManager {
                 Some(pos) => {
                     let old = plugins.remove(pos);
                     let mut guard = old.plugin.lock().await;
-                    if let Err(e) = guard.call::<&str, String>("shutdown", "") {
+                    if let Err(e) = guard.plugin.call::<&str, String>("shutdown", "") {
                         warn!("Plugin '{id}' shutdown on uninstall failed: {e}");
                     }
                     true
@@ -1879,7 +1969,7 @@ impl PluginManager {
         let mut plugins = self.plugins.lock().await;
         for loaded in plugins.iter() {
             let mut guard = loaded.plugin.lock().await;
-            if let Err(e) = guard.call::<&str, String>("shutdown", "") {
+            if let Err(e) = guard.plugin.call::<&str, String>("shutdown", "") {
                 warn!("Plugin '{}' shutdown failed: {e}", loaded.name);
             }
         }
@@ -2041,7 +2131,7 @@ impl PluginManager {
         // Find the single active plugin that declared this tool. Hold the
         // outer lock only long enough to clone its handle.
         type InvocationSlot = Arc<std::sync::RwLock<Option<super::host::InvocationContext>>>;
-        let target: Option<(String, Arc<Mutex<Plugin>>, InvocationSlot)> = {
+        let target: Option<(String, Arc<Mutex<PluginCell>>, InvocationSlot)> = {
             let plugins = self.plugins.lock().await;
             plugins
                 .iter()
@@ -2073,7 +2163,7 @@ impl PluginManager {
 
         let result = {
             let mut guard = plugin.lock().await;
-            guard.call::<String, String>("handle", call_input.to_string())
+            guard.call_handle(call_input.to_string())
         };
 
         // Clear the trusted context the moment `handle` returns — it must never
