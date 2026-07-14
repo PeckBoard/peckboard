@@ -2785,6 +2785,30 @@ host_fn!(peckboard_exec_any(user_data: HostState; input: String) -> String {
     Ok(exec_impl(&db, &input, &inv, false))
 });
 
+host_fn!(peckboard_ssh_probe(user_data: HostState; input: String) -> String {
+    let (_db, _plugin_id, ok) = state_and_permission(&user_data, "ssh")?;
+    if !ok { return Ok(error_json("plugin lacks the 'ssh' permission")); }
+    Ok(super::ssh::probe_impl(&input))
+});
+
+host_fn!(peckboard_ssh_exec(user_data: HostState; input: String) -> String {
+    let (_db, _plugin_id, ok) = state_and_permission(&user_data, "ssh")?;
+    if !ok { return Ok(error_json("plugin lacks the 'ssh' permission")); }
+    Ok(super::ssh::exec_impl(&input))
+});
+
+host_fn!(peckboard_ssh_read_file(user_data: HostState; input: String) -> String {
+    let (_db, _plugin_id, ok) = state_and_permission(&user_data, "ssh")?;
+    if !ok { return Ok(error_json("plugin lacks the 'ssh' permission")); }
+    Ok(super::ssh::read_file_impl(&input))
+});
+
+host_fn!(peckboard_ssh_write_file(user_data: HostState; input: String) -> String {
+    let (_db, _plugin_id, ok) = state_and_permission(&user_data, "ssh")?;
+    if !ok { return Ok(error_json("plugin lacks the 'ssh' permission")); }
+    Ok(super::ssh::write_file_impl(&input))
+});
+
 host_fn!(peckboard_ask_user(user_data: HostState; input: String) -> String {
     let (db, _plugin_id, ok, inv, live) = state_permission_invocation_and_live(&user_data, "ask_user")?;
     if !ok { return Ok(error_json("plugin lacks the 'ask_user' permission")); }
@@ -3260,6 +3284,34 @@ pub(crate) fn host_functions(
             [PTR],
             ud.clone(),
             peckboard_exec_any,
+        ),
+        Function::new(
+            "peckboard_ssh_probe",
+            [PTR],
+            [PTR],
+            ud.clone(),
+            peckboard_ssh_probe,
+        ),
+        Function::new(
+            "peckboard_ssh_exec",
+            [PTR],
+            [PTR],
+            ud.clone(),
+            peckboard_ssh_exec,
+        ),
+        Function::new(
+            "peckboard_ssh_read_file",
+            [PTR],
+            [PTR],
+            ud.clone(),
+            peckboard_ssh_read_file,
+        ),
+        Function::new(
+            "peckboard_ssh_write_file",
+            [PTR],
+            [PTR],
+            ud.clone(),
+            peckboard_ssh_write_file,
         ),
         Function::new(
             "peckboard_ask_user",

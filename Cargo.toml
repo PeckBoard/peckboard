@@ -75,6 +75,10 @@ urlencoding = "2"
 tar = "0.4"
 flate2 = "1"
 
+# SSH client for the native ssh_* host functions (pure Rust, no system libs)
+russh = "0.62"
+russh-sftp = "2"
+
 [dev-dependencies]
 rustls = "0.23.40"
 tempfile = "3.27.0"

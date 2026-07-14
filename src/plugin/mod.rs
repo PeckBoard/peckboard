@@ -6,6 +6,7 @@ pub mod manager;
 pub mod notify;
 pub mod registry;
 pub mod settings;
+pub mod ssh;
 pub mod todo_hook;
 
 // Plugin system has two complementary halves:

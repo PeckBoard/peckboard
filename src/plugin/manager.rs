@@ -124,7 +124,8 @@ pub const ALLOWED_PERMISSIONS: &[&str] = &[
     "project_files_write", // peckboard_write_file
     "provide_mcp_tools", // declare mcp_tools (mcp.tool.invoke)
     "register_provider", // peckboard_register_provider / _emit_provider_event / _provider_should_stop / _provider_get_session / _provider_get_mcp_config — register an AI provider and drive its turns
-    "session_dispatch",  // peckboard_dispatch_capture / resume_session
+    "ssh", // peckboard_ssh_probe / _exec / _read_file / _write_file — connect to remote SSH hosts, run commands, transfer files
+    "session_dispatch", // peckboard_dispatch_capture / resume_session
     "session_control", // peckboard_interrupt_session / terminate_agent / clear_session / send_message — full cross-folder control of any session
     "session_read",    // peckboard_get_session / list_sessions
     "session_write",   // peckboard_create_session / update_session
