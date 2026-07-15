@@ -372,25 +372,25 @@ async fn ssh_fleet_plugin_end_to_end() {
     }
 }
 
-/// One failed `handle` call must not poison the extism instance.
+/// A slow SSH op must NOT hold the plugin's single instance — the whole point
+/// of the defer/callback model (`Verdict::Defer` + `invoke_mcp_tool`).
 ///
-/// Live incident 2026-07-14: ssh-fleet's first slow SSH call blew the extism
-/// call budget, the epoch deadline trapped the wasm, and every subsequent
-/// call on the poisoned instance failed instantly (0–1ms) — all routes
-/// answered "plugin did not produce a response" until a core restart. Core
-/// now heals a failed call by resetting the instance and re-running `init`
-/// (`call_handle_healing` in src/plugin/manager.rs).
+/// Before deferring, a long `ssh_run`/`ssh_probe` ran the SSH work *inside* the
+/// wasm `handle` call, holding the per-plugin mutex for its full duration, so
+/// the dashboard and every other tool call froze behind it (and a call that
+/// overran the extism budget even trapped the instance — live incident
+/// 2026-07-14). Now the guest yields the op, core runs it with the instance
+/// free, then re-enters to finalize.
 ///
-/// Reproduce the real failure: shrink the call-budget ceiling to 2s
-/// (`with_max_call_timeout`), point a probe at a TCP listener that accepts
-/// but never speaks SSH, and give it a 6s connect timeout — the wasm resumes
-/// past its epoch deadline and traps, exactly like production. The next call
-/// must then answer instead of failing instantly.
-#[tokio::test]
-async fn ssh_fleet_plugin_heals_after_failed_call() {
+/// This drives a probe at a TCP listener that accepts but never speaks SSH (so
+/// the connect blocks until its timeout) and asserts (a) a concurrent
+/// `ssh_host_list` returns promptly instead of queueing behind it, and (b) the
+/// slow op ends as a graceful error result — no trap, instance still healthy.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn ssh_fleet_slow_op_does_not_freeze_the_plugin() {
     let Some(wasm) = plugin_wasm() else {
         eprintln!(
-            "SKIP ssh_fleet_plugin_heals_after_failed_call: plugin wasm not built \
+            "SKIP ssh_fleet_slow_op_does_not_freeze_the_plugin: plugin wasm not built \
              (run peck-plugins/ssh-fleet/build.sh)"
         );
         return;
@@ -425,14 +425,13 @@ async fn ssh_fleet_plugin_heals_after_failed_call() {
     .await
     .unwrap();
 
-    // Make the SSH connect attempt (6s) outlive the call budget (2s) so the
-    // epoch deadline fires while the probe is still inside the host call.
-    db.set_plugin_setting(PLUGIN_ID, "connect_timeout_secs", &json!(6))
+    // Long connect timeout so the deferred op stays in flight while we race a
+    // second call against it.
+    db.set_plugin_setting(PLUGIN_ID, "connect_timeout_secs", &json!(5))
         .await
         .unwrap();
 
-    let plugins =
-        PluginManager::new(data_dir, db.clone()).with_max_call_timeout(Duration::from_secs(2));
+    let plugins = std::sync::Arc::new(PluginManager::new(data_dir, db.clone()));
     plugins.load_all().await.unwrap();
     let info = plugins
         .decide(PLUGIN_ID, true)
@@ -443,8 +442,8 @@ async fn ssh_fleet_plugin_heals_after_failed_call() {
 
     let ctx = json!({ "sessionId": "caller-1", "folderId": "f1" });
 
-    // A TCP endpoint that accepts the connection but never sends the SSH
-    // version banner — the russh handshake hangs until its connect timeout.
+    // A TCP endpoint that accepts but never sends the SSH banner — the connect
+    // blocks until the 5s timeout.
     let hang = TcpListener::bind("127.0.0.1:0").unwrap();
     let hang_port = hang.local_addr().unwrap().port();
 
@@ -458,19 +457,53 @@ async fn ssh_fleet_plugin_heals_after_failed_call() {
     .await;
     assert_eq!(add["host"]["label"], json!("hang"), "add: {add}");
 
-    // Poison: the probe overruns the 2s budget → real epoch-timeout trap.
-    let poisoned = plugins
-        .invoke_mcp_tool("ssh_probe", json!({"host": "hang"}), ctx.clone())
-        .await
-        .expect("plugin owns ssh_probe");
+    // Fire the slow probe in the background: it defers instantly, then core runs
+    // the blocking connect with the instance FREE.
+    let slow = tokio::spawn({
+        let plugins = plugins.clone();
+        let ctx = ctx.clone();
+        async move {
+            plugins
+                .invoke_mcp_tool("ssh_probe", json!({"host": "hang"}), ctx)
+                .await
+        }
+    });
+
+    // Give the probe a moment to reach its defer (release the instance).
+    tokio::time::sleep(Duration::from_millis(300)).await;
+
+    // The concurrent call must NOT queue behind the ~5s probe. Pre-defer it
+    // blocked for the whole connect; now it returns in well under a second.
+    let start = std::time::Instant::now();
+    let list = invoke(&plugins, "ssh_host_list", json!({}), &ctx).await;
+    let elapsed = start.elapsed();
+    assert_eq!(
+        list["count"],
+        json!(1),
+        "list while probe in flight: {list}"
+    );
     assert!(
-        poisoned.is_err(),
-        "probe past the call budget must fail the call: {poisoned:?}"
+        elapsed < Duration::from_secs(2),
+        "a concurrent call blocked {elapsed:?} behind the in-flight slow op — the \
+         instance was held, defer is not releasing it"
     );
 
-    // Healed: the very next call must answer normally — without the healing
-    // fix it fails instantly on the poisoned instance.
-    let res = invoke(&plugins, "ssh_host_list", json!({}), &ctx).await;
-    assert_eq!(res["count"], json!(1), "post-trap list must answer: {res}");
+    // The slow op itself ends as a graceful error (connect timeout), not a trap.
+    let probe = slow
+        .await
+        .expect("probe task joins")
+        .expect("plugin owns ssh_probe")
+        .expect("finalize returns a value, not a hard error");
+    assert!(
+        probe.get("error").is_some() || probe["ok"] == json!(false),
+        "hang probe should end as an error result: {probe}"
+    );
+
+    // The instance is still healthy afterwards.
+    assert_eq!(
+        invoke(&plugins, "ssh_host_list", json!({}), &ctx).await["count"],
+        json!(1),
+        "instance healthy after the slow op"
+    );
     drop(hang);
 }

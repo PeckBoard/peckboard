@@ -22,6 +22,19 @@ pub enum Verdict {
     },
     /// This plugin has no opinion — pass through unchanged.
     Skip,
+    /// Defer a long-running host operation to core: the plugin returns the
+    /// operation to run (`op`) plus an opaque `resume` value it wants echoed
+    /// back. Core runs the op with the plugin instance **free** (so a slow op
+    /// does not hold the single-instance lock and freeze the plugin), then
+    /// re-enters the same `handle` export with the original payload plus
+    /// `{resume, op_result}` so the plugin can finalize (log, format the tool
+    /// result). Only honoured on the `mcp.tool.invoke` hook; every other hook
+    /// treats a defer as `Skip` (it has no core-side executor).
+    Defer {
+        op: serde_json::Value,
+        #[serde(default)]
+        resume: serde_json::Value,
+    },
 }
 
 impl Verdict {

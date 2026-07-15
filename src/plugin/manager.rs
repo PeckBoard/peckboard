@@ -1046,6 +1046,11 @@ impl PluginManager {
                     Ok(Verdict::Skip) => {
                         // No opinion, continue to next plugin
                     }
+                    Ok(Verdict::Defer { .. }) => {
+                        warn!(
+                            "Plugin '{name}' returned an unexpected defer verdict for hook '{hook}'; treating as skip"
+                        );
+                    }
                     Err(e) => {
                         warn!("Plugin '{name}' returned invalid verdict for hook '{hook}': {e}");
                         // Treat parse errors as skip
@@ -1101,22 +1106,25 @@ impl PluginManager {
                 "hook": hook,
                 "payload": current_payload,
             });
-            // Land the trusted user context for exactly this `handle` call.
-            if let Ok(mut slot) = user_slot.write() {
-                *slot = Some(super::host::UserContext {
-                    user_id: user_id.to_string(),
-                    folder_id: folder_id.clone(),
-                    project_id: project_id.clone(),
-                    session_id: session_id.clone(),
-                });
-            }
             let result = {
                 let mut guard = plugin.lock().await;
-                guard.call_handle(call_input.to_string())
+                // Land the trusted user context only while this call holds the
+                // instance, then clear it before releasing the lock so a
+                // concurrent dispatch can't clobber it mid-call.
+                if let Ok(mut slot) = user_slot.write() {
+                    *slot = Some(super::host::UserContext {
+                        user_id: user_id.to_string(),
+                        folder_id: folder_id.clone(),
+                        project_id: project_id.clone(),
+                        session_id: session_id.clone(),
+                    });
+                }
+                let out = guard.call_handle(call_input.to_string());
+                if let Ok(mut slot) = user_slot.write() {
+                    *slot = None;
+                }
+                out
             };
-            if let Ok(mut slot) = user_slot.write() {
-                *slot = None;
-            }
             match result {
                 Ok(output) => match serde_json::from_str::<Verdict>(&output) {
                     Ok(Verdict::Allow { payload }) => {
@@ -1133,6 +1141,11 @@ impl PluginManager {
                         };
                     }
                     Ok(Verdict::Skip) => {}
+                    Ok(Verdict::Defer { .. }) => {
+                        warn!(
+                            "Plugin '{name}' returned an unexpected defer verdict for hook '{hook}'; treating as skip"
+                        );
+                    }
                     Err(e) => {
                         warn!("Plugin '{name}' returned invalid verdict for hook '{hook}': {e}");
                     }
@@ -1173,23 +1186,26 @@ impl PluginManager {
 
         let call_input = serde_json::json!({ "hook": hook, "payload": payload }).to_string();
         for (name, plugin, user_slot) in targets {
-            // Land the trusted user context for exactly this `handle` call.
-            // A notification dispatch carries no request scope.
-            if let Ok(mut slot) = user_slot.write() {
-                *slot = Some(super::host::UserContext {
-                    user_id: user_id.to_string(),
-                    folder_id: None,
-                    project_id: None,
-                    session_id: None,
-                });
-            }
             let result = {
                 let mut guard = plugin.lock().await;
-                guard.call_handle(call_input.clone())
+                // Land the trusted user context only while this call holds the
+                // instance (a notification carries no request scope), then clear
+                // it before releasing the lock so a concurrent dispatch can't
+                // clobber it mid-call.
+                if let Ok(mut slot) = user_slot.write() {
+                    *slot = Some(super::host::UserContext {
+                        user_id: user_id.to_string(),
+                        folder_id: None,
+                        project_id: None,
+                        session_id: None,
+                    });
+                }
+                let out = guard.call_handle(call_input.clone());
+                if let Ok(mut slot) = user_slot.write() {
+                    *slot = None;
+                }
+                out
             };
-            if let Ok(mut slot) = user_slot.write() {
-                *slot = None;
-            }
             if let Err(e) = result {
                 warn!("Plugin '{name}' failed on authed hook '{hook}': {e}");
             }
@@ -1532,6 +1548,11 @@ impl PluginManager {
                         Verdict::Skip => {
                             // No opinion — let the next matching plugin try.
                         }
+                        Verdict::Defer { .. } => {
+                            warn!(
+                                "Plugin '{name}' returned an unexpected defer verdict for http route '{method} {path}'; treating as skip"
+                            );
+                        }
                     },
                     Err(e) => {
                         warn!("Plugin '{name}' returned invalid http verdict for '{path}': {e}");
@@ -1618,22 +1639,25 @@ impl PluginManager {
                 "payload": req_payload,
             });
 
-            // Land the trusted user context for exactly this `handle` call.
-            if let Ok(mut slot) = user_slot.write() {
-                *slot = Some(super::host::UserContext {
-                    user_id: user_id.to_string(),
-                    folder_id: scope.folder_id.clone(),
-                    project_id: scope.project_id.clone(),
-                    session_id: scope.session_id.clone(),
-                });
-            }
             let result = {
                 let mut guard = plugin.lock().await;
-                guard.call_handle(call_input.to_string())
+                // Land the trusted user context only while this call holds the
+                // instance, then clear it before releasing the lock — so a
+                // concurrent authed request can't clobber it mid-call.
+                if let Ok(mut slot) = user_slot.write() {
+                    *slot = Some(super::host::UserContext {
+                        user_id: user_id.to_string(),
+                        folder_id: scope.folder_id.clone(),
+                        project_id: scope.project_id.clone(),
+                        session_id: scope.session_id.clone(),
+                    });
+                }
+                let out = guard.call_handle(call_input.to_string());
+                if let Ok(mut slot) = user_slot.write() {
+                    *slot = None;
+                }
+                out
             };
-            if let Ok(mut slot) = user_slot.write() {
-                *slot = None;
-            }
 
             match result {
                 Ok(output) => match serde_json::from_str::<Verdict>(&output) {
@@ -1645,6 +1669,11 @@ impl PluginManager {
                         return error_outcome(500, &reason);
                     }
                     Ok(Verdict::Skip) => {}
+                    Ok(Verdict::Defer { .. }) => {
+                        warn!(
+                            "Plugin '{name}' returned an unexpected defer verdict for authed route '{path}'; treating as skip"
+                        );
+                    }
                     Err(e) => {
                         warn!("Plugin '{name}' returned invalid authed verdict for '{path}': {e}");
                     }
@@ -2131,64 +2160,132 @@ impl PluginManager {
         // Find the single active plugin that declared this tool. Hold the
         // outer lock only long enough to clone its handle.
         type InvocationSlot = Arc<std::sync::RwLock<Option<super::host::InvocationContext>>>;
-        let target: Option<(String, Arc<Mutex<PluginCell>>, InvocationSlot)> = {
+        let target: Option<(String, Arc<Mutex<PluginCell>>, InvocationSlot, bool)> = {
             let plugins = self.plugins.lock().await;
             plugins
                 .iter()
                 .find(|p| p.is_active() && p.manifest.mcp_tools.iter().any(|t| t.name == tool_name))
-                .map(|p| (p.name.clone(), p.plugin.clone(), p.invocation.clone()))
+                .map(|p| {
+                    (
+                        p.name.clone(),
+                        p.plugin.clone(),
+                        p.invocation.clone(),
+                        p.manifest
+                            .permissions
+                            .iter()
+                            .any(|perm| perm.as_str() == "ssh"),
+                    )
+                })
         };
-        let (name, plugin, invocation) = target?;
+        let (name, plugin, invocation, has_ssh) = target?;
 
-        let call_input = serde_json::json!({
-            "hook": MCP_TOOL_INVOKE_HOOK,
-            "payload": {
-                "tool": tool_name,
-                "arguments": arguments,
-                "context": &context,
-            },
+        // The *trusted* caller context, parsed once. It comes from `context` —
+        // built by `routes/mcp.rs` from the verified `ToolCallContext` — so the
+        // plugin cannot forge the session/folder it is treated as calling from.
+        // It is re-landed *inside* the lock on every guest call below (phase 1
+        // and each finalize), never before acquiring it, so a concurrent call to
+        // the same instance can't clobber it mid-dispatch. `None` (malformed,
+        // never expected) leaves scoped host functions to safely refuse.
+        let caller_ctx =
+            serde_json::from_value::<super::host::InvocationContext>(context.clone()).ok();
+
+        // The evolving `handle` payload. Phase 1 carries just the tool call;
+        // each `Defer` round-trip re-enters with `{resume, op_result}` appended
+        // so the plugin can finalize (log activity, format the result).
+        let mut payload = serde_json::json!({
+            "tool": tool_name,
+            "arguments": arguments.clone(),
+            "context": context.clone(),
         });
 
-        // Land the *trusted* caller context where this plugin's scoped host
-        // functions can read it, for exactly the span of the `handle` call.
-        // It comes from `context` — built by `routes/mcp.rs` from the verified
-        // `ToolCallContext` — so the plugin cannot forge the session/folder it
-        // is treated as calling from. A malformed context (shouldn't happen)
-        // leaves the slot `None`, so scoped functions safely refuse.
-        if let Ok(parsed) = serde_json::from_value::<super::host::InvocationContext>(context)
-            && let Ok(mut slot) = invocation.write()
-        {
-            *slot = Some(parsed);
+        // Bound the defer round-trips: a finalize that itself defers again is
+        // legitimate (e.g. `ssh_edit_file`: read then write), but a buggy or
+        // hostile plugin must not be able to loop forever.
+        const MAX_DEFER_ROUNDTRIPS: usize = 8;
+        for _ in 0..=MAX_DEFER_ROUNDTRIPS {
+            let call_input = serde_json::json!({
+                "hook": MCP_TOOL_INVOKE_HOOK,
+                "payload": &payload,
+            });
+
+            // Hold the per-plugin instance lock only across the (fast) guest
+            // call. The trusted context is landed and cleared *inside* the lock
+            // so its lifetime matches exactly this call (see `caller_ctx`).
+            let output = {
+                let mut guard = plugin.lock().await;
+                if let Some(ref ctx) = caller_ctx
+                    && let Ok(mut slot) = invocation.write()
+                {
+                    *slot = Some(ctx.clone());
+                }
+                let out = guard.call_handle(call_input.to_string());
+                if let Ok(mut slot) = invocation.write() {
+                    *slot = None;
+                }
+                out
+            };
+
+            let output = match output {
+                Ok(o) => o,
+                Err(e) => {
+                    return Some(Err(anyhow::anyhow!(
+                        "plugin '{name}' failed to handle tool '{tool_name}': {e}"
+                    )));
+                }
+            };
+            let verdict = match serde_json::from_str::<Verdict>(&output) {
+                Ok(v) => v,
+                Err(e) => {
+                    return Some(Err(anyhow::anyhow!(
+                        "plugin '{name}' returned an invalid verdict for tool '{tool_name}': {e}"
+                    )));
+                }
+            };
+
+            match verdict {
+                Verdict::Allow { payload: out } => {
+                    return Some(Ok(out.unwrap_or(serde_json::Value::Null)));
+                }
+                Verdict::Cancel { reason, .. } => {
+                    return Some(Err(anyhow::anyhow!(
+                        "plugin '{name}' cancelled tool call: {reason}"
+                    )));
+                }
+                Verdict::Skip => {
+                    return Some(Err(anyhow::anyhow!(
+                        "plugin '{name}' skipped tool '{tool_name}'"
+                    )));
+                }
+                Verdict::Defer { op, resume } => {
+                    // Deferring a host op requires the same capability the
+                    // synchronous SSH host functions are gated on; `run_op`
+                    // only performs SSH, so require the `ssh` permission.
+                    if !has_ssh {
+                        return Some(Err(anyhow::anyhow!(
+                            "plugin '{name}' deferred a host op for tool '{tool_name}' \
+                             but lacks the 'ssh' permission"
+                        )));
+                    }
+                    // Run the slow op with the instance FREE — the lock was
+                    // released above, so the dashboard and other tool calls
+                    // proceed meanwhile. `op` carries connection secrets and is
+                    // never logged.
+                    let op_result = super::ssh::run_op(&op).await;
+                    payload = serde_json::json!({
+                        "tool": tool_name,
+                        "arguments": arguments.clone(),
+                        "context": context.clone(),
+                        "resume": resume,
+                        "op_result": op_result,
+                    });
+                }
+            }
         }
 
-        let result = {
-            let mut guard = plugin.lock().await;
-            guard.call_handle(call_input.to_string())
-        };
-
-        // Clear the trusted context the moment `handle` returns — it must never
-        // outlive its dispatch (the next tool call sets its own).
-        if let Ok(mut slot) = invocation.write() {
-            *slot = None;
-        }
-
-        Some(match result {
-            Ok(output) => match serde_json::from_str::<Verdict>(&output) {
-                Ok(Verdict::Allow { payload }) => Ok(payload.unwrap_or(serde_json::Value::Null)),
-                Ok(Verdict::Cancel { reason, .. }) => Err(anyhow::anyhow!(
-                    "plugin '{name}' cancelled tool call: {reason}"
-                )),
-                Ok(Verdict::Skip) => Err(anyhow::anyhow!(
-                    "plugin '{name}' skipped tool '{tool_name}'"
-                )),
-                Err(e) => Err(anyhow::anyhow!(
-                    "plugin '{name}' returned an invalid verdict for tool '{tool_name}': {e}"
-                )),
-            },
-            Err(e) => Err(anyhow::anyhow!(
-                "plugin '{name}' failed to handle tool '{tool_name}': {e}"
-            )),
-        })
+        Some(Err(anyhow::anyhow!(
+            "plugin '{name}' exceeded the defer round-trip limit ({MAX_DEFER_ROUNDTRIPS}) \
+             for tool '{tool_name}'"
+        )))
     }
 }
 

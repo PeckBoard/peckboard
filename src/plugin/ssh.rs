@@ -699,6 +699,218 @@ impl ConnOwned {
     }
 }
 
+// ─────────────────────── deferred op execution (core-run) ───────────────────
+//
+// The defer/callback path used by `PluginManager::invoke_mcp_tool`: the plugin
+// yields an SSH op here and core runs it with the plugin instance FREE, then
+// re-enters the guest to finalize. Each result mirrors the matching `*_impl`
+// host function's JSON exactly, so the plugin formats it the same way whichever
+// path produced it.
+//
+// Unlike the host functions these never block a worker thread: the SSH future
+// is spawned on the same process-global pool runtime (so pooled connections and
+// their russh driver tasks keep working) and awaited from the caller's async
+// task. The caller already released the instance lock, so nothing is blocked
+// while the op runs — that is the whole point of deferring.
+
+/// An error op-result as a JSON value (the plugin's finalize phase checks
+/// `.error`). Distinct from [`err_json`], which returns a wire string.
+fn err_val(msg: impl std::fmt::Display) -> Value {
+    json!({ "error": msg.to_string() })
+}
+
+/// Run a `'static` SSH future on the pool runtime and await it from the caller
+/// (never blocking the caller's worker, unlike [`block_on`]). A join failure
+/// (panic/cancel) surfaces as an `Err`.
+///
+/// NOT an `async fn`: the (large) russh future is moved onto the pool runtime's
+/// heap *synchronously* here, so the returned future only holds the small
+/// `JoinHandle`. As an `async fn` taking `fut` by value it would embed the
+/// whole future in its own state, and — cascading up through `run_op` into
+/// `invoke_mcp_tool`, which awaits it inline — overflow the caller's stack.
+fn spawn_on_pool<F, T>(fut: F) -> impl std::future::Future<Output = Result<T, String>>
+where
+    F: std::future::Future<Output = Result<T, String>> + Send + 'static,
+    T: Send + 'static,
+{
+    let handle = pool().rt.spawn(fut);
+    async move {
+        match handle.await {
+            Ok(r) => r,
+            Err(e) => Err(format!("ssh task failed: {e}")),
+        }
+    }
+}
+
+/// Parse the flat connection fields carried on an op object (the same shape the
+/// `peckboard_ssh_*` host functions accept).
+fn op_conn(op: &Value) -> Result<(serde_json::Map<String, Value>, Conn), String> {
+    parse_conn(&op.to_string())
+}
+
+/// Cap on connections opened at once for a fleet `batch` op.
+const BATCH_CONCURRENCY: usize = 16;
+
+/// Execute a deferred SSH op. `op` is `{kind, ...conn, ...}`; `batch` runs its
+/// `ops` concurrently (bounded, order preserved). Never traps or panics —
+/// every failure becomes an `{"error": ...}` value the plugin can format.
+pub(crate) async fn run_op(op: &Value) -> Value {
+    if op.get("kind").and_then(Value::as_str) == Some("batch") {
+        let ops: Vec<Value> = op
+            .get("ops")
+            .and_then(Value::as_array)
+            .cloned()
+            .unwrap_or_default();
+        let mut results = Vec::with_capacity(ops.len());
+        for chunk in ops.chunks(BATCH_CONCURRENCY) {
+            let mut handles = Vec::with_capacity(chunk.len());
+            for one in chunk {
+                let one = one.clone();
+                handles.push(tokio::spawn(async move { run_single_op(&one).await }));
+            }
+            for h in handles {
+                results.push(
+                    h.await
+                        .unwrap_or_else(|e| err_val(format!("ssh task failed: {e}"))),
+                );
+            }
+        }
+        json!({ "results": results })
+    } else {
+        run_single_op(op).await
+    }
+}
+
+/// One non-`batch` op (leaf). Kept separate from [`run_op`] so the `batch`
+/// fan-out isn't a recursive `async fn` — which would not be `Send` and so
+/// could not be `tokio::spawn`ed. A nested `batch` is rejected here.
+async fn run_single_op(op: &Value) -> Value {
+    match op.get("kind").and_then(Value::as_str).unwrap_or_default() {
+        "exec" => run_exec_op(op).await,
+        "probe" => run_probe_op(op).await,
+        "read_file" => run_read_file_op(op).await,
+        "write_file" => run_write_file_op(op).await,
+        other => err_val(format!("unknown deferred op kind '{other}'")),
+    }
+}
+
+async fn run_exec_op(op: &Value) -> Value {
+    let (map, conn) = match op_conn(op) {
+        Ok(v) => v,
+        Err(e) => return err_val(e),
+    };
+    let command = match map.get("command").and_then(Value::as_str) {
+        Some(c) if !c.is_empty() => c.to_string(),
+        _ => return err_val("`command` (non-empty string) is required"),
+    };
+    let timeout = Duration::from_secs(
+        map.get("timeout_secs")
+            .and_then(Value::as_u64)
+            .unwrap_or(EXEC_DEFAULT_TIMEOUT)
+            .clamp(1, EXEC_MAX_TIMEOUT),
+    );
+    let started_at = now_rfc3339();
+    let start = Instant::now();
+    let owned = ConnOwned::from(&conn);
+    match spawn_on_pool(async move { do_exec(&owned.as_conn(), &command, timeout).await }).await {
+        Ok(o) => json!({
+            "ok": true,
+            "exit_code": o.exit_code,
+            "stdout": String::from_utf8_lossy(&o.stdout),
+            "stderr": String::from_utf8_lossy(&o.stderr),
+            "stdout_truncated": o.stdout_truncated,
+            "stderr_truncated": o.stderr_truncated,
+            "timed_out": o.timed_out,
+            "server_fingerprint": o.fingerprint,
+            "started_at": started_at,
+            "finished_at": now_rfc3339(),
+            "duration_ms": start.elapsed().as_millis() as u64,
+        }),
+        Err(e) => err_val(e),
+    }
+}
+
+async fn run_probe_op(op: &Value) -> Value {
+    let (_, conn) = match op_conn(op) {
+        Ok(v) => v,
+        Err(e) => return err_val(e),
+    };
+    let started_at = now_rfc3339();
+    let start = Instant::now();
+    let owned = ConnOwned::from(&conn);
+    match spawn_on_pool(async move { do_probe(&owned.as_conn()).await }).await {
+        Ok((fingerprint, latency_ms)) => json!({
+            "ok": true,
+            "server_fingerprint": fingerprint,
+            "latency_ms": latency_ms,
+            "started_at": started_at,
+            "finished_at": now_rfc3339(),
+            "duration_ms": start.elapsed().as_millis() as u64,
+        }),
+        Err(e) => err_val(e),
+    }
+}
+
+async fn run_read_file_op(op: &Value) -> Value {
+    let (map, conn) = match op_conn(op) {
+        Ok(v) => v,
+        Err(e) => return err_val(e),
+    };
+    let path = match map.get("path").and_then(Value::as_str) {
+        Some(p) if !p.is_empty() => p.to_string(),
+        _ => return err_val("`path` (non-empty string) is required"),
+    };
+    let started_at = now_rfc3339();
+    let owned = ConnOwned::from(&conn);
+    match spawn_on_pool(async move { do_read_file(&owned.as_conn(), &path).await }).await {
+        Ok((bytes, truncated, fingerprint)) => json!({
+            "ok": true,
+            "content_base64": base64::engine::general_purpose::STANDARD.encode(&bytes),
+            "size": bytes.len(),
+            "truncated": truncated,
+            "server_fingerprint": fingerprint,
+            "started_at": started_at,
+            "finished_at": now_rfc3339(),
+        }),
+        Err(e) => err_val(e),
+    }
+}
+
+async fn run_write_file_op(op: &Value) -> Value {
+    let (map, conn) = match op_conn(op) {
+        Ok(v) => v,
+        Err(e) => return err_val(e),
+    };
+    let path = match map.get("path").and_then(Value::as_str) {
+        Some(p) if !p.is_empty() => p.to_string(),
+        _ => return err_val("`path` (non-empty string) is required"),
+    };
+    let content_b64 = match map.get("content_base64").and_then(Value::as_str) {
+        Some(c) => c.to_string(),
+        None => return err_val("`content_base64` (string) is required"),
+    };
+    let bytes = match base64::engine::general_purpose::STANDARD.decode(content_b64.as_bytes()) {
+        Ok(b) => b,
+        Err(e) => return err_val(format!("content_base64 is not valid base64: {e}")),
+    };
+    if bytes.len() > MAX_BYTES {
+        return err_val(format!("content exceeds {MAX_BYTES}-byte limit"));
+    }
+    let started_at = now_rfc3339();
+    let owned = ConnOwned::from(&conn);
+    let n = bytes.len();
+    match spawn_on_pool(async move { do_write_file(&owned.as_conn(), &path, &bytes).await }).await {
+        Ok(fingerprint) => json!({
+            "ok": true,
+            "bytes": n,
+            "server_fingerprint": fingerprint,
+            "started_at": started_at,
+            "finished_at": now_rfc3339(),
+        }),
+        Err(e) => err_val(e),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
