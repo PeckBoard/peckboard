@@ -43,11 +43,6 @@ use crate::plugin::settings::PluginSettingsStore;
 use crate::provider::agent::{AgentProvider, ProcessCompletion, SendMessageContext, emit_event};
 use crate::provider::stream::{ModelInfo, ProviderEvent};
 
-/// Default per-turn timeout. Cursor agent turns can run for a while when
-/// the model takes several tool steps, so this is generous.
-const DEFAULT_TIMEOUT_SECS: u64 = 600;
-/// Hard ceiling so a misconfigured setting can't wedge a worker forever.
-const MAX_TIMEOUT_SECS: u64 = 3600;
 /// Default CLI binary name; overridable via the `cli_path` setting.
 const DEFAULT_CLI: &str = "cursor-agent";
 /// How long a model-discovery probe (success or failure) is cached, so the
@@ -167,10 +162,6 @@ impl AgentProvider for CursorProvider {
         let cli_path =
             setting_str(&settings, "cli_path").unwrap_or_else(|| DEFAULT_CLI.to_string());
         let default_model = setting_str(&settings, "default_model");
-        let timeout_secs = setting_int(&settings, "request_timeout_secs")
-            .map(|n| n.max(1) as u64)
-            .unwrap_or(DEFAULT_TIMEOUT_SECS)
-            .min(MAX_TIMEOUT_SECS);
         let auto_approve = setting_bool(&settings, "auto_approve").unwrap_or(true);
 
         let model = resolve_model(&config.model)
@@ -229,7 +220,6 @@ impl AgentProvider for CursorProvider {
                 session_id: &sid,
                 db: &db,
                 broadcaster: broadcaster.as_ref(),
-                timeout_secs,
                 cancel: cancel_for_task,
                 mcp_token: mcp_token.as_deref(),
             })
@@ -321,7 +311,6 @@ struct TurnArgs<'a> {
     session_id: &'a str,
     db: &'a crate::db::Db,
     broadcaster: &'a crate::ws::broadcaster::Broadcaster,
-    timeout_secs: u64,
     cancel: Arc<Notify>,
     /// Per-session MCP bearer token, exported as [`mcp::TOKEN_ENV_VAR`].
     mcp_token: Option<&'a str>,
@@ -329,7 +318,7 @@ struct TurnArgs<'a> {
 
 /// Spawn `cursor-agent` for one turn, stream its stdout into provider
 /// events, and emit a terminal `Completed` / `Crashed`. Returns `true` on a
-/// clean completion, `false` on cancel / timeout / spawn or runtime error.
+/// clean completion, `false` on cancel / spawn or runtime error.
 async fn run_turn(args: TurnArgs<'_>) -> bool {
     let TurnArgs {
         cli_path,
@@ -339,7 +328,6 @@ async fn run_turn(args: TurnArgs<'_>) -> bool {
         session_id,
         db,
         broadcaster,
-        timeout_secs,
         cancel,
         mcp_token,
     } = args;
@@ -405,18 +393,12 @@ async fn run_turn(args: TurnArgs<'_>) -> bool {
     let mut saw_any = false;
 
     let mut lines = BufReader::new(stdout).lines();
-    let deadline = tokio::time::sleep(Duration::from_secs(timeout_secs));
-    tokio::pin!(deadline);
 
     let outcome = loop {
         tokio::select! {
             _ = cancel.notified() => {
                 let _ = child.start_kill();
                 break TurnOutcome::Cancelled;
-            }
-            _ = &mut deadline => {
-                let _ = child.start_kill();
-                break TurnOutcome::Timeout;
             }
             line = lines.next_line() => {
                 match line {
@@ -502,20 +484,6 @@ async fn run_turn(args: TurnArgs<'_>) -> bool {
             .await;
             false
         }
-        TurnOutcome::Timeout => {
-            if !turn.emitted_start {
-                emit_started(db, broadcaster, session_id, model_label).await;
-            }
-            crash(
-                db,
-                broadcaster,
-                session_id,
-                &format!("cursor-agent turn exceeded {timeout_secs}s timeout"),
-                None,
-            )
-            .await;
-            false
-        }
         TurnOutcome::ReadError(e) => {
             if !turn.emitted_start {
                 emit_started(db, broadcaster, session_id, model_label).await;
@@ -536,7 +504,6 @@ async fn run_turn(args: TurnArgs<'_>) -> bool {
 enum TurnOutcome {
     Eof,
     Cancelled,
-    Timeout,
     ReadError(String),
 }
 
@@ -753,10 +720,6 @@ fn setting_str(settings: &HashMap<String, serde_json::Value>, key: &str) -> Opti
         .and_then(|v| v.as_str())
         .map(|s| s.trim().to_string())
         .filter(|s| !s.is_empty())
-}
-
-fn setting_int(settings: &HashMap<String, serde_json::Value>, key: &str) -> Option<i64> {
-    settings.get(key).and_then(|v| v.as_i64())
 }
 
 fn setting_bool(settings: &HashMap<String, serde_json::Value>, key: &str) -> Option<bool> {

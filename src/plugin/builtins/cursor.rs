@@ -7,8 +7,6 @@
 //!   `cursor-agent` (resolved on `PATH`).
 //! * `default_model` (string) — model used when a session has no explicit
 //!   `cursor:<model>` selection. Optional; falls back to `auto`.
-//! * `request_timeout_secs` (integer, 1–3600) — per-turn timeout. Defaults
-//!   to 600s.
 //! * `discover_models` (boolean, default `true`) — ask the CLI for its model
 //!   list and show those in the picker. Falls back to the built-in seed plus
 //!   `additional_models` when discovery is off or fails.
@@ -58,21 +56,6 @@ impl CursorPlugin {
                     secret: false,
                     default: None,
                     placeholder: Some("auto".into()),
-                },
-            },
-            SettingField {
-                key: "request_timeout_secs".into(),
-                title: "Turn Timeout (Seconds)".into(),
-                description: Some(
-                    "How long to let a single cursor-agent turn run before killing it. \
-                     Increase for long multi-step agent runs."
-                        .into(),
-                ),
-                required: false,
-                kind: FieldKind::Integer {
-                    default: Some(600),
-                    min: Some(1),
-                    max: Some(3600),
                 },
             },
             SettingField {
