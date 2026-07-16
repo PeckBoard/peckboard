@@ -679,6 +679,7 @@ impl AgentProvider for OllamaProvider {
         let client = self.client.clone();
         let sid = session_id.clone();
         let model_label = config.model.clone();
+        let mcp_config_path = config.mcp_config_path.clone();
         // The per-session override EXTENDS the system prompt: every session
         // ships the shared working-style rules, with any custom prompt
         // appended after them rather than replacing them.
@@ -709,6 +710,7 @@ impl AgentProvider for OllamaProvider {
                 timeout_secs,
                 cancel: cancel_for_task,
                 system_prompt,
+                mcp_config_path,
             })
             .await;
 
@@ -1105,6 +1107,10 @@ struct ChatStreamArgs<'a> {
     /// `role:"system"` message of the outgoing request (not persisted to
     /// the transcript, so history stays user-first).
     system_prompt: String,
+    /// Per-session worker-mcp config path. User-defined MCP servers for
+    /// this provider ride in it (merged at dispatch); they are connected
+    /// as native clients for the duration of the turn.
+    mcp_config_path: Option<String>,
 }
 
 /// Outcome of streaming one model response (one `/api/chat` call).
@@ -1140,6 +1146,7 @@ async fn run_chat_stream(args: ChatStreamArgs<'_>) -> bool {
         timeout_secs,
         cancel,
         system_prompt,
+        mcp_config_path,
     } = args;
     let broadcaster: &crate::ws::broadcaster::Broadcaster = broadcaster_arc.as_ref();
 
@@ -1189,6 +1196,38 @@ async fn run_chat_stream(args: ChatStreamArgs<'_>) -> bool {
         (None, None)
     };
 
+    // User-defined MCP servers (Settings → MCP Servers): connect native
+    // clients for the duration of the turn and offer their tools next to
+    // the built-ins, namespaced `<server>__<tool>`. Any failure degrades to
+    // the built-in toolset; dropping the set when the turn ends kills stdio
+    // children (`kill_on_drop`).
+    let mut tools = tools;
+    let mut external: Option<crate::service::mcp_client::McpClientSet> = None;
+    let mut external_routes: HashMap<String, (String, String)> = HashMap::new();
+    if tool_ctx.is_some() {
+        if let Some(path) = mcp_config_path.as_deref() {
+            let entries =
+                crate::service::mcp_server::user_servers::extra_entries_from_session_config(path);
+            if !entries.is_empty() {
+                let mut set = crate::service::mcp_client::McpClientSet::connect(&entries).await;
+                if !set.is_empty() {
+                    let ext_tools = set.list_all_tools().await;
+                    let offered: HashSet<String> = tools
+                        .as_deref()
+                        .unwrap_or_default()
+                        .iter()
+                        .filter_map(|t| t["function"]["name"].as_str().map(str::to_string))
+                        .collect();
+                    let (defs, routes) = external_tool_defs(&ext_tools, &offered);
+                    if !defs.is_empty() {
+                        tools.get_or_insert_with(Vec::new).extend(defs);
+                        external_routes = routes;
+                        external = Some(set);
+                    }
+                }
+            }
+        }
+    }
     // Assistant + tool turns produced this turn, appended to the persistent
     // transcript once we finish so the next turn replays the full exchange.
     let mut new_messages: Vec<ChatMessage> = Vec::new();
@@ -1236,7 +1275,22 @@ async fn run_chat_stream(args: ChatStreamArgs<'_>) -> bool {
                     crash(db, broadcaster, session_id, "interrupted", None).await;
                     return false;
                 }
-                m = run_one_tool(plugins, &registry, ctx, db, broadcaster, session_id, &call) => m,
+                m = async {
+                    match (external_routes.get(&call.function.name), external.as_mut()) {
+                        (Some((server, tool)), Some(ext)) => {
+                            run_one_external_tool(
+                                ext, server, tool, db, broadcaster, session_id, &call,
+                            )
+                            .await
+                        }
+                        _ => {
+                            run_one_tool(
+                                plugins, &registry, ctx, db, broadcaster, session_id, &call,
+                            )
+                            .await
+                        }
+                    }
+                } => m,
             };
             messages.push(tool_msg.clone());
             new_messages.push(tool_msg);
@@ -1596,6 +1650,97 @@ async fn run_one_tool(
     }
 }
 
+/// Namespace external tools as `<server>__<tool>`, dropping any that would
+/// collide with an already-offered name or bust Ollama's 64-char function
+/// name limit. Returns the tool defs plus offered-name → (server, tool)
+/// routes for dispatch.
+fn external_tool_defs(
+    ext: &[crate::service::mcp_client::ExternalMcpTool],
+    offered: &HashSet<String>,
+) -> (Vec<serde_json::Value>, HashMap<String, (String, String)>) {
+    let mut defs = Vec::new();
+    let mut routes: HashMap<String, (String, String)> = HashMap::new();
+    for t in ext {
+        let name = format!("{}__{}", t.server, t.name);
+        if name.len() > 64 {
+            tracing::warn!(tool = %name, "ollama: external tool name exceeds 64 chars; skipping");
+            continue;
+        }
+        if offered.contains(&name) || routes.contains_key(&name) {
+            tracing::warn!(
+                tool = %name,
+                "ollama: external tool name collides with an offered tool; skipping"
+            );
+            continue;
+        }
+        defs.push(ollama_tool_def(&name, &t.description, &t.input_schema));
+        routes.insert(name, (t.server.clone(), t.name.clone()));
+    }
+    (defs, routes)
+}
+
+/// Execute one user-server tool call over MCP, shaped exactly like
+/// [`run_one_tool`]'s reply — same events, error fed back as `{"error": …}`
+/// content so the model can recover or retry.
+async fn run_one_external_tool(
+    external: &mut crate::service::mcp_client::McpClientSet,
+    server: &str,
+    tool: &str,
+    db: &crate::db::Db,
+    broadcaster: &crate::ws::broadcaster::Broadcaster,
+    session_id: &str,
+    call: &ToolCall,
+) -> ChatMessage {
+    let name = call.function.name.clone();
+    let args = call.function.arguments.clone();
+    let tool_use_id = uuid::Uuid::new_v4().to_string();
+
+    emit_event(
+        db,
+        broadcaster,
+        session_id,
+        ProviderEvent::ToolStart {
+            tool_use_id: tool_use_id.clone(),
+            name: name.clone(),
+            input: args.clone(),
+        },
+    )
+    .await;
+
+    match external.call(server, tool, args).await {
+        Ok(text) => {
+            emit_event(
+                db,
+                broadcaster,
+                session_id,
+                ProviderEvent::ToolEnd {
+                    tool_use_id,
+                    output: Some(text.clone()),
+                    error: None,
+                    images: Vec::new(),
+                },
+            )
+            .await;
+            ChatMessage::tool_result(name, text)
+        }
+        Err(e) => {
+            let err = e.to_string();
+            emit_event(
+                db,
+                broadcaster,
+                session_id,
+                ProviderEvent::ToolEnd {
+                    tool_use_id,
+                    output: None,
+                    error: Some(err.clone()),
+                    images: Vec::new(),
+                },
+            )
+            .await;
+            ChatMessage::tool_result(name, serde_json::json!({ "error": err }).to_string())
+        }
+    }
+}
 /// Convenience for emitting a `Crashed` event. Keeps the noisy
 /// `exit_code: None, stderr: None` boilerplate out of every error site.
 async fn crash(
@@ -1697,6 +1842,35 @@ pub fn default_models() -> Vec<ModelInfo> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn external_tool_defs_namespace_collide_and_cap() {
+        use crate::service::mcp_client::ExternalMcpTool;
+        let mk = |server: &str, name: &str| ExternalMcpTool {
+            server: server.into(),
+            name: name.into(),
+            description: "d".into(),
+            input_schema: serde_json::json!({"type": "object"}),
+        };
+        let ext = vec![
+            mk("github", "list_issues"),
+            mk("github", "create_card"), // github__create_card ≠ core create_card
+            mk("clash", "tool"),
+            mk(&"x".repeat(60), "toolname"), // 60 + 2 + 8 > 64 → dropped
+        ];
+        let offered: HashSet<String> = ["clash__tool".to_string()].into();
+        let (defs, routes) = external_tool_defs(&ext, &offered);
+        let names: Vec<&str> = defs
+            .iter()
+            .map(|d| d["function"]["name"].as_str().unwrap())
+            .collect();
+        assert_eq!(names, vec!["github__list_issues", "github__create_card"]);
+        assert_eq!(
+            routes.get("github__list_issues").unwrap(),
+            &("github".to_string(), "list_issues".to_string())
+        );
+        assert!(!routes.contains_key("clash__tool"));
+    }
 
     #[test]
     fn resolve_model_strips_only_ollama_prefix() {

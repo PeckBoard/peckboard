@@ -11,6 +11,7 @@ mod context;
 mod handlers;
 mod schemas;
 mod spawn;
+pub mod user_servers;
 
 pub use auth::McpTokenRegistry;
 pub use config::{delete_mcp_config, write_mcp_config};

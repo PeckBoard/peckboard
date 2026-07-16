@@ -966,3 +966,270 @@ a.wasm-plugin-repo:hover {
   color: var(--text2);
   white-space: nowrap;
 }
+
+/* ── MCP Servers (Settings → MCP Servers) ─────────────────────────── */
+.mcp-server-list {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  margin: 12px 0;
+}
+.mcp-server-card {
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--surface);
+  padding: 12px 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  transition: border-color 0.15s ease;
+}
+.mcp-server-card:hover {
+  border-color: var(--ring);
+}
+.mcp-server-card--off {
+  opacity: 0.6;
+}
+.mcp-server-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+.mcp-server-name {
+  font-weight: 600;
+  font-size: var(--text-sm);
+  color: var(--text);
+  overflow-wrap: anywhere;
+}
+.mcp-server-actions {
+  margin-left: auto;
+  display: flex;
+  gap: 6px;
+  flex-shrink: 0;
+}
+.mcp-server-summary {
+  font-family: var(--font-mono);
+  font-size: var(--text-xs);
+  color: var(--text2);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  padding-left: 46px;
+}
+.mcp-server-providers {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+  padding-left: 46px;
+}
+
+/* Transport badges */
+.mcp-badge {
+  font-size: var(--text-xs);
+  font-weight: 600;
+  padding: 2px 8px;
+  border-radius: 999px;
+  flex-shrink: 0;
+}
+.mcp-badge--stdio {
+  background: var(--accent-subtle);
+  color: var(--accent);
+}
+.mcp-badge--http {
+  background: rgba(0, 160, 80, 0.12);
+  color: rgb(0, 130, 65);
+}
+.mcp-badge--sse {
+  background: rgba(210, 150, 0, 0.14);
+  color: rgb(160, 110, 0);
+}
+
+/* Provider chips (display + toggleable variant in the modal) */
+.mcp-chip {
+  font-size: var(--text-xs);
+  padding: 2px 10px;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  background: var(--surface2, var(--surface));
+  color: var(--text2);
+}
+.mcp-chip--toggle {
+  cursor: pointer;
+  font: inherit;
+  font-size: var(--text-sm);
+  padding: 4px 12px;
+  transition:
+    background 0.12s ease,
+    color 0.12s ease,
+    border-color 0.12s ease;
+}
+.mcp-chip--toggle:hover {
+  border-color: var(--ring);
+}
+.mcp-chip--on {
+  background: var(--accent-subtle);
+  border-color: var(--accent);
+  color: var(--accent);
+  font-weight: 600;
+}
+.mcp-provider-chips {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+/* Enable/disable switch */
+.mcp-switch {
+  position: relative;
+  display: inline-block;
+  width: 36px;
+  height: 20px;
+  flex-shrink: 0;
+}
+.mcp-switch input {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  opacity: 0;
+  margin: 0;
+  cursor: pointer;
+}
+.mcp-switch-slider {
+  position: absolute;
+  inset: 0;
+  border-radius: 999px;
+  background: var(--border);
+  transition: background 0.15s ease;
+  cursor: pointer;
+}
+.mcp-switch-slider::before {
+  content: '';
+  position: absolute;
+  width: 14px;
+  height: 14px;
+  left: 3px;
+  top: 3px;
+  border-radius: 50%;
+  background: var(--surface);
+  transition: transform 0.15s ease;
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.25);
+}
+.mcp-switch input:checked + .mcp-switch-slider {
+  background: var(--accent);
+}
+.mcp-switch input:checked + .mcp-switch-slider::before {
+  transform: translateX(16px);
+}
+.mcp-switch input:focus-visible + .mcp-switch-slider {
+  outline: 2px solid var(--ring);
+  outline-offset: 2px;
+}
+
+/* Buttons */
+.mcp-actions {
+  display: flex;
+  gap: 8px;
+  margin-top: 4px;
+}
+.mcp-btn {
+  font-size: var(--text-sm);
+  padding: 6px 14px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--surface);
+  color: var(--text);
+  cursor: pointer;
+  font-weight: 600;
+}
+.mcp-btn:hover {
+  background: var(--surface-hover, rgba(0, 0, 0, 0.04));
+}
+.mcp-btn--primary {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: #fff;
+}
+.mcp-btn--primary:hover {
+  background: var(--accent-hover);
+}
+.mcp-btn--primary[disabled] {
+  opacity: 0.5;
+  cursor: default;
+}
+.mcp-btn--primary[disabled]:hover {
+  background: var(--accent);
+}
+.mcp-btn--danger {
+  color: var(--danger, #c00);
+}
+.mcp-btn--danger:hover {
+  background: rgba(239, 68, 68, 0.08);
+  border-color: var(--danger, #c00);
+}
+
+/* Empty state, errors, import */
+.mcp-empty {
+  border: 1px dashed var(--border);
+  border-radius: var(--radius);
+  padding: 28px 20px;
+  text-align: center;
+  margin: 12px 0;
+}
+.mcp-empty-title {
+  font-weight: 600;
+  font-size: var(--text-sm);
+  color: var(--text2);
+}
+.mcp-empty-text {
+  font-size: var(--text-xs);
+  color: var(--text3);
+  margin-top: 4px;
+}
+.mcp-error {
+  font-size: var(--text-sm);
+  color: var(--danger, #c00);
+  background: rgba(239, 68, 68, 0.08);
+  border: 1px solid rgba(239, 68, 68, 0.35);
+  border-radius: var(--radius);
+  padding: 8px 12px;
+  margin: 8px 0;
+}
+.mcp-mono {
+  font-family: var(--font-mono);
+}
+.mcp-modal h3 {
+  margin-top: 0;
+}
+.mcp-modal-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-top: 12px;
+}
+.mcp-import-textarea {
+  width: 100%;
+  box-sizing: border-box;
+  font-family: var(--font-mono);
+  font-size: var(--text-xs);
+  padding: 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--surface);
+  color: var(--text);
+  resize: vertical;
+}
+.mcp-import-preview {
+  font-size: var(--text-sm);
+  color: rgb(0, 130, 65);
+  margin: 8px 0;
+}
+.mcp-enabled-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: var(--text-sm);
+  font-weight: 600;
+  color: var(--text);
+  cursor: pointer;
+}

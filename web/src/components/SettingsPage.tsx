@@ -19,6 +19,7 @@ import SystemPromptsSection from './SystemPromptsSection'
 import OllamaPullModel from './OllamaPullModel'
 import PluginsSection from './PluginsSection'
 import PluginRegistryPanel from './PluginRegistryPanel'
+import McpServersSection from './McpServersSection'
 
 interface KeepAliveRun {
   provider: string
@@ -58,8 +59,15 @@ function formatWhen(at: string): string {
   const d = new Date(at)
   return isNaN(d.getTime()) ? at : d.toLocaleString()
 }
-
-type SubPage = 'appearance' | 'chat' | 'prompts' | 'plugins' | 'providers' | 'registry' | 'server'
+type SubPage =
+  | 'appearance'
+  | 'chat'
+  | 'prompts'
+  | 'plugins'
+  | 'providers'
+  | 'mcp'
+  | 'registry'
+  | 'server'
 
 /**
  * The settings hub lists these sub-pages; each groups related sections
@@ -79,6 +87,11 @@ const SUB_PAGES: { id: SubPage; title: string; blurb: string }[] = [
     id: 'providers',
     title: 'Providers & Accounts',
     blurb: 'Claude and Grok accounts, Ollama servers, Cursor CLI, keep-alive',
+  },
+  {
+    id: 'mcp',
+    title: 'MCP Servers',
+    blurb: 'External tool servers injected into agent sessions',
   },
   {
     id: 'plugins',
@@ -525,6 +538,7 @@ export default function SettingsPage({ onBack, initialSubPage = null }: Props) {
         </>
       )}
 
+      {subPage === 'mcp' && <McpServersSection />}
       {subPage === 'plugins' && <PluginsSection onBrowseRegistry={() => setSubPage('registry')} />}
       {subPage === 'registry' && <PluginRegistryPanel />}
       {subPage === 'prompts' && <SystemPromptsSection />}

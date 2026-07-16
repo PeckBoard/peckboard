@@ -25,6 +25,7 @@ use std::sync::Arc;
 
 use crate::auth::middleware::require_auth;
 use crate::db::Db;
+use crate::service::mcp_server::user_servers;
 use crate::state::AppState;
 
 /// Plugin id / collection the native `run_command` tool records "always"
@@ -72,6 +73,10 @@ pub fn router(state: Arc<AppState>) -> Router<Arc<AppState>> {
         )
         .route("/api/settings/providers", get(get_providers))
         .route("/api/settings/providers/{id}", put(set_provider_hidden))
+        .route(
+            "/api/settings/mcp-servers",
+            get(get_mcp_servers).put(set_mcp_servers),
+        )
         .route_layer(middleware::from_fn_with_state(state, require_auth))
 }
 
@@ -409,6 +414,67 @@ async fn set_provider_hidden(
             SETTINGS_NS,
             SETTINGS_COLLECTION,
             HIDDEN_PROVIDERS_KEY,
+            &value,
+        )
+    })
+    .await;
+    match res {
+        Ok(Ok(_)) => Ok(StatusCode::NO_CONTENT),
+        Ok(Err(e)) => Err((
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({ "error": e.to_string() })),
+        )),
+        Err(e) => Err((
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({ "error": e.to_string() })),
+        )),
+    }
+}
+
+/// GET /api/settings/mcp-servers → the user-defined MCP server list plus
+/// which providers can consume it (the UI greys out the rest).
+async fn get_mcp_servers(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+    let servers = user_servers::load(&state.db).await;
+    Json(serde_json::json!({
+        "servers": servers,
+        "supported_providers": user_servers::MCP_SUPPORTED_PROVIDERS,
+    }))
+}
+
+#[derive(serde::Deserialize)]
+struct McpServersBody {
+    servers: Vec<user_servers::UserMcpServer>,
+}
+
+/// PUT /api/settings/mcp-servers `{"servers":[...]}` → 204. Validated as a
+/// whole list; applies from each session's next dispatched turn (the
+/// per-session config file is rewritten before every turn, see
+/// `service::mcp_server::user_servers`).
+async fn set_mcp_servers(
+    State(state): State<Arc<AppState>>,
+    Json(body): Json<McpServersBody>,
+) -> impl IntoResponse {
+    if let Err(msg) = user_servers::validate(&body.servers) {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({ "error": msg })),
+        ));
+    }
+    let value = match serde_json::to_string(&body.servers) {
+        Ok(v) => v,
+        Err(e) => {
+            return Err((
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({ "error": e.to_string() })),
+            ));
+        }
+    };
+    let db = state.db.clone();
+    let res = tokio::task::spawn_blocking(move || {
+        db.plugin_store_put_blocking(
+            SETTINGS_NS,
+            SETTINGS_COLLECTION,
+            user_servers::MCP_SERVERS_KEY,
             &value,
         )
     })

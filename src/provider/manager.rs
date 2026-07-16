@@ -329,6 +329,21 @@ impl SessionManager {
             is_pre_hatcher: session.expert_kind.as_deref()
                 == Some(crate::service::mcp_server::PRE_HATCHER_EXPERT_KIND),
         };
+        // User-defined MCP servers (Settings → MCP Servers) merge into the
+        // per-session config file here — the one spot every dispatch path
+        // crosses AFTER the model (hence provider) is resolved; the
+        // construction sites often only know `model: "default"`. Pre-hatcher
+        // research sessions stay locked to the built-in read-only toolset.
+        if !final_config.is_pre_hatcher {
+            if let Some(path) = &final_config.mcp_config_path {
+                crate::service::mcp_server::user_servers::append_user_mcp_servers(
+                    path,
+                    db,
+                    &provider_id,
+                )
+                .await;
+            }
+        }
 
         let ctx = SendMessageContext {
             session_id: session_id.to_string(),

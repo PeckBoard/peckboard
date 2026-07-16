@@ -177,11 +177,16 @@ impl AgentProvider for CursorProvider {
         }
 
         // Per-session MCP wiring: a static env-reference entry in the
-        // workspace `.cursor/mcp.json`, the real token via env var at spawn.
-        let mcp_token = config.mcp_config_path.as_deref().and_then(|path| {
+        // workspace `.cursor/mcp.json` (plus any user-defined servers riding
+        // in the per-session file), the real token via env var at spawn.
+        let mcp_wiring = config.mcp_config_path.as_deref().and_then(|path| {
             let wiring = mcp::parse_worker_mcp_config(path)?;
-            match mcp::ensure_workspace_mcp_config(&config.working_dir, &wiring.url) {
-                Ok(_) => Some(wiring.token),
+            match mcp::ensure_workspace_mcp_config(
+                &config.working_dir,
+                &wiring.url,
+                &wiring.extra_servers,
+            ) {
+                Ok(_) => Some(wiring),
                 Err(e) => {
                     tracing::warn!(session_id = %session_id, "cursor: MCP wiring skipped: {e}");
                     None
@@ -209,9 +214,10 @@ impl AgentProvider for CursorProvider {
             // Approval is sticky per server config but cheap to re-assert.
             // The token env var must match the turn's — approval hashes the
             // env-interpolated config.
-            if let Some(token) = mcp_token.as_deref() {
-                mcp::approve_workspace_server(&cli_path, &working_dir, token).await;
+            if let Some(wiring) = &mcp_wiring {
+                mcp::approve_workspace_servers(wiring, &cli_path, &working_dir).await;
             }
+            let mcp_token = mcp_wiring.as_ref().map(|w| w.token.as_str());
             let completed = run_turn(TurnArgs {
                 cli_path: &cli_path,
                 args: &args,
@@ -221,7 +227,7 @@ impl AgentProvider for CursorProvider {
                 db: &db,
                 broadcaster: broadcaster.as_ref(),
                 cancel: cancel_for_task,
-                mcp_token: mcp_token.as_deref(),
+                mcp_token,
             })
             .await;
 

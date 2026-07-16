@@ -25,6 +25,7 @@
 //! queues a second message and drains it when the current turn completes.
 
 pub mod login;
+mod mcp;
 mod parser;
 
 use std::collections::HashMap;
@@ -211,6 +212,19 @@ impl AgentProvider for GrokProvider {
                 "grok: dropping {} attachment(s) — the grok provider is text-only for now",
                 message.attachments.len()
             );
+        }
+        // User-defined MCP servers (Settings → MCP Servers): the per-session
+        // worker-mcp file already carries the grok-applicable entries (merged
+        // at dispatch); mirror them into the workspace `.mcp.json`, which
+        // Grok Build loads as a compatibility source. Best-effort — the turn
+        // runs without extras on any failure.
+        if !config.working_dir.is_empty() {
+            if let Some(path) = config.mcp_config_path.as_deref() {
+                let extras = mcp::extra_servers_from_worker_config(path);
+                if let Err(e) = mcp::ensure_workspace_mcp_json(&config.working_dir, &extras) {
+                    tracing::warn!(session_id = %session_id, "grok: MCP wiring skipped: {e}");
+                }
+            }
         }
 
         let args = build_cli_args(
