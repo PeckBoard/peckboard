@@ -31,6 +31,20 @@ pub const MCP_SERVERS_KEY: &str = "mcp_servers";
 /// Name reserved for the built-in per-session server entry.
 const RESERVED_NAME: &str = "peckboard";
 
+/// Authorize-request parameters owned by the OAuth flow — user-supplied
+/// extras (`McpOauthConfig::auth_params`) must not override them.
+pub const RESERVED_AUTH_PARAMS: &[&str] = &[
+    "response_type",
+    "client_id",
+    "redirect_uri",
+    "code_challenge",
+    "code_challenge_method",
+    "state",
+    "scope",
+    "user_scope",
+    "resource",
+];
+
 /// One env-var or header row. A `Vec` (not a map) so the editor preserves
 /// the user's row order.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -66,6 +80,20 @@ pub struct McpOauthConfig {
     /// (Slack: `authed_user.access_token`). Default `access_token`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub token_field: Option<String>,
+    /// Extra query parameters appended to the authorize request — SSO/team
+    /// pinning hints like Slack `team=T…`, Google `hd=…`, Microsoft
+    /// `domain_hint=…`. Names in [`RESERVED_AUTH_PARAMS`] are rejected.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub auth_params: Vec<KvEntry>,
+}
+
+/// One choice in a server's URL picker (e.g. a Datadog region). Registry
+/// templates ship these; the editor renders them as a dropdown that sets
+/// `url`, which stays the single source of truth for the connection.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct UrlOption {
+    pub label: String,
+    pub url: String,
 }
 
 /// One user-configured MCP server.
@@ -87,6 +115,9 @@ pub struct UserMcpServer {
     pub url: String,
     #[serde(default)]
     pub headers: Vec<KvEntry>,
+    /// Preset URL choices (regions/variants) for the editor's dropdown.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub url_options: Vec<UrlOption>,
     /// `""` = manual auth (headers as configured); `"oauth"` = sign in with
     /// the provider's OAuth flow — the Authorization header is injected at
     /// dispatch from the token store, keyed by this server's `id`.
@@ -195,6 +226,33 @@ pub fn validate(servers: &[UserMcpServer]) -> Result<(), String> {
                     "server '{}': env/header rows need a non-empty key",
                     s.name
                 ));
+            }
+        }
+        for o in &s.url_options {
+            if o.label.trim().is_empty()
+                || !(o.url.starts_with("http://") || o.url.starts_with("https://"))
+            {
+                return Err(format!(
+                    "server '{}': URL options need a label and an http(s) URL",
+                    s.name
+                ));
+            }
+        }
+        if let Some(cfg) = &s.oauth {
+            for kv in &cfg.auth_params {
+                let key = kv.key.trim();
+                if key.is_empty() {
+                    return Err(format!(
+                        "server '{}': extra sign-in parameters need a non-empty name",
+                        s.name
+                    ));
+                }
+                if RESERVED_AUTH_PARAMS.contains(&key) {
+                    return Err(format!(
+                        "server '{}': sign-in parameter '{key}' is set by the flow itself",
+                        s.name
+                    ));
+                }
             }
         }
         if s.disabled_tools.len() > 256 {
@@ -416,6 +474,7 @@ mod tests {
             headers: Vec::new(),
             auth: String::new(),
             oauth: None,
+            url_options: Vec::new(),
             enabled: true,
             providers: Vec::new(),
             disabled_tools: Vec::new(),
@@ -437,6 +496,7 @@ mod tests {
             }],
             auth: String::new(),
             oauth: None,
+            url_options: Vec::new(),
             enabled: true,
             providers: Vec::new(),
             disabled_tools: Vec::new(),

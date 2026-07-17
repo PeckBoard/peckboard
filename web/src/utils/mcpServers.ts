@@ -13,6 +13,12 @@ export interface KvEntry {
   value: string
 }
 
+/** One preset URL choice (e.g. a Datadog region) for the editor's dropdown. */
+export interface UrlOption {
+  label: string
+  url: string
+}
+
 export type McpTransport = 'stdio' | 'http' | 'sse'
 /**
  * OAuth endpoint/client template for a server using sign-in (`auth:
@@ -28,6 +34,8 @@ export interface McpOauthConfig {
   scopes?: string | null
   scope_param?: string | null
   token_field?: string | null
+  /** Extra authorize-request params (SSO/team hints, e.g. Slack team=T…). */
+  auth_params?: KvEntry[] | null
 }
 
 export interface McpServer {
@@ -38,6 +46,8 @@ export interface McpServer {
   args: string[]
   env: KvEntry[]
   url: string
+  /** Preset URL choices (regions/variants) shown as a dropdown. */
+  url_options?: UrlOption[]
   headers: KvEntry[]
   /** `''` = manual headers; `'oauth'` = provider sign-in via /api/mcp-oauth. */
   auth: string
@@ -59,6 +69,12 @@ export function tidy(s: McpServer): McpServer {
     url: s.url.trim(),
     args: s.args.map((a) => a.trim()).filter((a) => a !== ''),
     env: s.env.filter((kv) => kv.key.trim() !== ''),
+    oauth: s.oauth
+      ? {
+          ...s.oauth,
+          auth_params: (s.oauth.auth_params ?? []).filter((kv) => kv.key.trim() !== ''),
+        }
+      : s.oauth,
     headers: s.headers.filter((kv) => kv.key.trim() !== ''),
   }
 }

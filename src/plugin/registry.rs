@@ -131,6 +131,10 @@ pub struct McpRegistryEntry {
     pub url: String,
     #[serde(default)]
     pub headers: Vec<RegistryKv>,
+    /// Preset URL choices (regions/variants) rendered as a dropdown in the
+    /// editor (e.g. Datadog sites); picking one sets `url`.
+    #[serde(default)]
+    pub url_options: Vec<crate::service::mcp_server::user_servers::UrlOption>,
     /// Editor hint shown on add (e.g. where to create the API key).
     #[serde(default)]
     pub setup_note: Option<String>,

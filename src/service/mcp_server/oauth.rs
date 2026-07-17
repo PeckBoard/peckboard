@@ -120,6 +120,22 @@ pub struct Endpoints {
     /// Query parameter carrying the scopes (default `scope`; Slack's user
     /// flow wants `user_scope`).
     pub scope_param: Option<String>,
+    /// Extra authorize-request query params (SSO/team pinning hints),
+    /// pre-filtered against the reserved set.
+    pub auth_params: Vec<(String, String)>,
+}
+
+/// `cfg.auth_params` as ready-to-append pairs — blank and reserved names
+/// dropped (validation rejects them upstream; this is defence in depth).
+fn extra_auth_params(cfg: &McpOauthConfig) -> Vec<(String, String)> {
+    cfg.auth_params
+        .iter()
+        .filter(|kv| {
+            let k = kv.key.trim();
+            !k.is_empty() && !super::user_servers::RESERVED_AUTH_PARAMS.contains(&k)
+        })
+        .map(|kv| (kv.key.trim().to_string(), kv.value.clone()))
+        .collect()
 }
 
 async fn fetch_json(client: &reqwest::Client, url: &str) -> Option<serde_json::Value> {
@@ -178,6 +194,7 @@ pub async fn discover(
             resource: None,
             scopes: cfg.scopes.clone(),
             scope_param: cfg.scope_param.clone(),
+            auth_params: extra_auth_params(cfg),
         });
     }
 
@@ -269,6 +286,7 @@ pub async fn discover(
         resource,
         scopes: cfg.scopes.clone().or(prm_scopes),
         scope_param: cfg.scope_param.clone(),
+        auth_params: extra_auth_params(cfg),
     })
 }
 
@@ -376,6 +394,9 @@ pub fn authorize_request_url(
     }
     if let Some(r) = endpoints.resource.as_deref() {
         pairs.push(("resource", r));
+    }
+    for (k, v) in &endpoints.auth_params {
+        pairs.push((k.as_str(), v.as_str()));
     }
     let query = form_encode(&pairs);
     let sep = if endpoints.authorize_url.contains('?') {
@@ -782,6 +803,7 @@ mod tests {
             resource: Some("https://mcp.example/mcp".into()),
             scopes: Some("read write".into()),
             scope_param: None,
+            auth_params: Vec::new(),
         };
         let url = authorize_request_url(&ep, "cid", "https://pb.local/oauth/callback", "CH", "ST");
         assert!(url.starts_with("https://as.example/authorize?response_type=code"));
@@ -809,6 +831,39 @@ mod tests {
         let u = authorize_request_url(&ep3, "cid", "r", "c", "s");
         assert!(u.contains("user_scope=read%20write"));
         assert!(!u.contains("&scope="));
+        // Extra SSO params ride along on the authorize URL.
+        let ep4 = Endpoints {
+            auth_params: vec![("team".into(), "T0123ABC".into())],
+            ..ep3
+        };
+        let u = authorize_request_url(&ep4, "cid", "r", "c", "s");
+        assert!(u.contains("team=T0123ABC"));
+    }
+
+    #[test]
+    fn extra_auth_params_filters_reserved_and_blank() {
+        use super::super::user_servers::KvEntry;
+        let cfg = McpOauthConfig {
+            auth_params: vec![
+                KvEntry {
+                    key: "team".into(),
+                    value: "T1".into(),
+                },
+                KvEntry {
+                    key: "state".into(),
+                    value: "evil".into(),
+                },
+                KvEntry {
+                    key: "  ".into(),
+                    value: "y".into(),
+                },
+            ],
+            ..Default::default()
+        };
+        assert_eq!(
+            extra_auth_params(&cfg),
+            vec![("team".to_string(), "T1".to_string())]
+        );
     }
 
     #[test]

@@ -165,6 +165,7 @@ fn oauth_server(id: &str, name: &str, url: String, cfg: Option<McpOauthConfig>) 
         env: Vec::new(),
         url,
         headers: Vec::new(),
+        url_options: Vec::new(),
         auth: "oauth".into(),
         oauth: cfg,
         enabled: true,

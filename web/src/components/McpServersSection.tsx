@@ -616,11 +616,15 @@ function OauthConnect({
             This server authenticates with OAuth: signing in opens the provider in a new tab; the
             token stays on the PeckBoard host and is attached to sessions automatically.
           </span>
+          <span className="plugin-setting-desc" data-testid="mcp-oauth-callback">
+            Callback URL — allow-list it with the provider if it requires registered redirect URLs
+            (Datadog: Organization Settings): <code className="mcp-mono">{redirectUri}</code>
+          </span>
           {showClientFields && (
             <>
               <span className="plugin-setting-desc">
-                This provider needs an app of your own. Register one with this redirect URL, then
-                enter its credentials: <code className="mcp-mono">{redirectUri}</code>
+                This provider needs an app of your own. Register one with the callback URL above,
+                then enter its credentials:
               </span>
               <input
                 className="plugin-setting-input mcp-mono"
@@ -641,6 +645,58 @@ function OauthConnect({
             </>
           )}
           <div className="mcp-test-row">
+            <span className="plugin-setting-desc">
+              Extra sign-in parameters (optional) — SSO/workspace hints, e.g. Slack Enterprise{' '}
+              <code>team</code>, Google <code>hd</code>, Microsoft <code>domain_hint</code>:
+            </span>
+            {(draft.oauth?.auth_params ?? []).map((kv, i) => (
+              <div key={i} className="plugin-setting-kv-row">
+                <input
+                  type="text"
+                  placeholder="team"
+                  value={kv.key}
+                  data-testid={`mcp-oauth-param-key-${i}`}
+                  onChange={(e) => {
+                    const next = [...(draft.oauth?.auth_params ?? [])]
+                    next[i] = { ...next[i], key: e.target.value }
+                    setOauth({ auth_params: next })
+                  }}
+                />
+                <input
+                  type="text"
+                  placeholder="T0123ABC"
+                  value={kv.value}
+                  onChange={(e) => {
+                    const next = [...(draft.oauth?.auth_params ?? [])]
+                    next[i] = { ...next[i], value: e.target.value }
+                    setOauth({ auth_params: next })
+                  }}
+                />
+                <button
+                  type="button"
+                  className="plugin-setting-kv-remove"
+                  onClick={() =>
+                    setOauth({
+                      auth_params: (draft.oauth?.auth_params ?? []).filter((_, idx) => idx !== i),
+                    })
+                  }
+                >
+                  Remove
+                </button>
+              </div>
+            ))}
+            <button
+              type="button"
+              className="plugin-setting-kv-add"
+              data-testid="mcp-oauth-add-param"
+              onClick={() =>
+                setOauth({
+                  auth_params: [...(draft.oauth?.auth_params ?? []), { key: '', value: '' }],
+                })
+              }
+            >
+              + Add sign-in parameter
+            </button>
             <button
               type="button"
               className="mcp-btn mcp-btn--primary"
@@ -944,6 +1000,32 @@ export function ServerModal({
           </>
         ) : (
           <>
+            {(draft.url_options?.length ?? 0) > 0 && (
+              <label className="plugin-setting-field">
+                <span className="plugin-setting-label">Region</span>
+                <span className="plugin-setting-desc">
+                  Picking one sets the URL below; sign-in follows the URL.
+                </span>
+                <select
+                  className="plugin-setting-select"
+                  data-testid="mcp-field-url-option"
+                  value={draft.url_options?.find((o) => o.url === draft.url)?.url ?? ''}
+                  onChange={(e) => {
+                    if (e.target.value) {
+                      setTouched(true)
+                      set({ url: e.target.value })
+                    }
+                  }}
+                >
+                  <option value="">Custom URL…</option>
+                  {(draft.url_options ?? []).map((o) => (
+                    <option key={o.url} value={o.url}>
+                      {o.label}
+                    </option>
+                  ))}
+                </select>
+              </label>
+            )}
             <label className="plugin-setting-field">
               <span className="plugin-setting-label">URL</span>
               <input

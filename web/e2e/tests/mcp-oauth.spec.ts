@@ -91,6 +91,10 @@ test('OAuth server: badge, sign in → connected, disconnect', async ({ request,
           env: [],
           url: 'https://mcp.example.com/mcp',
           headers: [],
+          url_options: [
+            { label: 'US1', url: 'https://mcp.example.com/mcp' },
+            { label: 'EU', url: 'https://mcp.example.eu/mcp' },
+          ],
           auth: 'oauth',
           oauth: {},
           enabled: true,
@@ -119,6 +123,19 @@ test('OAuth server: badge, sign in → connected, disconnect', async ({ request,
   await expect(page.getByText('Headers', { exact: true })).toHaveCount(0)
   // Discovery-capable template: no client credential inputs up front.
   await expect(page.getByTestId('mcp-oauth-client-id')).toHaveCount(0)
+
+  // Region dropdown (url_options) drives the URL; the callback URL to
+  // allow-list is always visible.
+  const region = page.getByTestId('mcp-field-url-option')
+  await expect(region).toBeVisible()
+  await region.selectOption('https://mcp.example.eu/mcp')
+  await expect(page.getByTestId('mcp-field-url')).toHaveValue('https://mcp.example.eu/mcp')
+  await region.selectOption('https://mcp.example.com/mcp')
+  await expect(page.getByTestId('mcp-oauth-callback')).toContainText('/oauth/callback')
+
+  // Extra sign-in parameter rows (SSO hints like Slack team=…).
+  await page.getByTestId('mcp-oauth-add-param').click()
+  await page.getByTestId('mcp-oauth-param-key-0').fill('team')
 
   await page.waitForTimeout(400)
   await page.screenshot({ path: 'e2e/test-results/mcp-oauth-signin-panel.png' })

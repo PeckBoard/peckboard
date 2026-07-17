@@ -227,6 +227,8 @@ export interface RegistryMcpServer {
   headers: { key: string; value: string }[]
   /** OAuth sign-in template; present (even empty) ⇒ the server signs in with OAuth. */
   oauth?: McpOauthConfig | null
+  /** Preset URL choices (regions/variants) shown as a dropdown on add. */
+  url_options?: { label: string; url: string }[]
   setup_note?: string | null
   /** Human install steps for the host binary (stdio transport). */
   install?: string[]

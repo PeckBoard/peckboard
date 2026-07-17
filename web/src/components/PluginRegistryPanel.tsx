@@ -141,6 +141,7 @@ function draftFromTemplate(m: RegistryMcpServer): McpServer {
     env: (m.env ?? []).map((kv) => ({ ...kv })),
     url: m.url ?? '',
     headers: (m.headers ?? []).map((kv) => ({ ...kv })),
+    url_options: (m.url_options ?? []).map((o) => ({ ...o })),
     auth: m.oauth ? 'oauth' : '',
     oauth: m.oauth ? { ...m.oauth } : null,
     enabled: true,
