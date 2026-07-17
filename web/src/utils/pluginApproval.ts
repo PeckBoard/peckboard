@@ -1,4 +1,5 @@
 import { authedFetch } from '../store/auth'
+import type { McpOauthConfig } from './mcpServers'
 
 /** A loaded WASM plugin and its approval status, from `/api/plugins`. */
 export interface WasmPlugin {
@@ -224,6 +225,8 @@ export interface RegistryMcpServer {
   env: { key: string; value: string }[]
   url: string
   headers: { key: string; value: string }[]
+  /** OAuth sign-in template; present (even empty) ⇒ the server signs in with OAuth. */
+  oauth?: McpOauthConfig | null
   setup_note?: string | null
   /** Human install steps for the host binary (stdio transport). */
   install?: string[]

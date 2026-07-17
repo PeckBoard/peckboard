@@ -6,6 +6,7 @@ pub mod claude_accounts;
 pub mod folders;
 pub mod grok_accounts;
 pub mod mcp;
+pub mod mcp_oauth;
 pub mod me;
 pub mod misc;
 pub mod notifications;
@@ -38,6 +39,9 @@ pub fn api_router(state: Arc<AppState>) -> Router<Arc<AppState>> {
         .merge(askpass::router(state.clone()))
         // MCP route -- no auth middleware, uses its own token auth + loopback gating
         .merge(mcp::router(state.clone()))
+        // MCP-server OAuth: /api/* routes are JWT'd; GET /oauth/callback is
+        // public — the provider redirect is claimed by its one-time state.
+        .merge(mcp_oauth::router(state.clone()))
         .merge(auth::router(state.clone()))
         .merge(claude_accounts::router(state.clone()))
         .merge(grok_accounts::router(state.clone()))

@@ -132,9 +132,15 @@ pub struct McpRegistryEntry {
     #[serde(default)]
     pub headers: Vec<RegistryKv>,
     /// Editor hint shown on add (e.g. where to create the API key).
-    /// Editor hint shown on add (e.g. where to create the API key).
     #[serde(default)]
     pub setup_note: Option<String>,
+    /// OAuth sign-in template (http/sse transports). Present — even empty
+    /// `{}` — means the server authenticates with OAuth: the UI offers
+    /// "Sign in" instead of a manual Authorization header, and any missing
+    /// endpoint/client data is discovered from the server's `.well-known`
+    /// metadata at login (see `service::mcp_server::oauth`).
+    #[serde(default)]
+    pub oauth: Option<crate::service::mcp_server::user_servers::McpOauthConfig>,
     /// Optional human install steps for the host binary, shown when the
     /// `command` is missing on the Peckboard host (stdio transport only).
     #[serde(default)]

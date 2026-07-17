@@ -39,6 +39,35 @@ pub struct KvEntry {
     pub value: String,
 }
 
+/// OAuth endpoint/client template for a server whose auth is `"oauth"`.
+/// Every field is optional: anything missing is resolved at login time from
+/// the server's RFC 9728 / RFC 8414 `.well-known` metadata (and dynamic
+/// client registration, RFC 7591, when the server offers it).
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct McpOauthConfig {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub authorize_url: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub token_url: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub registration_url: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub client_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub client_secret: Option<String>,
+    /// Space-separated scope string for the authorize request.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scopes: Option<String>,
+    /// Query parameter carrying the scopes on the authorize request
+    /// (default `scope`; Slack's user flow wants `user_scope`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scope_param: Option<String>,
+    /// Dot-path of the access token in a non-standard token response
+    /// (Slack: `authed_user.access_token`). Default `access_token`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub token_field: Option<String>,
+}
+
 /// One user-configured MCP server.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct UserMcpServer {
@@ -58,6 +87,16 @@ pub struct UserMcpServer {
     pub url: String,
     #[serde(default)]
     pub headers: Vec<KvEntry>,
+    /// `""` = manual auth (headers as configured); `"oauth"` = sign in with
+    /// the provider's OAuth flow — the Authorization header is injected at
+    /// dispatch from the token store, keyed by this server's `id`.
+    #[serde(default)]
+    pub auth: String,
+    /// OAuth template (registry-provided endpoints / user-entered client
+    /// credentials); missing pieces are discovered from the server's
+    /// `.well-known` metadata when the login starts.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub oauth: Option<McpOauthConfig>,
     #[serde(default = "default_true")]
     pub enabled: bool,
     /// Provider ids this server applies to; empty = every supported provider.
@@ -126,6 +165,20 @@ pub fn validate(servers: &[UserMcpServer]) -> Result<(), String> {
             }
             other => {
                 return Err(format!("server '{}': unknown transport '{other}'", s.name));
+            }
+        }
+        match s.auth.as_str() {
+            "" => {}
+            "oauth" => {
+                if s.transport == "stdio" {
+                    return Err(format!(
+                        "server '{}': OAuth sign-in only applies to http/sse transports",
+                        s.name
+                    ));
+                }
+            }
+            other => {
+                return Err(format!("server '{}': unknown auth mode '{other}'", s.name));
             }
         }
         for p in &s.providers {
@@ -240,6 +293,35 @@ pub fn entries_for_provider(
         .collect()
 }
 
+/// [`entries_for_provider`] plus a live `Authorization: Bearer …` header for
+/// servers using OAuth sign-in (`auth == "oauth"`), resolved (and refreshed
+/// when near expiry) from the token store. A server whose token is missing
+/// or dead still ships — without the header — so the session surfaces the
+/// server's own 401 instead of the server silently vanishing.
+pub async fn entries_for_provider_with_oauth(
+    db: &Db,
+    servers: &[UserMcpServer],
+    provider_id: &str,
+) -> Vec<(String, serde_json::Value)> {
+    let mut entries = Vec::new();
+    for s in servers.iter().filter(|s| applies_to(s, provider_id)) {
+        let mut entry = entry_json(s);
+        if s.auth == "oauth" {
+            if let Some(bearer) = super::oauth::bearer_for_server(db, s).await {
+                entry["headers"]["Authorization"] = serde_json::Value::String(bearer);
+            } else {
+                tracing::warn!(
+                    "MCP server '{}' uses OAuth but has no usable token; connect it in \
+                     Settings → MCP Servers",
+                    s.name
+                );
+            }
+        }
+        entries.push((s.name.clone(), entry));
+    }
+    entries
+}
+
 /// Fully-qualified `mcp__<server>__<tool>` names for every tool the user
 /// switched off on servers that apply to `provider_id` — the shape Claude's
 /// `--disallowedTools` expects; Ollama matches the same strings against its
@@ -287,7 +369,7 @@ pub async fn append_user_mcp_servers(mcp_config_path: &str, db: &Db, provider_id
     if !MCP_SUPPORTED_PROVIDERS.contains(&provider_id) {
         return;
     }
-    let entries = entries_for_provider(&load(db).await, provider_id);
+    let entries = entries_for_provider_with_oauth(db, &load(db).await, provider_id).await;
     if entries.is_empty() {
         return;
     }
@@ -332,6 +414,8 @@ mod tests {
             }],
             url: String::new(),
             headers: Vec::new(),
+            auth: String::new(),
+            oauth: None,
             enabled: true,
             providers: Vec::new(),
             disabled_tools: Vec::new(),
@@ -351,6 +435,8 @@ mod tests {
                 key: "Authorization".into(),
                 value: "Bearer x".into(),
             }],
+            auth: String::new(),
+            oauth: None,
             enabled: true,
             providers: Vec::new(),
             disabled_tools: Vec::new(),

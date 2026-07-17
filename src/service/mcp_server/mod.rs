@@ -10,6 +10,7 @@ pub(crate) mod common_tools;
 mod config;
 mod context;
 mod handlers;
+pub mod oauth;
 mod schemas;
 mod spawn;
 pub mod user_servers;

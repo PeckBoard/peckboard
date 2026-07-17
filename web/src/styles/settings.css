@@ -1382,6 +1382,30 @@ a.wasm-plugin-repo:hover {
   color: var(--danger, #c00);
 }
 
+/* MCP OAuth sign-in (server editor + card badges) */
+.mcp-badge--oauth-on {
+  color: rgb(0, 130, 65);
+  border-color: rgba(0, 130, 65, 0.4);
+}
+.mcp-badge--oauth-off {
+  color: var(--warning, #a06a00);
+  border-color: rgba(160, 106, 0, 0.4);
+}
+.mcp-oauth-link {
+  align-self: flex-start;
+  margin-top: 6px;
+  padding: 0;
+  border: none;
+  background: none;
+  font-size: var(--text-xs);
+  color: var(--text3);
+  text-decoration: underline;
+  cursor: pointer;
+}
+.mcp-oauth-link:hover {
+  color: var(--text1);
+}
+
 /* Registry browse (aggregate plugins + MCP servers) */
 .registry-controls {
   display: flex;

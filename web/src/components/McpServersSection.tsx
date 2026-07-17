@@ -4,10 +4,14 @@ import { useResourcesStore } from '../store/resources'
 import Modal from './Modal'
 import {
   checkMcpCommand,
+  disconnectMcpOauth,
+  fetchMcpOauthTokens,
   probeMcpServer,
+  startMcpOauth,
   tidy,
   type CommandCheckResult,
   type KvEntry,
+  type McpOauthTokenInfo,
   type McpServer,
   type McpTransport,
   type ProbeResult,
@@ -45,6 +49,8 @@ function emptyServer(): McpServer {
     env: [],
     url: '',
     headers: [],
+    auth: '',
+    oauth: null,
     enabled: true,
     providers: [],
     disabled_tools: [],
@@ -126,6 +132,7 @@ function parseImport(text: string): { servers: McpServer[]; error: string | null
       env: kvList(entry.env),
       url,
       headers: kvList(entry.headers),
+      auth: '',
       enabled: true,
       providers: [],
       disabled_tools: [],
@@ -144,6 +151,7 @@ export default function McpServersSection() {
   const [isNew, setIsNew] = useState(false)
   const [importOpen, setImportOpen] = useState(false)
   const [deleting, setDeleting] = useState<McpServer | null>(null)
+  const [oauthTokens, setOauthTokens] = useState<Record<string, McpOauthTokenInfo>>({})
   const providers = useResourcesStore((s) => s.providers)
   const fetchModels = useResourcesStore((s) => s.fetchModels)
 
@@ -171,6 +179,12 @@ export default function McpServersSection() {
       .catch(() => setLoaded(true))
   }
   useEffect(load, [])
+
+  // OAuth connection status per server id — refreshed whenever the editor
+  // closes (a sign-in may have just completed inside it).
+  useEffect(() => {
+    if (!editing) void fetchMcpOauthTokens().then(setOauthTokens)
+  }, [editing])
 
   const providerLabel = (id: string) =>
     providers.find((p) => p.id === id)?.display_name ?? id.charAt(0).toUpperCase() + id.slice(1)
@@ -263,6 +277,14 @@ export default function McpServersSection() {
               <span className={`mcp-badge mcp-badge--${s.transport}`}>
                 {TRANSPORT_LABELS[s.transport]}
               </span>
+              {s.auth === 'oauth' && (
+                <span
+                  className={`mcp-badge ${oauthTokens[s.id] ? 'mcp-badge--oauth-on' : 'mcp-badge--oauth-off'}`}
+                  data-testid={`mcp-oauth-badge-${s.name}`}
+                >
+                  {oauthTokens[s.id] ? 'OAuth ✓' : 'OAuth — sign in needed'}
+                </span>
+              )}
               <span className="mcp-server-actions">
                 <button
                   type="button"
@@ -490,6 +512,165 @@ function ToolsPanel({
           )}
         </div>
       )}
+    </div>
+  )
+}
+
+/**
+ * The OAuth sign-in panel inside the server editor: shows connection state
+ * for the draft's id, starts the browser flow, and polls until the public
+ * callback stores the token. Providers without dynamic client registration
+ * (Slack) get client id/secret inputs bound to the draft's oauth template.
+ */
+function OauthConnect({
+  draft,
+  set,
+}: {
+  draft: McpServer
+  set: (patch: Partial<McpServer>) => void
+}) {
+  const [info, setInfo] = useState<McpOauthTokenInfo | null>(null)
+  const [starting, setStarting] = useState(false)
+  const [waiting, setWaiting] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+  const [needsClient, setNeedsClient] = useState(false)
+  const [redirectUri, setRedirectUri] = useState(`${window.location.origin}/oauth/callback`)
+
+  const refresh = async () => {
+    const tokens = await fetchMcpOauthTokens()
+    setInfo(tokens[draft.id] ?? null)
+    return !!tokens[draft.id]
+  }
+
+  useEffect(() => {
+    let cancelled = false
+    void fetchMcpOauthTokens().then((tokens) => {
+      if (!cancelled) setInfo(tokens[draft.id] ?? null)
+    })
+    return () => {
+      cancelled = true
+    }
+  }, [draft.id])
+
+  // While a sign-in tab is open, poll the token list (up to 5 minutes).
+  useEffect(() => {
+    if (!waiting) return
+    let tries = 0
+    const t = setInterval(() => {
+      tries += 1
+      void refresh().then((connected) => {
+        if (connected || tries > 150) setWaiting(false)
+      })
+    }, 2000)
+    return () => clearInterval(t)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [waiting])
+
+  // A registry template with static endpoints but no client id and no
+  // registration endpoint (Slack) will need user-supplied credentials —
+  // show the fields before the first failed attempt.
+  const likelyNeedsClient =
+    !!draft.oauth?.authorize_url && !draft.oauth?.registration_url && !draft.oauth?.client_id
+  const showClientFields = needsClient || likelyNeedsClient
+
+  const signIn = async () => {
+    setStarting(true)
+    setError(null)
+    const r = await startMcpOauth(tidy(draft))
+    setStarting(false)
+    if (r.ok) {
+      window.open(r.url, '_blank', 'noopener')
+      setWaiting(true)
+    } else {
+      if (r.redirectUri) setRedirectUri(r.redirectUri)
+      if (r.needsClient) setNeedsClient(true)
+      setError(r.error)
+    }
+  }
+
+  const setOauth = (patch: Partial<NonNullable<McpServer['oauth']>>) =>
+    set({ oauth: { ...(draft.oauth ?? {}), ...patch } })
+
+  return (
+    <div className="plugin-setting-field" data-testid="mcp-oauth-panel">
+      <span className="plugin-setting-label">Sign in</span>
+      {info ? (
+        <div className="mcp-test-row">
+          <span className="mcp-test-ok" data-testid="mcp-oauth-status">
+            ✓ Connected{info.expires_at_ms ? ' — renews automatically' : ''}
+          </span>
+          <button
+            type="button"
+            className="mcp-btn"
+            data-testid="mcp-oauth-disconnect"
+            onClick={() => {
+              void disconnectMcpOauth(draft.id).then(refresh)
+            }}
+          >
+            Disconnect
+          </button>
+        </div>
+      ) : (
+        <>
+          <span className="plugin-setting-desc">
+            This server authenticates with OAuth: signing in opens the provider in a new tab; the
+            token stays on the PeckBoard host and is attached to sessions automatically.
+          </span>
+          {showClientFields && (
+            <>
+              <span className="plugin-setting-desc">
+                This provider needs an app of your own. Register one with this redirect URL, then
+                enter its credentials: <code className="mcp-mono">{redirectUri}</code>
+              </span>
+              <input
+                className="plugin-setting-input mcp-mono"
+                type="text"
+                placeholder="Client ID"
+                value={draft.oauth?.client_id ?? ''}
+                data-testid="mcp-oauth-client-id"
+                onChange={(e) => setOauth({ client_id: e.target.value })}
+              />
+              <input
+                className="plugin-setting-input mcp-mono"
+                type="password"
+                placeholder="Client secret (if the app has one)"
+                value={draft.oauth?.client_secret ?? ''}
+                data-testid="mcp-oauth-client-secret"
+                onChange={(e) => setOauth({ client_secret: e.target.value })}
+              />
+            </>
+          )}
+          <div className="mcp-test-row">
+            <button
+              type="button"
+              className="mcp-btn mcp-btn--primary"
+              disabled={starting || waiting}
+              data-testid="mcp-oauth-signin"
+              onClick={signIn}
+            >
+              {waiting ? 'Waiting for sign-in…' : starting ? 'Starting…' : 'Sign in'}
+            </button>
+            {waiting && (
+              <button type="button" className="mcp-btn" onClick={() => setWaiting(false)}>
+                Cancel
+              </button>
+            )}
+          </div>
+          {error && (
+            <div className="mcp-error" data-testid="mcp-oauth-error">
+              {error}
+            </div>
+          )}
+        </>
+      )}
+      <button
+        type="button"
+        className="mcp-oauth-link"
+        data-testid="mcp-oauth-manual"
+        onClick={() => set({ auth: '' })}
+      >
+        Use manual headers instead
+      </button>
     </div>
   )
 }
@@ -777,16 +958,30 @@ export function ServerModal({
                 }}
               />
             </label>
-            <div className="plugin-setting-field">
-              <span className="plugin-setting-label">Headers</span>
-              {rows(
-                draft.headers,
-                (headers) => set({ headers }),
-                'Authorization',
-                'Bearer …',
-                '+ Add header',
-              )}
-            </div>
+            {draft.auth === 'oauth' ? (
+              <OauthConnect draft={draft} set={set} />
+            ) : (
+              <div className="plugin-setting-field">
+                <span className="plugin-setting-label">Headers</span>
+                {rows(
+                  draft.headers,
+                  (headers) => set({ headers }),
+                  'Authorization',
+                  'Bearer …',
+                  '+ Add header',
+                )}
+                {draft.oauth && (
+                  <button
+                    type="button"
+                    className="mcp-oauth-link"
+                    data-testid="mcp-oauth-use"
+                    onClick={() => set({ auth: 'oauth' })}
+                  >
+                    Use OAuth sign-in instead
+                  </button>
+                )}
+              </div>
+            )}
           </>
         )}
 

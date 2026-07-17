@@ -141,6 +141,8 @@ function draftFromTemplate(m: RegistryMcpServer): McpServer {
     env: (m.env ?? []).map((kv) => ({ ...kv })),
     url: m.url ?? '',
     headers: (m.headers ?? []).map((kv) => ({ ...kv })),
+    auth: m.oauth ? 'oauth' : '',
+    oauth: m.oauth ? { ...m.oauth } : null,
     enabled: true,
     providers: [],
     disabled_tools: [],
@@ -447,6 +449,11 @@ function RegistryDetailModal({
           <span className={`mcp-badge mcp-badge--${m.transport}`}>
             {m.transport === 'stdio' ? 'stdio' : m.transport.toUpperCase()}
           </span>
+          {m.oauth && (
+            <span className="mcp-badge mcp-badge--oauth-on" data-testid="registry-detail-oauth">
+              OAuth sign-in
+            </span>
+          )}
           {added && <span className="plugin-badge plugin-badge--approved">Added</span>}
         </div>
       </header>

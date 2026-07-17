@@ -81,8 +81,8 @@ pub fn router(state: Arc<AppState>) -> Router<Arc<AppState>> {
             "/api/settings/mcp-servers/check-command",
             post(check_mcp_command),
         )
-        .route_layer(middleware::from_fn_with_state(state, require_auth))
         .route("/api/settings/mcp-servers/probe", post(probe_mcp_server))
+        .route_layer(middleware::from_fn_with_state(state, require_auth))
 }
 
 /// GET /api/settings/caveman → `{"level":"off|lite|full"}` (default "off").
@@ -502,11 +502,29 @@ async fn set_mcp_servers(
 /// server is a result (`{"ok":false,"error"}`), not a transport error. The
 /// stdio probe runs the configured command server-side — the same trust model
 /// as dispatch, which already launches every enabled server each turn.
-async fn probe_mcp_server(Json(server): Json<user_servers::UserMcpServer>) -> impl IntoResponse {
+async fn probe_mcp_server(
+    State(state): State<Arc<AppState>>,
+    Json(server): Json<user_servers::UserMcpServer>,
+) -> impl IntoResponse {
     if let Err(msg) = user_servers::validate(std::slice::from_ref(&server)) {
         return Json(serde_json::json!({ "ok": false, "error": msg }));
     }
-    let entry = user_servers::entry_json(&server);
+    let mut entry = user_servers::entry_json(&server);
+    // OAuth servers probe with the same injected Authorization header a
+    // session would get — including the just-connected, not-yet-saved case.
+    if server.auth == "oauth" {
+        match crate::service::mcp_server::oauth::bearer_for_server(&state.db, &server).await {
+            Some(bearer) => {
+                entry["headers"]["Authorization"] = serde_json::Value::String(bearer);
+            }
+            None => {
+                return Json(serde_json::json!({
+                    "ok": false,
+                    "error": "not signed in yet — use the Sign in button above first",
+                }));
+            }
+        }
+    }
     let probe = async {
         let mut client = crate::service::mcp_client::McpClient::connect(&server.name, &entry)
             .await

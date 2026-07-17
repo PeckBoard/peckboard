@@ -14,6 +14,21 @@ export interface KvEntry {
 }
 
 export type McpTransport = 'stdio' | 'http' | 'sse'
+/**
+ * OAuth endpoint/client template for a server using sign-in (`auth:
+ * 'oauth'`). Mirrors the backend's `McpOauthConfig` — every field optional;
+ * missing pieces are discovered from the server's `.well-known` metadata.
+ */
+export interface McpOauthConfig {
+  authorize_url?: string | null
+  token_url?: string | null
+  registration_url?: string | null
+  client_id?: string | null
+  client_secret?: string | null
+  scopes?: string | null
+  scope_param?: string | null
+  token_field?: string | null
+}
 
 export interface McpServer {
   id: string
@@ -24,6 +39,10 @@ export interface McpServer {
   env: KvEntry[]
   url: string
   headers: KvEntry[]
+  /** `''` = manual headers; `'oauth'` = provider sign-in via /api/mcp-oauth. */
+  auth: string
+  /** OAuth template (from the registry entry or user-entered credentials). */
+  oauth?: McpOauthConfig | null
   enabled: boolean
   /** Provider ids this server applies to; empty = every supported provider. */
   providers: string[]
@@ -97,5 +116,78 @@ export async function checkMcpCommand(command: string): Promise<CommandCheckResu
     }
   } catch {
     return null
+  }
+}
+
+/** Connection status for one OAuth-connected server (token values stay server-side). */
+export interface McpOauthTokenInfo {
+  server_name: string
+  connected: boolean
+  expires_at_ms?: number | null
+  obtained_at_ms?: number
+  has_refresh_token?: boolean
+}
+
+export type StartOauthResult =
+  | { ok: true; url: string }
+  | { ok: false; needsClient: boolean; error: string; redirectUri?: string }
+
+/**
+ * Begin the OAuth sign-in for a server draft. `needsClient` means the
+ * provider offers no dynamic client registration — the user must supply a
+ * client id/secret from a provider-registered app (redirect URL included
+ * for that registration).
+ */
+export async function startMcpOauth(server: McpServer): Promise<StartOauthResult> {
+  try {
+    const res = await authedFetch('/api/mcp-oauth/start', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ server }),
+    })
+    const data = (await res.json().catch(() => null)) as Record<string, unknown> | null
+    if (res.ok && data && typeof data.url === 'string') return { ok: true, url: data.url }
+    const needsClient = res.status === 422 && data?.error === 'needs_client'
+    const error = needsClient
+      ? typeof data?.message === 'string'
+        ? data.message
+        : 'This provider needs a client id and secret.'
+      : typeof data?.error === 'string'
+        ? data.error
+        : `Sign-in could not start (${res.status}).`
+    return {
+      ok: false,
+      needsClient,
+      error,
+      redirectUri: typeof data?.redirect_uri === 'string' ? data.redirect_uri : undefined,
+    }
+  } catch {
+    return { ok: false, needsClient: false, error: 'Sign-in could not start — server unreachable.' }
+  }
+}
+
+/** All connected servers' OAuth status, keyed by server id. */
+export async function fetchMcpOauthTokens(): Promise<Record<string, McpOauthTokenInfo>> {
+  try {
+    const res = await authedFetch('/api/mcp-oauth/tokens')
+    if (!res.ok) return {}
+    const data = (await res.json().catch(() => null)) as {
+      tokens?: Record<string, McpOauthTokenInfo>
+    } | null
+    return data?.tokens && typeof data.tokens === 'object' ? data.tokens : {}
+  } catch {
+    return {}
+  }
+}
+
+/** Drop a server's stored OAuth token. */
+export async function disconnectMcpOauth(serverId: string): Promise<boolean> {
+  try {
+    const res = await authedFetch(`/api/mcp-oauth/tokens/${encodeURIComponent(serverId)}`, {
+      method: 'DELETE',
+    })
+    return res.ok
+  } catch {
+    return false
   }
 }
