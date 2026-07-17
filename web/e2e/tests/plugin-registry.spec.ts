@@ -130,6 +130,15 @@ test('browse → search → install from the registry page', async ({ request, p
   await expect(row).toBeVisible()
   await expect(row).toContainText('Demo Plugin')
 
+  // The row is thin — full details (description, hooks) live in a modal.
+  await page.getByTestId('registry-open-demo').click()
+  const detail = page.getByTestId('registry-detail-modal')
+  await expect(detail).toBeVisible()
+  await expect(detail).toContainText('A demo plugin from the registry.')
+  await expect(detail.locator('[data-hook="http.request.before"]')).toBeVisible()
+  await detail.getByRole('button', { name: 'Close' }).click()
+  await expect(detail).toHaveCount(0)
+
   // Search filters.
   await page.getByTestId('registry-search').fill('zzz-no-match')
   await expect(page.getByTestId('registry-plugin-demo')).toHaveCount(0)
@@ -438,11 +447,14 @@ test('aggregate browse: kind/category/tag filters and the MCP add flow', async (
   await expect(page.getByTestId('registry-mcp-playwright')).toHaveCount(0)
   await expect(page.getByTestId('registry-plugin-demo')).toHaveCount(0)
 
-  // Tag chips narrow further; Clear filters resets everything.
+  // Tags live behind a searchable dropdown (no tag wall); picking one
+  // narrows the list and shows a removable active-tag chip.
   await page.getByTestId('registry-clear-filters').click()
+  await page.getByTestId('registry-tag-filter').click()
   await page.getByTestId('registry-tag-browser').click()
   await expect(page.getByTestId('registry-result-count')).toHaveText('1 of 3 shown')
   await expect(page.getByTestId('registry-mcp-playwright')).toBeVisible()
+  await expect(page.getByTestId('registry-active-tag-browser')).toBeVisible()
   await page.getByTestId('registry-clear-filters').click()
 
   // Search hits tags too.
@@ -451,6 +463,30 @@ test('aggregate browse: kind/category/tag filters and the MCP add flow', async (
   await expect(page.getByTestId('registry-mcp-github')).toHaveCount(0)
   await page.getByTestId('registry-clear-filters').click()
 
+  // Row → details modal: a tag chip inside applies the filter and closes.
+  await page.getByTestId('registry-open-demo').click()
+  const pluginDetail = page.getByTestId('registry-detail-modal')
+  await expect(pluginDetail).toBeVisible()
+  await expect(pluginDetail).toContainText('A demo plugin from the registry.')
+  await pluginDetail.getByTestId('registry-detail-tag-git').click()
+  await expect(pluginDetail).toHaveCount(0)
+  await expect(page.getByTestId('registry-result-count')).toHaveText('1 of 3 shown')
+  await page.getByTestId('registry-clear-filters').click()
+
+  // MCP details modal: config, setup note, and Add from the modal opens
+  // the prefilled editor.
+  await page.getByTestId('registry-open-mcp-github').click()
+  const mcpDetail = page.getByTestId('registry-detail-modal')
+  await expect(mcpDetail).toBeVisible()
+  await expect(mcpDetail).toContainText('https://api.githubcopilot.com/mcp/')
+  await expect(mcpDetail).toContainText('Set the Authorization header to: Bearer YOUR_TOKEN.')
+  await mcpDetail.getByTestId('registry-modal-add-mcp-github').click()
+  await expect(mcpDetail).toHaveCount(0)
+  const editor = page.getByTestId('mcp-server-modal')
+  await expect(editor).toBeVisible()
+  await expect(page.getByTestId('mcp-field-name')).toHaveValue('github')
+  await editor.getByRole('button', { name: 'Cancel' }).click()
+  await expect(editor).toHaveCount(0)
   await page.screenshot({ path: 'e2e/test-results/registry-browse.png', fullPage: true })
 
   // ── MCP add flow: prefilled editor → PUT → row flips to Added ────

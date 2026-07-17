@@ -1,5 +1,7 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import HookList from './HookList'
+import Modal from './Modal'
+import { MenuButton } from './Dropdown'
 import {
   addRepository,
   fetchRegistry,
@@ -17,13 +19,21 @@ import { tidy, type McpServer } from '../utils/mcpServers'
 
 type Tab = 'browse' | 'repositories'
 type Kind = 'all' | 'plugins' | 'mcp'
+/** What the details modal is showing, when open. */
+type Detail = { kind: 'plugin'; plugin: RegistryPlugin } | { kind: 'mcp'; mcp: RegistryMcpServer }
 
 /**
  * The Plugin Registry Settings sub-page. Two tabs: **Browse** — every WASM
  * plugin AND MCP server template aggregated across all configured
- * repositories, with one search box over names/descriptions/tags/categories
- * plus kind, category, and tag filters — and **Repositories** — manage the
- * registry sources. One `/api/plugins/registry` call powers both tabs.
+ * repositories — and **Repositories** — manage the registry sources. One
+ * `/api/plugins/registry` call powers both tabs.
+ *
+ * Browse renders compact one-line rows (the same `.plugin-row` language as
+ * Settings → Plugins); everything beyond name + one-line summary lives in a
+ * per-entry details modal opened by clicking the row. Filters: one search
+ * box over names/descriptions/tags/categories, kind chips, a category
+ * select, and a searchable tag dropdown (no tag wall).
+ *
  * Installing a wasm plugin downloads + SHA-256-verifies it server-side;
  * adding an MCP server opens the Settings → MCP Servers editor prefilled
  * from the template (nothing is downloaded).
@@ -137,8 +147,11 @@ function draftFromTemplate(m: RegistryMcpServer): McpServer {
   }
 }
 
-/** Clickable category + tag chips shown on a card; clicking narrows the filters. */
-function CardChips({
+/**
+ * Category + tag chips inside the details modal; clicking one applies it as
+ * a filter (the caller also closes the modal so the narrowed list shows).
+ */
+function DetailChips({
   tags,
   category,
   activeTags,
@@ -153,12 +166,13 @@ function CardChips({
 }) {
   if ((!tags || tags.length === 0) && !category) return null
   return (
-    <div className="registry-tag-chips">
+    <div className="registry-detail-chips">
       {category && (
         <button
           type="button"
           className="mcp-chip registry-cat-chip"
           title={`Filter by category '${category}'`}
+          data-testid="registry-detail-cat"
           onClick={() => onCategory(category)}
         >
           {category}
@@ -170,7 +184,7 @@ function CardChips({
           type="button"
           className={`mcp-chip mcp-chip--toggle${activeTags.has(t) ? ' mcp-chip--on' : ''}`}
           title={`Filter by tag '${t}'`}
-          data-testid={`registry-card-tag-${t}`}
+          data-testid={`registry-detail-tag-${t}`}
           onClick={() => onTag(t)}
         >
           #{t}
@@ -181,14 +195,20 @@ function CardChips({
 }
 
 /**
- * The action control for one registry row: Install / Upgrade / Installed, or a
- * disabled "needs a newer Peckboard" state when the entry's `min_peckboard`
- * floor isn't met. The test id is stable across states (`registry-install-…`);
- * `data-action` distinguishes them for assertions and styling.
+ * The action control for one registry plugin: Install / Upgrade / Installed,
+ * or a disabled "needs a newer Peckboard" state when the entry's
+ * `min_peckboard` floor isn't met. Rendered both on the row and in the
+ * details modal — `testidPrefix` keeps the two testids distinct while
+ * `data-action` distinguishes states for assertions and styling.
  */
-function renderAction(p: RegistryPlugin, isBusy: boolean, install: (p: RegistryPlugin) => void) {
+function renderAction(
+  p: RegistryPlugin,
+  isBusy: boolean,
+  install: (p: RegistryPlugin) => void,
+  testidPrefix = 'registry-install-',
+) {
   const compatible = p.compatible !== false
-  const testid = `registry-install-${p.id}`
+  const testid = `${testidPrefix}${p.id}`
   const needs = `Requires Peckboard ≥ ${p.min_peckboard ?? '?'}`
 
   // Newer compatible version on offer → Upgrade.
@@ -265,6 +285,214 @@ function renderAction(p: RegistryPlugin, isBusy: boolean, install: (p: RegistryP
   )
 }
 
+/**
+ * The action control for one MCP template: Add / Added, or the disabled
+ * incompatible state. `label` lets the row say "Add" while the modal says
+ * "Add to MCP Servers"; `testidPrefix` keeps the two testids distinct.
+ */
+function renderMcpAction(
+  m: RegistryMcpServer,
+  added: boolean,
+  onAdd: () => void,
+  label = 'Add',
+  testidPrefix = 'registry-add-mcp-',
+) {
+  const testid = `${testidPrefix}${m.id}`
+  if (m.compatible === false) {
+    return (
+      <button
+        type="button"
+        className="plugin-approval-approve"
+        data-testid={testid}
+        data-action="incompatible"
+        disabled
+        title={`Requires Peckboard ≥ ${m.min_peckboard ?? '?'}`}
+      >
+        Needs Peckboard ≥ {m.min_peckboard}
+      </button>
+    )
+  }
+  if (added) {
+    return (
+      <button
+        type="button"
+        className="plugin-approval-approve"
+        data-testid={testid}
+        data-action="added"
+        disabled
+      >
+        Added
+      </button>
+    )
+  }
+  return (
+    <button
+      type="button"
+      className="plugin-approval-approve"
+      data-testid={testid}
+      data-action="add"
+      onClick={onAdd}
+    >
+      {label}
+    </button>
+  )
+}
+
+/**
+ * Full details for one registry entry, opened by clicking its row. Carries
+ * everything the compact rows deliberately omit: full description, meta
+ * (author / source / docs / version delta), category + tag chips (click =
+ * apply as filter), hooks for plugins, transport + config + setup note for
+ * MCP templates, and the install/add action.
+ */
+function RegistryDetailModal({
+  detail,
+  busy,
+  added,
+  activeTags,
+  onClose,
+  onInstall,
+  onAdd,
+  onTag,
+  onCategory,
+}: {
+  detail: Detail
+  busy: string | null
+  added: boolean
+  activeTags: Set<string>
+  onClose: () => void
+  onInstall: (p: RegistryPlugin) => void
+  onAdd: (m: RegistryMcpServer) => void
+  onTag: (t: string) => void
+  onCategory: (c: string) => void
+}) {
+  if (detail.kind === 'plugin') {
+    const p = detail.plugin
+    return (
+      <Modal
+        onClose={onClose}
+        className="plugin-details-modal"
+        maxWidth={560}
+        data-testid="registry-detail-modal"
+      >
+        <header className="plugin-details-head">
+          <h2>{p.name}</h2>
+          <div className="registry-detail-badges">
+            <span className="registry-kind-badge">Plugin</span>
+            {p.upgrade_available ? (
+              <span className="plugin-badge plugin-badge--pending">Update available</span>
+            ) : p.installed ? (
+              <span className="plugin-badge plugin-badge--approved">Installed</span>
+            ) : null}
+          </div>
+        </header>
+        <div className="plugin-card-meta">
+          <span>v{p.version}</span>
+          {p.installed && p.installed_version && p.installed_version !== p.version && (
+            <>
+              <span>·</span>
+              <span>installed v{p.installed_version}</span>
+            </>
+          )}
+          <span>·</span>
+          <span>{p.author}</span>
+          {p.homepage && (
+            <>
+              <span>·</span>
+              <a href={p.homepage} target="_blank" rel="noreferrer">
+                docs
+              </a>
+            </>
+          )}
+          <span>·</span>
+          <span>{p.repository_label}</span>
+        </div>
+        <p className="plugin-card-description">{p.description}</p>
+        <DetailChips
+          tags={p.tags}
+          category={p.category}
+          activeTags={activeTags}
+          onTag={onTag}
+          onCategory={onCategory}
+        />
+        <HookList hooks={p.hooks} title="Hooks" />
+        {p.compatible === false && (
+          <p className="registry-setup-note">
+            Requires Peckboard ≥ {p.min_peckboard ?? '?'} — update Peckboard to install this
+            version.
+          </p>
+        )}
+        <div className="form-actions">
+          {renderAction(p, busy === p.id, onInstall, 'registry-modal-install-')}
+          <button type="button" className="btn-secondary" onClick={onClose}>
+            Close
+          </button>
+        </div>
+      </Modal>
+    )
+  }
+
+  const m = detail.mcp
+  return (
+    <Modal
+      onClose={onClose}
+      className="plugin-details-modal"
+      maxWidth={560}
+      data-testid="registry-detail-modal"
+    >
+      <header className="plugin-details-head">
+        <h2>{m.name}</h2>
+        <div className="registry-detail-badges">
+          <span className="registry-kind-badge registry-kind-badge--mcp">MCP server</span>
+          <span className={`mcp-badge mcp-badge--${m.transport}`}>
+            {m.transport === 'stdio' ? 'stdio' : m.transport.toUpperCase()}
+          </span>
+          {added && <span className="plugin-badge plugin-badge--approved">Added</span>}
+        </div>
+      </header>
+      <div className="plugin-card-meta">
+        <span>{m.author}</span>
+        {m.homepage && (
+          <>
+            <span>·</span>
+            <a href={m.homepage} target="_blank" rel="noreferrer">
+              docs
+            </a>
+          </>
+        )}
+        <span>·</span>
+        <span>{m.repository_label}</span>
+      </div>
+      <p className="plugin-card-description">{m.description}</p>
+      {(m.command || m.url) && (
+        <div className="registry-detail-config">
+          <div className="plugin-section-title">Configuration</div>
+          <code className="registry-detail-cmd">
+            {m.transport === 'stdio' ? [m.command, ...(m.args ?? [])].join(' ') : m.url}
+          </code>
+        </div>
+      )}
+      {m.setup_note && <p className="registry-setup-note">{m.setup_note}</p>}
+      <DetailChips
+        tags={m.tags}
+        category={m.category}
+        activeTags={activeTags}
+        onTag={onTag}
+        onCategory={onCategory}
+      />
+      {m.compatible === false && (
+        <p className="registry-setup-note">Requires Peckboard ≥ {m.min_peckboard ?? '?'}.</p>
+      )}
+      <div className="form-actions">
+        {renderMcpAction(m, added, () => onAdd(m), 'Add to MCP Servers', 'registry-modal-add-mcp-')}
+        <button type="button" className="btn-secondary" onClick={onClose}>
+          Close
+        </button>
+      </div>
+    </Modal>
+  )
+}
+
 function BrowseTab({
   data,
   query,
@@ -281,6 +509,7 @@ function BrowseTab({
   const [kind, setKind] = useState<Kind>('all')
   const [category, setCategory] = useState('')
   const [selTags, setSelTags] = useState<Set<string>>(new Set())
+  const [detail, setDetail] = useState<Detail | null>(null)
 
   // The user's configured MCP servers — powers the "Added" state and the
   // save target of the add flow. Same endpoint Settings → MCP Servers uses.
@@ -348,15 +577,15 @@ function BrowseTab({
   const visiblePlugins =
     kind === 'mcp'
       ? []
-      : data.plugins.filter(
-          (p) => textMatch(pluginHay(p), query) && catOk(p.category) && tagOk(p.tags),
-        )
+      : data.plugins
+          .filter((p) => textMatch(pluginHay(p), query) && catOk(p.category) && tagOk(p.tags))
+          .sort((a, b) => a.name.localeCompare(b.name))
   const visibleMcp =
     kind === 'plugins'
       ? []
-      : data.mcp_servers.filter(
-          (m) => textMatch(mcpHay(m), query) && catOk(m.category) && tagOk(m.tags),
-        )
+      : data.mcp_servers
+          .filter((m) => textMatch(mcpHay(m), query) && catOk(m.category) && tagOk(m.tags))
+          .sort((a, b) => a.name.localeCompare(b.name))
 
   const total = data.plugins.length + data.mcp_servers.length
   const shown = visiblePlugins.length + visibleMcp.length
@@ -381,6 +610,13 @@ function BrowseTab({
       .finally(() => setBusy(null))
   }
 
+  /** Open the prefilled MCP editor (closes the details modal if open). */
+  const beginAdd = (m: RegistryMcpServer) => {
+    setAddError(null)
+    setDetail(null)
+    setAdding(m)
+  }
+
   const saveMcp = async (draft: McpServer) => {
     setAddError(null)
     const next = [...mcpConfig.servers, tidy(draft)]
@@ -401,6 +637,8 @@ function BrowseTab({
       setAddError('Save failed — server unreachable.')
     }
   }
+
+  const detailAdded = detail?.kind === 'mcp' ? addedNames.has(detail.mcp.id.toLowerCase()) : false
 
   return (
     <div className="registry-panel" data-testid="registry-plugins-tab">
@@ -441,20 +679,38 @@ function BrowseTab({
             </option>
           ))}
         </select>
+        {allTags.length > 0 && (
+          <MenuButton
+            ariaLabel="Filter by tag"
+            triggerClassName="mcp-btn registry-tag-btn"
+            testId="registry-tag-filter"
+            searchable
+            searchPlaceholder="Filter tags…"
+            items={allTags.map((t) => ({
+              label: `#${t}`,
+              active: selTags.has(t),
+              hint: selTags.has(t) ? '✓' : undefined,
+              onSelect: () => toggleTag(t),
+              testId: `registry-tag-${t}`,
+            }))}
+          >
+            Tags{selTags.size > 0 ? ` · ${selTags.size}` : ''} ▾
+          </MenuButton>
+        )}
       </div>
 
-      {allTags.length > 0 && (
-        <div className="registry-tag-row" data-testid="registry-tag-row">
-          {allTags.map((t) => (
+      {selTags.size > 0 && (
+        <div className="registry-active-tags" data-testid="registry-active-tags">
+          {[...selTags].sort().map((t) => (
             <button
               key={t}
               type="button"
-              className={`mcp-chip mcp-chip--toggle${selTags.has(t) ? ' mcp-chip--on' : ''}`}
-              data-testid={`registry-tag-${t}`}
-              aria-pressed={selTags.has(t)}
+              className="mcp-chip mcp-chip--toggle mcp-chip--on"
+              title={`Remove tag filter '${t}'`}
+              data-testid={`registry-active-tag-${t}`}
               onClick={() => toggleTag(t)}
             >
-              #{t}
+              #{t} ✕
             </button>
           ))}
         </div>
@@ -493,46 +749,35 @@ function BrowseTab({
       {visiblePlugins.length > 0 && (
         <>
           {visibleMcp.length > 0 && <div className="registry-group-title">Plugins</div>}
-          <ul className="registry-grid">
+          <ul className="wasm-plugins-list registry-list">
             {visiblePlugins.map((p) => (
               <li
                 key={`${p.repository}:${p.id}`}
-                className="wasm-plugin-row"
+                className="wasm-plugin-row plugin-row registry-row"
                 data-testid={`registry-plugin-${p.id}`}
                 data-installed={p.installed}
               >
-                <div className="wasm-plugin-head">
+                <button
+                  type="button"
+                  className="plugin-row-body"
+                  data-testid={`registry-open-${p.id}`}
+                  onClick={() => setDetail({ kind: 'plugin', plugin: p })}
+                >
+                  <span className="registry-kind-badge">Plugin</span>
                   <span className="wasm-plugin-name">
                     {p.name} <span className="wasm-plugin-version">v{p.version}</span>
                   </span>
-                  <span className="registry-kind-badge">Plugin</span>
-                  {p.upgrade_available ? (
+                  {p.upgrade_available && (
                     <span
                       className="plugin-badge plugin-badge--pending"
                       data-testid={`registry-update-badge-${p.id}`}
                     >
                       Update available
                     </span>
-                  ) : p.installed ? (
-                    <span className="plugin-badge plugin-badge--approved">Installed</span>
-                  ) : null}
-                </div>
-                <div className="registry-plugin-source">
-                  {p.repository_label}
-                  {p.installed && p.installed_version && p.installed_version !== p.version && (
-                    <> · installed v{p.installed_version}</>
                   )}
-                </div>
-                <p className="plugin-card-description">{p.description}</p>
-                <CardChips
-                  tags={p.tags}
-                  category={p.category}
-                  activeTags={selTags}
-                  onTag={toggleTag}
-                  onCategory={setCategory}
-                />
-                <HookList hooks={p.hooks} title="Hooks" />
-                <div className="wasm-plugin-actions">{renderAction(p, busy === p.id, install)}</div>
+                  <span className="plugin-row-summary">{p.description}</span>
+                </button>
+                <div className="registry-row-action">{renderAction(p, busy === p.id, install)}</div>
               </li>
             ))}
           </ul>
@@ -542,89 +787,57 @@ function BrowseTab({
       {visibleMcp.length > 0 && (
         <>
           {visiblePlugins.length > 0 && <div className="registry-group-title">MCP servers</div>}
-          <ul className="registry-grid">
+          <ul className="wasm-plugins-list registry-list">
             {visibleMcp.map((m) => {
               const added = addedNames.has(m.id.toLowerCase())
-              const compatible = m.compatible !== false
               return (
                 <li
                   key={`${m.repository}:${m.id}`}
-                  className="wasm-plugin-row"
+                  className="wasm-plugin-row plugin-row registry-row"
                   data-testid={`registry-mcp-${m.id}`}
                   data-added={added}
                 >
-                  <div className="wasm-plugin-head">
+                  <button
+                    type="button"
+                    className="plugin-row-body"
+                    data-testid={`registry-open-mcp-${m.id}`}
+                    onClick={() => setDetail({ kind: 'mcp', mcp: m })}
+                  >
+                    <span className="registry-kind-badge registry-kind-badge--mcp">MCP</span>
                     <span className="wasm-plugin-name">{m.name}</span>
-                    <span className={`mcp-badge mcp-badge--${m.transport}`}>
-                      {m.transport === 'stdio' ? 'stdio' : m.transport.toUpperCase()}
-                    </span>
-                    <span className="registry-kind-badge registry-kind-badge--mcp">MCP server</span>
-                    {added && <span className="plugin-badge plugin-badge--approved">Added</span>}
-                  </div>
-                  <div className="registry-plugin-source">
-                    {m.author}
-                    {m.homepage && (
-                      <>
-                        {' · '}
-                        <a href={m.homepage} target="_blank" rel="noreferrer">
-                          docs
-                        </a>
-                      </>
-                    )}
-                    {' · '}
-                    {m.repository_label}
-                  </div>
-                  <p className="plugin-card-description">{m.description}</p>
-                  {m.setup_note && <p className="registry-setup-note">{m.setup_note}</p>}
-                  <CardChips
-                    tags={m.tags}
-                    category={m.category}
-                    activeTags={selTags}
-                    onTag={toggleTag}
-                    onCategory={setCategory}
-                  />
-                  <div className="wasm-plugin-actions">
-                    {!compatible ? (
-                      <button
-                        type="button"
-                        className="plugin-approval-approve"
-                        data-testid={`registry-add-mcp-${m.id}`}
-                        data-action="incompatible"
-                        disabled
-                        title={`Requires Peckboard ≥ ${m.min_peckboard ?? '?'}`}
-                      >
-                        Needs Peckboard ≥ {m.min_peckboard}
-                      </button>
-                    ) : added ? (
-                      <button
-                        type="button"
-                        className="plugin-approval-approve"
-                        data-testid={`registry-add-mcp-${m.id}`}
-                        data-action="added"
-                        disabled
-                      >
-                        Added
-                      </button>
-                    ) : (
-                      <button
-                        type="button"
-                        className="plugin-approval-approve"
-                        data-testid={`registry-add-mcp-${m.id}`}
-                        data-action="add"
-                        onClick={() => {
-                          setAddError(null)
-                          setAdding(m)
-                        }}
-                      >
-                        Add to MCP Servers
-                      </button>
-                    )}
+                    <span className="plugin-row-summary">{m.description}</span>
+                  </button>
+                  <div className="registry-row-action">
+                    {renderMcpAction(m, added, () => beginAdd(m))}
                   </div>
                 </li>
               )
             })}
           </ul>
         </>
+      )}
+
+      {detail && (
+        <RegistryDetailModal
+          detail={detail}
+          busy={busy}
+          added={detailAdded}
+          activeTags={selTags}
+          onClose={() => setDetail(null)}
+          onInstall={(p) => {
+            setDetail(null)
+            install(p)
+          }}
+          onAdd={beginAdd}
+          onTag={(t) => {
+            toggleTag(t)
+            setDetail(null)
+          }}
+          onCategory={(c) => {
+            setCategory(c)
+            setDetail(null)
+          }}
+        />
       )}
 
       {adding && (
@@ -714,15 +927,15 @@ function RepositoriesTab({ data, onChanged }: { data: RegistryData; onChanged: (
         </button>
       </div>
       {error && <p className="plugin-card-error">{error}</p>}
-      <ul className="wasm-plugins-list">
+      <ul className="wasm-plugins-list registry-list">
         {data.repositories.map((r: RegistryRepo, i: number) => (
           <li
             key={r.url}
-            className="wasm-plugin-row"
+            className="wasm-plugin-row plugin-row registry-row"
             data-testid={`registry-repo-${i}`}
             data-repo-url={r.url}
           >
-            <div className="wasm-plugin-head">
+            <div className="plugin-row-body registry-row-static">
               <span className="wasm-plugin-name">{r.label}</span>
               {r.ok ? (
                 <span className="plugin-badge plugin-badge--approved">OK</span>
@@ -731,10 +944,14 @@ function RepositoriesTab({ data, onChanged }: { data: RegistryData; onChanged: (
                   Unreachable
                 </span>
               )}
+              <span
+                className="plugin-row-summary"
+                title={!r.ok && r.error ? `${r.url} — ${r.error}` : r.url}
+              >
+                {!r.ok && r.error ? `${r.url} — ${r.error}` : r.url}
+              </span>
             </div>
-            <div className="registry-plugin-source">{r.url}</div>
-            {!r.ok && r.error && <p className="plugin-card-error">{r.error}</p>}
-            <div className="wasm-plugin-actions">
+            <div className="registry-row-action">
               <button
                 type="button"
                 className="plugin-approval-deny"
