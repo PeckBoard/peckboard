@@ -970,16 +970,17 @@ export function ServerModal({
                   'Bearer …',
                   '+ Add header',
                 )}
-                {draft.oauth && (
-                  <button
-                    type="button"
-                    className="mcp-oauth-link"
-                    data-testid="mcp-oauth-use"
-                    onClick={() => set({ auth: 'oauth' })}
-                  >
-                    Use OAuth sign-in instead
-                  </button>
-                )}
+                {/* Always offered: discovery needs no pre-config, so any
+                    remote server — including ones saved before OAuth sign-in
+                    existed — can switch. */}
+                <button
+                  type="button"
+                  className="mcp-oauth-link"
+                  data-testid="mcp-oauth-use"
+                  onClick={() => set({ auth: 'oauth' })}
+                >
+                  Use OAuth sign-in instead
+                </button>
               </div>
             )}
           </>
