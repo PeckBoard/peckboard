@@ -2,6 +2,14 @@ import { useEffect, useMemo, useState } from 'react'
 import { authedFetch } from '../store/auth'
 import { useResourcesStore } from '../store/resources'
 import Modal from './Modal'
+import {
+  probeMcpServer,
+  tidy,
+  type KvEntry,
+  type McpServer,
+  type McpTransport,
+  type ProbeResult,
+} from '../utils/mcpServers'
 
 /**
  * Settings → MCP Servers: the editor for user-defined MCP servers.
@@ -15,27 +23,6 @@ import Modal from './Modal'
  * Client-side validation mirrors `service::mcp_server::user_servers` in
  * the backend; the server re-validates on PUT.
  */
-
-export interface KvEntry {
-  key: string
-  value: string
-}
-
-export type McpTransport = 'stdio' | 'http' | 'sse'
-
-export interface McpServer {
-  id: string
-  name: string
-  transport: McpTransport
-  command: string
-  args: string[]
-  env: KvEntry[]
-  url: string
-  headers: KvEntry[]
-  enabled: boolean
-  /** Provider ids this server applies to; empty = every supported provider. */
-  providers: string[]
-}
 
 const NAME_RE = /^[A-Za-z0-9_-]{1,64}$/
 
@@ -57,6 +44,7 @@ function emptyServer(): McpServer {
     headers: [],
     enabled: true,
     providers: [],
+    disabled_tools: [],
   }
 }
 
@@ -80,19 +68,6 @@ function validateServer(s: McpServer, others: McpServer[]): string | null {
     if (!kv.key.trim() && kv.value.trim()) return 'Every env/header row needs a key.'
   }
   return null
-}
-
-/** Drop blank list rows the user left behind before saving. */
-function tidy(s: McpServer): McpServer {
-  return {
-    ...s,
-    name: s.name.trim(),
-    command: s.command.trim(),
-    url: s.url.trim(),
-    args: s.args.map((a) => a.trim()).filter((a) => a !== ''),
-    env: s.env.filter((kv) => kv.key.trim() !== ''),
-    headers: s.headers.filter((kv) => kv.key.trim() !== ''),
-  }
 }
 
 /** One-line summary shown on the card: what runs / where it connects. */
@@ -150,6 +125,7 @@ function parseImport(text: string): { servers: McpServer[]; error: string | null
       headers: kvList(entry.headers),
       enabled: true,
       providers: [],
+      disabled_tools: [],
     })
   }
   if (servers.length === 0) return { servers: [], error: 'No server entries found.' }
@@ -177,7 +153,14 @@ export default function McpServersSection() {
       .then((res) => (res.ok ? res.json() : null))
       .then((data) => {
         if (data) {
-          setServers(Array.isArray(data.servers) ? data.servers : [])
+          setServers(
+            Array.isArray(data.servers)
+              ? data.servers.map((s: McpServer) => ({
+                  ...s,
+                  disabled_tools: s.disabled_tools ?? [],
+                }))
+              : [],
+          )
           setSupported(Array.isArray(data.supported_providers) ? data.supported_providers : [])
         }
         setLoaded(true)
@@ -187,8 +170,7 @@ export default function McpServersSection() {
   useEffect(load, [])
 
   const providerLabel = (id: string) =>
-    providers.find((p) => p.id === id)?.display_name ??
-    id.charAt(0).toUpperCase() + id.slice(1)
+    providers.find((p) => p.id === id)?.display_name ?? id.charAt(0).toUpperCase() + id.slice(1)
 
   const unsupportedNote = useMemo(() => {
     const names = providers
@@ -224,9 +206,7 @@ export default function McpServersSection() {
 
   const saveDraft = async (draft: McpServer) => {
     const clean = tidy(draft)
-    const next = isNew
-      ? [...servers, clean]
-      : servers.map((s) => (s.id === clean.id ? clean : s))
+    const next = isNew ? [...servers, clean] : servers.map((s) => (s.id === clean.id ? clean : s))
     if (await persist(next)) setEditing(null)
   }
 
@@ -310,6 +290,23 @@ export default function McpServersSection() {
                 </span>
               ))}
             </div>
+            <ToolsPanel
+              server={s}
+              onToggleTool={(tool, on) =>
+                persist(
+                  servers.map((o) =>
+                    o.id === s.id
+                      ? {
+                          ...o,
+                          disabled_tools: on
+                            ? o.disabled_tools.filter((t) => t !== tool)
+                            : [...o.disabled_tools, tool],
+                        }
+                      : o,
+                  ),
+                )
+              }
+            />
           </div>
         ))}
       </div>
@@ -362,8 +359,8 @@ export default function McpServersSection() {
         <Modal onClose={() => setDeleting(null)} maxWidth={420} data-testid="mcp-delete-modal">
           <h3>Delete {deleting.name}?</h3>
           <p className="form-hint">
-            Agent sessions stop seeing this server from their next message. Its configuration is
-            not recoverable.
+            Agent sessions stop seeing this server from their next message. Its configuration is not
+            recoverable.
           </p>
           <div className="mcp-modal-actions">
             <button type="button" className="mcp-btn" onClick={() => setDeleting(null)}>
@@ -386,7 +383,115 @@ export default function McpServersSection() {
   )
 }
 
-function ServerModal({
+/**
+ * Expandable per-server Tools panel: probes the server live (`tools/list`)
+ * and lets the user switch individual tools off. Switches are enforced for
+ * Claude (hard `--disallowedTools`) and Ollama (native client filter);
+ * Cursor and Grok sessions load every advertised tool.
+ */
+function ToolsPanel({
+  server,
+  onToggleTool,
+}: {
+  server: McpServer
+  onToggleTool: (tool: string, enabled: boolean) => void
+}) {
+  const [open, setOpen] = useState(false)
+  const [probing, setProbing] = useState(false)
+  const [probe, setProbe] = useState<ProbeResult | null>(null)
+
+  const runProbe = async () => {
+    setProbing(true)
+    setProbe(null)
+    setProbe(await probeMcpServer(server))
+    setProbing(false)
+  }
+
+  const offCount = server.disabled_tools.length
+  const disabled = new Set(server.disabled_tools)
+  // Tools switched off but no longer advertised still render, so they can be
+  // switched back on after a server-side rename/removal.
+  const stale =
+    probe && probe.ok
+      ? server.disabled_tools.filter((t) => !probe.tools.some((pt) => pt.name === t))
+      : []
+
+  return (
+    <div className="mcp-tools-panel">
+      <button
+        type="button"
+        className="mcp-tools-toggle"
+        aria-expanded={open}
+        data-testid={`mcp-tools-toggle-${server.name}`}
+        onClick={() => {
+          const next = !open
+          setOpen(next)
+          if (next && probe === null && !probing) void runProbe()
+        }}
+      >
+        {open ? '▾' : '▸'} Tools
+        {offCount > 0 && <span className="mcp-tools-off-count">{offCount} off</span>}
+      </button>
+      {open && (
+        <div className="mcp-tools-body" data-testid={`mcp-tools-body-${server.name}`}>
+          {probing && <div className="mcp-tools-status">Connecting…</div>}
+          {!probing && probe && !probe.ok && (
+            <div className="mcp-error" data-testid={`mcp-tools-error-${server.name}`}>
+              {probe.error}
+            </div>
+          )}
+          {!probing && probe && probe.ok && probe.tools.length === 0 && stale.length === 0 && (
+            <div className="mcp-tools-status">The server advertises no tools.</div>
+          )}
+          {!probing && probe && probe.ok && (
+            <>
+              {probe.tools.map((t) => (
+                <label key={t.name} className="mcp-tool-row" title={t.description}>
+                  <input
+                    type="checkbox"
+                    checked={!disabled.has(t.name)}
+                    data-testid={`mcp-tool-toggle-${server.name}-${t.name}`}
+                    onChange={(e) => onToggleTool(t.name, e.target.checked)}
+                  />
+                  <span className="mcp-tool-name">{t.name}</span>
+                  {t.description && <span className="mcp-tool-desc">{t.description}</span>}
+                </label>
+              ))}
+              {stale.map((t) => (
+                <label key={t} className="mcp-tool-row mcp-tool-row--stale">
+                  <input
+                    type="checkbox"
+                    checked={false}
+                    data-testid={`mcp-tool-toggle-${server.name}-${t}`}
+                    onChange={() => onToggleTool(t, true)}
+                  />
+                  <span className="mcp-tool-name">{t}</span>
+                  <span className="mcp-tool-desc">no longer advertised by the server</span>
+                </label>
+              ))}
+              <div className="mcp-tools-hint">
+                Switched-off tools are enforced for Claude and Ollama sessions; Cursor and Grok load
+                every advertised tool.
+              </div>
+            </>
+          )}
+          {!probing && (
+            <button
+              type="button"
+              className="mcp-btn mcp-tools-refresh"
+              data-testid={`mcp-tools-refresh-${server.name}`}
+              onClick={() => void runProbe()}
+            >
+              Refresh
+            </button>
+          )}
+        </div>
+      )}
+    </div>
+  )
+}
+
+export function ServerModal({
   draft: initial,
   isNew,
   others,
@@ -394,6 +499,7 @@ function ServerModal({
   providerLabel,
   onCancel,
   onSave,
+  note,
 }: {
   draft: McpServer
   isNew: boolean
@@ -402,8 +508,12 @@ function ServerModal({
   providerLabel: (id: string) => string
   onCancel: () => void
   onSave: (draft: McpServer) => void
+  /** Optional hint under the title (e.g. a registry template's setup note). */
+  note?: string
 }) {
   const [draft, setDraft] = useState<McpServer>(initial)
+  const [testing, setTesting] = useState(false)
+  const [testResult, setTestResult] = useState<ProbeResult | null>(null)
   const [touched, setTouched] = useState(false)
   // Empty `providers` means "all supported" — the chips show that as
   // everything checked; checking all of them stores [] again.
@@ -470,11 +580,13 @@ function ServerModal({
   return (
     <Modal onClose={onCancel} maxWidth={620} className="mcp-modal" data-testid="mcp-server-modal">
       <h3>{isNew ? 'Add MCP server' : `Edit ${initial.name}`}</h3>
+      {note && <p className="form-hint">{note}</p>}
       <div className="plugin-settings">
         <label className="plugin-setting-field">
           <span className="plugin-setting-label">Name</span>
           <span className="plugin-setting-desc">
-            Key in the generated config — tools show up as <code>mcp__{draft.name || 'name'}__…</code>
+            Key in the generated config — tools show up as{' '}
+            <code>mcp__{draft.name || 'name'}__…</code>
           </span>
           <input
             className="plugin-setting-input"
@@ -620,6 +732,37 @@ function ServerModal({
 
         {touched && error && <div className="mcp-error">{error}</div>}
         {noProvider && <div className="mcp-error">Select at least one provider.</div>}
+        <div className="mcp-test-row">
+          <button
+            type="button"
+            className="mcp-btn"
+            disabled={!!error || testing}
+            data-testid="mcp-test-connection"
+            onClick={async () => {
+              setTesting(true)
+              setTestResult(null)
+              setTestResult(await probeMcpServer(tidy(draft)))
+              setTesting(false)
+            }}
+          >
+            {testing ? 'Testing…' : 'Test connection'}
+          </button>
+          {testResult &&
+            (testResult.ok ? (
+              <span className="mcp-test-ok" data-testid="mcp-test-result">
+                ✓ {testResult.tools.length} tool{testResult.tools.length === 1 ? '' : 's'}
+                {testResult.tools.length > 0 &&
+                  `: ${testResult.tools
+                    .slice(0, 6)
+                    .map((t) => t.name)
+                    .join(', ')}${testResult.tools.length > 6 ? ', …' : ''}`}
+              </span>
+            ) : (
+              <span className="mcp-test-error" data-testid="mcp-test-result">
+                {testResult.error}
+              </span>
+            ))}
+        </div>
 
         <div className="mcp-modal-actions">
           <button type="button" className="mcp-btn" onClick={onCancel}>
@@ -665,7 +808,10 @@ function ImportModal({
     return null
   }, [parsed, existing])
 
-  const problem = parsed?.error ?? invalid ?? (conflicts.length > 0 ? `Already configured: ${conflicts.join(', ')}.` : null)
+  const problem =
+    parsed?.error ??
+    invalid ??
+    (conflicts.length > 0 ? `Already configured: ${conflicts.join(', ')}.` : null)
 
   return (
     <Modal onClose={onCancel} maxWidth={620} className="mcp-modal" data-testid="mcp-import-modal">
@@ -679,7 +825,9 @@ function ImportModal({
         className="mcp-import-textarea"
         rows={10}
         spellCheck={false}
-        placeholder={'{\n  "mcpServers": {\n    "github": {\n      "command": "npx",\n      "args": ["-y", "@modelcontextprotocol/server-github"],\n      "env": { "GITHUB_TOKEN": "…" }\n    }\n  }\n}'}
+        placeholder={
+          '{\n  "mcpServers": {\n    "github": {\n      "command": "npx",\n      "args": ["-y", "@modelcontextprotocol/server-github"],\n      "env": { "GITHUB_TOKEN": "…" }\n    }\n  }\n}'
+        }
         value={text}
         data-testid="mcp-import-textarea"
         onChange={(e) => setText(e.target.value)}

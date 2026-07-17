@@ -63,6 +63,10 @@ pub struct RegistryIndex {
     pub schema_version: u32,
     #[serde(default)]
     pub plugins: Vec<RegistryEntry>,
+    /// Installable MCP server templates (Settings → MCP Servers entries with
+    /// one-click add). Older cores ignore this field entirely.
+    #[serde(default)]
+    pub mcp_servers: Vec<McpRegistryEntry>,
 }
 
 /// One installable plugin in the index. Mirrors the registry schema; extra
@@ -83,6 +87,57 @@ pub struct RegistryEntry {
     /// Optional minimum Peckboard version this plugin supports (semver). The
     /// install/upgrade is refused, and the UI gates the button, when the
     /// running Peckboard is older. Absent ⇒ no floor declared ⇒ compatible.
+    #[serde(default)]
+    pub min_peckboard: Option<String>,
+    /// Freeform discovery tags (kebab-case) for registry search.
+    #[serde(default)]
+    pub tags: Vec<String>,
+    /// Curated category (e.g. `dev-tools`, `infrastructure`); optional.
+    #[serde(default)]
+    pub category: Option<String>,
+}
+
+/// One key/value row in an MCP server template (env var or header). Secret
+/// values ship empty — the editor prompts the user to fill them.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct RegistryKv {
+    pub key: String,
+    #[serde(default)]
+    pub value: String,
+}
+
+/// One installable MCP server template in the index. Mirrors the
+/// Settings → MCP Servers editor shape so the UI can prefill the add-server
+/// modal directly; nothing is downloaded — "installing" just saves a user
+/// MCP server. `id` doubles as the suggested `mcpServers` key.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct McpRegistryEntry {
+    pub id: String,
+    pub name: String,
+    pub description: String,
+    #[serde(default)]
+    pub author: String,
+    #[serde(default)]
+    pub homepage: Option<String>,
+    /// `stdio` | `http` | `sse` — same values the editor accepts.
+    pub transport: String,
+    #[serde(default)]
+    pub command: String,
+    #[serde(default)]
+    pub args: Vec<String>,
+    #[serde(default)]
+    pub env: Vec<RegistryKv>,
+    #[serde(default)]
+    pub url: String,
+    #[serde(default)]
+    pub headers: Vec<RegistryKv>,
+    /// Editor hint shown on add (e.g. where to create the API key).
+    #[serde(default)]
+    pub setup_note: Option<String>,
+    #[serde(default)]
+    pub tags: Vec<String>,
+    #[serde(default)]
+    pub category: Option<String>,
     #[serde(default)]
     pub min_peckboard: Option<String>,
 }
@@ -296,5 +351,38 @@ mod tests {
         assert_eq!(e.id, "api");
         assert_eq!(e.hooks, vec!["http.request.before"]);
         assert!(e.homepage.is_none());
+    }
+
+    #[test]
+    fn mcp_servers_and_tags_parse_and_default() {
+        let json = r#"{
+            "schema_version": 1,
+            "plugins": [{
+                "id": "api", "name": "API", "description": "d", "author": "PeckBoard",
+                "version": "0.2.0", "hooks": [], "url": "https://e/a.wasm", "sha256": "00",
+                "tags": ["http-api", "integrations"], "category": "integrations"
+            }],
+            "mcp_servers": [{
+                "id": "playwright", "name": "Playwright", "description": "Browser automation",
+                "transport": "stdio", "command": "npx",
+                "args": ["-y", "@playwright/mcp@latest"],
+                "tags": ["browser", "testing"], "category": "dev-tools"
+            }]
+        }"#;
+        let index: RegistryIndex = serde_json::from_str(json).unwrap();
+        assert_eq!(index.plugins[0].tags, vec!["http-api", "integrations"]);
+        assert_eq!(index.plugins[0].category.as_deref(), Some("integrations"));
+        let m = &index.mcp_servers[0];
+        assert_eq!(m.id, "playwright");
+        assert_eq!(m.transport, "stdio");
+        assert_eq!(m.command, "npx");
+        assert_eq!(m.args[1], "@playwright/mcp@latest");
+        assert!(m.env.is_empty() && m.headers.is_empty());
+        assert_eq!(m.category.as_deref(), Some("dev-tools"));
+
+        // An index without the new fields still parses (older registries).
+        let bare: RegistryIndex =
+            serde_json::from_str(r#"{"schema_version":1,"plugins":[]}"#).unwrap();
+        assert!(bare.mcp_servers.is_empty());
     }
 }

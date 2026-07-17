@@ -63,6 +63,12 @@ pub struct UserMcpServer {
     /// Provider ids this server applies to; empty = every supported provider.
     #[serde(default)]
     pub providers: Vec<String>,
+    /// Bare tool names (as reported by the server) the user switched off.
+    /// Enforced where PeckBoard owns the loop — Claude (`--disallowedTools`)
+    /// and Ollama (native client filter); Cursor/Grok configs can't carry
+    /// per-tool state.
+    #[serde(default)]
+    pub disabled_tools: Vec<String>,
 }
 
 fn default_true() -> bool {
@@ -134,6 +140,20 @@ pub fn validate(servers: &[UserMcpServer]) -> Result<(), String> {
             if kv.key.trim().is_empty() {
                 return Err(format!(
                     "server '{}': env/header rows need a non-empty key",
+                    s.name
+                ));
+            }
+        }
+        if s.disabled_tools.len() > 256 {
+            return Err(format!(
+                "server '{}': too many disabled tools (max 256)",
+                s.name
+            ));
+        }
+        for t in &s.disabled_tools {
+            if t.trim().is_empty() || t.len() > 128 {
+                return Err(format!(
+                    "server '{}': disabled tool names must be 1-128 characters",
                     s.name
                 ));
             }
@@ -220,6 +240,21 @@ pub fn entries_for_provider(
         .collect()
 }
 
+/// Fully-qualified `mcp__<server>__<tool>` names for every tool the user
+/// switched off on servers that apply to `provider_id` — the shape Claude's
+/// `--disallowedTools` expects; Ollama matches the same strings against its
+/// namespaced external tools.
+pub fn disallowed_tool_names(servers: &[UserMcpServer], provider_id: &str) -> Vec<String> {
+    servers
+        .iter()
+        .filter(|s| applies_to(s, provider_id))
+        .flat_map(|s| {
+            s.disabled_tools
+                .iter()
+                .map(|t| format!("mcp__{}__{}", s.name, t))
+        })
+        .collect()
+}
 /// Non-peckboard `mcpServers` entries from a per-session worker-mcp config
 /// file (read AFTER the dispatch-time merge, so already provider-filtered).
 /// Empty on any read or shape problem — consumers run without extras rather
@@ -299,6 +334,7 @@ mod tests {
             headers: Vec::new(),
             enabled: true,
             providers: Vec::new(),
+            disabled_tools: Vec::new(),
         }
     }
 
@@ -317,6 +353,7 @@ mod tests {
             }],
             enabled: true,
             providers: Vec::new(),
+            disabled_tools: Vec::new(),
         }
     }
 
@@ -428,5 +465,33 @@ mod tests {
         let list = parse_servers(r#"[{"id":"a","name":"gh","transport":"stdio","command":"npx"}]"#);
         assert_eq!(list.len(), 1);
         assert!(list[0].enabled, "enabled defaults to true");
+    }
+
+    #[test]
+    fn disallowed_names_are_namespaced_and_filtered() {
+        let mut gh = stdio_server("gh");
+        gh.disabled_tools = vec!["create_issue".into(), "merge_pr".into()];
+        let mut off = http_server("off");
+        off.enabled = false;
+        off.disabled_tools = vec!["x".into()];
+        let mut cursor_only = http_server("cursoronly");
+        cursor_only.providers = vec!["cursor".into()];
+        cursor_only.disabled_tools = vec!["y".into()];
+
+        let names = disallowed_tool_names(&[gh, off, cursor_only], "claude");
+        assert_eq!(names, vec!["mcp__gh__create_issue", "mcp__gh__merge_pr"]);
+    }
+
+    #[test]
+    fn validate_rejects_bad_disabled_tools() {
+        let mut s = stdio_server("gh");
+        s.disabled_tools = vec!["  ".into()];
+        assert!(validate(&[s]).unwrap_err().contains("disabled tool"));
+    }
+
+    #[test]
+    fn disabled_tools_default_empty_on_parse() {
+        let list = parse_servers(r#"[{"id":"a","name":"gh","transport":"stdio","command":"npx"}]"#);
+        assert!(list[0].disabled_tools.is_empty());
     }
 }

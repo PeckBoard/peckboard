@@ -296,7 +296,7 @@ impl SessionManager {
                 None => config.system_prompt_suffix,
             }
         };
-        let final_config = SpawnConfig {
+        let mut final_config = SpawnConfig {
             working_dir,
             model: final_model,
             effort: resolved_effort,
@@ -320,6 +320,9 @@ impl SessionManager {
                 .into_iter()
                 .map(|t| t.name)
                 .collect(),
+            // Filled below, after this literal — the user's per-tool MCP
+            // switches need the resolved provider id.
+            extra_disallowed_tools: Vec::new(),
             // The authoritative worker flag — every dispatch path funnels
             // through here, so providers can trust it over whatever the
             // construction sites filled in.
@@ -343,6 +346,14 @@ impl SessionManager {
                 )
                 .await;
             }
+            // Per-tool switches ride the same dispatch point: tools the user
+            // disabled on applicable servers become hard-denied names for the
+            // providers that can enforce them (Claude, Ollama).
+            final_config.extra_disallowed_tools =
+                crate::service::mcp_server::user_servers::disallowed_tool_names(
+                    &crate::service::mcp_server::user_servers::load(db).await,
+                    &provider_id,
+                );
         }
 
         let ctx = SendMessageContext {

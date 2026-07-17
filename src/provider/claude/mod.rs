@@ -194,15 +194,23 @@ pub fn build_cli_args(config: &SpawnConfig, conversation_id: Option<&str>) -> Ve
     // ignored in practice (runaway pre-hatcher turns edited files, ran
     // releases, and hunted processes via Bash). ToolSearch stays available
     // — it only loads MCP tool schemas.
-    let disallowed = if config.is_pre_hatcher {
+    let mut disallowed: String = if config.is_pre_hatcher {
         "AskUserQuestion,Read,Write,Edit,MultiEdit,NotebookEdit,Bash,BashOutput,KillShell,\
          Glob,Grep,Task,Agent,WebFetch,WebSearch,Skill,SlashCommand,ExitPlanMode,\
          EnterWorktree,ExitWorktree,TodoWrite"
+            .to_string()
     } else if has_file_tools {
-        "AskUserQuestion,Read,Write,Edit,MultiEdit"
+        "AskUserQuestion,Read,Write,Edit,MultiEdit".to_string()
     } else {
-        "AskUserQuestion"
+        "AskUserQuestion".to_string()
     };
+    // Per-tool switches from Settings → MCP Servers: the injected mcp.json
+    // can't carry per-tool state, so user-disabled external tools are
+    // hard-denied here instead.
+    for t in &config.extra_disallowed_tools {
+        disallowed.push(',');
+        disallowed.push_str(t);
+    }
 
     let mut args = vec![
         "claude".to_string(),
@@ -385,6 +393,7 @@ mod tests {
             system_prompt_suffix: None,
             system_prompt_override: None,
             extra_allowed_tools: Vec::new(),
+            extra_disallowed_tools: Vec::new(),
             is_worker: false,
             is_pre_hatcher: false,
         }
@@ -512,6 +521,7 @@ mod tests {
             system_prompt_suffix: None,
             system_prompt_override: None,
             extra_allowed_tools: Vec::new(),
+            extra_disallowed_tools: Vec::new(),
             is_worker: false,
             is_pre_hatcher: false,
         };
@@ -618,6 +628,24 @@ mod tests {
         );
     }
 
+    #[test]
+    fn user_disabled_mcp_tools_join_the_denylist() {
+        let mut config = default_spawn("default");
+        config.extra_disallowed_tools = vec![
+            "mcp__gh__create_issue".to_string(),
+            "mcp__gh__merge_pr".to_string(),
+        ];
+        let args = build_cli_args(&config, None);
+        let disallowed = args
+            .iter()
+            .find(|a| a.starts_with("--disallowedTools="))
+            .expect("disallowedTools present");
+        let list = disallowed.trim_start_matches("--disallowedTools=");
+        // The built-in denylist stays; the user's per-tool switches append.
+        assert!(list.split(',').any(|t| t == "AskUserQuestion"));
+        assert!(list.split(',').any(|t| t == "mcp__gh__create_issue"));
+        assert!(list.split(',').any(|t| t == "mcp__gh__merge_pr"));
+    }
     #[test]
     fn test_build_cli_args_merges_plugin_tools_and_denies_builtin_file_tools() {
         // Plugin-contributed tools are threaded in via extra_allowed_tools and

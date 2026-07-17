@@ -301,3 +301,169 @@ test('repositories tab adds and removes a repository', async ({ request, page, b
   await expect(page.getByTestId('registry-repo-1')).toHaveCount(0)
   expect(state.lastRemove?.url).toContain('octo/cat')
 })
+
+/**
+ * Aggregate Browse: wasm plugins and MCP server templates in one searchable
+ * view — kind chips, category dropdown, tag chips — and the MCP add flow
+ * that prefills the Settings → MCP Servers editor and persists via PUT.
+ */
+async function mockAggregateRegistry(page: Page) {
+  const state = {
+    mcpServers: [] as unknown[],
+    lastPut: null as {
+      servers?: { name: string; command: string; args: string[] }[]
+    } | null,
+  }
+
+  await page.route('**/api/plugins', async (route) => {
+    await route.fulfill({
+      contentType: 'application/json',
+      body: JSON.stringify({ plugins: [], ui_panels: [], wasm_plugins: [] }),
+    })
+  })
+
+  await page.route('**/api/settings/mcp-servers', async (route) => {
+    if (route.request().method() === 'PUT') {
+      state.lastPut = route.request().postDataJSON()
+      state.mcpServers = state.lastPut?.servers ?? []
+      await route.fulfill({ status: 204, body: '' })
+    } else {
+      await route.fulfill({
+        contentType: 'application/json',
+        body: JSON.stringify({
+          servers: state.mcpServers,
+          supported_providers: ['claude', 'cursor', 'grok', 'ollama'],
+        }),
+      })
+    }
+  })
+
+  await page.route('**/api/plugins/registry', async (route) => {
+    await route.fulfill({
+      contentType: 'application/json',
+      body: JSON.stringify({
+        repositories: [{ url: REPO_URL, label: 'PeckBoard/plugins', removable: true, ok: true }],
+        plugins: [
+          {
+            id: 'demo',
+            name: 'Demo Plugin',
+            description: 'A demo plugin from the registry.',
+            author: 'PeckBoard',
+            version: '1.0.0',
+            hooks: ['http.request.before'],
+            tags: ['git', 'code-review'],
+            category: 'dev-tools',
+            repository: REPO_URL,
+            repository_label: 'PeckBoard/plugins',
+            installed: false,
+          },
+        ],
+        mcp_servers: [
+          {
+            id: 'playwright',
+            name: 'Playwright',
+            description: 'Browser automation for agents.',
+            author: 'Microsoft',
+            homepage: 'https://example.com/playwright-mcp',
+            transport: 'stdio',
+            command: 'npx',
+            args: ['@playwright/mcp@latest'],
+            env: [],
+            url: '',
+            headers: [],
+            setup_note: '',
+            tags: ['browser', 'testing'],
+            category: 'dev-tools',
+            repository: REPO_URL,
+            repository_label: 'PeckBoard/plugins',
+            compatible: true,
+          },
+          {
+            id: 'github',
+            name: 'GitHub',
+            description: 'Official GitHub MCP server.',
+            author: 'GitHub',
+            homepage: 'https://example.com/github-mcp',
+            transport: 'http',
+            command: '',
+            args: [],
+            env: [],
+            url: 'https://api.githubcopilot.com/mcp/',
+            headers: [{ key: 'Authorization', value: '' }],
+            setup_note: 'Set the Authorization header to: Bearer YOUR_TOKEN.',
+            tags: ['github', 'issues'],
+            category: 'integrations',
+            repository: REPO_URL,
+            repository_label: 'PeckBoard/plugins',
+            compatible: true,
+          },
+        ],
+      }),
+    })
+  })
+
+  return state
+}
+
+test('aggregate browse: kind/category/tag filters and the MCP add flow', async ({
+  request,
+  page,
+  baseURL,
+}) => {
+  expect(baseURL).toBeTruthy()
+  const token = await authenticate(request)
+  const state = await mockAggregateRegistry(page)
+
+  await loadAppAt(page, token, '/plugin-registry')
+  await expect(page.getByTestId('plugin-registry-panel')).toBeVisible({ timeout: 10_000 })
+
+  // Both kinds listed; the count reflects the full catalog.
+  await expect(page.getByTestId('registry-plugin-demo')).toBeVisible()
+  await expect(page.getByTestId('registry-mcp-playwright')).toBeVisible()
+  await expect(page.getByTestId('registry-mcp-github')).toBeVisible()
+  await expect(page.getByTestId('registry-result-count')).toHaveText('3 of 3 shown')
+
+  // Kind chips narrow to one side.
+  await page.getByTestId('registry-kind-plugins').click()
+  await expect(page.getByTestId('registry-mcp-playwright')).toHaveCount(0)
+  await expect(page.getByTestId('registry-plugin-demo')).toBeVisible()
+  await page.getByTestId('registry-kind-mcp').click()
+  await expect(page.getByTestId('registry-plugin-demo')).toHaveCount(0)
+  await expect(page.getByTestId('registry-mcp-playwright')).toBeVisible()
+  await page.getByTestId('registry-kind-all').click()
+
+  // Category dropdown (options populated from the data).
+  await page.getByTestId('registry-filter-category').selectOption('integrations')
+  await expect(page.getByTestId('registry-mcp-github')).toBeVisible()
+  await expect(page.getByTestId('registry-mcp-playwright')).toHaveCount(0)
+  await expect(page.getByTestId('registry-plugin-demo')).toHaveCount(0)
+
+  // Tag chips narrow further; Clear filters resets everything.
+  await page.getByTestId('registry-clear-filters').click()
+  await page.getByTestId('registry-tag-browser').click()
+  await expect(page.getByTestId('registry-result-count')).toHaveText('1 of 3 shown')
+  await expect(page.getByTestId('registry-mcp-playwright')).toBeVisible()
+  await page.getByTestId('registry-clear-filters').click()
+
+  // Search hits tags too.
+  await page.getByTestId('registry-search').fill('code-review')
+  await expect(page.getByTestId('registry-plugin-demo')).toBeVisible()
+  await expect(page.getByTestId('registry-mcp-github')).toHaveCount(0)
+  await page.getByTestId('registry-clear-filters').click()
+
+  await page.screenshot({ path: 'e2e/test-results/registry-browse.png', fullPage: true })
+
+  // ── MCP add flow: prefilled editor → PUT → row flips to Added ────
+  await page.getByTestId('registry-add-mcp-playwright').click()
+  const modal = page.getByTestId('mcp-server-modal')
+  await expect(modal).toBeVisible()
+  await expect(page.getByTestId('mcp-field-name')).toHaveValue('playwright')
+  await expect(page.getByTestId('mcp-field-command')).toHaveValue('npx')
+  await page.getByTestId('mcp-server-save').click()
+  await expect(modal).toHaveCount(0)
+  expect(state.lastPut?.servers?.[0]?.name).toBe('playwright')
+  expect(state.lastPut?.servers?.[0]?.args).toEqual(['@playwright/mcp@latest'])
+  const addBtn = page.getByTestId('registry-add-mcp-playwright')
+  await expect(addBtn).toHaveText('Added')
+  await expect(addBtn).toBeDisabled()
+})

@@ -68,6 +68,7 @@ impl AppExpertDispatcher {
             system_prompt_override: None,
             // Populated in SessionManager::final_config from the plugin registry.
             extra_allowed_tools: Vec::new(),
+            extra_disallowed_tools: Vec::new(),
             // Set from the session row in SessionManager::final_config.
             is_worker: false,
             is_pre_hatcher: false,

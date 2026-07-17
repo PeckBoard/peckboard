@@ -396,6 +396,7 @@ async fn list_registry(State(state): State<Arc<AppState>>) -> impl IntoResponse 
     let client = reqwest::Client::new();
     let mut repo_statuses = Vec::new();
     let mut plugins = Vec::new();
+    let mut mcp_servers = Vec::new();
     for (label, url, removable) in repos {
         match registry::fetch_index(&client, &url).await {
             Ok(index) => {
@@ -419,6 +420,8 @@ async fn list_registry(State(state): State<Arc<AppState>>) -> impl IntoResponse 
                         "homepage": e.homepage,
                         "version": e.version,
                         "hooks": e.hooks,
+                        "tags": e.tags,
+                        "category": e.category,
                         "repository": url,
                         "repository_label": label,
                         "installed": installed_version.is_some(),
@@ -426,6 +429,29 @@ async fn list_registry(State(state): State<Arc<AppState>>) -> impl IntoResponse 
                         "min_peckboard": e.min_peckboard,
                         "compatible": compatible,
                         "upgrade_available": upgrade_available,
+                    }));
+                }
+                for m in index.mcp_servers {
+                    let compatible = registry::is_compatible(running, m.min_peckboard.as_deref());
+                    mcp_servers.push(serde_json::json!({
+                        "id": m.id,
+                        "name": m.name,
+                        "description": m.description,
+                        "author": m.author,
+                        "homepage": m.homepage,
+                        "transport": m.transport,
+                        "command": m.command,
+                        "args": m.args,
+                        "env": m.env,
+                        "url": m.url,
+                        "headers": m.headers,
+                        "setup_note": m.setup_note,
+                        "tags": m.tags,
+                        "category": m.category,
+                        "repository": url,
+                        "repository_label": label,
+                        "min_peckboard": m.min_peckboard,
+                        "compatible": compatible,
                     }));
                 }
             }
@@ -441,6 +467,7 @@ async fn list_registry(State(state): State<Arc<AppState>>) -> impl IntoResponse 
     Ok(Json(serde_json::json!({
         "repositories": repo_statuses,
         "plugins": plugins,
+        "mcp_servers": mcp_servers,
         "peckboard_version": running,
     })))
 }

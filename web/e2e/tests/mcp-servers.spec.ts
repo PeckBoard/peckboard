@@ -1,4 +1,7 @@
 import { test, expect, type APIRequestContext, type Page } from '@playwright/test'
+import fs from 'node:fs/promises'
+import os from 'node:os'
+import path from 'node:path'
 
 /**
  * UI e2e for Settings → MCP Servers (the user-defined MCP server editor).
@@ -133,10 +136,7 @@ test('MCP server editor: add, import, validate, toggle, delete', async ({
 
 /** Open the github card's edit modal, screenshot it, close it. */
 async function githubEditShot(page: Page) {
-  await page
-    .getByTestId('mcp-server-card-github')
-    .getByRole('button', { name: 'Edit' })
-    .click()
+  await page.getByTestId('mcp-server-card-github').getByRole('button', { name: 'Edit' }).click()
   await expect(page.getByTestId('mcp-server-modal')).toBeVisible()
   // Viewport shot (fullPage stitching washes out the fixed-position modal),
   // after the backdrop fade-in settles so the capture isn't mid-animation.
@@ -145,3 +145,118 @@ async function githubEditShot(page: Page) {
   await page.keyboard.press('Escape')
   await expect(page.getByTestId('mcp-server-modal')).toHaveCount(0)
 }
+
+/**
+ * Live tools panel: a real stdio MCP server (a tiny node script written to a
+ * temp dir) is probed from the card's Tools panel; per-tool switches persist
+ * as `disabled_tools`; the editor's Test connection reports the tool count;
+ * a broken command surfaces the probe error.
+ */
+test('tools panel: probe, per-tool toggle persistence, test connection, error', async ({
+  request,
+  page,
+  baseURL,
+}) => {
+  expect(baseURL, 'baseURL configured').toBeTruthy()
+  const token = await authenticate(request)
+
+  // A minimal MCP stdio server: answers initialize + tools/list.
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'pb-mcp-e2e-'))
+  const serverPath = path.join(dir, 'fake-mcp.cjs')
+  await fs.writeFile(
+    serverPath,
+    `
+const readline = require('node:readline')
+const rl = readline.createInterface({ input: process.stdin })
+rl.on('line', (line) => {
+  let msg
+  try { msg = JSON.parse(line) } catch { return }
+  if (msg.id === undefined) return
+  let result = {}
+  if (msg.method === 'initialize') {
+    result = { protocolVersion: '2025-06-18', capabilities: { tools: {} }, serverInfo: { name: 'fake', version: '0.0.1' } }
+  } else if (msg.method === 'tools/list') {
+    result = { tools: [
+      { name: 'alpha', description: 'first tool', inputSchema: { type: 'object' } },
+      { name: 'beta', description: 'second tool', inputSchema: { type: 'object' } },
+    ] }
+  }
+  process.stdout.write(JSON.stringify({ jsonrpc: '2.0', id: msg.id, result }) + '\\n')
+})
+`,
+  )
+
+  // Seed one working and one broken server via the API.
+  const put = await request.put('/api/settings/mcp-servers', {
+    data: {
+      servers: [
+        {
+          id: 'e2e-fake',
+          name: 'fake',
+          transport: 'stdio',
+          command: 'node',
+          args: [serverPath],
+          env: [],
+          url: '',
+          headers: [],
+          enabled: true,
+          providers: [],
+          disabled_tools: [],
+        },
+        {
+          id: 'e2e-broken',
+          name: 'broken',
+          transport: 'stdio',
+          command: 'definitely-not-a-real-command-xyz',
+          args: [],
+          env: [],
+          url: '',
+          headers: [],
+          enabled: true,
+          providers: [],
+          disabled_tools: [],
+        },
+      ],
+    },
+    headers: { Authorization: `Bearer ${token}` },
+  })
+  expect(put.ok(), `seed failed: ${await put.text()}`).toBeTruthy()
+
+  await openMcpSettings(page, token)
+
+  // ── Probe lists the fake server's tools ──────────────────────
+  await page.getByTestId('mcp-tools-toggle-fake').click()
+  const alpha = page.getByTestId('mcp-tool-toggle-fake-alpha')
+  await expect(alpha).toBeVisible({ timeout: 15_000 })
+  await expect(alpha).toBeChecked()
+  await expect(page.getByTestId('mcp-tool-toggle-fake-beta')).toBeChecked()
+
+  // ── Switching a tool off persists as disabled_tools ──────────────
+  await alpha.click()
+  await expect(alpha).not.toBeChecked()
+  await expect
+    .poll(async () => {
+      const res = await request.get('/api/settings/mcp-servers', {
+        headers: { Authorization: `Bearer ${token}` },
+      })
+      const body = (await res.json()) as {
+        servers: { name: string; disabled_tools?: string[] }[]
+      }
+      return body.servers.find((s) => s.name === 'fake')?.disabled_tools ?? []
+    })
+    .toEqual(['alpha'])
+  await expect(page.getByTestId('mcp-tools-toggle-fake')).toContainText('1 off')
+
+  await page.screenshot({ path: 'e2e/test-results/mcp-tools-panel.png', fullPage: true })
+
+  // ── Test connection from the editor reports the tool count ───────
+  await page.getByTestId('mcp-server-card-fake').getByRole('button', { name: 'Edit' }).click()
+  await page.getByTestId('mcp-test-connection').click()
+  await expect(page.getByTestId('mcp-test-result')).toContainText('2 tools', { timeout: 15_000 })
+  await page.keyboard.press('Escape')
+  await expect(page.getByTestId('mcp-server-modal')).toHaveCount(0)
+
+  // ── A dead command surfaces the probe error ────────────────────
+  await page.getByTestId('mcp-tools-toggle-broken').click()
+  await expect(page.getByTestId('mcp-tools-error-broken')).toBeVisible({ timeout: 15_000 })
+})

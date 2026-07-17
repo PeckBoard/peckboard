@@ -18,7 +18,7 @@ use axum::{
     http::StatusCode,
     middleware,
     response::IntoResponse,
-    routing::{delete, get, put},
+    routing::{delete, get, post, put},
 };
 use std::collections::HashSet;
 use std::sync::Arc;
@@ -78,6 +78,7 @@ pub fn router(state: Arc<AppState>) -> Router<Arc<AppState>> {
             get(get_mcp_servers).put(set_mcp_servers),
         )
         .route_layer(middleware::from_fn_with_state(state, require_auth))
+        .route("/api/settings/mcp-servers/probe", post(probe_mcp_server))
 }
 
 /// GET /api/settings/caveman → `{"level":"off|lite|full"}` (default "off").
@@ -490,4 +491,40 @@ async fn set_mcp_servers(
             Json(serde_json::json!({ "error": e.to_string() })),
         )),
     }
+}
+
+/// POST /api/settings/mcp-servers/probe — connect to ONE server entry (saved
+/// or a yet-unsaved editor draft) and list its tools. Always 200: a dead
+/// server is a result (`{"ok":false,"error"}`), not a transport error. The
+/// stdio probe runs the configured command server-side — the same trust model
+/// as dispatch, which already launches every enabled server each turn.
+async fn probe_mcp_server(Json(server): Json<user_servers::UserMcpServer>) -> impl IntoResponse {
+    if let Err(msg) = user_servers::validate(std::slice::from_ref(&server)) {
+        return Json(serde_json::json!({ "ok": false, "error": msg }));
+    }
+    let entry = user_servers::entry_json(&server);
+    let probe = async {
+        let mut client = crate::service::mcp_client::McpClient::connect(&server.name, &entry)
+            .await
+            .map_err(|e| e.to_string())?;
+        client
+            .list_tools()
+            .await
+            .map_err(|e| format!("connected, but tools/list failed: {e}"))
+    };
+    // The client's own SETUP_TIMEOUT covers each request; this caps the whole
+    // probe so the settings UI never hangs on a slow-to-die process.
+    let result = tokio::time::timeout(std::time::Duration::from_secs(20), probe).await;
+    let payload = match result {
+        Ok(Ok(tools)) => serde_json::json!({
+            "ok": true,
+            "tools": tools
+                .iter()
+                .map(|t| serde_json::json!({ "name": t.name, "description": t.description }))
+                .collect::<Vec<_>>(),
+        }),
+        Ok(Err(e)) => serde_json::json!({ "ok": false, "error": e }),
+        Err(_) => serde_json::json!({ "ok": false, "error": "probe timed out after 20 seconds" }),
+    };
+    Json(payload)
 }

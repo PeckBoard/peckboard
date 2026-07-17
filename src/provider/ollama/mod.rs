@@ -694,6 +694,7 @@ impl AgentProvider for OllamaProvider {
             system_prompt.push_str(custom);
         }
 
+        let disallowed_external = config.extra_disallowed_tools.clone();
         let handle = tokio::spawn(async move {
             let completed = run_chat_stream(ChatStreamArgs {
                 client: &client,
@@ -711,6 +712,7 @@ impl AgentProvider for OllamaProvider {
                 cancel: cancel_for_task,
                 system_prompt,
                 mcp_config_path,
+                disallowed_external,
             })
             .await;
 
@@ -1111,6 +1113,10 @@ struct ChatStreamArgs<'a> {
     /// this provider ride in it (merged at dispatch); they are connected
     /// as native clients for the duration of the turn.
     mcp_config_path: Option<String>,
+    /// `mcp__<server>__<tool>` names the user disabled (Settings → MCP
+    /// Servers → per-tool toggles) — matching external tools are not offered
+    /// to the model this turn.
+    disallowed_external: Vec<String>,
 }
 
 /// Outcome of streaming one model response (one `/api/chat` call).
@@ -1147,6 +1153,7 @@ async fn run_chat_stream(args: ChatStreamArgs<'_>) -> bool {
         cancel,
         system_prompt,
         mcp_config_path,
+        disallowed_external,
     } = args;
     let broadcaster: &crate::ws::broadcaster::Broadcaster = broadcaster_arc.as_ref();
 
@@ -1212,6 +1219,16 @@ async fn run_chat_stream(args: ChatStreamArgs<'_>) -> bool {
                 let mut set = crate::service::mcp_client::McpClientSet::connect(&entries).await;
                 if !set.is_empty() {
                     let ext_tools = set.list_all_tools().await;
+                    // Per-tool switches (Settings → MCP Servers): drop tools
+                    // the user disabled before they are offered to the model.
+                    let ext_tools: Vec<_> = ext_tools
+                        .into_iter()
+                        .filter(|t| {
+                            !disallowed_external
+                                .iter()
+                                .any(|d| *d == format!("mcp__{}__{}", t.server, t.name))
+                        })
+                        .collect();
                     let offered: HashSet<String> = tools
                         .as_deref()
                         .unwrap_or_default()

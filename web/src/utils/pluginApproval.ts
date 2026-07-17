@@ -191,6 +191,10 @@ export interface RegistryPlugin {
   homepage?: string | null
   version: string
   hooks: string[]
+  /** Freeform discovery tags from the registry entry. */
+  tags?: string[]
+  /** Curated category (e.g. dev-tools, infrastructure). */
+  category?: string | null
   /** Resolved URL of the repository this entry came from. */
   repository: string
   /** Operator-facing label of that repository (slug or URL). */
@@ -207,6 +211,27 @@ export interface RegistryPlugin {
   upgrade_available?: boolean
 }
 
+/** An MCP server template from the registry (one-click add — nothing is downloaded). */
+export interface RegistryMcpServer {
+  id: string
+  name: string
+  description: string
+  author: string
+  homepage?: string | null
+  transport: 'stdio' | 'http' | 'sse'
+  command: string
+  args: string[]
+  env: { key: string; value: string }[]
+  url: string
+  headers: { key: string; value: string }[]
+  setup_note?: string | null
+  tags?: string[]
+  category?: string | null
+  repository: string
+  repository_label: string
+  min_peckboard?: string | null
+  compatible?: boolean
+}
 /** One configured registry repository plus its reachability this fetch. */
 export interface RegistryRepo {
   url: string
@@ -222,6 +247,7 @@ export interface RegistryRepo {
 export interface RegistryData {
   repositories: RegistryRepo[]
   plugins: RegistryPlugin[]
+  mcp_servers: RegistryMcpServer[]
   /** The running Peckboard version, for "needs Peckboard ≥ X" messaging. */
   peckboard_version?: string
 }
@@ -237,6 +263,7 @@ export async function fetchRegistry(): Promise<RegistryData> {
   return {
     repositories: data.repositories ?? [],
     plugins: data.plugins ?? [],
+    mcp_servers: data.mcp_servers ?? [],
     peckboard_version: data.peckboard_version,
   }
 }

@@ -224,6 +224,15 @@ pub struct SpawnConfig {
     /// `--allowedTools`. Other providers ignore it.
     #[serde(default)]
     pub extra_allowed_tools: Vec<String>,
+    /// Fully-qualified `mcp__<server>__<tool>` names the user switched OFF
+    /// on their external MCP servers (Settings → MCP Servers → per-tool
+    /// toggles). Populated once per dispatch in `SessionManager::final_config`
+    /// next to the config-file injection. The Claude provider appends them to
+    /// `--disallowedTools`; the Ollama provider filters its native external
+    /// tool set. Cursor/Grok can't enforce per-tool state through injected
+    /// config files and ignore it.
+    #[serde(default)]
+    pub extra_disallowed_tools: Vec<String>,
     /// Whether the session being spawned is worker-flagged. Set from the
     /// session row in `SessionManager::final_config` — the single dispatch
     /// chokepoint — so values at other construction sites are placeholders.

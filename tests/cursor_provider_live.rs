@@ -149,6 +149,7 @@ async fn cursor_auto_turn_completes_end_to_end() {
         system_prompt_suffix: None,
         system_prompt_override: None,
         extra_allowed_tools: Vec::new(),
+        extra_disallowed_tools: Vec::new(),
         is_worker: false,
         is_pre_hatcher: false,
     };
@@ -435,6 +436,7 @@ async fn cursor_mcp_tool_roundtrip() {
         system_prompt_suffix: None,
         system_prompt_override: None,
         extra_allowed_tools: Vec::new(),
+        extra_disallowed_tools: Vec::new(),
         is_worker: false,
         is_pre_hatcher: false,
     };

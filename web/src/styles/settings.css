@@ -1233,3 +1233,186 @@ a.wasm-plugin-repo:hover {
   color: var(--text);
   cursor: pointer;
 }
+
+/* Tools panel (probe + per-tool switches) */
+.mcp-tools-panel {
+  padding-left: 46px;
+}
+.mcp-tools-toggle {
+  font: inherit;
+  font-size: var(--text-xs);
+  font-weight: 600;
+  color: var(--text2);
+  background: none;
+  border: none;
+  padding: 2px 0;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+.mcp-tools-toggle:hover {
+  color: var(--text);
+}
+.mcp-tools-off-count {
+  font-weight: 600;
+  font-size: var(--text-xs);
+  color: rgb(160, 110, 0);
+  background: rgba(210, 150, 0, 0.14);
+  border-radius: 999px;
+  padding: 1px 8px;
+}
+.mcp-tools-body {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin-top: 6px;
+}
+.mcp-tools-status {
+  font-size: var(--text-xs);
+  color: var(--text3);
+}
+.mcp-tool-row {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  font-size: var(--text-xs);
+  cursor: pointer;
+}
+.mcp-tool-row input {
+  flex-shrink: 0;
+  transform: translateY(1px);
+}
+.mcp-tool-row--stale .mcp-tool-name {
+  text-decoration: line-through;
+}
+.mcp-tool-name {
+  font-family: var(--font-mono);
+  color: var(--text);
+  flex-shrink: 0;
+}
+.mcp-tool-desc {
+  color: var(--text3);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.mcp-tools-hint {
+  font-size: var(--text-xs);
+  color: var(--text3);
+  margin-top: 4px;
+}
+.mcp-tools-refresh {
+  align-self: flex-start;
+  margin-top: 4px;
+  font-size: var(--text-xs);
+  padding: 3px 10px;
+}
+.mcp-test-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-top: 8px;
+  flex-wrap: wrap;
+}
+.mcp-test-ok {
+  font-size: var(--text-xs);
+  color: rgb(0, 130, 65);
+}
+.mcp-test-error {
+  font-size: var(--text-xs);
+  color: var(--danger, #c00);
+}
+
+/* Registry browse (aggregate plugins + MCP servers) */
+.registry-controls {
+  display: flex;
+  gap: 10px;
+  align-items: center;
+  flex-wrap: wrap;
+  margin-bottom: 8px;
+}
+.registry-controls .registry-search {
+  flex: 1 1 220px;
+  margin: 0;
+}
+.registry-kind-chips {
+  display: flex;
+  gap: 6px;
+  flex-shrink: 0;
+}
+.registry-category-select {
+  max-width: 200px;
+}
+.registry-tag-row {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+  margin: 4px 0 8px;
+}
+.registry-result-line {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-size: var(--text-xs);
+  color: var(--text3);
+  margin-bottom: 4px;
+}
+.registry-clear-filters {
+  font-size: var(--text-xs);
+  padding: 2px 10px;
+}
+.registry-grid {
+  list-style: none;
+  margin: 12px 0;
+  padding: 0;
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(320px, 1fr));
+  gap: 10px;
+}
+.registry-group-title {
+  font-size: var(--text-xs);
+  font-weight: 600;
+  color: var(--text3);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  margin: 10px 0 4px;
+}
+.registry-kind-badge {
+  font-size: var(--text-xs);
+  font-weight: 600;
+  padding: 2px 8px;
+  border-radius: 999px;
+  background: var(--surface2, var(--surface));
+  border: 1px solid var(--border);
+  color: var(--text2);
+  flex-shrink: 0;
+}
+.registry-kind-badge--mcp {
+  background: var(--accent-subtle);
+  border-color: var(--accent);
+  color: var(--accent);
+}
+.registry-tag-chips {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+  margin-top: 6px;
+}
+.registry-cat-chip {
+  cursor: pointer;
+  font: inherit;
+  font-size: var(--text-xs);
+  font-weight: 600;
+}
+.registry-cat-chip:hover {
+  border-color: var(--ring);
+}
+.registry-setup-note {
+  font-size: var(--text-xs);
+  color: var(--text3);
+  border-left: 3px solid var(--border);
+  padding-left: 8px;
+  margin: 6px 0;
+  overflow-wrap: anywhere;
+}
