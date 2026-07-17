@@ -67,3 +67,35 @@ export async function probeMcpServer(server: McpServer): Promise<ProbeResult> {
     return { ok: false, error: 'Probe failed — server unreachable.' }
   }
 }
+
+export interface CommandCheckResult {
+  found: boolean
+  resolved_path: string | null
+  /** Human install steps (built-in per-runner hints from the server). */
+  hints: string[]
+  /** Suggested working folder for a one-off install session. */
+  suggested_folder_path: string
+}
+
+/** Ask the server whether a stdio `command` exists on its PATH. */
+export async function checkMcpCommand(command: string): Promise<CommandCheckResult | null> {
+  try {
+    const res = await authedFetch('/api/settings/mcp-servers/check-command', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ command }),
+    })
+    if (!res.ok) return null
+    const data = await res.json().catch(() => null)
+    if (!data || typeof data.found !== 'boolean') return null
+    return {
+      found: data.found,
+      resolved_path: typeof data.resolved_path === 'string' ? data.resolved_path : null,
+      hints: Array.isArray(data.hints) ? data.hints : [],
+      suggested_folder_path:
+        typeof data.suggested_folder_path === 'string' ? data.suggested_folder_path : '',
+    }
+  } catch {
+    return null
+  }
+}

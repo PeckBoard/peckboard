@@ -1,3 +1,4 @@
+pub mod askpass;
 pub mod attachments;
 pub mod auth;
 pub mod backup;
@@ -32,6 +33,9 @@ pub fn api_router(state: Arc<AppState>) -> Router<Arc<AppState>> {
     Router::new()
         .route("/api/health", get(health))
         .route("/ws", get(ws_handler))
+        // Sudo askpass bridge -- /api/askpass is token-authed (called by the
+        // generated helper from inside sessions), the answer route is JWT'd.
+        .merge(askpass::router(state.clone()))
         // MCP route -- no auth middleware, uses its own token auth + loopback gating
         .merge(mcp::router(state.clone()))
         .merge(auth::router(state.clone()))

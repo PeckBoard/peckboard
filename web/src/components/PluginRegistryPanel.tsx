@@ -848,6 +848,7 @@ function BrowseTab({
           supported={mcpConfig.supported}
           providerLabel={providerLabel}
           note={adding.setup_note ?? undefined}
+          installSteps={adding.install}
           onCancel={() => setAdding(null)}
           onSave={saveMcp}
         />

@@ -5,6 +5,7 @@
 //! `crate::service::mcp_server::…`.
 
 mod auth;
+pub mod command_check;
 pub(crate) mod common_tools;
 mod config;
 mod context;

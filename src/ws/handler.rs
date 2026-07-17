@@ -252,6 +252,12 @@ async fn handle_connection(socket: WebSocket, state: Arc<AppState>) {
                             // open approval prompt updates the moment any
                             // operator (in any tab) decides.
                             | "plugin-approval"
+                            // askpass must reach every client: a sudo prompt
+                            // in a session whose tab was closed still needs a
+                            // human, and the resolve must dismiss every
+                            // dialog, not just the answering tab's.
+                            | "askpass-request"
+                            | "askpass-resolved"
                     );
 
                     let should_send = if is_global {

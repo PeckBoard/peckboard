@@ -225,6 +225,8 @@ export interface RegistryMcpServer {
   url: string
   headers: { key: string; value: string }[]
   setup_note?: string | null
+  /** Human install steps for the host binary (stdio transport). */
+  install?: string[]
   tags?: string[]
   category?: string | null
   repository: string

@@ -39,6 +39,7 @@ import {
 } from './components/tabKinds'
 import { useRepeatingTasksStore } from './store/repeatingTasks'
 import ErrorBoundary from './components/ErrorBoundary'
+import AskpassDialog from './components/AskpassDialog'
 import ConnectionBanner from './components/ConnectionBanner'
 import { startTabsAutoSync, useTabsStore, type TabType } from './store/tabs'
 import './App.css'
@@ -663,6 +664,23 @@ function App() {
       cancelled = true
     }
   }, [authenticated, activeSessionId, sessionsLoaded, sessions, setActiveSession])
+
+  // Open a session tab on demand — used by the "Install in a session" flow
+  // (utils/installSession) after it creates a temp session, and safe for any
+  // future caller that wants to focus a freshly-created session.
+  useEffect(() => {
+    if (!authenticated) return
+    const onOpenSession = (e: Event) => {
+      const id = (e as CustomEvent).detail?.session_id as string | undefined
+      if (!id) return
+      void fetchSessions()
+      setActiveSession(id)
+      navigate('sessions', id)
+      useTabsStore.getState().openTab('session', id)
+    }
+    window.addEventListener('peckboard:open-session', onOpenSession)
+    return () => window.removeEventListener('peckboard:open-session', onOpenSession)
+  }, [authenticated, fetchSessions, setActiveSession, navigate])
   const lastOpenedProjectTab = useRef<string | null>(null)
   useEffect(() => {
     if (!authenticated) return
@@ -1264,6 +1282,7 @@ function App() {
           </div>
         )}
         <ConnectionBanner connected={connected} />
+        <AskpassDialog />
         <ErrorBoundary
           label="view"
           resetKey={`${view}:${activeSessionId}:${activeProjectId}:${sessionSub}`}

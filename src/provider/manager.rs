@@ -63,6 +63,10 @@ pub struct SessionManager {
     /// Defaults to an empty (no-op) manager; the real one is wired in main via
     /// `with_plugins`.
     plugins: Arc<PluginManager>,
+    /// Sudo-askpass wiring (helper script path, endpoint URL, token
+    /// registry). `None` (tests, or the helper failed to write) means
+    /// sessions get no `SUDO_ASKPASS` env and `sudo -A` stays unavailable.
+    askpass: Option<crate::service::askpass::AskpassEnv>,
 }
 
 impl SessionManager {
@@ -74,7 +78,21 @@ impl SessionManager {
             completion_rx: Arc::new(Mutex::new(Some(completion_rx))),
             session_locks: Arc::new(Mutex::new(HashMap::new())),
             plugins: Arc::new(PluginManager::empty()),
+            askpass: None,
         }
+    }
+
+    /// Wire the sudo-askpass bridge so dispatched sessions can run
+    /// `sudo -A` (masked password dialog in the UI, see `service::askpass`).
+    pub fn with_askpass(mut self, askpass: Option<crate::service::askpass::AskpassEnv>) -> Self {
+        self.askpass = askpass;
+        self
+    }
+
+    /// The askpass registry wired via [`Self::with_askpass`], if any — the
+    /// `/api/askpass` routes resolve tokens and pending requests through it.
+    pub fn askpass_registry(&self) -> Option<&crate::service::askpass::AskpassRegistry> {
+        self.askpass.as_ref().map(|a| &a.registry)
     }
 
     /// Attach the application's plugin host so providers dispatched by this
@@ -354,6 +372,27 @@ impl SessionManager {
                     &crate::service::mcp_server::user_servers::load(db).await,
                     &provider_id,
                 );
+        }
+
+        // Sudo askpass: interactive (non-worker) sessions get the helper +
+        // a per-session secret so `sudo -A` inside the CLI child raises a
+        // masked password dialog in the UI. Workers are headless (nobody is
+        // watching a tab to type the password) and pre-hatchers are locked
+        // read-only — both excluded.
+        if !final_config.is_worker
+            && !final_config.is_pre_hatcher
+            && let Some(ap) = &self.askpass
+        {
+            let token = ap.registry.issue_token(session_id).await;
+            final_config
+                .env
+                .insert("SUDO_ASKPASS".into(), ap.script_path.clone());
+            final_config
+                .env
+                .insert("PECKBOARD_ASKPASS_URL".into(), ap.url.clone());
+            final_config
+                .env
+                .insert("PECKBOARD_ASKPASS_TOKEN".into(), token);
         }
 
         let ctx = SendMessageContext {

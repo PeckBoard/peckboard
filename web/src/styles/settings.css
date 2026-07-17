@@ -1212,6 +1212,46 @@ a.wasm-plugin-repo:hover {
   border-radius: var(--radius);
   padding: 8px 12px;
   margin: 8px 0;
+  /* Missing-binary warning inside the stdio server editor. */
+  .mcp-cmd-warning {
+    font-size: var(--text-sm);
+    color: var(--text);
+    background: rgba(234, 179, 8, 0.08);
+    border: 1px solid rgba(234, 179, 8, 0.4);
+    border-radius: var(--radius);
+    padding: 10px 12px;
+    margin: 8px 0;
+  }
+  .mcp-cmd-warning-head code {
+    font-family: var(--font-mono);
+  }
+  .mcp-cmd-warning-steps {
+    margin: 8px 0 8px 0;
+    padding-left: 18px;
+    font-family: var(--font-mono);
+    font-size: var(--text-xs);
+    color: var(--text2);
+  }
+  .mcp-cmd-warning-steps li {
+    margin: 2px 0;
+    word-break: break-word;
+  }
+  .mcp-cmd-warning-actions {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    flex-wrap: wrap;
+    margin-top: 4px;
+  }
+  .mcp-cmd-warning-hint {
+    font-size: var(--text-xs);
+    color: var(--text3);
+  }
+  .mcp-cmd-warning-msg {
+    margin-top: 8px;
+    font-size: var(--text-xs);
+    color: var(--text2);
+  }
 }
 .mcp-mono {
   font-family: var(--font-mono);

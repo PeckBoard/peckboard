@@ -77,6 +77,10 @@ pub fn router(state: Arc<AppState>) -> Router<Arc<AppState>> {
             "/api/settings/mcp-servers",
             get(get_mcp_servers).put(set_mcp_servers),
         )
+        .route(
+            "/api/settings/mcp-servers/check-command",
+            post(check_mcp_command),
+        )
         .route_layer(middleware::from_fn_with_state(state, require_auth))
         .route("/api/settings/mcp-servers/probe", post(probe_mcp_server))
 }
@@ -527,4 +531,27 @@ async fn probe_mcp_server(Json(server): Json<user_servers::UserMcpServer>) -> im
         Err(_) => serde_json::json!({ "ok": false, "error": "probe timed out after 20 seconds" }),
     };
     Json(payload)
+}
+
+#[derive(serde::Deserialize)]
+struct CheckCommandBody {
+    command: String,
+}
+
+/// POST /api/settings/mcp-servers/check-command — does a stdio server's
+/// `command` exist on this host's PATH? Returns install hints and a
+/// suggested working folder for a one-off install session when it doesn't.
+async fn check_mcp_command(
+    State(state): State<Arc<AppState>>,
+    Json(body): Json<CheckCommandBody>,
+) -> impl IntoResponse {
+    use crate::service::mcp_server::command_check;
+    let checked = command_check::check_command(&body.command);
+    let suggested = command_check::suggested_install_folder(&body.command, &state.config.data_dir);
+    Json(serde_json::json!({
+        "found": checked.found,
+        "resolved_path": checked.resolved_path.map(|p| p.to_string_lossy().to_string()),
+        "hints": command_check::install_hints(&body.command),
+        "suggested_folder_path": suggested.to_string_lossy().to_string(),
+    }))
 }

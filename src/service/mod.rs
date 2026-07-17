@@ -1,3 +1,4 @@
+pub mod askpass;
 pub mod backup;
 pub mod browser;
 pub mod browser_runs;

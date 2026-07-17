@@ -132,9 +132,13 @@ pub struct McpRegistryEntry {
     #[serde(default)]
     pub headers: Vec<RegistryKv>,
     /// Editor hint shown on add (e.g. where to create the API key).
+    /// Editor hint shown on add (e.g. where to create the API key).
     #[serde(default)]
     pub setup_note: Option<String>,
+    /// Optional human install steps for the host binary, shown when the
+    /// `command` is missing on the Peckboard host (stdio transport only).
     #[serde(default)]
+    pub install: Vec<String>,
     pub tags: Vec<String>,
     #[serde(default)]
     pub category: Option<String>,

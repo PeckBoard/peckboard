@@ -165,6 +165,11 @@ export const useWsStore = create<WsState>((set, get) => ({
         return
       }
 
+      if (msg.type === 'askpass-request' || msg.type === 'askpass-resolved') {
+        // Sudo password bridge: fan out to the global AskpassDialog.
+        window.dispatchEvent(new CustomEvent(`peckboard:${msg.type}`, { detail: msg }))
+        return
+      }
       if (msg.type === 'session-deleted') {
         // Another device deleted this session (or the orchestrator's
         // worker-session cleanup did). Drop every trace of it locally so

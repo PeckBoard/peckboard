@@ -3,13 +3,16 @@ import { authedFetch } from '../store/auth'
 import { useResourcesStore } from '../store/resources'
 import Modal from './Modal'
 import {
+  checkMcpCommand,
   probeMcpServer,
   tidy,
+  type CommandCheckResult,
   type KvEntry,
   type McpServer,
   type McpTransport,
   type ProbeResult,
 } from '../utils/mcpServers'
+import { startInstallSession } from '../utils/installSession'
 
 /**
  * Settings → MCP Servers: the editor for user-defined MCP servers.
@@ -500,6 +503,7 @@ export function ServerModal({
   onCancel,
   onSave,
   note,
+  installSteps,
 }: {
   draft: McpServer
   isNew: boolean
@@ -510,11 +514,21 @@ export function ServerModal({
   onSave: (draft: McpServer) => void
   /** Optional hint under the title (e.g. a registry template's setup note). */
   note?: string
+  /** Registry-provided install steps for the host binary (stdio only). */
+  installSteps?: string[]
 }) {
   const [draft, setDraft] = useState<McpServer>(initial)
   const [testing, setTesting] = useState(false)
   const [testResult, setTestResult] = useState<ProbeResult | null>(null)
   const [touched, setTouched] = useState(false)
+  // Host-binary existence check for stdio servers (debounced on `command`).
+  // Tagged with the command it ran for so a stale result for a since-edited
+  // command is ignored by the `missing` guard rather than cleared in-effect.
+  const [cmdCheck, setCmdCheck] = useState<{ command: string; result: CommandCheckResult } | null>(
+    null,
+  )
+  const [installing, setInstalling] = useState(false)
+  const [installMsg, setInstallMsg] = useState<string | null>(null)
   // Empty `providers` means "all supported" — the chips show that as
   // everything checked; checking all of them stores [] again.
   const checked = draft.providers.length > 0 ? draft.providers : supported
@@ -526,6 +540,46 @@ export function ServerModal({
   const toggleProvider = (id: string) => {
     const next = checked.includes(id) ? checked.filter((p) => p !== id) : [...checked, id]
     set({ providers: next.length === supported.length ? [] : next })
+  }
+
+  // Debounced host-binary check: whenever a stdio server's command settles,
+  // ask the server whether it exists on PATH. An empty command runs no check;
+  // the render guard below keys on the tagged command so nothing stale shows.
+  const cmd = draft.transport === 'stdio' ? draft.command.trim() : ''
+  useEffect(() => {
+    if (!cmd) return
+    let cancelled = false
+    const t = setTimeout(() => {
+      void checkMcpCommand(cmd).then((r) => {
+        if (!cancelled && r) setCmdCheck({ command: cmd, result: r })
+      })
+    }, 400)
+    return () => {
+      cancelled = true
+      clearTimeout(t)
+    }
+  }, [cmd])
+
+  const checkForCmd = cmdCheck?.command === cmd ? cmdCheck.result : null
+  const missing = draft.transport === 'stdio' && !!cmd && checkForCmd?.found === false
+
+  const runInstall = async () => {
+    if (!checkForCmd) return
+    setInstalling(true)
+    setInstallMsg(null)
+    try {
+      await startInstallSession({
+        command: cmd,
+        serverName: draft.name.trim() || cmd,
+        steps: installSteps && installSteps.length > 0 ? installSteps : checkForCmd.hints,
+        suggestedFolderPath: checkForCmd.suggested_folder_path,
+      })
+      setInstallMsg('Install session opened — watch its tab, then re-test the connection.')
+    } catch (e) {
+      setInstallMsg(e instanceof Error ? e.message : 'Could not start install session.')
+    } finally {
+      setInstalling(false)
+    }
   }
 
   const rows = (
@@ -631,6 +685,42 @@ export function ServerModal({
                 }}
               />
             </label>
+            {missing && (
+              <div className="mcp-cmd-warning" data-testid="mcp-cmd-warning">
+                <div className="mcp-cmd-warning-head">
+                  <code>{cmd}</code> was not found on the Peckboard host&apos;s PATH. This server
+                  will fail to launch until it is installed.
+                </div>
+                {(() => {
+                  const steps =
+                    installSteps && installSteps.length > 0
+                      ? installSteps
+                      : (checkForCmd?.hints ?? [])
+                  return steps.length > 0 ? (
+                    <ul className="mcp-cmd-warning-steps">
+                      {steps.map((s, i) => (
+                        <li key={i}>{s}</li>
+                      ))}
+                    </ul>
+                  ) : null
+                })()}
+                <div className="mcp-cmd-warning-actions">
+                  <button
+                    type="button"
+                    className="mcp-btn mcp-btn--primary"
+                    disabled={installing}
+                    data-testid="mcp-install-in-session"
+                    onClick={runInstall}
+                  >
+                    {installing ? 'Opening…' : 'Install in a session'}
+                  </button>
+                  <span className="mcp-cmd-warning-hint">
+                    Opens a temporary session that installs it for you (sudo prompts appear here).
+                  </span>
+                </div>
+                {installMsg && <div className="mcp-cmd-warning-msg">{installMsg}</div>}
+              </div>
+            )}
             <div className="plugin-setting-field">
               <span className="plugin-setting-label">Arguments</span>
               {draft.args.map((a, i) => (

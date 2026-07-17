@@ -129,8 +129,26 @@ async fn main() -> anyhow::Result<()> {
     // `register_*_provider` calls. The catalog records the granted
     // permissions for `/api/plugins` and the Settings UI.
     register_builtin_plugins(&builtin_plugins, provider_registry.clone(), db.clone()).await;
-    let session_manager =
-        SessionManager::new(provider_registry.clone()).with_plugins(plugins.clone());
+    // Sudo askpass bridge: write the helper script and wire the registry so
+    // interactive sessions can run `sudo -A` with the password typed in the
+    // web UI (service::askpass). A write failure only disables sudo support.
+    let askpass_registry = peckboard::service::askpass::AskpassRegistry::new();
+    let askpass_env = match peckboard::service::askpass::write_askpass_script(&config.data_dir) {
+        Ok(script) => Some(peckboard::service::askpass::AskpassEnv {
+            registry: askpass_registry,
+            script_path: script.to_string_lossy().to_string(),
+            // The CLI child runs on this host, so loopback + the plain HTTP
+            // port is always right regardless of how the UI is reached.
+            url: format!("http://127.0.0.1:{}/api/askpass", config.port),
+        }),
+        Err(e) => {
+            tracing::warn!("askpass helper not written: {e} — sudo -A disabled in sessions");
+            None
+        }
+    };
+    let session_manager = SessionManager::new(provider_registry.clone())
+        .with_plugins(plugins.clone())
+        .with_askpass(askpass_env);
     let repeating_task_manager = RepeatingTaskManager::new();
     let run_auditor = RunAuditor::new();
 
