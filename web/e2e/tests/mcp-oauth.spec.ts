@@ -218,8 +218,44 @@ test('provider without dynamic registration asks for client credentials', async 
   expect(put.ok(), `seed failed: ${await put.text()}`).toBeTruthy()
 
   await mockOauthApi(page, serverId)
+  // Registry mock: a template whose url_options cover this server's URL —
+  // the editor backfills the Region dropdown for servers saved before
+  // url_options existed.
+  await page.route('**/api/plugins/registry', async (route) => {
+    await route.fulfill({
+      contentType: 'application/json',
+      body: JSON.stringify({
+        repositories: [],
+        plugins: [],
+        mcp_servers: [
+          {
+            id: 'slack',
+            name: 'Slack',
+            description: '',
+            author: '',
+            transport: 'http',
+            command: '',
+            args: [],
+            env: [],
+            url: 'https://mcp.example.com/mcp',
+            headers: [],
+            url_options: [
+              { label: 'US', url: 'https://mcp.example.com/mcp' },
+              { label: 'EU', url: 'https://mcp.example.eu/mcp' },
+            ],
+            repository: 'x',
+            repository_label: 'x',
+          },
+        ],
+      }),
+    })
+  })
   await openMcpSettings(page, token)
   await page.getByTestId('mcp-server-card-slack').getByRole('button', { name: 'Edit' }).click()
+
+  // Fallback Region dropdown from the registry template (the server itself
+  // was saved without url_options).
+  await expect(page.getByTestId('mcp-field-url-option')).toBeVisible()
 
   // Client credentials + the redirect URL to register, shown up front.
   await expect(page.getByTestId('mcp-oauth-client-id')).toBeVisible()

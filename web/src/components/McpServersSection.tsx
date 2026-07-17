@@ -15,8 +15,10 @@ import {
   type McpServer,
   type McpTransport,
   type ProbeResult,
+  type UrlOption,
 } from '../utils/mcpServers'
 import { startInstallSession } from '../utils/installSession'
+import { fetchRegistry, type RegistryMcpServer } from '../utils/pluginApproval'
 
 /**
  * Settings → MCP Servers: the editor for user-defined MCP servers.
@@ -152,6 +154,7 @@ export default function McpServersSection() {
   const [importOpen, setImportOpen] = useState(false)
   const [deleting, setDeleting] = useState<McpServer | null>(null)
   const [oauthTokens, setOauthTokens] = useState<Record<string, McpOauthTokenInfo>>({})
+  const [registryMcp, setRegistryMcp] = useState<RegistryMcpServer[]>([])
   const providers = useResourcesStore((s) => s.providers)
   const fetchModels = useResourcesStore((s) => s.fetchModels)
 
@@ -185,6 +188,24 @@ export default function McpServersSection() {
   useEffect(() => {
     if (!editing) void fetchMcpOauthTokens().then(setOauthTokens)
   }, [editing])
+
+  // Registry templates, to backfill URL region options for servers saved
+  // before `url_options` existed. Best-effort: no registry, no dropdown.
+  useEffect(() => {
+    void fetchRegistry()
+      .then((d) => setRegistryMcp(d.mcp_servers))
+      .catch(() => {})
+  }, [])
+
+  const urlOptionsFor = (s: McpServer): UrlOption[] => {
+    if ((s.url_options?.length ?? 0) > 0) return s.url_options ?? []
+    const match = registryMcp.find(
+      (e) =>
+        (e.url_options?.length ?? 0) > 0 &&
+        (e.url === s.url || (e.url_options ?? []).some((o) => o.url === s.url)),
+    )
+    return match?.url_options ?? []
+  }
 
   const providerLabel = (id: string) =>
     providers.find((p) => p.id === id)?.display_name ?? id.charAt(0).toUpperCase() + id.slice(1)
@@ -367,6 +388,7 @@ export default function McpServersSection() {
           providerLabel={providerLabel}
           onCancel={() => setEditing(null)}
           onSave={saveDraft}
+          urlOptions={urlOptionsFor(editing)}
         />
       )}
 
@@ -741,6 +763,7 @@ export function ServerModal({
   onSave,
   note,
   installSteps,
+  urlOptions: urlOptionsProp,
 }: {
   draft: McpServer
   isNew: boolean
@@ -753,6 +776,8 @@ export function ServerModal({
   note?: string
   /** Registry-provided install steps for the host binary (stdio only). */
   installSteps?: string[]
+  /** Fallback URL presets when the draft itself carries none. */
+  urlOptions?: UrlOption[]
 }) {
   const [draft, setDraft] = useState<McpServer>(initial)
   const [testing, setTesting] = useState(false)
@@ -766,6 +791,10 @@ export function ServerModal({
   )
   const [installing, setInstalling] = useState(false)
   const [installMsg, setInstallMsg] = useState<string | null>(null)
+  // The draft's own presets win; otherwise the section's registry-matched
+  // fallback (covers servers saved before url_options existed).
+  const urlOptions =
+    (draft.url_options?.length ?? 0) > 0 ? (draft.url_options ?? []) : (urlOptionsProp ?? [])
   // Empty `providers` means "all supported" — the chips show that as
   // everything checked; checking all of them stores [] again.
   const checked = draft.providers.length > 0 ? draft.providers : supported
@@ -1000,7 +1029,7 @@ export function ServerModal({
           </>
         ) : (
           <>
-            {(draft.url_options?.length ?? 0) > 0 && (
+            {urlOptions.length > 0 && (
               <label className="plugin-setting-field">
                 <span className="plugin-setting-label">Region</span>
                 <span className="plugin-setting-desc">
@@ -1009,7 +1038,7 @@ export function ServerModal({
                 <select
                   className="plugin-setting-select"
                   data-testid="mcp-field-url-option"
-                  value={draft.url_options?.find((o) => o.url === draft.url)?.url ?? ''}
+                  value={urlOptions.find((o) => o.url === draft.url)?.url ?? ''}
                   onChange={(e) => {
                     if (e.target.value) {
                       setTouched(true)
@@ -1018,7 +1047,7 @@ export function ServerModal({
                   }}
                 >
                   <option value="">Custom URL…</option>
-                  {(draft.url_options ?? []).map((o) => (
+                  {urlOptions.map((o) => (
                     <option key={o.url} value={o.url}>
                       {o.label}
                     </option>
