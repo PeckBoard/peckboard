@@ -213,18 +213,6 @@
   padding: 16px;
   background: var(--surface);
 }
-.plugin-card-header {
-  display: flex;
-  justify-content: space-between;
-  align-items: flex-start;
-  gap: 12px;
-}
-.plugin-card-name {
-  font-size: var(--text-base);
-  font-weight: 700;
-  color: var(--text);
-  margin: 0 0 4px;
-}
 .plugin-card-meta {
   font-size: var(--text-xs);
   color: var(--text3);
@@ -307,30 +295,6 @@
 .plugin-permission-desc {
   color: var(--text3);
   font-size: var(--text-xs);
-}
-.plugin-card-actions {
-  margin-top: 14px;
-  padding-top: 14px;
-  border-top: 1px dashed var(--border);
-  display: flex;
-  justify-content: flex-end;
-}
-.plugin-settings-open {
-  font-size: var(--text-sm);
-  padding: 6px 14px;
-  border: 1px solid var(--border);
-  border-radius: var(--radius);
-  background: var(--surface);
-  color: var(--text);
-  cursor: pointer;
-  font-weight: 600;
-}
-.plugin-settings-open:hover {
-  background: var(--surface-hover, rgba(0, 0, 0, 0.04));
-}
-.plugin-settings-modal {
-  max-height: calc(var(--app-height) - 64px);
-  overflow-y: auto;
 }
 .plugin-settings {
   display: flex;
@@ -471,6 +435,69 @@
   border-radius: var(--radius);
   padding: 12px 14px;
   background: var(--surface);
+}
+
+/* Compact plugin rows (Settings → Plugins): the whole row body is a
+   button that opens the details modal; only Remove sits beside it. */
+.plugin-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 12px;
+}
+.plugin-row-body {
+  appearance: none;
+  background: none;
+  border: none;
+  padding: 0;
+  margin: 0;
+  font: inherit;
+  color: var(--text);
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  text-align: left;
+  cursor: pointer;
+}
+.plugin-row-body .plugin-badge {
+  flex: none;
+}
+.plugin-row .wasm-plugin-name {
+  flex: none;
+  white-space: nowrap;
+}
+.plugin-row-summary {
+  flex: 1;
+  min-width: 0;
+  color: var(--text3);
+  font-size: var(--text-xs);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.plugin-row .plugin-approval-remove {
+  flex: none;
+}
+
+/* Plugin details modal (opened from a compact row). */
+.plugin-details-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  margin-bottom: 6px;
+}
+.plugin-details-head h2 {
+  margin: 0;
+}
+.plugin-details-modal .plugin-card-description {
+  margin: 10px 0 0;
+}
+.plugin-details-modal .plugin-panels,
+.plugin-details-modal .plugin-permissions {
+  margin-top: 12px;
 }
 .wasm-plugin-head {
   display: flex;

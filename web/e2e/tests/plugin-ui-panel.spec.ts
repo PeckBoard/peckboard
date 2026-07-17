@@ -5,8 +5,9 @@ import { test, expect, type APIRequestContext } from '@playwright/test'
  *
  * A plugin declares a `ui_panel` in its manifest; core surfaces it in the
  * `GET /api/plugins` catalog as `{ plugin, id, title, path }`, and the
- * Plugins area lists it. Opening a panel embeds the plugin-served page in
- * a sandboxed `<iframe>` pointed at the panel's `/plugin-api/*` path.
+ * plugin's details modal lists it. Opening a panel embeds the
+ * plugin-served page in a sandboxed `<iframe>` pointed at the panel's
+ * `/plugin-api/*` path.
  *
  * The panel's page is served by a WASM plugin's own `/plugin-api` route,
  * which this repo can't compile in CI (no wasm32 toolchain — see
@@ -40,8 +41,8 @@ test('plugin UI panel opens its plugin-served page in a sandboxed iframe', async
   const token = await authenticate(request)
 
   // Mock the catalog so an approved plugin declares one UI panel. Panels
-  // render inside the row of the plugin that registered them, so the
-  // catalog must report that plugin too.
+  // render inside the details modal of the plugin that registered them,
+  // so the catalog must report that plugin too.
   await page.route('**/api/plugins', async (route) => {
     await route.fulfill({
       contentType: 'application/json',
@@ -86,23 +87,25 @@ test('plugin UI panel opens its plugin-served page in a sandboxed iframe', async
   // (generic; opens the plugin page in the same iframe panel when clicked).
   await expect(page.getByTestId('plugin-sidebar-demo-admin')).toBeVisible()
 
-  // The declared panel is listed inside the registering plugin's own row,
-  // not a separate "Plugin Pages" section.
+  // The compact row shows the plugin's name and one-line summary; the full
+  // manifest (version, source repo, contributed pages) lives in the row's
+  // details modal — not a separate "Plugin Pages" section.
   const row = page.getByTestId('wasm-plugin-demo')
   await expect(row).toBeVisible()
-  // The card shows the plugin's manifest metadata: version, source repo
-  // (as a link), and description.
-  await expect(row).toContainText('v1.0.0')
   await expect(row).toContainText('Demo plugin')
-  await expect(row.getByRole('link', { name: 'github.com/acme/demo' })).toHaveAttribute(
+  await row.getByTestId('wasm-plugin-open-demo').click()
+  const details = page.getByTestId('plugin-details-demo')
+  await expect(details).toBeVisible()
+  await expect(details).toContainText('v1.0.0')
+  await expect(details.getByRole('link', { name: 'github.com/acme/demo' })).toHaveAttribute(
     'href',
     'https://github.com/acme/demo',
   )
-  await expect(row.getByTestId('plugin-panels')).toContainText('Demo Admin')
+  await expect(details.getByTestId('plugin-panels')).toContainText('Demo Admin')
   await expect(page.getByText('Plugin Pages')).toHaveCount(0)
 
   // Opening it renders a sandboxed iframe pointed at the panel path.
-  await row.getByTestId('plugin-panel-open-demo-admin').click()
+  await details.getByTestId('plugin-panel-open-demo-admin').click()
   await expect(page.getByTestId('plugin-panel-modal')).toBeVisible()
 
   const frameEl = page.getByTestId('plugin-panel-frame')

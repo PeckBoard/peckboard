@@ -1,17 +1,17 @@
 import { test, expect, type APIRequestContext, type Page } from '@playwright/test'
 
 /**
- * UI e2e for the per-plugin settings modal opened from the Ollama card.
+ * UI e2e for the Ollama settings form on Settings → Plugin Settings
+ * (`/plugin-settings`).
  *
  * Verifies:
  *
- * 1. The Ollama plugin card renders inside the Plugins modal, and
- *    clicking its "Settings" button opens a dedicated per-plugin
- *    modal layered on top.
+ * 1. The Ollama plugin (a built-in that declares settings) gets its own
+ *    section rendering the shared per-plugin settings form.
  * 2. The settings form shows the typed fields the backend declared
  *    (base URL, default model, request timeout, additional headers).
  * 3. A change to base URL round-trips through the PUT endpoint and is
- *    reflected after reopening the modal on a fresh page load.
+ *    reflected after reopening the page on a fresh load.
  * 4. The additional-headers key/value list lets the user add an entry
  *    that POSTs successfully; the saved value comes back masked on
  *    the next GET (the field is `secret_values: true`).
@@ -36,6 +36,11 @@ async function loadAppAt(page: Page, token: string, route: string) {
   await page.goto(route)
 }
 
+/** The Ollama settings form inside its Plugin Settings section. */
+function ollamaForm(page: Page) {
+  return page.getByTestId('plugin-settings-entry-ollama').getByTestId('plugin-settings-ollama')
+}
+
 test('Ollama plugin renders its settings form and round-trips saves', async ({
   request,
   page,
@@ -43,21 +48,11 @@ test('Ollama plugin renders its settings form and round-trips saves', async ({
 }) => {
   expect(baseURL, 'baseURL configured').toBeTruthy()
   const token = await authenticate(request)
-  await loadAppAt(page, token, '/plugins')
+  await loadAppAt(page, token, '/plugin-settings')
 
-  await expect(page.getByTestId('plugins-section')).toBeVisible({ timeout: 10_000 })
-  const ollamaCard = page.getByTestId('plugin-card-ollama')
-  await expect(ollamaCard).toBeVisible({ timeout: 10_000 })
-  await expect(ollamaCard).toContainText('Ollama')
-
-  // The card only shows a "Settings" button; the form lives inside its
-  // own per-plugin modal so each plugin's config is isolated.
-  await expect(ollamaCard.getByTestId('plugin-settings-ollama')).toHaveCount(0)
-  await ollamaCard.getByTestId('plugin-settings-open-ollama').click()
-  const settingsModal = page.getByTestId('plugin-settings-modal-ollama')
-  await expect(settingsModal).toBeVisible({ timeout: 5_000 })
-  const settings = settingsModal.getByTestId('plugin-settings-ollama')
-  await expect(settings).toBeVisible()
+  await expect(page.getByTestId('plugin-settings-section')).toBeVisible({ timeout: 10_000 })
+  const settings = ollamaForm(page)
+  await expect(settings).toBeVisible({ timeout: 10_000 })
   await expect(settings.locator('[data-field="base_url"]')).toBeVisible()
   await expect(settings.locator('[data-field="default_model"]')).toBeVisible()
   await expect(settings.locator('[data-field="request_timeout_secs"]')).toBeVisible()
@@ -85,17 +80,11 @@ test('Ollama plugin renders its settings form and round-trips saves', async ({
   await settings.locator('.plugin-settings-save').click()
   await expect(settings.locator('.plugin-settings-success')).toBeVisible({ timeout: 5_000 })
 
-  // Reload the page and reopen the per-plugin modal to verify the base
-  // URL persisted, and that the header KEY survives (it's not a secret)
-  // but the VALUE is gone from the wire payload — the form input must
-  // come back empty.
+  // Reload the page to verify the base URL persisted, and that the header
+  // KEY survives (it's not a secret) but the VALUE is gone from the wire
+  // payload — the form input must come back empty.
   await page.reload()
-  const reopenedCard = page.getByTestId('plugin-card-ollama')
-  await expect(reopenedCard).toBeVisible({ timeout: 10_000 })
-  await reopenedCard.getByTestId('plugin-settings-open-ollama').click()
-  const settingsAfter = page
-    .getByTestId('plugin-settings-modal-ollama')
-    .getByTestId('plugin-settings-ollama')
+  const settingsAfter = ollamaForm(page)
   await expect(settingsAfter.locator('[data-field="base_url"] input')).toHaveValue(
     'http://ollama.test.local:11434',
     { timeout: 10_000 },
@@ -125,16 +114,11 @@ test('additional models registered in settings appear in the model catalog', asy
 }) => {
   expect(baseURL, 'baseURL configured').toBeTruthy()
   const token = await authenticate(request)
-  await loadAppAt(page, token, '/plugins')
+  await loadAppAt(page, token, '/plugin-settings')
 
-  await expect(page.getByTestId('plugins-section')).toBeVisible({ timeout: 10_000 })
-  const ollamaCard = page.getByTestId('plugin-card-ollama')
-  await expect(ollamaCard).toBeVisible({ timeout: 10_000 })
-  await ollamaCard.getByTestId('plugin-settings-open-ollama').click()
-  const settings = page
-    .getByTestId('plugin-settings-modal-ollama')
-    .getByTestId('plugin-settings-ollama')
-  await expect(settings).toBeVisible({ timeout: 5_000 })
+  await expect(page.getByTestId('plugin-settings-section')).toBeVisible({ timeout: 10_000 })
+  const settings = ollamaForm(page)
+  await expect(settings).toBeVisible({ timeout: 10_000 })
 
   // The additional-models list renders, distinct from the headers list.
   const modelsField = settings.locator('[data-field="additional_models"]')
@@ -164,13 +148,7 @@ test('additional models registered in settings appear in the model catalog', asy
   // Reopen on a fresh load: the entry persisted and round-trips into the
   // form (not a secret, so the value comes back verbatim).
   await page.reload()
-  const reopened = page.getByTestId('plugin-card-ollama')
-  await expect(reopened).toBeVisible({ timeout: 10_000 })
-  await reopened.getByTestId('plugin-settings-open-ollama').click()
-  const reloadedModels = page
-    .getByTestId('plugin-settings-modal-ollama')
-    .getByTestId('plugin-settings-ollama')
-    .locator('[data-field="additional_models"]')
+  const reloadedModels = ollamaForm(page).locator('[data-field="additional_models"]')
   await expect(reloadedModels.locator('.plugin-setting-kv-row input').first()).toHaveValue(
     'llama3.1:8b',
     { timeout: 10_000 },

@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useState } from 'react'
 import { authedFetch } from '../store/auth'
-import PluginSettingsModal from './PluginSettingsModal'
+import Modal from './Modal'
 import PluginPanelModal from './PluginPanelModal'
 import ConfirmDialog from './ConfirmDialog'
 import HookList from './HookList'
@@ -48,13 +48,22 @@ interface UiPanel {
 }
 
 /**
- * Lists every plugin compiled into Peckboard, with the permissions it
- * was granted and its current status.
- *
- * Today the catalog is read-only: every built-in plugin is always
- * enabled and receives every permission it asks for. The UI is in place
- * so a future enable/disable + grant flow can hook in without another
- * round of design work.
+ * The first sentence of a plugin description, for the compact list rows.
+ * Falls back to the whole text when it has no sentence punctuation; the
+ * row additionally clamps to one line in CSS.
+ */
+function firstSentence(text: string): string {
+  const m = text.match(/^[^.!?]*[.!?]/)
+  return (m ? m[0] : text).trim()
+}
+
+/**
+ * Lists every plugin (installed WASM + built-in) as a compact row: name,
+ * status badge, one-sentence summary, and — for installed plugins — a
+ * Remove button. Clicking a row opens a details modal with the full
+ * description, hooks, permissions, contributed pages, and approval
+ * controls. Plugin settings are NOT reachable from here; they live on
+ * Settings → Plugin Settings.
  */
 export default function PluginsSection({ onBrowseRegistry }: { onBrowseRegistry?: () => void }) {
   const [plugins, setPlugins] = useState<PluginEntry[] | null>(null)
@@ -112,19 +121,36 @@ export default function PluginsSection({ onBrowseRegistry }: { onBrowseRegistry?
       {plugins && plugins.length === 0 && <p className="settings-loading">No plugins installed.</p>}
       {plugins && plugins.length > 0 && (
         <div className="plugins-list">
-          {plugins.map((p) => (
-            <PluginCard key={p.id} plugin={p} />
-          ))}
+          <div className="plugin-panels-title">Built-in Plugins</div>
+          <ul className="wasm-plugins-list">
+            {plugins.map((p) => (
+              <PluginCard key={p.id} plugin={p} />
+            ))}
+          </ul>
         </div>
       )}
     </section>
   )
 }
 
+function badgeFor(status: WasmPlugin['status']) {
+  const label =
+    status === 'approved'
+      ? 'Approved'
+      : status === 'pending'
+        ? 'Awaiting approval'
+        : status === 'denied'
+          ? 'Denied'
+          : 'Init failed'
+  return <span className={`plugin-badge plugin-badge--${status}`}>{label}</span>
+}
+
 /**
- * Lists every loaded WASM plugin and its approval status, with the hooks
- * it declares and an Approve/Deny control. A plugin is inert until its
- * hook set is approved here (or via the startup prompt).
+ * Compact rows for every loaded WASM plugin: name, approval badge,
+ * one-line summary, Remove. The full manifest (hooks, permissions,
+ * contributed pages) and the Approve/Deny controls live in the row's
+ * details modal — a plugin is inert until its hook set is approved there
+ * (or via the startup prompt).
  */
 function WasmPluginList({
   plugins,
@@ -137,13 +163,16 @@ function WasmPluginList({
 }) {
   const [busy, setBusy] = useState<string | null>(null)
   const [confirmRemove, setConfirmRemove] = useState<string | null>(null)
-  const [settingsFor, setSettingsFor] = useState<WasmPlugin | null>(null)
+  const [detailsFor, setDetailsFor] = useState<WasmPlugin | null>(null)
 
   const decide = (pluginId: string, decision: 'approve' | 'deny') => {
     setBusy(pluginId)
     decidePluginApproval(pluginId, decision)
       .then(() => onDecided())
-      .finally(() => setBusy(null))
+      .finally(() => {
+        setBusy(null)
+        setDetailsFor(null)
+      })
   }
 
   const remove = (pluginId: string) => {
@@ -154,18 +183,6 @@ function WasmPluginList({
       .finally(() => setBusy(null))
   }
 
-  const badgeFor = (status: WasmPlugin['status']) => {
-    const label =
-      status === 'approved'
-        ? 'Approved'
-        : status === 'pending'
-          ? 'Awaiting approval'
-          : status === 'denied'
-            ? 'Denied'
-            : 'Init failed'
-    return <span className={`plugin-badge plugin-badge--${status}`}>{label}</span>
-  }
-
   return (
     <div className="wasm-plugins" data-testid="wasm-plugins">
       <div className="plugin-panels-title">Installed Plugins</div>
@@ -173,80 +190,83 @@ function WasmPluginList({
         {plugins.map((p) => (
           <li
             key={p.name}
-            className="wasm-plugin-row"
+            className="wasm-plugin-row plugin-row"
             data-testid={`wasm-plugin-${p.name}`}
             data-status={p.status}
           >
-            <div className="wasm-plugin-head">
-              <div className="wasm-plugin-heading">
-                <span className="wasm-plugin-name">{p.name}</span>
-                <div className="plugin-card-meta">
-                  <span>v{p.version}</span>
-                  <span>·</span>
-                  <SourceRepo repository={p.repository} />
-                </div>
-              </div>
+            <button
+              type="button"
+              className="plugin-row-body"
+              data-testid={`wasm-plugin-open-${p.name}`}
+              onClick={() => setDetailsFor(p)}
+            >
+              <span className="wasm-plugin-name">{p.name}</span>
               {badgeFor(p.status)}
-            </div>
-            <p className="plugin-card-description">{p.description}</p>
-            <HookList hooks={p.hooks} title="Hooks" />
-            <PermissionList permissions={p.permissions} title="Permissions" />
-            <PluginPanelList panels={panels.filter((panel) => panel.plugin === p.name)} />
-            {p.status === 'init_failed' && p.error && (
-              <p className="plugin-card-error">{p.error}</p>
-            )}
-            <div className="wasm-plugin-actions">
-              {(p.settings_schema?.fields?.length ?? 0) > 0 && (
-                <button
-                  type="button"
-                  className="plugin-settings-open"
-                  data-testid={`wasm-plugin-settings-${p.name}`}
-                  onClick={() => setSettingsFor(p)}
-                >
-                  Settings
-                </button>
-              )}
-              {p.status !== 'approved' && (
-                <button
-                  type="button"
-                  className="plugin-approval-approve"
-                  data-testid={`wasm-plugin-approve-${p.name}`}
-                  disabled={busy === p.name}
-                  onClick={() => decide(p.name, 'approve')}
-                >
-                  Approve
-                </button>
-              )}
-              {p.status !== 'denied' && (
-                <button
-                  type="button"
-                  className="plugin-approval-deny"
-                  data-testid={`wasm-plugin-deny-${p.name}`}
-                  disabled={busy === p.name}
-                  onClick={() => decide(p.name, 'deny')}
-                >
-                  {p.status === 'approved' ? 'Revoke' : 'Deny'}
-                </button>
-              )}
-              <button
-                type="button"
-                className="plugin-approval-remove"
-                data-testid={`wasm-plugin-remove-${p.name}`}
-                disabled={busy === p.name}
-                onClick={() => setConfirmRemove(p.name)}
-              >
-                Remove
-              </button>
-            </div>
+              <span className="plugin-row-summary">{firstSentence(p.description)}</span>
+            </button>
+            <button
+              type="button"
+              className="plugin-approval-remove"
+              data-testid={`wasm-plugin-remove-${p.name}`}
+              disabled={busy === p.name}
+              onClick={() => setConfirmRemove(p.name)}
+            >
+              Remove
+            </button>
           </li>
         ))}
       </ul>
-      {settingsFor && (
-        <PluginSettingsModal
-          pluginId={settingsFor.name}
-          pluginName={settingsFor.name}
-          onClose={() => setSettingsFor(null)}
-        />
+      {detailsFor && (
+        <Modal
+          onClose={() => setDetailsFor(null)}
+          className="plugin-details-modal"
+          maxWidth={560}
+          data-testid={`plugin-details-${detailsFor.name}`}
+        >
+          <header className="plugin-details-head">
+            <h2>{detailsFor.name}</h2>
+            {badgeFor(detailsFor.status)}
+          </header>
+          <div className="plugin-card-meta">
+            <span>v{detailsFor.version}</span>
+            <span>·</span>
+            <SourceRepo repository={detailsFor.repository} />
+          </div>
+          <p className="plugin-card-description">{detailsFor.description}</p>
+          {detailsFor.status === 'init_failed' && detailsFor.error && (
+            <p className="plugin-card-error">{detailsFor.error}</p>
+          )}
+          <HookList hooks={detailsFor.hooks} title="Hooks" />
+          <PermissionList permissions={detailsFor.permissions} title="Permissions" />
+          <PluginPanelList panels={panels.filter((panel) => panel.plugin === detailsFor.name)} />
+          <div className="form-actions">
+            {detailsFor.status !== 'approved' && (
+              <button
+                type="button"
+                className="plugin-approval-approve"
+                data-testid={`wasm-plugin-approve-${detailsFor.name}`}
+                disabled={busy === detailsFor.name}
+                onClick={() => decide(detailsFor.name, 'approve')}
+              >
+                Approve
+              </button>
+            )}
+            {detailsFor.status !== 'denied' && (
+              <button
+                type="button"
+                className="plugin-approval-deny"
+                data-testid={`wasm-plugin-deny-${detailsFor.name}`}
+                disabled={busy === detailsFor.name}
+                onClick={() => decide(detailsFor.name, 'deny')}
+              >
+                {detailsFor.status === 'approved' ? 'Revoke' : 'Deny'}
+              </button>
+            )}
+            <button type="button" className="btn-secondary" onClick={() => setDetailsFor(null)}>
+              Close
+            </button>
+          </div>
+        </Modal>
       )}
       {confirmRemove && (
         <ConfirmDialog
@@ -281,9 +301,10 @@ function SourceRepo({ repository }: { repository: string }) {
 
 /**
  * The UI pages a single plugin contributes, rendered inside that plugin's
- * row: one titled "Open" button per page, each embedding the plugin-served
- * page in a sandboxed iframe. Generic — the host knows nothing about a
- * page's contents. Renders nothing when the plugin contributes no pages.
+ * details modal: one titled "Open" button per page, each embedding the
+ * plugin-served page in a sandboxed iframe. Generic — the host knows
+ * nothing about a page's contents. Renders nothing when the plugin
+ * contributes no pages.
  */
 function PluginPanelList({ panels }: { panels: UiPanel[] }) {
   const [open, setOpen] = useState<UiPanel | null>(null)
@@ -317,9 +338,13 @@ function PluginPanelList({ panels }: { panels: UiPanel[] }) {
   )
 }
 
+/**
+ * A built-in plugin as a compact row; the details modal carries the full
+ * description, the built-in tag, and the permission grants. Built-ins
+ * can't be removed and their settings live on Settings → Plugin Settings.
+ */
 function PluginCard({ plugin }: { plugin: PluginEntry }) {
-  const [settingsOpen, setSettingsOpen] = useState(false)
-  const hasSettings = (plugin.settings_schema?.fields?.length ?? 0) > 0
+  const [detailsOpen, setDetailsOpen] = useState(false)
   const statusBadge =
     plugin.status.kind === 'active' ? (
       <span className="plugin-badge plugin-badge--active">Active</span>
@@ -329,14 +354,32 @@ function PluginCard({ plugin }: { plugin: PluginEntry }) {
       </span>
     )
   return (
-    <article
-      className="plugin-card"
+    <li
+      className="plugin-card plugin-row"
       data-testid={`plugin-card-${plugin.id}`}
       data-plugin-id={plugin.id}
     >
-      <header className="plugin-card-header">
-        <div>
-          <h4 className="plugin-card-name">{plugin.display_name}</h4>
+      <button
+        type="button"
+        className="plugin-row-body"
+        data-testid={`plugin-open-${plugin.id}`}
+        onClick={() => setDetailsOpen(true)}
+      >
+        <span className="wasm-plugin-name">{plugin.display_name}</span>
+        {statusBadge}
+        <span className="plugin-row-summary">{firstSentence(plugin.description)}</span>
+      </button>
+      {detailsOpen && (
+        <Modal
+          onClose={() => setDetailsOpen(false)}
+          className="plugin-details-modal"
+          maxWidth={560}
+          data-testid={`plugin-details-${plugin.id}`}
+        >
+          <header className="plugin-details-head">
+            <h2>{plugin.display_name}</h2>
+            {statusBadge}
+          </header>
           <div className="plugin-card-meta">
             <span>v{plugin.version}</span>
             <span>·</span>
@@ -348,47 +391,32 @@ function PluginCard({ plugin }: { plugin: PluginEntry }) {
               </>
             )}
           </div>
-        </div>
-        {statusBadge}
-      </header>
-      <p className="plugin-card-description">{plugin.description}</p>
-      {plugin.status.kind === 'init_failed' && plugin.status.message && (
-        <p className="plugin-card-error">{plugin.status.message}</p>
+          <p className="plugin-card-description">{plugin.description}</p>
+          {plugin.status.kind === 'init_failed' && plugin.status.message && (
+            <p className="plugin-card-error">{plugin.status.message}</p>
+          )}
+          <div className="plugin-permissions">
+            <div className="plugin-section-title">Permissions</div>
+            {plugin.permissions.length === 0 ? (
+              <p className="plugin-permissions-empty">No permissions requested.</p>
+            ) : (
+              <ul className="plugin-permissions-list">
+                {plugin.permissions.map((perm) => (
+                  <li key={perm.id} className="plugin-permission" data-permission={perm.id}>
+                    <span className="plugin-permission-label">{perm.label}</span>
+                    <span className="plugin-permission-desc">{perm.description}</span>
+                  </li>
+                ))}
+              </ul>
+            )}
+          </div>
+          <div className="form-actions">
+            <button type="button" className="btn-secondary" onClick={() => setDetailsOpen(false)}>
+              Close
+            </button>
+          </div>
+        </Modal>
       )}
-      <div className="plugin-permissions">
-        <div className="plugin-section-title">Permissions</div>
-        {plugin.permissions.length === 0 ? (
-          <p className="plugin-permissions-empty">No permissions requested.</p>
-        ) : (
-          <ul className="plugin-permissions-list">
-            {plugin.permissions.map((perm) => (
-              <li key={perm.id} className="plugin-permission" data-permission={perm.id}>
-                <span className="plugin-permission-label">{perm.label}</span>
-                <span className="plugin-permission-desc">{perm.description}</span>
-              </li>
-            ))}
-          </ul>
-        )}
-      </div>
-      {hasSettings && (
-        <div className="plugin-card-actions">
-          <button
-            type="button"
-            className="plugin-settings-open"
-            data-testid={`plugin-settings-open-${plugin.id}`}
-            onClick={() => setSettingsOpen(true)}
-          >
-            Settings
-          </button>
-        </div>
-      )}
-      {settingsOpen && (
-        <PluginSettingsModal
-          pluginId={plugin.id}
-          pluginName={plugin.display_name}
-          onClose={() => setSettingsOpen(false)}
-        />
-      )}
-    </article>
+    </li>
   )
 }

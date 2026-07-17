@@ -5,9 +5,10 @@ import { test, expect, type APIRequestContext, type Page } from '@playwright/tes
  *
  * A WASM plugin (nginx-manager here) can declare operator settings in its
  * manifest; the catalog carries them as `wasm_plugins[].settings_schema`
- * and the plugin row grows a "Settings" button that opens the same
- * per-plugin modal built-in plugins use, backed by the same
- * `/api/plugins/:id/settings` routes.
+ * and the plugin gets a section on Settings → Plugin Settings
+ * (`/plugin-settings`) rendering the same shared form built-in plugins
+ * use, backed by the same `/api/plugins/:id/settings` routes. The
+ * installed-plugins list itself offers NO settings entry point.
  *
  * A real `.wasm` can't be compiled in CI (no wasm32 toolchain — see
  * `plugin-approval-prompt.spec.ts` for the same constraint), so the catalog
@@ -62,7 +63,7 @@ async function loadAppAt(page: Page, token: string, route: string) {
   await page.goto(route)
 }
 
-test('WASM plugin row offers Settings and saves URL + token through the shared form', async ({
+test('WASM plugin settings live on Plugin Settings and save through the shared form', async ({
   request,
   page,
   baseURL,
@@ -123,19 +124,17 @@ test('WASM plugin row offers Settings and saves URL + token through the shared f
     })
   })
 
-  await loadAppAt(page, token, '/plugins')
+  // The /plugin-settings deep-link opens Settings → Plugin Settings, which
+  // lists a section per plugin that declares settings.
+  await loadAppAt(page, token, '/plugin-settings')
+  const section = page.getByTestId('plugin-settings-section')
+  await expect(section).toBeVisible({ timeout: 10_000 })
+  const entry = page.getByTestId('plugin-settings-entry-nginx-manager')
+  await expect(entry).toBeVisible()
+  await expect(entry).toContainText('nginx-manager')
 
-  // The installed-plugins list shows the row with a Settings button.
-  const row = page.getByTestId('wasm-plugin-nginx-manager')
-  await expect(row).toBeVisible({ timeout: 10_000 })
-  const openSettings = row.getByTestId('wasm-plugin-settings-nginx-manager')
-  await expect(openSettings).toBeVisible()
-  await openSettings.click()
-
-  // The shared per-plugin modal renders the manifest-declared fields.
-  const modal = page.getByTestId('plugin-settings-modal-nginx-manager')
-  await expect(modal).toBeVisible({ timeout: 5_000 })
-  const form = modal.getByTestId('plugin-settings-nginx-manager')
+  // The shared form renders the manifest-declared fields.
+  const form = entry.getByTestId('plugin-settings-nginx-manager')
   await expect(form.locator('[data-field="base_url"]')).toBeVisible()
   await expect(form.locator('[data-field="api_key"]')).toBeVisible()
   await expect(form.locator('[data-field="base_url"]')).toContainText('Nginx Proxy Manager URL')
@@ -158,4 +157,15 @@ test('WASM plugin row offers Settings and saves URL + token through the shared f
   // form shows the "currently set" hint.
   await expect(form.locator('[data-field="api_key"] input')).toHaveValue('')
   await expect(form.locator('[data-field="api_key"] .plugin-setting-secret-set')).toBeVisible()
+
+  // The installed-plugins list itself no longer offers a Settings entry
+  // point — neither on the row nor in the details modal.
+  await page.goto('/plugins')
+  const row = page.getByTestId('wasm-plugin-nginx-manager')
+  await expect(row).toBeVisible({ timeout: 10_000 })
+  await expect(page.getByTestId('wasm-plugin-settings-nginx-manager')).toHaveCount(0)
+  await row.getByTestId('wasm-plugin-open-nginx-manager').click()
+  const details = page.getByTestId('plugin-details-nginx-manager')
+  await expect(details).toBeVisible()
+  await expect(details.getByRole('button', { name: 'Settings' })).toHaveCount(0)
 })

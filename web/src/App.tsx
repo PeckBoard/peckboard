@@ -94,7 +94,7 @@ function pluginSubItemId(sub: SessionSub): string | null {
 /** Parse the current URL pathname into a view, optional active ID, an
  *  optional sub-view (only meaningful when `view` is 'sessions' or
  *  'projects'), and an optional Settings sub-page hint for the routes
- *  that deep-link into Settings (`/plugins`, `/plugin-registry`).
+ *  that deep-link into Settings (`/plugins`, `/plugin-settings`, `/plugin-registry`).
  *
  *  For the reports view, `activeId` is the encoded `<folder>/<file>`
  *  pair the user is reading (the same id used as the report tab's
@@ -103,7 +103,7 @@ function parseRoute(): {
   view: View
   activeId: string | null
   sub: SessionSub
-  settingsSub?: 'plugins' | 'registry' | null
+  settingsSub?: 'plugins' | 'plugin-settings' | 'registry' | null
 } {
   const path = window.location.pathname
   const segments = path.split('/').filter(Boolean)
@@ -144,6 +144,8 @@ function parseRoute(): {
       return { view: 'settings', activeId: null, sub: 'chat', settingsSub: 'plugins' }
     case 'plugin-registry':
       return { view: 'settings', activeId: null, sub: 'chat', settingsSub: 'registry' }
+    case 'plugin-settings':
+      return { view: 'settings', activeId: null, sub: 'chat', settingsSub: 'plugin-settings' }
     case 'reports': {
       // `/reports` — index; `/reports/<folder>/<file>` — single report
       // viewer. We compose the same `<folder>/<file>` id the tab strip
@@ -310,7 +312,7 @@ function App() {
   const [showChangePassword, setShowChangePassword] = useState(false)
   // Which Settings sub-page to open on mount. `/plugins` deep-links
   // straight to Settings → Plugins; null lands on the Settings hub.
-  const [settingsSub, setSettingsSub] = useState<'plugins' | 'registry' | null>(
+  const [settingsSub, setSettingsSub] = useState<'plugins' | 'plugin-settings' | 'registry' | null>(
     initialRoute.settingsSub ?? null,
   )
   // Plugin-contributed user-menu links (generic; populated from /api/plugins).

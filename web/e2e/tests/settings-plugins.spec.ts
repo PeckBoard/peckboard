@@ -8,10 +8,12 @@ import { test, expect, type APIRequestContext, type Page } from '@playwright/tes
  * verify:
  *
  * 1. The `/plugins` deep-link opens Settings → Plugins.
- * 2. The two built-in plugins (`claude-code`, `mock`) show up with their
- *    display names, "Built-in · always enabled" tag, and Active badge.
- * 3. Each plugin lists the permissions it was granted (the wire shape
- *    used by the UI).
+ * 2. The two built-in plugins (`claude-code`, `mock`) show up as compact
+ *    rows with their display names and Active badge.
+ * 3. Clicking a row opens the details modal carrying the "Built-in ·
+ *    always enabled" tag and the permissions the plugin was granted (the
+ *    wire shape used by the UI). Settings are NOT offered here — they
+ *    live on Settings → Plugin Settings.
  */
 
 const E2E_USER = 'e2e-user'
@@ -33,7 +35,7 @@ async function loadAppAt(page: Page, token: string, route: string) {
   await page.goto(route)
 }
 
-test('Plugins settings page lists built-in plugins with their permissions', async ({
+test('Plugins settings page lists built-in plugins; details modal shows permissions', async ({
   request,
   page,
   baseURL,
@@ -46,33 +48,44 @@ test('Plugins settings page lists built-in plugins with their permissions', asyn
   // renders inside the settings page.
   const section = page.getByTestId('plugins-section')
   await expect(section).toBeVisible({ timeout: 10_000 })
-  await expect(section).toBeVisible({ timeout: 10_000 })
 
   // Two built-in plugins are registered (`claude-code` and `mock`); the
-  // UI renders each as a card carrying its display name and an "Active"
-  // status badge.
-  const claudeCard = page.getByTestId('plugin-card-claude-code')
-  await expect(claudeCard).toBeVisible()
-  await expect(claudeCard).toContainText('Claude Code')
-  await expect(claudeCard).toContainText('Built-in · always enabled')
-  await expect(claudeCard.locator('.plugin-badge--active')).toBeVisible()
+  // UI renders each as a compact row carrying its display name and an
+  // "Active" status badge.
+  const claudeRow = page.getByTestId('plugin-card-claude-code')
+  await expect(claudeRow).toBeVisible()
+  await expect(claudeRow).toContainText('Claude Code')
+  await expect(claudeRow.locator('.plugin-badge--active')).toBeVisible()
 
-  const mockCard = page.getByTestId('plugin-card-mock')
-  await expect(mockCard).toBeVisible()
-  await expect(mockCard).toContainText('Mock Provider')
-  await expect(mockCard).toContainText('Built-in · always enabled')
+  const mockRow = page.getByTestId('plugin-card-mock')
+  await expect(mockRow).toBeVisible()
+  await expect(mockRow).toContainText('Mock Provider')
 
-  // Each plugin renders its requested permissions. The display labels
-  // come from the backend Permission::label table; pinning a couple
-  // catches regressions in the wire shape.
-  await expect(claudeCard.locator('[data-permission="register_provider"]')).toBeVisible()
-  await expect(claudeCard.locator('[data-permission="spawn_process"]')).toBeVisible()
-  await expect(claudeCard.locator('[data-permission="network_access"]')).toBeVisible()
+  // Clicking the row opens the details modal: built-in tag plus the
+  // requested permissions. The display labels come from the backend
+  // Permission::label table; pinning a couple catches regressions in the
+  // wire shape.
+  await claudeRow.getByTestId('plugin-open-claude-code').click()
+  const claudeDetails = page.getByTestId('plugin-details-claude-code')
+  await expect(claudeDetails).toBeVisible()
+  await expect(claudeDetails).toContainText('Built-in · always enabled')
+  await expect(claudeDetails.locator('[data-permission="register_provider"]')).toBeVisible()
+  await expect(claudeDetails.locator('[data-permission="spawn_process"]')).toBeVisible()
+  await expect(claudeDetails.locator('[data-permission="network_access"]')).toBeVisible()
+  // Plugin settings moved to Settings → Plugin Settings; the modal must
+  // not offer them.
+  await expect(claudeDetails.getByRole('button', { name: 'Settings' })).toHaveCount(0)
+  await page.keyboard.press('Escape')
+  await expect(claudeDetails).toHaveCount(0)
 
   // The mock plugin should declare exactly one permission — it does no
   // I/O. Asserting both the present permission and the absence of an
   // overreach (`spawn_process`) catches a future plugin author adding a
   // permission without realising the catalog displays it.
-  await expect(mockCard.locator('[data-permission="register_provider"]')).toBeVisible()
-  await expect(mockCard.locator('[data-permission="spawn_process"]')).toHaveCount(0)
+  await mockRow.getByTestId('plugin-open-mock').click()
+  const mockDetails = page.getByTestId('plugin-details-mock')
+  await expect(mockDetails).toBeVisible()
+  await expect(mockDetails).toContainText('Built-in · always enabled')
+  await expect(mockDetails.locator('[data-permission="register_provider"]')).toBeVisible()
+  await expect(mockDetails.locator('[data-permission="spawn_process"]')).toHaveCount(0)
 })

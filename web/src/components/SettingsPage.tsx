@@ -18,6 +18,7 @@ import PluginSettingsForm from './PluginSettingsForm'
 import SystemPromptsSection from './SystemPromptsSection'
 import OllamaPullModel from './OllamaPullModel'
 import PluginsSection from './PluginsSection'
+import PluginSettingsSection from './PluginSettingsSection'
 import PluginRegistryPanel from './PluginRegistryPanel'
 import McpServersSection from './McpServersSection'
 
@@ -64,6 +65,7 @@ type SubPage =
   | 'chat'
   | 'prompts'
   | 'plugins'
+  | 'plugin-settings'
   | 'providers'
   | 'mcp'
   | 'registry'
@@ -72,8 +74,9 @@ type SubPage =
 /**
  * The settings hub lists these sub-pages; each groups related sections
  * that used to be stacked on one long page. Plugins (installed plugins,
- * approvals, the registry) is its own sub-page; the Ollama and Cursor
- * plugin settings also live under Providers, same form either way.
+ * approvals, the registry) is its own sub-page; plugin settings are
+ * edited on Plugin Settings (the Ollama and Cursor forms also appear
+ * under Providers, same form either way).
  */
 const SUB_PAGES: { id: SubPage; title: string; blurb: string }[] = [
   { id: 'appearance', title: 'Appearance', blurb: 'Theme and accent color' },
@@ -97,6 +100,11 @@ const SUB_PAGES: { id: SubPage; title: string; blurb: string }[] = [
     id: 'plugins',
     title: 'Plugins',
     blurb: 'Installed plugins and approvals',
+  },
+  {
+    id: 'plugin-settings',
+    title: 'Plugin Settings',
+    blurb: 'Configure plugins that declare settings',
   },
   {
     id: 'registry',
@@ -540,6 +548,7 @@ export default function SettingsPage({ onBack, initialSubPage = null }: Props) {
 
       {subPage === 'mcp' && <McpServersSection />}
       {subPage === 'plugins' && <PluginsSection onBrowseRegistry={() => setSubPage('registry')} />}
+      {subPage === 'plugin-settings' && <PluginSettingsSection />}
       {subPage === 'registry' && <PluginRegistryPanel />}
       {subPage === 'prompts' && <SystemPromptsSection />}
     </div>
