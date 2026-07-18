@@ -13,6 +13,7 @@ mod plans;
 mod projects;
 mod repeating_tasks;
 mod reports;
+mod subagents;
 mod workers;
 
 pub use model_control::autoswitch_enabled;

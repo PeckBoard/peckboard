@@ -775,6 +775,22 @@ pub(super) fn tool_definitions() -> Vec<McpToolDef> {
             }),
         },
         McpToolDef {
+            name: "spawn_subagent".into(),
+            description: "Spawn a subagent: a child session (works on every provider) that runs the given task in the background and posts its final message back into THIS session automatically when it finishes. Use it to split large tasks and run independent parts in parallel (max 5 in flight). Pick the child's model deliberately (model routing rules apply) and a task-matched system_prompt_name. Subagents cannot spawn subagents. Results arrive on their own — do not poll; peek with read_worker_session if needed.".into(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "name": { "type": "string", "description": "Short label for the subagent (its session shows as \"sub: <name>\")." },
+                    "prompt": { "type": "string", "description": "The task. Make it self-contained: the child shares your project folder but not your conversation." },
+                    "model": { "type": "string", "description": "Model id for the child (see list_models). Default: your model." },
+                    "effort": { "type": "string", "description": "Effort level for the child. Default: your effort." },
+                    "system_prompt_name": { "type": "string", "description": "Library prompt matching the work (see list_system_prompts: research / implement / review / debug / docs …)." }
+                },
+                "required": ["name", "prompt"],
+                "additionalProperties": false
+            }),
+        },
+        McpToolDef {
             name: "upgrade_plugin".into(),
             description: "Install/upgrade a Peckboard plugin from the registry by id (e.g. \"common-tools\"): downloads the registry version, verifies checksum, swaps it in. If the hook set changed, stays pending until an operator re-approves.".into(),
             input_schema: serde_json::json!({

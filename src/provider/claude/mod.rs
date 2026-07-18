@@ -40,6 +40,50 @@ Before starting a task, ask (via `mcp__peckboard__ask_user`) when the request is
 You are restricted to the current working directory and its subdirectories. Never read, write, or access paths outside the project folder — such attempts are denied. All file paths must stay within the project root.
 "#;
 
+/// Context injected into every subagent (Task/Agent tool call) via a
+/// `SubagentStart` hook. The CLI's `--append-system-prompt` reaches only the
+/// main loop — a subagent never sees `PECKBOARD_SYSTEM_PROMPT` or
+/// `WORKING_STYLE` — so the standing Peckboard rules are restated here and
+/// delivered through the hook's `additionalContext` output. Keep in sync
+/// with `PECKBOARD_SYSTEM_PROMPT` and `crate::provider::WORKING_STYLE`.
+const SUBAGENT_CONTEXT: &str = r#"# Peckboard subagent rules
+
+You are a subagent inside Peckboard, a remote web UI. There is no terminal, and the user does not see your output — only your final message returns to the agent that spawned you.
+
+- NEVER use the terminal or shell tools (Bash and similar). To run a command, use the `mcp__peckboard__run_command` tool; use `mcp__peckboard__run_tests` for test suites and `mcp__peckboard__git` for git operations.
+- Prefer the Peckboard code tools — `file_outline`, `read_symbol`, `search_files`, `read_file`, `edit_file` — to navigate and edit code. NEVER use `grep` or `sed` — not in commands, not in scripts; use `search_files` (ripgrep-backed) instead.
+- The built-in Read/Write/Edit file tools may be disabled; use `mcp__peckboard__read_file`, `mcp__peckboard__edit_file`, and `mcp__peckboard__write_file` for file access.
+- Stay inside the current working directory and its subdirectories — paths outside the project folder are denied.
+- Never ask the user questions — no `ask_user`, no questions in plain text. If you are blocked or something is ambiguous, state the open question in your final message so the caller can decide.
+"#;
+
+/// File name of the SubagentStart hook context, written next to the
+/// per-session MCP configs. Content is identical for every session, so one
+/// file serves all spawns.
+const HOOK_CONTEXT_FILE: &str = "claude-subagent-context.json";
+
+/// Write the hook-output JSON that the SubagentStart hook command `cat`s:
+/// `additionalContext` carrying `SUBAGENT_CONTEXT`. Idempotent (static
+/// content, rewritten per spawn); returns the context file path for
+/// `build_cli_args` to wire into the merged `--settings` value.
+pub(crate) fn write_subagent_context_file(
+    dir: &std::path::Path,
+) -> anyhow::Result<std::path::PathBuf> {
+    std::fs::create_dir_all(dir)?;
+    // Canonicalize so the `cat` path stays valid regardless of the CLI's
+    // working directory (the project folder, not the data dir).
+    let dir = dir.canonicalize().unwrap_or_else(|_| dir.to_path_buf());
+
+    let context_path = dir.join(HOOK_CONTEXT_FILE);
+    let hook_output = serde_json::json!({
+        "hookSpecificOutput": {
+            "hookEventName": "SubagentStart",
+            "additionalContext": SUBAGENT_CONTEXT,
+        }
+    });
+    std::fs::write(&context_path, serde_json::to_string_pretty(&hook_output)?)?;
+    Ok(context_path)
+}
 /// Discover available Claude models.
 pub(crate) fn discover_models() -> Vec<ModelInfo> {
     let mut models = vec![
@@ -133,7 +177,11 @@ pub(crate) fn discover_models() -> Vec<ModelInfo> {
 /// starts with. The prompt no longer enters argv at all (it goes over
 /// stdin), so there is no positional argument to worry about. Both
 /// properties are exercised by the regression tests below.
-pub fn build_cli_args(config: &SpawnConfig, conversation_id: Option<&str>) -> Vec<String> {
+pub fn build_cli_args(
+    config: &SpawnConfig,
+    conversation_id: Option<&str>,
+    subagent_context_path: Option<&str>,
+) -> Vec<String> {
     // Build the single --append-system-prompt value. Claude's CLI takes only
     // one such flag, so we fold several sources into it: the standing
     // Peckboard prompt, the shared working-style rules, any per-spawn suffix
@@ -276,15 +324,48 @@ pub fn build_cli_args(config: &SpawnConfig, conversation_id: Option<&str>) -> Ve
         args.push(format!("--allowedTools={}", allowed.join(",")));
     }
 
-    // Only worker sessions may compact automatically. Peckboard's own
-    // machinery already enforces that (crate::handover::maybe_auto_compact
-    // is worker-gated; the UI prompts interactive users to clear / compact /
-    // continue instead), but the CLI ALSO auto-compacts on its own near the
-    // context limit — silently, bypassing that rule — so it is switched off
-    // for non-workers here. Workers keep the built-in behaviour as a
-    // backstop below peckboard's own threshold recycle.
+    // Single merged --settings payload: the CLI keeps only the LAST
+    // --settings flag, so every settings key must ride in one value.
+    //
+    // - autoCompactEnabled: only worker sessions may compact automatically.
+    //   Peckboard's own machinery already enforces that
+    //   (crate::handover::maybe_auto_compact is worker-gated; the UI prompts
+    //   interactive users to clear / compact / continue instead), but the
+    //   CLI ALSO auto-compacts on its own near the context limit — silently,
+    //   bypassing that rule — so it is switched off for non-workers. Workers
+    //   keep the built-in behaviour as a backstop below peckboard's own
+    //   threshold recycle.
+    // - hooks: a SubagentStart hook `cat`s the context file written by
+    //   `write_subagent_context_file`, injecting the Peckboard subagent
+    //   rules into every Task/Agent subagent — which the main loop's
+    //   --append-system-prompt never reaches.
+    let mut settings = serde_json::Map::new();
     if !config.is_worker {
-        args.push(r#"--settings={"autoCompactEnabled":false}"#.to_string());
+        settings.insert(
+            "autoCompactEnabled".to_string(),
+            serde_json::Value::Bool(false),
+        );
+    }
+    if let Some(ctx) = subagent_context_path {
+        settings.insert(
+            "hooks".to_string(),
+            serde_json::json!({
+                "SubagentStart": [{
+                    "hooks": [{
+                        "type": "command",
+                        // Single-quoted so a space in the data dir survives
+                        // the shell; the path is Peckboard-controlled.
+                        "command": format!("cat '{ctx}'"),
+                    }]
+                }]
+            }),
+        );
+    }
+    if !settings.is_empty() {
+        args.push(format!(
+            "--settings={}",
+            serde_json::Value::Object(settings)
+        ));
     }
     // Permission handling: Peckboard runs Claude headless, so we need
     // to skip interactive permission prompts. Without this, the CLI
@@ -403,14 +484,14 @@ mod tests {
     fn test_build_cli_args_autocompact_gated_on_worker() {
         // Non-worker spawns disable the CLI's built-in auto-compaction —
         // only worker sessions may compact automatically.
-        let args = build_cli_args(&default_spawn("claude-opus-4-8"), None);
+        let args = build_cli_args(&default_spawn("claude-opus-4-8"), None, None);
         assert!(args.contains(&r#"--settings={"autoCompactEnabled":false}"#.to_string()));
 
         let worker = SpawnConfig {
             is_worker: true,
             ..default_spawn("claude-opus-4-8")
         };
-        let args = build_cli_args(&worker, None);
+        let args = build_cli_args(&worker, None, None);
         assert!(!args.iter().any(|a| a.starts_with("--settings")));
     }
 
@@ -427,7 +508,7 @@ mod tests {
         let mut config = default_spawn("claude-opus-4-8");
         config.system_prompt_suffix = Some("# Repeating Task Context\n\nrun #42".to_string());
 
-        let args = build_cli_args(&config, None);
+        let args = build_cli_args(&config, None, None);
         // The base prompt and the suffix are concatenated into the same
         // --append-system-prompt flag value (Claude's CLI takes only one).
         let append = args
@@ -448,7 +529,7 @@ mod tests {
         config.system_prompt_suffix = Some("# Repeating Task Context".to_string());
         config.system_prompt_override = Some("You are a pirate. Only say arrr.".to_string());
 
-        let args = build_cli_args(&config, None);
+        let args = build_cli_args(&config, None, None);
         let append = args
             .iter()
             .find(|a| a.starts_with("--append-system-prompt="))
@@ -464,7 +545,7 @@ mod tests {
         let mut config = default_spawn("claude-opus-4-8");
         config.system_prompt_override = Some(String::new());
 
-        let args = build_cli_args(&config, None);
+        let args = build_cli_args(&config, None, None);
         let append = args
             .iter()
             .find(|a| a.starts_with("--append-system-prompt="))
@@ -478,9 +559,9 @@ mod tests {
         let mut config = default_spawn("claude-opus-4-8");
         config.system_prompt_suffix = Some(String::new());
 
-        let with_empty = build_cli_args(&config, None);
+        let with_empty = build_cli_args(&config, None, None);
         let none = default_spawn("claude-opus-4-8");
-        let with_none = build_cli_args(&none, None);
+        let with_none = build_cli_args(&none, None, None);
 
         // Empty-string and None must produce byte-identical CLI args —
         // no "None" marker, no spurious trailing blank line from the
@@ -492,7 +573,7 @@ mod tests {
     fn test_build_cli_args_basic() {
         let config = default_spawn("claude-opus-4-8");
 
-        let args = build_cli_args(&config, None);
+        let args = build_cli_args(&config, None, None);
         assert!(args.contains(&"claude".to_string()));
         // Stream-json mode in both directions — the prompt is no longer
         // in argv; it goes over stdin as `{type:'user', ...}` envelopes.
@@ -526,7 +607,7 @@ mod tests {
             is_pre_hatcher: false,
         };
 
-        let args = build_cli_args(&config, Some("conv-123"));
+        let args = build_cli_args(&config, Some("conv-123"), None);
         assert!(args.contains(&"--resume=conv-123".to_string()));
         assert!(args.contains(&"--effort=high".to_string()));
         assert!(args.contains(&"--mcp-config=/tmp/mcp.json".to_string()));
@@ -544,7 +625,7 @@ mod tests {
             is_pre_hatcher: true,
             ..default_spawn("claude-haiku-4-5")
         };
-        let args = build_cli_args(&config, None);
+        let args = build_cli_args(&config, None, None);
         let disallowed = args
             .iter()
             .find(|a| a.starts_with("--disallowedTools="))
@@ -598,7 +679,7 @@ mod tests {
             mcp_config_path: Some("/tmp/mcp.json".into()),
             ..default_spawn("claude-opus-4-8")
         };
-        let args = build_cli_args(&config, None);
+        let args = build_cli_args(&config, None, None);
         // read_file / edit_file are now core, always-on MCP tools, so Claude's
         // built-in whole-file tools are denied even for a plain session — all
         // file access routes through the containment-enforcing MCP tools.
@@ -635,7 +716,7 @@ mod tests {
             "mcp__gh__create_issue".to_string(),
             "mcp__gh__merge_pr".to_string(),
         ];
-        let args = build_cli_args(&config, None);
+        let args = build_cli_args(&config, None, None);
         let disallowed = args
             .iter()
             .find(|a| a.starts_with("--disallowedTools="))
@@ -661,7 +742,7 @@ mod tests {
             ],
             ..default_spawn("claude-opus-4-8")
         };
-        let args = build_cli_args(&config, None);
+        let args = build_cli_args(&config, None, None);
 
         let disallowed = args
             .iter()
@@ -706,7 +787,7 @@ mod tests {
     fn test_build_cli_args_default_model() {
         let config = default_spawn("default");
 
-        let args = build_cli_args(&config, None);
+        let args = build_cli_args(&config, None, None);
         assert!(!args.iter().any(|a| a.starts_with("--model")));
     }
 
@@ -815,7 +896,7 @@ mod tests {
         // and bypassed the tool allow-list.
         let config = default_spawn("--allowedTools=Bash");
 
-        let args = build_cli_args(&config, None);
+        let args = build_cli_args(&config, None, None);
 
         assert!(args.contains(&"--model=--allowedTools=Bash".to_string()));
         assert!(
@@ -832,7 +913,7 @@ mod tests {
         let mut config = default_spawn("claude-opus-4-8");
         config.effort = Some("--mcp-config=/tmp/evil.json".into());
 
-        let args = build_cli_args(&config, None);
+        let args = build_cli_args(&config, None, None);
 
         assert!(args.contains(&"--effort=--mcp-config=/tmp/evil.json".to_string()));
         assert!(!has_bare(&args, "--mcp-config=/tmp/evil.json"));
@@ -847,7 +928,7 @@ mod tests {
         // flag.
         let config = default_spawn("default");
 
-        let args = build_cli_args(&config, Some("--allowedTools=Bash"));
+        let args = build_cli_args(&config, Some("--allowedTools=Bash"), None);
 
         assert!(args.contains(&"--resume=--allowedTools=Bash".to_string()));
         assert!(!has_bare(&args, "--allowedTools=Bash"));
@@ -863,7 +944,7 @@ mod tests {
         let mut config = default_spawn("default");
         config.mcp_config_path = Some("--allowedTools=Bash".into());
 
-        let args = build_cli_args(&config, None);
+        let args = build_cli_args(&config, None, None);
 
         assert!(args.contains(&"--mcp-config=--allowedTools=Bash".to_string()));
         // The allowedTools the build emits is the legitimate list of
@@ -885,7 +966,7 @@ mod tests {
         config.mcp_config_path = Some("--evil-mcp".into());
 
         let evil_values = ["--evil-model", "--evil-effort", "--evil-mcp", "--evil-conv"];
-        let args = build_cli_args(&config, Some("--evil-conv"));
+        let args = build_cli_args(&config, Some("--evil-conv"), None);
 
         for evil in evil_values {
             assert!(
@@ -893,5 +974,71 @@ mod tests {
                 "attacker value {evil:?} appeared as a standalone argv entry: {args:?}"
             );
         }
+    }
+
+    #[test]
+    fn test_subagent_hook_joins_merged_settings() {
+        // Non-worker + hook context: ONE --settings argv entry carrying both
+        // autoCompactEnabled and the SubagentStart hook (the CLI keeps only
+        // the last --settings flag, so they must ride together).
+        let config = default_spawn("default");
+        let args = build_cli_args(
+            &config,
+            None,
+            Some("/data/worker-mcp/claude-subagent-context.json"),
+        );
+
+        let flags: Vec<&String> = args
+            .iter()
+            .filter(|a| a.starts_with("--settings="))
+            .collect();
+        assert_eq!(flags.len(), 1);
+        let value: serde_json::Value =
+            serde_json::from_str(flags[0].trim_start_matches("--settings=")).unwrap();
+        assert_eq!(value["autoCompactEnabled"], false);
+        assert_eq!(
+            value["hooks"]["SubagentStart"][0]["hooks"][0]["command"],
+            "cat '/data/worker-mcp/claude-subagent-context.json'"
+        );
+
+        // Worker + hook context: hook only, autocompact stays on.
+        let mut worker = default_spawn("default");
+        worker.is_worker = true;
+        let args = build_cli_args(&worker, None, Some("/ctx.json"));
+        let flag = args.iter().find(|a| a.starts_with("--settings=")).unwrap();
+        let value: serde_json::Value =
+            serde_json::from_str(flag.trim_start_matches("--settings=")).unwrap();
+        assert!(value.get("autoCompactEnabled").is_none());
+        assert_eq!(
+            value["hooks"]["SubagentStart"][0]["hooks"][0]["type"],
+            "command"
+        );
+
+        // Worker without hook context: no settings at all.
+        let args = build_cli_args(&worker, None, None);
+        assert!(!args.iter().any(|a| a.starts_with("--settings=")));
+    }
+
+    #[test]
+    fn test_write_subagent_context_file_carries_the_rules() {
+        let tmp = tempfile::tempdir().unwrap();
+        let context_path = write_subagent_context_file(tmp.path()).unwrap();
+
+        let context: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&context_path).unwrap()).unwrap();
+        assert_eq!(
+            context["hookSpecificOutput"]["hookEventName"],
+            "SubagentStart"
+        );
+        assert_eq!(
+            context["hookSpecificOutput"]["additionalContext"],
+            SUBAGENT_CONTEXT
+        );
+
+        // Idempotent: a second write succeeds and returns the same path.
+        assert_eq!(
+            write_subagent_context_file(tmp.path()).unwrap(),
+            context_path
+        );
     }
 }

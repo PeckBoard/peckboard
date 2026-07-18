@@ -103,6 +103,13 @@ Discovered from:
 - Supports `--mcp-config` for MCP tool exposure
 - Supports `--effort` for reasoning budget control
 - Supports `--permission-prompt-tool stdio` for interactive sessions
+- Injects the Peckboard subagent rules into every Task/Agent subagent via a
+  `SubagentStart` hook: `spawn_claude` writes a static
+  `claude-subagent-context.json` next to the per-session MCP configs
+  (`data_dir/worker-mcp/`), and `build_cli_args` folds a hook that `cat`s it
+  into the single merged `--settings` value (shared with `autoCompactEnabled`
+  — the CLI honours only the last `--settings` flag). Needed because
+  `--append-system-prompt` reaches only the main loop, never subagents.
 
 ### CLI-Specific Behavior
 

@@ -98,6 +98,7 @@ impl McpToolRegistry {
             "list_project_reports" => self.handle_list_project_reports(ctx).await,
             "read_report" => self.handle_read_report(args, ctx).await,
             "read_worker_session" => self.handle_read_worker_session(args, ctx).await,
+            "spawn_subagent" => self.handle_spawn_subagent(args, ctx).await,
             "search_sessions" => self.handle_search_sessions(args, ctx).await,
             "list_sessions" => self.handle_list_sessions(ctx).await,
             "set_session_system_prompt" => self.handle_set_session_system_prompt(args, ctx).await,
@@ -474,7 +475,8 @@ mod tests {
         assert!(names.contains(&"switch_session_model"));
         assert!(names.contains(&"propose_plan"));
         assert!(names.contains(&"delete_plan"));
-        assert_eq!(names.len(), 69);
+        assert!(names.contains(&"spawn_subagent"));
+        assert_eq!(names.len(), 70);
     }
 
     #[test]

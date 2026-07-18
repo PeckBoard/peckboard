@@ -128,7 +128,26 @@ pub fn spawn_claude(
     config: &SpawnConfig,
     conversation_id: Option<&str>,
 ) -> anyhow::Result<ClaudeProcess> {
-    let args = build_cli_args(config, conversation_id);
+    // Wire the SubagentStart hook: write the static context file next to
+    // the per-session MCP configs; build_cli_args folds the hook into the
+    // merged --settings value. Best-effort — a write failure must never
+    // block the spawn, it just loses subagent prompt injection.
+    let subagent_context = config
+        .mcp_config_path
+        .as_deref()
+        .map(std::path::Path::new)
+        .and_then(std::path::Path::parent)
+        .and_then(|dir| match super::write_subagent_context_file(dir) {
+            Ok(p) => Some(p.to_string_lossy().into_owned()),
+            Err(e) => {
+                tracing::warn!(
+                    session_id = session_id,
+                    "subagent hook context not written, spawning without it: {e}"
+                );
+                None
+            }
+        });
+    let args = build_cli_args(config, conversation_id, subagent_context.as_deref());
 
     // args[0] is "claude", the rest are actual arguments
     let program = &args[0];
@@ -697,30 +716,35 @@ pub async fn stream_events(
             }
             saw_clean_completion = true;
 
-            // A worker whose context crossed the compaction threshold gets
-            // its child recycled after this turn so a ProcessCompletion
-            // fires NOW (mid-stream children otherwise only complete on the
-            // ~30-minute idle reap) and the completion listener can
-            // auto-dispatch a compaction turn. Interactive sessions are
-            // never auto-compacted (the UI prompts the user instead), so
-            // they are left running to --resume normally — no forced
-            // recycle. The is_worker lookup only runs in the rare
-            // over-threshold case, so the extra query is cheap.
-            if turn_context >= crate::handover::WORKER_COMPACT_CONTEXT_THRESHOLD
-                && !shutdown_after_turn
-                && db
-                    .get_session(&session_id)
-                    .await
-                    .ok()
-                    .flatten()
-                    .is_some_and(|s| s.is_worker)
-            {
-                tracing::info!(
-                    session_id = %session_id,
-                    context_tokens = turn_context,
-                    "Worker context over compaction threshold; recycling child after this turn"
-                );
-                shutdown_after_turn = true;
+            // Recycle-after-turn decisions need the session row (one point
+            // lookup per completed turn). A worker whose context crossed the
+            // compaction threshold recycles so a ProcessCompletion fires NOW
+            // and the completion listener can auto-dispatch a compaction
+            // turn; a SUBAGENT always recycles so the listener can report
+            // its result to the parent immediately — mid-stream children
+            // otherwise only complete on the ~30-minute idle reap.
+            // Interactive sessions are never auto-compacted (the UI prompts
+            // the user instead) and keep running to --resume normally.
+            if !shutdown_after_turn {
+                let row = db.get_session(&session_id).await.ok().flatten();
+                let is_subagent = row.as_ref().is_some_and(|s| s.parent_session_id.is_some());
+                let is_worker = row.is_some_and(|s| s.is_worker);
+                if is_subagent {
+                    tracing::info!(
+                        session_id = %session_id,
+                        "Subagent turn complete; recycling child to report the result"
+                    );
+                    shutdown_after_turn = true;
+                } else if is_worker
+                    && turn_context >= crate::handover::WORKER_COMPACT_CONTEXT_THRESHOLD
+                {
+                    tracing::info!(
+                        session_id = %session_id,
+                        context_tokens = turn_context,
+                        "Worker context over compaction threshold; recycling child after this turn"
+                    );
+                    shutdown_after_turn = true;
+                }
             }
             // Graceful-shutdown rendezvous: a tool handler (e.g.
             // `finish_card`) set the flag mid-turn so the response

@@ -169,6 +169,48 @@ impl Db {
         .await
     }
 
+    /// Count `parent_id`'s subagent sessions that have not yet reported
+    /// back (`subagent_completed_at IS NULL`) — enforces the parent's
+    /// concurrent-subagent cap in `spawn_subagent`.
+    pub async fn count_active_subagents(&self, parent_id: &str) -> anyhow::Result<i64> {
+        let parent_id = parent_id.to_string();
+        self.with_conn(move |conn| {
+            sessions::table
+                .filter(sessions::parent_session_id.eq(&parent_id))
+                .filter(sessions::subagent_completed_at.is_null())
+                .count()
+                .get_result(conn)
+                .map_err(Into::into)
+        })
+        .await
+    }
+
+    /// Claim a subagent's completion: stamp `subagent_completed_at` iff it
+    /// is still NULL. Returns true only for the call that won the claim —
+    /// the completion listener can fire more than once per session (crash
+    /// then drain, recycled child), and only the winner reports to the
+    /// parent.
+    pub async fn claim_subagent_completion(
+        &self,
+        session_id: &str,
+        ts: &str,
+    ) -> anyhow::Result<bool> {
+        let session_id = session_id.to_string();
+        let ts = ts.to_string();
+        self.with_conn(move |conn| {
+            let n = diesel::update(
+                sessions::table
+                    .filter(sessions::id.eq(&session_id))
+                    .filter(sessions::subagent_completed_at.is_null())
+                    .filter(sessions::parent_session_id.is_not_null()),
+            )
+            .set(sessions::subagent_completed_at.eq(&ts))
+            .execute(conn)?;
+            Ok(n > 0)
+        })
+        .await
+    }
+
     /// Plain (non-worker, non-expert) sessions — the ordinary chat list.
     /// Experts are deliberately excluded: they must never surface in the
     /// normal chat session list.

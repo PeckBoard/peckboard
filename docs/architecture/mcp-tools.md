@@ -76,3 +76,33 @@ Attachments go through `attach_report_file` as base64-encoded bytes (never file 
 ## Side Effects
 
 When a worker calls a tool that creates/references a project or card, the MCP server appends a "chip" system message to the caller's session transcript. This renders as a clickable reference in the chat UI.
+
+## Subagents (`spawn_subagent`)
+
+Any session on any provider can spawn a subagent — a child session that
+works a task in the background and has its final message posted back into
+the parent automatically. This is the provider-independent counterpart to
+Claude's native Task tool (grok / ollama / cursor have no such mechanism).
+
+Flow (`src/subagent.rs`):
+
+1. `spawn_subagent {name, prompt, model?, effort?, system_prompt_name?}`
+   creates the child row — `expert_kind = 'subagent'`,
+   `parent_session_id` = caller, caller's folder/project/user, model and
+   effort inherited unless given — persists the preamble+task as the
+   child's first `user` event, and returns `{subagent_session_id}` plus a
+   `_dispatch_session` marker.
+2. The `mcp` route (which holds the `AppState`) strips the marker and
+   fire-and-forgets the child's first turn through
+   `ExpertDispatcher::resume_session`.
+3. Every provider emits a `ProcessCompletion`; the completion listener in
+   `main.rs` calls `subagent::handle_subagent_done`, which claims the
+   completion (idempotent via `sessions.subagent_completed_at`), extracts
+   the child's final reply (trailing `agent-text` events), and delivers
+   `[subagent "<name>" finished] …` to the parent like a user message
+   (spawn if idle, queue/inject if running). Crashes deliver the error.
+
+Guards: depth 1 (a subagent may not spawn subagents), max 5 in flight per
+parent, blocked for pre-hatcher sessions by the read-only allowlist.
+Subagent sessions are ordinary sessions — readable with
+`read_worker_session`/`search_sessions`, terminable via session-control.

@@ -418,6 +418,29 @@ async fn mcp_handler(
                             );
                         }
                     }
+                    // `_dispatch_session` (spawn_subagent): drive the freshly
+                    // created child session's first turn here, where the
+                    // AppState-backed dispatcher lives. Fire-and-forget so the
+                    // tool result returns to the caller immediately; the
+                    // prompt is already persisted as the child's user event.
+                    if let Some((child_id, text)) = result.as_object_mut().and_then(|o| {
+                        let d = o.remove("_dispatch_session")?;
+                        let sid = d.get("session_id").and_then(|v| v.as_str())?.to_string();
+                        let text = d.get("text").and_then(|v| v.as_str())?.to_string();
+                        Some((sid, text))
+                    }) {
+                        let dispatcher =
+                            crate::service::mcp_server::AppExpertDispatcher::new(state.clone());
+                        tokio::spawn(async move {
+                            use crate::service::mcp_server::ExpertDispatcher;
+                            if let Err(e) = dispatcher.resume_session(&child_id, &text).await {
+                                tracing::warn!(
+                                    session_id = %child_id,
+                                    "subagent first-turn dispatch failed: {e}"
+                                );
+                            }
+                        });
+                    }
                     let text_block = serde_json::json!({
                         "type": "text",
                         "text": serde_json::to_string(&result).unwrap_or_default(),

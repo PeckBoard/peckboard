@@ -933,6 +933,8 @@ pub(crate) fn create_session_impl(db: &Db, input: &str, inv: &InvocationContext)
         model_autoswitch: None,
         system_prompt_name: req.system_prompt_name,
         is_temp: false,
+        parent_session_id: None,
+        subagent_completed_at: None,
     };
     match db.create_session_blocking(new) {
         Ok(session) => serde_json::json!({ "session": session }).to_string(),

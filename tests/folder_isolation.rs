@@ -94,6 +94,8 @@ async fn seed_session(
         context_reset_ts: None,
         system_prompt_name: None,
         is_temp: false,
+        parent_session_id: None,
+        subagent_completed_at: None,
     })
     .await
     .unwrap();

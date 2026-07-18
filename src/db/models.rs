@@ -99,6 +99,15 @@ pub struct Session {
     /// see `routes::me::delete_tab` and the startup sweep in
     /// `routes::sessions`. Cleared by the "Keep session" action.
     pub is_temp: bool,
+    /// Parent session that spawned this one via the `spawn_subagent` MCP
+    /// tool. `Some` marks the session as a subagent (paired with
+    /// `expert_kind = "subagent"`): the completion listener reports its
+    /// final message back to this parent. `None` for every other session.
+    pub parent_session_id: Option<String>,
+    /// When (RFC3339) this subagent's completion was reported to its
+    /// parent. `None` while running — such rows count toward the parent's
+    /// concurrent-subagent cap. Always `None` for non-subagent sessions.
+    pub subagent_completed_at: Option<String>,
 }
 
 #[derive(Insertable, Deserialize, Debug, Default)]
@@ -131,6 +140,8 @@ pub struct NewSession {
     pub system_prompt_name: Option<String>,
     pub model_autoswitch: Option<bool>,
     pub is_temp: bool,
+    pub parent_session_id: Option<String>,
+    pub subagent_completed_at: Option<String>,
 }
 #[derive(AsChangeset, Deserialize, Debug, Default)]
 #[diesel(table_name = sessions)]

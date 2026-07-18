@@ -469,6 +469,18 @@ async fn main() -> anyhow::Result<()> {
                                     }
                                 }
                             }
+                            // Subagent finished: report its final message
+                            // back to the parent session. Idempotent (claim
+                            // inside); a crash reports the error instead.
+                            Ok(Some(session)) if session.parent_session_id.is_some() => {
+                                peckboard::subagent::handle_subagent_done(
+                                    &orchestrator_state,
+                                    &session,
+                                    completion.completed,
+                                    completion.error.as_deref(),
+                                )
+                                .await;
+                            }
                             _ => {}
                         }
                     } // release lock before drain_queue_for_session, which

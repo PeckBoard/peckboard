@@ -40,6 +40,8 @@ diesel::table! {
         system_prompt_name -> Nullable<Text>,
         pending_plan_review -> Bool,
         is_temp -> Bool,
+        parent_session_id -> Nullable<Text>,
+        subagent_completed_at -> Nullable<Text>,
     }
 }
 
