@@ -28,6 +28,7 @@ const MAX_CONSOLE_EVENTS: usize = 400;
 const BODY_CAP_CHARS: usize = 4096;
 const HEADER_VALUE_CAP_CHARS: usize = 512;
 const CONSOLE_TEXT_CAP_CHARS: usize = 2000;
+const MAX_POINTER_EVENTS: usize = 5000;
 
 #[derive(Serialize, Deserialize, Clone)]
 pub struct RunStep {
@@ -89,6 +90,20 @@ pub struct ConsoleEvent {
     pub text: String,
 }
 
+/// One sampled pointer position (cursor replay). `t` is `move` or `down`;
+/// coordinates are CSS px within a `vw`×`vh` viewport (the player
+/// normalizes, so device pixel ratio never matters).
+#[derive(Serialize, Deserialize, Clone)]
+pub struct PointerEvent {
+    pub ts_ms: i64,
+    pub t: String,
+    pub x: i32,
+    pub y: i32,
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub vw: u32,
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub vh: u32,
+}
 fn is_zero(n: &u32) -> bool {
     *n == 0
 }
@@ -118,6 +133,11 @@ pub struct RunMeta {
     pub network_truncated: u32,
     #[serde(default, skip_serializing_if = "is_zero")]
     pub console_truncated: u32,
+    /// Sampled cursor positions from the capture sidecar (cursor replay).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub pointer_events: Vec<PointerEvent>,
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub pointer_truncated: u32,
 }
 
 struct ActiveRun {
@@ -183,6 +203,8 @@ pub fn start(
             console_events: Vec::new(),
             network_truncated: 0,
             console_truncated: 0,
+            pointer_events: Vec::new(),
+            pointer_truncated: 0,
         },
         next_frame: 0,
         events_cursor: 0,
@@ -381,6 +403,31 @@ pub fn ingest_events(page_id: &str, payload: &serde_json::Value) {
                         .unwrap_or("log")
                         .to_string(),
                     text: cap_chars(&redact::mask_text(text), CONSOLE_TEXT_CAP_CHARS).0,
+                });
+            }
+            "pointer" => {
+                if run.meta.pointer_events.len() >= MAX_POINTER_EVENTS {
+                    run.meta.pointer_truncated += 1;
+                    continue;
+                }
+                run.meta.pointer_events.push(PointerEvent {
+                    ts_ms: ts,
+                    t: match ev.get("t").and_then(|v| v.as_str()) {
+                        Some("down") => "down".to_string(),
+                        _ => "move".to_string(),
+                    },
+                    x: ev.get("x").and_then(|v| v.as_i64()).unwrap_or(0) as i32,
+                    y: ev.get("y").and_then(|v| v.as_i64()).unwrap_or(0) as i32,
+                    vw: ev
+                        .get("vw")
+                        .and_then(|v| v.as_u64())
+                        .unwrap_or(0)
+                        .min(u64::from(u32::MAX)) as u32,
+                    vh: ev
+                        .get("vh")
+                        .and_then(|v| v.as_u64())
+                        .unwrap_or(0)
+                        .min(u64::from(u32::MAX)) as u32,
                 });
             }
             _ => {}
@@ -586,6 +633,75 @@ mod tests {
         assert!(m.network.is_empty() && m.console_events.is_empty());
     }
 
+    #[test]
+    fn pointer_events_ingest_and_cap() {
+        let dir = tempfile::tempdir().unwrap();
+        start(
+            dir.path(),
+            "page-ptr",
+            "ptr",
+            "https://x",
+            "s-9",
+            None,
+            None,
+        );
+        ingest_events(
+            "page-ptr",
+            &serde_json::json!({
+                "next": 3,
+                "events": [
+                    { "seq": 1, "kind": "pointer", "ts": 100, "t": "move",
+                      "x": 10, "y": 20, "vw": 1280, "vh": 720 },
+                    { "seq": 2, "kind": "pointer", "ts": 160, "t": "down",
+                      "x": 11, "y": 21, "vw": 1280, "vh": 720 },
+                    { "seq": 3, "kind": "pointer", "ts": 200, "t": "weird",
+                      "x": -5, "y": 7 }
+                ]
+            }),
+        );
+        finish("page-ptr");
+        let run = get_run(dir.path(), &list_runs(dir.path())[0].id).unwrap();
+        assert_eq!(run.pointer_events.len(), 3);
+        assert_eq!(run.pointer_events[0].t, "move");
+        assert_eq!(run.pointer_events[1].t, "down");
+        // Unknown kinds coerce to "move"; missing viewport stays 0.
+        assert_eq!(run.pointer_events[2].t, "move");
+        assert_eq!(run.pointer_events[2].x, -5);
+        assert_eq!(run.pointer_events[0].vw, 1280);
+        assert_eq!(run.pointer_events[2].vw, 0);
+
+        // Cap: past MAX_POINTER_EVENTS only the truncation counter grows.
+        let dir2 = tempfile::tempdir().unwrap();
+        start(
+            dir2.path(),
+            "page-ptr2",
+            "ptr2",
+            "https://x",
+            "s-9",
+            None,
+            None,
+        );
+        let events: Vec<serde_json::Value> = (0..(MAX_POINTER_EVENTS as u64 + 10))
+            .map(|i| {
+                serde_json::json!({ "seq": i + 1, "kind": "pointer", "ts": i,
+                    "t": "move", "x": i, "y": 0 })
+            })
+            .collect();
+        ingest_events(
+            "page-ptr2",
+            &serde_json::json!({ "next": MAX_POINTER_EVENTS as u64 + 10, "events": events }),
+        );
+        finish("page-ptr2");
+        let run2 = get_run(dir2.path(), &list_runs(dir2.path())[0].id).unwrap();
+        assert_eq!(run2.pointer_events.len(), MAX_POINTER_EVENTS);
+        assert_eq!(run2.pointer_truncated, 10);
+
+        // A legacy meta.json without pointer fields still parses.
+        let legacy =
+            r#"{"id":"x","name":"n","url":"u","session_id":"s","started_ms":1,"steps":[]}"#;
+        let m: RunMeta = serde_json::from_str(legacy).unwrap();
+        assert!(m.pointer_events.is_empty() && m.pointer_truncated == 0);
+    }
     #[test]
     fn event_caps_are_enforced() {
         let dir = tempfile::tempdir().unwrap();

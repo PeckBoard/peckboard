@@ -189,6 +189,67 @@ function attachCapture(pageId, page) {
   });
 }
 
+/**
+ * Cursor replay capture. An init script reports throttled mousemove plus
+ * mousedown from the page via an exposed binding; Playwright's own
+ * high-level actions (click/hover) drive the real mouse, so agent actions
+ * show up too. Coordinates are CSS px in a vw×vh viewport (the player
+ * normalizes, so DPR never matters).
+ *
+ * The binding is page-global while runs are keyed by pageId — resolved
+ * lazily through `pageIds` (filled in the pages.set patch, which runs
+ * before the initial goto can emit anything).
+ */
+const POINTER_THROTTLE_MS = 60;
+/** Page object -> upstream pageId (set in the pages.set patch). */
+const pageIds = new WeakMap();
+
+/** Install the binding + init script; MUST be awaited before the first
+ * goto — fire-and-forget loses the race with the initial navigation and
+ * the loaded document never gets its listeners. */
+async function installPointer(page) {
+  try {
+    await page.exposeBinding("__peckboardPointer", (source, ev) => {
+      try {
+        const pageId = pageIds.get(source.page);
+        if (pageId === undefined || !ev || typeof ev !== "object") return;
+        push(buffer(pageId), {
+          kind: "pointer",
+          ts: Date.now(),
+          t: ev.t === "down" ? "down" : "move",
+          x: Math.round(Number(ev.x) || 0),
+          y: Math.round(Number(ev.y) || 0),
+          vw: Math.round(Number(ev.vw) || 0),
+          vh: Math.round(Number(ev.vh) || 0),
+        });
+      } catch {
+        /* capture must never break the page */
+      }
+    });
+    await page.addInitScript(`(() => {
+      if (window.__peckboardPointerHooked) return;
+      window.__peckboardPointerHooked = true;
+      var last = 0;
+      var send = function (t, e) {
+        try {
+          window.__peckboardPointer({
+            t: t, x: e.clientX, y: e.clientY,
+            vw: window.innerWidth, vh: window.innerHeight,
+          });
+        } catch (_e) { /* binding gone during teardown */ }
+      };
+      addEventListener("mousemove", function (e) {
+        var now = Date.now();
+        if (now - last < ${POINTER_THROTTLE_MS}) return;
+        last = now;
+        send("move", e);
+      }, { capture: true, passive: true });
+      addEventListener("mousedown", function (e) { send("down", e); }, { capture: true, passive: true });
+    })();`);
+  } catch (err) {
+    console.error(`[peckboard-sidecar] pointer install failed: ${err}`);
+  }
+}
 /** Answer our events route; return false for everything else. */
 function handleEvents(req, res) {
   const u = new URL(req.url, "http://sidecar");
@@ -235,6 +296,23 @@ function fallbackToUpstream(reason) {
     process.exit(1);
   });
   child.on("exit", (code) => process.exit(code || 0));
+  // Never orphan the fallback: it owns the port, and an orphaned instance
+  // makes every future capture sidecar die EADDRINUSE while still looking
+  // healthy to core's poll.
+  const reap = () => {
+    try {
+      child.kill("SIGKILL");
+    } catch {
+      /* already gone */
+    }
+  };
+  process.on("exit", reap);
+  for (const sig of ["SIGTERM", "SIGINT", "SIGHUP"]) {
+    process.on(sig, () => {
+      reap();
+      process.exit(0);
+    });
+  }
 }
 
 const pkgDir = findPackageDir();
@@ -254,11 +332,36 @@ if (!pkgDir) {
     const origSet = server.pages.set.bind(server.pages);
     server.pages.set = (id, info) => {
       try {
-        if (info && info.page) attachCapture(id, info.page);
+        if (info && info.page) {
+          pageIds.set(info.page, id);
+          attachCapture(id, info.page);
+        }
       } catch (err) {
         console.error(`[peckboard-sidecar] attach failed for ${id}: ${err}`);
       }
       return origSet(id, info);
+    };
+    // Pointer capture must be installed BETWEEN newPage and the initial
+    // goto, and AWAITED — see installPointer. createPage calls
+    // browserContext.newPage, so wrap it once per (re)launched context.
+    const origEnsure = server.ensureBrowser.bind(server);
+    server.ensureBrowser = async (...args) => {
+      const out = await origEnsure(...args);
+      try {
+        const ctx = server.browserContext;
+        if (ctx && !ctx.__peckboardPointerPatched) {
+          ctx.__peckboardPointerPatched = true;
+          const origNewPage = ctx.newPage.bind(ctx);
+          ctx.newPage = async (...pa) => {
+            const page = await origNewPage(...pa);
+            await installPointer(page);
+            return page;
+          };
+        }
+      } catch (err) {
+        console.error(`[peckboard-sidecar] pointer patch failed: ${err}`);
+      }
+      return out;
     };
     // Upstream caches a dead browser forever: ensureBrowser only checks
     // `persistentContext == null`, so once Chrome crashes (or is killed)
@@ -286,7 +389,10 @@ if (!pkgDir) {
     // Compose our route in front of the upstream express app (an express
     // app is itself a (req, res) handler) instead of calling
     // server.start() — immune to upstream middleware ordering.
-    createServer((req, res) => {
+    const srv = createServer((req, res) => {
+      // Ownership marker: core health-checks this header to distinguish a
+      // live capture sidecar from a foreign/orphaned server on the port.
+      res.setHeader("x-peckboard-capture", "1");
       try {
         if (handleEvents(req, res)) return;
       } catch (err) {
@@ -295,7 +401,14 @@ if (!pkgDir) {
         return;
       }
       server.app(req, res);
-    }).listen(PORT, () => {
+    });
+    srv.on("error", (err) => {
+      // Typically EADDRINUSE: an orphaned server owns the port. Exit fast
+      // and loud — core reads stderr and hops to the next port.
+      console.error(`[peckboard-sidecar] listen failed: ${err}`);
+      process.exit(1);
+    });
+    srv.listen(PORT, () => {
       console.log(`[peckboard-sidecar] capturing on http://127.0.0.1:${PORT}`);
     });
   } catch (err) {

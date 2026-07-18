@@ -318,7 +318,15 @@ impl McpToolRegistry {
             "browser_close" => {
                 let page_id = req_str(&args, "page_id")?;
                 browser::delete(&format!("/api/pages/{page_id}")).await?;
+                // Late arrivals: the sidecar's `requestfinished`/console
+                // handlers are async and can land after the page delete —
+                // drain, give them one beat, and drain again so the last
+                // action's responses aren't lost as forever-"pending".
                 capture_events(page_id).await;
+                if crate::service::browser_runs::events_cursor(page_id).is_some() {
+                    tokio::time::sleep(std::time::Duration::from_millis(400)).await;
+                    capture_events(page_id).await;
+                }
                 crate::service::browser_runs::finish(page_id);
                 Ok(serde_json::json!({ "closed": page_id }))
             }

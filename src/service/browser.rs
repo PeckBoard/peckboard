@@ -76,6 +76,16 @@ pub(crate) fn set_test_base_url(url: &str) {
     let _ = TEST_BASE.set(url.trim_end_matches('/').to_string());
 }
 
+/// Marker header the capture sidecar stamps on every response — how core
+/// tells "our live sidecar" from an orphaned/foreign server that happens
+/// to answer on the port (the classic failure: a crashed predecessor's
+/// fallback child squats the port, every new sidecar dies EADDRINUSE, and
+/// a naive health check silently adopts the capture-less orphan — runs
+/// then record no network/console at all).
+const SIDECAR_MARKER_HEADER: &str = "x-peckboard-capture";
+/// How many consecutive ports to try when squatted.
+const MAX_PORT_HOPS: u16 = 10;
+
 /// Resolve the browser server's base URL, spawning the managed child if
 /// needed. An explicit `PECKBOARD_BROWSER_URL` wins and disables the
 /// managed lifecycle entirely.
@@ -106,30 +116,90 @@ async fn base_url() -> anyhow::Result<String> {
         }
     }
 
-    let port = std::env::var("PECKBOARD_BROWSER_PORT")
+    let first_port = std::env::var("PECKBOARD_BROWSER_PORT")
         .ok()
         .and_then(|p| p.parse::<u16>().ok())
         .unwrap_or(DEFAULT_PORT);
-    let base = format!("http://127.0.0.1:{port}");
-
-    tracing::info!(port, "Spawning browser server (sidecar + {UPSTREAM_PKG})");
     let sidecar = write_sidecar()?;
-    let mut child = tokio::process::Command::new("npx")
-        .args(["-y", "-p", UPSTREAM_PKG, "-p", PINNED_PLAYWRIGHT, "node"])
-        .arg(&sidecar)
+
+    for hop in 0..MAX_PORT_HOPS {
+        let Some(port) = first_port.checked_add(hop) else {
+            break;
+        };
+        match spawn_on_port(&sidecar, port).await? {
+            SpawnOutcome::Ready { child, capture } => {
+                if !capture {
+                    tracing::warn!(
+                        port,
+                        "browser sidecar is running WITHOUT capture (fallback mode); \
+                         recorded runs will have no network/console data"
+                    );
+                }
+                let base = format!("http://127.0.0.1:{port}");
+                *guard = Some(Managed {
+                    child,
+                    base: base.clone(),
+                    last_used: Instant::now(),
+                });
+                spawn_idle_reaper_once();
+                return Ok(base);
+            }
+            SpawnOutcome::PortSquatted => {
+                tracing::warn!(
+                    port,
+                    "a server answers on this port but is not our capture sidecar \
+                     (orphaned browser server?); trying the next port"
+                );
+            }
+        }
+    }
+    anyhow::bail!(
+        "no usable port for the browser sidecar in {first_port}..{} — every port is \
+         owned by a foreign server; kill stale `better-playwright-mcp3` processes \
+         or set PECKBOARD_BROWSER_PORT",
+        first_port.saturating_add(MAX_PORT_HOPS)
+    )
+}
+
+enum SpawnOutcome {
+    /// The child came up: with the sidecar marker (capture on), or as our
+    /// own declared no-capture fallback (browsing works, recording data
+    /// won't be captured).
+    Ready {
+        child: tokio::process::Child,
+        capture: bool,
+    },
+    /// The port belongs to some other process — our child died EADDRINUSE
+    /// behind a server that answers without the marker. Hop to the next.
+    PortSquatted,
+}
+
+/// Spawn the sidecar on `port` and poll until it is verifiably OURS (marker
+/// header or declared fallback), the port turns out squatted, or startup
+/// fails/times out.
+async fn spawn_on_port(sidecar: &std::path::Path, port: u16) -> anyhow::Result<SpawnOutcome> {
+    let base = format!("http://127.0.0.1:{port}");
+    tracing::info!(port, "Spawning browser server (sidecar + {UPSTREAM_PKG})");
+    let mut cmd = tokio::process::Command::new("npx");
+    cmd.args(["-y", "-p", UPSTREAM_PKG, "-p", PINNED_PLAYWRIGHT, "node"])
+        .arg(sidecar)
         .env("PORT", port.to_string())
         .env("HEADLESS", "true")
         .env("NO_USER_PROFILE", "true")
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::piped())
-        .spawn()
-        .map_err(|e| {
-            anyhow::anyhow!(
-                "failed to spawn `npx {UPSTREAM_PKG}` ({e}); browser tools need \
-                 Node.js/npx on PATH"
-            )
-        })?;
+        .stderr(std::process::Stdio::piped());
+    // Own process group so reaping kills the whole npx → node → chrome tree
+    // — killing only the wrapper is exactly how capture-less orphans got
+    // left behind to squat the port.
+    #[cfg(unix)]
+    cmd.process_group(0);
+    let mut child = cmd.spawn().map_err(|e| {
+        anyhow::anyhow!(
+            "failed to spawn `npx {UPSTREAM_PKG}` ({e}); browser tools need \
+             Node.js/npx on PATH"
+        )
+    })?;
 
     // Keep a rolling stderr tail so a failed startup has a real diagnosis.
     let stderr_tail = Arc::new(std::sync::Mutex::new(String::new()));
@@ -149,28 +219,47 @@ async fn base_url() -> anyhow::Result<String> {
             }
         });
     }
+    let tail_now = || {
+        stderr_tail
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .clone()
+    };
 
-    // Health-poll until the API answers (or the child dies / times out).
+    // Health-poll until the API answers AS OURS (or the child dies / times
+    // out). A success response without the marker proves nothing yet: it
+    // may be a foreign server racing our child's boot.
     let deadline = Instant::now() + Duration::from_secs(SPAWN_TIMEOUT_SECS);
     loop {
         if let Ok(Some(status)) = child.try_wait() {
-            let tail = stderr_tail
-                .lock()
-                .unwrap_or_else(|p| p.into_inner())
-                .clone();
+            let tail = tail_now();
+            if tail.contains("EADDRINUSE") {
+                return Ok(SpawnOutcome::PortSquatted);
+            }
             anyhow::bail!("browser server exited during startup ({status}). stderr tail:\n{tail}");
         }
         if let Ok(resp) = http().get(format!("{base}/api/pages")).send().await
             && resp.status().is_success()
         {
-            break;
+            if resp.headers().contains_key(SIDECAR_MARKER_HEADER) {
+                return Ok(SpawnOutcome::Ready {
+                    child,
+                    capture: true,
+                });
+            }
+            // Marker-less answer: our own no-capture fallback announces
+            // itself on stderr; anything else keeps polling until the child
+            // crashes (EADDRINUSE → squatted) or the deadline calls it.
+            if tail_now().contains("capture unavailable") {
+                return Ok(SpawnOutcome::Ready {
+                    child,
+                    capture: false,
+                });
+            }
         }
         if Instant::now() > deadline {
-            let _ = child.start_kill();
-            let tail = stderr_tail
-                .lock()
-                .unwrap_or_else(|p| p.into_inner())
-                .clone();
+            kill_group(&mut child);
+            let tail = tail_now();
             anyhow::bail!(
                 "browser server did not become healthy within {SPAWN_TIMEOUT_SECS}s. \
                  stderr tail:\n{tail}"
@@ -178,14 +267,19 @@ async fn base_url() -> anyhow::Result<String> {
         }
         tokio::time::sleep(Duration::from_millis(400)).await;
     }
+}
 
-    *guard = Some(Managed {
-        child,
-        base: base.clone(),
-        last_used: Instant::now(),
-    });
-    spawn_idle_reaper_once();
-    Ok(base)
+/// Kill the managed child and (on unix) its whole process group — the tree
+/// is npx → node sidecar → chrome/fallback children.
+fn kill_group(child: &mut tokio::process::Child) {
+    #[cfg(unix)]
+    if let Some(pid) = child.id() {
+        // Negative pid targets the process group created at spawn.
+        unsafe {
+            libc::kill(-(pid as i32), libc::SIGKILL);
+        }
+    }
+    let _ = child.start_kill();
 }
 
 /// One global reaper: kills the managed child after `IDLE_SHUTDOWN_SECS`
@@ -204,7 +298,7 @@ fn spawn_idle_reaper_once() {
                     .unwrap_or(false);
                 if idle && let Some(mut m) = guard.take() {
                     tracing::info!("Reaping idle browser server");
-                    let _ = m.child.start_kill();
+                    kill_group(&mut m.child);
                 }
             }
         });
