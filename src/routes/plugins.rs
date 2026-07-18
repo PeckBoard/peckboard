@@ -445,6 +445,8 @@ async fn list_registry(State(state): State<Arc<AppState>>) -> impl IntoResponse 
                         "env": m.env,
                         "url": m.url,
                         "headers": m.headers,
+                        "url_options": m.url_options,
+                        "oauth": m.oauth,
                         "setup_note": m.setup_note,
                         "install": m.install,
                         "tags": m.tags,

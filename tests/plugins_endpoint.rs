@@ -616,6 +616,57 @@ async fn registry_endpoint_reports_compatibility_and_version() {
     assert!(compat["min_peckboard"].is_null());
 }
 
+/// Registry index with one MCP server template carrying `oauth` and
+/// `url_options` — the fields the settings editor needs verbatim.
+const STUB_MCP_INDEX: &str = r#"{
+  "schema_version": 1,
+  "mcp_servers": [
+    {"id":"datadog","name":"Datadog","description":"d","transport":"http",
+     "url":"https://mcp.datadoghq.com/v1/mcp",
+     "url_options":[{"label":"US1","url":"https://mcp.datadoghq.com/v1/mcp"},
+                    {"label":"EU","url":"https://mcp.datadoghq.eu/v1/mcp"}],
+     "oauth":{"scopes":"openid"},
+     "tags":["observability"]}
+  ]
+}"#;
+
+/// Regression: the registry route assembles its JSON by hand, and once
+/// dropped `oauth`/`url_options` — the editor then showed no Region
+/// dropdown and no OAuth sign-in for registry-added servers.
+#[tokio::test]
+async fn registry_endpoint_carries_mcp_oauth_and_url_options() {
+    let (state, token) = build_state().await;
+    let url = spawn_stub_registry(STUB_MCP_INDEX).await;
+    state.db.add_plugin_repository(&url, "stub").await.unwrap();
+    let app = router(state.clone()).with_state(state.clone());
+
+    let req = Request::builder()
+        .uri("/api/plugins/registry")
+        .header(header::AUTHORIZATION, format!("Bearer {token}"))
+        .body(Body::empty())
+        .unwrap();
+    let res = app.oneshot(req).await.unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(res.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let json: Value = serde_json::from_slice(&body).unwrap();
+
+    let servers = json["mcp_servers"].as_array().expect("mcp_servers array");
+    let dd = servers
+        .iter()
+        .find(|s| s["id"] == "datadog")
+        .expect("datadog entry");
+    let opts = dd["url_options"].as_array().expect("url_options array");
+    assert_eq!(opts.len(), 2);
+    assert_eq!(opts[1]["label"], "EU");
+    assert_eq!(opts[1]["url"], "https://mcp.datadoghq.eu/v1/mcp");
+    assert_eq!(
+        dd["oauth"]["scopes"], "openid",
+        "oauth carried through: {dd}"
+    );
+}
+
 #[tokio::test]
 async fn install_refuses_incompatible_but_passes_compatible_gate() {
     let (state, token) = build_state().await;
