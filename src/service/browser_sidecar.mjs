@@ -107,6 +107,18 @@ function attachCapture(pageId, page) {
     const id = inflight.get(req);
     if (id === undefined) return;
     inflight.delete(req);
+    const ts = Date.now();
+    // req.timing() is the browser's network-stack clock; Date.now() here only
+    // measures CDP event-arrival batching, which flattens real load times.
+    let start = null;
+    let dur = null;
+    try {
+      const t = req.timing();
+      if (t && t.startTime > 0) start = t.startTime;
+      if (t && t.responseEnd >= 0) dur = t.responseEnd;
+    } catch {
+      /* timing unavailable */
+    }
     try {
       const resp = await req.response();
       if (!resp) return;
@@ -130,7 +142,9 @@ function attachCapture(pageId, page) {
       push(b, {
         kind: "net-fin",
         id,
-        ts: Date.now(),
+        ts,
+        ...(start != null && { start }),
+        ...(dur != null && { dur }),
         status: resp.status(),
         headers,
         ...(body !== undefined && { body, bodyTruncated }),
@@ -145,11 +159,19 @@ function attachCapture(pageId, page) {
     const id = inflight.get(req);
     if (id === undefined) return;
     inflight.delete(req);
+    let start = null;
+    try {
+      const t = req.timing();
+      if (t && t.startTime > 0) start = t.startTime;
+    } catch {
+      /* timing unavailable */
+    }
     try {
       push(b, {
         kind: "net-fin",
         id,
         ts: Date.now(),
+        ...(start != null && { start }),
         failure: (req.failure() || {}).errorText || "failed",
       });
     } catch {

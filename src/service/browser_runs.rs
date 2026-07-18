@@ -369,7 +369,18 @@ pub fn ingest_events(page_id: &str, payload: &serde_json::Value) {
                         .unwrap_or(false),
                 );
                 let ne = &mut run.meta.network[idx];
-                ne.dur_ms = Some((ts - ne.ts_ms).max(0));
+                // Prefer the sidecar's browser-reported HAR timing (start = epoch
+                // ms, dur = ms to last body byte): CDP delivers events in batches,
+                // so req/fin arrival deltas flatten real load times.
+                if let Some(s) = ev.get("start").and_then(|v| v.as_f64()) {
+                    if s > 0.0 {
+                        ne.ts_ms = s.round() as i64;
+                    }
+                }
+                ne.dur_ms = Some(match ev.get("dur").and_then(|v| v.as_f64()) {
+                    Some(d) if d >= 0.0 => d.round() as i64,
+                    _ => (ts - ne.ts_ms).max(0),
+                });
                 ne.status = ev
                     .get("status")
                     .and_then(|v| v.as_u64())
@@ -631,6 +642,45 @@ mod tests {
             r#"{"id":"x","name":"n","url":"u","session_id":"s","started_ms":1,"steps":[]}"#;
         let m: RunMeta = serde_json::from_str(legacy).unwrap();
         assert!(m.network.is_empty() && m.console_events.is_empty());
+    }
+
+    #[test]
+    fn net_fin_browser_timing_overrides_arrival_deltas() {
+        let dir = tempfile::tempdir().unwrap();
+        start(
+            dir.path(),
+            "page-t",
+            "timing",
+            "https://x",
+            "s-3",
+            None,
+            None,
+        );
+        ingest_events(
+            "page-t",
+            &serde_json::json!({
+                "next": 5,
+                "events": [
+                    { "seq": 1, "kind": "net-req", "id": 1, "ts": 5000, "method": "GET",
+                      "url": "https://cdn.example/a.css", "resourceType": "stylesheet" },
+                    { "seq": 2, "kind": "net-req", "id": 2, "ts": 5001, "method": "GET",
+                      "url": "https://cdn.example/b.css", "resourceType": "stylesheet" },
+                    { "seq": 3, "kind": "net-fin", "id": 1, "ts": 5020, "status": 200,
+                      "start": 4980.4, "dur": 351.6 },
+                    { "seq": 4, "kind": "net-fin", "id": 2, "ts": 5021, "status": 200 }
+                ]
+            }),
+        );
+        finish("page-t");
+        let run = get_run(dir.path(), &list_runs(dir.path())[0].id).unwrap();
+        let a = &run.network[0];
+        // browser timing wins: start rewrites ts_ms, dur used verbatim
+        assert_eq!(a.ts_ms, 4980);
+        assert_eq!(a.dur_ms, Some(352));
+        let b = &run.network[1];
+        // no timing fields → arrival-delta fallback
+        assert_eq!(b.ts_ms, 5001);
+        assert_eq!(b.dur_ms, Some(20));
     }
 
     #[test]
