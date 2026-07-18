@@ -53,7 +53,13 @@ export default function PlanImplementWizard({
     setProviderId(pid)
     setAccountId('')
     const endpoint =
-      pid === 'claude' ? '/api/claude-accounts' : pid === 'grok' ? '/api/grok-accounts' : null
+      pid === 'claude'
+        ? '/api/claude-accounts'
+        : pid === 'grok'
+          ? '/api/grok-accounts'
+          : pid === 'kimi'
+            ? '/api/kimi-accounts'
+            : null
     if (!endpoint) {
       setAccounts([])
       return

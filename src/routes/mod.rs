@@ -5,6 +5,7 @@ pub mod backup;
 pub mod claude_accounts;
 pub mod folders;
 pub mod grok_accounts;
+pub mod kimi_accounts;
 pub mod mcp;
 pub mod mcp_oauth;
 pub mod me;
@@ -45,6 +46,7 @@ pub fn api_router(state: Arc<AppState>) -> Router<Arc<AppState>> {
         .merge(auth::router(state.clone()))
         .merge(claude_accounts::router(state.clone()))
         .merge(grok_accounts::router(state.clone()))
+        .merge(kimi_accounts::router(state.clone()))
         .merge(folders::router(state.clone()))
         .merge(sessions::router(state.clone()))
         .merge(projects::router(state.clone()))

@@ -329,6 +329,23 @@ diesel::table! {
         updated_at -> BigInt,
     }
 }
+
+diesel::table! {
+    kimi_accounts (id) {
+        id -> Text,
+        name -> Text,
+        kind -> Text,
+        credential -> Text,
+        config_dir -> Nullable<Text>,
+        budget_window_hours -> Nullable<Integer>,
+        budget_limit_usd -> Nullable<Double>,
+        budget_limit_tokens -> Nullable<BigInt>,
+        warn_threshold -> Double,
+        critical_threshold -> Double,
+        created_at -> BigInt,
+        updated_at -> BigInt,
+    }
+}
 diesel::table! {
     system_prompts (id) {
         id -> Text,
@@ -405,6 +422,7 @@ diesel::allow_tables_to_appear_in_same_query!(
     usage_events,
     claude_accounts,
     grok_accounts,
+    kimi_accounts,
     system_prompts,
     plans,
     plan_comments,

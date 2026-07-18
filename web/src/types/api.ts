@@ -315,6 +315,57 @@ export interface GrokAccountInput {
   warn_threshold: number
   critical_threshold: number
 }
+/** How a Kimi account authenticates the spawned CLI: `device` is a browser
+ *  device-code sign-in (`kimi login`); `api_key` is a Moonshot AI key baked
+ *  into the account's own config (and injected as `KIMI_API_KEY`). */
+export type KimiAccountKind = 'device' | 'api_key'
+
+export interface KimiAccountUsage {
+  total_tokens: number
+  est_cost_usd: number
+  turns: number
+  used_fraction: number | null
+  level: WarnLevel
+}
+
+/** One Moonshot AI / Kimi Code account. The credential is never returned;
+ *  `authenticated` reports whether a device account has finished its browser
+ *  sign-in (or an api_key account has a key set). */
+export interface KimiAccount {
+  id: string
+  name: string
+  kind: KimiAccountKind
+  authenticated: boolean
+  config_dir: string | null
+  budget_window_hours: number | null
+  budget_limit_usd: number | null
+  budget_limit_tokens: number | null
+  warn_threshold: number
+  critical_threshold: number
+  created_at: number
+  updated_at: number
+  usage: KimiAccountUsage
+}
+
+/** The device-login URL returned by `POST /api/kimi-accounts/{id}/login/start`.
+ *  The user opens it and authorises in the browser; the `kimi` CLI completes
+ *  the sign-in on the server side. */
+export interface KimiLoginStart {
+  url: string
+}
+
+/** Body for creating/updating a Kimi account. `credential` is only meaningful
+ *  for an `api_key` account; on update an empty/omitted value keeps the key. */
+export interface KimiAccountInput {
+  name: string
+  kind: KimiAccountKind
+  credential: string
+  budget_window_hours: number | null
+  budget_limit_usd: number | null
+  budget_limit_tokens: number | null
+  warn_threshold: number
+  critical_threshold: number
+}
 
 export interface PushSubscription {
   endpoint: string

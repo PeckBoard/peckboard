@@ -12,6 +12,7 @@ import {
 } from '../util/appearance'
 import ClaudeAccountsSection from './ClaudeAccountsSection'
 import GrokAccountsSection from './GrokAccountsSection'
+import KimiAccountsSection from './KimiAccountsSection'
 import ApprovedCommandsSection from './ApprovedCommandsSection'
 import SoftwareUpdate from './SoftwareUpdate'
 import PluginSettingsForm from './PluginSettingsForm'
@@ -89,7 +90,7 @@ const SUB_PAGES: { id: SubPage; title: string; blurb: string }[] = [
   {
     id: 'providers',
     title: 'Providers & Accounts',
-    blurb: 'Claude and Grok accounts, Ollama servers, Cursor CLI, keep-alive',
+    blurb: 'Claude, Grok and Kimi accounts, Ollama servers, Cursor CLI, keep-alive',
   },
   {
     id: 'mcp',
@@ -433,6 +434,10 @@ export default function SettingsPage({ onBack, initialSubPage = null }: Props) {
 
           {providerVisibility.find((p) => p.id === 'grok')?.hidden !== true && (
             <GrokAccountsSection />
+          )}
+
+          {providerVisibility.find((p) => p.id === 'kimi')?.hidden !== true && (
+            <KimiAccountsSection />
           )}
 
           {providerVisibility.find((p) => p.id === 'ollama')?.hidden !== true && (

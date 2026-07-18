@@ -112,8 +112,8 @@ async fn list_plugins_returns_builtin_catalog() {
     let plugins = json["plugins"].as_array().expect("plugins array");
     assert_eq!(
         plugins.len(),
-        5,
-        "expected built-in claude-code + mock + ollama + cursor + grok; got {plugins:?}",
+        6,
+        "expected built-in claude-code + mock + ollama + cursor + kimi + grok; got {plugins:?}",
     );
 
     // The catalog also carries the plugin-contributed UI panels (from
