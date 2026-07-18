@@ -20,7 +20,7 @@ concurrency:
 jobs:
   build:
     name: Build Jekyll site
-    runs-on: blacksmith-4vcpu-ubuntu-2404
+    runs-on: [self-hosted, Linux, X64]
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -39,7 +39,7 @@ jobs:
 
   deploy:
     name: Deploy to GitHub Pages
-    runs-on: blacksmith-4vcpu-ubuntu-2404
+    runs-on: [self-hosted, Linux, X64]
     needs: build
     environment:
       name: github-pages

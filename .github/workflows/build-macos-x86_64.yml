@@ -11,7 +11,7 @@ permissions:
 jobs:
   build:
     name: Build release binary (x86_64-apple-darwin)
-    runs-on: blacksmith-6vcpu-macos-15
+    runs-on: [self-hosted, macOS, ARM64] # ARM host; the build cross-compiles the x86_64 target
 
     env:
       CARGO_TERM_COLOR: always
