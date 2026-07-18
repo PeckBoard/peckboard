@@ -51,30 +51,47 @@ test('temp session: hourglass chip, and closing the tab deletes the session', as
 
   await loadAs(page, token, '/')
 
-  // Create through the New Session modal with the Temporary checkbox on.
-  const name = `temp-e2e-${Date.now()}`
+  // Create through the New Session modal. Checking Temporary hides the
+  // Name field entirely — temp sessions are auto-named "Temp session" —
+  // so the created id is resolved by diffing the sessions list.
+  const listSessions = async () =>
+    (
+      (await (await request.get('/api/sessions?limit=100', { headers: auth })).json()) as {
+        items: { id: string; is_temp: boolean }[]
+      }
+    ).items
+  const before = new Set((await listSessions()).map((s) => s.id))
+
   await page.locator('.tab-new').click()
-  await page.getByPlaceholder('My session').fill(name)
+  await expect(page.getByPlaceholder('My session')).toBeVisible()
   await page.getByTestId('new-session-temp').check()
+  await expect(page.getByPlaceholder('My session')).toHaveCount(0)
   await page.screenshot({ path: 'test-results/temp-session-modal.png' })
   await page.getByRole('button', { name: 'Create Session' }).click()
 
+  let id = ''
+  await expect
+    .poll(async () => {
+      const created = (await listSessions()).find((s) => !before.has(s.id))
+      if (created) id = created.id
+      return created?.is_temp ?? null
+    })
+    .toBe(true)
+
   // The session opens; its tab chip carries the temp (hourglass) marker.
-  const chip = page.locator('.tab-wrap', { hasText: name })
+  const chip = page.locator(`.tab-wrap[data-tab-id="session:${id}"]`)
   await expect(chip).toBeVisible()
   await expect(chip.locator('.tab-icon-temp-session')).toBeVisible()
   await page.screenshot({ path: 'test-results/temp-session-chip.png' })
 
-  // Grab the id via the API so we can assert server-side deletion.
+  // The tab row agrees it's temp.
   const tabs = (await (await request.get('/api/me/tabs', { headers: auth })).json()) as {
     item_id: string
-    name: string
     is_temp: boolean
   }[]
-  const ours = tabs.find((t) => t.name === name)
+  const ours = tabs.find((t) => t.item_id === id)
   expect(ours, 'temp session tab should be listed').toBeTruthy()
   expect(ours?.is_temp).toBe(true)
-  const id = ours!.item_id
 
   // Close the chip — for a temp session this deletes the session itself.
   await chip.locator('.tab-close').click()
@@ -88,7 +105,7 @@ test('temp session: hourglass chip, and closing the tab deletes the session', as
     .toBe(404)
 
   // And the sessions list view no longer shows it.
-  await expect(page.locator('.list-view-row', { hasText: name })).toHaveCount(0)
+  await expect(page.locator('.list-view-row', { hasText: 'Temp session' })).toHaveCount(0)
   await page.screenshot({ path: 'test-results/temp-session-after-close.png' })
 })
 

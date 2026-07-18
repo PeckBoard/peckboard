@@ -1,10 +1,13 @@
 import { useEffect, useMemo, useState, type FormEvent } from 'react'
 import { useSessionsStore } from '../store/sessions'
+import { authedFetch } from '../store/auth'
 import { useFoldersStore } from '../store/folders'
 import { effortOptionsForModel, useResourcesStore } from '../store/resources'
 import Modal from './Modal'
 import ModelPicker from './ModelPicker'
 import SystemPromptPicker from './SystemPromptPicker'
+import { PRESET_PROMPTS, presetSessionName } from '../utils/presetPrompts'
+import type { WasmPlugin } from '../utils/pluginApproval'
 
 interface Props {
   onClose: () => void
@@ -13,6 +16,7 @@ interface Props {
 export default function NewSessionModal({ onClose }: Props) {
   const createSession = useSessionsStore((s) => s.createSession)
   const setActiveSession = useSessionsStore((s) => s.setActiveSession)
+  const setDraft = useSessionsStore((s) => s.setDraft)
   const folders = useFoldersStore((s) => s.folders)
   const fetchFolders = useFoldersStore((s) => s.fetchFolders)
   const createFolder = useFoldersStore((s) => s.createFolder)
@@ -32,6 +36,13 @@ export default function NewSessionModal({ onClose }: Props) {
   // Temp sessions are deleted server-side when their last tab is closed.
   const [isTemp, setIsTemp] = useState(false)
   const [systemPromptName, setSystemPromptName] = useState<string | null>(null)
+  // '' = no preset (default). Picking one auto-sends its prompt as the
+  // session's first message right after create.
+  const [presetId, setPresetId] = useState('')
+  const [topic, setTopic] = useState('')
+  // True once /api/plugins confirms the playwright-video plugin is active —
+  // gates the browser bug-hunt preset on its replay UI existing.
+  const [playwrightVideoActive, setPlaywrightVideoActive] = useState(false)
   const [newFolderName, setNewFolderName] = useState('')
   const [newFolderPath, setNewFolderPath] = useState('')
   const [showNewFolder, setShowNewFolder] = useState(false)
@@ -46,6 +57,24 @@ export default function NewSessionModal({ onClose }: Props) {
     fetchModels()
   }, [fetchModels])
 
+  // One-shot probe for the playwright-video plugin. Failures just leave
+  // the bug-hunt preset hidden.
+  useEffect(() => {
+    let cancelled = false
+    authedFetch('/api/plugins')
+      .then((res) => (res.ok ? res.json() : null))
+      .then((body: { wasm_plugins?: WasmPlugin[] } | null) => {
+        const active = (body?.wasm_plugins ?? []).some(
+          (p) => p.name === 'playwright-video' && p.status === 'approved',
+        )
+        if (!cancelled) setPlaywrightVideoActive(active)
+      })
+      .catch(() => {})
+    return () => {
+      cancelled = true
+    }
+  }, [])
+
   // Effort options follow the chosen model's provider.
   const effortOptions = useMemo(() => effortOptionsForModel(model, providers), [model, providers])
   // Clear a now-invalid effort back to Default on model change so we never
@@ -55,6 +84,11 @@ export default function NewSessionModal({ onClose }: Props) {
     const opts = effortOptionsForModel(id, providers)
     if (providers.length > 0 && effort && !opts.some((o) => o.value === effort)) setEffort('')
   }
+
+  const availablePresets = PRESET_PROMPTS.filter(
+    (p) => !p.requiresPlaywrightVideo || playwrightVideoActive,
+  )
+  const preset = availablePresets.find((p) => p.id === presetId)
 
   const handleCreateFolder = async () => {
     if (!newFolderName.trim() || !newFolderPath.trim()) return
@@ -71,15 +105,21 @@ export default function NewSessionModal({ onClose }: Props) {
 
   const handleSubmit = async (e: FormEvent) => {
     e.preventDefault()
-    if (!name.trim() || !folderId) {
+    if (!folderId || (!isTemp && !preset && !name.trim())) {
       setError('Name and folder are required')
+      return
+    }
+    if (preset?.needsTopic && !topic.trim()) {
+      setError(`${preset.topicLabel ?? 'Topic'} is required`)
       return
     }
     setLoading(true)
     setError('')
     try {
+      // Name field is hidden for temp sessions; presets auto-name either way.
+      const finalName = (isTemp ? '' : name.trim()) || presetSessionName(preset, topic)
       const session = await createSession(
-        name.trim(),
+        finalName,
         folderId,
         model || undefined,
         effort || undefined,
@@ -87,6 +127,23 @@ export default function NewSessionModal({ onClose }: Props) {
         systemPromptName,
         isTemp,
       )
+      if (preset) {
+        // Same create-then-message pattern as utils/installSession.ts. The
+        // session already exists here, so a failed send must not fail the
+        // modal (retrying would duplicate the session) — park the prompt in
+        // the input draft instead so nothing is lost.
+        const text = preset.build(topic.trim())
+        try {
+          const msg = await authedFetch(`/api/sessions/${session.id}/message`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ text }),
+          })
+          if (!msg.ok) setDraft(session.id, text)
+        } catch {
+          setDraft(session.id, text)
+        }
+      }
       setActiveSession(session.id)
       onClose()
     } catch (err) {
@@ -100,17 +157,20 @@ export default function NewSessionModal({ onClose }: Props) {
     <Modal onClose={onClose}>
       <h2>New Session</h2>
       <form onSubmit={handleSubmit}>
-        <div className="form-field">
-          <label className="form-label">Name</label>
-          <input
-            className="form-input"
-            value={name}
-            onChange={(e) => setName(e.target.value)}
-            placeholder="My session"
-            autoFocus
-            required
-          />
-        </div>
+        {/* Temp sessions are auto-named — the field would be dead weight. */}
+        {!isTemp && (
+          <div className="form-field">
+            <label className="form-label">Name</label>
+            <input
+              className="form-input"
+              value={name}
+              onChange={(e) => setName(e.target.value)}
+              placeholder={preset ? presetSessionName(preset, topic) : 'My session'}
+              autoFocus
+              required={!preset}
+            />
+          </div>
+        )}
         <div className="form-field">
           <label className="form-label">Folder</label>
           {folders.length > 0 ? (
@@ -192,6 +252,35 @@ export default function NewSessionModal({ onClose }: Props) {
           />
         </div>
         <div className="form-field">
+          <label className="form-label">Preset prompt</label>
+          <select
+            className="form-input"
+            value={presetId}
+            onChange={(e) => setPresetId(e.target.value)}
+            data-testid="new-session-preset"
+          >
+            <option value="">None — start empty</option>
+            {availablePresets.map((p) => (
+              <option key={p.id} value={p.id}>
+                {p.label}
+              </option>
+            ))}
+          </select>
+        </div>
+        {preset?.needsTopic && (
+          <div className="form-field">
+            <label className="form-label">{preset.topicLabel ?? 'Topic'}</label>
+            <input
+              className="form-input"
+              value={topic}
+              onChange={(e) => setTopic(e.target.value)}
+              placeholder={preset.topicPlaceholder}
+              data-testid="new-session-preset-topic"
+              required
+            />
+          </div>
+        )}
+        <div className="form-field">
           <label className="form-checkbox-label">
             <input
               type="checkbox"
@@ -221,7 +310,12 @@ export default function NewSessionModal({ onClose }: Props) {
           <button
             type="submit"
             className="btn-primary"
-            disabled={loading || !name.trim() || !folderId}
+            disabled={
+              loading ||
+              !folderId ||
+              (!isTemp && !preset && !name.trim()) ||
+              (!!preset?.needsTopic && !topic.trim())
+            }
           >
             {loading ? 'Creating...' : 'Create Session'}
           </button>
