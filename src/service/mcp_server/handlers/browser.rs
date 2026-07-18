@@ -46,6 +46,19 @@ async fn capture_frame(page_id: &str) -> Option<String> {
     Some(shot.rsplit(',').next().unwrap_or(shot).to_string())
 }
 
+/// Drain new capture events (network/console) from the sidecar into the
+/// page's run, masked before persisting. Best-effort and recording-gated:
+/// when the page isn't recorded (or the sidecar runs in its no-capture
+/// fallback) this is a no-op.
+async fn capture_events(page_id: &str) {
+    let Some(cursor) = crate::service::browser_runs::events_cursor(page_id) else {
+        return;
+    };
+    if let Ok(v) = browser::get(&format!("/api/pages/{page_id}/events?since={cursor}")).await {
+        crate::service::browser_runs::ingest_events(page_id, &v);
+    }
+}
+
 impl McpToolRegistry {
     pub(crate) async fn handle_browser_tool(
         &self,
@@ -93,6 +106,7 @@ impl McpToolRegistry {
                         Some(serde_json::json!({ "url": url })),
                         frame.as_deref(),
                     );
+                    capture_events(&page_id).await;
                 }
                 Ok(serde_json::json!({ "page_id": page_id, "url": url, "outline": outline }))
             }
@@ -226,6 +240,14 @@ impl McpToolRegistry {
                             detail.insert(k.to_string(), v.clone());
                         }
                     }
+                    // Typed input is never stored raw — the target may be a
+                    // password field, indistinguishable from here, so mask it
+                    // wholesale like session-replay tools do.
+                    if matches!(action, "fill" | "type")
+                        && let Some(v) = detail.get_mut("text")
+                    {
+                        *v = Value::String(crate::service::redact::MASK.to_string());
+                    }
                     crate::service::browser_runs::record_step(
                         page_id,
                         action,
@@ -233,6 +255,7 @@ impl McpToolRegistry {
                         (!detail.is_empty()).then_some(Value::Object(detail)),
                         frame.as_deref(),
                     );
+                    capture_events(page_id).await;
                 }
                 let mut out = serde_json::json!({
                     "success": r.get("success").cloned().unwrap_or(Value::Bool(true)),
@@ -275,6 +298,7 @@ impl McpToolRegistry {
                     None,
                     Some(&b64),
                 );
+                capture_events(page_id).await;
                 // `_image_base64` is the routes/mcp.rs convention for
                 // returning an MCP image content block.
                 Ok(serde_json::json!({
@@ -294,6 +318,7 @@ impl McpToolRegistry {
             "browser_close" => {
                 let page_id = req_str(&args, "page_id")?;
                 browser::delete(&format!("/api/pages/{page_id}")).await?;
+                capture_events(page_id).await;
                 crate::service::browser_runs::finish(page_id);
                 Ok(serde_json::json!({ "closed": page_id }))
             }
@@ -310,7 +335,7 @@ mod tests {
     use super::super::super::McpToolRegistry;
     use super::super::super::context::ToolCallContext;
 
-    fn ctx() -> ToolCallContext {
+    fn ctx_with(data_dir: Option<std::path::PathBuf>) -> ToolCallContext {
         ToolCallContext {
             session_id: "s-1".into(),
             project_id: None,
@@ -319,16 +344,29 @@ mod tests {
             db: Arc::new(crate::db::Db::in_memory().unwrap()),
             broadcaster: crate::ws::broadcaster::Broadcaster::new(),
             provider_registry: None,
-            data_dir: None,
+            data_dir,
         }
     }
 
-    /// Stub of the better-playwright-mcp3 HTTP API. One server for the whole
-    /// test — the base-url override is a process-global OnceLock.
-    async fn start_stub() -> String {
+    fn ctx() -> ToolCallContext {
+        ctx_with(None)
+    }
+
+    /// Both tests drive the same global page-id ("p1") through the global
+    /// `browser_runs` registry — serialize them so runs don't interleave.
+    fn test_guard() -> std::sync::MutexGuard<'static, ()> {
+        static M: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        M.lock().unwrap_or_else(|p| p.into_inner())
+    }
+
+    /// Stub of the sidecar HTTP API (upstream routes + `/events`). One
+    /// server for the whole process, on its own runtime thread — tests share
+    /// it because the base-url override is a process-global OnceLock, so it
+    /// must outlive every test's runtime.
+    fn stub_router() -> axum::Router {
         use axum::Json;
         use axum::routing::{delete, post};
-        let app = axum::Router::new()
+        axum::Router::new()
             .route(
                 "/api/pages",
                 post(|| async { Json(serde_json::json!({ "pageId": "p1", "success": true })) })
@@ -373,22 +411,70 @@ mod tests {
                 }),
             )
             .route(
+                "/api/pages/p1/fill",
+                post(|Json(b): Json<serde_json::Value>| async move {
+                    Json(serde_json::json!({ "success": true, "ref": b["ref"] }))
+                }),
+            )
+            .route(
                 "/api/pages/p1/screenshot",
                 post(|| async { Json(serde_json::json!({ "screenshot": "aGVsbG8=" })) }),
             )
             .route(
+                "/api/pages/p1/events",
+                axum::routing::get(
+                    |q: axum::extract::Query<std::collections::HashMap<String, String>>| async move {
+                        let since: u64 = q.get("since").and_then(|s| s.parse().ok()).unwrap_or(0);
+                        if since >= 3 {
+                            return Json(serde_json::json!({ "events": [], "next": 3, "dropped": 0 }));
+                        }
+                        Json(serde_json::json!({
+                            "next": 3,
+                            "dropped": 0,
+                            "events": [
+                                { "seq": 1, "kind": "net-req", "id": 7, "ts": 1000, "method": "POST",
+                                  "url": "https://api.example/login?access_token=hush",
+                                  "resourceType": "xhr",
+                                  "headers": { "authorization": "Bearer supersecret99", "content-type": "application/json" },
+                                  "postData": "{\"user\":\"jo\",\"password\":\"hunter2\"}" },
+                                { "seq": 2, "kind": "net-fin", "id": 7, "ts": 1400, "status": 200,
+                                  "headers": { "set-cookie": "sid=abc", "content-type": "application/json" },
+                                  "body": "{\"ok\":true,\"token\":\"tok-1\"}", "size": 27 },
+                                { "seq": 3, "kind": "console", "ts": 1500, "level": "error",
+                                  "text": "auth failed for Bearer zzzz11112222" }
+                            ]
+                        }))
+                    },
+                ),
+            )
+            .route(
                 "/api/pages/p1",
                 delete(|| async { Json(serde_json::json!({ "success": true })) }),
-            );
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let addr = listener.local_addr().unwrap();
-        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
-        format!("http://{addr}")
+            )
+    }
+
+    fn start_stub() -> String {
+        static BASE: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+        BASE.get_or_init(|| {
+            let (tx, rx) = std::sync::mpsc::channel();
+            std::thread::spawn(move || {
+                let rt = tokio::runtime::Runtime::new().unwrap();
+                rt.block_on(async move {
+                    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+                    tx.send(format!("http://{}", listener.local_addr().unwrap()))
+                        .unwrap();
+                    axum::serve(listener, stub_router()).await.unwrap();
+                });
+            });
+            rx.recv().unwrap()
+        })
+        .clone()
     }
 
     #[tokio::test]
     async fn browser_tools_map_onto_the_http_api() {
-        let base = start_stub().await;
+        let _g = test_guard();
+        let base = start_stub();
         crate::service::browser::set_test_base_url(&base);
         let reg = McpToolRegistry::new();
         let ctx = ctx();
@@ -495,5 +581,62 @@ mod tests {
         assert!(err.contains("`files`"), "got: {err}");
 
         assert_eq!(closed["closed"], "p1");
+    }
+
+    #[tokio::test]
+    async fn capture_events_land_masked_in_the_run() {
+        let _g = test_guard();
+        let base = start_stub();
+        crate::service::browser::set_test_base_url(&base);
+        let dir = tempfile::tempdir().unwrap();
+        let reg = McpToolRegistry::new();
+        let ctx = ctx_with(Some(dir.path().to_path_buf()));
+
+        reg.handle_tool_call(
+            "browser_open",
+            serde_json::json!({ "url": "https://example.com" }),
+            &ctx,
+        )
+        .await
+        .unwrap();
+        reg.handle_tool_call(
+            "browser_act",
+            serde_json::json!({ "page_id": "p1", "action": "fill", "ref": "e9", "text": "hunter2-typed-pw" }),
+            &ctx,
+        )
+        .await
+        .unwrap();
+        reg.handle_tool_call(
+            "browser_close",
+            serde_json::json!({ "page_id": "p1" }),
+            &ctx,
+        )
+        .await
+        .unwrap();
+
+        let runs = crate::service::browser_runs::list_runs(dir.path());
+        assert_eq!(runs.len(), 1);
+        let run = &runs[0];
+        assert!(run.ended_ms.is_some());
+        assert_eq!(run.steps[0].action, "open");
+        // Typed input is stored fully masked — the field may be a password.
+        let fill = run.steps.iter().find(|s| s.action == "fill").unwrap();
+        let detail = serde_json::to_string(&fill.detail).unwrap();
+        assert!(!detail.contains("hunter2-typed-pw"), "got: {detail}");
+        assert!(detail.contains("masked"), "got: {detail}");
+        assert_eq!(run.network.len(), 1);
+        let ne = &run.network[0];
+        assert_eq!(ne.status, Some(200));
+        assert_eq!(ne.dur_ms, Some(400));
+        assert_eq!(
+            ne.req_headers["authorization"],
+            crate::service::redact::MASK
+        );
+        assert_eq!(ne.resp_headers["set-cookie"], crate::service::redact::MASK);
+        assert!(ne.url.ends_with("access_token=«masked»"), "url: {}", ne.url);
+        assert!(!ne.req_body.as_deref().unwrap_or("").contains("hunter2"));
+        assert!(!ne.resp_body.as_deref().unwrap_or("").contains("tok-1"));
+        assert_eq!(run.console_events.len(), 1);
+        assert!(!run.console_events[0].text.contains("zzzz11112222"));
     }
 }

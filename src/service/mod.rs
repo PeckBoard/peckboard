@@ -6,6 +6,7 @@ pub mod mcp_client;
 pub mod mcp_server;
 pub mod mdns;
 pub mod push;
+pub mod redact;
 pub mod tls;
 pub mod update;
 pub mod wake;

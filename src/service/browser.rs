@@ -5,9 +5,12 @@
 //! regex search over the snapshot, instead of dumping raw DOMs into agent
 //! context.
 //!
-//! The node server is spawned lazily on first use (`npx -y
-//! better-playwright-mcp3@latest server --headless --no-user-profile`) on a
-//! loopback port and killed after [`IDLE_SHUTDOWN_SECS`] without a call.
+//! The node side is spawned lazily on first use and killed after
+//! [`IDLE_SHUTDOWN_SECS`] without a call. It runs the pinned upstream
+//! package through our capture sidecar (`browser_sidecar.mjs`, embedded at
+//! compile time): the unmodified upstream server plus per-page
+//! request/response/console capture served at `/api/pages/:id/events`,
+//! which `browser_runs` ingests (masked) after every recorded step.
 //! `PECKBOARD_BROWSER_URL` overrides the whole lifecycle — point it at an
 //! already-running instance (this is also how tests stub the HTTP API).
 
@@ -23,6 +26,26 @@ const IDLE_SHUTDOWN_SECS: u64 = 900;
 /// Page loads / actions can legitimately take a while.
 const REQUEST_TIMEOUT_SECS: u64 = 90;
 
+/// Pinned upstream package: the sidecar patches its internals (pages map,
+/// express app), so an unvetted `@latest` bump must not reach it.
+const UPSTREAM_PKG: &str = "better-playwright-mcp3@3.2.0";
+/// Pinned alongside it: the upstream outline calls Playwright's PRIVATE
+/// `page._snapshotForAI()`, which its own `^1.49.1` range no longer
+/// guarantees (gone in 1.60 — fresh installs 500 on every outline). 1.55 is
+/// the era the package shipped against; npm hoists it to the one copy the
+/// upstream import resolves.
+const PINNED_PLAYWRIGHT: &str = "playwright@1.55.0";
+/// The capture sidecar source, embedded so the binary is self-contained.
+const SIDECAR_SRC: &str = include_str!("browser_sidecar.mjs");
+
+/// Materialize the sidecar into the temp dir (idempotent overwrite — cheap,
+/// and keeps upgrades in sync with the binary).
+fn write_sidecar() -> anyhow::Result<std::path::PathBuf> {
+    let path = std::env::temp_dir().join("peckboard-browser-sidecar.mjs");
+    std::fs::write(&path, SIDECAR_SRC)
+        .map_err(|e| anyhow::anyhow!("failed to write browser sidecar to {path:?}: {e}"))?;
+    Ok(path)
+}
 struct Managed {
     child: tokio::process::Child,
     base: String,
@@ -89,24 +112,21 @@ async fn base_url() -> anyhow::Result<String> {
         .unwrap_or(DEFAULT_PORT);
     let base = format!("http://127.0.0.1:{port}");
 
-    tracing::info!(port, "Spawning better-playwright-mcp3 browser server");
+    tracing::info!(port, "Spawning browser server (sidecar + {UPSTREAM_PKG})");
+    let sidecar = write_sidecar()?;
     let mut child = tokio::process::Command::new("npx")
-        .args([
-            "-y",
-            "better-playwright-mcp3@latest",
-            "server",
-            "--headless",
-            "--no-user-profile",
-            "--port",
-            &port.to_string(),
-        ])
+        .args(["-y", "-p", UPSTREAM_PKG, "-p", PINNED_PLAYWRIGHT, "node"])
+        .arg(&sidecar)
+        .env("PORT", port.to_string())
+        .env("HEADLESS", "true")
+        .env("NO_USER_PROFILE", "true")
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::piped())
         .spawn()
         .map_err(|e| {
             anyhow::anyhow!(
-                "failed to spawn `npx better-playwright-mcp3` ({e}); browser tools need \
+                "failed to spawn `npx {UPSTREAM_PKG}` ({e}); browser tools need \
                  Node.js/npx on PATH"
             )
         })?;
