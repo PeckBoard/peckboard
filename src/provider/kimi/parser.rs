@@ -30,7 +30,6 @@ use crate::provider::stream::ProviderEvent;
 pub(super) fn parse_stream_json(
     json: &serde_json::Value,
     conversation_id: &mut Option<String>,
-    denied_tool_ids: &mut std::collections::HashSet<String>,
 ) -> Vec<ProviderEvent> {
     let mut events = Vec::new();
 
@@ -62,32 +61,18 @@ pub(super) fn parse_stream_json(
                     .unwrap_or("tool")
                     .to_string();
                 let input = tool_arguments(function);
-                if crate::provider::is_terminal_tool(&name) {
-                    // Kimi's prompt mode auto-approves tools with no
-                    // pre-execution gate, so peckboard cannot stop the CLI
-                    // from executing a terminal command. Surface it as a
-                    // denied tool call and drop the real result (see the
-                    // `tool` arm); the WORKING_STYLE prompt stays the only
-                    // model-side deterrent — matching the grok provider.
-                    denied_tool_ids.insert(tool_use_id.clone());
-                    events.push(ProviderEvent::ToolStart {
-                        tool_use_id: tool_use_id.clone(),
-                        name,
-                        input,
-                    });
-                    events.push(ProviderEvent::ToolEnd {
-                        tool_use_id,
-                        output: None,
-                        error: Some(crate::provider::TERMINAL_TOOL_DISABLED_MSG.to_string()),
-                        images: Vec::new(),
-                    });
-                } else {
-                    events.push(ProviderEvent::ToolStart {
-                        tool_use_id,
-                        name,
-                        input,
-                    });
-                }
+                // Kimi's prompt mode auto-approves its built-in tools with
+                // no pre-execution gate peckboard could hook, so terminal
+                // calls are rendered honestly — real name, input, and (in
+                // the `tool` arm) real result. The old fake "denied" row
+                // showed an error for a command that had actually executed.
+                // The WORKING_STYLE prompt plus the wired `run_command` MCP
+                // tool remain the steer away from the internal shell.
+                events.push(ProviderEvent::ToolStart {
+                    tool_use_id,
+                    name,
+                    input,
+                });
             }
         }
 
@@ -95,12 +80,6 @@ pub(super) fn parse_stream_json(
         // error channel — failures arrive as ordinary content text.
         "tool" => {
             let tool_use_id = tool_id(json);
-            if denied_tool_ids.remove(&tool_use_id) {
-                // Result of a terminal tool we already denied at the call;
-                // drop the CLI's real output so it never enters the
-                // transcript.
-                return events;
-            }
             let output = json
                 .get("content")
                 .and_then(|v| v.as_str())
@@ -171,15 +150,56 @@ fn extract_session_id(json: &serde_json::Value) -> Option<String> {
     None
 }
 
+/// One model alias from `kimi provider list --json` — `id` is the string
+/// `--model` accepts; the display name and capabilities ride along for the
+/// picker.
+#[derive(Debug, Clone, PartialEq)]
+pub(super) struct CliModel {
+    pub id: String,
+    pub display_name: Option<String>,
+    /// Peckboard capability tags mapped from the CLI's (`code` always).
+    pub capabilities: Vec<String>,
+}
+
 /// Parse `kimi provider list --json` output into the configured model
-/// aliases (the strings `--model` accepts). `None` when the output isn't the
-/// expected shape.
-pub(super) fn parse_cli_models(text: &str) -> Option<Vec<String>> {
+/// aliases. `None` when the output isn't the expected shape.
+pub(super) fn parse_cli_models(text: &str) -> Option<Vec<CliModel>> {
     let json: serde_json::Value = serde_json::from_str(text.trim()).ok()?;
     let models = json.get("models")?.as_object()?;
-    let mut ids: Vec<String> = models.keys().cloned().collect();
-    ids.sort();
-    Some(ids)
+    let mut out: Vec<CliModel> = models
+        .iter()
+        .map(|(id, spec)| CliModel {
+            id: id.clone(),
+            display_name: spec
+                .get("displayName")
+                .and_then(|v| v.as_str())
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(str::to_string),
+            capabilities: map_cli_capabilities(spec.get("capabilities")),
+        })
+        .collect();
+    out.sort_by(|a, b| a.id.cmp(&b.id));
+    Some(out)
+}
+
+/// Map the CLI's capability tags onto peckboard's `ModelInfo` vocabulary
+/// (`code` always; `thinking` gates planning; `tools`/`vision` match the
+/// other providers).
+fn map_cli_capabilities(caps: Option<&serde_json::Value>) -> Vec<String> {
+    let mut out = vec!["code".to_string()];
+    for cap in caps.and_then(|v| v.as_array()).into_iter().flatten() {
+        let mapped = match cap.as_str() {
+            Some("thinking") => "thinking",
+            Some("tool_use") => "tools",
+            Some("image_in") => "vision",
+            _ => continue,
+        };
+        if !out.iter().any(|c| c == mapped) {
+            out.push(mapped.to_string());
+        }
+    }
+    out
 }
 
 #[cfg(test)]
@@ -187,8 +207,7 @@ mod tests {
     use super::*;
 
     fn parse(json: serde_json::Value, conv: &mut Option<String>) -> Vec<ProviderEvent> {
-        let mut denied = std::collections::HashSet::new();
-        parse_stream_json(&json, conv, &mut denied)
+        parse_stream_json(&json, conv)
     }
 
     #[test]
@@ -302,37 +321,34 @@ mod tests {
     }
 
     #[test]
-    fn terminal_tool_is_denied_and_real_result_suppressed() {
+    fn terminal_tool_passes_through_with_real_result() {
         let mut conv = None;
-        let mut denied = std::collections::HashSet::new();
-        let start = parse_stream_json(
-            &serde_json::json!({
+        let start = parse(
+            serde_json::json!({
                 "role": "assistant",
                 "tool_calls": [{
                     "type": "function",
                     "id": "tc_9",
-                    "function": {"name": "Bash", "arguments": "{\"command\":\"rm -rf /\"}"}
+                    "function": {"name": "Bash", "arguments": "{\"command\":\"ls\"}"}
                 }]
             }),
             &mut conv,
-            &mut denied,
         );
-        assert_eq!(start.len(), 2);
+        // Rendered honestly: the CLI executes its own tools regardless, so
+        // no fake denial row.
+        assert_eq!(start.len(), 1);
         assert!(matches!(&start[0], ProviderEvent::ToolStart { name, .. } if name == "Bash"));
-        assert!(matches!(
-            &start[1],
-            ProviderEvent::ToolEnd { error: Some(e), .. }
-                if e == crate::provider::TERMINAL_TOOL_DISABLED_MSG
-        ));
 
-        // The CLI's real result line for that id is dropped.
-        let result = parse_stream_json(
-            &serde_json::json!({"role": "tool", "tool_call_id": "tc_9", "content": "done"}),
+        // The CLI's real result line becomes an ordinary ToolEnd.
+        let result = parse(
+            serde_json::json!({"role": "tool", "tool_call_id": "tc_9", "content": "done"}),
             &mut conv,
-            &mut denied,
         );
-        assert!(result.is_empty());
-        assert!(denied.is_empty());
+        assert!(matches!(
+            &result[..],
+            [ProviderEvent::ToolEnd { tool_use_id, output: Some(o), error: None, .. }]
+                if tool_use_id == "tc_9" && o == "done"
+        ));
     }
 
     #[test]
@@ -366,11 +382,19 @@ mod tests {
 
     #[test]
     fn parse_cli_models_reads_alias_keys() {
-        let ids = parse_cli_models(
-            r#"{"providers":{"moonshot":{"type":"kimi"}},"models":{"kimi-for-coding":{"provider":"moonshot"},"k2-thinking":{"provider":"moonshot"}}}"#,
+        let models = parse_cli_models(
+            r#"{"providers":{"moonshot":{"type":"kimi"}},"models":{"kimi-for-coding":{"provider":"moonshot","displayName":"K2.7 Coding","capabilities":["thinking","always_thinking","tool_use","image_in"]},"k2-thinking":{"provider":"moonshot"}}}"#,
         )
         .unwrap();
+        let ids: Vec<&str> = models.iter().map(|m| m.id.as_str()).collect();
         assert_eq!(ids, vec!["k2-thinking", "kimi-for-coding"]);
+        assert_eq!(models[0].display_name, None);
+        assert_eq!(models[0].capabilities, vec!["code"]);
+        assert_eq!(models[1].display_name.as_deref(), Some("K2.7 Coding"));
+        assert_eq!(
+            models[1].capabilities,
+            vec!["code", "thinking", "tools", "vision"]
+        );
     }
 
     #[test]

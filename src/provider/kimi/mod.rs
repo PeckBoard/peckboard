@@ -14,12 +14,16 @@
 //! id is captured from the trailing `session.resume_hint` frame and emitted
 //! on `Completed` so the next turn can resume the same conversation with
 //! `--session`. Prompt mode always auto-approves tool actions (the CLI
-//! rejects `--prompt` combined with `--yolo`), so terminal tools are denied
-//! at parse time exactly like the grok provider.
+//! rejects `--prompt` combined with `--yolo`); its built-in tool calls —
+//! including the shell — render as ordinary tool rows with their real
+//! results, since peckboard has no pre-execution gate on them.
 //!
-//! The CLI has no system-prompt or MCP flags, so — as with Cursor — the
-//! shared WORKING_STYLE rules (plus any per-session override) are folded into
-//! the first turn's prompt, and user-defined MCP servers are not wired in.
+//! The CLI has no system-prompt flag, so — as with Cursor — the shared
+//! WORKING_STYLE rules (plus any per-session override) are folded into the
+//! first turn's prompt. MCP has no CLI flag either, but Kimi Code loads
+//! `.kimi-code/mcp.json` from the working directory at session start, so the
+//! peckboard MCP server (and user-defined servers) are wired through that
+//! file per turn — see [`mcp`].
 //!
 //! Auth is host-level: `kimi login` (device-code flow) or a
 //! `~/.kimi-code/config.toml` with a `type = "kimi"` provider. The optional
@@ -39,6 +43,7 @@
 //! queues a second message and drains it when the current turn completes.
 
 pub mod login;
+mod mcp;
 mod parser;
 
 use std::collections::HashMap;
@@ -117,14 +122,14 @@ struct KimiRun {
 /// TTL cache for the model-discovery probe.
 struct DiscoveryCache {
     fetched_at: Instant,
-    models: Option<Vec<String>>,
+    models: Option<Vec<parser::CliModel>>,
 }
 
 /// `AgentProvider` backed by per-turn `kimi` invocations.
 pub struct KimiProvider {
     settings: PluginSettingsStore,
     runs: Arc<Mutex<HashMap<String, KimiRun>>>,
-    discovery_cache: Arc<Mutex<Option<DiscoveryCache>>>,
+    discovery_cache: Arc<Mutex<HashMap<String, DiscoveryCache>>>,
     /// DB handle for multi-account support: `dynamic_models` enumerates the
     /// stored accounts and `send_message` resolves the per-account credential
     /// to inject. `None` in tests / no-DB registrations keeps the
@@ -137,7 +142,7 @@ impl KimiProvider {
         KimiProvider {
             settings,
             runs: Arc::new(Mutex::new(HashMap::new())),
-            discovery_cache: Arc::new(Mutex::new(None)),
+            discovery_cache: Arc::new(Mutex::new(HashMap::new())),
             db: None,
         }
     }
@@ -177,10 +182,18 @@ impl KimiProvider {
         Ok(())
     }
 
-    /// One labelled variant of each base model per stored account
-    /// (`<model>@<account_id>`, shown as `[Account] Model`). Mirrors the
-    /// Grok provider's `account_scoped_models`.
-    async fn account_scoped_models(&self, base: &[ModelInfo]) -> Vec<ModelInfo> {
+    /// One labelled variant per stored account (`<model>@<account_id>`,
+    /// shown as `[Account] Model`). Each account's model set comes from ITS
+    /// OWN config via `KIMI_CODE_HOME` discovery — host and account configs
+    /// are separate files, so the host list can't stand in for an account's.
+    /// Discovery off/failed falls back to mirroring `base` (the old shape,
+    /// matching the Grok provider).
+    async fn account_scoped_models(
+        &self,
+        base: &[ModelInfo],
+        cli_path: &str,
+        discover: bool,
+    ) -> Vec<ModelInfo> {
         let Some(db) = &self.db else {
             return Vec::new();
         };
@@ -193,35 +206,59 @@ impl KimiProvider {
         };
         let mut out = Vec::new();
         for acct in &accounts {
-            for m in base {
+            let discovered = match (&acct.config_dir, discover) {
+                (Some(dir), true) => {
+                    let env = HashMap::from([("KIMI_CODE_HOME".to_string(), dir.clone())]);
+                    self.discovered_models(cli_path, &acct.id, &env).await
+                }
+                _ => None,
+            };
+            let acct_base: Vec<ModelInfo> = match discovered {
+                Some(models) if !models.is_empty() => default_models()
+                    .into_iter()
+                    .chain(models.into_iter().map(model_info))
+                    .collect(),
+                _ => base.to_vec(),
+            };
+            for m in acct_base {
                 out.push(ModelInfo {
                     id: format!("{}@{}", m.id, acct.id),
                     display_name: format!("[{}] {}", acct.name, m.display_name),
-                    capabilities: m.capabilities.clone(),
+                    capabilities: m.capabilities,
                     tier: m.tier,
                 });
             }
         }
         out
     }
-    /// Run the discovery command and return model aliases, going through the
-    /// TTL cache. `Some(list)` on success (possibly empty), `None` when the
-    /// last probe failed and the caller should fall back to the static seed.
-    async fn discovered_models(&self, cli_path: &str) -> Option<Vec<String>> {
+    /// Run the discovery command under `env` and return model aliases, via
+    /// the per-scope TTL cache (`scope`: "" = host config, or a kimi account
+    /// id whose env selects its `KIMI_CODE_HOME`). `Some(list)` on success
+    /// (possibly empty), `None` when the last probe failed and the caller
+    /// should fall back.
+    async fn discovered_models(
+        &self,
+        cli_path: &str,
+        scope: &str,
+        env: &HashMap<String, String>,
+    ) -> Option<Vec<parser::CliModel>> {
         {
             let cache = self.discovery_cache.lock().await;
-            if let Some(entry) = cache.as_ref()
+            if let Some(entry) = cache.get(scope)
                 && entry.fetched_at.elapsed() < MODEL_DISCOVERY_TTL
             {
                 return entry.models.clone();
             }
         }
-        let result = probe_cli_models(cli_path).await;
+        let result = probe_cli_models(cli_path, env).await;
         let mut cache = self.discovery_cache.lock().await;
-        *cache = Some(DiscoveryCache {
-            fetched_at: Instant::now(),
-            models: result.clone(),
-        });
+        cache.insert(
+            scope.to_string(),
+            DiscoveryCache {
+                fetched_at: Instant::now(),
+                models: result.clone(),
+            },
+        );
         result
     }
 }
@@ -247,12 +284,12 @@ impl AgentProvider for KimiProvider {
         let discover = setting_bool(&settings, "discover_models").unwrap_or(true);
 
         let base = if discover {
-            match self.discovered_models(&cli_path).await {
+            match self.discovered_models(&cli_path, "", &HashMap::new()).await {
                 // The config-default entry stays first so an alias-free setup
                 // still has a working selection.
-                Some(ids) if !ids.is_empty() => default_models()
+                Some(models) if !models.is_empty() => default_models()
                     .into_iter()
-                    .chain(ids.into_iter().map(model_info))
+                    .chain(models.into_iter().map(model_info))
                     .collect(),
                 // Discovery failed or returned nothing usable → static seed.
                 _ => default_models(),
@@ -262,7 +299,7 @@ impl AgentProvider for KimiProvider {
         };
 
         let base = merge_additional_models(base, extras);
-        let account_variants = self.account_scoped_models(&base).await;
+        let account_variants = self.account_scoped_models(&base, &cli_path, discover).await;
         Some(base.into_iter().chain(account_variants).collect())
     }
 
@@ -275,8 +312,9 @@ impl AgentProvider for KimiProvider {
             config,
             conversation_id,
             completion_tx,
-            // kimi runs its own tool loop; the plugin host (MCP tool
-            // execution) isn't wired in — the CLI has no MCP flags.
+            // kimi runs its own tool loop; the WASM plugin tool host isn't
+            // wired in. Peckboard MCP tools reach the CLI via the workspace
+            // `.kimi-code/mcp.json` instead (see the `mcp` module below).
             plugins: _,
         } = ctx;
 
@@ -323,11 +361,30 @@ impl AgentProvider for KimiProvider {
                 message.attachments.len()
             );
         }
-        if config.mcp_config_path.is_some() {
-            tracing::debug!(
-                session_id = %session_id,
-                "kimi: MCP servers not wired — the kimi CLI exposes no MCP flags"
-            );
+        // Wire the peckboard MCP server (and any user-defined servers) into
+        // the workspace `.kimi-code/mcp.json` — Kimi Code loads it at session
+        // start; the bearer token rides an env var so the file stays
+        // secret-free. Best-effort: the turn still runs without MCP on any
+        // failure.
+        let mcp_wiring = config.mcp_config_path.as_deref().and_then(|path| {
+            if config.working_dir.is_empty() {
+                return None;
+            }
+            let wiring = mcp::parse_worker_mcp_config(path)?;
+            match mcp::ensure_workspace_mcp_config(
+                &config.working_dir,
+                &wiring.url,
+                &wiring.extra_servers,
+            ) {
+                Ok(_) => Some(wiring),
+                Err(e) => {
+                    tracing::warn!(session_id = %session_id, "kimi: MCP wiring skipped: {e}");
+                    None
+                }
+            }
+        });
+        if let Some(wiring) = &mcp_wiring {
+            env.insert(mcp::TOKEN_ENV_VAR.into(), wiring.token.clone());
         }
 
         // No system-prompt flag: the shared working-style rules (plus any
@@ -546,9 +603,6 @@ async fn run_turn(args: TurnArgs<'_>) -> bool {
     emit_started(db, broadcaster, session_id, model_label).await;
 
     let mut conversation_id: Option<String> = None;
-    // Terminal-tool calls denied at parse time; their ids are tracked here so
-    // the CLI's real result line can be dropped (see kimi parser).
-    let mut denied_tool_ids: std::collections::HashSet<String> = std::collections::HashSet::new();
 
     let mut lines = BufReader::new(stdout).lines();
     let deadline = tokio::time::sleep(Duration::from_secs(timeout_secs));
@@ -578,7 +632,6 @@ async fn run_turn(args: TurnArgs<'_>) -> bool {
                         for event in parser::parse_stream_json(
                             &json,
                             &mut conversation_id,
-                            &mut denied_tool_ids,
                         ) {
                             emit_event(db, broadcaster, session_id, event).await;
                         }
@@ -714,14 +767,21 @@ async fn crash(
 }
 
 /// Probe the CLI for its configured model aliases via
-/// `kimi provider list --json`.
-async fn probe_cli_models(cli_path: &str) -> Option<Vec<String>> {
+/// `kimi provider list --json`, run under `env` (e.g. an account's
+/// `KIMI_CODE_HOME`).
+async fn probe_cli_models(
+    cli_path: &str,
+    env: &HashMap<String, String>,
+) -> Option<Vec<parser::CliModel>> {
     let mut cmd = Command::new(cli_path);
     cmd.args(["provider", "list", "--json"])
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
         .kill_on_drop(true);
+    for (key, value) in env {
+        cmd.env(key, value);
+    }
 
     let child = match cmd.spawn() {
         Ok(c) => c,
@@ -805,11 +865,15 @@ fn resolve_model_and_account(raw: &str) -> (Option<String>, Option<String>) {
     (model, account.map(str::to_string))
 }
 
-fn model_info(name: String) -> ModelInfo {
+fn model_info(m: parser::CliModel) -> ModelInfo {
+    let display_name = match &m.display_name {
+        Some(d) => format!("{d} (Kimi)"),
+        None => format!("{} (Kimi)", m.id),
+    };
     ModelInfo {
-        display_name: format!("{name} (Kimi)"),
-        id: name,
-        capabilities: vec!["code".into()],
+        id: m.id,
+        display_name,
+        capabilities: m.capabilities,
         tier: 0,
     }
 }
@@ -833,7 +897,11 @@ fn merge_additional_models(base: Vec<ModelInfo>, extras: Vec<String>) -> Vec<Mod
     let mut models = base;
     for name in extras {
         if seen.insert(name.clone()) {
-            models.push(model_info(name));
+            models.push(model_info(parser::CliModel {
+                id: name,
+                display_name: None,
+                capabilities: vec!["code".into()],
+            }));
         }
     }
     models

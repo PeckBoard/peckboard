@@ -46,10 +46,6 @@ pub(super) struct TurnState {
     pub model_name: Option<String>,
     /// Guards against emitting more than one `Started` per run.
     pub emitted_start: bool,
-    /// Terminal-tool calls denied at their start; the matching `completed`
-    /// frame (or Claude-style `tool_result`) is dropped so the real output
-    /// never lands in the transcript.
-    denied_tool_ids: std::collections::HashSet<String>,
     /// Delta text accumulated for the current segment; an assistant frame
     /// exactly equal to it is the segment's cumulative snapshot → swallowed.
     text_acc: String,
@@ -106,7 +102,7 @@ pub(super) fn parse_stream_json(
                 &mut events,
                 serde_json::json!({ "provider": "cursor" }),
             );
-            push_tool_call(json, &mut events, state);
+            push_tool_call(json, &mut events);
         }
 
         // ── user message (Claude-style tool results) ─────────────
@@ -116,15 +112,6 @@ pub(super) fn parse_stream_json(
             {
                 for block in blocks {
                     if block.get("type").and_then(|v| v.as_str()) == Some("tool_result") {
-                        let id = block
-                            .get("tool_use_id")
-                            .and_then(|v| v.as_str())
-                            .unwrap_or("");
-                        if state.denied_tool_ids.remove(id) {
-                            // Real result of a terminal tool we denied at its
-                            // `tool_use`; drop it so its output never lands.
-                            continue;
-                        }
                         events.push(tool_result_event(block));
                     }
                 }
@@ -212,7 +199,7 @@ fn push_content_blocks(
                     .get("input")
                     .cloned()
                     .unwrap_or(serde_json::Value::Null);
-                push_tool_start(tool_use_id, name, input, events, state);
+                push_tool_start(tool_use_id, name, input, events);
             }
             _ => {}
         }
@@ -239,46 +226,23 @@ fn push_text(text: &str, events: &mut Vec<ProviderEvent>, state: &mut TurnState)
     });
 }
 
-/// Emit `ToolStart` — and, for a terminal tool, an immediate denied
-/// `ToolEnd`. cursor-agent's headless `--force` runs tools autonomously
-/// with no pre-execution gate, so peckboard cannot stop the CLI from
-/// executing a terminal command. Surface it as a denied tool call and drop
-/// the real result when it arrives; the model's own context is unchanged,
-/// so the WORKING_STYLE prompt stays the only model-side deterrent.
+/// Emit `ToolStart` for a tool the CLI began. cursor-agent's headless
+/// `--force` runs tools autonomously with no pre-execution gate peckboard
+/// could hook, so every call — including the shell — is rendered honestly
+/// with its real result (the old fake "denied" row showed an error for a
+/// command that had actually executed). The WORKING_STYLE prompt plus the
+/// wired `run_command` MCP tool steer models away from the internal shell.
 fn push_tool_start(
     tool_use_id: String,
     name: String,
     input: serde_json::Value,
     events: &mut Vec<ProviderEvent>,
-    state: &mut TurnState,
 ) {
-    if is_denied_tool(&name) {
-        state.denied_tool_ids.insert(tool_use_id.clone());
-        events.push(ProviderEvent::ToolStart {
-            tool_use_id: tool_use_id.clone(),
-            name,
-            input,
-        });
-        events.push(ProviderEvent::ToolEnd {
-            tool_use_id,
-            output: None,
-            error: Some(crate::provider::TERMINAL_TOOL_DISABLED_MSG.to_string()),
-            images: Vec::new(),
-        });
-    } else {
-        events.push(ProviderEvent::ToolStart {
-            tool_use_id,
-            name,
-            input,
-        });
-    }
-}
-
-/// Cursor's shell tool (`shellToolCall` → "shell") plus the shared
-/// Claude-CLI terminal names, so command execution stays behind the
-/// approval-gated `run_command` MCP tool.
-fn is_denied_tool(name: &str) -> bool {
-    name == "shell" || crate::provider::is_terminal_tool(name)
+    events.push(ProviderEvent::ToolStart {
+        tool_use_id,
+        name,
+        input,
+    });
 }
 
 /// Translate a `tool_call` frame into `ToolStart` / `ToolEnd`.
@@ -286,11 +250,7 @@ fn is_denied_tool(name: &str) -> bool {
 /// The tool payload sits under the single key of `tool_call` ending in
 /// `ToolCall`; the prefix is the tool name (`readToolCall` → `read`). The
 /// frame-level `call_id` pairs `started` with `completed`.
-fn push_tool_call(
-    json: &serde_json::Value,
-    events: &mut Vec<ProviderEvent>,
-    state: &mut TurnState,
-) {
+fn push_tool_call(json: &serde_json::Value, events: &mut Vec<ProviderEvent>) {
     let Some(tc) = json.get("tool_call").and_then(|v| v.as_object()) else {
         return;
     };
@@ -316,14 +276,9 @@ fn push_tool_call(
                 .and_then(|p| p.get("args"))
                 .cloned()
                 .unwrap_or(serde_json::Value::Null);
-            push_tool_start(tool_use_id, name, input, events, state);
+            push_tool_start(tool_use_id, name, input, events);
         }
         "completed" => {
-            if state.denied_tool_ids.remove(&tool_use_id) {
-                // Real result of a terminal tool denied at `started`; drop
-                // it so its output never lands.
-                return;
-            }
             let (output, error) = tool_call_outcome(payload.and_then(|p| p.get("result")));
             events.push(ProviderEvent::ToolEnd {
                 tool_use_id,
@@ -628,7 +583,7 @@ mod tests {
     }
 
     #[test]
-    fn legacy_bash_tool_use_is_denied_and_real_result_suppressed() {
+    fn legacy_bash_tool_use_passes_through_with_real_result() {
         let mut state = started_state();
         let events = parse(
             serde_json::json!({
@@ -640,19 +595,12 @@ mod tests {
             }),
             &mut state,
         );
-        assert_eq!(events.len(), 2);
+        // Rendered honestly: the CLI executes its own tools regardless, so
+        // no fake denial row.
+        assert_eq!(events.len(), 1);
         assert!(matches!(&events[0], ProviderEvent::ToolStart { name, .. } if name == "Bash"));
-        let ProviderEvent::ToolEnd { output, error, .. } = &events[1] else {
-            panic!("expected ToolEnd, got {:?}", events[1]);
-        };
-        assert!(output.is_none());
-        assert_eq!(
-            error.as_deref(),
-            Some(crate::provider::TERMINAL_TOOL_DISABLED_MSG)
-        );
-        assert!(state.denied_tool_ids.contains("t1"));
 
-        // The matching tool_result frame is dropped entirely.
+        // The matching tool_result frame becomes an ordinary ToolEnd.
         let result = parse(
             serde_json::json!({
                 "type": "user",
@@ -662,8 +610,11 @@ mod tests {
             }),
             &mut state,
         );
-        assert!(result.is_empty());
-        assert!(!state.denied_tool_ids.contains("t1"));
+        assert_eq!(result.len(), 1);
+        assert!(matches!(
+            &result[0],
+            ProviderEvent::ToolEnd { output: Some(o), error: None, .. } if o == "ran"
+        ));
     }
 
     #[test]
@@ -842,7 +793,7 @@ mod tests {
     }
 
     #[test]
-    fn shell_tool_call_is_denied_and_its_completed_frame_dropped() {
+    fn shell_tool_call_passes_through_with_real_result() {
         let mut state = started_state();
         let events = parse(
             serde_json::json!({
@@ -851,20 +802,17 @@ mod tests {
             }),
             &mut state,
         );
-        assert_eq!(events.len(), 2);
+        // Rendered honestly: the CLI executes its own tools regardless, so
+        // no fake denial row.
+        assert_eq!(events.len(), 1);
         assert!(matches!(
             &events[0],
             ProviderEvent::ToolStart { name, input, .. }
             if name == "shell" && input["command"] == "ls"
         ));
-        let ProviderEvent::ToolEnd { error, .. } = &events[1] else {
-            panic!("expected ToolEnd, got {:?}", events[1]);
-        };
-        assert_eq!(
-            error.as_deref(),
-            Some(crate::provider::TERMINAL_TOOL_DISABLED_MSG)
-        );
 
+        // The completed frame becomes an ordinary ToolEnd with the real
+        // stdout.
         let events = parse(
             serde_json::json!({
                 "type": "tool_call", "subtype": "completed", "call_id": "s1",
@@ -875,10 +823,12 @@ mod tests {
             }),
             &mut state,
         );
-        assert!(
-            events.is_empty(),
-            "denied tool's real result must be dropped"
-        );
+        assert_eq!(events.len(), 1);
+        let ProviderEvent::ToolEnd { output, error, .. } = &events[0] else {
+            panic!("expected ToolEnd, got {:?}", events[0]);
+        };
+        assert!(error.is_none());
+        assert!(output.as_deref().unwrap_or_default().contains("a.rs"));
     }
 
     #[test]

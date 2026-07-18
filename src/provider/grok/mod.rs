@@ -431,9 +431,6 @@ async fn run_turn(args: TurnArgs<'_>) -> bool {
     emit_started(db, broadcaster, session_id, model_label).await;
 
     let mut conversation_id: Option<String> = None;
-    // Terminal-tool calls denied at parse time; their ids are tracked here so
-    // the CLI's real result line can be dropped (see grok parser).
-    let mut denied_tool_ids: std::collections::HashSet<String> = std::collections::HashSet::new();
     let mut error_reason: Option<String> = None;
 
     let mut lines = BufReader::new(stdout).lines();
@@ -474,7 +471,6 @@ async fn run_turn(args: TurnArgs<'_>) -> bool {
                         for event in parser::parse_stream_json(
                             &json,
                             &mut conversation_id,
-                            &mut denied_tool_ids,
                         ) {
                             emit_event(db, broadcaster, session_id, event).await;
                         }
