@@ -179,11 +179,13 @@ fn is_authenticated(acct: &KimiAccount) -> bool {
 }
 
 /// The `kimi` binary the login flow spawns, from the plugin's `cli_path`
-/// setting (the same one every turn uses), defaulting to `kimi` on PATH.
+/// setting (the same one every turn uses), defaulting to `kimi` — resolved
+/// through the installer-location fallback so a service PATH that predates
+/// the CLI install still works.
 async fn login_cli_path(state: &AppState) -> String {
     let store =
         PluginSettingsStore::new("kimi".to_string(), KimiPlugin::schema(), state.db.clone());
-    match store.load().await {
+    let configured = match store.load().await {
         Ok(settings) => settings
             .get("cli_path")
             .and_then(|v| v.as_str())
@@ -195,7 +197,8 @@ async fn login_cli_path(state: &AppState) -> String {
             tracing::warn!("kimi: failed to load settings for login cli_path: {e}");
             "kimi".to_string()
         }
-    }
+    };
+    crate::provider::kimi::resolve_cli_path(&configured)
 }
 
 /// Thresholds must be ordered fractions in `(0, 1]`. Defaults (0.75 / 0.90).
@@ -503,7 +506,10 @@ async fn start_login(
     let cli_path = login_cli_path(&state).await;
     match KIMI_LOGIN.start(&id, config_dir, &cli_path).await {
         Ok(url) => Ok(Json(LoginStartResponse { url })),
-        Err(e) => Err(bad_request(&format!("Kimi login failed: {e}"))),
+        Err(e) => {
+            tracing::warn!(account_id = %id, "kimi login start failed: {e}");
+            Err(bad_request(&format!("Kimi login failed: {e}")))
+        }
     }
 }
 

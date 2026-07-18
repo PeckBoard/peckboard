@@ -62,6 +62,41 @@ use crate::provider::stream::{ModelInfo, ProviderEvent};
 const DEFAULT_TIMEOUT_SECS: u64 = 600;
 /// Default CLI binary name; overridable via the `cli_path` setting.
 const DEFAULT_CLI: &str = "kimi";
+
+/// Resolve the `kimi` executable to spawn. A configured path containing a
+/// `/` is used verbatim. A bare name is kept when it resolves on the
+/// server's PATH; otherwise fall back to the official installer location
+/// (`~/.kimi-code/bin/kimi`) when that exists. This matters because the
+/// PeckBoard server often runs with a service PATH that predates the CLI
+/// install (the installer only extends `~/.bashrc`).
+pub(crate) fn resolve_cli_path(configured: &str) -> String {
+    let path_var = std::env::var("PATH").unwrap_or_default();
+    let home = std::env::var("HOME").ok();
+    resolve_cli_path_with(configured, &path_var, home.as_deref())
+}
+
+fn resolve_cli_path_with(configured: &str, path_var: &str, home: Option<&str>) -> String {
+    if configured.contains('/') {
+        return configured.to_string();
+    }
+    let on_path = std::env::split_paths(path_var).any(|dir| {
+        let candidate = dir.join(configured);
+        candidate.is_file()
+    });
+    if on_path {
+        return configured.to_string();
+    }
+    if let Some(home) = home {
+        let fallback = std::path::Path::new(home)
+            .join(".kimi-code")
+            .join("bin")
+            .join(configured);
+        if fallback.is_file() {
+            return fallback.to_string_lossy().to_string();
+        }
+    }
+    configured.to_string()
+}
 /// Cap on stderr bytes captured for a crash message.
 const MAX_STDERR_BYTES: usize = 16 * 1024;
 /// How long a model-discovery probe (success or failure) is cached, so the
@@ -205,8 +240,9 @@ impl AgentProvider for KimiProvider {
                 HashMap::new()
             }
         };
-        let cli_path =
-            setting_str(&settings, "cli_path").unwrap_or_else(|| DEFAULT_CLI.to_string());
+        let cli_path = resolve_cli_path(
+            &setting_str(&settings, "cli_path").unwrap_or_else(|| DEFAULT_CLI.to_string()),
+        );
         let extras = setting_str_list(&settings, "additional_models");
         let discover = setting_bool(&settings, "discover_models").unwrap_or(true);
 
@@ -253,8 +289,9 @@ impl AgentProvider for KimiProvider {
         }
 
         let settings = self.settings.load().await?;
-        let cli_path =
-            setting_str(&settings, "cli_path").unwrap_or_else(|| DEFAULT_CLI.to_string());
+        let cli_path = resolve_cli_path(
+            &setting_str(&settings, "cli_path").unwrap_or_else(|| DEFAULT_CLI.to_string()),
+        );
         let default_model =
             setting_str(&settings, "default_model").filter(|m| !crate::provider::is_auto_model(m));
         // Strip the `kimi:` prefix and peel off any `@<account_id>` suffix.
@@ -898,6 +935,37 @@ mod tests {
         assert_eq!(ids, vec!["default", "my-alias"]);
     }
 
+    #[test]
+    fn resolve_cli_path_prefers_path_then_installer_fallback() {
+        let tmp = std::env::temp_dir().join(format!("kimi-cli-res-{}", std::process::id()));
+        let path_dir = tmp.join("onpath");
+        let home = tmp.join("home");
+        let installer_bin = home.join(".kimi-code").join("bin");
+        std::fs::create_dir_all(&path_dir).unwrap();
+        std::fs::create_dir_all(&installer_bin).unwrap();
+        let path_var = path_dir.to_str().unwrap().to_string();
+        let home_str = home.to_str();
+
+        // A path with a slash passes through untouched.
+        assert_eq!(resolve_cli_path_with("/opt/kimi", "", None), "/opt/kimi");
+
+        // Bare name, not on PATH, no installer file → unchanged (spawn will
+        // surface the original error).
+        assert_eq!(resolve_cli_path_with("kimi", &path_var, home_str), "kimi");
+
+        // Installer fallback exists → absolute fallback wins.
+        std::fs::write(installer_bin.join("kimi"), b"#!").unwrap();
+        assert_eq!(
+            resolve_cli_path_with("kimi", &path_var, home_str),
+            installer_bin.join("kimi").to_string_lossy()
+        );
+
+        // On PATH → bare name kept even with the fallback present.
+        std::fs::write(path_dir.join("kimi"), b"#!").unwrap();
+        assert_eq!(resolve_cli_path_with("kimi", &path_var, home_str), "kimi");
+
+        std::fs::remove_dir_all(&tmp).ok();
+    }
     #[test]
     fn default_models_are_prefix_free() {
         for m in default_models() {

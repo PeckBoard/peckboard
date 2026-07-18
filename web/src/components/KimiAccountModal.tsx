@@ -159,7 +159,11 @@ export default function KimiAccountModal({ account, onSaved, onClose }: Props) {
               </button>
             ))}
           </div>
-          <span className="form-hint">{KIND_OPTIONS.find((k) => k.value === kind)?.hint}</span>
+          <span className="form-hint">
+            {kindLocked
+              ? 'Credential type is fixed after creation — add another account to use the other type.'
+              : KIND_OPTIONS.find((k) => k.value === kind)?.hint}
+          </span>
         </div>
 
         {kind === 'api_key' ? (
