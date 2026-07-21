@@ -67,6 +67,10 @@ pub struct SessionManager {
     /// registry). `None` (tests, or the helper failed to write) means
     /// sessions get no `SUDO_ASKPASS` env and `sudo -A` stays unavailable.
     askpass: Option<crate::service::askpass::AskpassEnv>,
+    /// Encrypted-env-var unlock registry — the SAME `Arc` as
+    /// `AppState.env_unlock`. `None` in tests (custom env injection skipped).
+    /// Wired from `main` via [`Self::with_env_unlock`].
+    env_unlock: Option<Arc<crate::service::env_vars::EnvUnlockRegistry>>,
 }
 
 impl SessionManager {
@@ -79,6 +83,7 @@ impl SessionManager {
             session_locks: Arc::new(Mutex::new(HashMap::new())),
             plugins: Arc::new(PluginManager::empty()),
             askpass: None,
+            env_unlock: None,
         }
     }
 
@@ -86,6 +91,17 @@ impl SessionManager {
     /// `sudo -A` (masked password dialog in the UI, see `service::askpass`).
     pub fn with_askpass(mut self, askpass: Option<crate::service::askpass::AskpassEnv>) -> Self {
         self.askpass = askpass;
+        self
+    }
+
+    /// Wire the encrypted-env-var unlock registry (same `Arc` as
+    /// `AppState.env_unlock`) so dispatched interactive sessions can merge
+    /// custom env vars and prompt to unlock encrypted ones over WS.
+    pub fn with_env_unlock(
+        mut self,
+        registry: Option<Arc<crate::service::env_vars::EnvUnlockRegistry>>,
+    ) -> Self {
+        self.env_unlock = registry;
         self
     }
 
@@ -374,6 +390,20 @@ impl SessionManager {
                 );
         }
 
+        // Custom environment variables (Settings → Environment Variables)
+        // merge here — the single dispatch chokepoint — BEFORE the askpass
+        // block and before providers layer in account credentials, using
+        // `entry().or_insert()` so anything already present wins. Decrypted
+        // values never touch logs, events, or disk.
+        self.merge_custom_env_vars(
+            &mut final_config,
+            db,
+            broadcaster,
+            session_id,
+            session.repeating_task_id.is_some(),
+        )
+        .await;
+
         // Sudo askpass: interactive (non-worker) sessions get the helper +
         // a per-session secret so `sudo -A` inside the CLI child raises a
         // masked password dialog in the UI. Workers are headless (nobody is
@@ -407,6 +437,117 @@ impl SessionManager {
         };
 
         provider.send_message(ctx).await
+    }
+
+    /// Merge user-defined custom environment variables (Settings →
+    /// Environment Variables) into `final_config.env` at the single dispatch
+    /// chokepoint. Plain vars merge for every session kind; encrypted vars
+    /// resolve through the unlock registry — a cache hit merges immediately,
+    /// a miss on an interactive session prompts over WS and blocks up to the
+    /// unlock timeout, and a miss on a headless (worker / repeating /
+    /// pre-hatcher) session is skipped silently. Never fails or delays the
+    /// spawn: any db error logs a warn and skips. Decrypted values are never
+    /// logged, broadcast, or persisted.
+    async fn merge_custom_env_vars(
+        &self,
+        final_config: &mut SpawnConfig,
+        db: &Db,
+        broadcaster: &Arc<Broadcaster>,
+        session_id: &str,
+        is_repeating: bool,
+    ) {
+        let Some(registry) = &self.env_unlock else {
+            return;
+        };
+        let rows = match db.list_env_vars().await {
+            Ok(rows) => rows,
+            Err(e) => {
+                tracing::warn!("env vars: list failed ({e}) — skipping custom env injection");
+                return;
+            }
+        };
+
+        // Plain vars merge for every session kind.
+        merge_plain_env_vars(&mut final_config.env, &rows);
+
+        // Encrypted vars, grouped by the owner who can unlock them.
+        let mut owners: HashMap<String, Vec<String>> = HashMap::new();
+        for row in &rows {
+            if row.encrypted {
+                if let Some(owner) = &row.encrypted_by {
+                    owners
+                        .entry(owner.clone())
+                        .or_default()
+                        .push(row.name.clone());
+                }
+            }
+        }
+        if owners.is_empty() {
+            return;
+        }
+
+        let interactive = !final_config.is_worker && !final_config.is_pre_hatcher && !is_repeating;
+        for (owner, var_names) in owners {
+            // Cache hit: the owner unlocked recently — merge without prompting.
+            if let Some(values) = registry.cache_get(&owner).await {
+                merge_env_no_override(&mut final_config.env, values);
+                continue;
+            }
+            // Headless sessions never prompt and never block.
+            if !interactive {
+                continue;
+            }
+
+            let (request_id, rx) = registry.begin_request(&owner, var_names.clone()).await;
+            let username = db
+                .get_user(&owner)
+                .await
+                .ok()
+                .flatten()
+                .map(|u| u.username)
+                .unwrap_or_default();
+            broadcaster.broadcast(WsEvent {
+                event_type: "env-unlock-request".into(),
+                session_id: session_id.to_string(),
+                data: serde_json::json!({
+                    "request_id": request_id,
+                    "session_id": session_id,
+                    "user_id": owner,
+                    "username": username,
+                    "var_names": var_names,
+                }),
+            });
+
+            let reason = match tokio::time::timeout(
+                std::time::Duration::from_secs(
+                    crate::service::env_vars::UNLOCK_ANSWER_TIMEOUT_SECS,
+                ),
+                rx,
+            )
+            .await
+            {
+                Ok(Ok(Some(values))) => {
+                    merge_env_no_override(&mut final_config.env, values);
+                    "answered"
+                }
+                Ok(Ok(None)) => "cancelled",
+                Ok(Err(_)) => "dropped",
+                Err(_) => {
+                    registry.drop_request(&request_id).await;
+                    "timeout"
+                }
+            };
+            // Always resolve so stale dialogs on other tabs close (mirror
+            // routes/askpass.rs).
+            broadcaster.broadcast(WsEvent {
+                event_type: "env-unlock-resolved".into(),
+                session_id: session_id.to_string(),
+                data: serde_json::json!({
+                    "request_id": request_id,
+                    "reason": reason,
+                }),
+            });
+        }
     }
 
     /// Atomic check-and-act for the message dispatch path.
@@ -761,6 +902,31 @@ pub async fn shutdown_after_turn_via_registry(registry: &ProviderRegistry, sessi
     }
 }
 
+/// Merge `values` into `env` without overriding any key already present:
+/// `entry().or_insert()` means an existing value (a provider account
+/// credential inserted later, or an env already set on the config) always
+/// wins over a custom var.
+fn merge_env_no_override(
+    env: &mut HashMap<String, String>,
+    values: impl IntoIterator<Item = (String, String)>,
+) {
+    for (k, v) in values {
+        env.entry(k).or_insert(v);
+    }
+}
+
+/// Merge plain (unencrypted) custom env var rows into `env`, honouring the
+/// no-override rule. Encrypted rows are ignored here — they resolve through
+/// the unlock registry at dispatch.
+fn merge_plain_env_vars(env: &mut HashMap<String, String>, rows: &[crate::db::models::EnvVar]) {
+    merge_env_no_override(
+        env,
+        rows.iter()
+            .filter(|r| !r.encrypted)
+            .filter_map(|r| r.value.clone().map(|v| (r.name.clone(), v))),
+    );
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -877,5 +1043,51 @@ mod tests {
             resume_conversation_id_from_tail(&events),
             Some("conv-fresh".into())
         );
+    }
+
+    fn plain_var(name: &str, value: &str) -> crate::db::models::EnvVar {
+        crate::db::models::EnvVar {
+            id: uuid::Uuid::new_v4().to_string(),
+            name: name.into(),
+            value: Some(value.into()),
+            ciphertext: None,
+            nonce: None,
+            kdf_salt: None,
+            encrypted: false,
+            encrypted_by: None,
+            created_at: String::new(),
+            updated_at: String::new(),
+        }
+    }
+
+    #[test]
+    fn plain_vars_land_in_config_env() {
+        let mut env = HashMap::new();
+        let rows = vec![plain_var("FOO", "bar"), plain_var("BAZ", "qux")];
+        merge_plain_env_vars(&mut env, &rows);
+        assert_eq!(env.get("FOO"), Some(&"bar".to_string()));
+        assert_eq!(env.get("BAZ"), Some(&"qux".to_string()));
+    }
+
+    #[test]
+    fn existing_key_not_overridden_by_custom_var() {
+        let mut env = HashMap::new();
+        env.insert("FOO".to_string(), "original".to_string());
+        let rows = vec![plain_var("FOO", "custom"), plain_var("NEW", "added")];
+        merge_plain_env_vars(&mut env, &rows);
+        // Present key wins; the new key still merges.
+        assert_eq!(env.get("FOO"), Some(&"original".to_string()));
+        assert_eq!(env.get("NEW"), Some(&"added".to_string()));
+    }
+
+    #[test]
+    fn encrypted_rows_skipped_by_plain_merge() {
+        let mut env = HashMap::new();
+        let mut enc = plain_var("SECRET", "nope");
+        enc.encrypted = true;
+        enc.value = None;
+        enc.encrypted_by = Some("u1".into());
+        merge_plain_env_vars(&mut env, &[enc]);
+        assert!(env.is_empty());
     }
 }

@@ -898,6 +898,42 @@ pub struct NewSystemPrompt {
     pub updated_at: String,
 }
 
+// ── Env Vars ─────────────────────────────────────
+
+/// A user-defined environment variable injected into agent sessions. Either
+/// plaintext (`value` set, `encrypted = false`) or encrypted with a user's
+/// login password (`ciphertext`/`nonce`/`kdf_salt` set, `encrypted = true`,
+/// `encrypted_by` = the unlocking user's id). `name` is unique.
+#[derive(Queryable, Selectable, Serialize, Debug, Clone)]
+#[diesel(table_name = env_vars)]
+pub struct EnvVar {
+    pub id: String,
+    pub name: String,
+    pub value: Option<String>,
+    pub ciphertext: Option<String>,
+    pub nonce: Option<String>,
+    pub kdf_salt: Option<String>,
+    pub encrypted: bool,
+    pub encrypted_by: Option<String>,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+#[derive(Insertable, Debug)]
+#[diesel(table_name = env_vars)]
+pub struct NewEnvVar {
+    pub id: String,
+    pub name: String,
+    pub value: Option<String>,
+    pub ciphertext: Option<String>,
+    pub nonce: Option<String>,
+    pub kdf_salt: Option<String>,
+    pub encrypted: bool,
+    pub encrypted_by: Option<String>,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
 // ── Plans ────────────────────────────────────────
 
 /// A durable plan authored by a session. Survives model switches,

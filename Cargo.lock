@@ -3075,6 +3075,7 @@ dependencies = [
 name = "peckboard"
 version = "0.1.0"
 dependencies = [
+ "aes-gcm",
  "anyhow",
  "argon2 0.5.3",
  "async-trait",

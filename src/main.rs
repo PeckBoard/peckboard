@@ -146,9 +146,11 @@ async fn main() -> anyhow::Result<()> {
             None
         }
     };
+    let env_unlock = Arc::new(peckboard::service::env_vars::EnvUnlockRegistry::new());
     let session_manager = SessionManager::new(provider_registry.clone())
         .with_plugins(plugins.clone())
-        .with_askpass(askpass_env);
+        .with_askpass(askpass_env)
+        .with_env_unlock(Some(env_unlock.clone()));
     let repeating_task_manager = RepeatingTaskManager::new();
     let run_auditor = RunAuditor::new();
 
@@ -170,6 +172,7 @@ async fn main() -> anyhow::Result<()> {
         run_auditor,
         mcp_tokens,
         push_service,
+        env_unlock,
     });
 
     // Now that `AppState` exists, bind the plugin agent-dispatch bridge. A

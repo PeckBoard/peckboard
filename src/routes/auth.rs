@@ -355,6 +355,59 @@ async fn change_password(
             )
         })?;
 
+    // Re-encrypt this user's encrypted env vars under the new password so
+    // they stay unlockable. A var that won't decrypt with the old password
+    // (shouldn't happen) is skipped with a warn — name only, never values.
+    match state
+        .db
+        .list_env_vars_encrypted_by(&auth_user.user_id)
+        .await
+    {
+        Ok(vars) => {
+            for v in vars {
+                let (Some(ct), Some(nonce), Some(salt)) = (
+                    v.ciphertext.as_deref(),
+                    v.nonce.as_deref(),
+                    v.kdf_salt.as_deref(),
+                ) else {
+                    tracing::warn!(name = %v.name, "env var missing crypto columns; skipping re-encrypt");
+                    continue;
+                };
+                let Some(plaintext) = crate::service::env_vars::decrypt_value(
+                    &body.current_password,
+                    salt,
+                    nonce,
+                    ct,
+                ) else {
+                    tracing::warn!(name = %v.name, "env var failed to decrypt on password change; skipping re-encrypt");
+                    continue;
+                };
+                match crate::service::env_vars::encrypt_value(&body.new_password, &plaintext) {
+                    Ok(enc) => {
+                        if let Err(e) = state
+                            .db
+                            .update_env_var_ciphertext(
+                                &v.id,
+                                &enc.ciphertext_b64,
+                                &enc.nonce_hex,
+                                &enc.kdf_salt_hex,
+                            )
+                            .await
+                        {
+                            tracing::warn!(name = %v.name, error = %e, "failed to store re-encrypted env var");
+                        }
+                    }
+                    Err(e) => {
+                        tracing::warn!(name = %v.name, error = %e, "failed to re-encrypt env var");
+                    }
+                }
+            }
+        }
+        Err(e) => {
+            tracing::warn!(error = %e, "could not list env vars to re-encrypt on password change");
+        }
+    }
+
     // Revoke all existing auth sessions for this user
     state
         .db

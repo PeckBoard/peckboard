@@ -49,6 +49,7 @@ async fn build_state() -> Arc<AppState> {
     let session_manager = SessionManager::new(registry.clone()).with_plugins(plugins.clone());
 
     Arc::new(AppState {
+        env_unlock: Arc::new(peckboard::service::env_vars::EnvUnlockRegistry::new()),
         config: Config {
             port: 0,
             https_port: 0,

@@ -155,6 +155,7 @@ mod tests {
             repeating_task_manager: crate::repeating::RepeatingTaskManager::new(),
             run_auditor: crate::repeating::RunAuditor::new(),
             mcp_tokens: crate::service::mcp_server::McpTokenRegistry::new(),
+            env_unlock: Arc::new(crate::service::env_vars::EnvUnlockRegistry::new()),
             push_service: crate::service::push::PushService::new(dir),
         })
     }

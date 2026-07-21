@@ -7,6 +7,7 @@ mod cards;
 mod cascades;
 mod claude_accounts;
 mod dependencies;
+mod env_vars;
 mod events;
 mod folders;
 mod grok_accounts;

@@ -2,6 +2,7 @@ pub mod askpass;
 pub mod backup;
 pub mod browser;
 pub mod browser_runs;
+pub mod env_vars;
 pub mod mcp_client;
 pub mod mcp_server;
 pub mod mdns;

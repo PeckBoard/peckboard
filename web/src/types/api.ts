@@ -172,6 +172,20 @@ export interface AuthSession {
   ip_address: string | null
 }
 
+/** One user-defined environment variable injected into agent sessions.
+ * Encrypted rows expose metadata only — `value` is null and the ciphertext
+ * never reaches the client. */
+export interface EnvVar {
+  id: string
+  name: string
+  encrypted: boolean
+  encrypted_by: string | null
+  encrypted_by_username: string | null
+  value: string | null
+  created_at: string
+  updated_at: string
+}
+
 /** How a Claude account stores its credential — selects the env var the
  *  spawned CLI authenticates through. */
 export type ClaudeAccountKind = 'api_key' | 'oauth_token'

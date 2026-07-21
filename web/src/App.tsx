@@ -40,6 +40,7 @@ import {
 import { useRepeatingTasksStore } from './store/repeatingTasks'
 import ErrorBoundary from './components/ErrorBoundary'
 import AskpassDialog from './components/AskpassDialog'
+import EnvUnlockDialog from './components/EnvUnlockDialog'
 import ConnectionBanner from './components/ConnectionBanner'
 import { startTabsAutoSync, useTabsStore, type TabType } from './store/tabs'
 import './App.css'
@@ -1283,6 +1284,7 @@ function App() {
         )}
         <ConnectionBanner connected={connected} />
         <AskpassDialog />
+        <EnvUnlockDialog />
         <ErrorBoundary
           label="view"
           resetKey={`${view}:${activeSessionId}:${activeProjectId}:${sessionSub}`}

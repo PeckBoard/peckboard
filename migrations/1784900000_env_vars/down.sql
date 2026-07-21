@@ -1,0 +1,2 @@
+-- Self-contained table with no inbound references: a clean local rollback.
+DROP TABLE IF EXISTS env_vars;

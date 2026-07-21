@@ -651,6 +651,108 @@ mod tests {
         assert_eq!(db.count_users().await.unwrap(), 0);
     }
 
+    // ── Env Vars ─────────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn test_env_var_crud() {
+        let db = test_db();
+        let ts = now();
+
+        // Insert a plaintext var.
+        let plain = db
+            .upsert_env_var(NewEnvVar {
+                id: "e1".into(),
+                name: "API_HOST".into(),
+                value: Some("example.com".into()),
+                ciphertext: None,
+                nonce: None,
+                kdf_salt: None,
+                encrypted: false,
+                encrypted_by: None,
+                created_at: ts.clone(),
+                updated_at: ts.clone(),
+            })
+            .await
+            .unwrap();
+        assert_eq!(plain.value.as_deref(), Some("example.com"));
+        assert!(!plain.encrypted);
+
+        // Upsert by name flips it to encrypted in place (same id/created_at).
+        let enc = db
+            .upsert_env_var(NewEnvVar {
+                id: "ignored".into(),
+                name: "API_HOST".into(),
+                value: None,
+                ciphertext: Some("ct".into()),
+                nonce: Some("nn".into()),
+                kdf_salt: Some("ss".into()),
+                encrypted: true,
+                encrypted_by: Some("u1".into()),
+                created_at: now(),
+                updated_at: now(),
+            })
+            .await
+            .unwrap();
+        assert_eq!(enc.id, "e1");
+        assert_eq!(enc.created_at, ts);
+        assert!(enc.encrypted);
+        assert!(enc.value.is_none());
+        assert_eq!(enc.encrypted_by.as_deref(), Some("u1"));
+
+        // A second, distinct var.
+        db.upsert_env_var(NewEnvVar {
+            id: "e2".into(),
+            name: "TOKEN".into(),
+            value: None,
+            ciphertext: Some("ct2".into()),
+            nonce: Some("nn2".into()),
+            kdf_salt: Some("ss2".into()),
+            encrypted: true,
+            encrypted_by: Some("u1".into()),
+            created_at: now(),
+            updated_at: now(),
+        })
+        .await
+        .unwrap();
+
+        let all = db.list_env_vars().await.unwrap();
+        assert_eq!(all.len(), 2);
+        // Ordered by name: API_HOST, TOKEN.
+        assert_eq!(all[0].name, "API_HOST");
+        assert_eq!(all[1].name, "TOKEN");
+
+        assert!(db.get_env_var("TOKEN").await.unwrap().is_some());
+        assert!(db.get_env_var("MISSING").await.unwrap().is_none());
+
+        let mine = db.list_env_vars_encrypted_by("u1").await.unwrap();
+        assert_eq!(mine.len(), 2);
+        assert!(
+            db.list_env_vars_encrypted_by("u2")
+                .await
+                .unwrap()
+                .is_empty()
+        );
+
+        // Rotate ciphertext by id.
+        assert!(
+            db.update_env_var_ciphertext("e2", "ct2b", "nn2b", "ss2b")
+                .await
+                .unwrap()
+        );
+        let rotated = db.get_env_var("TOKEN").await.unwrap().unwrap();
+        assert_eq!(rotated.ciphertext.as_deref(), Some("ct2b"));
+        assert_eq!(rotated.nonce.as_deref(), Some("nn2b"));
+        assert!(
+            !db.update_env_var_ciphertext("missing", "x", "y", "z")
+                .await
+                .unwrap()
+        );
+
+        assert!(db.delete_env_var("API_HOST").await.unwrap());
+        assert!(!db.delete_env_var("API_HOST").await.unwrap());
+        assert_eq!(db.list_env_vars().await.unwrap().len(), 1);
+    }
+
     // ── Auth Sessions ────────────────────────────────────────────────
 
     #[tokio::test]

@@ -347,6 +347,20 @@ diesel::table! {
     }
 }
 diesel::table! {
+    env_vars (id) {
+        id -> Text,
+        name -> Text,
+        value -> Nullable<Text>,
+        ciphertext -> Nullable<Text>,
+        nonce -> Nullable<Text>,
+        kdf_salt -> Nullable<Text>,
+        encrypted -> Bool,
+        encrypted_by -> Nullable<Text>,
+        created_at -> Text,
+        updated_at -> Text,
+    }
+}
+diesel::table! {
     system_prompts (id) {
         id -> Text,
         name -> Text,
@@ -425,5 +439,6 @@ diesel::allow_tables_to_appear_in_same_query!(
     kimi_accounts,
     system_prompts,
     plans,
+    env_vars,
     plan_comments,
 );

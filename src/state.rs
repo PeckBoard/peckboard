@@ -34,5 +34,8 @@ pub struct AppState {
     /// schedule's minimum-gap invariant is violated. Cheap to clone.
     pub run_auditor: RunAuditor,
     pub mcp_tokens: McpTokenRegistry,
+    /// In-memory unlock registry + short-lived decrypted-value cache for
+    /// user-defined encrypted env vars. See `service::env_vars`.
+    pub env_unlock: std::sync::Arc<crate::service::env_vars::EnvUnlockRegistry>,
     pub push_service: PushService,
 }

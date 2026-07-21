@@ -258,6 +258,12 @@ async fn handle_connection(socket: WebSocket, state: Arc<AppState>) {
                             // dialog, not just the answering tab's.
                             | "askpass-request"
                             | "askpass-resolved"
+                            // env-unlock mirrors askpass: the vars' owner
+                            // may not have the requesting session's tab
+                            // open, and the resolve must dismiss every
+                            // open dialog.
+                            | "env-unlock-request"
+                            | "env-unlock-resolved"
                     );
 
                     let should_send = if is_global {

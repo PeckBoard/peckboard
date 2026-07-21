@@ -165,8 +165,14 @@ export const useWsStore = create<WsState>((set, get) => ({
         return
       }
 
-      if (msg.type === 'askpass-request' || msg.type === 'askpass-resolved') {
-        // Sudo password bridge: fan out to the global AskpassDialog.
+      if (
+        msg.type === 'askpass-request' ||
+        msg.type === 'askpass-resolved' ||
+        msg.type === 'env-unlock-request' ||
+        msg.type === 'env-unlock-resolved'
+      ) {
+        // Password bridges: fan out to the global AskpassDialog /
+        // EnvUnlockDialog.
         window.dispatchEvent(new CustomEvent(`peckboard:${msg.type}`, { detail: msg }))
         return
       }

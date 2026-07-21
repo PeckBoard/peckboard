@@ -3,6 +3,7 @@ pub mod attachments;
 pub mod auth;
 pub mod backup;
 pub mod claude_accounts;
+pub mod env_vars;
 pub mod folders;
 pub mod grok_accounts;
 pub mod kimi_accounts;
@@ -56,6 +57,7 @@ pub fn api_router(state: Arc<AppState>) -> Router<Arc<AppState>> {
         .merge(attachments::router(state.clone()))
         .merge(notifications::router(state.clone()))
         .merge(me::router(state.clone()))
+        .merge(env_vars::router(state.clone()))
         .merge(settings::router(state.clone()))
         .merge(system_prompts::router(state.clone()))
         .merge(ollama::router(state.clone()))

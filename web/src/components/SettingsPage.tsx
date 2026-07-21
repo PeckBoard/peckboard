@@ -22,6 +22,7 @@ import PluginsSection from './PluginsSection'
 import PluginSettingsSection from './PluginSettingsSection'
 import PluginRegistryPanel from './PluginRegistryPanel'
 import McpServersSection from './McpServersSection'
+import EnvVarsSection from './EnvVarsSection'
 
 interface KeepAliveRun {
   provider: string
@@ -69,6 +70,7 @@ type SubPage =
   | 'plugin-settings'
   | 'providers'
   | 'mcp'
+  | 'env'
   | 'registry'
   | 'server'
 
@@ -96,6 +98,11 @@ const SUB_PAGES: { id: SubPage; title: string; blurb: string }[] = [
     id: 'mcp',
     title: 'MCP Servers',
     blurb: 'External tool servers injected into agent sessions',
+  },
+  {
+    id: 'env',
+    title: 'Environment Variables',
+    blurb: 'Injected into agent sessions; optionally encrypted with your password',
   },
   {
     id: 'plugins',
@@ -552,6 +559,7 @@ export default function SettingsPage({ onBack, initialSubPage = null }: Props) {
       )}
 
       {subPage === 'mcp' && <McpServersSection />}
+      {subPage === 'env' && <EnvVarsSection />}
       {subPage === 'plugins' && <PluginsSection onBrowseRegistry={() => setSubPage('registry')} />}
       {subPage === 'plugin-settings' && <PluginSettingsSection />}
       {subPage === 'registry' && <PluginRegistryPanel />}

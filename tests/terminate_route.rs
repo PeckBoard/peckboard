@@ -96,6 +96,7 @@ async fn build_state() -> (Arc<AppState>, String) {
     .unwrap();
 
     let state = Arc::new(AppState {
+        env_unlock: Arc::new(peckboard::service::env_vars::EnvUnlockRegistry::new()),
         config,
         db,
         plugins,
