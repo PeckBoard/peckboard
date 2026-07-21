@@ -2230,9 +2230,17 @@ pub(crate) fn exec_impl(
             .clamp(1, EXEC_MAX_TIMEOUT_SECS),
     );
 
+    // Commands run WITH the custom env vars (Settings → Environment
+    // Variables) — plain always, encrypted while an owner's unlock cache is
+    // warm — layered over the inherited host env (custom wins on collision:
+    // user-configured beats ambient). The agent itself never gets these
+    // values: its own process env carries no custom vars, and any secret a
+    // command prints is masked below before the agent can read it.
+    let (inject_env, masker) = crate::service::secret_mask::command_env_blocking(db);
     use std::process::{Command, Stdio};
     let mut child = match Command::new(command)
         .args(&req.args)
+        .envs(inject_env.iter().map(|(k, v)| (k, v)))
         .current_dir(&root)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
@@ -2272,15 +2280,32 @@ pub(crate) fn exec_impl(
         .map(|h| h.join().unwrap_or_default())
         .unwrap_or_default();
 
+    // Console output is the one surface where an env secret could reach the
+    // agent — mask known secret values (verbatim or interleaved) with `*`.
+    let stdout = String::from_utf8_lossy(&stdout);
+    let stderr = String::from_utf8_lossy(&stderr);
     serde_json::json!({
         "exit_code": status.and_then(|s| s.code()),
-        "stdout": String::from_utf8_lossy(&stdout),
-        "stderr": String::from_utf8_lossy(&stderr),
+        "stdout": masker.mask(&stdout),
+        "stderr": masker.mask(&stderr),
         "stdout_truncated": stdout_truncated,
         "stderr_truncated": stderr_truncated,
         "timed_out": timed_out,
     })
     .to_string()
+}
+
+/// Run a JSON envelope's `stdout`/`stderr` fields through the secret masker
+/// (custom env values + sensitive-named host env). Non-object or unmatched
+/// output passes through unchanged. Blocking — same thread contract as
+/// [`exec_impl`].
+fn mask_console_envelope(db: &Db, out: String) -> String {
+    let Ok(mut v) = serde_json::from_str::<serde_json::Value>(&out) else {
+        return out;
+    };
+    let masker = crate::service::secret_mask::masker_blocking(db);
+    crate::service::secret_mask::mask_console_fields(&mut v, &masker);
+    v.to_string()
 }
 
 // ── Interactive user prompts (ask / read-answer) ──────────────────────
@@ -2796,9 +2821,12 @@ host_fn!(peckboard_ssh_probe(user_data: HostState; input: String) -> String {
 });
 
 host_fn!(peckboard_ssh_exec(user_data: HostState; input: String) -> String {
-    let (_db, _plugin_id, ok) = state_and_permission(&user_data, "ssh")?;
+    let (db, _plugin_id, ok) = state_and_permission(&user_data, "ssh")?;
     if !ok { return Ok(error_json("plugin lacks the 'ssh' permission")); }
-    Ok(super::ssh::exec_impl(&input))
+    // Remote console output gets the same secret masking as local exec — a
+    // remote command can echo back a secret it was handed.
+    let out = super::ssh::exec_impl(&input);
+    Ok(mask_console_envelope(&db, out))
 });
 
 host_fn!(peckboard_ssh_read_file(user_data: HostState; input: String) -> String {
@@ -4761,5 +4789,134 @@ mod tests {
     async fn update_card_malformed_json_is_error() {
         let db = setup().await;
         assert!(update_card_impl(&db, "not json").contains("invalid request"));
+    }
+
+    // ── exec env injection + console secret masking ───────────────────
+
+    /// Db + a real folder (`fx`) the exec tests run in.
+    async fn exec_fixture() -> (Db, tempfile::TempDir) {
+        let dir = tempfile::tempdir().unwrap();
+        let db = Db::in_memory().unwrap();
+        db.create_folder(NewFolder {
+            id: "fx".into(),
+            name: "fx".into(),
+            path: dir.path().to_string_lossy().to_string(),
+            created_at: chrono::Utc::now().to_rfc3339(),
+        })
+        .await
+        .unwrap();
+        (db, dir)
+    }
+
+    fn exec_inv() -> InvocationContext {
+        InvocationContext {
+            folder_id: Some("fx".into()),
+            ..Default::default()
+        }
+    }
+
+    fn custom_var(name: &str, value: &str) -> crate::db::models::NewEnvVar {
+        let ts = chrono::Utc::now().to_rfc3339();
+        crate::db::models::NewEnvVar {
+            id: uuid::Uuid::new_v4().to_string(),
+            name: name.into(),
+            value: Some(value.into()),
+            ciphertext: None,
+            nonce: None,
+            kdf_salt: None,
+            encrypted: false,
+            encrypted_by: None,
+            created_at: ts.clone(),
+            updated_at: ts,
+        }
+    }
+
+    /// Run `sh -c <script>` through `exec_impl` on a blocking thread (the
+    /// exec path's real thread contract) and parse the JSON envelope.
+    async fn exec_sh(db: &Db, script: &str) -> serde_json::Value {
+        let db = db.clone();
+        let script = script.to_string();
+        let out = tokio::task::spawn_blocking(move || {
+            let req = serde_json::json!({ "command": "sh", "args": ["-c", script] }).to_string();
+            exec_impl(&db, &req, &exec_inv(), false)
+        })
+        .await
+        .unwrap();
+        serde_json::from_str(&out).unwrap()
+    }
+
+    #[tokio::test]
+    async fn exec_injects_custom_env_but_masks_its_value_in_output() {
+        let (db, _dir) = exec_fixture().await;
+        db.upsert_env_var(custom_var("PB_TEST_SECRET", "supersecretvalue123"))
+            .await
+            .unwrap();
+
+        // The command really received the value (a length check leaks nothing).
+        let v = exec_sh(&db, "echo len=${#PB_TEST_SECRET}").await;
+        assert_eq!(v["exit_code"], 0, "envelope: {v}");
+        assert!(
+            v["stdout"].as_str().unwrap().contains("len=19"),
+            "envelope: {v}"
+        );
+
+        // Printing it verbatim or with symbols in between is masked.
+        let v = exec_sh(
+            &db,
+            "echo $PB_TEST_SECRET; echo $PB_TEST_SECRET | sed 's/./&-/g'",
+        )
+        .await;
+        let stdout = v["stdout"].as_str().unwrap();
+        assert!(!stdout.contains("supersecretvalue123"), "stdout: {stdout}");
+        assert!(!stdout.contains("s-u-p-e-r"), "stdout: {stdout}");
+        assert!(stdout.contains("********"), "stdout: {stdout}");
+    }
+
+    #[tokio::test]
+    async fn exec_masks_sensitive_host_env_values() {
+        let (db, _dir) = exec_fixture().await;
+        // SAFETY: test-only process env mutation; the name is unique to this
+        // test and the value appears nowhere else.
+        unsafe { std::env::set_var("PB_TEST_HOST_TOKEN", "hostenvsecret987654") };
+        let v = exec_sh(&db, "printenv PB_TEST_HOST_TOKEN").await;
+        let stdout = v["stdout"].as_str().unwrap();
+        assert!(!stdout.contains("hostenvsecret987654"), "stdout: {stdout}");
+        assert!(stdout.contains("********"), "stdout: {stdout}");
+    }
+
+    #[tokio::test]
+    async fn exec_injects_unlocked_encrypted_vars_and_masks_them() {
+        let (db, _dir) = exec_fixture().await;
+        let ts = chrono::Utc::now().to_rfc3339();
+        db.upsert_env_var(crate::db::models::NewEnvVar {
+            id: uuid::Uuid::new_v4().to_string(),
+            name: "PB_TEST_ENC".into(),
+            value: None,
+            ciphertext: Some("irrelevant".into()),
+            nonce: Some("irrelevant".into()),
+            kdf_salt: Some("irrelevant".into()),
+            encrypted: true,
+            encrypted_by: Some("owner-x".into()),
+            created_at: ts.clone(),
+            updated_at: ts,
+        })
+        .await
+        .unwrap();
+
+        // Seed the unlock cache through the process-global registry (first
+        // set wins; use whichever instance is installed).
+        crate::service::env_vars::set_global_registry(std::sync::Arc::new(
+            crate::service::env_vars::EnvUnlockRegistry::new(),
+        ));
+        let reg = crate::service::env_vars::global_registry().unwrap();
+        let mut vals = std::collections::HashMap::new();
+        vals.insert("PB_TEST_ENC".to_string(), "unlockedsecret4321".to_string());
+        reg.cache_put("owner-x", vals).await;
+
+        let v = exec_sh(&db, "echo len=${#PB_TEST_ENC}; echo $PB_TEST_ENC").await;
+        let stdout = v["stdout"].as_str().unwrap();
+        assert!(stdout.contains("len=18"), "stdout: {stdout}");
+        assert!(!stdout.contains("unlockedsecret4321"), "stdout: {stdout}");
+        assert!(stdout.contains("********"), "stdout: {stdout}");
     }
 }

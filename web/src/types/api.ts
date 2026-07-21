@@ -172,7 +172,8 @@ export interface AuthSession {
   ip_address: string | null
 }
 
-/** One user-defined environment variable injected into agent sessions.
+/** One user-defined environment variable injected into the commands agents
+ * run (never into the agent process; console output is masked).
  * Encrypted rows expose metadata only — `value` is null and the ciphertext
  * never reaches the client. */
 export interface EnvVar {

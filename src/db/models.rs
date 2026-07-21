@@ -900,7 +900,9 @@ pub struct NewSystemPrompt {
 
 // ── Env Vars ─────────────────────────────────────
 
-/// A user-defined environment variable injected into agent sessions. Either
+/// A user-defined environment variable, injected into the commands agents
+/// run — never into the agent process itself (see `plugin::host::exec_impl`,
+/// which also masks secret values out of console output). Either
 /// plaintext (`value` set, `encrypted = false`) or encrypted with a user's
 /// login password (`ciphertext`/`nonce`/`kdf_salt` set, `encrypted = true`,
 /// `encrypted_by` = the unlocking user's id). `name` is unique.

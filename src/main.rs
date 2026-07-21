@@ -147,6 +147,9 @@ async fn main() -> anyhow::Result<()> {
         }
     };
     let env_unlock = Arc::new(peckboard::service::env_vars::EnvUnlockRegistry::new());
+    // Late-bind the process-global handle so the blocking command-exec path
+    // can snapshot unlocked values (`service::env_vars::unlocked_values_blocking`).
+    peckboard::service::env_vars::set_global_registry(env_unlock.clone());
     let session_manager = SessionManager::new(provider_registry.clone())
         .with_plugins(plugins.clone())
         .with_askpass(askpass_env)

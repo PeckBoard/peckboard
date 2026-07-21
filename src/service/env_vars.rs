@@ -15,7 +15,7 @@
 //! the channel payloads nor the cache are ever persisted or logged.
 
 use std::collections::HashMap;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant};
 
 use aes_gcm::aead::{Aead, KeyInit};
@@ -248,8 +248,53 @@ impl EnvUnlockRegistry {
         g.cache.retain(|_, e| e.expires_at > now);
         g.cache.get(user_id).map(|e| e.values.clone())
     }
+
+    /// Blocking snapshot of every owner's unexpired cached plaintexts,
+    /// merged name → value (names are unique DB-wide, so a var appears at
+    /// most once). Purges expired entries as a side effect. Uses
+    /// `Mutex::blocking_lock` — callable only OUTSIDE the async runtime's
+    /// worker threads (the blocking command-exec path qualifies).
+    pub fn all_cached_values_blocking(&self) -> HashMap<String, String> {
+        let now = Instant::now();
+        let mut g = self.inner.blocking_lock();
+        g.cache.retain(|_, e| e.expires_at > now);
+        let mut out = HashMap::new();
+        for entry in g.cache.values() {
+            for (k, v) in &entry.values {
+                out.insert(k.clone(), v.clone());
+            }
+        }
+        out
+    }
 }
 
+/// Process-global handle to the app's unlock registry, late-bound by `main`
+/// (same pattern as `plugin::manager::set_notify_global`). Lets the
+/// synchronous command-exec path snapshot unlocked values without threading
+/// `AppState` into the plugin host. Unset in tests → snapshot is empty.
+static GLOBAL_REGISTRY: OnceLock<Arc<EnvUnlockRegistry>> = OnceLock::new();
+
+/// Bind the app's registry as the process-global one. First call wins.
+pub fn set_global_registry(registry: Arc<EnvUnlockRegistry>) {
+    let _ = GLOBAL_REGISTRY.set(registry);
+}
+
+/// The process-global registry, if bound. Exposed for exec-path tests that
+/// seed the unlock cache the blocking snapshot reads.
+#[cfg(test)]
+pub(crate) fn global_registry() -> Option<Arc<EnvUnlockRegistry>> {
+    GLOBAL_REGISTRY.get().cloned()
+}
+
+/// Every unlocked (cached) encrypted env var value, name → plaintext, from
+/// the process-global registry. Empty when no registry is bound or nothing
+/// is unlocked. Blocking — call from a blocking thread only.
+pub fn unlocked_values_blocking() -> HashMap<String, String> {
+    match GLOBAL_REGISTRY.get() {
+        Some(reg) => reg.all_cached_values_blocking(),
+        None => HashMap::new(),
+    }
+}
 #[cfg(test)]
 mod tests {
     use super::*;

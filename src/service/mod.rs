@@ -8,6 +8,7 @@ pub mod mcp_server;
 pub mod mdns;
 pub mod push;
 pub mod redact;
+pub mod secret_mask;
 pub mod tls;
 pub mod update;
 pub mod wake;

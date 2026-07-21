@@ -17,6 +17,18 @@ impl Db {
         .await
     }
 
+    /// Synchronous twin of [`Db::list_env_vars`] for the blocking plugin-host
+    /// exec path (runs on a blocking thread; see `Db::with_conn_blocking`).
+    pub(crate) fn list_env_vars_blocking(&self) -> anyhow::Result<Vec<EnvVar>> {
+        self.with_conn_blocking(|conn| {
+            env_vars::table
+                .select(EnvVar::as_select())
+                .order(env_vars::name.asc())
+                .load(conn)
+                .map_err(Into::into)
+        })
+    }
+
     /// Look up one var by its unique name.
     pub async fn get_env_var(&self, name: &str) -> anyhow::Result<Option<EnvVar>> {
         let name = name.to_string();

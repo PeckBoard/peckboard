@@ -390,13 +390,15 @@ impl SessionManager {
                 );
         }
 
-        // Custom environment variables (Settings → Environment Variables)
-        // merge here — the single dispatch chokepoint — BEFORE the askpass
-        // block and before providers layer in account credentials, using
-        // `entry().or_insert()` so anything already present wins. Decrypted
-        // values never touch logs, events, or disk.
-        self.merge_custom_env_vars(
-            &mut final_config,
+        // Custom environment variables (Settings → Environment Variables) are
+        // deliberately NOT injected into the agent process: an agent must not
+        // be able to pull secret values out of its own environment. Commands
+        // the agent runs receive them instead (see `plugin::host::exec_impl`,
+        // which also masks secret values out of console output). Dispatch
+        // still warms the encrypted-var unlock cache — the one moment an
+        // interactive user is present to type the password.
+        self.warm_env_unlock_cache(
+            &final_config,
             db,
             broadcaster,
             session_id,
@@ -439,18 +441,21 @@ impl SessionManager {
         provider.send_message(ctx).await
     }
 
-    /// Merge user-defined custom environment variables (Settings →
-    /// Environment Variables) into `final_config.env` at the single dispatch
-    /// chokepoint. Plain vars merge for every session kind; encrypted vars
-    /// resolve through the unlock registry — a cache hit merges immediately,
-    /// a miss on an interactive session prompts over WS and blocks up to the
-    /// unlock timeout, and a miss on a headless (worker / repeating /
-    /// pre-hatcher) session is skipped silently. Never fails or delays the
-    /// spawn: any db error logs a warn and skips. Decrypted values are never
-    /// logged, broadcast, or persisted.
-    async fn merge_custom_env_vars(
+    /// Warm the encrypted env var unlock cache at the dispatch chokepoint.
+    ///
+    /// Custom env vars (Settings → Environment Variables) are NOT merged into
+    /// the agent's environment — agents must not be able to read secret
+    /// values; commands they run receive the vars instead (see
+    /// `plugin::host::exec_impl`). Dispatch only ensures encrypted values are
+    /// unlockable by the time a command needs them: a cache hit needs
+    /// nothing, a miss on an interactive session prompts the owner over WS
+    /// (the unlock route decrypts and fills the cache), and a miss on a
+    /// headless (worker / repeating / pre-hatcher) session is skipped
+    /// silently. Never fails or delays the spawn: any db error logs a warn
+    /// and skips. Decrypted values are never logged, broadcast, or persisted.
+    async fn warm_env_unlock_cache(
         &self,
-        final_config: &mut SpawnConfig,
+        final_config: &SpawnConfig,
         db: &Db,
         broadcaster: &Arc<Broadcaster>,
         session_id: &str,
@@ -462,13 +467,10 @@ impl SessionManager {
         let rows = match db.list_env_vars().await {
             Ok(rows) => rows,
             Err(e) => {
-                tracing::warn!("env vars: list failed ({e}) — skipping custom env injection");
+                tracing::warn!("env vars: list failed ({e}) — skipping unlock warm-up");
                 return;
             }
         };
-
-        // Plain vars merge for every session kind.
-        merge_plain_env_vars(&mut final_config.env, &rows);
 
         // Encrypted vars, grouped by the owner who can unlock them.
         let mut owners: HashMap<String, Vec<String>> = HashMap::new();
@@ -488,9 +490,9 @@ impl SessionManager {
 
         let interactive = !final_config.is_worker && !final_config.is_pre_hatcher && !is_repeating;
         for (owner, var_names) in owners {
-            // Cache hit: the owner unlocked recently — merge without prompting.
-            if let Some(values) = registry.cache_get(&owner).await {
-                merge_env_no_override(&mut final_config.env, values);
+            // Cache hit: the owner unlocked recently — commands can already
+            // draw the values from the cache; nothing to prompt.
+            if registry.cache_get(&owner).await.is_some() {
                 continue;
             }
             // Headless sessions never prompt and never block.
@@ -526,10 +528,9 @@ impl SessionManager {
             )
             .await
             {
-                Ok(Ok(Some(values))) => {
-                    merge_env_no_override(&mut final_config.env, values);
-                    "answered"
-                }
+                // The unlock route decrypts and caches the values before
+                // resolving; the payload here only signals the outcome.
+                Ok(Ok(Some(_))) => "answered",
                 Ok(Ok(None)) => "cancelled",
                 Ok(Err(_)) => "dropped",
                 Err(_) => {
@@ -902,31 +903,6 @@ pub async fn shutdown_after_turn_via_registry(registry: &ProviderRegistry, sessi
     }
 }
 
-/// Merge `values` into `env` without overriding any key already present:
-/// `entry().or_insert()` means an existing value (a provider account
-/// credential inserted later, or an env already set on the config) always
-/// wins over a custom var.
-fn merge_env_no_override(
-    env: &mut HashMap<String, String>,
-    values: impl IntoIterator<Item = (String, String)>,
-) {
-    for (k, v) in values {
-        env.entry(k).or_insert(v);
-    }
-}
-
-/// Merge plain (unencrypted) custom env var rows into `env`, honouring the
-/// no-override rule. Encrypted rows are ignored here — they resolve through
-/// the unlock registry at dispatch.
-fn merge_plain_env_vars(env: &mut HashMap<String, String>, rows: &[crate::db::models::EnvVar]) {
-    merge_env_no_override(
-        env,
-        rows.iter()
-            .filter(|r| !r.encrypted)
-            .filter_map(|r| r.value.clone().map(|v| (r.name.clone(), v))),
-    );
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1043,51 +1019,5 @@ mod tests {
             resume_conversation_id_from_tail(&events),
             Some("conv-fresh".into())
         );
-    }
-
-    fn plain_var(name: &str, value: &str) -> crate::db::models::EnvVar {
-        crate::db::models::EnvVar {
-            id: uuid::Uuid::new_v4().to_string(),
-            name: name.into(),
-            value: Some(value.into()),
-            ciphertext: None,
-            nonce: None,
-            kdf_salt: None,
-            encrypted: false,
-            encrypted_by: None,
-            created_at: String::new(),
-            updated_at: String::new(),
-        }
-    }
-
-    #[test]
-    fn plain_vars_land_in_config_env() {
-        let mut env = HashMap::new();
-        let rows = vec![plain_var("FOO", "bar"), plain_var("BAZ", "qux")];
-        merge_plain_env_vars(&mut env, &rows);
-        assert_eq!(env.get("FOO"), Some(&"bar".to_string()));
-        assert_eq!(env.get("BAZ"), Some(&"qux".to_string()));
-    }
-
-    #[test]
-    fn existing_key_not_overridden_by_custom_var() {
-        let mut env = HashMap::new();
-        env.insert("FOO".to_string(), "original".to_string());
-        let rows = vec![plain_var("FOO", "custom"), plain_var("NEW", "added")];
-        merge_plain_env_vars(&mut env, &rows);
-        // Present key wins; the new key still merges.
-        assert_eq!(env.get("FOO"), Some(&"original".to_string()));
-        assert_eq!(env.get("NEW"), Some(&"added".to_string()));
-    }
-
-    #[test]
-    fn encrypted_rows_skipped_by_plain_merge() {
-        let mut env = HashMap::new();
-        let mut enc = plain_var("SECRET", "nope");
-        enc.encrypted = true;
-        enc.value = None;
-        enc.encrypted_by = Some("u1".into());
-        merge_plain_env_vars(&mut env, &[enc]);
-        assert!(env.is_empty());
     }
 }

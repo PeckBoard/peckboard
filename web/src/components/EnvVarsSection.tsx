@@ -3,8 +3,10 @@ import { authedFetch } from '../store/auth'
 import type { EnvVar } from '../types/api'
 
 /**
- * Settings section for user-defined environment variables injected into
- * agent sessions. Plain vars show a masked value with a reveal toggle;
+ * Settings section for user-defined environment variables injected into the
+ * commands agents run — never into the agent process itself, and values
+ * printed to console output are masked so the agent can't read them.
+ * Plain vars show a masked value with a reveal toggle;
  * encrypted vars expose metadata only (the server never returns the
  * ciphertext), so editing one means entering a NEW value plus the owner's
  * password. "Lock now" drops the server's cache of decrypted values.
@@ -143,8 +145,10 @@ export default function EnvVarsSection() {
     <section className="settings-section" data-testid="env-vars-section">
       <h3>Environment Variables</h3>
       <p className="form-hint">
-        Injected into agent sessions. Encrypted variables are sealed with their owner&rsquo;s login
-        password; a session that needs them prompts the owner to unlock.
+        Injected into the commands agents run — never into the agent itself; secret values that
+        show up in console output are masked with ******** so the agent can&rsquo;t read them.
+        Encrypted variables are sealed with their owner&rsquo;s login password; a session that
+        needs them prompts the owner to unlock.
       </p>
 
       {error && <p className="settings-error">{error}</p>}

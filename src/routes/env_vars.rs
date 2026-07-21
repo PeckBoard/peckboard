@@ -1,5 +1,7 @@
-//! `/api/env-vars/*` — user-defined environment variables injected into
-//! agent sessions. All routes are JWT-authenticated (`require_auth`).
+//! `/api/env-vars/*` — user-defined environment variables injected into the
+//! commands agents run (never into the agent process itself; console output
+//! is masked — see `plugin::host::exec_impl`). All routes are
+//! JWT-authenticated (`require_auth`).
 //!
 //! Storage lives in `db::crud::env_vars`; crypto + the in-memory unlock
 //! registry live in `service::env_vars`. This module is HTTP glue only:
