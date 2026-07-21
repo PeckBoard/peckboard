@@ -1,7 +1,9 @@
 //! `/api/env-vars/*` — user-defined environment variables injected into the
 //! commands agents run (never into the agent process itself; console output
-//! is masked — see `plugin::host::exec_impl`). All routes are
-//! JWT-authenticated (`require_auth`).
+//! is masked — see `plugin::host::exec_impl`). A var is global (`folder_id`
+//! NULL) or folder-scoped; a folder var shadows a global one with the same
+//! name for sessions in that folder. All routes are JWT-authenticated
+//! (`require_auth`).
 //!
 //! Storage lives in `db::crud::env_vars`; crypto + the in-memory unlock
 //! registry live in `service::env_vars`. This module is HTTP glue only:
@@ -37,7 +39,7 @@ const MAX_PASSWORD_LEN: usize = 1024;
 pub fn router(state: Arc<AppState>) -> Router<Arc<AppState>> {
     Router::new()
         .route("/api/env-vars", get(list).post(upsert))
-        .route("/api/env-vars/{name}", delete(delete_var))
+        .route("/api/env-vars/{id}", delete(delete_var))
         .route("/api/env-vars/unlock-answer", post(unlock_answer))
         .route("/api/env-vars/lock", post(lock))
         .route_layer(middleware::from_fn_with_state(state, require_auth))
@@ -89,6 +91,9 @@ struct EnvVarView {
     encrypted: bool,
     encrypted_by: Option<String>,
     encrypted_by_username: Option<String>,
+    folder_id: Option<String>,
+    /// Resolved folder name for folder-scoped vars; `null` for global.
+    folder_name: Option<String>,
     /// Plaintext only for unencrypted rows; `null` for encrypted rows
     /// (ciphertext/nonce/salt are never surfaced).
     value: Option<String>,
@@ -102,9 +107,10 @@ async fn list(State(state): State<Arc<AppState>>) -> Response {
         Ok(v) => v,
         Err(e) => return internal_err(e),
     };
-    // Resolve `encrypted_by` ids to usernames, caching per id so a list full
-    // of one user's vars is a single lookup.
+    // Resolve `encrypted_by` ids to usernames and `folder_id`s to folder
+    // names, caching per id so a homogeneous list stays a few lookups.
     let mut usernames: HashMap<String, Option<String>> = HashMap::new();
+    let mut folder_names: HashMap<String, Option<String>> = HashMap::new();
     let mut out = Vec::with_capacity(vars.len());
     for v in vars {
         let encrypted_by_username = match &v.encrypted_by {
@@ -123,12 +129,30 @@ async fn list(State(state): State<Arc<AppState>>) -> Response {
             }
             None => None,
         };
+        let folder_name = match &v.folder_id {
+            Some(fid) => {
+                if !folder_names.contains_key(fid) {
+                    let fname = state
+                        .db
+                        .get_folder(fid)
+                        .await
+                        .ok()
+                        .flatten()
+                        .map(|f| f.name);
+                    folder_names.insert(fid.clone(), fname);
+                }
+                folder_names.get(fid).cloned().flatten()
+            }
+            None => None,
+        };
         out.push(EnvVarView {
             id: v.id,
             name: v.name,
             encrypted: v.encrypted,
             encrypted_by: v.encrypted_by,
             encrypted_by_username,
+            folder_id: v.folder_id,
+            folder_name,
             value: if v.encrypted { None } else { v.value },
             created_at: v.created_at,
             updated_at: v.updated_at,
@@ -146,9 +170,13 @@ struct UpsertBody {
     encrypt: bool,
     #[serde(default)]
     password: Option<String>,
+    /// Omitted/`null` = global; else the id of the folder the var is
+    /// scoped to.
+    #[serde(default)]
+    folder_id: Option<String>,
 }
 
-/// POST /api/env-vars — upsert (by name) a plaintext or encrypted var.
+/// POST /api/env-vars — upsert (by name + scope) a plaintext or encrypted var.
 async fn upsert(State(state): State<Arc<AppState>>, request: Request<Body>) -> Response {
     let user_id = auth_user(&request).user_id.clone();
     let body: UpsertBody = match parse_body(request).await {
@@ -161,6 +189,14 @@ async fn upsert(State(state): State<Arc<AppState>>, request: Request<Body>) -> R
     }
     if body.value.len() > VALUE_MAX_LEN {
         return err(StatusCode::BAD_REQUEST, "value too long");
+    }
+    // A folder-scoped var must reference an existing folder.
+    if let Some(fid) = &body.folder_id {
+        match state.db.get_folder(fid).await {
+            Ok(Some(_)) => {}
+            Ok(None) => return err(StatusCode::BAD_REQUEST, "unknown folder"),
+            Err(e) => return internal_err(e),
+        }
     }
 
     let now = chrono::Utc::now().to_rfc3339();
@@ -196,6 +232,7 @@ async fn upsert(State(state): State<Arc<AppState>>, request: Request<Body>) -> R
             kdf_salt: Some(enc.kdf_salt_hex),
             encrypted: true,
             encrypted_by: Some(user_id.clone()),
+            folder_id: body.folder_id.clone(),
             created_at: now.clone(),
             updated_at: now,
         }
@@ -209,6 +246,7 @@ async fn upsert(State(state): State<Arc<AppState>>, request: Request<Body>) -> R
             kdf_salt: None,
             encrypted: false,
             encrypted_by: None,
+            folder_id: body.folder_id.clone(),
             created_at: now.clone(),
             updated_at: now,
         }
@@ -220,9 +258,10 @@ async fn upsert(State(state): State<Arc<AppState>>, request: Request<Body>) -> R
     }
 }
 
-/// DELETE /api/env-vars/{name} — 404 if it doesn't exist.
-async fn delete_var(State(state): State<Arc<AppState>>, Path(name): Path<String>) -> Response {
-    match state.db.delete_env_var(&name).await {
+/// DELETE /api/env-vars/{id} — by id, since a name is only unique per
+/// scope. 404 if it doesn't exist.
+async fn delete_var(State(state): State<Arc<AppState>>, Path(id): Path<String>) -> Response {
+    match state.db.delete_env_var(&id).await {
         Ok(true) => ok(),
         Ok(false) => err(StatusCode::NOT_FOUND, "not found"),
         Err(e) => internal_err(e),
@@ -279,7 +318,8 @@ async fn unlock_answer(State(state): State<Arc<AppState>>, request: Request<Body
     };
 
     // Decrypt every var: any failure means the password is wrong. Leave the
-    // request pending (no `resolve`) so the dialog can retry.
+    // request pending (no `resolve`) so the dialog can retry. Values are
+    // keyed by var id — names are only unique per scope.
     let mut values = HashMap::new();
     for v in vars {
         let (Some(ct), Some(nonce), Some(salt)) = (
@@ -291,7 +331,7 @@ async fn unlock_answer(State(state): State<Arc<AppState>>, request: Request<Body
         };
         match decrypt_value(&password, salt, nonce, ct) {
             Some(pt) => {
-                values.insert(v.name, pt);
+                values.insert(v.id, pt);
             }
             None => return err(StatusCode::FORBIDDEN, "wrong password"),
         }

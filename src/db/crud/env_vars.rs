@@ -29,31 +29,54 @@ impl Db {
         })
     }
 
-    /// Look up one var by its unique name.
-    pub async fn get_env_var(&self, name: &str) -> anyhow::Result<Option<EnvVar>> {
+    /// Look up one var by name within a scope (`None` = global).
+    pub async fn get_env_var(
+        &self,
+        name: &str,
+        folder_id: Option<&str>,
+    ) -> anyhow::Result<Option<EnvVar>> {
         let name = name.to_string();
+        let folder_id = folder_id.map(str::to_string);
         self.with_conn(move |conn| {
-            env_vars::table
+            let q = env_vars::table
                 .filter(env_vars::name.eq(&name))
-                .select(EnvVar::as_select())
-                .first(conn)
-                .optional()
-                .map_err(Into::into)
+                .select(EnvVar::as_select());
+            match &folder_id {
+                Some(fid) => q
+                    .filter(env_vars::folder_id.eq(fid))
+                    .first(conn)
+                    .optional()
+                    .map_err(Into::into),
+                None => q
+                    .filter(env_vars::folder_id.is_null())
+                    .first(conn)
+                    .optional()
+                    .map_err(Into::into),
+            }
         })
         .await
     }
 
-    /// Insert a var, or update the existing var with the same `name` in place
-    /// (keeping its `id` and `created_at`). All value/crypto columns are
-    /// overwritten from `new`, so flipping a var between plaintext and
-    /// encrypted clears the fields that no longer apply.
+    /// Insert a var, or update the existing var with the same
+    /// `(name, folder_id)` scope in place (keeping its `id` and
+    /// `created_at`). All value/crypto columns are overwritten from `new`,
+    /// so flipping a var between plaintext and encrypted clears the fields
+    /// that no longer apply.
     pub async fn upsert_env_var(&self, new: NewEnvVar) -> anyhow::Result<EnvVar> {
         self.with_conn(move |conn| {
-            let existing: Option<EnvVar> = env_vars::table
+            let base = env_vars::table
                 .filter(env_vars::name.eq(&new.name))
-                .select(EnvVar::as_select())
-                .first(conn)
-                .optional()?;
+                .select(EnvVar::as_select());
+            let existing: Option<EnvVar> = match &new.folder_id {
+                Some(fid) => base
+                    .filter(env_vars::folder_id.eq(fid))
+                    .first(conn)
+                    .optional()?,
+                None => base
+                    .filter(env_vars::folder_id.is_null())
+                    .first(conn)
+                    .optional()?,
+            };
             if let Some(existing) = existing {
                 let updated = EnvVar {
                     id: existing.id,
@@ -64,6 +87,7 @@ impl Db {
                     kdf_salt: new.kdf_salt,
                     encrypted: new.encrypted,
                     encrypted_by: new.encrypted_by,
+                    folder_id: existing.folder_id,
                     created_at: existing.created_at,
                     updated_at: new.updated_at,
                 };
@@ -89,6 +113,7 @@ impl Db {
                     kdf_salt: new.kdf_salt.clone(),
                     encrypted: new.encrypted,
                     encrypted_by: new.encrypted_by.clone(),
+                    folder_id: new.folder_id.clone(),
                     created_at: new.created_at.clone(),
                     updated_at: new.updated_at.clone(),
                 };
@@ -101,13 +126,24 @@ impl Db {
         .await
     }
 
-    /// Delete a var by name. Idempotent — `false` when nothing was removed.
-    pub async fn delete_env_var(&self, name: &str) -> anyhow::Result<bool> {
-        let name = name.to_string();
+    /// Delete a var by id (name alone is only unique per scope).
+    /// Idempotent — `false` when nothing was removed.
+    pub async fn delete_env_var(&self, id: &str) -> anyhow::Result<bool> {
+        let id = id.to_string();
         self.with_conn(move |conn| {
-            let count =
-                diesel::delete(env_vars::table.filter(env_vars::name.eq(&name))).execute(conn)?;
+            let count = diesel::delete(env_vars::table.find(&id)).execute(conn)?;
             Ok(count > 0)
+        })
+        .await
+    }
+
+    /// Drop every env var scoped to `folder_id` (folder-deletion cleanup).
+    pub async fn delete_env_vars_for_folder(&self, folder_id: &str) -> anyhow::Result<usize> {
+        let folder_id = folder_id.to_string();
+        self.with_conn(move |conn| {
+            diesel::delete(env_vars::table.filter(env_vars::folder_id.eq(&folder_id)))
+                .execute(conn)
+                .map_err(Into::into)
         })
         .await
     }

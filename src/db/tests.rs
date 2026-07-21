@@ -653,6 +653,33 @@ mod tests {
 
     // ── Env Vars ─────────────────────────────────────────────────────
 
+    fn plain_env_var(id: &str, name: &str, value: &str, folder_id: Option<&str>) -> NewEnvVar {
+        NewEnvVar {
+            id: id.into(),
+            name: name.into(),
+            value: Some(value.into()),
+            ciphertext: None,
+            nonce: None,
+            kdf_salt: None,
+            encrypted: false,
+            encrypted_by: None,
+            folder_id: folder_id.map(Into::into),
+            created_at: now(),
+            updated_at: now(),
+        }
+    }
+
+    async fn make_folder(db: &Db, id: &str) {
+        db.create_folder(NewFolder {
+            id: id.into(),
+            name: format!("Folder {id}"),
+            path: format!("/tmp/{id}"),
+            created_at: now(),
+        })
+        .await
+        .unwrap();
+    }
+
     #[tokio::test]
     async fn test_env_var_crud() {
         let db = test_db();
@@ -669,6 +696,7 @@ mod tests {
                 kdf_salt: None,
                 encrypted: false,
                 encrypted_by: None,
+                folder_id: None,
                 created_at: ts.clone(),
                 updated_at: ts.clone(),
             })
@@ -688,6 +716,7 @@ mod tests {
                 kdf_salt: Some("ss".into()),
                 encrypted: true,
                 encrypted_by: Some("u1".into()),
+                folder_id: None,
                 created_at: now(),
                 updated_at: now(),
             })
@@ -709,6 +738,7 @@ mod tests {
             kdf_salt: Some("ss2".into()),
             encrypted: true,
             encrypted_by: Some("u1".into()),
+            folder_id: None,
             created_at: now(),
             updated_at: now(),
         })
@@ -721,8 +751,8 @@ mod tests {
         assert_eq!(all[0].name, "API_HOST");
         assert_eq!(all[1].name, "TOKEN");
 
-        assert!(db.get_env_var("TOKEN").await.unwrap().is_some());
-        assert!(db.get_env_var("MISSING").await.unwrap().is_none());
+        assert!(db.get_env_var("TOKEN", None).await.unwrap().is_some());
+        assert!(db.get_env_var("MISSING", None).await.unwrap().is_none());
 
         let mine = db.list_env_vars_encrypted_by("u1").await.unwrap();
         assert_eq!(mine.len(), 2);
@@ -739,7 +769,7 @@ mod tests {
                 .await
                 .unwrap()
         );
-        let rotated = db.get_env_var("TOKEN").await.unwrap().unwrap();
+        let rotated = db.get_env_var("TOKEN", None).await.unwrap().unwrap();
         assert_eq!(rotated.ciphertext.as_deref(), Some("ct2b"));
         assert_eq!(rotated.nonce.as_deref(), Some("nn2b"));
         assert!(
@@ -748,9 +778,162 @@ mod tests {
                 .unwrap()
         );
 
-        assert!(db.delete_env_var("API_HOST").await.unwrap());
-        assert!(!db.delete_env_var("API_HOST").await.unwrap());
+        // Delete is by id (name alone is only unique per scope).
+        assert!(db.delete_env_var("e1").await.unwrap());
+        assert!(!db.delete_env_var("e1").await.unwrap());
         assert_eq!(db.list_env_vars().await.unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn test_env_var_folder_scope() {
+        let db = test_db();
+        make_folder(&db, "f1").await;
+
+        // Same name in global and folder scope are distinct rows.
+        db.upsert_env_var(plain_env_var("g1", "API_HOST", "global.example", None))
+            .await
+            .unwrap();
+        let scoped = db
+            .upsert_env_var(plain_env_var(
+                "s1",
+                "API_HOST",
+                "folder.example",
+                Some("f1"),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(scoped.folder_id.as_deref(), Some("f1"));
+        assert_eq!(db.list_env_vars().await.unwrap().len(), 2);
+
+        // Upsert within the folder scope updates in place.
+        let again = db
+            .upsert_env_var(plain_env_var(
+                "other",
+                "API_HOST",
+                "folder2.example",
+                Some("f1"),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(again.id, "s1");
+        assert_eq!(again.value.as_deref(), Some("folder2.example"));
+        assert_eq!(db.list_env_vars().await.unwrap().len(), 2);
+
+        // Scope-aware lookup.
+        let global = db.get_env_var("API_HOST", None).await.unwrap().unwrap();
+        assert_eq!(global.value.as_deref(), Some("global.example"));
+        let folder = db
+            .get_env_var("API_HOST", Some("f1"))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(folder.value.as_deref(), Some("folder2.example"));
+
+        // Folder cleanup drops scoped rows only.
+        assert_eq!(db.delete_env_vars_for_folder("f1").await.unwrap(), 1);
+        let left = db.list_env_vars().await.unwrap();
+        assert_eq!(left.len(), 1);
+        assert!(left[0].folder_id.is_none());
+    }
+
+    // ── Agent Vars ───────────────────────────────────────────────────
+
+    fn agent_var(id: &str, name: &str, value: &str, folder_id: Option<&str>) -> NewAgentVar {
+        NewAgentVar {
+            id: id.into(),
+            name: name.into(),
+            value: value.into(),
+            folder_id: folder_id.map(Into::into),
+            created_at: now(),
+            updated_at: now(),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_agent_var_crud_and_scope() {
+        let db = test_db();
+        make_folder(&db, "f1").await;
+        make_folder(&db, "f2").await;
+
+        let created = db
+            .upsert_agent_var(agent_var("a1", "GREETING", "hello", None))
+            .await
+            .unwrap();
+        assert_eq!(created.value, "hello");
+        db.upsert_agent_var(agent_var("a2", "GREETING", "bonjour", Some("f1")))
+            .await
+            .unwrap();
+        db.upsert_agent_var(agent_var("a3", "TARGET", "prod", Some("f1")))
+            .await
+            .unwrap();
+
+        // Upsert by (name, scope) updates in place, keeping id/created_at.
+        let updated = db
+            .upsert_agent_var(agent_var("ignored", "GREETING", "salut", Some("f1")))
+            .await
+            .unwrap();
+        assert_eq!(updated.id, "a2");
+        assert_eq!(updated.value, "salut");
+
+        assert_eq!(db.list_agent_vars().await.unwrap().len(), 3);
+
+        // Folder view: globals plus that folder's vars; f2 sees only globals.
+        let f1_vars = db.list_agent_vars_for_folder("f1").await.unwrap();
+        assert_eq!(f1_vars.len(), 3);
+        let f2_vars = db.list_agent_vars_for_folder("f2").await.unwrap();
+        assert_eq!(f2_vars.len(), 1);
+        assert!(f2_vars[0].folder_id.is_none());
+
+        // Scoped delete removes only the addressed row.
+        assert!(db.delete_agent_var("GREETING", Some("f1")).await.unwrap());
+        assert!(!db.delete_agent_var("GREETING", Some("f1")).await.unwrap());
+        let remaining = db.list_agent_vars().await.unwrap();
+        assert!(
+            remaining
+                .iter()
+                .any(|v| v.name == "GREETING" && v.folder_id.is_none())
+        );
+        assert_eq!(db.list_agent_vars().await.unwrap().len(), 2);
+
+        // Delete by id (Settings UI path).
+        assert!(db.delete_agent_var_by_id("a3").await.unwrap());
+        assert!(!db.delete_agent_var_by_id("a3").await.unwrap());
+
+        // Global delete via scope None.
+        assert!(db.delete_agent_var("GREETING", None).await.unwrap());
+        assert!(db.list_agent_vars().await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_folder_delete_cleans_scoped_vars() {
+        let db = test_db();
+        make_folder(&db, "f1").await;
+
+        db.upsert_env_var(plain_env_var("g1", "KEEP", "1", None))
+            .await
+            .unwrap();
+        db.upsert_env_var(plain_env_var("s1", "DROP", "1", Some("f1")))
+            .await
+            .unwrap();
+        db.upsert_agent_var(agent_var("a1", "KEEP", "1", None))
+            .await
+            .unwrap();
+        db.upsert_agent_var(agent_var("a2", "DROP", "1", Some("f1")))
+            .await
+            .unwrap();
+
+        use crate::db::crud::FolderEmptyDelete;
+        assert_eq!(
+            db.delete_folder_if_empty("f1").await.unwrap(),
+            FolderEmptyDelete::Deleted
+        );
+
+        let env_left = db.list_env_vars().await.unwrap();
+        assert_eq!(env_left.len(), 1);
+        assert_eq!(env_left[0].name, "KEEP");
+        let agent_left = db.list_agent_vars().await.unwrap();
+        assert_eq!(agent_left.len(), 1);
+        assert_eq!(agent_left[0].name, "KEEP");
     }
 
     // ── Auth Sessions ────────────────────────────────────────────────

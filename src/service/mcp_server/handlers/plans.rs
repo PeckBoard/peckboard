@@ -4,11 +4,9 @@ use super::super::McpToolRegistry;
 use crate::service::mcp_server::context::ToolCallContext;
 
 impl McpToolRegistry {
-    /// Save (or revise) the calling session's plan. Restricted to thinking
-    /// (reasoning) models — planning on a non-thinking model is refused to
-    /// avoid hallucinated designs. Available to workers and chats. The plan
-    /// lives in the `plans` table, so it survives model switches, agent
-    /// termination, and `clear_session`.
+    /// Save (or revise) the calling session's plan. Available to workers
+    /// and chats on any model. The plan lives in the `plans` table, so it
+    /// survives model switches, agent termination, and `clear_session`.
     pub(crate) async fn handle_propose_plan(
         &self,
         args: Value,
@@ -27,24 +25,11 @@ impl McpToolRegistry {
             .filter(|s| !s.is_empty())
             .unwrap_or("Plan");
 
-        let session = ctx
-            .db
+        // The session must exist — a plan row must never dangle.
+        ctx.db
             .get_session(&ctx.session_id)
             .await?
             .ok_or_else(|| anyhow::anyhow!("session not found"))?;
-
-        // Thinking-model gate. An unknown or missing model resolves to
-        // non-thinking, so planning is refused rather than risked.
-        let is_thinking = match (&session.model, &ctx.provider_registry) {
-            (Some(model), Some(reg)) => reg.is_thinking_model(model).await,
-            _ => false,
-        };
-        if !is_thinking {
-            anyhow::bail!(
-                "propose_plan is restricted to thinking (reasoning) models. Switch to a \
-                 thinking model (e.g. via switch_session_model) before proposing a plan."
-            );
-        }
 
         let plan = ctx
             .db

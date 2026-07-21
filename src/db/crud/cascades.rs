@@ -55,6 +55,10 @@ impl Db {
             // doesn't block the folder delete below.
             diesel::delete(repeating_tasks::table.filter(repeating_tasks::folder_id.eq(&id)))
                 .execute(conn)?;
+            // Scoped variables die with their folder.
+            diesel::delete(env_vars::table.filter(env_vars::folder_id.eq(&id))).execute(conn)?;
+            diesel::delete(agent_vars::table.filter(agent_vars::folder_id.eq(&id)))
+                .execute(conn)?;
             diesel::delete(folders::table.find(&id)).execute(conn)?;
             Ok(FolderEmptyDelete::Deleted)
         })
@@ -93,6 +97,10 @@ impl Db {
             // sessions.repeating_task_id FKs onto these tasks no longer
             // exist.
             diesel::delete(repeating_tasks::table.filter(repeating_tasks::folder_id.eq(&id)))
+                .execute(conn)?;
+            // Scoped variables die with their folder.
+            diesel::delete(env_vars::table.filter(env_vars::folder_id.eq(&id))).execute(conn)?;
+            diesel::delete(agent_vars::table.filter(agent_vars::folder_id.eq(&id)))
                 .execute(conn)?;
             let folder_deleted = diesel::delete(folders::table.find(&id)).execute(conn)?;
             if folder_deleted == 0 {

@@ -1,23 +1,19 @@
 import { useCallback, useEffect, useState } from 'react'
 import { authedFetch } from '../store/auth'
 import { useFoldersStore } from '../store/folders'
-import type { EnvVar } from '../types/api'
+import type { AgentVar } from '../types/api'
 
 /**
- * Settings section for user-defined environment variables injected into the
- * commands agents run — never into the agent process itself, and values
- * printed to console output are masked so the agent can't read them.
- * Plain vars show a masked value with a reveal toggle;
- * encrypted vars expose metadata only (the server never returns the
- * ciphertext), so editing one means entering a NEW value plus the owner's
- * password. "Lock now" drops the server's cache of decrypted values.
+ * Settings section for agent variables — shared key/value state agents read
+ * AND write via the list_variables / set_variable / delete_variable tools.
+ * Values are plain (never masked or encrypted); a folder-scoped variable
+ * shadows a global one with the same name. Secrets belong in Environment
+ * Variables, not here.
  */
-export default function EnvVarsSection() {
-  const [vars, setVars] = useState<EnvVar[] | null>(null)
+export default function AgentVarsSection() {
+  const [vars, setVars] = useState<AgentVar[] | null>(null)
   const [error, setError] = useState<string | null>(null)
-  const [revealed, setRevealed] = useState<Record<string, boolean>>({})
   const [deleting, setDeleting] = useState<string | null>(null)
-  const [locking, setLocking] = useState(false)
   const folders = useFoldersStore((s) => s.folders)
   const fetchFolders = useFoldersStore((s) => s.fetchFolders)
 
@@ -27,21 +23,19 @@ export default function EnvVarsSection() {
   const [editing, setEditing] = useState<string | null>(null)
   const [name, setName] = useState('')
   const [value, setValue] = useState('')
-  const [encrypt, setEncrypt] = useState(false)
-  const [password, setPassword] = useState('')
   const [folderId, setFolderId] = useState<string>('')
   const [formError, setFormError] = useState<string | null>(null)
   const [saving, setSaving] = useState(false)
 
   const load = useCallback(async () => {
     try {
-      const res = await authedFetch('/api/env-vars')
+      const res = await authedFetch('/api/agent-vars')
       if (!res.ok) throw new Error(`HTTP ${res.status}`)
-      const data = (await res.json()) as { vars: EnvVar[] }
+      const data = (await res.json()) as { vars: AgentVar[] }
       setVars(data.vars)
       setError(null)
     } catch {
-      setError('Could not load environment variables.')
+      setError('Could not load agent variables.')
       setVars([])
     }
   }, [])
@@ -49,17 +43,17 @@ export default function EnvVarsSection() {
   // Initial fetch on mount, matching the codebase's fetch-in-effect style.
   useEffect(() => {
     let cancelled = false
-    authedFetch('/api/env-vars')
+    authedFetch('/api/agent-vars')
       .then((res) => res.json().then((data) => ({ ok: res.ok, data })))
       .then(({ ok, data }) => {
         if (cancelled) return
         if (!ok) throw new Error('bad status')
-        setVars((data as { vars: EnvVar[] }).vars)
+        setVars((data as { vars: AgentVar[] }).vars)
         setError(null)
       })
       .catch(() => {
         if (cancelled) return
-        setError('Could not load environment variables.')
+        setError('Could not load agent variables.')
         setVars([])
       })
     return () => {
@@ -71,22 +65,19 @@ export default function EnvVarsSection() {
   useEffect(() => {
     void fetchFolders()
   }, [fetchFolders])
+
   const clearForm = () => {
     setEditing(null)
     setName('')
     setValue('')
-    setEncrypt(false)
-    setPassword('')
     setFolderId('')
     setFormError(null)
   }
 
-  const startEdit = (v: EnvVar) => {
+  const startEdit = (v: AgentVar) => {
     setEditing(v.name)
     setName(v.name)
-    setValue(v.encrypted ? '' : (v.value ?? ''))
-    setEncrypt(v.encrypted)
-    setPassword('')
+    setValue(v.value)
     setFolderId(v.folder_id ?? '')
     setFormError(null)
   }
@@ -96,22 +87,16 @@ export default function EnvVarsSection() {
     setSaving(true)
     setFormError(null)
     try {
-      const body: Record<string, unknown> = {
+      const body = {
         name: name.trim(),
         value,
-        encrypt,
         folder_id: folderId === '' ? null : folderId,
       }
-      if (encrypt) body.password = password
-      const res = await authedFetch('/api/env-vars', {
+      const res = await authedFetch('/api/agent-vars', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(body),
       })
-      if (res.status === 403) {
-        setFormError('Wrong password')
-        return
-      }
       if (!res.ok) {
         const d = (await res.json().catch(() => null)) as { error?: string } | null
         setFormError(d?.error ?? `Failed (${res.status}).`)
@@ -126,11 +111,11 @@ export default function EnvVarsSection() {
     }
   }
 
-  const remove = async (v: EnvVar) => {
+  const remove = async (v: AgentVar) => {
     setError(null)
     setDeleting(v.id)
     try {
-      const res = await authedFetch(`/api/env-vars/${encodeURIComponent(v.id)}`, {
+      const res = await authedFetch(`/api/agent-vars/${encodeURIComponent(v.id)}`, {
         method: 'DELETE',
       })
       if (!res.ok) throw new Error(`HTTP ${res.status}`)
@@ -143,72 +128,39 @@ export default function EnvVarsSection() {
     }
   }
 
-  const lockNow = async () => {
-    if (locking) return
-    setError(null)
-    setLocking(true)
-    try {
-      const res = await authedFetch('/api/env-vars/lock', { method: 'POST' })
-      if (!res.ok) throw new Error(`HTTP ${res.status}`)
-    } catch {
-      setError('Could not lock.')
-    } finally {
-      setLocking(false)
-    }
-  }
-
   return (
-    <section className="settings-section" data-testid="env-vars-section">
-      <h3>Environment Variables</h3>
+    <section className="settings-section" data-testid="agent-vars-section">
+      <h3>Agent Variables</h3>
       <p className="form-hint">
-        Injected into the commands agents run — never into the agent itself; secret values that show
-        up in console output are masked with ******** so the agent can&rsquo;t read them. Encrypted
-        variables are sealed with their owner&rsquo;s login password; a session that needs them
-        prompts the owner to unlock.
+        Variables agents can read <strong>and write</strong> via the <code>list_variables</code>,{' '}
+        <code>set_variable</code> and <code>delete_variable</code> tools. A folder-scoped variable
+        shadows a global one with the same name. Don&rsquo;t store secrets here — use Environment
+        Variables for secrets.
       </p>
 
       {error && <p className="settings-error">{error}</p>}
 
       {vars === null ? (
-        <p className="settings-loading">Loading environment variables...</p>
+        <p className="settings-loading">Loading agent variables...</p>
       ) : vars.length === 0 ? (
-        <p className="settings-loading">No environment variables yet. Add one below.</p>
+        <p className="settings-loading">No agent variables yet. Add one below.</p>
       ) : (
-        <ul className="env-var-list" aria-label="Environment variables">
+        <ul className="env-var-list" aria-label="Agent variables">
           {vars.map((v) => (
-            <li className="env-var-row" key={v.id} data-testid={`env-var-${v.name}`}>
+            <li className="env-var-row" key={v.id} data-testid={`agent-var-${v.name}`}>
               <div className="env-var-main">
                 <span className="env-var-name">{v.name}</span>
                 <span className={`env-var-scope${v.folder_id ? '' : ' env-var-scope--global'}`}>
                   {v.folder_name ?? 'Global'}
                 </span>
-                {v.encrypted ? (
-                  <span className="env-var-meta">
-                    <span aria-hidden>🔒</span> Encrypted with {v.encrypted_by_username ?? 'a user'}
-                    &rsquo;s password
-                  </span>
-                ) : (
-                  <span className="env-var-value">
-                    {revealed[v.id] ? (v.value ?? '') : '••••••••'}
-                  </span>
-                )}
+                <span className="env-var-value">{v.value}</span>
               </div>
               <div className="env-var-actions">
-                {!v.encrypted && (
-                  <button
-                    type="button"
-                    className="btn-secondary btn-sm"
-                    onClick={() => setRevealed((r) => ({ ...r, [v.id]: !r[v.id] }))}
-                    data-testid={`env-var-reveal-${v.name}`}
-                  >
-                    {revealed[v.id] ? 'Hide' : 'Reveal'}
-                  </button>
-                )}
                 <button
                   type="button"
                   className="btn-secondary btn-sm"
                   onClick={() => startEdit(v)}
-                  data-testid={`env-var-edit-${v.name}`}
+                  data-testid={`agent-var-edit-${v.name}`}
                 >
                   Edit
                 </button>
@@ -217,7 +169,7 @@ export default function EnvVarsSection() {
                   className="btn-secondary btn-sm"
                   onClick={() => void remove(v)}
                   disabled={deleting === v.id}
-                  data-testid={`env-var-delete-${v.name}`}
+                  data-testid={`agent-var-delete-${v.name}`}
                 >
                   {deleting === v.id ? 'Deleting…' : 'Delete'}
                 </button>
@@ -235,21 +187,15 @@ export default function EnvVarsSection() {
         }}
       >
         <h4>{editing ? `Edit ${editing}` : 'Add variable'}</h4>
-        {editing && encrypt && (
-          <p className="form-hint">
-            Encrypted values can&rsquo;t be shown — enter a new value and your password to replace
-            it.
-          </p>
-        )}
         <div className="form-field">
           <label className="form-label">Name</label>
           <input
             className="form-input"
             value={name}
             autoComplete="off"
-            placeholder="MY_VAR"
+            placeholder="my_var"
             onChange={(e) => setName(e.target.value)}
-            data-testid="env-var-name-input"
+            data-testid="agent-var-name-input"
           />
         </div>
         <div className="form-field">
@@ -259,7 +205,7 @@ export default function EnvVarsSection() {
             value={value}
             autoComplete="off"
             onChange={(e) => setValue(e.target.value)}
-            data-testid="env-var-value-input"
+            data-testid="agent-var-value-input"
           />
         </div>
         <div className="form-field">
@@ -268,7 +214,7 @@ export default function EnvVarsSection() {
             className="form-input"
             value={folderId}
             onChange={(e) => setFolderId(e.target.value)}
-            data-testid="env-var-scope-select"
+            data-testid="agent-var-scope-select"
           >
             <option value="">Global</option>
             {folders.map((f) => (
@@ -278,30 +224,6 @@ export default function EnvVarsSection() {
             ))}
           </select>
         </div>
-        <div className="form-field">
-          <label className="form-label env-var-encrypt-label">
-            <input
-              type="checkbox"
-              checked={encrypt}
-              onChange={(e) => setEncrypt(e.target.checked)}
-              data-testid="env-var-encrypt-checkbox"
-            />
-            Encrypt with my password
-          </label>
-        </div>
-        {encrypt && (
-          <div className="form-field">
-            <label className="form-label">Your password</label>
-            <input
-              className="form-input"
-              type="password"
-              value={password}
-              autoComplete="off"
-              onChange={(e) => setPassword(e.target.value)}
-              data-testid="env-var-password-input"
-            />
-          </div>
-        )}
         {formError && <p className="form-error">{formError}</p>}
         <div className="form-actions">
           {editing && (
@@ -312,28 +234,13 @@ export default function EnvVarsSection() {
           <button
             type="submit"
             className="btn-primary"
-            disabled={saving || name.trim().length === 0 || (encrypt && password.length === 0)}
-            data-testid="env-var-save-btn"
+            disabled={saving || name.trim().length === 0}
+            data-testid="agent-var-save-btn"
           >
             {saving ? 'Saving…' : editing ? 'Save' : 'Add'}
           </button>
         </div>
       </form>
-
-      <div className="env-var-lock">
-        <button
-          type="button"
-          className="btn-secondary"
-          onClick={() => void lockNow()}
-          disabled={locking}
-          data-testid="env-vars-lock-btn"
-        >
-          {locking ? 'Locking…' : 'Lock now'}
-        </button>
-        <p className="form-hint">
-          Clears unlocked values from server memory; sessions will prompt again.
-        </p>
-      </div>
     </section>
   )
 }

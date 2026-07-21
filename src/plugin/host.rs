@@ -2231,12 +2231,15 @@ pub(crate) fn exec_impl(
     );
 
     // Commands run WITH the custom env vars (Settings → Environment
-    // Variables) — plain always, encrypted while an owner's unlock cache is
-    // warm — layered over the inherited host env (custom wins on collision:
-    // user-configured beats ambient). The agent itself never gets these
-    // values: its own process env carries no custom vars, and any secret a
-    // command prints is masked below before the agent can read it.
-    let (inject_env, masker) = crate::service::secret_mask::command_env_blocking(db);
+    // Variables) visible to this folder — globals plus the folder's own,
+    // folder winning on a name collision; plain always, encrypted while an
+    // owner's unlock cache is warm — layered over the inherited host env
+    // (custom wins on collision: user-configured beats ambient). The agent
+    // itself never gets these values: its own process env carries no custom
+    // vars, and any secret a command prints is masked below before the
+    // agent can read it.
+    let (inject_env, masker) =
+        crate::service::secret_mask::command_env_blocking(db, inv.folder_id.as_deref());
     use std::process::{Command, Stdio};
     let mut child = match Command::new(command)
         .args(&req.args)
@@ -4815,7 +4818,11 @@ mod tests {
         }
     }
 
-    fn custom_var(name: &str, value: &str) -> crate::db::models::NewEnvVar {
+    fn custom_var(
+        name: &str,
+        value: &str,
+        folder_id: Option<&str>,
+    ) -> crate::db::models::NewEnvVar {
         let ts = chrono::Utc::now().to_rfc3339();
         crate::db::models::NewEnvVar {
             id: uuid::Uuid::new_v4().to_string(),
@@ -4826,6 +4833,7 @@ mod tests {
             kdf_salt: None,
             encrypted: false,
             encrypted_by: None,
+            folder_id: folder_id.map(Into::into),
             created_at: ts.clone(),
             updated_at: ts,
         }
@@ -4848,7 +4856,7 @@ mod tests {
     #[tokio::test]
     async fn exec_injects_custom_env_but_masks_its_value_in_output() {
         let (db, _dir) = exec_fixture().await;
-        db.upsert_env_var(custom_var("PB_TEST_SECRET", "supersecretvalue123"))
+        db.upsert_env_var(custom_var("PB_TEST_SECRET", "supersecretvalue123", None))
             .await
             .unwrap();
 
@@ -4888,20 +4896,22 @@ mod tests {
     async fn exec_injects_unlocked_encrypted_vars_and_masks_them() {
         let (db, _dir) = exec_fixture().await;
         let ts = chrono::Utc::now().to_rfc3339();
-        db.upsert_env_var(crate::db::models::NewEnvVar {
-            id: uuid::Uuid::new_v4().to_string(),
-            name: "PB_TEST_ENC".into(),
-            value: None,
-            ciphertext: Some("irrelevant".into()),
-            nonce: Some("irrelevant".into()),
-            kdf_salt: Some("irrelevant".into()),
-            encrypted: true,
-            encrypted_by: Some("owner-x".into()),
-            created_at: ts.clone(),
-            updated_at: ts,
-        })
-        .await
-        .unwrap();
+        let row = db
+            .upsert_env_var(crate::db::models::NewEnvVar {
+                id: uuid::Uuid::new_v4().to_string(),
+                name: "PB_TEST_ENC".into(),
+                value: None,
+                ciphertext: Some("irrelevant".into()),
+                nonce: Some("irrelevant".into()),
+                kdf_salt: Some("irrelevant".into()),
+                encrypted: true,
+                encrypted_by: Some("owner-x".into()),
+                folder_id: None,
+                created_at: ts.clone(),
+                updated_at: ts,
+            })
+            .await
+            .unwrap();
 
         // Seed the unlock cache through the process-global registry (first
         // set wins; use whichever instance is installed).
@@ -4910,13 +4920,53 @@ mod tests {
         ));
         let reg = crate::service::env_vars::global_registry().unwrap();
         let mut vals = std::collections::HashMap::new();
-        vals.insert("PB_TEST_ENC".to_string(), "unlockedsecret4321".to_string());
+        // The unlock cache is keyed by var id (names are only unique per
+        // scope).
+        vals.insert(row.id.clone(), "unlockedsecret4321".to_string());
         reg.cache_put("owner-x", vals).await;
 
         let v = exec_sh(&db, "echo len=${#PB_TEST_ENC}; echo $PB_TEST_ENC").await;
         let stdout = v["stdout"].as_str().unwrap();
         assert!(stdout.contains("len=18"), "stdout: {stdout}");
         assert!(!stdout.contains("unlockedsecret4321"), "stdout: {stdout}");
+        assert!(stdout.contains("********"), "stdout: {stdout}");
+    }
+
+    #[tokio::test]
+    async fn exec_folder_var_shadows_global_and_foreign_folder_masked() {
+        let (db, _dir) = exec_fixture().await;
+        // Global + same-name var in the caller's folder ("fx", from
+        // `exec_inv`) + a var scoped to some other folder.
+        db.upsert_env_var(custom_var("PB_TEST_SCOPED", "globalvalue123456789", None))
+            .await
+            .unwrap();
+        db.upsert_env_var(custom_var("PB_TEST_SCOPED", "fldrvalue4321", Some("fx")))
+            .await
+            .unwrap();
+        db.upsert_env_var(custom_var(
+            "PB_TEST_FOREIGN",
+            "foreignsecret555777",
+            Some("other-folder"),
+        ))
+        .await
+        .unwrap();
+
+        // The folder value (len 13) wins over the global (len 20); the
+        // foreign folder's var is not injected at all.
+        let v = exec_sh(
+            &db,
+            "echo len=${#PB_TEST_SCOPED}; echo foreign=${PB_TEST_FOREIGN:-unset}",
+        )
+        .await;
+        let stdout = v["stdout"].as_str().unwrap();
+        assert!(stdout.contains("len=13"), "stdout: {stdout}");
+        assert!(stdout.contains("foreign=unset"), "stdout: {stdout}");
+
+        // Even a var another folder owns stays masked if its value ever
+        // shows up in output.
+        let v = exec_sh(&db, "echo foreignsecret555777").await;
+        let stdout = v["stdout"].as_str().unwrap();
+        assert!(!stdout.contains("foreignsecret555777"), "stdout: {stdout}");
         assert!(stdout.contains("********"), "stdout: {stdout}");
     }
 }

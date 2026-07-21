@@ -1,6 +1,7 @@
 //! Inherent `impl Db` blocks for each entity, grouped one module per entity.
 //! All methods land on `Db` regardless of which submodule defines them.
 
+mod agent_vars;
 mod announcements;
 mod auth_sessions;
 mod cards;

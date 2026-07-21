@@ -88,6 +88,7 @@ pub fn pre_hatcher_allowed_tool_names() -> &'static [&'static str] {
         "parse_web",
         "search_web",
         "pre_hatch_result",
+        "list_variables",
     ]
 }
 
@@ -174,7 +175,7 @@ pub(super) fn tool_definitions() -> Vec<McpToolDef> {
         },
         McpToolDef {
             name: "propose_plan".into(),
-            description: "Save (or revise) your plan for the current work as Markdown (may include ```mermaid diagrams and other visuals). Restricted to thinking models. The plan persists across model switches, termination, and session clears, and is viewable from the 3-dots menu. Call again to revise it (bumps the version).".into(),
+            description: "Save (or revise) your plan for the current work as Markdown (may include ```mermaid diagrams and other visuals). The plan persists across model switches, termination, and session clears, and is viewable from the 3-dots menu. Call again to revise it (bumps the version).".into(),
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
@@ -1500,6 +1501,42 @@ pub(super) fn tool_definitions() -> Vec<McpToolDef> {
                     "page_id": { "type": "string", "description": "From browser_open." }
                 },
                 "required": ["page_id"]
+            }),
+        },
+        McpToolDef {
+            name: "list_variables".into(),
+            description: "List agent variables visible to this session: globals plus this folder's, a folder variable shadowing a global one with the same name. Full values included — agent variables are shared, non-secret state managed by agents (set_variable / delete_variable) and users (Settings → Agent Variables).".into(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {},
+                "additionalProperties": false
+            }),
+        },
+        McpToolDef {
+            name: "set_variable".into(),
+            description: "Create or update an agent variable (upsert by name within a scope). scope 'folder' (default) = this session's folder; 'global' = shared across all folders. A folder variable shadows a global one with the same name. Values are plain text visible to users and other agents — NEVER store secrets here (Settings → Environment Variables is for secrets).".into(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "name": { "type": "string", "description": "Variable name, ^[A-Za-z_][A-Za-z0-9_]*$, max 128 chars." },
+                    "value": { "type": "string", "description": "Value to store (max 32 KB)." },
+                    "scope": { "type": "string", "enum": ["folder", "global"], "description": "Where to write: 'folder' (default) = this session's folder, 'global' = all folders." }
+                },
+                "required": ["name", "value"],
+                "additionalProperties": false
+            }),
+        },
+        McpToolDef {
+            name: "delete_variable".into(),
+            description: "Delete an agent variable by name from a scope: 'folder' (default) = this session's folder, 'global' = the shared global scope.".into(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "name": { "type": "string", "description": "Variable name to delete." },
+                    "scope": { "type": "string", "enum": ["folder", "global"], "description": "Scope to delete from (default 'folder')." }
+                },
+                "required": ["name"],
+                "additionalProperties": false
             }),
         },
     ]

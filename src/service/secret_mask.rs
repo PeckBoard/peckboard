@@ -15,7 +15,7 @@
 //! bounds here keep honest output readable while closing the stated leaks.
 
 use std::borrow::Cow;
-use std::collections::{BTreeMap, HashSet};
+use std::collections::BTreeMap;
 
 /// What a masked secret is replaced with. Fixed width so the mask reveals
 /// neither the value nor its length.
@@ -245,15 +245,21 @@ pub fn mask_console_fields(v: &mut serde_json::Value, masker: &SecretMasker) {
 /// Assemble what a command child process needs: the env vars to inject and
 /// the masker for its console output.
 ///
-/// - inject: every custom env var (Settings → Environment Variables) — plain
-///   values from the DB, encrypted values from the unlock cache while an
-///   owner's unlock is warm. Layered over the inherited host env by the
-///   caller (custom wins on collision: user-configured beats ambient).
-/// - masker: every injected value, plus host env values whose NAME is
+/// - inject: every custom env var (Settings → Environment Variables) visible
+///   to `folder_id` — globals plus that folder's own vars, a folder var
+///   shadowing a global one with the same name. Plain values come from the
+///   DB, encrypted values from the unlock cache while an owner's unlock is
+///   warm. Layered over the inherited host env by the caller (custom wins on
+///   collision: user-configured beats ambient).
+/// - masker: every resolvable value from EVERY scope (output must not leak
+///   another folder's secret either), plus host env values whose NAME is
 ///   sensitive ([`is_sensitive_env_name`]).
 ///
 /// Blocking (DB + lock) — call from a blocking thread only.
-pub fn command_env_blocking(db: &crate::db::Db) -> (Vec<(String, String)>, SecretMasker) {
+pub fn command_env_blocking(
+    db: &crate::db::Db,
+    folder_id: Option<&str>,
+) -> (Vec<(String, String)>, SecretMasker) {
     let rows = match db.list_env_vars_blocking() {
         Ok(rows) => rows,
         Err(e) => {
@@ -261,26 +267,31 @@ pub fn command_env_blocking(db: &crate::db::Db) -> (Vec<(String, String)>, Secre
             Vec::new()
         }
     };
-    let mut inject: BTreeMap<String, String> = BTreeMap::new();
-    let mut encrypted_names: HashSet<&str> = HashSet::new();
-    for r in &rows {
-        if r.encrypted {
-            encrypted_names.insert(r.name.as_str());
-        } else if let Some(v) = &r.value {
-            inject.insert(r.name.clone(), v.clone());
-        }
-    }
-    if !encrypted_names.is_empty() {
-        for (name, value) in crate::service::env_vars::unlocked_values_blocking() {
-            // The cache may hold values for since-deleted vars; only rows
-            // that still exist as encrypted vars are injected.
-            if encrypted_names.contains(name.as_str()) {
-                inject.insert(name, value);
-            }
-        }
-    }
+    // Unlocked encrypted values, var id → plaintext. Keyed by id because
+    // names are only unique per scope. Stale cache entries for since-deleted
+    // vars never match a row, so they are neither injected nor masked.
+    let unlocked = crate::service::env_vars::unlocked_values_blocking();
 
-    let mut secrets: Vec<String> = inject.values().cloned().collect();
+    let mut global: BTreeMap<String, String> = BTreeMap::new();
+    let mut folder: BTreeMap<String, String> = BTreeMap::new();
+    let mut secrets: Vec<String> = Vec::new();
+    for r in &rows {
+        let value = if r.encrypted {
+            unlocked.get(&r.id).cloned()
+        } else {
+            r.value.clone()
+        };
+        let Some(value) = value else { continue };
+        secrets.push(value.clone());
+        if r.folder_id.is_none() {
+            global.insert(r.name.clone(), value);
+        } else if folder_id.is_some() && r.folder_id.as_deref() == folder_id {
+            folder.insert(r.name.clone(), value);
+        }
+    }
+    let mut inject = global;
+    inject.extend(folder);
+
     for (name, value) in std::env::vars() {
         if is_sensitive_env_name(&name) {
             secrets.push(value);
@@ -289,11 +300,11 @@ pub fn command_env_blocking(db: &crate::db::Db) -> (Vec<(String, String)>, Secre
     (inject.into_iter().collect(), SecretMasker::new(secrets))
 }
 
-/// The console masker alone (custom env values + sensitive host env), for
-/// output paths that don't spawn a local child (e.g. remote `ssh_run`
-/// output). Blocking — call from a blocking thread only.
+/// The console masker alone (custom env values from every scope + sensitive
+/// host env), for output paths that don't spawn a local child (e.g. remote
+/// `ssh_run` output). Blocking — call from a blocking thread only.
 pub fn masker_blocking(db: &crate::db::Db) -> SecretMasker {
-    command_env_blocking(db).1
+    command_env_blocking(db, None).1
 }
 
 #[cfg(test)]

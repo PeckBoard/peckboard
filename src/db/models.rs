@@ -905,7 +905,9 @@ pub struct NewSystemPrompt {
 /// which also masks secret values out of console output). Either
 /// plaintext (`value` set, `encrypted = false`) or encrypted with a user's
 /// login password (`ciphertext`/`nonce`/`kdf_salt` set, `encrypted = true`,
-/// `encrypted_by` = the unlocking user's id). `name` is unique.
+/// `encrypted_by` = the unlocking user's id). Scoped by `folder_id` (NULL =
+/// global); `name` is unique per scope, and a folder var shadows a global
+/// one with the same name for sessions in that folder.
 #[derive(Queryable, Selectable, Serialize, Debug, Clone)]
 #[diesel(table_name = env_vars)]
 pub struct EnvVar {
@@ -917,6 +919,7 @@ pub struct EnvVar {
     pub kdf_salt: Option<String>,
     pub encrypted: bool,
     pub encrypted_by: Option<String>,
+    pub folder_id: Option<String>,
     pub created_at: String,
     pub updated_at: String,
 }
@@ -932,10 +935,41 @@ pub struct NewEnvVar {
     pub kdf_salt: Option<String>,
     pub encrypted: bool,
     pub encrypted_by: Option<String>,
+    pub folder_id: Option<String>,
     pub created_at: String,
     pub updated_at: String,
 }
 
+// ── Agent Vars ───────────────────────────────────
+
+/// A user-defined agent variable: plain name/value state agents read AND
+/// write via the MCP tools (`list_variables` / `set_variable` /
+/// `delete_variable`) and users manage in Settings. Scoped by `folder_id`
+/// (NULL = global); `name` is unique per scope, and a folder var shadows a
+/// global one with the same name. Never injected into command environments
+/// and never encrypted — values are agent-readable by design, so they must
+/// not hold secrets.
+#[derive(Queryable, Selectable, Serialize, Debug, Clone)]
+#[diesel(table_name = agent_vars)]
+pub struct AgentVar {
+    pub id: String,
+    pub name: String,
+    pub value: String,
+    pub folder_id: Option<String>,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+#[derive(Insertable, Debug)]
+#[diesel(table_name = agent_vars)]
+pub struct NewAgentVar {
+    pub id: String,
+    pub name: String,
+    pub value: String,
+    pub folder_id: Option<String>,
+    pub created_at: String,
+    pub updated_at: String,
+}
 // ── Plans ────────────────────────────────────────
 
 /// A durable plan authored by a session. Survives model switches,

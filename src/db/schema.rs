@@ -356,6 +356,17 @@ diesel::table! {
         kdf_salt -> Nullable<Text>,
         encrypted -> Bool,
         encrypted_by -> Nullable<Text>,
+        folder_id -> Nullable<Text>,
+        created_at -> Text,
+        updated_at -> Text,
+    }
+}
+diesel::table! {
+    agent_vars (id) {
+        id -> Text,
+        name -> Text,
+        value -> Text,
+        folder_id -> Nullable<Text>,
         created_at -> Text,
         updated_at -> Text,
     }
@@ -410,6 +421,8 @@ diesel::joinable!(repeating_tasks -> folders (folder_id));
 diesel::joinable!(project_workflow_instructions -> projects (project_id));
 diesel::joinable!(pm_decisions -> projects (project_id));
 diesel::joinable!(usage_events -> sessions (session_id));
+diesel::joinable!(env_vars -> folders (folder_id));
+diesel::joinable!(agent_vars -> folders (folder_id));
 
 diesel::joinable!(user_tabs -> users (user_id));
 
@@ -440,5 +453,6 @@ diesel::allow_tables_to_appear_in_same_query!(
     system_prompts,
     plans,
     env_vars,
+    agent_vars,
     plan_comments,
 );

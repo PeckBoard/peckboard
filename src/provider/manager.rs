@@ -402,6 +402,7 @@ impl SessionManager {
             db,
             broadcaster,
             session_id,
+            &session.folder_id,
             session.repeating_task_id.is_some(),
         )
         .await;
@@ -453,12 +454,15 @@ impl SessionManager {
     /// headless (worker / repeating / pre-hatcher) session is skipped
     /// silently. Never fails or delays the spawn: any db error logs a warn
     /// and skips. Decrypted values are never logged, broadcast, or persisted.
+    /// Only vars visible to the session's folder (global + its own) are
+    /// considered — no prompting for other folders' secrets.
     async fn warm_env_unlock_cache(
         &self,
         final_config: &SpawnConfig,
         db: &Db,
         broadcaster: &Arc<Broadcaster>,
         session_id: &str,
+        folder_id: &str,
         is_repeating: bool,
     ) {
         let Some(registry) = &self.env_unlock else {
@@ -475,13 +479,15 @@ impl SessionManager {
         // Encrypted vars, grouped by the owner who can unlock them.
         let mut owners: HashMap<String, Vec<String>> = HashMap::new();
         for row in &rows {
-            if row.encrypted {
-                if let Some(owner) = &row.encrypted_by {
-                    owners
-                        .entry(owner.clone())
-                        .or_default()
-                        .push(row.name.clone());
-                }
+            let visible = row.folder_id.is_none() || row.folder_id.as_deref() == Some(folder_id);
+            if row.encrypted
+                && visible
+                && let Some(owner) = &row.encrypted_by
+            {
+                owners
+                    .entry(owner.clone())
+                    .or_default()
+                    .push(row.name.clone());
             }
         }
         if owners.is_empty() {

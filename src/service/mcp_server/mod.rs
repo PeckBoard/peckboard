@@ -86,6 +86,9 @@ impl McpToolRegistry {
             "create_project" => self.handle_create_project(args, ctx).await,
             "create_folder" => self.handle_create_folder(args, ctx).await,
             "list_folders" => self.handle_list_folders(ctx).await,
+            "list_variables" => self.handle_list_variables(ctx).await,
+            "set_variable" => self.handle_set_variable(args, ctx).await,
+            "delete_variable" => self.handle_delete_variable(args, ctx).await,
             "pause_project" => self.handle_pause_project(args, ctx).await,
             "resume_project" => self.handle_resume_project(args, ctx).await,
             "delete_project" => self.handle_delete_project(args, ctx).await,
@@ -476,7 +479,11 @@ mod tests {
         assert!(names.contains(&"propose_plan"));
         assert!(names.contains(&"delete_plan"));
         assert!(names.contains(&"spawn_subagent"));
-        assert_eq!(names.len(), 70);
+        // Agent variables (shared, folder- or global-scoped state).
+        assert!(names.contains(&"list_variables"));
+        assert!(names.contains(&"set_variable"));
+        assert!(names.contains(&"delete_variable"));
+        assert_eq!(names.len(), 73);
     }
 
     #[test]
@@ -509,6 +516,111 @@ mod tests {
             .await;
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("unknown tool"));
+    }
+
+    #[tokio::test]
+    async fn test_variable_tools_roundtrip() {
+        let registry = McpToolRegistry::new();
+        let db = Arc::new(crate::db::Db::in_memory().unwrap());
+        let ctx = ToolCallContext {
+            session_id: "s1".into(),
+            project_id: None,
+            card_id: None,
+            db,
+            broadcaster: crate::ws::broadcaster::Broadcaster::new(),
+            provider_registry: None,
+            data_dir: None,
+            folder_id: "f1".into(),
+        };
+
+        // Global GREETING, folder GREETING (default scope), global TARGET.
+        registry
+            .handle_tool_call(
+                "set_variable",
+                serde_json::json!({"name": "GREETING", "value": "hello", "scope": "global"}),
+                &ctx,
+            )
+            .await
+            .unwrap();
+        registry
+            .handle_tool_call(
+                "set_variable",
+                serde_json::json!({"name": "GREETING", "value": "bonjour"}),
+                &ctx,
+            )
+            .await
+            .unwrap();
+        registry
+            .handle_tool_call(
+                "set_variable",
+                serde_json::json!({"name": "TARGET", "value": "prod", "scope": "global"}),
+                &ctx,
+            )
+            .await
+            .unwrap();
+
+        // Effective list: folder GREETING shadows the global one.
+        let out = registry
+            .handle_tool_call("list_variables", serde_json::json!({}), &ctx)
+            .await
+            .unwrap();
+        assert_eq!(out["count"], 2);
+        let vars = out["variables"].as_array().unwrap().clone();
+        let greeting = vars.iter().find(|v| v["name"] == "GREETING").unwrap();
+        assert_eq!(greeting["value"], "bonjour");
+        assert_eq!(greeting["scope"], "folder");
+
+        // Invalid names and scopes are rejected.
+        assert!(
+            registry
+                .handle_tool_call(
+                    "set_variable",
+                    serde_json::json!({"name": "bad name", "value": "x"}),
+                    &ctx,
+                )
+                .await
+                .is_err()
+        );
+        assert!(
+            registry
+                .handle_tool_call(
+                    "set_variable",
+                    serde_json::json!({"name": "OK", "value": "x", "scope": "galaxy"}),
+                    &ctx,
+                )
+                .await
+                .is_err()
+        );
+
+        // Deleting the folder copy unshadows the global.
+        let del = registry
+            .handle_tool_call(
+                "delete_variable",
+                serde_json::json!({"name": "GREETING"}),
+                &ctx,
+            )
+            .await
+            .unwrap();
+        assert_eq!(del["status"], "ok");
+        let out = registry
+            .handle_tool_call("list_variables", serde_json::json!({}), &ctx)
+            .await
+            .unwrap();
+        let vars = out["variables"].as_array().unwrap().clone();
+        let greeting = vars.iter().find(|v| v["name"] == "GREETING").unwrap();
+        assert_eq!(greeting["value"], "hello");
+        assert_eq!(greeting["scope"], "global");
+
+        // Idempotent delete reports not_found.
+        let del = registry
+            .handle_tool_call(
+                "delete_variable",
+                serde_json::json!({"name": "GREETING"}),
+                &ctx,
+            )
+            .await
+            .unwrap();
+        assert_eq!(del["status"], "not_found");
     }
 
     /// `upgrade_plugin` is intercepted by `dispatch_tool_call` (not the core

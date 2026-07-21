@@ -35,7 +35,8 @@ pub const UNLOCK_CACHE_TTL_SECS: u64 = 30 * 60;
 /// caller gives up. 2 minutes.
 pub const UNLOCK_ANSWER_TIMEOUT_SECS: u64 = 120;
 
-/// The decrypted contents of an unlock: var name → plaintext value.
+/// The decrypted contents of an unlock: var id → plaintext value. Keyed by
+/// id because names are only unique per scope (global vs per-folder).
 type ValueMap = HashMap<String, String>;
 
 /// Ciphertext + the public inputs needed to reproduce the key and decrypt.
@@ -250,8 +251,8 @@ impl EnvUnlockRegistry {
     }
 
     /// Blocking snapshot of every owner's unexpired cached plaintexts,
-    /// merged name → value (names are unique DB-wide, so a var appears at
-    /// most once). Purges expired entries as a side effect. Uses
+    /// merged var id → value (ids are unique DB-wide, so a value appears
+    /// at most once). Purges expired entries as a side effect. Uses
     /// `Mutex::blocking_lock` — callable only OUTSIDE the async runtime's
     /// worker threads (the blocking command-exec path qualifies).
     pub fn all_cached_values_blocking(&self) -> HashMap<String, String> {
@@ -286,7 +287,7 @@ pub(crate) fn global_registry() -> Option<Arc<EnvUnlockRegistry>> {
     GLOBAL_REGISTRY.get().cloned()
 }
 
-/// Every unlocked (cached) encrypted env var value, name → plaintext, from
+/// Every unlocked (cached) encrypted env var value, var id → plaintext, from
 /// the process-global registry. Empty when no registry is bound or nothing
 /// is unlocked. Blocking — call from a blocking thread only.
 pub fn unlocked_values_blocking() -> HashMap<String, String> {

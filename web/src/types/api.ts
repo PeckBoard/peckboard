@@ -182,7 +182,23 @@ export interface EnvVar {
   encrypted: boolean
   encrypted_by: string | null
   encrypted_by_username: string | null
+  folder_id: string | null
+  folder_name: string | null
   value: string | null
+  created_at: string
+  updated_at: string
+}
+
+/** One agent-managed variable: agents read AND write these via the
+ *  list_variables / set_variable / delete_variable tools. Values are plain
+ *  (not secret); a folder-scoped row shadows a global one with the same
+ *  name. */
+export interface AgentVar {
+  id: string
+  name: string
+  value: string
+  folder_id: string | null
+  folder_name: string | null
   created_at: string
   updated_at: string
 }
