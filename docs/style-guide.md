@@ -66,7 +66,7 @@ graph TD
 
 ## Images
 
-Screenshots live in `assets/screenshots/`, named in kebab-case after what they show (`kanban-board.png`, not `screenshot-1.png`). Give every image alt text that describes the state on screen, not the filename. Embed with the `relative_url` filter so links survive the site's `/peckboard` baseurl in production and the empty baseurl in local preview:
+Screenshots live in `assets/screenshots/`, named in kebab-case after what they show (`kanban-board.png`, not `screenshot-1.png`). Give every image alt text that describes the state on screen, not the filename. Embed with the `relative_url` filter so links keep working if the site's `baseurl` ever changes — it is empty today, with the site served from the root of <https://peckboard.com>:
 
 {% raw %}
 

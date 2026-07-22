@@ -4,8 +4,9 @@ import { defineConfig } from '@playwright/test'
  * Playwright config for the public docs site (docs/ → Jekyll → docs/_site).
  *
  * Unlike the app e2e config this does not boot the peckboard binary; it
- * serves the prebuilt static site under the production /peckboard baseurl
- * via e2e/docs/serve.mjs. Build the site first (see that file's header),
+ * serves the prebuilt static site from the root — matching production at
+ * https://peckboard.com/ — via e2e/docs/serve.mjs. Build the site first
+ * (see that file's header),
  * then: npm run e2e:docs
  */
 const PORT = process.env.DOCS_E2E_PORT ?? '4448'
@@ -17,12 +18,12 @@ export default defineConfig({
   retries: 0,
   reporter: process.env.CI ? 'github' : 'list',
   use: {
-    baseURL: `http://127.0.0.1:${PORT}/peckboard/`,
+    baseURL: `http://127.0.0.1:${PORT}/`,
     trace: 'on-first-retry',
   },
   webServer: {
     command: 'node docs/serve.mjs',
-    url: `http://127.0.0.1:${PORT}/peckboard/`,
+    url: `http://127.0.0.1:${PORT}/`,
     reuseExistingServer: !process.env.CI,
     timeout: 15_000,
     stdout: 'pipe',

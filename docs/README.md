@@ -14,13 +14,12 @@ Requires Ruby 3.x with Bundler (e.g. `brew install ruby`).
 ```bash
 cd docs
 bundle install
-bundle exec jekyll serve --baseurl ""
+bundle exec jekyll serve
 ```
 
-Then open <http://127.0.0.1:4000/>.
-
-The `--baseurl ""` flag overrides the production `baseurl: "/peckboard"`
-so links work at the local server root.
+Then open <http://127.0.0.1:4000/>. The site's `baseurl` is empty (it
+is served from the root of <https://peckboard.com/>), so no override is
+needed locally.
 
 ## Build Without Ruby (Docker)
 
@@ -34,8 +33,8 @@ docker run --rm -v "$PWD:/github/workspace" -w /github/workspace \
   ghcr.io/actions/jekyll-build-pages:v1.0.13
 ```
 
-Output lands in `docs/_site/` with the production `/peckboard` baseurl
-baked in.
+Output lands in `docs/_site/`, ready to serve from the domain root —
+`baseurl` is empty.
 
 ## Rendering Tests
 
@@ -65,20 +64,21 @@ Output lands in `docs/_site/` (gitignored).
 on every push to `main` that touches `docs/**` (or via manual
 `workflow_dispatch`). No `gh-pages` branch is involved.
 
-### One-Time Manual Step: Enable GitHub Pages
+The published site is <https://peckboard.com/> — a custom domain set in
+Settings → Pages (source: **GitHub Actions**, i.e.
+`build_type=workflow`), with HTTPS enforced and DNS fronted by
+Cloudflare.
 
-The repo's Pages source must be set to **GitHub Actions** before the
-deploy job can succeed:
+### If the Site Suddenly Shows a Rendered README
+
+That is GitHub's legacy branch build (the `pages build and deployment`
+workflow) having deployed a Jekyll render of the repository root over
+the docs artifact; it can fire when Pages settings change. Confirm the
+source is still GitHub Actions —
 
 ```bash
-gh api repos/PeckBoard/peckboard/pages -X POST -f build_type=workflow
+gh api repos/PeckBoard/peckboard/pages -X PUT -F build_type=workflow
 ```
 
-(or Settings → Pages → Source → "GitHub Actions" in the web UI).
-
-**Note:** GitHub Pages is not available for private repositories on
-the free plan, so this step is deferred until the owner makes the repo
-public. Until then the workflow fails at the "Setup Pages" step — this
-is expected. No code change is needed when the repo goes public: enable
-Pages with the command above and the workflow starts succeeding
-automatically on the next push to `main`.
+— then re-run the "Deploy Docs to GitHub Pages" workflow to put the
+docs artifact back.

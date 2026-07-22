@@ -1,7 +1,7 @@
 title: PeckBoard
 description: A remote control panel that spawns Claude Code agents and orchestrates multi-agent workflows on a kanban board.
-baseurl: "/peckboard"
-url: "https://peckboard.github.io"
+baseurl: ""
+url: "https://peckboard.com"
 
 remote_theme: just-the-docs/just-the-docs
 plugins:
@@ -25,4 +25,3 @@ exclude:
   - frontend/
   - tasks/
   - proposals/
-  - tasks/

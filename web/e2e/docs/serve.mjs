@@ -1,8 +1,9 @@
-// Static server for the built docs site (docs/_site), mounted under the
-// production baseurl /peckboard so relative_url-generated links resolve
-// exactly as they will on GitHub Pages. Build the site first:
+// Static server for the built docs site (docs/_site), served from the
+// root — matching production, where the site lives at the root of
+// https://peckboard.com/ with an empty baseurl. Build the site first:
 //   docker run --rm -v "$PWD:/github/workspace" -w /github/workspace \
 //     -e INPUT_SOURCE=./docs -e INPUT_DESTINATION=./docs/_site \
+//     -e GITHUB_WORKSPACE=/github/workspace \
 //     ghcr.io/actions/jekyll-build-pages:v1.0.13
 import { createServer } from 'node:http'
 import { existsSync, statSync, createReadStream } from 'node:fs'
@@ -11,7 +12,6 @@ import { fileURLToPath } from 'node:url'
 
 const SITE = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../../../docs/_site')
 const PORT = Number(process.env.DOCS_E2E_PORT ?? '4448')
-const BASE = '/peckboard'
 
 if (!existsSync(path.join(SITE, 'index.html'))) {
   console.error(`docs site not built: ${SITE}/index.html missing — run the Jekyll build first`)
@@ -38,16 +38,7 @@ const MIME = {
 
 createServer((req, res) => {
   const url = new URL(req.url, `http://127.0.0.1:${PORT}`)
-  let p = decodeURIComponent(url.pathname)
-  if (p === '/' || p === BASE) {
-    res.writeHead(302, { location: `${BASE}/` })
-    return res.end()
-  }
-  if (!p.startsWith(`${BASE}/`)) {
-    res.writeHead(404)
-    return res.end('outside baseurl')
-  }
-  p = p.slice(BASE.length)
+  const p = decodeURIComponent(url.pathname)
   let file = path.normalize(path.join(SITE, p))
   if (!file.startsWith(SITE)) {
     res.writeHead(403)
@@ -61,5 +52,5 @@ createServer((req, res) => {
   res.writeHead(200, { 'content-type': MIME[path.extname(file)] ?? 'application/octet-stream' })
   createReadStream(file).pipe(res)
 }).listen(PORT, '127.0.0.1', () => {
-  console.log(`docs site at http://127.0.0.1:${PORT}${BASE}/`)
+  console.log(`docs site at http://127.0.0.1:${PORT}/`)
 })

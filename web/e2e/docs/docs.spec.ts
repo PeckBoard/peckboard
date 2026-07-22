@@ -1,8 +1,8 @@
 import { test, expect } from '@playwright/test'
 
 /**
- * Rendering checks for the public docs site, served from docs/_site under
- * the production /peckboard baseurl (see serve.mjs). Every page must
+ * Rendering checks for the public docs site, served from docs/_site at
+ * the root — matching production at https://peckboard.com/. Every page must
  * render with its title and sidebar, internal links and images must
  * resolve, Mermaid diagrams must render to SVG, and collapsible blocks
  * must toggle.
