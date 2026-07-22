@@ -1,6 +1,6 @@
 ---
 title: Style Guide
-nav_order: 7
+nav_order: 8
 ---
 
 # Style Guide
@@ -18,10 +18,9 @@ Use an HTML `<details>` element with a `<summary>` line, and add `markdown="1"` 
 
 ```html
 <details markdown="1">
-<summary>One-line label for what is inside</summary>
+  <summary>One-line label for what is inside</summary>
 
-Body text, code blocks, and lists all work here.
-
+  Body text, code blocks, and lists all work here.
 </details>
 ```
 
@@ -33,8 +32,8 @@ This block is itself the working example: it collapsed until you opened it.
 
 State what the software does. Never rate it — no "revolutionary", "amazing", "powerful", or any adjective whose job is praise rather than information.
 
-| Bad | Good |
-| --- | --- |
+| Bad                                                                     | Good                                                                |
+| ----------------------------------------------------------------------- | ------------------------------------------------------------------- |
 | PeckBoard's powerful expert system gives you amazing answers instantly. | An expert session answers questions about one part of the codebase. |
 
 ## Prose, Not Bullet Dumps
@@ -43,7 +42,7 @@ Explain things in short paragraphs, the way this page does. A bullet list is acc
 
 ## Plain Words Before Jargon
 
-When a PeckBoard term is unavoidable, define it in plain words the first time it appears, then give one example sentence. For instance: an *expert* is a long-running session that has read one part of the codebase and answers questions about it, as in "the worker asked the docs expert where screenshots live." Likewise a *worker session* is an agent launched to complete one card on the board. A reader should never need another page to decode the current one.
+When a PeckBoard term is unavoidable, define it in plain words the first time it appears, then give one example sentence. For instance: an _expert_ is a long-running session that has read one part of the codebase and answers questions about it, as in "the worker asked the docs expert where screenshots live." Likewise a _worker session_ is an agent launched to complete one card on the board. A reader should never need another page to decode the current one.
 
 ## Code and Diagrams
 
@@ -70,9 +69,11 @@ graph TD
 Screenshots live in `assets/screenshots/`, named in kebab-case after what they show (`kanban-board.png`, not `screenshot-1.png`). Give every image alt text that describes the state on screen, not the filename. Embed with the `relative_url` filter so links survive the site's `/peckboard` baseurl in production and the empty baseurl in local preview:
 
 {% raw %}
+
 ```liquid
 ![Kanban board]({{ "/assets/screenshots/kanban-board.png" | relative_url }})
 ```
+
 {% endraw %}
 
 ## Front Matter

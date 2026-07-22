@@ -25,7 +25,7 @@ chmod +x peckboard-macos-arm64
 ./peckboard-macos-arm64
 ```
 
-The web interface, database, and TLS certificate generator are all inside the binary, so there is nothing else to install. The one external dependency is the Claude Code CLI, which the server launches to run agents — the built-in mock models work without it, but real work needs `claude` installed and signed in on the same machine.
+The web interface, database, and TLS certificate generator are all inside the binary, so there is nothing else to install. Running agents on Claude models needs the Claude Code CLI — `claude` installed and signed in on the same machine; the Grok, Kimi, and Cursor providers sign in from Settings, Ollama connects to an Ollama server you point it at, and the built-in mock models work with nothing installed at all.
 
 ## Build from Source
 

@@ -1,6 +1,6 @@
 ---
 title: Architecture
-nav_order: 5
+nav_order: 6
 ---
 
 # Architecture
@@ -23,13 +23,13 @@ graph LR
 ## One Server, One File
 
 The backend is written in Rust. HTTP routes and WebSocket connections are handled by [axum](https://github.com/tokio-rs/axum), an async web framework that runs on the Tokio runtime, so one process serves many browsers and agent sessions concurrently. Data is stored in SQLite through the [Diesel](https://diesel.rs/) ORM. SQLite means the whole database is one self-contained file — there is no separate database server to install, configure, or keep running — and Diesel checks queries against the schema at compile time, so a query that no longer matches the tables fails the build instead of failing at runtime.
-
+The SQLite library, the database migrations, and the built frontend assets are all compiled into the release binary. Installing PeckBoard is therefore copying one executable; beyond a writable data directory, the main thing it needs on the host is a provider for real agent work — typically the Claude Code CLI it spawns.
 The SQLite library, the database migrations, and the built frontend assets are all compiled into the release binary. Installing PeckBoard is therefore copying one executable; beyond a writable data directory, the main thing it needs on the host is the Claude Code CLI it spawns.
 
 <details markdown="1">
 <summary>Backend components in detail</summary>
 
-The async runtime is Tokio, with axum 0.8 (and its `ws` feature) on top for routing and WebSockets. Diesel 2 talks to SQLite via a bundled `libsqlite3`, so no system SQLite is needed; schema changes ship as embedded migrations that run on startup. `rust-embed` packs the compiled frontend from `web/dist/` into the release binary. Authentication hashes passwords with Argon2 and issues JWTs; `rcgen` generates a self-signed certificate so the server can also listen over HTTPS, with TLS provided by `rustls` so no OpenSSL is required on the host. Agent backends are pluggable behind an `AgentProvider` trait — the real provider drives the Claude Code CLI, and a mock provider replays scripted scenarios for tests.
+The async runtime is Tokio, with axum 0.8 (and its `ws` feature) on top for routing and WebSockets. Diesel 2 talks to SQLite via a bundled `libsqlite3`, so no system SQLite is needed; schema changes ship as embedded migrations that run on startup. `rust-embed` packs the compiled frontend from `web/dist/` into the release binary. Authentication hashes passwords with Argon2 and issues JWTs; `rcgen` generates a self-signed certificate so the server can also listen over HTTPS, with TLS provided by `rustls` so no OpenSSL is required on the host. Agent backends are pluggable behind an `AgentProvider` trait — providers drive the Claude Code CLI, Grok, Kimi, Cursor, and Ollama, and a mock provider replays scripted scenarios for tests.
 
 </details>
 
@@ -42,7 +42,7 @@ The server embeds its own MCP server as an HTTP endpoint that only accepts conne
 <details markdown="1">
 <summary>How a session reaches the MCP server</summary>
 
-The endpoint is `POST /mcp`, speaking JSON-RPC 2.0, and rejects any caller that is not on loopback. The Claude Code CLI expects an MCP server on stdio, so at launch the server writes a small Node.js bridge script and points the CLI's `--mcp-config` at it; the bridge forwards each stdio call as an HTTP request carrying the session's bearer token. Tokens are issued per session, stored hashed, and carry the session's project and card scope, so a tool call can only touch the board the session belongs to.
+The endpoint is `POST /mcp`, speaking JSON-RPC 2.0, and rejects any caller that is not on loopback. At launch the server writes a per-session MCP config that points the CLI directly at that endpoint over MCP's HTTP transport — no bridge process sits in between. Tokens are issued per session, stored hashed, and carry the session's project and card scope, so a tool call can only touch the board the session belongs to.
 
 </details>
 
