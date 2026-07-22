@@ -3,7 +3,7 @@
 <svg width="100%" height="100%" viewBox="0 0 1000 1000" version="1.1" xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" xml:space="preserve" xmlns:serif="http://www.serif.com/" style="fill-rule:evenodd;clip-rule:evenodd;stroke-linecap:round;stroke-miterlimit:1.5;">
     <g id="Layer2">
     </g>
-    <g id="Layer1">
+    <g id="Layer1" transform="translate(1000,0) scale(-1,1)">
         <g transform="matrix(1.182994,0.127629,-0.127629,1.182994,-117.161576,-7.859575)">
             <path d="M510,171C468.31,88.162 429.768,53.275 385,81C362.427,94.979 367,152 367,152C367,152 306.912,128.251 279,160C251.088,191.749 285,242 285,242C285,242 251.14,220.899 220,261C188.86,301.101 236.456,432.051 412,451" style="fill:rgb(236,32,0);"/>
         </g>
