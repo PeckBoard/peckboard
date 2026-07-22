@@ -11,6 +11,7 @@ A _plugin_ is a WebAssembly module PeckBoard loads to add tools, pages, and beha
 ## Installing and Updating
 
 Open the Plugins panel in Settings to browse the registry. Installing downloads the plugin into the data directory, verifies its checksum and that your PeckBoard version is new enough, and loads it _inert_: it cannot act yet. An approval dialog then lists the exact hooks and permissions the plugin requests — approve to activate it, deny to keep it dormant. Updating an installed plugin follows the same flow, and an agent session can install or update one for you with the `upgrade_plugin` tool.
+![The plugin registry's Browse tab listing installable plugins and MCP server templates, with search, kind, and category filters]({{ "/assets/screenshots/plugin-registry.png" | relative_url }})
 
 ```mermaid
 graph LR
@@ -74,6 +75,8 @@ The API plugin exposes a public REST API under `/plugin-api/v1/` for reading pro
 ## Playwright Tests
 
 Playwright Tests adds a view that replays recorded browser test runs the way session-replay products do: a timeline of user events with rage-click detection, the network waterfall, the console, and a cursor replay with time-scaled playback that skips inactivity. It reads the run recordings PeckBoard's browser testing writes into the data directory, so there is nothing to configure — runs appear as they are recorded.
+
+![A recorded browser test replayed in the Playwright Tests view: the replayed frame with the cursor, an event timeline with a rage click, and a network waterfall with two failed requests]({{ "/assets/screenshots/playwright-player.png" | relative_url }})
 
 ## SSH Fleet
 

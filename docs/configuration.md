@@ -64,6 +64,10 @@ A _mock model_ is a fake agent: instead of talking to a provider, it replays a f
 
 You choose a model when creating a session; the dropdown groups models by provider — Claude, Grok, Kimi, Cursor, Ollama, Mock — with _Server default_ at the top. An existing session can be switched from the model button in the chat toolbar. Projects have their own model setting, used for the worker sessions they spawn, and a card can override its project's choice.
 
+Providers and their accounts are managed in Settings → Providers & Accounts: toggle a provider off to hide its models everywhere, sign in Claude, Grok, and Kimi accounts (each then appears in every model picker as `[Name] Model`, with optional per-account budgets), and configure Ollama servers and the Cursor CLI. The same page shows the Claude subscription plan usage the `claude /usage` command reports.
+
+![Settings → Providers & Accounts: provider on/off toggles, Claude plan usage, and two signed-in Claude accounts with spend and budget badges]({{ "/assets/screenshots/providers.png" | relative_url }})
+
 <details markdown="1">
 <summary>Available models</summary>
 
