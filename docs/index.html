@@ -1,0 +1,334 @@
+---
+title: Home
+nav_order: 1
+layout: null
+---
+
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>PeckBoard — the kanban board that works itself</title>
+    <meta
+      name="description"
+      content="PeckBoard is a self-hosted control panel that spawns Claude Code agents to work your project board: add a card, a worker picks it up, edits real files, and moves it to Done. One binary on your own machine."
+    />
+    <link rel="icon" href="{{ '/assets/icon.png' | relative_url }}" />
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      rel="stylesheet"
+      href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,500..800&display=swap"
+    />
+    <link
+      rel="stylesheet"
+      href="{{ '/assets/css/landing.css' | relative_url }}"
+    />
+    <meta
+      property="og:title"
+      content="PeckBoard — the kanban board that works itself"
+    />
+    <meta
+      property="og:description"
+      content="Self-hosted AI project board: agents pick up your cards, edit real files, and ship them. One binary, your machine, your code."
+    />
+    <meta
+      property="og:image"
+      content="{{ '/assets/screenshots/board.png' | absolute_url }}"
+    />
+    <meta property="og:url" content="{{ '/' | absolute_url }}" />
+  </head>
+  <body>
+    <header class="topbar">
+      <div class="wrap">
+        <img src="{{ '/assets/icon.svg' | relative_url }}" alt="" />
+        <span class="brand">PeckBoard</span>
+        <nav>
+          <a href="{{ '/getting-started.html' | relative_url }}">Docs</a>
+          <a class="hide-sm" href="{{ '/plugins.html' | relative_url }}"
+            >Plugins</a
+          >
+          <a class="hide-sm" href="{{ '/architecture.html' | relative_url }}"
+            >Architecture</a
+          >
+          <a class="gh" href="https://github.com/PeckBoard/peckboard">GitHub</a>
+        </nav>
+      </div>
+    </header>
+
+    <main>
+      <section class="hero">
+        <div aria-hidden="true">
+          <div class="float-card fc-1">
+            <span class="tag">Backlog</span>
+            <b>Rate-limit public API endpoints</b>
+          </div>
+          <div class="float-card fc-2">
+            <span class="tag">In progress</span>
+            <b>Fix flaky WebSocket reconnect</b>
+          </div>
+          <div class="float-card fc-3">
+            <span class="tag">Review</span>
+            <b>Refactor session storage layer</b>
+          </div>
+          <div class="float-card fc-4">
+            <span class="tag">Done ✓</span>
+            <b>OAuth login with GitHub</b>
+          </div>
+        </div>
+        <div class="wrap">
+          <span class="kicker">Self-hosted multi-agent orchestration</span>
+          <h1>The kanban board that <span class="mark">works itself</span></h1>
+          <p class="pitch">
+            PeckBoard spawns Claude Code agents to work your project board. Add
+            a card describing a task; a worker session — one of your flock —
+            picks it up, edits real files in your repository, and moves the card
+            across the board until it reaches Done.
+          </p>
+          <div class="cta-row">
+            <a
+              class="btn btn-primary"
+              href="{{ '/getting-started.html' | relative_url }}"
+              >Get started</a
+            >
+            <a
+              class="btn btn-ghost"
+              href="https://github.com/PeckBoard/peckboard"
+              >View on GitHub</a
+            >
+          </div>
+          <p class="hero-note">
+            <b>One binary</b> · your machine · your code never leaves the nest
+          </p>
+        </div>
+        <div class="hero-shot">
+          <img
+            class="perch"
+            src="{{ '/assets/icon.svg' | relative_url }}"
+            alt=""
+            aria-hidden="true"
+          />
+          <img
+            src="{{ '/assets/screenshots/board.png' | relative_url }}"
+            alt="A project board with cards spread across Backlog, In Progress, Review, and Done columns"
+          />
+        </div>
+        <div class="marquee" aria-hidden="true">
+          <div class="marquee-track">
+            <span>Claude</span><span>Grok</span><span>Kimi Code</span
+            ><span>Cursor</span><span>Ollama</span><span>WASM plugins</span
+            ><span>MCP servers</span><span>Experts</span><span>Test replay</span
+            ><span>Diff viewer</span><span>SQLite inside</span
+            ><span>Claude</span><span>Grok</span><span>Kimi Code</span
+            ><span>Cursor</span><span>Ollama</span><span>WASM plugins</span
+            ><span>MCP servers</span><span>Experts</span><span>Test replay</span
+            ><span>Diff viewer</span><span>SQLite inside</span>
+          </div>
+        </div>
+      </section>
+
+      <section class="steps">
+        <div class="wrap">
+          <span class="kicker">How it works</span>
+          <h2>You write the cards. The flock ships them.</h2>
+          <div class="step-grid">
+            <div class="step">
+              <span class="num">01</span>
+              <h3>Lay out the cards</h3>
+              <p>
+                Write cards the way you'd brief a colleague. Set priorities and
+                dependencies; blocked cards wait until the cards they depend on
+                are done.
+              </p>
+            </div>
+            <div class="step">
+              <span class="num">02</span>
+              <h3>A worker swoops in</h3>
+              <p>
+                The orchestrator spawns a worker session — a Claude Code agent —
+                in the project's folder. It consults the project's experts,
+                edits files, and runs your tests.
+              </p>
+            </div>
+            <div class="step">
+              <span class="num">03</span>
+              <h3>Review, then Done</h3>
+              <p>
+                Watch every step live, chat with the worker mid-run, inspect a
+                side-by-side diff of what changed, and let the card land in
+                Done.
+              </p>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <section class="features">
+        <span class="kicker">The toolkit</span>
+        <h2>Everything your flock needs</h2>
+        <div class="wrap">
+          <div class="feature">
+            <div class="feature-copy">
+              <span class="kicker">Sessions</span>
+              <h3>Chat with any session</h3>
+              <p>
+                Every agent run is a session you can open: the full transcript,
+                each tool call, and the model's replies stream in live.
+                Interrupt, redirect, or just ask what it's doing — workers,
+                experts, and plain chats all speak the same way.
+              </p>
+              <a class="more" href="{{ '/core-concepts.html' | relative_url }}"
+                >Core concepts →</a
+              >
+            </div>
+            <div class="feature-shot f-chat">
+              <img
+                src="{{ '/assets/screenshots/chat.png' | relative_url }}"
+                alt="Chat view of a session showing user messages, agent replies, and a collapsed tool call"
+              />
+            </div>
+          </div>
+
+          <div class="feature">
+            <div class="feature-copy">
+              <span class="kicker">Experts</span>
+              <h3>Experts that know every branch</h3>
+              <p>
+                Long-lived expert sessions each read one area of the repository
+                and answer workers' questions; a question expert remembers your
+                answers, and a PM expert records decisions. Workers ask before
+                they guess.
+              </p>
+              <a class="more" href="{{ '/experts.html' | relative_url }}"
+                >How experts work →</a
+              >
+            </div>
+            <div class="feature-shot f-experts">
+              <img
+                src="{{ '/assets/screenshots/experts.png' | relative_url }}"
+                alt="Experts view listing expert sessions grouped by scope, with Question, Knowledge, and PM badges"
+              />
+            </div>
+          </div>
+
+          <div class="feature">
+            <div class="feature-copy">
+              <span class="kicker">Providers</span>
+              <h3>Every provider, with budgets</h3>
+              <p>
+                Run agents on Claude, Grok, Kimi, Cursor, or your own Ollama
+                servers. Sign in multiple accounts per provider, give each a
+                spending budget, and watch real subscription plan usage — every
+                model shows up in one picker.
+              </p>
+              <a class="more" href="{{ '/configuration.html' | relative_url }}"
+                >Models &amp; providers →</a
+              >
+            </div>
+            <div class="feature-shot f-providers">
+              <img
+                src="{{ '/assets/screenshots/providers.png' | relative_url }}"
+                alt="Settings page with provider on/off toggles, Claude plan usage, and two signed-in accounts with spend and budget badges"
+              />
+            </div>
+          </div>
+
+          <div class="feature">
+            <div class="feature-copy">
+              <span class="kicker">Plugins</span>
+              <h3>Plugins in two clicks</h3>
+              <p>
+                A built-in registry installs WebAssembly plugins — diff viewer,
+                SSH fleet tools, a public REST API — and MCP server templates.
+                Nothing runs until you approve the exact hooks a plugin asks
+                for; deny and it stays dormant.
+              </p>
+              <a class="more" href="{{ '/plugins.html' | relative_url }}"
+                >Browse the plugins →</a
+              >
+            </div>
+            <div class="feature-shot f-plugins">
+              <img
+                src="{{ '/assets/screenshots/plugin-registry.png' | relative_url }}"
+                alt="The plugin registry's Browse tab listing installable plugins and MCP server templates, with search and filters"
+              />
+            </div>
+          </div>
+
+          <div class="feature">
+            <div class="feature-copy">
+              <span class="kicker">Replay</span>
+              <h3>Replay every test flight</h3>
+              <p>
+                Recorded test runs replay like a session-replay product: the
+                cursor moves, clicks ripple, the network waterfall and console
+                scroll alongside, and rage-clicks are called out. Playback skips
+                inactivity so a two-minute run reviews in seconds.
+              </p>
+              <a
+                class="more"
+                href="{{ '/plugins.html#playwright-tests' | relative_url }}"
+                >The Playwright Tests plugin →</a
+              >
+            </div>
+            <div class="feature-shot f-replay">
+              <img
+                src="{{ '/assets/screenshots/playwright-player.png' | relative_url }}"
+                alt="A recorded browser test replayed with a frame stage, cursor, event timeline with a rage click, and a network waterfall"
+              />
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <section class="binary">
+        <div class="wrap">
+          <div>
+            <span class="kicker">Zero infrastructure</span>
+            <h2>One binary. Your machine. Your code.</h2>
+            <p>
+              The web interface, database, and TLS certificates all live inside
+              a single binary. State is a SQLite file in one directory — a
+              backup is a folder copy. No external services, no cloud account,
+              and your source never leaves the machine the agents run on.
+            </p>
+            <p>
+              <a href="{{ '/configuration.html' | relative_url }}"
+                >Configuration</a
+              >
+              covers the flags, accounts, and where data lives.
+            </p>
+          </div>
+          <div class="term">
+            <div class="term-bar"><i></i><i></i><i></i></div>
+            <pre><code><span class="comment"># grab a release, then hatch it:</span>
+<span class="cmd">./peckboard</span>
+<span class="comment"># prints the admin login and listens on :3344</span></code></pre>
+          </div>
+        </div>
+      </section>
+    </main>
+
+    <footer>
+      <div class="wrap">
+        <span class="foot-brand">
+          <img src="{{ '/assets/icon.svg' | relative_url }}" alt="" />
+          PeckBoard
+        </span>
+        <span class="foot-note">Assembled with many small pecks.</span>
+        <nav>
+          <a href="{{ '/getting-started.html' | relative_url }}"
+            >Getting Started</a
+          >
+          <a href="{{ '/core-concepts.html' | relative_url }}">Core Concepts</a>
+          <a href="{{ '/experts.html' | relative_url }}">Experts</a>
+          <a href="{{ '/plugins.html' | relative_url }}">Plugins</a>
+          <a href="{{ '/architecture.html' | relative_url }}">Architecture</a>
+          <a href="{{ '/configuration.html' | relative_url }}">Configuration</a>
+          <a href="https://github.com/PeckBoard/peckboard">GitHub</a>
+        </nav>
+      </div>
+    </footer>
+  </body>
+</html>

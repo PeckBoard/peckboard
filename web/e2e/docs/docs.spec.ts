@@ -1,16 +1,17 @@
-import { test, expect } from '@playwright/test'
+import { test, expect, type APIRequestContext, type Page } from '@playwright/test'
 
 /**
  * Rendering checks for the public docs site, served from docs/_site at
- * the root — matching production at https://peckboard.com/. Every page must
- * render with its title and sidebar, internal links and images must
- * resolve, Mermaid diagrams must render to SVG, and collapsible blocks
- * must toggle.
+ * the root — matching production at https://peckboard.com/. The landing
+ * page is a standalone software page (hero, feature sections, footer —
+ * no theme sidebar); every documentation page must render with its
+ * title and sidebar, internal links and images must resolve, Mermaid
+ * diagrams must render to SVG, and collapsible blocks must toggle.
  */
 
-// path (relative to baseURL) → sidebar/page title
+// path (relative to baseURL) → sidebar/page title. The landing page is
+// NOT in this list — it has no theme sidebar; see the 'Landing' suite.
 const PAGES: Array<{ path: string; title: string }> = [
-  { path: '', title: 'Home' },
   { path: 'getting-started.html', title: 'Getting Started' },
   { path: 'core-concepts.html', title: 'Core Concepts' },
   { path: 'experts.html', title: 'Experts' },
@@ -19,6 +20,10 @@ const PAGES: Array<{ path: string; title: string }> = [
   { path: 'configuration.html', title: 'Configuration' },
   { path: 'style-guide.html', title: 'Style Guide' },
 ]
+
+// Titles every doc page's sidebar must list (the landing keeps its Home
+// entry in the theme nav via its front matter, linking back to /).
+const NAV_TITLES = ['Home', ...PAGES.map((p) => p.title)]
 
 // Pages whose source contains ```mermaid blocks.
 const MERMAID_PAGES = [
@@ -29,6 +34,91 @@ const MERMAID_PAGES = [
   'style-guide.html',
 ]
 
+/** First raw `{{`/`{%` fragment in rendered text outside code, or null. */
+async function liquidLeak(page: Page): Promise<string | null> {
+  return page.evaluate(() => {
+    const clone = document.body.cloneNode(true) as HTMLElement
+    clone.querySelectorAll('pre, code, script, style').forEach((el) => el.remove())
+    const text = clone.textContent ?? ''
+    for (const marker of ['{{', '{%']) {
+      const i = text.indexOf(marker)
+      if (i >= 0) return text.slice(Math.max(0, i - 40), i + 40)
+    }
+    return null
+  })
+}
+
+/** Every same-origin link on the page must answer < 400. */
+async function assertInternalLinksResolve(
+  page: Page,
+  request: APIRequestContext,
+  baseURL: string,
+  label: string,
+): Promise<void> {
+  const hrefs = await page.$$eval('a[href]', (as) => as.map((a) => (a as HTMLAnchorElement).href))
+  const origin = new URL(baseURL).origin
+  const internal = [...new Set(hrefs)]
+    .filter((h) => h.startsWith(origin))
+    .map((h) => h.split('#')[0])
+    .filter((h) => h.length > 0)
+  expect(internal.length).toBeGreaterThan(0)
+  for (const url of internal) {
+    const res = await request.get(url)
+    expect(res.status(), `broken link on ${label || 'index'}: ${url}`).toBeLessThan(400)
+  }
+}
+
+/** Srcs of images that failed to load (naturalWidth 0 after settle). */
+async function brokenImages(page: Page): Promise<string[]> {
+  return page.evaluate(async () => {
+    const imgs = Array.from(document.querySelectorAll('img'))
+    await Promise.all(
+      imgs.map((img) =>
+        img.complete ? null : new Promise((r) => img.addEventListener('load', r, { once: true })),
+      ),
+    )
+    return imgs.filter((i) => i.naturalWidth === 0).map((i) => i.src)
+  })
+}
+
+// ── Landing page (standalone software page, no theme chrome) ────────
+test.describe('Landing', () => {
+  test.beforeEach(async ({ page }) => {
+    await page.goto('')
+  })
+
+  test('hero, CTAs, and section anatomy render', async ({ page }) => {
+    await expect(page).toHaveTitle(/PeckBoard/)
+    await expect(page.locator('.hero h1')).toContainText('The kanban board that works itself')
+    // Both hero CTAs: docs entry + repository.
+    const getStarted = page.locator('.cta-row a', { hasText: 'Get started' })
+    await expect(getStarted).toBeVisible()
+    await expect(getStarted).toHaveAttribute('href', /getting-started\.html$/)
+    await expect(page.locator('.cta-row a', { hasText: 'View on GitHub' })).toHaveAttribute(
+      'href',
+      'https://github.com/PeckBoard/peckboard',
+    )
+    // The three how-it-works steps and all five feature rows.
+    await expect(page.locator('.step')).toHaveCount(3)
+    await expect(page.locator('.feature')).toHaveCount(5)
+    // No doc-theme chrome on the landing.
+    await expect(page.locator('.site-nav')).toHaveCount(0)
+  })
+
+  test('no unrendered Liquid', async ({ page }) => {
+    const leak = await liquidLeak(page)
+    expect(leak, `raw Liquid leaked into rendered text: ${leak}`).toBeNull()
+  })
+
+  test('internal links resolve', async ({ page, request, baseURL }) => {
+    await assertInternalLinksResolve(page, request, baseURL!, 'landing')
+  })
+
+  test('images load', async ({ page }) => {
+    const bad = await brokenImages(page)
+    expect(bad, `images failed to load: ${bad.join(', ')}`).toEqual([])
+  })
+})
 for (const { path: pagePath, title } of PAGES) {
   test.describe(title, () => {
     test.beforeEach(async ({ page }) => {
@@ -39,61 +129,30 @@ for (const { path: pagePath, title } of PAGES) {
       await expect(page).toHaveTitle(new RegExp('PeckBoard'))
       const h1 = page.locator('h1').first()
       await expect(h1).toBeVisible()
-      if (pagePath !== '') await expect(h1).toContainText(title)
-      // The sidebar lists every public page.
+      await expect(h1).toContainText(title)
+      // The sidebar lists every public page, incl. the Home landing.
       const nav = page.locator('.site-nav, nav[aria-label="Main"]').first()
       await expect(nav).toBeVisible()
-      for (const other of PAGES) {
-        if (other.title === title) {
+      for (const other of NAV_TITLES) {
+        if (other === title) {
           // The current page's nav item is not exposed as a link.
-          await expect(nav.getByText(other.title, { exact: true }).first()).toBeVisible()
+          await expect(nav.getByText(other, { exact: true }).first()).toBeVisible()
         } else {
-          await expect(nav.getByRole('link', { name: other.title, exact: true })).toBeVisible()
+          await expect(nav.getByRole('link', { name: other, exact: true })).toBeVisible()
         }
       }
     })
     test('no unrendered Liquid outside code blocks', async ({ page }) => {
-      const leak = await page.evaluate(() => {
-        const clone = document.body.cloneNode(true) as HTMLElement
-        clone.querySelectorAll('pre, code, script, style').forEach((el) => el.remove())
-        const text = clone.textContent ?? ''
-        for (const marker of ['{{', '{%']) {
-          const i = text.indexOf(marker)
-          if (i >= 0) return text.slice(Math.max(0, i - 40), i + 40)
-        }
-        return null
-      })
+      const leak = await liquidLeak(page)
       expect(leak, `raw Liquid leaked into rendered text: ${leak}`).toBeNull()
     })
 
     test('internal links resolve', async ({ page, request, baseURL }) => {
-      const hrefs = await page.$$eval('a[href]', (as) =>
-        as.map((a) => (a as HTMLAnchorElement).href),
-      )
-      const origin = new URL(baseURL!).origin
-      const internal = [...new Set(hrefs)]
-        .filter((h) => h.startsWith(origin))
-        .map((h) => h.split('#')[0])
-        .filter((h) => h.length > 0)
-      expect(internal.length).toBeGreaterThan(0)
-      for (const url of internal) {
-        const res = await request.get(url)
-        expect(res.status(), `broken link on ${pagePath || 'index'}: ${url}`).toBeLessThan(400)
-      }
+      await assertInternalLinksResolve(page, request, baseURL!, pagePath)
     })
 
     test('images load', async ({ page }) => {
-      const bad = await page.evaluate(async () => {
-        const imgs = Array.from(document.querySelectorAll('img'))
-        await Promise.all(
-          imgs.map((img) =>
-            img.complete
-              ? null
-              : new Promise((r) => img.addEventListener('load', r, { once: true })),
-          ),
-        )
-        return imgs.filter((i) => i.naturalWidth === 0).map((i) => i.src)
-      })
+      const bad = await brokenImages(page)
       expect(bad, `images failed to load: ${bad.join(', ')}`).toEqual([])
     })
   })
@@ -125,7 +184,8 @@ test('collapsible details blocks toggle open', async ({ page }) => {
 })
 
 test('search finds core pages', async ({ page }) => {
-  await page.goto('')
+  // The landing is theme-less, so search lives on the doc pages.
+  await page.goto('getting-started.html')
   const input = page.locator('#search-input, .search-input').first()
   await expect(input).toBeVisible()
   // The theme's search only reacts to real keystrokes (fill()'s synthetic
