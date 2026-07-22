@@ -4073,55 +4073,64 @@ mod tests {
         .unwrap();
         let caller = inv(Some("pE"), Some("fE"));
 
-        // Not on the allowlist → refused before spawning (allowlist enforced).
-        let r = exec_impl(&db, r#"{"command":"rm","args":["-rf","/"]}"#, &caller, true);
-        assert!(r.contains("not on the allowlist"), "rm: {r}");
+        // exec_impl is blocking (DB reads + the env-var unlock snapshot's
+        // blocking_lock) — run it on a blocking thread, the exec path's real
+        // thread contract, same as `exec_sh`. Calling it on the runtime
+        // thread panics once another test has bound the process-global
+        // unlock registry.
+        tokio::task::spawn_blocking(move || {
+            // Not on the allowlist → refused before spawning (allowlist enforced).
+            let r = exec_impl(&db, r#"{"command":"rm","args":["-rf","/"]}"#, &caller, true);
+            assert!(r.contains("not on the allowlist"), "rm: {r}");
 
-        // The unrestricted variant skips the allowlist (but still bare-name +
-        // folder-scoped): `rm` is no longer refused on allowlist grounds.
-        let r = exec_impl(
-            &db,
-            r#"{"command":"rm","args":["--version"]}"#,
-            &caller,
-            false,
-        );
-        assert!(
-            !r.contains("not on the allowlist"),
-            "exec_any allowlist: {r}"
-        );
-
-        // A path component (escape attempt) → refused as not-a-bare-name, even
-        // for the unrestricted variant.
-        let r = exec_impl(&db, r#"{"command":"../../bin/sh"}"#, &caller, false);
-        assert!(r.contains("bare executable name"), "path: {r}");
-
-        // No folder scope → refused (cwd cannot be pinned).
-        let unscoped = inv(Some("pE"), None);
-        let r = exec_impl(
-            &db,
-            r#"{"command":"git","args":["--version"]}"#,
-            &unscoped,
-            true,
-        );
-        assert!(r.contains("folder"), "unscoped: {r}");
-
-        // Allowlisted command runs in the folder when the tool is present.
-        let r = exec_impl(
-            &db,
-            r#"{"command":"git","args":["--version"]}"#,
-            &caller,
-            true,
-        );
-        let v: serde_json::Value = serde_json::from_str(&r).unwrap();
-        if v.get("error").is_none() {
-            // git is installed: it ran and exited cleanly.
-            assert_eq!(v["timed_out"], serde_json::json!(false), "exec: {r}");
-            assert!(
-                v["stdout"].as_str().unwrap_or("").contains("git")
-                    || v["exit_code"] == serde_json::json!(0),
-                "exec: {r}"
+            // The unrestricted variant skips the allowlist (but still bare-name +
+            // folder-scoped): `rm` is no longer refused on allowlist grounds.
+            let r = exec_impl(
+                &db,
+                r#"{"command":"rm","args":["--version"]}"#,
+                &caller,
+                false,
             );
-        }
+            assert!(
+                !r.contains("not on the allowlist"),
+                "exec_any allowlist: {r}"
+            );
+
+            // A path component (escape attempt) → refused as not-a-bare-name, even
+            // for the unrestricted variant.
+            let r = exec_impl(&db, r#"{"command":"../../bin/sh"}"#, &caller, false);
+            assert!(r.contains("bare executable name"), "path: {r}");
+
+            // No folder scope → refused (cwd cannot be pinned).
+            let unscoped = inv(Some("pE"), None);
+            let r = exec_impl(
+                &db,
+                r#"{"command":"git","args":["--version"]}"#,
+                &unscoped,
+                true,
+            );
+            assert!(r.contains("folder"), "unscoped: {r}");
+
+            // Allowlisted command runs in the folder when the tool is present.
+            let r = exec_impl(
+                &db,
+                r#"{"command":"git","args":["--version"]}"#,
+                &caller,
+                true,
+            );
+            let v: serde_json::Value = serde_json::from_str(&r).unwrap();
+            if v.get("error").is_none() {
+                // git is installed: it ran and exited cleanly.
+                assert_eq!(v["timed_out"], serde_json::json!(false), "exec: {r}");
+                assert!(
+                    v["stdout"].as_str().unwrap_or("").contains("git")
+                        || v["exit_code"] == serde_json::json!(0),
+                    "exec: {r}"
+                );
+            }
+        })
+        .await
+        .unwrap();
     }
 
     /// A plugin-driven model/effort change must recycle the session's live
