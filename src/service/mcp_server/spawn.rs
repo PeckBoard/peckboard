@@ -147,6 +147,37 @@ impl crate::plugin::host::LiveHost for AppLiveHost {
         });
     }
 
+    fn answer_question(
+        &self,
+        session_id: String,
+        question_id: String,
+        answers: serde_json::Value,
+        rejected: bool,
+        user_id: String,
+    ) {
+        let Some(state) = self.state.upgrade() else {
+            return;
+        };
+        self.rt.spawn(async move {
+            // Mirror the shapes core's own UI posts: `{question_id, answers}`
+            // to answer, `{question_id, rejected: true}` to dismiss.
+            let data = if rejected {
+                serde_json::json!({ "question_id": question_id, "rejected": true })
+            } else {
+                serde_json::json!({ "question_id": question_id, "answers": answers })
+            };
+            if let Err(e) = crate::service::questions::resolve_question(
+                state,
+                user_id,
+                session_id.clone(),
+                data,
+            )
+            .await
+            {
+                tracing::warn!("plugin answer_question for {session_id} failed: {e}");
+            }
+        });
+    }
     fn ask_user(
         &self,
         session_id: String,

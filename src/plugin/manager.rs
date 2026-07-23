@@ -131,8 +131,8 @@ pub const ALLOWED_PERMISSIONS: &[&str] = &[
     "session_read",    // peckboard_get_session / list_sessions
     "session_write",   // peckboard_create_session / update_session
     "user_authority",  // serve authenticated UI + act under the user (ui_routes)
+    "worker_questions", // peckboard_session_questions / peckboard_answer_question — read pending user questions (full payloads) and resolve them under user authority
 ];
-
 /// Whether an operator has approved the set of hooks a loaded plugin
 /// declares. A plugin is **inert** — no hook fires, no `/plugin-api`
 /// route dispatches, no ui_panel surfaces, and its `init` is not even

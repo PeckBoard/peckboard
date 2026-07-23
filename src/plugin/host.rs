@@ -179,6 +179,21 @@ pub trait LiveHost: Send + Sync {
         _redirect_session_id: Option<String>,
     ) {
     }
+    /// Resolve a pending user question on `session_id` as `user_id`: persist
+    /// the `question-resolved` event, broadcast it, feed question-expert
+    /// plugins, and resume the answered conversation — the same flow as
+    /// answering from core's own UI (see [`crate::service::questions`]).
+    /// The caller has already authorized the target session and verified the
+    /// question is real and unresolved. Fire-and-forget; no-op default.
+    fn answer_question(
+        &self,
+        _session_id: String,
+        _question_id: String,
+        _answers: serde_json::Value,
+        _rejected: bool,
+        _user_id: String,
+    ) {
+    }
 }
 
 /// The verified caller scope of an in-flight `mcp.tool.invoke` — the keys the
@@ -2514,6 +2529,176 @@ pub(crate) fn get_answer_impl(db: &Db, inv: &InvocationContext, input: &str) -> 
     serde_json::json!({ "status": "pending" }).to_string()
 }
 
+/// JSON request for `peckboard_session_questions`.
+#[derive(Deserialize)]
+struct SessionQuestionsRequest {
+    session_id: String,
+}
+
+/// `peckboard_session_questions` — the unresolved `question` events of a
+/// session visible to the caller, FULL payloads included (question text,
+/// options, card context), unlike the deliberately-slim
+/// `peckboard_session_events`. Exists so a UI plugin can render a pending
+/// question for the user; gated on the dedicated `worker_questions`
+/// permission.
+pub(crate) fn session_questions_impl(db: &Db, inv: &InvocationContext, input: &str) -> String {
+    let req: SessionQuestionsRequest = match serde_json::from_str(input) {
+        Ok(r) => r,
+        Err(e) => return error_json(format!("invalid request: {e}")),
+    };
+    let session = match fetch_visible_session(db, req.session_id.trim(), inv) {
+        Ok(s) => s,
+        Err(e) => return error_json(e),
+    };
+    let events = match db.list_events_by_session_blocking(&session.id) {
+        Ok(e) => e,
+        Err(e) => return error_json(e.to_string()),
+    };
+    let resolved: std::collections::HashSet<String> = events
+        .iter()
+        .filter(|e| e.kind == "question-resolved")
+        .filter_map(|e| serde_json::from_str::<serde_json::Value>(&e.data).ok())
+        .filter_map(|d| {
+            d.get("question_id")
+                .or_else(|| d.get("questionId"))
+                .and_then(|v| v.as_str())
+                .map(String::from)
+        })
+        .collect();
+    let items: Vec<serde_json::Value> = events
+        .iter()
+        .filter(|e| e.kind == "question" && !resolved.contains(&e.id))
+        .map(|e| {
+            serde_json::json!({
+                "id": e.id,
+                "seq": e.seq,
+                "ts": e.ts,
+                "data": serde_json::from_str::<serde_json::Value>(&e.data).unwrap_or_default(),
+            })
+        })
+        .collect();
+    serde_json::json!({ "questions": items }).to_string()
+}
+
+/// JSON request for `peckboard_answer_question`.
+#[derive(Deserialize)]
+struct AnswerQuestionRequest {
+    session_id: String,
+    question_id: String,
+    #[serde(default)]
+    answers: serde_json::Value,
+    #[serde(default)]
+    rejected: bool,
+}
+
+/// `peckboard_answer_question` — resolve a pending question on a session
+/// visible to the user, as that user. Validates the question exists in the
+/// session and is unresolved, then hands off to the [`LiveHost`], which runs
+/// the exact resolution flow of core's own answer route (event + broadcast,
+/// expert feed, conversation resume). Requires the trusted [`UserContext`] of
+/// an authenticated plugin-UI request: a question is a prompt to the *user*,
+/// so only a user-driven surface may answer it — an agent-driven MCP
+/// invocation may not.
+pub(crate) fn answer_question_impl(
+    db: &Db,
+    input: &str,
+    user: &UserContext,
+    live: Option<Arc<dyn LiveHost>>,
+) -> String {
+    let req: AnswerQuestionRequest = match serde_json::from_str(input) {
+        Ok(r) => r,
+        Err(e) => return error_json(format!("invalid request: {e}")),
+    };
+    let inv = user.as_invocation();
+    let session = match fetch_visible_session(db, req.session_id.trim(), &inv) {
+        Ok(s) => s,
+        Err(e) => return error_json(e),
+    };
+    let qid = req.question_id.trim().to_string();
+    if qid.is_empty() {
+        return error_json("question_id is required");
+    }
+    let events = match db.list_events_by_session_blocking(&session.id) {
+        Ok(e) => e,
+        Err(e) => return error_json(e.to_string()),
+    };
+    if !events.iter().any(|e| e.id == qid && e.kind == "question") {
+        return error_json("question not found");
+    }
+    let already = events.iter().any(|e| {
+        e.kind == "question-resolved"
+            && serde_json::from_str::<serde_json::Value>(&e.data)
+                .ok()
+                .and_then(|d| {
+                    d.get("question_id")
+                        .or_else(|| d.get("questionId"))
+                        .and_then(|v| v.as_str())
+                        .map(String::from)
+                })
+                .as_deref()
+                == Some(qid.as_str())
+    });
+    if already {
+        return error_json("question already resolved");
+    }
+    let Some(live) = live else {
+        return error_json("live host unavailable; answering requires the running app");
+    };
+    live.answer_question(
+        session.id,
+        qid,
+        req.answers,
+        req.rejected,
+        user.user_id.clone(),
+    );
+    serde_json::json!({ "ok": true }).to_string()
+}
+
+/// Like [`state_and_permission`] but returns the **trusted** authenticated-
+/// user context (`None` outside a plugin-UI request) and the late-bound
+/// [`LiveHost`]. For host functions that act strictly under *user* authority
+/// — never under an agent's MCP invocation.
+#[allow(clippy::type_complexity)]
+fn state_permission_user_and_live(
+    user_data: &UserData<HostState>,
+    permission: &str,
+) -> Result<
+    (
+        Db,
+        String,
+        bool,
+        Option<UserContext>,
+        Option<Arc<dyn LiveHost>>,
+    ),
+    Error,
+> {
+    let state = user_data.get()?;
+    let state = state
+        .lock()
+        .map_err(|_| anyhow::anyhow!("plugin host state mutex poisoned"))?;
+    let granted = state
+        .permissions
+        .read()
+        .map_err(|_| anyhow::anyhow!("plugin permission set poisoned"))?
+        .contains(permission);
+    let user = state
+        .user
+        .read()
+        .map_err(|_| anyhow::anyhow!("plugin user context poisoned"))?
+        .clone();
+    let live = state
+        .live
+        .read()
+        .map_err(|_| anyhow::anyhow!("plugin live host poisoned"))?
+        .clone();
+    Ok((
+        state.db.clone(),
+        state.plugin_id.clone(),
+        granted,
+        user,
+        live,
+    ))
+}
 /// Clone the `Db` and calling plugin id out of the host-function user data
 /// without holding the mutex across the (potentially DB-locking) call. A
 /// poisoned mutex is surfaced as an `Err` rather than a panic, keeping the
@@ -2719,6 +2904,19 @@ host_fn!(peckboard_session_events(user_data: HostState; input: String) -> String
     Ok(session_events_impl(&db, &input))
 });
 
+host_fn!(peckboard_session_questions(user_data: HostState; input: String) -> String {
+    let (db, _plugin_id, ok, inv) = state_permission_and_invocation(&user_data, "worker_questions")?;
+    if !ok { return Ok(error_json("plugin lacks the 'worker_questions' permission")); }
+    let Some(inv) = inv else { return Ok(error_json("no caller context; peckboard_session_questions requires an authenticated request or tool invocation")); };
+    Ok(session_questions_impl(&db, &inv, &input))
+});
+
+host_fn!(peckboard_answer_question(user_data: HostState; input: String) -> String {
+    let (db, _plugin_id, ok, user, live) = state_permission_user_and_live(&user_data, "worker_questions")?;
+    if !ok { return Ok(error_json("plugin lacks the 'worker_questions' permission")); }
+    let Some(user) = user else { return Ok(error_json("peckboard_answer_question is only callable from an authenticated plugin-UI request")); };
+    Ok(answer_question_impl(&db, &input, &user, live))
+});
 // ── Generic session / event host functions (gated, scoped) ────────────
 // Each refuses if called outside an `mcp.tool.invoke` (no trusted context).
 
@@ -3232,6 +3430,20 @@ pub(crate) fn host_functions(
             [PTR],
             ud.clone(),
             peckboard_session_events,
+        ),
+        Function::new(
+            "peckboard_session_questions",
+            [PTR],
+            [PTR],
+            ud.clone(),
+            peckboard_session_questions,
+        ),
+        Function::new(
+            "peckboard_answer_question",
+            [PTR],
+            [PTR],
+            ud.clone(),
+            peckboard_answer_question,
         ),
         Function::new(
             "peckboard_create_session",

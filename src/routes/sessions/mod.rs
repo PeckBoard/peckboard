@@ -890,7 +890,7 @@ pub(crate) async fn clear_session_core(state: &AppState, id: &str) -> anyhow::Re
 }
 
 /// Resolve `[session:id]` and `[report:folder/file]` references in text.
-pub(super) async fn resolve_references(text: &str, state: &Arc<AppState>) -> String {
+pub(crate) async fn resolve_references(text: &str, state: &Arc<AppState>) -> String {
     let mut result = text.to_string();
 
     // Resolve session references
