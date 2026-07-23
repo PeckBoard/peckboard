@@ -1786,6 +1786,38 @@ pub(crate) fn list_all_sessions_impl(db: &Db, input: &str) -> String {
     serde_json::json!({ "sessions": out }).to_string()
 }
 
+/// `peckboard_list_sessions_brief` — slim, read-only enumeration of every
+/// session for visualization plugins (e.g. chicken-coop's one-bird-per-
+/// session roster): kind flags and lineage only. Deliberately omits
+/// conversation ids, models, folder ids, and prompt content; gated on
+/// `session_read` like `peckboard_session_events`.
+pub(crate) fn list_sessions_brief_impl(db: &Db) -> String {
+    let sessions = match db.list_sessions_blocking() {
+        Ok(s) => s,
+        Err(e) => return error_json(e.to_string()),
+    };
+    let out: Vec<serde_json::Value> = sessions
+        .into_iter()
+        .map(|s| {
+            serde_json::json!({
+                "session_id": s.id,
+                "name": s.name,
+                "is_worker": s.is_worker,
+                "is_expert": s.is_expert,
+                "expert_kind": s.expert_kind,
+                "card_id": s.card_id,
+                "project_id": s.project_id,
+                "parent_session_id": s.parent_session_id,
+                "is_temp": s.is_temp,
+                "repeating_task_id": s.repeating_task_id,
+                "last_activity": s.last_activity,
+                "subagent_completed_at": s.subagent_completed_at,
+            })
+        })
+        .collect();
+    serde_json::json!({ "sessions": out }).to_string()
+}
+
 fn control_session(
     db: &Db,
     input: &str,
@@ -2904,6 +2936,13 @@ host_fn!(peckboard_session_events(user_data: HostState; input: String) -> String
     Ok(session_events_impl(&db, &input))
 });
 
+host_fn!(peckboard_list_sessions_brief(user_data: HostState; input: String) -> String {
+    let (db, _plugin_id, ok) = state_and_permission(&user_data, "session_read")?;
+    if !ok { return Ok(error_json("plugin lacks the 'session_read' permission")); }
+    let _ = input;
+    Ok(list_sessions_brief_impl(&db))
+});
+
 host_fn!(peckboard_session_questions(user_data: HostState; input: String) -> String {
     let (db, _plugin_id, ok, inv) = state_permission_and_invocation(&user_data, "worker_questions")?;
     if !ok { return Ok(error_json("plugin lacks the 'worker_questions' permission")); }
@@ -3432,6 +3471,13 @@ pub(crate) fn host_functions(
             peckboard_session_events,
         ),
         Function::new(
+            "peckboard_list_sessions_brief",
+            [PTR],
+            [PTR],
+            ud.clone(),
+            peckboard_list_sessions_brief,
+        ),
+        Function::new(
             "peckboard_session_questions",
             [PTR],
             [PTR],
@@ -3635,6 +3681,70 @@ pub(crate) fn host_functions(
 mod tests {
     use super::*;
     use crate::db::models::{NewFolder, NewProject};
+
+    #[tokio::test]
+    async fn list_sessions_brief_impl_maps_kind_fields() {
+        let db = Db::in_memory().unwrap();
+        let ts = chrono::Utc::now().to_rfc3339();
+        db.create_folder(NewFolder {
+            id: "f1".into(),
+            name: "f1".into(),
+            path: "/tmp/f1".into(),
+            created_at: ts.clone(),
+        })
+        .await
+        .unwrap();
+        let mk = |id: &str| crate::db::models::NewSession {
+            id: id.into(),
+            name: id.into(),
+            folder_id: "f1".into(),
+            created_at: ts.clone(),
+            last_activity: ts.clone(),
+            ..Default::default()
+        };
+        db.create_session(crate::db::models::NewSession {
+            is_worker: true,
+            ..mk("worker")
+        })
+        .await
+        .unwrap();
+        db.create_session(crate::db::models::NewSession {
+            is_expert: true,
+            expert_kind: Some("subagent".into()),
+            parent_session_id: Some("worker".into()),
+            ..mk("chick")
+        })
+        .await
+        .unwrap();
+        db.create_session(crate::db::models::NewSession {
+            is_temp: true,
+            ..mk("temp")
+        })
+        .await
+        .unwrap();
+
+        let out = list_sessions_brief_impl(&db);
+        let v: serde_json::Value = serde_json::from_str(&out).unwrap();
+        let rows = v["sessions"].as_array().unwrap();
+        assert_eq!(rows.len(), 3, "all sessions listed: {out}");
+        let by_id = |id: &str| {
+            rows.iter()
+                .find(|r| r["session_id"] == id)
+                .unwrap_or_else(|| panic!("missing {id}: {out}"))
+        };
+        assert_eq!(by_id("worker")["is_worker"], true);
+        assert!(by_id("worker")["card_id"].is_null());
+        assert_eq!(by_id("chick")["expert_kind"], "subagent");
+        assert_eq!(by_id("chick")["parent_session_id"], "worker");
+        assert!(by_id("chick")["subagent_completed_at"].is_null());
+        assert_eq!(by_id("temp")["is_temp"], true);
+        // Key names present even when null, so the plugin can rely on them.
+        assert!(out.contains("\"repeating_task_id\""), "key missing: {out}");
+        // Slim: no conversation ids, models, or prompt content.
+        assert!(!out.contains("conversation_id"), "payload not slim: {out}");
+        assert!(!out.contains("system_prompt"), "payload not slim: {out}");
+        assert!(!out.contains("\"model\""), "payload not slim: {out}");
+    }
 
     #[test]
     fn store_impls_roundtrip_and_validate() {
