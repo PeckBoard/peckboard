@@ -1,0 +1,28 @@
+// PeckBoard color scheme — the landing page palette applied to
+// just-the-docs variables. Tokens defined in custom/setup.scss.
+
+$body-font-family:
+  system-ui,
+  -apple-system,
+  "Segoe UI",
+  Roboto,
+  sans-serif;
+
+$body-background-color: $pb-paper;
+$body-text-color: $pb-ink;
+$body-heading-color: $pb-ink;
+$link-color: $pb-red-deep;
+
+$sidebar-color: $pb-cream;
+$border-color: $pb-line;
+
+$btn-primary-color: $pb-red;
+$base-button-color: #fff;
+
+$table-background-color: #fff;
+$code-background-color: $pb-cream;
+$search-background-color: #fff;
+$search-result-preview-color: $pb-muted;
+$feedback-color: #efe9db;
+
+$nav-child-link-color: $pb-muted;

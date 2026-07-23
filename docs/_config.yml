@@ -7,6 +7,14 @@ remote_theme: just-the-docs/just-the-docs
 plugins:
   - jekyll-remote-theme
 
+color_scheme: peckboard
+
+aux_links:
+  GitHub:
+    - "https://github.com/PeckBoard/peckboard"
+
+footer_content: "Assembled with many small pecks."
+
 mermaid:
   version: "10.9.1"
 

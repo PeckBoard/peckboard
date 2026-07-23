@@ -60,8 +60,8 @@ graph TD
   TURN -->|turn ends or crashes| AE
   AE -->|back to the root| IDLE
 
-  classDef hook fill:#e7e1fb,stroke:#7253ed
-  classDef root fill:#fff8dc,stroke:#b8860b
+  classDef hook fill:#fdece7,stroke:#b93000
+  classDef root fill:#fff3cf,stroke:#c98d00
 ```
 
 {% endraw %}
@@ -94,8 +94,8 @@ graph TD
   GONE --> CDA{{mcp.config.delete.after}}:::hook
   CDA --> TRA{{mcp.token.revoke.after}}:::hook
 
-  classDef hook fill:#e7e1fb,stroke:#7253ed
-  classDef root fill:#fff8dc,stroke:#b8860b
+  classDef hook fill:#fdece7,stroke:#b93000
+  classDef root fill:#fff3cf,stroke:#c98d00
 ```
 
 {% endraw %}
@@ -129,8 +129,8 @@ graph TD
   WB --> PP
   PP -->|project paused, tree stops growing| STOP([Paused]):::root
 
-  classDef hook fill:#e7e1fb,stroke:#7253ed
-  classDef root fill:#fff8dc,stroke:#b8860b
+  classDef hook fill:#fdece7,stroke:#b93000
+  classDef root fill:#fff3cf,stroke:#c98d00
 ```
 
 {% endraw %}

@@ -1,0 +1,123 @@
+// PeckBoard docs skin — carries the landing page look (index.html +
+// assets/css/landing.css) into the doc pages: Bricolage display
+// headings, hairline borders, soft depth, and the bird in small doses.
+// Palette variables come from _sass/color_schemes/peckboard.scss.
+
+$pb-display-font: "Bricolage Grotesque", $body-font-family;
+$pb-shadow-sm: 0 1px 2px rgba(31, 26, 19, 0.06);
+$pb-shadow-img:
+  0 10px 28px -14px rgba(31, 26, 19, 0.2),
+  0 1px 2px rgba(31, 26, 19, 0.06);
+
+// ── type ──
+
+h1,
+h2,
+.text-alpha,
+.text-beta {
+  font-family: $pb-display-font;
+  letter-spacing: -0.01em;
+}
+
+// ── sidebar ──
+
+.side-bar {
+  border-right: 1px solid $border-color;
+}
+
+.site-title {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-family: $pb-display-font;
+  font-weight: 700;
+}
+
+.site-title .pb-mark {
+  width: 30px;
+  height: 30px;
+}
+
+// Nav links stay ink like the landing topbar; only the current page is
+// red, with a small gold perch bar.
+.site-nav .nav-list .nav-list-link {
+  color: $pb-ink;
+}
+
+.site-nav .nav-list .nav-list-link.active {
+  color: $pb-red-deep;
+  box-shadow: inset 3px 0 0 $pb-gold;
+}
+
+.site-nav .nav-list .nav-list-expander {
+  color: $pb-muted;
+}
+
+// The GitHub aux link, styled like the landing topbar's outline chip.
+.main .aux-nav {
+  display: flex;
+  align-items: center;
+  height: 100%;
+  padding-right: 16px;
+}
+
+.main .aux-nav .aux-nav-list {
+  display: flex;
+  align-items: center;
+}
+
+.main .aux-nav .aux-nav-list-item .site-button {
+  display: inline-block;
+  height: auto;
+  padding: 6px 14px;
+  border: 1px solid $border-color;
+  border-radius: 8px;
+  background: #fff;
+  color: $pb-ink;
+  font-weight: 600;
+  line-height: 1.4;
+  box-shadow: $pb-shadow-sm;
+}
+
+.main .aux-nav .aux-nav-list-item .site-button:hover {
+  background-image: none;
+  border-color: #cfc7b6;
+}
+.site-footer {
+  color: $pb-muted;
+}
+
+// The per-page footer note (footer_content) — italic like the landing
+// footer's nest note.
+#main-content footer .text-small {
+  color: $pb-muted;
+  font-style: italic;
+}
+
+// ── content ──
+
+.main-content a {
+  text-decoration: none;
+}
+
+.main-content a:hover {
+  text-decoration: underline;
+}
+
+// Every content image today is a product screenshot — frame it like the
+// hero shot on the landing page.
+.main-content img {
+  border: 1px solid $border-color;
+  border-radius: 12px;
+  box-shadow: $pb-shadow-img;
+}
+
+.table-wrapper {
+  border: 1px solid $border-color;
+  border-radius: 12px;
+  box-shadow: $pb-shadow-sm;
+}
+
+div.highlighter-rouge {
+  border: 1px solid $border-color;
+}

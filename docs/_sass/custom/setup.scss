@@ -1,0 +1,14 @@
+// Landing page tokens (assets/css/landing.css :root), shared by the
+// peckboard color scheme and custom.scss. Lives in custom/setup.scss
+// because just-the-docs imports it into every generated stylesheet
+// before the color schemes.
+
+$pb-ink: #1f1a13;
+$pb-muted: #6a6255;
+$pb-line: #e7e2d6;
+$pb-paper: #fcfaf5;
+$pb-cream: #f6f1e6;
+$pb-red: #ec2000;
+$pb-red-deep: #b93000;
+$pb-gold: #ffbb10;
+$pb-navy: #161d28;
