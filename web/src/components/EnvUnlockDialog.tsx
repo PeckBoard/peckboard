@@ -33,7 +33,7 @@ export default function EnvUnlockDialog() {
       const frame = (e as CustomEvent).detail as Record<string, unknown> | null
       // The payload rides in the frame's `data` field (top-level fallback in
       // case the frame shape ever flattens).
-      const d = ((frame?.data ?? frame) ?? {}) as {
+      const d = (frame?.data ?? frame ?? {}) as {
         request_id?: string
         session_id?: string
         user_id?: string
@@ -57,7 +57,7 @@ export default function EnvUnlockDialog() {
     }
     const onResolved = (e: Event) => {
       const frame = (e as CustomEvent).detail as Record<string, unknown> | null
-      const d = ((frame?.data ?? frame) ?? {}) as { request_id?: string }
+      const d = (frame?.data ?? frame ?? {}) as { request_id?: string }
       setPending((cur) => {
         if (cur && d.request_id === cur.requestId) {
           setPassword('')

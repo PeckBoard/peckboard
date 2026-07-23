@@ -3,6 +3,10 @@ import type { Project, Card } from '../types/api'
 import { authedFetch } from './auth'
 import { useTabsStore } from './tabs'
 
+/** `POST /api/projects` rejects a body missing `name`, `folder_id`, or
+ *  `workflow` before the handler runs (no serde defaults), so encode the
+ *  requirement in the type. */
+export type CreateProjectInput = Partial<Project> & Pick<Project, 'name' | 'folder_id' | 'workflow'>
 export interface CardReport {
   folder: string
   file: string
@@ -40,7 +44,7 @@ interface ProjectsState {
   cardReportsByCard: Record<string, CardReport[]>
   pendingQuestionsByProject: Record<string, PendingQuestion[]>
   fetchProjects: () => Promise<void>
-  createProject: (data: Partial<Project>) => Promise<Project>
+  createProject: (data: CreateProjectInput) => Promise<Project>
   updateProject: (id: string, data: Partial<Project>) => Promise<Project>
   deleteProject: (id: string) => Promise<void>
   setActiveProject: (id: string | null) => void
@@ -69,7 +73,7 @@ export const useProjectsStore = create<ProjectsState>((set) => ({
     }
   },
 
-  createProject: async (data: Partial<Project>) => {
+  createProject: async (data: CreateProjectInput) => {
     const res = await authedFetch('/api/projects', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },

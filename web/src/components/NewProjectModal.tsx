@@ -40,7 +40,7 @@ export default function NewProjectModal({ onClose }: Props) {
   const [workerCommunication, setWorkerCommunication] = useState(false)
   const [worktreeIsolation, setWorktreeIsolation] = useState(false)
   const [budgetDollars, setBudgetDollars] = useState('')
-  const [budgetPeriod, setBudgetPeriod] = useState('')
+  const [budgetPeriod, setBudgetPeriod] = useState<'' | 'daily' | 'weekly' | 'monthly'>('')
   const [error, setError] = useState('')
   const [loading, setLoading] = useState(false)
   // Per-workflow staged drafts: { workflowId: { step: text } }. Survives
@@ -84,6 +84,7 @@ export default function NewProjectModal({ onClose }: Props) {
     setError('')
     try {
       const project = await createProject({
+        name: name.trim(),
         folder_id: folderId,
         context: context.trim(),
         worker_count: workerCount,
@@ -97,7 +98,7 @@ export default function NewProjectModal({ onClose }: Props) {
         budget_usd_cents:
           budgetDollars && budgetPeriod ? Math.round(parseFloat(budgetDollars) * 100) : undefined,
         budget_period: budgetPeriod || undefined,
-      } as Record<string, unknown>)
+      })
       // After the project exists, persist any staged per-step
       // instructions the user added across ANY workflow they touched.
       // Project creation already succeeded — collect each failure so we
@@ -253,7 +254,9 @@ export default function NewProjectModal({ onClose }: Props) {
                   <select
                     className="form-input"
                     value={budgetPeriod}
-                    onChange={(e) => setBudgetPeriod(e.target.value)}
+                    onChange={(e) =>
+                      setBudgetPeriod(e.target.value as '' | 'daily' | 'weekly' | 'monthly')
+                    }
                     style={{ flex: 1 }}
                   >
                     <option value="">No budget</option>
