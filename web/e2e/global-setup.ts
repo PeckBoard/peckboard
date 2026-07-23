@@ -38,12 +38,14 @@ export default async function globalSetup() {
     })
     if (login.ok) {
       const { token } = (await login.json()) as { token: string }
-      await fetch(`${baseURL}/api/plugins/openai-compat/approval`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
-        body: JSON.stringify({ decision: 'approve' }),
-      })
-      console.log('[e2e] Approved openai-compat plugin (if present)')
+      for (const plugin of ['openai-compat', 'chicken-coop']) {
+        await fetch(`${baseURL}/api/plugins/${plugin}/approval`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+          body: JSON.stringify({ decision: 'approve' }),
+        })
+      }
+      console.log('[e2e] Approved staged wasm plugins (if present)')
     }
   } catch {
     // Server not reachable yet — plugin tests will self-skip.

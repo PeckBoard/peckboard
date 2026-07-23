@@ -114,6 +114,29 @@ impl Db {
         })
     }
 
+    /// Synchronous twin of [`events_since`], for WASM plugin host functions
+    /// running inside a blocking extism call. Returns the session's events
+    /// with `seq` greater than `since_seq`, ordered by `seq` ascending, capped
+    /// at `limit` rows.
+    pub(crate) fn events_since_blocking(
+        &self,
+        session_id: &str,
+        since_seq: i32,
+        limit: i64,
+    ) -> anyhow::Result<Vec<Event>> {
+        let session_id = session_id.to_string();
+        self.with_conn_blocking(move |conn| {
+            events::table
+                .filter(events::session_id.eq(&session_id))
+                .filter(events::seq.gt(since_seq))
+                .select(Event::as_select())
+                .order(events::seq.asc())
+                .limit(limit)
+                .load(conn)
+                .map_err(Into::into)
+        })
+    }
+
     /// Get events since a specific seq number (exclusive).
     pub async fn events_since(
         &self,
@@ -344,6 +367,37 @@ mod tests {
         assert_eq!(since_0.len(), 5);
 
         let since_5 = db.events_since("s1", 5).await.unwrap();
+        assert_eq!(since_5.len(), 0);
+    }
+
+    #[tokio::test]
+    async fn test_events_since_blocking() {
+        let db = setup().await;
+
+        for i in 1..=5 {
+            db.append_event("s1", "agent-text", serde_json::json!({"n": i}))
+                .await
+                .unwrap();
+        }
+
+        // seq > 2, ordered ascending — the blocking twin of `events_since`.
+        let since_2 = db.events_since_blocking("s1", 2, 200).unwrap();
+        assert_eq!(since_2.len(), 3);
+        assert_eq!(since_2[0].seq, 3);
+        assert_eq!(since_2[2].seq, 5);
+
+        // after_seq 0 → from the beginning.
+        let all = db.events_since_blocking("s1", 0, 200).unwrap();
+        assert_eq!(all.len(), 5);
+
+        // `limit` caps the window, keeping the oldest matches first.
+        let capped = db.events_since_blocking("s1", 0, 2).unwrap();
+        assert_eq!(capped.len(), 2);
+        assert_eq!(capped[0].seq, 1);
+        assert_eq!(capped[1].seq, 2);
+
+        // Nothing newer than the tail.
+        let since_5 = db.events_since_blocking("s1", 5, 200).unwrap();
         assert_eq!(since_5.len(), 0);
     }
 

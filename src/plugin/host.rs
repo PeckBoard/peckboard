@@ -651,6 +651,15 @@ struct SessionMetaGetRequest {
     session_id: String,
 }
 
+#[derive(Deserialize)]
+struct SessionEventsRequest {
+    session_id: String,
+    #[serde(default)]
+    after_seq: Option<i32>,
+    #[serde(default)]
+    limit: Option<i64>,
+}
+
 /// Reject empty / oversized identifiers so a misbehaving plugin can't bloat
 /// the key space.
 fn validate_id(label: &str, value: &str) -> Result<(), String> {
@@ -766,6 +775,38 @@ pub(crate) fn session_meta_get_impl(db: &Db, plugin_id: &str, input: &str) -> St
     };
     match db.plugin_session_meta_get_blocking(req.session_id.trim(), plugin_id) {
         Ok(raw) => serde_json::json!({ "value": decode_doc(raw) }).to_string(),
+        Err(e) => error_json(e),
+    }
+}
+
+/// Read a slim tail of a session's event log for visualization: the `seq`,
+/// `kind`, and (when the payload carries one) the tool `name` of each event
+/// after `after_seq` (default 0 → from the beginning), oldest-first, capped at
+/// `limit` (clamped to 1..=200, default 200). Deliberately omits the event
+/// `data` payloads — it surfaces only low-sensitivity activity metadata (which
+/// tool ran, in what order), never message text or tool arguments.
+pub(crate) fn session_events_impl(db: &Db, input: &str) -> String {
+    let req: SessionEventsRequest = match serde_json::from_str(input) {
+        Ok(r) => r,
+        Err(e) => return error_json(format!("invalid request: {e}")),
+    };
+    let after_seq = req.after_seq.unwrap_or(0);
+    let limit = req.limit.unwrap_or(200).clamp(1, 200);
+    match db.events_since_blocking(req.session_id.trim(), after_seq, limit) {
+        Ok(events) => {
+            let latest_seq = events.last().map(|e| e.seq);
+            let items: Vec<serde_json::Value> = events
+                .into_iter()
+                .map(|e| {
+                    // Slim by design: seq + kind + the tool name only, never `data`.
+                    let name = serde_json::from_str::<serde_json::Value>(&e.data)
+                        .ok()
+                        .and_then(|d| d.get("name").and_then(|n| n.as_str()).map(String::from));
+                    serde_json::json!({ "seq": e.seq, "kind": e.kind, "name": name })
+                })
+                .collect();
+            serde_json::json!({ "events": items, "latest_seq": latest_seq }).to_string()
+        }
         Err(e) => error_json(e),
     }
 }
@@ -2672,6 +2713,12 @@ host_fn!(peckboard_session_meta_get(user_data: HostState; input: String) -> Stri
     Ok(session_meta_get_impl(&db, &plugin_id, &input))
 });
 
+host_fn!(peckboard_session_events(user_data: HostState; input: String) -> String {
+    let (db, _plugin_id, ok) = state_and_permission(&user_data, "session_read")?;
+    if !ok { return Ok(error_json("plugin lacks the 'session_read' permission")); }
+    Ok(session_events_impl(&db, &input))
+});
+
 // ── Generic session / event host functions (gated, scoped) ────────────
 // Each refuses if called outside an `mcp.tool.invoke` (no trusted context).
 
@@ -3180,6 +3227,13 @@ pub(crate) fn host_functions(
             peckboard_session_meta_get,
         ),
         Function::new(
+            "peckboard_session_events",
+            [PTR],
+            [PTR],
+            ud.clone(),
+            peckboard_session_events,
+        ),
+        Function::new(
             "peckboard_create_session",
             [PTR],
             [PTR],
@@ -3409,6 +3463,76 @@ mod tests {
         // A session the plugin never tagged reads back null.
         let none = session_meta_get_impl(&db, "experts", r#"{"session_id":"nope"}"#);
         assert!(none.contains("null"), "absent meta should be null: {none}");
+    }
+
+    #[tokio::test]
+    async fn session_events_impl_returns_slim_tail() {
+        let db = Db::in_memory().unwrap();
+        let ts = chrono::Utc::now().to_rfc3339();
+        db.create_folder(NewFolder {
+            id: "f1".into(),
+            name: "f1".into(),
+            path: "/tmp/f1".into(),
+            created_at: ts.clone(),
+        })
+        .await
+        .unwrap();
+        db.create_session(crate::db::models::NewSession {
+            id: "s1".into(),
+            name: "s1".into(),
+            folder_id: "f1".into(),
+            created_at: ts.clone(),
+            last_activity: ts,
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+
+        db.append_event("s1", "user", serde_json::json!({ "text": "hi" }))
+            .await
+            .unwrap();
+        db.append_event(
+            "s1",
+            "agent-tool-start",
+            serde_json::json!({ "name": "Bash" }),
+        )
+        .await
+        .unwrap();
+
+        // From the beginning: slim shape, tool name surfaced, no `data` leak.
+        let out = session_events_impl(&db, r#"{"session_id":"s1"}"#);
+        let v: serde_json::Value = serde_json::from_str(&out).unwrap();
+        let events = v["events"].as_array().unwrap();
+        assert_eq!(events.len(), 2);
+        assert_eq!(events[0]["seq"], 1);
+        assert_eq!(events[0]["kind"], "user");
+        assert!(
+            events[0]["name"].is_null(),
+            "non-tool event → null name: {out}"
+        );
+        assert_eq!(events[1]["kind"], "agent-tool-start");
+        assert_eq!(events[1]["name"], "Bash");
+        assert_eq!(v["latest_seq"], 2);
+        assert!(!out.contains("\"text\""), "event data must not leak: {out}");
+
+        // after_seq skips consumed events; empty tail → null latest_seq.
+        let out = session_events_impl(&db, r#"{"session_id":"s1","after_seq":2}"#);
+        let v: serde_json::Value = serde_json::from_str(&out).unwrap();
+        assert_eq!(v["events"].as_array().unwrap().len(), 0);
+        assert!(
+            v["latest_seq"].is_null(),
+            "no events → null latest_seq: {out}"
+        );
+
+        // limit clamps to the window (oldest-first).
+        let out = session_events_impl(&db, r#"{"session_id":"s1","limit":1}"#);
+        let v: serde_json::Value = serde_json::from_str(&out).unwrap();
+        assert_eq!(v["events"].as_array().unwrap().len(), 1);
+        assert_eq!(v["events"][0]["seq"], 1);
+        assert_eq!(v["latest_seq"], 1);
+
+        // Malformed JSON is an error, not a panic.
+        assert!(session_events_impl(&db, "not json").contains("invalid request"));
     }
 
     #[tokio::test]

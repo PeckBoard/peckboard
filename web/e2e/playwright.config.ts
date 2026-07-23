@@ -47,22 +47,21 @@ process.env.PECKBOARD_E2E_DATA_DIR = DATA_DIR
 // Config evaluation happens first (it defines the webServer), making this
 // the only reliable pre-boot hook. Idempotent — worker processes re-eval
 // this file against the same DATA_DIR.
-const openaiCompatWasm = path.resolve(
+const pluginsSrcRoot = path.resolve(
   path.dirname(fileURLToPath(import.meta.url)),
   '..',
   '..',
   '..',
   'peck-plugins',
-  'openai-compat',
-  'dist',
-  'plugin.wasm',
 )
-if (existsSync(openaiCompatWasm)) {
-  const pluginsDir = path.join(DATA_DIR, 'plugins')
-  mkdirSync(pluginsDir, { recursive: true })
-  copyFileSync(openaiCompatWasm, path.join(pluginsDir, 'openai-compat.wasm'))
+for (const plugin of ['openai-compat', 'chicken-coop']) {
+  const wasm = path.join(pluginsSrcRoot, plugin, 'dist', 'plugin.wasm')
+  if (existsSync(wasm)) {
+    const pluginsDir = path.join(DATA_DIR, 'plugins')
+    mkdirSync(pluginsDir, { recursive: true })
+    copyFileSync(wasm, path.join(pluginsDir, `${plugin}.wasm`))
+  }
 }
-
 export default defineConfig({
   testDir: './tests',
   fullyParallel: false,
