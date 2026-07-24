@@ -23,6 +23,16 @@ const E2E_PASS = 'e2e-password-1234'
 
 const PANEL_PATH = '/plugin-api/v1/demo-admin'
 
+// A hostile plugin icon: one legitimate glyph path plus script /
+// foreignObject / event-handler payloads. The host's sanitizer must keep
+// the path and strip everything else without executing anything.
+const EVIL_ICON =
+  '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor">' +
+  '<script>window.__pwned = true</script>' +
+  '<path d="M3 12h18" onload="window.__pwned = true"/>' +
+  '<foreignObject><img src="x" onerror="window.__pwned = true"/></foreignObject>' +
+  '</svg>'
+
 async function authenticate(request: APIRequestContext): Promise<string> {
   const res = await request.post('/api/auth/login', {
     data: { username: E2E_USER, password: E2E_PASS },
@@ -61,7 +71,10 @@ test('plugin UI panel opens its plugin-served page in a sandboxed iframe', async
           },
         ],
         ui_panels: [{ plugin: 'demo', id: 'admin', title: 'Demo Admin', path: PANEL_PATH }],
-        sidebar_items: [{ plugin: 'demo', id: 'admin', label: 'Demo Rail', path: PANEL_PATH }],
+        sidebar_items: [
+          { plugin: 'demo', id: 'admin', label: 'Demo Rail', icon: EVIL_ICON, path: PANEL_PATH },
+          { plugin: 'demo', id: 'plain', label: 'Plain Rail', path: PANEL_PATH },
+        ],
       }),
     })
   })
@@ -86,6 +99,23 @@ test('plugin UI panel opens its plugin-served page in a sandboxed iframe', async
   // The plugin's declared sidebar_item renders as a button in the left rail
   // (generic; opens the plugin page in the same iframe panel when clicked).
   await expect(page.getByTestId('plugin-sidebar-demo-admin')).toBeVisible()
+
+  // The declared icon renders inline after strict sanitization: the glyph
+  // path survives; script / foreignObject / event handlers do not, and none
+  // of the payloads executed.
+  const railBtn = page.getByTestId('plugin-sidebar-demo-admin')
+  await expect(railBtn.locator('.plugin-icon svg path')).toHaveCount(1)
+  const iconHtml = await railBtn.innerHTML()
+  expect(iconHtml).not.toContain('script')
+  expect(iconHtml).not.toContain('onload')
+  expect(iconHtml).not.toContain('onerror')
+  expect(iconHtml).not.toContain('foreignObject')
+  expect(await page.evaluate(() => '__pwned' in window)).toBe(false)
+
+  // An entry that declares no icon keeps the generic fallback glyph.
+  const plainBtn = page.getByTestId('plugin-sidebar-demo-plain')
+  await expect(plainBtn.locator('svg')).toBeVisible()
+  await expect(plainBtn.locator('.plugin-icon')).toHaveCount(0)
 
   // The compact row shows the plugin's name and one-line summary; the full
   // manifest (version, source repo, contributed pages) lives in the row's

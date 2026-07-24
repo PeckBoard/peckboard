@@ -449,6 +449,30 @@ A plugin can contribute a **UI panel** — a page the Peckboard web app surfaces
 **Plugin-defined security headers (`/plugin-api` browser-security carve-out).** Core's global `security_headers` middleware stamps `X-Frame-Options: DENY` + CSP `frame-ancestors 'none'` (and `default-src 'self'`) on every response, which would forbid framing the panel page at all and clobber the plugin page's own CSP. For `/plugin-api/*` only, core therefore **defers to plugin-defined security headers**: the security policy comes from the plugin itself. A plugin returns the headers for each response in its `http.request.before` verdict and the `/plugin-api` dispatch (`src/routes/plugin_api.rs`) applies them verbatim — this is the generic hook by which a plugin owns its own CSP and framing. So `src/security.rs`:
 
 - skips `security_headers` for `/plugin-api/*` (core adds none of its own CSP/framing — the plugin's response headers stand), and
+
+### Sidebar, Project, and Session Items
+
+Beyond dropdown panels, a plugin holding the **`contribute_sidebar`** permission can declare full-page entries in three manifest arrays sharing one shape: `sidebar_items` (a button in the left navigation rail), `project_items` (an entry in a project's menu), and `session_items` (an entry in a session's menu). Each opens the plugin's own `/plugin-api/*` page in the same sandboxed-iframe model as UI panels, and each entry is `{ "id", "label", "icon"?, "path" }`:
+
+```json
+{
+  "sidebar_items": [
+    {
+      "id": "ssh-fleet",
+      "label": "SSH Fleet",
+      "icon": "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"2\">…</svg>",
+      "path": "/plugin-api/v1/ssh-fleet"
+    }
+  ]
+}
+```
+
+**Icons.** `icon` is an optional **inline SVG string** rendered on the rail button in place of the generic placeholder. Style guidance: a single-color line glyph on a `viewBox="0 0 24 24"` canvas using `stroke="currentColor"` (or `fill="currentColor"`), with no fixed `width`/`height` — the host sizes it to the rail's 18px and `currentColor` picks up hover/active tinting, matching the built-in icons.
+
+Plugin markup is untrusted, so icons pass two gates. At catalog build, core (`collect_items`, `src/plugin/manager.rs`) drops any icon that isn't plausibly inline SVG or exceeds **8 KiB**. Before rendering, the web app runs a **strict allowlist sanitizer** (`web/src/utils/pluginIcon.ts`): only static shape elements (`svg` / `g` / `path` / `circle` / `ellipse` / `rect` / `line` / `polyline` / `polygon` / `title` / `desc`) and geometry/paint attributes survive — scripts, event handlers, `style`, `href` / `use` / `image`, `foreignObject`, animation, filters, and `url(…)` paint references are stripped or cause rejection. A missing or rejected icon falls back to the generic placeholder; the entry itself still renders.
+
+**Surfacing.** Validated entries are aggregated into the `GET /api/plugins` catalog as top-level `sidebar_items` / `project_items` / `session_items` arrays, each entry tagged with the declaring plugin and carrying the (size-gated) `icon` through. Path validation is the same `/plugin-api/`-prefix choke point UI panels use.
+
 - skips `origin_check` (CSRF) for `/plugin-api/*` — it is bearer-key-authenticated with no ambient cookie credentials, so Origin/CSRF defense is unnecessary there and would 403 the opaque-origin iframe's `Origin: null` calls.
 
 `/api/*` is completely untouched (still `DENY`/`'none'` + global origin check). A plugin serving an embeddable page declares its framing in that page's response, e.g. CSP `frame-ancestors 'self'` (and/or `X-Frame-Options: SAMEORIGIN`), so Peckboard can frame it same-origin while foreign origins cannot. Because the policy is per-response, the same plugin can serve a strict page CSP for its HTML and no page CSP for its JSON API responses. The `api` plugin's management page does exactly this (`frame-ancestors 'self'`).

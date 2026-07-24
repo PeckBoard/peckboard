@@ -2298,6 +2298,10 @@ struct AuthedScope {
     session_id: Option<String>,
 }
 
+/// Cap on a sidebar/project/session item's inline-SVG `icon`, in bytes.
+/// Mirrored client-side in `web/src/utils/pluginIcon.ts`; a real rail icon
+/// is a few hundred bytes, so 8 KiB is already generous.
+const MAX_SIDEBAR_ICON_LEN: usize = 8192;
 /// Collect validated contribution entries (sidebar / project / session items)
 /// from the active plugins, applying the same id/label/path checks `ui_panels`
 /// and the original `sidebar_items` used. `kind` only labels skip warnings;
@@ -2328,16 +2332,42 @@ fn collect_items(
                 );
                 continue;
             }
+            // Icons pass through size/shape-gated only — the web client does
+            // the real allowlist sanitization before rendering. This guard
+            // just keeps a hostile manifest from bloating /api/plugins or
+            // smuggling non-SVG payloads into the catalog.
+            let icon = accept_item_icon(item.icon.as_deref());
+            if item.icon.is_some() && icon.is_none() {
+                warn!(
+                    "Plugin '{}' {kind} '{}' icon rejected (must be inline \
+                     <svg…> markup, <= {} bytes); using the default icon",
+                    loaded.name, item.id, MAX_SIDEBAR_ICON_LEN
+                );
+            }
             out.push(SidebarItemEntry {
                 plugin: loaded.name.clone(),
                 id: item.id.clone(),
                 label: item.label.clone(),
-                icon: item.icon.clone(),
+                icon,
                 path: item.path.clone(),
             });
         }
     }
     out
+}
+/// The catalog-side gate for a manifest-declared item icon: accepted only
+/// when it plausibly is inline SVG (`<svg` after trimming) and within
+/// [`MAX_SIDEBAR_ICON_LEN`]. Returns the trimmed markup to pass through, or
+/// None to fall back to the client's default icon. Real XSS hardening lives
+/// client-side (`web/src/utils/pluginIcon.ts`) — this only keeps junk and
+/// oversized payloads out of `/api/plugins`.
+fn accept_item_icon(icon: Option<&str>) -> Option<String> {
+    let trimmed = icon?.trim();
+    if !trimmed.is_empty() && trimmed.len() <= MAX_SIDEBAR_ICON_LEN && trimmed.starts_with("<svg") {
+        Some(trimmed.to_string())
+    } else {
+        None
+    }
 }
 
 /// Whether a plugin-declared UI-panel path is safe for the host to embed.
@@ -2735,6 +2765,28 @@ mod tests {
         m.permissions.clear();
         let err = validate_mcp_tools("p", &m).unwrap_err().to_string();
         assert!(err.contains("provide_mcp_tools"), "got: {err}");
+    }
+
+    #[test]
+    fn accept_item_icon_gates_shape_and_size() {
+        // Plausible inline SVG passes through, trimmed.
+        let svg = "  <svg viewBox=\"0 0 24 24\"><path d=\"M0 0h24\"/></svg>  ";
+        assert_eq!(
+            accept_item_icon(Some(svg)).as_deref(),
+            Some(svg.trim()),
+            "valid svg accepted"
+        );
+        // Missing / blank / non-SVG / oversized all fall back to None.
+        assert_eq!(accept_item_icon(None), None);
+        assert_eq!(accept_item_icon(Some("   ")), None);
+        assert_eq!(accept_item_icon(Some("<img src=x>")), None);
+        assert_eq!(
+            accept_item_icon(Some("iVBORw0KGgo=")),
+            None,
+            "base64 png rejected"
+        );
+        let huge = format!("<svg>{}</svg>", "x".repeat(MAX_SIDEBAR_ICON_LEN));
+        assert_eq!(accept_item_icon(Some(&huge)), None, "oversized rejected");
     }
 
     fn setting(key: &str) -> crate::plugin::settings::SettingField {

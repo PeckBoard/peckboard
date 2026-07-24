@@ -18,6 +18,7 @@ import SettingsPage from './components/SettingsPage'
 import PluginPanelModal from './components/PluginPanelModal'
 import PluginFullPage from './components/PluginFullPage'
 import PluginApprovalPrompt from './components/PluginApprovalPrompt'
+import { PluginIcon } from './components/PluginIcon'
 import NewSessionModal from './components/NewSessionModal'
 import NewProjectModal from './components/NewProjectModal'
 import FoldersPage from './components/ManageFoldersModal'
@@ -71,8 +72,9 @@ interface UiPanel {
 /** A left-rail entry a plugin contributes (from the `/api/plugins` catalog).
  *  Generic: the host renders a rail button and opens the plugin-served `path`
  *  in the same sandboxed iframe panels use. Mirrors the backend
- *  `SidebarItemEntry`. The `icon` (optional inline SVG) is not yet rendered —
- *  a generic icon is shown until icon sanitization is designed. */
+ *  `SidebarItemEntry`. The `icon` (optional inline SVG) is rendered after
+ *  strict allowlist sanitization (see components/PluginIcon.tsx); a missing
+ *  or rejected icon falls back to a generic placeholder. */
 interface SidebarItem {
   plugin: string
   id: string
@@ -1045,18 +1047,7 @@ function App() {
               title={item.label}
               aria-label={item.label}
             >
-              <svg
-                width="18"
-                height="18"
-                viewBox="0 0 24 24"
-                fill="none"
-                stroke="currentColor"
-                strokeWidth="2"
-                strokeLinecap="round"
-                strokeLinejoin="round"
-              >
-                <polygon points="5 3 19 12 5 21 5 3" />
-              </svg>
+              <PluginIcon icon={item.icon} />
             </button>
           ))}
           <button

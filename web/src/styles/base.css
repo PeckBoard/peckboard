@@ -96,6 +96,20 @@
   box-shadow: 0 0 0 2px var(--bg);
 }
 
+/* Plugin-contributed rail icons: sanitized inline SVG (PluginIcon). Sized to
+   match the built-in 18px glyphs; currentColor inherits hover/active tint. */
+.plugin-icon {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.plugin-icon svg {
+  display: block;
+  width: 18px;
+  height: 18px;
+}
+
 .rail-avatar {
   width: 34px;
   height: 34px;
