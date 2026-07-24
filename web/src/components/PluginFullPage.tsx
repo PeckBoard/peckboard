@@ -101,7 +101,7 @@ export default function PluginFullPage({ title, plugin, path, scope, onBack }: P
         data-plugin={plugin}
         title={title}
         src={path}
-        sandbox="allow-scripts allow-forms allow-popups"
+        sandbox="allow-scripts allow-forms allow-popups allow-downloads"
       />
     </div>
   )

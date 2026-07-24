@@ -98,7 +98,7 @@ export default function PluginPanelModal({ title, plugin, path, onClose }: Props
         data-plugin={plugin}
         title={title}
         src={path}
-        sandbox="allow-scripts allow-forms allow-popups"
+        sandbox="allow-scripts allow-forms allow-popups allow-downloads"
       />
       <div className="form-actions">
         <button type="button" className="btn-secondary" onClick={onClose}>
