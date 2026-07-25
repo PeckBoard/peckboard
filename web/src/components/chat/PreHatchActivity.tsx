@@ -3,6 +3,7 @@ import type { Event } from '../../types/api'
 import { useSessionsStore } from '../../store/sessions'
 import { useWsStore } from '../../store/ws'
 import { EMPTY_EVENTS } from './events'
+import { getCommandLine, getToolLabel } from './toolDisplay'
 
 /** The first of these input keys present on a tool call becomes the detail
  *  text of its action line — the argument a human would want to see. */
@@ -51,10 +52,12 @@ function deriveActionLines(events: Event[]): ActionLine[] {
       // The CLI emits both streaming and snapshot starts for one call.
       if (openByToolId.has(toolUseId)) continue
       openByToolId.set(toolUseId, lines.length)
+      const name = (ev.data.name as string) ?? (ev.data.tool_name as string) ?? 'tool'
+      const input = ev.data.input as Record<string, unknown> | undefined
       lines.push({
         key: ev.id,
-        label: (ev.data.name as string) ?? (ev.data.tool_name as string) ?? 'tool',
-        detail: truncate(detailFor(ev.data.input as Record<string, unknown> | undefined), 80),
+        label: getToolLabel(name),
+        detail: truncate(getCommandLine(name, input) || detailFor(input), 80),
         running: true,
       })
     } else if (ev.kind === 'agent-tool-end') {

@@ -1,5 +1,6 @@
 import type { CardReport, PendingQuestion } from '../../store/projects'
 import type { Card, Event } from '../../types/api'
+import { getCommandLine, getToolLabel } from '../chat/toolDisplay'
 
 // How long a thought bubble lingers after its event before fading out,
 // unless a newer event replaces it first.
@@ -45,12 +46,16 @@ export function summarizeEvent(event: Event): string {
     }
     case 'agent-tool-start': {
       const name = (d.name as string) ?? (d.tool_name as string) ?? 'tool'
-      const hint = toolHint(d.input as Record<string, unknown> | undefined)
-      return hint ? `${name}: ${hint}` : `Running ${name}`
+      const input = d.input as Record<string, unknown> | undefined
+      const cmd = getCommandLine(name, input)
+      if (cmd) return truncate(cmd)
+      const hint = toolHint(input)
+      const label = getToolLabel(name)
+      return hint ? `${label}: ${hint}` : `Running ${label}`
     }
     case 'agent-tool-end': {
       const name = (d.name as string) ?? (d.tool_name as string) ?? 'tool'
-      return d.error ? `${name} failed` : `${name} done`
+      return d.error ? `${getToolLabel(name)} failed` : `${getToolLabel(name)} done`
     }
     case 'agent-end':
       return (d.status as string) === 'crashed' ? 'Crashed' : 'Done'

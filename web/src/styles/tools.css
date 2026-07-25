@@ -50,6 +50,27 @@
   white-space: nowrap;
   min-width: 0;
 }
+/* Exec-like tools (run_command, git, run_tests, native shells): the real
+   command line is the row's primary text, the model's why-sentence follows. */
+.tool-cmd {
+  font-family: var(--font-mono);
+  font-weight: 600;
+  font-size: 11px;
+  color: inherit;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  flex-shrink: 0;
+  max-width: 75%;
+}
+.tool-reason {
+  color: var(--text3);
+  font-size: var(--text-xs);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  min-width: 0;
+}
 
 .tool-chevron {
   font-size: 9px;

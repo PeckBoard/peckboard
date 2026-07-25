@@ -19,6 +19,8 @@ use crate::provider::stream::{ModelInfo, ProviderEvent, ToolImage};
 /// * `echo` — Started → Text(echo of message) → Completed
 /// * `happy-path` — Started → Text → ToolStart/ToolEnd → Text → Completed
 /// * `tool-use` — Started → ToolStart/ToolEnd (with input/output) → Completed
+/// * `run-command` — Started → Text → run_command ToolStart/ToolEnd (command,
+///   args and a `reason` sentence, as the chat renders them) → Completed
 /// * `usage` — Started → Text → Edit ToolStart/ToolEnd → ask_expert
 ///   ToolStart/ToolEnd → Usage(token rollup) → Completed. Drives the usage
 ///   dashboard (entity rollups, file_update + ask_expert cost breakdowns,
@@ -317,7 +319,7 @@ async fn run_scenario(
                 ProviderEvent::ToolStart {
                     tool_use_id: tool_id.clone(),
                     name: "Bash".into(),
-                    input: serde_json::json!({ "command": "echo hello" }),
+                    input: serde_json::json!({ "command": "echo hello", "description": "Say hello to prove the shell works." }),
                 },
             )
             .await;
@@ -341,6 +343,57 @@ async fn run_scenario(
                 session_id,
                 ProviderEvent::Text {
                     text: "Done.".into(),
+                },
+            )
+            .await;
+        }
+        "run-command" => {
+            emit_event(
+                db,
+                broadcaster,
+                session_id,
+                ProviderEvent::Text {
+                    text: "Building the release binary...".into(),
+                },
+            )
+            .await;
+            tick().await;
+            let tool_id = format!("tool-{}", uuid::Uuid::new_v4());
+            emit_event(
+                db,
+                broadcaster,
+                session_id,
+                ProviderEvent::ToolStart {
+                    tool_use_id: tool_id.clone(),
+                    name: "mcp__peckboard__run_command".into(),
+                    input: serde_json::json!({
+                        "command": "cargo",
+                        "args": ["build", "--release"],
+                        "reason": "Build the release binary to verify the change compiles.",
+                    }),
+                },
+            )
+            .await;
+            tick().await;
+            emit_event(
+                db,
+                broadcaster,
+                session_id,
+                ProviderEvent::ToolEnd {
+                    tool_use_id: tool_id,
+                    output: Some("Finished `release` profile".into()),
+                    error: None,
+                    images: Vec::new(),
+                },
+            )
+            .await;
+            tick().await;
+            emit_event(
+                db,
+                broadcaster,
+                session_id,
+                ProviderEvent::Text {
+                    text: "Build complete.".into(),
                 },
             )
             .await;
@@ -1005,6 +1058,12 @@ pub fn mock_model_infos() -> Vec<ModelInfo> {
             display_name: "Mock: happy path".into(),
             capabilities: vec!["mock".into(), "tools".into()],
             tier: 3,
+        },
+        ModelInfo {
+            id: "run-command".into(),
+            display_name: "Mock: run command".into(),
+            capabilities: vec!["mock".into(), "tools".into()],
+            tier: 2,
         },
         ModelInfo {
             id: "tool-use".into(),

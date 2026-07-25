@@ -66,6 +66,12 @@ impl McpToolRegistry {
             _ => anyhow::bail!("`args` must be an array of strings"),
         };
         let timeout = args.get("timeout_secs").and_then(|v| v.as_u64());
+        let reason = args
+            .get("reason")
+            .and_then(|v| v.as_str())
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_string);
 
         tracing::info!(session_id = %ctx.session_id, command = %command, "MCP tool: run_command");
 
@@ -107,7 +113,12 @@ impl McpToolRegistry {
                     &ctx.db,
                     &ctx.broadcaster,
                     &ctx.session_id,
-                    &format!("Approve running this command?\n\n    {display}"),
+                    &match &reason {
+                        Some(r) => {
+                            format!("Approve running this command?\n\n    {display}\n\nWhy: {r}")
+                        }
+                        None => format!("Approve running this command?\n\n    {display}"),
+                    },
                     &options,
                     &token,
                     None,

@@ -1338,20 +1338,25 @@ pub(super) fn tool_definitions() -> Vec<McpToolDef> {
                                                 },
                                                 "description": "argv after the subcommand, e.g. [\"--oneline\", \"-n\", \"10\"]."
                                 },
+                                "reason": {
+                                                "type": "string",
+                                                "description": "One short sentence, shown to the user in the chat: why you are running this git command."
+                                },
                                 "timeout_secs": {
                                                 "type": "integer",
                                                 "description": "Optional timeout (default 120, max 600)."
                                 }
                 },
                 "required": [
-                                "subcommand"
+                                "subcommand",
+                                "reason"
                 ],
                 "additionalProperties": false
 }),
         },
         McpToolDef {
             name: "run_command".into(),
-            description: "Run an arbitrary command in the project folder. Worker sessions run commands immediately, no approval needed (exec is always scoped to the project folder). Chat sessions are gated by USER APPROVAL: allowlisted or 'always'-approved programs run immediately; otherwise returns status 'awaiting_approval' while the user picks Approve once / Approve always / Deny \u{2014} their answer resumes the session, then re-call run_command with the SAME command. Args are argv (no shell); cwd = project folder; output capped and timed out. Commands receive the configured environment variables, but secret values are masked as ******** in the returned output \u{2014} work with secrets by passing them along to programs, not by reading them.".into(),
+            description: "Run an arbitrary command in the project folder. Worker sessions run commands immediately, no approval needed (exec is always scoped to the project folder). Chat sessions are gated by USER APPROVAL: allowlisted or 'always'-approved programs run immediately; otherwise returns status 'awaiting_approval' while the user picks Approve once / Approve always / Deny \u{2014} their answer resumes the session, then re-call run_command with the SAME command. Args are argv (no shell); cwd = project folder; output capped and timed out. Commands receive the configured environment variables, but secret values are masked as ******** in the returned output \u{2014} work with secrets by passing them along to programs, not by reading them. ALWAYS pass `reason` \u{2014} one short sentence, shown to the user in the chat, explaining why you are running this command.".into(),
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
@@ -1366,13 +1371,18 @@ pub(super) fn tool_definitions() -> Vec<McpToolDef> {
                                                 },
                                                 "description": "argv after the command, e.g. [\"-n\", \"TODO\", \"src\"]."
                                 },
+                                "reason": {
+                                                "type": "string",
+                                                "description": "One short sentence, shown to the user in the chat: why you are running this command."
+                                },
                                 "timeout_secs": {
                                                 "type": "integer",
                                                 "description": "Optional timeout (default 120, max 600)."
                                 }
                 },
                 "required": [
-                                "command"
+                                "command",
+                                "reason"
                 ],
                 "additionalProperties": false
 }),
@@ -1408,11 +1418,18 @@ pub(super) fn tool_definitions() -> Vec<McpToolDef> {
                                                 },
                                                 "description": "Extra arguments forwarded to the runner."
                                 },
+                                "reason": {
+                                                "type": "string",
+                                                "description": "One short sentence, shown to the user in the chat: why you are running the tests."
+                                },
                                 "timeout_secs": {
                                                 "type": "integer",
                                                 "description": "Optional timeout (default 300, max 600)."
                                 }
                 },
+                "required": [
+                                "reason"
+                ],
                 "additionalProperties": false
 }),
         },
