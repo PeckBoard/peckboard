@@ -36,6 +36,14 @@ struct ClaudeRun {
     account_id: Option<String>,
 }
 
+/// TTL cache for the CLI model-discovery probe. Success and failure are
+/// cached alike so a broken or slow `claude` binary stalls at most one
+/// model-list request per [`super::MODEL_DISCOVERY_TTL`] window.
+struct DiscoveryCache {
+    fetched_at: std::time::Instant,
+    models: Option<Vec<crate::provider::stream::ModelInfo>>,
+}
+
 /// `AgentProvider` impl backed by the Claude CLI in stream-json
 /// duplex mode.
 ///
@@ -56,6 +64,8 @@ pub struct ClaudeProvider {
     /// credential to inject. `None` in tests / no-DB registrations, which
     /// keeps the single-(Default-)account behaviour.
     db: Option<crate::db::Db>,
+    /// TTL cache for the CLI-probed model catalog (see `discovered_models`).
+    discovery_cache: Arc<Mutex<Option<DiscoveryCache>>>,
 }
 
 impl ClaudeProvider {
@@ -63,6 +73,7 @@ impl ClaudeProvider {
         ClaudeProvider {
             runs: Arc::new(Mutex::new(HashMap::new())),
             db: None,
+            discovery_cache: Arc::new(Mutex::new(None)),
         }
     }
 
@@ -156,12 +167,49 @@ impl ClaudeProvider {
         Ok(())
     }
 
-    /// The model catalog the picker shows: the Default-account models (bare
-    /// ids, today's behaviour) plus one labelled variant per stored account
-    /// (`<model>@<account_id>`, shown as `[Account] Model`). Returns just the
-    /// base list when there are no accounts or no DB handle.
+    /// CLI-probed base catalog through the TTL cache. `None` when discovery
+    /// is disabled (`PECKBOARD_CLAUDE_MODEL_DISCOVERY=0`) or the last probe
+    /// failed — the caller then seeds from the static list. Failures are
+    /// cached for the full TTL too, so a missing/broken CLI costs one probe
+    /// timeout per window, not one per model-list request.
+    async fn discovered_models(&self) -> Option<Vec<crate::provider::stream::ModelInfo>> {
+        if !super::model_discovery_enabled() {
+            return None;
+        }
+        {
+            let cache = self.discovery_cache.lock().await;
+            if let Some(entry) = cache.as_ref()
+                && entry.fetched_at.elapsed() < super::MODEL_DISCOVERY_TTL
+            {
+                return entry.models.clone();
+            }
+        }
+        let result = super::probe_cli_models().await;
+        let mut cache = self.discovery_cache.lock().await;
+        *cache = Some(DiscoveryCache {
+            fetched_at: std::time::Instant::now(),
+            models: result.clone(),
+        });
+        result
+    }
+
+    /// Fill the discovery cache ahead of the first model-list request — the
+    /// `claude-code` builtin calls this from a background task at init so
+    /// the first model-picker open never waits on the CLI spawn.
+    pub async fn prime_model_cache(&self) {
+        let _ = self.discovered_models().await;
+    }
+
+    /// The model catalog the picker shows: the base models (CLI-probed when
+    /// possible, static seed otherwise — bare ids, Default-account) plus one
+    /// labelled variant per stored account (`<model>@<account_id>`, shown as
+    /// `[Account] Model`). Returns just the base list when there are no
+    /// accounts or no DB handle.
     async fn account_scoped_models(&self) -> Vec<crate::provider::stream::ModelInfo> {
-        let base = super::discover_models();
+        let base = match self.discovered_models().await {
+            Some(models) if !models.is_empty() => models,
+            _ => super::discover_models(),
+        };
         let Some(db) = &self.db else {
             return base;
         };

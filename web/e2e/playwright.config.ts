@@ -79,7 +79,10 @@ export default defineConfig({
     // Fresh data dir each run so prior state can't bleed in.
     // The binary embeds the frontend, so we only run the binary here —
     // both builds happen in global-setup before webServer launches.
-    command: `PECKBOARD_DATA_DIR=${DATA_DIR} PECKBOARD_BOOTSTRAP_USERNAME=${E2E_USER} PECKBOARD_BOOTSTRAP_PASSWORD=${E2E_PASS} ../../target/release/peckboard --port ${PORT} --https-port ${HTTPS_PORT} --host 127.0.0.1`,
+    // PECKBOARD_CLAUDE_MODEL_DISCOVERY=0 pins the Claude catalog to the
+    // static seed: specs assert exact model labels, which must not depend
+    // on whatever `claude` binary the host machine has installed.
+    command: `PECKBOARD_DATA_DIR=${DATA_DIR} PECKBOARD_BOOTSTRAP_USERNAME=${E2E_USER} PECKBOARD_BOOTSTRAP_PASSWORD=${E2E_PASS} PECKBOARD_CLAUDE_MODEL_DISCOVERY=0 ../../target/release/peckboard --port ${PORT} --https-port ${HTTPS_PORT} --host 127.0.0.1`,
     url: `http://127.0.0.1:${PORT}/api/health`,
     reuseExistingServer: !process.env.CI,
     timeout: 60_000,

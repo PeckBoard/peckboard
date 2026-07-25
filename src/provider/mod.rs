@@ -60,22 +60,25 @@ pub fn is_auto_model(id: &str) -> bool {
 /// it is deterministic and costs zero tokens (no classifier call). With no
 /// effort at all, workers get Sonnet (their effort defaults to medium) and
 /// chats get Opus (interactive quality expectations).
+///
+/// Returns CLI aliases (`haiku`/`sonnet`/`opus`/`fable`), not pinned model
+/// ids: the CLI resolves an alias to its newest model of that tier, so
+/// auto-routed sessions track CLI updates without a PeckBoard release.
 pub fn auto_model(effort: Option<&str>, is_worker: bool) -> &'static str {
     match effort {
-        Some("low") => "claude-haiku-4-5",
-        Some("medium") => "claude-sonnet-4-6",
-        Some("high") => "claude-opus-4-8",
-        Some("xhigh") | Some("max") => "claude-fable-5",
+        Some("low") => "haiku",
+        Some("medium") => "sonnet",
+        Some("high") => "opus",
+        Some("xhigh") | Some("max") => "fable",
         _ => {
             if is_worker {
-                "claude-sonnet-4-6"
+                "sonnet"
             } else {
-                "claude-opus-4-8"
+                "opus"
             }
         }
     }
 }
-
 #[cfg(test)]
 mod auto_tests {
     use super::*;
@@ -84,15 +87,16 @@ mod auto_tests {
     fn auto_model_routes_by_effort_then_role() {
         assert!(is_auto_model("") && is_auto_model("default") && is_auto_model("Auto"));
         assert!(!is_auto_model("claude-opus-4-8"));
-        assert_eq!(auto_model(Some("low"), true), "claude-haiku-4-5");
-        assert_eq!(auto_model(Some("medium"), false), "claude-sonnet-4-6");
-        assert_eq!(auto_model(Some("high"), true), "claude-opus-4-8");
-        assert_eq!(auto_model(Some("xhigh"), false), "claude-fable-5");
-        assert_eq!(auto_model(Some("max"), true), "claude-fable-5");
-        assert_eq!(auto_model(None, true), "claude-sonnet-4-6");
-        assert_eq!(auto_model(None, false), "claude-opus-4-8");
+        assert!(!is_auto_model("opus"));
+        assert_eq!(auto_model(Some("low"), true), "haiku");
+        assert_eq!(auto_model(Some("medium"), false), "sonnet");
+        assert_eq!(auto_model(Some("high"), true), "opus");
+        assert_eq!(auto_model(Some("xhigh"), false), "fable");
+        assert_eq!(auto_model(Some("max"), true), "fable");
+        assert_eq!(auto_model(None, true), "sonnet");
+        assert_eq!(auto_model(None, false), "opus");
         // Junk effort falls back by role rather than panicking.
-        assert_eq!(auto_model(Some("very high"), false), "claude-opus-4-8");
+        assert_eq!(auto_model(Some("very high"), false), "opus");
     }
 }
 

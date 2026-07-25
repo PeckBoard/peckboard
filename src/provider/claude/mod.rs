@@ -146,6 +146,190 @@ pub(crate) fn discover_models() -> Vec<ModelInfo> {
     models
 }
 
+/// How long one CLI model-discovery result (success or failure alike) is
+/// reused before the CLI is probed again. The probe spawns a full `claude`
+/// process (~2-4s), so the TTL is generous compared to the other providers'
+/// lightweight discovery commands.
+pub(crate) const MODEL_DISCOVERY_TTL: std::time::Duration = std::time::Duration::from_secs(15 * 60);
+
+/// Hard cap on one discovery probe: CLI spawn + initialize handshake.
+const MODEL_DISCOVERY_TIMEOUT_SECS: u64 = 10;
+
+/// Kill-switch for CLI model discovery. Set `PECKBOARD_CLAUDE_MODEL_DISCOVERY`
+/// to `0`/`false`/`off` to always serve the static seed — the e2e harness
+/// uses this to keep model labels deterministic on machines that have a real
+/// `claude` binary installed.
+pub(crate) fn model_discovery_enabled() -> bool {
+    !matches!(
+        std::env::var("PECKBOARD_CLAUDE_MODEL_DISCOVERY").as_deref(),
+        Ok("0") | Ok("false") | Ok("off")
+    )
+}
+
+/// Ask the `claude` CLI for its model catalog. The CLI has no `models`
+/// subcommand; the catalog rides the stream-json control protocol's
+/// `initialize` handshake instead (the same frames the session process
+/// already speaks). Spawns `claude --print` in duplex stream-json mode with
+/// tools and MCP disabled, writes one `control_request{subtype:"initialize"}`
+/// line, and reads the matching `control_response`, whose `models` array
+/// carries value/displayName/description per model. `None` on any failure so
+/// the caller falls back to the static [`discover_models`] seed.
+pub(crate) async fn probe_cli_models() -> Option<Vec<ModelInfo>> {
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+
+    const REQUEST_ID: &str = "peckboard-model-discovery";
+
+    let mut cmd = tokio::process::Command::new("claude");
+    cmd.args([
+        "--print",
+        "--input-format=stream-json",
+        "--output-format=stream-json",
+        "--verbose",
+        // Keep startup lean: no MCP servers, no built-in tools.
+        "--strict-mcp-config",
+        "--tools",
+        "",
+    ])
+    .stdin(std::process::Stdio::piped())
+    .stdout(std::process::Stdio::piped())
+    .stderr(std::process::Stdio::null())
+    .kill_on_drop(true);
+
+    let mut child = match cmd.spawn() {
+        Ok(c) => c,
+        Err(e) => {
+            tracing::warn!("claude: model discovery spawn failed: {e}");
+            return None;
+        }
+    };
+
+    let request = serde_json::json!({
+        "type": "control_request",
+        "request_id": REQUEST_ID,
+        "request": { "subtype": "initialize" },
+    });
+
+    let probe = async {
+        let mut stdin = child.stdin.take()?;
+        let stdout = child.stdout.take()?;
+        stdin
+            .write_all(format!("{request}\n").as_bytes())
+            .await
+            .ok()?;
+        stdin.flush().await.ok()?;
+        // stdin stays open while reading: closing it ends the CLI's input
+        // stream and it may exit before answering the control request.
+
+        let mut lines = BufReader::new(stdout).lines();
+        while let Ok(Some(line)) = lines.next_line().await {
+            if let Some(models) = parse_initialize_models(&line, REQUEST_ID) {
+                return Some(models);
+            }
+        }
+        None
+    };
+
+    let result = tokio::time::timeout(
+        std::time::Duration::from_secs(MODEL_DISCOVERY_TIMEOUT_SECS),
+        probe,
+    )
+    .await;
+
+    // The handshake answered (or failed); the child has no further job.
+    let _ = child.kill().await;
+
+    match result {
+        Ok(Some(models)) if !models.is_empty() => Some(models),
+        Ok(_) => {
+            tracing::warn!("claude: model discovery returned no models");
+            None
+        }
+        Err(_) => {
+            tracing::warn!("claude: model discovery timed out");
+            None
+        }
+    }
+}
+
+/// Parse one stream-json stdout line: if it is the successful
+/// `control_response` for `request_id`, map its `models` array into
+/// [`ModelInfo`]s. `None` for every other line (system frames, other
+/// responses) and for malformed or error responses.
+fn parse_initialize_models(line: &str, request_id: &str) -> Option<Vec<ModelInfo>> {
+    let json: serde_json::Value = serde_json::from_str(line.trim()).ok()?;
+    if json.get("type")?.as_str()? != "control_response" {
+        return None;
+    }
+    let response = json.get("response")?;
+    if response.get("request_id")?.as_str()? != request_id
+        || response.get("subtype")?.as_str()? != "success"
+    {
+        return None;
+    }
+    let models = response.get("response")?.get("models")?.as_array()?;
+    Some(models.iter().filter_map(cli_model_info).collect())
+}
+
+/// Map one CLI catalog entry to a [`ModelInfo`].
+///
+/// The CLI's `value` becomes the model id verbatim — it is exactly what
+/// `--model=` accepts (aliases like `opus[1m]` included), so it round-trips
+/// through spawn untouched. The `default` sentinel is skipped: PeckBoard's
+/// own Auto entry already covers "let the CLI choose". The display name
+/// prefers the description head ("Opus 4.8 with 1M context · Best for…" →
+/// "Opus 4.8 with 1M context") because it names the concrete model version,
+/// which the bare alias label ("Opus") does not.
+fn cli_model_info(entry: &serde_json::Value) -> Option<ModelInfo> {
+    let value = entry.get("value")?.as_str()?.trim();
+    if value.is_empty() || value == "default" {
+        return None;
+    }
+    let label = entry
+        .get("displayName")
+        .and_then(|v| v.as_str())
+        .unwrap_or(value);
+    let description = entry
+        .get("description")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    let display_name = description
+        .split('·')
+        .next()
+        .map(str::trim)
+        .filter(|head| !head.is_empty())
+        .unwrap_or(label)
+        .to_string();
+
+    let haystack = format!("{value} {label} {description}").to_lowercase();
+    let tier = if haystack.contains("fable") || haystack.contains("mythos") {
+        4
+    } else if haystack.contains("opus") {
+        3
+    } else if haystack.contains("sonnet") {
+        2
+    } else if haystack.contains("haiku") {
+        1
+    } else {
+        2
+    };
+
+    let flag = |key: &str| entry.get(key).and_then(|v| v.as_bool()).unwrap_or(false);
+    let mut capabilities = vec!["code".to_string()];
+    if flag("supportsAdaptiveThinking") || flag("supportsEffort") {
+        capabilities.push("reasoning".into());
+    }
+    if tier >= 2 {
+        capabilities.push("vision".into());
+    }
+
+    Some(ModelInfo {
+        id: value.to_string(),
+        display_name,
+        capabilities,
+        tier,
+    })
+}
+
 /// Build the CLI arguments for spawning a long-lived Claude process.
 ///
 /// # Stream-json mode
@@ -459,6 +643,99 @@ mod tests {
         assert!(models.iter().any(|m| m.id == "claude-opus-4-8"));
         assert!(models.iter().any(|m| m.id == "claude-sonnet-4-6"));
         assert!(models.iter().any(|m| m.id == "claude-haiku-4-5"));
+    }
+
+    /// Trimmed real capture from `claude` 2.1.195's initialize response.
+    fn initialize_fixture(request_id: &str) -> String {
+        serde_json::json!({
+            "type": "control_response",
+            "response": {
+                "subtype": "success",
+                "request_id": request_id,
+                "response": {
+                    "commands": [],
+                    "models": [
+                        {
+                            "value": "default",
+                            "displayName": "Default (recommended)",
+                            "description": "Opus 4.8 with 1M context · Best for everyday, complex tasks",
+                            "supportsEffort": true,
+                            "supportsAdaptiveThinking": true
+                        },
+                        {
+                            "value": "opus[1m]",
+                            "displayName": "Opus",
+                            "description": "Opus 4.8 with 1M context · Best for everyday, complex tasks",
+                            "supportsEffort": true,
+                            "supportsAdaptiveThinking": true
+                        },
+                        {
+                            "value": "claude-fable-5[1m]",
+                            "displayName": "Fable",
+                            "description": "Fable 5 · Most capable for your hardest and longest-running tasks",
+                            "supportsEffort": true,
+                            "supportsAdaptiveThinking": true
+                        },
+                        {
+                            "value": "sonnet",
+                            "displayName": "Sonnet",
+                            "description": "Sonnet 4.6 · Efficient for routine tasks",
+                            "supportsEffort": true,
+                            "supportsAdaptiveThinking": true
+                        },
+                        {
+                            "value": "haiku",
+                            "displayName": "Haiku",
+                            "description": "Haiku 4.5 · Fastest for quick answers"
+                        }
+                    ],
+                    "account": {"subscriptionType": "Claude Max"}
+                }
+            }
+        })
+        .to_string()
+    }
+
+    #[test]
+    fn parse_initialize_models_maps_cli_catalog() {
+        let models = parse_initialize_models(&initialize_fixture("rid-1"), "rid-1").unwrap();
+
+        // The `default` sentinel is dropped; everything else survives.
+        let ids: Vec<&str> = models.iter().map(|m| m.id.as_str()).collect();
+        assert_eq!(ids, ["opus[1m]", "claude-fable-5[1m]", "sonnet", "haiku"]);
+
+        // Display names come from the description head (concrete versions).
+        assert_eq!(models[0].display_name, "Opus 4.8 with 1M context");
+        assert_eq!(models[1].display_name, "Fable 5");
+        assert_eq!(models[3].display_name, "Haiku 4.5");
+
+        // Tier ranking mirrors the static seed: haiku < sonnet < opus < fable.
+        assert_eq!(models[0].tier, 3);
+        assert_eq!(models[1].tier, 4);
+        assert_eq!(models[2].tier, 2);
+        assert_eq!(models[3].tier, 1);
+
+        // Effort/adaptive-thinking flags become the `reasoning` capability
+        // (planning is gated on it); haiku reports neither flag.
+        assert!(models[0].is_thinking());
+        assert!(!models[3].is_thinking());
+        assert!(models[0].capabilities.iter().any(|c| c == "vision"));
+        assert!(!models[3].capabilities.iter().any(|c| c == "vision"));
+    }
+
+    #[test]
+    fn parse_initialize_models_rejects_other_frames() {
+        // Wrong request id.
+        assert!(parse_initialize_models(&initialize_fixture("rid-1"), "rid-2").is_none());
+        // Error response for our id.
+        let err = r#"{"type":"control_response","response":{"subtype":"error","request_id":"rid-1","error":"Unsupported control request subtype: supported_models"}}"#;
+        assert!(parse_initialize_models(err, "rid-1").is_none());
+        // Unrelated stream frames and garbage.
+        assert!(
+            parse_initialize_models(r#"{"type":"system","subtype":"init"}"#, "rid-1").is_none()
+        );
+        assert!(parse_initialize_models("not json", "rid-1").is_none());
+        assert!(parse_initialize_models("", "rid-1").is_none());
     }
 
     fn default_spawn(model: &str) -> SpawnConfig {

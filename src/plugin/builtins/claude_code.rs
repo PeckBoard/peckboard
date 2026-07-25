@@ -54,12 +54,20 @@ impl BuiltinPlugin for ClaudeCodePlugin {
         // child alive forever.
         provider.spawn_idle_reaper(30 * 60 * 1_000, Duration::from_secs(60));
 
+        // Prewarm the CLI model-discovery cache off the startup path so the
+        // first model-picker open doesn't wait on a `claude` spawn.
+        {
+            let provider = provider.clone();
+            tokio::spawn(async move { provider.prime_model_cache().await });
+        }
         ctx.provider_registry
             .register(
                 provider,
                 ProviderInfo {
                     id: "claude".into(),
                     display_name: "Claude (CLI)".into(),
+                    // Static seed only — model-list requests go through the
+                    // provider's `dynamic_models`, which probes the CLI.
                     models: discover_models(),
                     effort_levels: standard_effort_levels(),
                 },
