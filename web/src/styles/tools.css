@@ -146,6 +146,20 @@
   color: var(--accent);
 }
 
+/* Pass/fail counts parsed from a test runner's stdout. */
+.tool-counts {
+  margin-left: 8px;
+  font-size: var(--text-xs);
+  color: var(--text3);
+  flex-shrink: 0;
+}
+
+/* Stderr pane — tinted lighter than a hard error so warnings read as
+   warnings, not failures. */
+.tool-pre-stderr {
+  background: color-mix(in srgb, var(--danger-bg) 55%, var(--surface2));
+}
+
 .tool-body {
   /* Indent under the chevron + gap so the body lines up with the label. */
   padding: 6px 0 6px 18px;

@@ -153,6 +153,55 @@ export function getSummary(toolName: string, input?: Record<string, unknown>): s
       return query ?? ''
     }
     default:
+      break
+  }
+
+  // Peckboard MCP tools — matched on the bare name so the `mcp__peckboard__`
+  // (or any other server's) prefix doesn't matter.
+  switch (bareToolName(toolName)) {
+    case 'read_file': {
+      const p = input.path as string | undefined
+      if (!p) return ''
+      const start = input.start_line as number | undefined
+      return start ? `${shortenPath(p)}:${start}` : shortenPath(p)
+    }
+    case 'write_file':
+    case 'edit_file':
+    case 'file_outline': {
+      const p = input.path as string | undefined
+      return p ? shortenPath(p) : ''
+    }
+    case 'read_symbol': {
+      const name = input.name as string | undefined
+      const p = input.path as string | undefined
+      return [name, p ? `in ${shortenPath(p)}` : ''].filter(Boolean).join(' ')
+    }
+    case 'search_files': {
+      const q = input.query as string | undefined
+      const scope = input.path_contains as string | undefined
+      const parts: string[] = []
+      if (q) parts.push(`"${q}"`)
+      if (scope) parts.push(`in ${scope}`)
+      return parts.join(' ')
+    }
+    case 'list_files': {
+      const scope = input.path_contains as string | undefined
+      return scope ?? ''
+    }
+    case 'fetch_url':
+    case 'fetch_web': {
+      const url = input.url as string | undefined
+      return url ?? ''
+    }
+    case 'search_web': {
+      const q = input.query as string | undefined
+      return q ?? ''
+    }
+    case 'spawn_subagent': {
+      const n = input.name as string | undefined
+      return n ?? ''
+    }
+    default:
       return ''
   }
 }

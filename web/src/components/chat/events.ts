@@ -67,7 +67,9 @@ export type DisplayItem =
       type: 'tool'
       toolName: string
       input?: Record<string, unknown>
-      output?: Record<string, unknown>
+      /** Structured object from the mock/plugin providers, or the raw text
+       *  (often JSON-in-a-string) echoed back through the Claude CLI. */
+      output?: Record<string, unknown> | string
       error?: string
       images?: ToolImage[]
       isRunning: boolean
@@ -354,7 +356,7 @@ export function buildDisplayItems(events: Event[]): DisplayItem[] {
         if (idx !== undefined) {
           const existing = items[idx] as Extract<DisplayItem, { type: 'tool' }>
           const errorText = ev.data.error as string | undefined
-          const output = (ev.data.output as Record<string, unknown>) ?? undefined
+          const output = (ev.data.output as Record<string, unknown> | string) ?? undefined
           items[idx] = {
             ...existing,
             isRunning: false,
@@ -367,7 +369,7 @@ export function buildDisplayItems(events: Event[]): DisplayItem[] {
         } else {
           const toolName = (ev.data.name as string) ?? (ev.data.tool_name as string) ?? 'tool'
           const errorText = ev.data.error as string | undefined
-          const output = (ev.data.output as Record<string, unknown>) ?? undefined
+          const output = (ev.data.output as Record<string, unknown> | string) ?? undefined
           items.push({
             type: 'tool',
             toolName,
