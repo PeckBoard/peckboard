@@ -142,9 +142,11 @@ async function waitForWorker(
   }
   throw new Error(`worker never spawned within ${timeoutMs}ms`)
 }
-
 type CoopChicken = {
-  card_id: string
+  id?: string
+  kind?: string
+  session_id?: string | null
+  card_id: string | null
   phase: string
   activity: number
   tool_class: string | null
@@ -158,8 +160,9 @@ async function coopState(
 ): Promise<CoopChicken[]> {
   const res = await request.get('/api/plugin-ui/chicken-coop/state', { headers: auth })
   expect(res.ok(), `state endpoint failed: ${await res.text()}`).toBeTruthy()
-  const body = (await res.json()) as { chickens: CoopChicken[] }
-  return body.chickens
+  // `birds` since plugin 0.3.0; `chickens` was the pre-0.3.0 key.
+  const body = (await res.json()) as { birds?: CoopChicken[]; chickens?: CoopChicken[] }
+  return body.birds ?? body.chickens ?? []
 }
 
 /** Open the app authenticated and navigate to the Chicken Coop page. */
@@ -346,4 +349,50 @@ test('one hen per card: two active cards → two hens', async ({ request, page, 
   // the per-card asserts above are the real check. Just sanity the HUD.
   await expect(frame.getByTestId('coop-hud')).toContainText('hens out', { timeout: 10_000 })
   await page.screenshot({ path: test.info().outputPath('flock.png') })
+})
+
+test('a plain chat session spawns a rooster (session birds need the brief-list host fn)', async ({
+  request,
+  page,
+  baseURL,
+}) => {
+  expect(baseURL).toBeTruthy()
+  const { token, auth } = await authenticate(request)
+  await ensurePluginActive(request, auth)
+
+  // A card-less chat session: covered by `peckboard_list_sessions_brief`,
+  // which the wasm must DECLARE in src/index.d.ts to be able to call — an
+  // undeclared import degrades silently to card-hens-only (the v0.4.0 bug).
+  const folderPath = mkdtempSync(path.join(tmpdir(), 'peckboard-e2e-coop-chat-'))
+  const folderRes = await request.post('/api/folders', {
+    headers: auth,
+    data: { name: `e2e-coop-chat-${Date.now()}`, path: folderPath },
+  })
+  expect(folderRes.ok(), `create folder failed: ${await folderRes.text()}`).toBeTruthy()
+  const folder = (await folderRes.json()) as { id: string }
+
+  const sessionRes = await request.post('/api/sessions', {
+    headers: auth,
+    data: { name: 'Coop chat rooster', folder_id: folder.id, model: 'mock:echo' },
+  })
+  expect(sessionRes.ok(), `create session failed: ${await sessionRes.text()}`).toBeTruthy()
+  const session = (await sessionRes.json()) as { id: string }
+
+  // Backend: the session shows up as a working rooster.
+  await expect
+    .poll(
+      async () => (await coopState(request, auth)).find((b) => b.id === session.id)?.kind ?? null,
+      { timeout: 15_000 },
+    )
+    .toBe('rooster')
+  const bird = (await coopState(request, auth)).find((b) => b.id === session.id)
+  expect(bird!.phase).toBe('working')
+  expect(bird!.session_id).toBe(session.id)
+  expect(bird!.title).toBe('Coop chat rooster')
+
+  // UI: the rooster is rendered in the run.
+  const frame = await openCoopPage(page, token)
+  const rooster = frame.locator(`[data-testid="coop-chicken"][data-card-id="${session.id}"]`)
+  await expect(rooster).toHaveAttribute('data-kind', 'rooster', { timeout: 15_000 })
+  await page.screenshot({ path: test.info().outputPath('rooster.png') })
 })
