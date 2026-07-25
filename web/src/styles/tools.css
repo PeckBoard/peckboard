@@ -104,6 +104,25 @@
   }
 }
 
+/* Elapsed (running) / duration (done) — quiet timing chips on the header. */
+.tool-elapsed {
+  font-size: var(--text-xs);
+  color: var(--text3);
+  font-variant-numeric: tabular-nums;
+  flex-shrink: 0;
+}
+.tool-duration {
+  margin-left: auto;
+  font-size: var(--text-xs);
+  color: var(--text3);
+  font-variant-numeric: tabular-nums;
+  flex-shrink: 0;
+}
+/* When a badge follows the duration, the duration owns the auto-margin. */
+.tool-duration + .tool-status-badge {
+  margin-left: 8px;
+}
+
 .tool-status-badge {
   margin-left: auto;
   font-size: 10px;

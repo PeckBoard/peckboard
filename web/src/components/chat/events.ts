@@ -71,6 +71,9 @@ export type DisplayItem =
       error?: string
       images?: ToolImage[]
       isRunning: boolean
+      /** Event ts (ms) of the tool start / end — drives the duration badge. */
+      startTs?: number
+      endTs?: number
       key: string
     }
   | { type: 'status'; text: string; key: string; ts: number }
@@ -192,6 +195,7 @@ function closeOpenTools(
   items: DisplayItem[],
   openTools: Map<string, number>,
   reason: string,
+  endTs?: number,
 ): void {
   for (const idx of openTools.values()) {
     const item = items[idx]
@@ -200,6 +204,7 @@ function closeOpenTools(
         ...item,
         isRunning: false,
         error: item.error ?? reason,
+        endTs: item.endTs ?? endTs,
       }
     }
   }
@@ -337,7 +342,7 @@ export function buildDisplayItems(events: Event[]): DisplayItem[] {
         if (seenToolIds.has(toolUseId)) break
         seenToolIds.add(toolUseId)
         const idx = items.length
-        items.push({ type: 'tool', toolName, input, isRunning: true, key: ev.id })
+        items.push({ type: 'tool', toolName, input, isRunning: true, key: ev.id, startTs: ev.ts })
         openTools.set(toolUseId, idx)
         break
       }
@@ -350,7 +355,14 @@ export function buildDisplayItems(events: Event[]): DisplayItem[] {
           const existing = items[idx] as Extract<DisplayItem, { type: 'tool' }>
           const errorText = ev.data.error as string | undefined
           const output = (ev.data.output as Record<string, unknown>) ?? undefined
-          items[idx] = { ...existing, isRunning: false, output, error: errorText, images }
+          items[idx] = {
+            ...existing,
+            isRunning: false,
+            output,
+            error: errorText,
+            images,
+            endTs: ev.ts,
+          }
           openTools.delete(toolUseId)
         } else {
           const toolName = (ev.data.name as string) ?? (ev.data.tool_name as string) ?? 'tool'
@@ -380,7 +392,7 @@ export function buildDisplayItems(events: Event[]): DisplayItem[] {
       }
       case 'agent-end': {
         flushAssistant()
-        closeOpenTools(items, openTools, 'agent ended before tool completed')
+        closeOpenTools(items, openTools, 'agent ended before tool completed', ev.ts)
         const reason = (ev.data.reason as string) ?? 'unknown error'
         const wasInterrupted = pendingInterrupt && reason === 'interrupted'
         pendingInterrupt = false
@@ -406,7 +418,7 @@ export function buildDisplayItems(events: Event[]): DisplayItem[] {
       }
       case 'interrupt': {
         flushAssistant()
-        closeOpenTools(items, openTools, 'interrupted')
+        closeOpenTools(items, openTools, 'interrupted', ev.ts)
         items.push({ type: 'interrupt', ts: ev.ts, key: ev.id })
         pendingInterrupt = true
         break

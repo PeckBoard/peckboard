@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
 import rehypeHighlight from 'rehype-highlight'
+import type { Components } from 'react-markdown'
 import SafeMarkdown from './SafeMarkdown'
 import type { Event, Session } from '../types/api'
 import { authedFetch } from '../store/auth'
@@ -9,6 +10,7 @@ import { useSessionsStore, type PendingUserMessage } from '../store/sessions'
 import { effortOptionsForModel, useResourcesStore, type ProviderInfo } from '../store/resources'
 import InputBar from './InputBar'
 import ToolUseBlock from './ToolUseBlock'
+import MermaidBlock from './MermaidBlock'
 import ConfirmDialog from './ConfirmDialog'
 import { MenuButton, type MenuItem } from './Dropdown'
 import ModelPicker from './ModelPicker'
@@ -33,6 +35,30 @@ import 'highlight.js/styles/github-dark.css'
 // fresh-array warning from React fast refresh).
 const EMPTY_TODOS: TodoItem[] = []
 const EMPTY_PENDING_MESSAGES: PendingUserMessage[] = []
+
+// Render fenced ```mermaid blocks in chat markdown as diagrams — same
+// wiring PlanView uses for plan bodies.
+const chatMarkdownComponents: Components = {
+  code({ className, children }) {
+    const text = String(children ?? '')
+    if (className && /\blanguage-mermaid\b/.test(className)) {
+      return <MermaidBlock code={text.replace(/\n$/, '')} />
+    }
+    return <code className={className}>{children}</code>
+  },
+}
+
+/** Live stopwatch; isolated so the 1s tick re-renders only this span. */
+function ElapsedSince({ since }: { since: number }) {
+  const [now, setNow] = useState(() => Date.now())
+  useEffect(() => {
+    const id = setInterval(() => setNow(Date.now()), 1000)
+    return () => clearInterval(id)
+  }, [])
+  const s = Math.max(0, Math.floor((now - since) / 1000))
+  const mm = Math.floor(s / 60)
+  return <span className="chat-thinking-elapsed">{mm > 0 ? `${mm}m ${s % 60}s` : `${s}s`}</span>
+}
 
 // Interactive-session context prompt: the banner appears once context
 // occupancy reaches this, and after "Continue" reappears each time it grows
@@ -585,15 +611,15 @@ export default function ChatView({
     setCtxPromptDismissal({ boundary: lastHandoverSeq, until: contextTokens + CONTEXT_PROMPT_STEP })
 
   // Determine if agent is working (includes waiting for CLI to start after user sends)
-  const agentWorking = (() => {
+  const { agentWorking, workingSince } = (() => {
     for (let i = events.length - 1; i >= 0; i--) {
-      const kind = events[i].kind
-      if (kind === 'agent-start') return true
-      if (kind === 'agent-end') return false
+      const ev = events[i]
+      if (ev.kind === 'agent-start') return { agentWorking: true, workingSince: ev.ts }
+      if (ev.kind === 'agent-end') return { agentWorking: false, workingSince: 0 }
       // User sent a message but CLI hasn't started yet — still "working"
-      if (kind === 'user') return true
+      if (ev.kind === 'user') return { agentWorking: true, workingSince: ev.ts }
     }
-    return false
+    return { agentWorking: false, workingSince: 0 }
   })()
 
   const agentStatus = deriveAgentStatus(events)
@@ -1064,7 +1090,11 @@ export default function ChatView({
               return (
                 <div key={item.key} className="chat-row chat-row-assistant">
                   <div className="chat-bubble chat-bubble-assistant">
-                    <SafeMarkdown className="chat-markdown" rehypePlugins={[rehypeHighlight]}>
+                    <SafeMarkdown
+                      className="chat-markdown"
+                      rehypePlugins={[rehypeHighlight]}
+                      components={chatMarkdownComponents}
+                    >
                       {item.text}
                     </SafeMarkdown>
                     <div className="chat-time">{formatTime(item.ts)}</div>
@@ -1188,7 +1218,10 @@ export default function ChatView({
                       </span>
                       <span className="chat-handover-time">{formatTime(item.ts)}</span>
                     </summary>
-                    <SafeMarkdown className="chat-markdown chat-handover-doc">
+                    <SafeMarkdown
+                      className="chat-markdown chat-handover-doc"
+                      components={chatMarkdownComponents}
+                    >
                       {item.doc}
                     </SafeMarkdown>
                   </details>
@@ -1204,6 +1237,8 @@ export default function ChatView({
                     error={item.error}
                     images={item.images}
                     isRunning={item.isRunning}
+                    startTs={item.startTs}
+                    endTs={item.endTs}
                   />
                 </div>
               )
@@ -1294,6 +1329,7 @@ export default function ChatView({
                 <span />
               </div>
               <span>Thinking...</span>
+              {workingSince > 0 && <ElapsedSince since={workingSince} />}
               <button
                 className="chat-thinking-interrupt"
                 onClick={() => interruptSession(sessionId)}
