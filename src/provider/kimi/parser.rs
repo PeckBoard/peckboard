@@ -14,10 +14,17 @@
 //! ```
 //!
 //! Assistant text is flushed in blocks (before every tool result and at turn
-//! end), not streamed as deltas; thinking is never written. The session id
-//! rides the trailing `session.resume_hint` meta frame and is carried out via
-//! `conversation_id` so the next turn can resume with `--session`. `Started`
-//! and the final `Completed` are emitted by the run loop, never here.
+//! end), not streamed as deltas. The session id rides the trailing
+//! `session.resume_hint` meta frame and is carried out via `conversation_id`
+//! so the next turn can resume with `--session`. `Started` and the final
+//! `Completed` are emitted by the run loop, never here.
+//!
+//! No `Thinking` events: kimi-code 0.27.0 writes no reasoning to prompt-mode
+//! stream-json, and `kimi --help` exposes no reasoning/thinking flag to turn
+//! any on (`--output-format` takes only `text` | `stream-json`). Reasoning
+//! is rendered in the interactive TUI only. Re-check when the CLI gains a
+//! reasoning option; the mapping would be one arm here, like the grok and
+//! cursor parsers.
 //!
 //! The shape isn't formally specified, so every accessor is defensive: an
 //! unrecognised line yields no events rather than an error.

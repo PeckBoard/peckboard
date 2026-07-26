@@ -191,6 +191,12 @@ struct ChatRequest<'a> {
     /// plain chat request is byte-for-byte what it was before tools existed.
     #[serde(skip_serializing_if = "Option::is_none")]
     tools: Option<&'a [serde_json::Value]>,
+    /// Ask the model to emit its reasoning in a separate `message.thinking`
+    /// field. Only sent for models whose `/api/show` capabilities include
+    /// `thinking` — Ollama 400s a `think` request for a model that can't,
+    /// so it stays omitted (and the request byte-identical) otherwise.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    think: Option<bool>,
 }
 
 #[derive(Deserialize)]
@@ -215,6 +221,11 @@ struct StreamMessage {
     /// so we can collect them as they arrive and dispatch once `done`.
     #[serde(default)]
     tool_calls: Option<Vec<ToolCall>>,
+    /// Reasoning text, present only when the request set `think: true` on a
+    /// thinking-capable model. Streamed as deltas ahead of `content`, and
+    /// surfaced as `Thinking` events rather than assistant text.
+    #[serde(default)]
+    thinking: Option<String>,
 }
 
 /// Shape of Ollama's OpenAI-compatible `GET /v1/models` response. We only
@@ -633,6 +644,7 @@ impl AgentProvider for OllamaProvider {
         let capabilities = self.model_capabilities(&settings, &model_ref).await;
         let supports_tools = capability_present(capabilities.as_deref(), "tools");
         let supports_vision = capability_present(capabilities.as_deref(), "vision");
+        let supports_thinking = capability_present(capabilities.as_deref(), "thinking");
         if enable_tools && !supports_tools {
             tracing::info!(
                 model = %model,
@@ -707,6 +719,7 @@ impl AgentProvider for OllamaProvider {
                 conversations: &conversations,
                 plugins: &plugins,
                 enable_tools,
+                think: supports_thinking.then_some(true),
                 extra_headers,
                 timeout_secs,
                 cancel: cancel_for_task,
@@ -1101,6 +1114,11 @@ struct ChatStreamArgs<'a> {
     conversations: &'a Arc<Mutex<HashMap<String, Vec<ChatMessage>>>>,
     plugins: &'a PluginManager,
     enable_tools: bool,
+    /// `Some(true)` when the model advertises the `thinking` capability, so
+    /// the request opts into a separate `message.thinking` stream. `None`
+    /// for every other model — the field is then omitted from the request
+    /// body, leaving it exactly as it was before thinking was wired.
+    think: Option<bool>,
     extra_headers: Vec<(String, String)>,
     timeout_secs: u64,
     cancel: Arc<Notify>,
@@ -1148,6 +1166,7 @@ async fn run_chat_stream(args: ChatStreamArgs<'_>) -> bool {
         conversations,
         plugins,
         enable_tools,
+        think,
         extra_headers,
         timeout_secs,
         cancel,
@@ -1256,6 +1275,7 @@ async fn run_chat_stream(args: ChatStreamArgs<'_>) -> bool {
             model,
             messages: &messages,
             tools: tools.as_deref(),
+            think,
             extra_headers: &extra_headers,
             timeout_secs,
             db,
@@ -1341,6 +1361,7 @@ struct StreamRound<'a> {
     model: &'a str,
     messages: &'a [ChatMessage],
     tools: Option<&'a [serde_json::Value]>,
+    think: Option<bool>,
     extra_headers: &'a [(String, String)],
     timeout_secs: u64,
     db: &'a crate::db::Db,
@@ -1361,6 +1382,7 @@ async fn stream_one_round(round: StreamRound<'_>) -> RoundOutcome {
         model,
         messages,
         tools,
+        think,
         extra_headers,
         timeout_secs,
         db,
@@ -1374,6 +1396,7 @@ async fn stream_one_round(round: StreamRound<'_>) -> RoundOutcome {
         messages,
         stream: true,
         tools,
+        think,
     };
 
     let mut request = client
@@ -1486,6 +1509,20 @@ async fn stream_one_round(round: StreamRound<'_>) -> RoundOutcome {
                         return RoundOutcome::Failed;
                     }
                     if let Some(message) = parsed.message {
+                        // Reasoning deltas ride their own field and go to
+                        // the collapsed Thinking channel, never the
+                        // assistant transcript replayed back to the model.
+                        if let Some(thinking) = message.thinking
+                            && !thinking.is_empty()
+                        {
+                            emit_event(
+                                db,
+                                broadcaster,
+                                session_id,
+                                ProviderEvent::Thinking { text: thinking },
+                            )
+                            .await;
+                        }
                         if let Some(content) = message.content
                             && !content.is_empty()
                         {
@@ -2114,15 +2151,55 @@ mod tests {
             messages: &messages,
             stream: true,
             tools: None,
+            think: None,
         };
         let v = serde_json::to_value(&body).unwrap();
         assert!(v.get("tools").is_none(), "no tools key when None");
+        assert!(v.get("think").is_none(), "no think key when None");
         let msg = &v["messages"][0];
         assert_eq!(msg["role"], "user");
         assert!(msg.get("tool_calls").is_none());
         assert!(msg.get("tool_name").is_none());
         // No attachments → no `images` key, so a text turn is unchanged.
         assert!(msg.get("images").is_none());
+    }
+
+    #[test]
+    fn chat_request_sends_think_for_thinking_capable_models() {
+        let messages = vec![ChatMessage::user("hi".into(), None)];
+        let body = ChatRequest {
+            model: "qwen3",
+            messages: &messages,
+            stream: true,
+            tools: None,
+            think: capability_present(Some(&["completion".into(), "thinking".into()]), "thinking")
+                .then_some(true),
+        };
+        let v = serde_json::to_value(&body).unwrap();
+        assert_eq!(v["think"], true);
+    }
+
+    #[test]
+    fn stream_chunk_carries_thinking_alongside_content() {
+        // One raw `/api/chat` line from a thinking model: reasoning rides its
+        // own field and must not be folded into the assistant text.
+        let chunk: ChatStreamChunk = serde_json::from_str(
+            r#"{"model":"qwen3","message":{"role":"assistant","thinking":"17*20=340","content":""},"done":false}"#,
+        )
+        .unwrap();
+        let msg = chunk.message.expect("message present");
+        assert_eq!(msg.thinking.as_deref(), Some("17*20=340"));
+        assert_eq!(msg.content.as_deref(), Some(""));
+    }
+
+    #[test]
+    fn stream_chunk_without_thinking_field_parses() {
+        let chunk: ChatStreamChunk =
+            serde_json::from_str(r#"{"message":{"role":"assistant","content":"hi"},"done":true}"#)
+                .unwrap();
+        let msg = chunk.message.expect("message present");
+        assert!(msg.thinking.is_none());
+        assert_eq!(msg.content.as_deref(), Some("hi"));
     }
 
     #[test]
@@ -2139,6 +2216,7 @@ mod tests {
             messages: &messages,
             stream: true,
             tools: None,
+            think: None,
         };
         let v = serde_json::to_value(&body).unwrap();
         assert_eq!(v["messages"][0]["role"], "system");

@@ -15,9 +15,9 @@
 //! `sessionId` out via `conversation_id` so the next turn can resume it with
 //! `--session-id`. The `Started` and final `Completed` events are emitted by
 //! the run loop (which owns the model label and the captured id), so this
-//! parser never produces them. `thought` (reasoning) has no channel in the
-//! unified event model — matching the Claude/Cursor providers, which also
-//! don't surface reasoning as assistant text — so it is dropped.
+//! parser never produces them. `thought` (reasoning) maps to
+//! [`ProviderEvent::Thinking`], the same collapsed channel the Claude
+//! provider feeds from its `thinking` blocks.
 //!
 //! The exact tool-event shape isn't formally specified, so every accessor is
 //! defensive: an unrecognised shape yields no events rather than an error.
@@ -48,8 +48,14 @@ pub(super) fn parse_stream_json(
             }
         }
 
-        // Reasoning / chain-of-thought — no unified channel, dropped.
-        "thought" => {}
+        // Reasoning / chain-of-thought — its own collapsed channel.
+        "thought" => {
+            if let Some(text) = event_data_str(json) {
+                if !text.is_empty() {
+                    events.push(ProviderEvent::Thinking { text });
+                }
+            }
+        }
 
         // A tool invocation begins.
         "tool_call" => {
@@ -214,12 +220,22 @@ mod tests {
     }
 
     #[test]
-    fn thought_is_dropped() {
+    fn thought_becomes_thinking() {
         let mut conv = None;
         let events = parse(
             serde_json::json!({"type":"thought","data":"hmm let me think"}),
             &mut conv,
         );
+        assert_eq!(events.len(), 1);
+        assert!(
+            matches!(&events[0], ProviderEvent::Thinking { text } if text == "hmm let me think")
+        );
+    }
+
+    #[test]
+    fn empty_thought_is_dropped() {
+        let mut conv = None;
+        let events = parse(serde_json::json!({"type":"thought","data":""}), &mut conv);
         assert!(events.is_empty());
     }
 

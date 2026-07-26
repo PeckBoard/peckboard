@@ -17,6 +17,10 @@
 //!   `args` and, on completion, `result.success` / `result.error`. Mapped
 //!   to `ToolStart` / `ToolEnd` so the UI shows Cursor's actions live,
 //!   matching the Claude provider's verbosity.
+//! - `thinking` (subtype `delta` / `completed`) — reasoning deltas, each
+//!   carrying a `text` chunk (the `completed` frame carries none). Verified
+//!   against cursor-agent 2026.07.20; mapped to `Thinking` so reasoning
+//!   lands in the collapsed channel instead of the assistant transcript.
 //! - `user` — Claude-style `tool_result` blocks (compatibility path; the
 //!   initial prompt echo carries only `text` blocks and yields nothing).
 //! - `result` — turn complete. Carries the chat id and token `usage`
@@ -103,6 +107,25 @@ pub(super) fn parse_stream_json(
                 serde_json::json!({ "provider": "cursor" }),
             );
             push_tool_call(json, &mut events);
+        }
+
+        // ── thinking (reasoning deltas) ─────────────────────────
+        // Cursor streams reasoning as its own frame type, never as a
+        // cumulative snapshot, so deltas pass straight through. The
+        // trailing `subtype:"completed"` frame has no `text` → no event.
+        "thinking" => {
+            synth_started(
+                state,
+                &mut events,
+                serde_json::json!({ "provider": "cursor" }),
+            );
+            if let Some(text) = json.get("text").and_then(|v| v.as_str())
+                && !text.is_empty()
+            {
+                events.push(ProviderEvent::Thinking {
+                    text: text.to_string(),
+                });
+            }
         }
 
         // ── user message (Claude-style tool results) ─────────────
@@ -1040,5 +1063,46 @@ mod tests {
                 "claude-fable-5-low".into(),
             ])
         );
+    }
+
+    #[test]
+    fn thinking_delta_becomes_thinking_event() {
+        let mut state = started_state();
+        let events = parse(
+            serde_json::json!({
+                "type":"thinking",
+                "subtype":"delta",
+                "text":"Calculating 17 times",
+                "session_id":"s1"
+            }),
+            &mut state,
+        );
+        assert_eq!(events.len(), 1);
+        assert!(
+            matches!(&events[0], ProviderEvent::Thinking { text } if text == "Calculating 17 times")
+        );
+        assert_eq!(state.conversation_id.as_deref(), Some("s1"));
+    }
+
+    #[test]
+    fn thinking_completed_frame_yields_nothing() {
+        let mut state = started_state();
+        let events = parse(
+            serde_json::json!({"type":"thinking","subtype":"completed","session_id":"s1"}),
+            &mut state,
+        );
+        assert!(events.is_empty());
+    }
+
+    #[test]
+    fn thinking_without_prior_init_synthesizes_started() {
+        let mut state = TurnState::default();
+        let events = parse(
+            serde_json::json!({"type":"thinking","subtype":"delta","text":"hmm"}),
+            &mut state,
+        );
+        assert_eq!(events.len(), 2);
+        assert!(matches!(&events[0], ProviderEvent::Started { .. }));
+        assert!(matches!(&events[1], ProviderEvent::Thinking { text } if text == "hmm"));
     }
 }
