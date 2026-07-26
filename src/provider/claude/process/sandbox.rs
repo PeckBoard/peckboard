@@ -143,4 +143,27 @@ mod tests {
         let denied = check_path_violation("Read", &json!({"file_path": "Cargo.toml"}), ".");
         assert!(denied.is_none());
     }
+
+    #[test]
+    fn path_violation_denies_outside_glob_grep_notebook() {
+        for (tool, key) in [
+            ("Glob", "path"),
+            ("Grep", "path"),
+            ("NotebookEdit", "notebook_path"),
+        ] {
+            let denied = check_path_violation(tool, &json!({ key: "/etc" }), ".");
+            assert!(denied.is_some(), "{tool} outside project should be denied");
+        }
+    }
+
+    #[test]
+    fn path_violation_denies_relative_traversal() {
+        // A relative `../` path that resolves (to an existing file) outside
+        // the allowed dir is caught after resolution, not just absolute
+        // paths. Allowed dir is `src/`; `../Cargo.toml` resolves to the
+        // crate root, one level above it.
+        let denied = check_path_violation("Read", &json!({"file_path": "../Cargo.toml"}), "src");
+        assert!(denied.is_some());
+        assert!(denied.unwrap().contains("outside the project folder"));
+    }
 }

@@ -146,6 +146,7 @@ export default function SettingsPage({ onBack, initialSubPage = null }: Props) {
   const [hue, setHue] = useState<number>(getStoredHue)
   const [serverConfig, setServerConfig] = useState<ServerConfig | null>(null)
   const [caveman, setCaveman] = useState<string>('off')
+  const [claudeBypass, setClaudeBypass] = useState<boolean>(false)
   const [preHatchModel, setPreHatchModel] = useState<string>('')
   const models = useResourcesStore((s) => s.models)
   const providers = useResourcesStore((s) => s.providers)
@@ -167,6 +168,15 @@ export default function SettingsPage({ onBack, initialSubPage = null }: Props) {
       .then((res) => (res.ok ? res.json() : null))
       .then((data: { level?: string } | null) => {
         if (data?.level) setCaveman(data.level)
+      })
+      .catch(() => {})
+  }, [])
+
+  useEffect(() => {
+    authedFetch('/api/settings/claude-permissions')
+      .then((res) => (res.ok ? res.json() : null))
+      .then((data: { bypass?: boolean } | null) => {
+        if (typeof data?.bypass === 'boolean') setClaudeBypass(data.bypass)
       })
       .catch(() => {})
   }, [])
@@ -208,6 +218,15 @@ export default function SettingsPage({ onBack, initialSubPage = null }: Props) {
       method: 'PUT',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ level }),
+    }).catch(() => {})
+  }
+
+  const changeClaudeBypass = (bypass: boolean) => {
+    setClaudeBypass(bypass)
+    authedFetch('/api/settings/claude-permissions', {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ bypass }),
     }).catch(() => {})
   }
 
@@ -534,6 +553,31 @@ export default function SettingsPage({ onBack, initialSubPage = null }: Props) {
           </section>
 
           <ApprovedCommandsSection />
+
+          <section className="settings-section" data-testid="claude-permissions-section">
+            <h3>Claude Tool Permissions</h3>
+            <p className="form-hint">
+              Enforced (default) runs Claude CLI sessions under PeckBoard&apos;s permission gate:
+              every tool call is checked server-side, file access outside the project folder is
+              denied, and the terminal tool stays blocked. Bypass restores the legacy
+              --dangerously-skip-permissions behavior for this host. Applies to newly spawned agent
+              processes.
+            </p>
+            <div className="theme-toggle">
+              <button
+                className={`theme-btn ${!claudeBypass ? 'active' : ''}`}
+                onClick={() => changeClaudeBypass(false)}
+              >
+                Enforced
+              </button>
+              <button
+                className={`theme-btn ${claudeBypass ? 'active' : ''}`}
+                onClick={() => changeClaudeBypass(true)}
+              >
+                Bypass
+              </button>
+            </div>
+          </section>
 
           <SoftwareUpdate />
 

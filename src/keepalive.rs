@@ -296,7 +296,7 @@ async fn ping(
         working_dir: String::new(), // filled from the folder by the manager
         mcp_config_path: None,
         env: Default::default(),
-        permission_mode: Some("bypass".into()),
+        permission_mode: None, // host default: enforced unless the bypass setting is on
         timeout_ms: Some(RUN_TIMEOUT.as_millis() as u64),
         metadata: serde_json::Value::Null,
         system_prompt_suffix: None,

@@ -55,6 +55,11 @@ const PRE_HATCHER_SYSTEM_PROMPT_KEY: &str = "pre_hatcher_system_prompt";
 pub const PRE_HATCHER_DEFAULT_SYSTEM_PROMPT: &str = "fable 5";
 const HIDDEN_PROVIDERS_KEY: &str = "hidden_providers";
 
+/// Plugin-store key for the Claude permission-bypass escape hatch
+/// (`{"bypass": bool}`; missing ⇒ false = enforced). See
+/// `claude_bypass_permissions_for_db`.
+const CLAUDE_BYPASS_KEY: &str = "claude_bypass_permissions";
+
 pub fn router(state: Arc<AppState>) -> Router<Arc<AppState>> {
     Router::new()
         .route("/api/settings/approved-commands", get(list_approved))
@@ -63,6 +68,10 @@ pub fn router(state: Arc<AppState>) -> Router<Arc<AppState>> {
             delete(delete_approved),
         )
         .route("/api/settings/caveman", get(get_caveman).put(set_caveman))
+        .route(
+            "/api/settings/claude-permissions",
+            get(get_claude_permissions).put(set_claude_permissions),
+        )
         .route(
             "/api/settings/pre-hatcher",
             get(get_pre_hatcher).put(set_pre_hatcher),
@@ -123,6 +132,67 @@ async fn set_caveman(
     let value = serde_json::json!({ "level": body.level }).to_string();
     let res = tokio::task::spawn_blocking(move || {
         db.plugin_store_put_blocking(SETTINGS_NS, SETTINGS_COLLECTION, "caveman_mode", &value)
+    })
+    .await;
+    match res {
+        Ok(Ok(_)) => Ok(StatusCode::NO_CONTENT),
+        Ok(Err(e)) => Err((
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({ "error": e.to_string() })),
+        )),
+        Err(e) => Err((
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({ "error": e.to_string() })),
+        )),
+    }
+}
+
+/// Whether the Claude permission-bypass escape hatch is on (default off =
+/// enforced). Read at dispatch time by
+/// `SessionManager::send_message_locked` for spawns that leave
+/// `SpawnConfig::permission_mode` unset.
+pub(crate) async fn claude_bypass_permissions_for_db(db: Db) -> bool {
+    let raw = tokio::task::spawn_blocking(move || {
+        db.plugin_store_get_blocking(SETTINGS_NS, SETTINGS_COLLECTION, CLAUDE_BYPASS_KEY)
+    })
+    .await;
+    match raw {
+        Ok(Ok(Some(json))) => serde_json::from_str::<serde_json::Value>(&json)
+            .ok()
+            .and_then(|v| v.get("bypass").and_then(|b| b.as_bool()))
+            .unwrap_or(false),
+        _ => false,
+    }
+}
+
+/// GET /api/settings/claude-permissions → `{"bypass": bool}` (default false).
+///
+/// `bypass = false` (enforced, the default): Claude CLI spawns run with the
+/// stdio permission tool, so every tool call not pre-approved via
+/// `--allowedTools` round-trips through Peckboard's sandbox gate
+/// (project-folder containment + terminal-tool deny). `bypass = true`
+/// restores the legacy `--dangerously-skip-permissions` behavior host-wide.
+async fn get_claude_permissions(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+    let bypass = claude_bypass_permissions_for_db(state.db.clone()).await;
+    Json(serde_json::json!({ "bypass": bypass }))
+}
+
+#[derive(serde::Deserialize)]
+struct ClaudePermissionsBody {
+    bypass: bool,
+}
+
+/// PUT /api/settings/claude-permissions `{"bypass": bool}` → 204. Takes
+/// effect on each session's next dispatched spawn — a running CLI child
+/// keeps its spawn-time mode until it exits and respawns.
+async fn set_claude_permissions(
+    State(state): State<Arc<AppState>>,
+    Json(body): Json<ClaudePermissionsBody>,
+) -> impl IntoResponse {
+    let db = state.db.clone();
+    let value = serde_json::json!({ "bypass": body.bypass }).to_string();
+    let res = tokio::task::spawn_blocking(move || {
+        db.plugin_store_put_blocking(SETTINGS_NS, SETTINGS_COLLECTION, CLAUDE_BYPASS_KEY, &value)
     })
     .await;
     match res {

@@ -235,7 +235,7 @@ pub async fn begin_handover(
         working_dir: String::new(),
         mcp_config_path: None,
         env: Default::default(),
-        permission_mode: Some("bypass".into()),
+        permission_mode: None, // host default: enforced unless the bypass setting is on
         timeout_ms: None,
         metadata: serde_json::Value::Null,
         system_prompt_suffix: None,

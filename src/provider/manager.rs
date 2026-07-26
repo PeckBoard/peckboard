@@ -366,6 +366,18 @@ impl SessionManager {
             is_pre_hatcher: session.expert_kind.as_deref()
                 == Some(crate::service::mcp_server::PRE_HATCHER_EXPERT_KIND),
         };
+        // Permission-mode resolution, at the same dispatch chokepoint:
+        // construction sites leave `permission_mode` unset (host default =
+        // enforced — the Claude provider answers `can_use_tool` control
+        // requests through its sandbox gate). The app-level escape hatch
+        // (Settings → Claude Permissions) restores the legacy
+        // `--dangerously-skip-permissions` behavior host-wide. Explicitly
+        // set modes pass through untouched.
+        if final_config.permission_mode.is_none()
+            && crate::routes::settings::claude_bypass_permissions_for_db(db.clone()).await
+        {
+            final_config.permission_mode = Some("bypass".into());
+        }
         // User-defined MCP servers (Settings → MCP Servers) merge into the
         // per-session config file here — the one spot every dispatch path
         // crosses AFTER the model (hence provider) is resolved; the

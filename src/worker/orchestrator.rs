@@ -403,7 +403,7 @@ pub async fn check_and_spawn_workers(state: &Arc<AppState>) {
                     working_dir,
                     mcp_config_path,
                     env: Default::default(),
-                    permission_mode: Some("bypass".into()),
+                    permission_mode: None, // host default: enforced unless the bypass setting is on
                     timeout_ms: None,
                     metadata: serde_json::json!({ "worker": true, "inter_worker_followup": true }),
                     system_prompt_suffix: None,
@@ -755,7 +755,7 @@ async fn spawn_worker_for_card(
         .await,
         mcp_config_path: Some(mcp_config_path.to_string_lossy().to_string()),
         env: Default::default(),
-        permission_mode: Some("bypass".into()),
+        permission_mode: None, // host default: enforced unless the bypass setting is on
         timeout_ms: None,
         metadata: serde_json::json!({
             "worker": true,
@@ -1223,7 +1223,7 @@ pub async fn drain_queue_for_session(
         working_dir: String::new(),
         mcp_config_path,
         env: Default::default(),
-        permission_mode: Some("bypass".into()),
+        permission_mode: None, // host default: enforced unless the bypass setting is on
         timeout_ms: None,
         metadata: serde_json::Value::Null,
         system_prompt_suffix: None,

@@ -437,7 +437,7 @@ impl RepeatingTaskManager {
             effort: task.effort.clone(),
             mcp_config_path: mcp_config_path.map(|p| p.to_string_lossy().to_string()),
             env: Default::default(),
-            permission_mode: Some("bypass".into()),
+            permission_mode: None, // host default: enforced unless the bypass setting is on
             timeout_ms: None,
             metadata: serde_json::Value::Null,
             system_prompt_suffix: Some(build_recurring_system_prompt(

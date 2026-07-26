@@ -367,6 +367,12 @@ pub struct SpawnConfig {
     pub mcp_config_path: Option<String>,
     #[serde(default)]
     pub env: std::collections::HashMap<String, String>,
+    /// Permission handling for the spawned CLI. `None` = host default:
+    /// enforced permissions (Claude answers `can_use_tool` control requests
+    /// through its sandbox gate) unless the app-level bypass setting is on,
+    /// which `SessionManager::send_message_locked` resolves to `"bypass"`
+    /// (`--dangerously-skip-permissions`). Explicit values pass through
+    /// untouched.
     pub permission_mode: Option<String>,
     pub timeout_ms: Option<u64>,
     #[serde(default)]

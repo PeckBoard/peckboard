@@ -353,8 +353,8 @@ fn cli_model_info(entry: &serde_json::Value) -> Option<ModelInfo> {
 /// as a separate option instead. An attacker who could pick the value
 /// of one of these fields could therefore inject arbitrary flags into
 /// the spawned `claude` process (`--mcp-config`, `--allowedTools`, …),
-/// which would be a real escalation given the CLI runs with
-/// `--dangerously-skip-permissions`.
+/// which would be a real escalation — the CLI can run with
+/// `--dangerously-skip-permissions` when the bypass escape hatch is on.
 ///
 /// Defence: every value-taking flag uses the `--name=VALUE` form,
 /// which commander.js parses unambiguously regardless of what VALUE
@@ -485,8 +485,10 @@ pub fn build_cli_args(
         // tools (single source of truth via `tool_names()`) plus any tools
         // contributed by active plugins (e.g. common-tools' read_file /
         // edit_file), threaded in through `SpawnConfig::extra_allowed_tools`.
-        // In the default bypass mode this is advisory, but it keeps "prompt"
-        // permission mode from stalling on a plugin file tool.
+        // In enforced (default) permission mode this pre-approval matters:
+        // allowlisted tools skip the `can_use_tool` round-trip entirely, so
+        // every Peckboard MCP tool call stays zero-overhead and can never
+        // stall on the permission path.
         // Pre-hatcher sessions advertise only their read-only allowlist
         // (which already includes the plugin's own `pre_hatch_result`
         // hand-off tool); everything else gets the full core + plugin set.
@@ -555,22 +557,25 @@ pub fn build_cli_args(
             serde_json::Value::Object(settings)
         ));
     }
-    // Permission handling: Peckboard runs Claude headless, so we need
-    // to skip interactive permission prompts. Without this, the CLI
-    // blocks waiting for user input on tool use approvals.
+    // Permission handling: Peckboard runs Claude headless, so interactive
+    // permission prompts must never block. Two modes:
+    //
+    // * enforced (the default, `permission_mode` unset or "prompt"): pass
+    //   `--permission-prompt-tool=stdio` so the CLI routes every tool call
+    //   not pre-approved via --allowedTools through a `can_use_tool`
+    //   control request on stdin/stdout. The process loop answers each one
+    //   immediately (allow, or deny on a sandbox violation — see
+    //   process/sandbox.rs), so nothing ever waits on a human.
+    // * "bypass": legacy `--dangerously-skip-permissions` — the CLI never
+    //   emits `can_use_tool` and the sandbox gate is skipped. Opt-in only,
+    //   via the app setting behind `routes::settings` (escape hatch).
     match config.permission_mode.as_deref() {
-        Some("bypass") | None => {
-            // Default for headless operation: skip all permission prompts
+        Some("bypass") => {
             args.push("--dangerously-skip-permissions".to_string());
         }
-        Some("prompt") => {
-            // Interactive mode: use stdio for permission prompts
-            // (answers delivered via stdin channel)
+        // Unknown modes fall through to enforced — the safe default.
+        _ => {
             args.push("--permission-prompt-tool=stdio".to_string());
-        }
-        Some(_) => {
-            // Unknown mode: default to skip
-            args.push("--dangerously-skip-permissions".to_string());
         }
     }
 
@@ -863,12 +868,32 @@ mod tests {
         // Partial messages on: token streaming reaches the parser.
         assert!(args.contains(&"--include-partial-messages".to_string()));
         assert!(args.contains(&"--model=claude-opus-4-8".to_string()));
-        assert!(args.contains(&"--dangerously-skip-permissions".to_string()));
+        // Default is ENFORCED: can_use_tool control requests flow over
+        // stdio; the blanket bypass flag must not appear.
+        assert!(args.contains(&"--permission-prompt-tool=stdio".to_string()));
+        assert!(!args.contains(&"--dangerously-skip-permissions".to_string()));
         assert!(!args.iter().any(|a| a.starts_with("--resume")));
         // No positional prompt — no `--` separator either.
         assert!(!args.contains(&"--".to_string()));
         // And no `-p` (one-shot print mode) since we run interactively.
         assert!(!args.contains(&"-p".to_string()));
+    }
+
+    #[test]
+    fn test_build_cli_args_permission_modes() {
+        // Explicit bypass (the settings escape hatch) restores the legacy
+        // flag and drops the stdio permission tool.
+        let mut config = default_spawn("claude-opus-4-8");
+        config.permission_mode = Some("bypass".into());
+        let args = build_cli_args(&config, None, None);
+        assert!(args.contains(&"--dangerously-skip-permissions".to_string()));
+        assert!(!args.contains(&"--permission-prompt-tool=stdio".to_string()));
+
+        // Unknown modes fall through to enforced, never to bypass.
+        config.permission_mode = Some("whatever".into());
+        let args = build_cli_args(&config, None, None);
+        assert!(args.contains(&"--permission-prompt-tool=stdio".to_string()));
+        assert!(!args.contains(&"--dangerously-skip-permissions".to_string()));
     }
 
     #[test]
