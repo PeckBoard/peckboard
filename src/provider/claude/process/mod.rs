@@ -52,7 +52,7 @@ use crate::ws::broadcaster::{Broadcaster, WsEvent};
 
 use super::build_cli_args;
 use crate::provider::stream::SpawnConfig;
-use parser::{normalize_questions, parse_stream_json};
+use parser::{ParserState, normalize_questions, parse_stream_json};
 use sandbox::check_path_violation;
 use usage::{TurnModelUsage, UsageTracker};
 
@@ -292,22 +292,12 @@ pub async fn stream_events(
     // Subscribe to broadcasts for immediate inter-worker message delivery
     let mut broadcast_rx = broadcaster.subscribe_all();
 
-    // Per-conversation state. These cursors persist across turns —
-    // a `result` event resets the per-turn flags below but keeps the
-    // conversation_id and model_name we've discovered.
-    let mut conversation_id: Option<String> = None;
-    let mut model_name: Option<String> = None;
-
-    // Per-turn state. The parser uses `emitted_start` to suppress
-    // duplicate `Started` events within one turn; we reset it on each
-    // `result` so the next turn's `system.init` emits a fresh
-    // agent-start event. `current_tool_id` is per-turn for the same
-    // reason — a long-running process must not carry over a tool id
-    // from a previous turn's content_block_start that never saw its
-    // matching content_block_stop because the parser sees them all
-    // in order anyway.
-    let mut current_tool_id: Option<String> = None;
-    let mut emitted_start = false;
+    // Parser state. `conversation_id` and `model_name` persist across
+    // turns; the per-turn pieces (`emitted_start`, block coalescing/dedupe
+    // buffers) are reset on each `result` via `reset_turn` so the next
+    // turn's `system.init` emits a fresh agent-start event (the live CLI
+    // re-emits system.init on every turn of a long-lived child).
+    let mut parser_state = ParserState::new();
 
     let mut was_cancelled = false;
     let mut saw_clean_completion = false;
@@ -574,13 +564,7 @@ pub async fn stream_events(
 
         usage_tracker.observe_line(&json);
 
-        let events = parse_stream_json(
-            &json,
-            &mut conversation_id,
-            &mut model_name,
-            &mut current_tool_id,
-            &mut emitted_start,
-        );
+        let events = parse_stream_json(&json, &mut parser_state);
 
         let mut todo_events: Vec<ProviderEvent> = Vec::new();
 
@@ -675,7 +659,7 @@ pub async fn stream_events(
             // already persisted. The tracker prefers the per-model
             // `modelUsage` deltas (which include subagent and utility-call
             // tokens the main-loop `usage` object misses).
-            let turn_usages = usage_tracker.on_result(&json, model_name.as_deref());
+            let turn_usages = usage_tracker.on_result(&json, parser_state.model_name.as_deref());
             let turn_context = turn_usages
                 .iter()
                 .map(|u| u.context_tokens)
@@ -687,12 +671,12 @@ pub async fn stream_events(
                 &broadcaster,
                 &session_id,
                 ProviderEvent::Completed {
-                    conversation_id: conversation_id.clone(),
+                    conversation_id: parser_state.conversation_id.clone(),
                 },
             )
             .await;
             state.turn_active.store(false, Ordering::Release);
-            emitted_start = false;
+            parser_state.reset_turn();
             // Closing any tools still flagged open at result time
             // — keeps spinner state self-consistent across turn
             // boundaries.
@@ -827,7 +811,7 @@ pub async fn stream_events(
     // reaches the settle-on-result path above — record whatever the
     // per-message snapshots saw so its tokens aren't lost.
     if turn_was_active {
-        let crash_usages = usage_tracker.take_crash_fallback(model_name.as_deref());
+        let crash_usages = usage_tracker.take_crash_fallback(parser_state.model_name.as_deref());
         emit_turn_usage(&db, &broadcaster, &session_id, crash_usages).await;
     }
 

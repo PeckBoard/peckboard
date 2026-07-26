@@ -449,6 +449,10 @@ pub fn build_cli_args(
         "--input-format=stream-json".to_string(),
         "--output-format=stream-json".to_string(),
         "--verbose".to_string(),
+        // True token streaming: text/thinking deltas arrive as
+        // `stream_event` envelopes instead of only whole per-message
+        // `assistant` snapshots (parser coalesces + dedupes them).
+        "--include-partial-messages".to_string(),
         format!("--append-system-prompt={combined_system_prompt}"),
         format!("--disallowedTools={disallowed}"),
     ];
@@ -856,6 +860,8 @@ mod tests {
         // in argv; it goes over stdin as `{type:'user', ...}` envelopes.
         assert!(args.contains(&"--input-format=stream-json".to_string()));
         assert!(args.contains(&"--output-format=stream-json".to_string()));
+        // Partial messages on: token streaming reaches the parser.
+        assert!(args.contains(&"--include-partial-messages".to_string()));
         assert!(args.contains(&"--model=claude-opus-4-8".to_string()));
         assert!(args.contains(&"--dangerously-skip-permissions".to_string()));
         assert!(!args.iter().any(|a| a.starts_with("--resume")));
