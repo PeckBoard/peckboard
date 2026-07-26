@@ -139,40 +139,42 @@ graph TD
 
 ## Outside the Tree
 
-Four hooks are not part of any session's tree. `http.request.before` and `http.request.authed` serve plugin HTTP routes — public `/plugin-api/*` and signed-in `/api/plugin-ui/*` respectively — where the plugin owns the request end to end; this is how plugin pages like the diff viewer exist. `provider.register` fires at startup and whenever the plugin set changes, asking each provider plugin to register its models. `card.priorities.list` fires when the priority options are listed, letting a plugin add to them.
+Five hooks are not part of any session's tree. `http.request.before` and `http.request.authed` serve plugin HTTP routes — public `/plugin-api/*` and signed-in `/api/plugin-ui/*` respectively — where the plugin owns the request end to end; this is how plugin pages like the diff viewer exist. `provider.register` fires at startup and whenever the plugin set changes, asking each provider plugin to register its models, and the optional `provider.models` fires on every model-catalog read, letting that plugin refresh the list without being re-registered. `card.priorities.list` fires when the priority options are listed, letting a plugin add to them.
 
 <details markdown="1">
 <summary>Every hook at a glance</summary>
 
-| Hook                        | Fires                                          | Plugin can                         |
-| --------------------------- | ---------------------------------------------- | ---------------------------------- |
-| `session.message.before`    | Before a chat message reaches the agent        | Rewrite the text, or take the turn |
-| `session.prehatch.answer`   | You answer a pre-hatch question card           | Own the outcome                    |
-| `session.prehatch.cancel`   | You cancel an in-flight pre-hatch              | Own the fallback delivery          |
-| `session.reference.resolve` | A `session:` reference appears in a message    | Replace it with custom text        |
-| `provider.send`             | A turn runs on a plugin-registered model       | Own the entire turn                |
-| `mcp.tool.call.before`      | Before any MCP tool call                       | Cancel it or modify the arguments  |
-| `mcp.tool.invoke`           | A plugin-owned tool is called                  | Own the call and return its result |
-| `mcp.tool.call.after`       | A tool call succeeded                          | Observe                            |
-| `mcp.tool.call.failed`      | A tool call failed                             | Observe                            |
-| `question.pending`          | A session surfaces a question for you          | Observe                            |
-| `session.user.answer`       | You answer an `ask_user` question              | Observe                            |
-| `todo`                      | A batch of raw plugin-provider output arrives  | Report the session's work items    |
-| `session.agent.ended`       | An agent run completes or crashes              | Observe                            |
-| `mcp.token.issue.before`    | Before a session's MCP token is issued         | Cancel                             |
-| `mcp.token.issue.after`     | After the token is issued                      | Observe                            |
-| `mcp.token.revoke.after`    | After the token is revoked                     | Observe                            |
-| `mcp.config.write.before`   | Before the session's MCP config is written     | Cancel or modify the config        |
-| `mcp.config.write.after`    | After the config is written                    | Observe                            |
-| `mcp.config.delete.after`   | After the config is cleaned up                 | Observe                            |
-| `card.create.before`        | Before a card is created                       | Cancel or adjust the fields        |
-| `card.update.before`        | Before a card is updated                       | Cancel or adjust the fields        |
-| `card.step.after`           | After a card changes step                      | Observe                            |
-| `card.priorities.list`      | When priority options are listed               | Add or modify options              |
-| `worker.blocked`            | A card's crashes pause its project             | Observe                            |
-| `project.paused`            | A project pauses (manual, crash, or budget)    | Observe                            |
-| `provider.register`         | Startup, or the plugin set changes             | Register a provider and models     |
-| `http.request.before`       | A public `/plugin-api/*` request arrives       | Own the request and response       |
-| `http.request.authed`       | A signed-in `/api/plugin-ui/*` request arrives | Own the request and response       |
+| Hook                        | Fires                                          | Plugin can                          |
+| --------------------------- | ---------------------------------------------- | ----------------------------------- |
+| `session.message.before`    | Before a chat message reaches the agent        | Rewrite the text, or take the turn  |
+| `session.prehatch.answer`   | You answer a pre-hatch question card           | Own the outcome                     |
+| `session.prehatch.cancel`   | You cancel an in-flight pre-hatch              | Own the fallback delivery           |
+| `session.reference.resolve` | A `session:` reference appears in a message    | Replace it with custom text         |
+| `provider.send`             | A turn runs on a plugin-registered model       | Own the entire turn                 |
+| `provider.interrupt`        | You interrupt a turn on a plugin model         | Release what the turn owns upstream |
+| `mcp.tool.call.before`      | Before any MCP tool call                       | Cancel it or modify the arguments   |
+| `mcp.tool.invoke`           | A plugin-owned tool is called                  | Own the call and return its result  |
+| `mcp.tool.call.after`       | A tool call succeeded                          | Observe                             |
+| `mcp.tool.call.failed`      | A tool call failed                             | Observe                             |
+| `question.pending`          | A session surfaces a question for you          | Observe                             |
+| `session.user.answer`       | You answer an `ask_user` question              | Observe                             |
+| `todo`                      | A batch of raw plugin-provider output arrives  | Report the session's work items     |
+| `session.agent.ended`       | An agent run completes or crashes              | Observe                             |
+| `mcp.token.issue.before`    | Before a session's MCP token is issued         | Cancel                              |
+| `mcp.token.issue.after`     | After the token is issued                      | Observe                             |
+| `mcp.token.revoke.after`    | After the token is revoked                     | Observe                             |
+| `mcp.config.write.before`   | Before the session's MCP config is written     | Cancel or modify the config         |
+| `mcp.config.write.after`    | After the config is written                    | Observe                             |
+| `mcp.config.delete.after`   | After the config is cleaned up                 | Observe                             |
+| `card.create.before`        | Before a card is created                       | Cancel or adjust the fields         |
+| `card.update.before`        | Before a card is updated                       | Cancel or adjust the fields         |
+| `card.step.after`           | After a card changes step                      | Observe                             |
+| `card.priorities.list`      | When priority options are listed               | Add or modify options               |
+| `worker.blocked`            | A card's crashes pause its project             | Observe                             |
+| `project.paused`            | A project pauses (manual, crash, or budget)    | Observe                             |
+| `provider.register`         | Startup, or the plugin set changes             | Register a provider and models      |
+| `provider.models`           | The model catalog is read                      | Refresh its model list              |
+| `http.request.before`       | A public `/plugin-api/*` request arrives       | Own the request and response        |
+| `http.request.authed`       | A signed-in `/api/plugin-ui/*` request arrives | Own the request and response        |
 
 </details>

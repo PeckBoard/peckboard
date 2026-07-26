@@ -19,9 +19,21 @@
 //!
 //! v1 scope: HTTP-API providers only (OpenAI-compatible request/response or
 //! chunked HTTP the plugin consumes inside the call). No subprocess CLIs, no
-//! host-side SSE plumbing. Interrupts are cooperative — the adapter sets a
-//! per-session stop flag the plugin polls via `peckboard_provider_should_stop`
-//! between chunks; the per-call WASM timeout guarantees termination either way.
+//! host-side SSE plumbing.
+//!
+//! Interrupts are cooperative: the adapter sets a per-session stop flag the
+//! plugin polls via `peckboard_provider_should_stop` between chunks, and the
+//! per-call WASM timeout guarantees termination either way. A plugin may
+//! additionally declare the optional `provider.interrupt` hook to release
+//! out-of-wasm resources (see [`crate::plugin::hooks::PROVIDER_INTERRUPT_HOOK`]
+//! for why that hook cannot itself abort the turn).
+//!
+//! Two other opt-ins close the gap to native providers: the optional
+//! `provider.models` hook backs [`AgentProvider::dynamic_models`] so a
+//! catalog can follow the plugin's settings without re-registration, and
+//! `supports_mid_stream_injection` on the registration lets a plugin absorb a
+//! mid-turn user message (delivered through
+//! `peckboard_provider_take_message`) instead of core queueing it in the DB.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -33,6 +45,7 @@ use serde::Deserialize;
 use crate::db::Db;
 use crate::plugin::manager::PluginManager;
 use crate::provider::agent::{AgentProvider, ProcessCompletion, SendMessageContext, emit_event};
+use crate::provider::message::UserMessage;
 use crate::provider::registry::{
     AnswerTransport, EffortLevel, InterruptKind, ProviderCapabilities,
 };
@@ -58,12 +71,24 @@ pub struct ProviderRegistration {
     pub pricing: HashMap<String, ModelPricing>,
     /// Declared capabilities (optional — older plugins simply omit it and
     /// get [`ProviderCapabilities::plugin_defaults`]). Transport semantics
-    /// the adapter fixes (cooperative interrupt, no stdin, no mid-stream
-    /// injection, answers as a new turn) are clamped at registration by
-    /// [`effective_capabilities`], so a plugin can only refine what it
-    /// genuinely controls: thinking, image input, usage, resume.
+    /// the adapter fixes (cooperative interrupt, no stdin, answers as a new
+    /// turn) are clamped at registration by [`effective_capabilities`], so a
+    /// plugin can only refine what it genuinely controls: thinking, image
+    /// input, usage, resume — plus mid-stream injection, which is declared
+    /// by the dedicated flag below rather than inside `capabilities`.
     #[serde(default)]
     pub capabilities: Option<ProviderCapabilities>,
+    /// The plugin's `provider.send` turn can absorb a SECOND user message
+    /// while it is still running: core hands it over through
+    /// `peckboard_provider_take_message` instead of persisting it in
+    /// `queued_messages` (see `AgentProvider::supports_mid_stream_injection`).
+    ///
+    /// Defaults to `false`, which is what every plugin registered before this
+    /// field existed gets — core keeps using the durable queue for them. Only
+    /// declare `true` if the turn actually polls for injected messages;
+    /// otherwise a mid-turn message is accepted and never acted on.
+    #[serde(default)]
+    pub supports_mid_stream_injection: bool,
 }
 
 #[derive(Debug, Clone, Copy, Deserialize)]
@@ -75,18 +100,47 @@ pub struct ModelPricing {
 /// The capabilities a plugin registration actually gets: declared values
 /// (or conservative defaults when omitted), with the adapter-fixed
 /// transport semantics clamped — a plugin provider runs one turn per WASM
-/// call, so interrupt is cooperative, there is no stdin, no mid-stream
-/// injection, and answers arrive as a fresh turn regardless of what the
-/// registration claims.
+/// call, so interrupt is cooperative, there is no stdin, and answers arrive
+/// as a fresh turn regardless of what the registration claims. Mid-stream
+/// injection is the one transport bit a plugin CAN claim, and it is read
+/// from the dedicated [`ProviderRegistration::supports_mid_stream_injection`]
+/// flag so it can never be turned on by accident through a copied
+/// `capabilities` blob.
 pub fn effective_capabilities(reg: &ProviderRegistration) -> ProviderCapabilities {
     let mut caps = reg
         .capabilities
         .clone()
         .unwrap_or_else(|| ProviderCapabilities::plugin_defaults(&reg.models));
     caps.interrupt_kind = InterruptKind::Cooperative;
-    caps.supports_mid_stream_injection = false;
+    caps.supports_mid_stream_injection = reg.supports_mid_stream_injection;
     caps.answer_transport = AnswerTransport::NewTurn;
     caps
+}
+
+/// Shape-validate a model catalog: non-empty, ids usable as the suffix of a
+/// `provider:model` id, no duplicates. Shared by [`validate_registration`]
+/// and the `provider.models` refresh path, which must hold the catalog to
+/// exactly the same standard as registration did.
+pub fn validate_models(models: &[ModelInfo]) -> Result<(), String> {
+    if models.is_empty() {
+        return Err("a provider must register at least one model".into());
+    }
+    let mut seen = std::collections::HashSet::new();
+    for m in models {
+        // `@` would break the account-suffix split and whitespace breaks
+        // everything downstream; `:` is tolerated (model-id parsing splits
+        // on the FIRST colon, which the provider prefix owns).
+        if m.id.is_empty() || m.id.contains('@') || m.id.chars().any(char::is_whitespace) {
+            return Err(format!(
+                "model id '{}' is invalid: must be non-empty, no '@', no whitespace",
+                m.id
+            ));
+        }
+        if !seen.insert(m.id.as_str()) {
+            return Err(format!("duplicate model id '{}'", m.id));
+        }
+    }
+    Ok(())
 }
 
 /// Shape-validate a registration payload. Collision with existing providers
@@ -109,24 +163,7 @@ pub fn validate_registration(reg: &ProviderRegistration) -> Result<(), String> {
     if reg.display_name.trim().is_empty() {
         return Err("display_name must not be blank".into());
     }
-    if reg.models.is_empty() {
-        return Err("a provider must register at least one model".into());
-    }
-    let mut seen = std::collections::HashSet::new();
-    for m in &reg.models {
-        // `@` would break the account-suffix split and whitespace breaks
-        // everything downstream; `:` is tolerated (model-id parsing splits
-        // on the FIRST colon, which the provider prefix owns).
-        if m.id.is_empty() || m.id.contains('@') || m.id.chars().any(char::is_whitespace) {
-            return Err(format!(
-                "model id '{}' is invalid: must be non-empty, no '@', no whitespace",
-                m.id
-            ));
-        }
-        if !seen.insert(m.id.as_str()) {
-            return Err(format!("duplicate model id '{}'", m.id));
-        }
-    }
+    validate_models(&reg.models)?;
     if reg.effort_levels.iter().any(|e| e.id.trim().is_empty()) {
         return Err("effort level ids must not be blank".into());
     }
@@ -176,6 +213,11 @@ struct TurnState {
     /// turn), never on an async worker thread.
     rt: tokio::runtime::Handle,
     snapshot: SessionSnapshot,
+    /// User messages handed to this turn mid-flight, oldest first. Only ever
+    /// non-empty for a plugin that declared
+    /// [`ProviderRegistration::supports_mid_stream_injection`]; the plugin
+    /// drains it with `peckboard_provider_take_message`.
+    injected: std::sync::Mutex<std::collections::VecDeque<serde_json::Value>>,
 }
 
 /// Host-side state shared between every [`PluginProviderAdapter`] and the
@@ -265,6 +307,26 @@ impl PluginProviderRuntime {
         }
     }
 
+    /// Hand `message` to the turn `plugin_id` is running for `session_id`.
+    /// `false` when there is no such turn (it ended between the caller's
+    /// check and this call), in which case the caller must fall back to
+    /// dispatching a fresh turn rather than dropping the message.
+    pub fn queue_injection(
+        &self,
+        plugin_id: &str,
+        session_id: &str,
+        message: serde_json::Value,
+    ) -> bool {
+        let Ok(turn) = self.owned_turn(plugin_id, session_id) else {
+            return false;
+        };
+        let Ok(mut queue) = turn.injected.lock() else {
+            return false;
+        };
+        queue.push_back(message);
+        true
+    }
+
     // ── Host-function backends (JSON-string in/out, never panic) ──────
 
     /// `peckboard_emit_provider_event {session_id, event}` — validate the
@@ -339,6 +401,30 @@ impl PluginProviderRuntime {
 
     /// `peckboard_provider_get_session {session_id}` — the trusted session
     /// snapshot captured at dispatch time.
+    /// `peckboard_provider_take_message {session_id}` — pop the oldest user
+    /// message core handed to this turn mid-flight, or `{"message": null}`
+    /// when there is none. Poll it where the turn can act on more input (a
+    /// plugin that never polls must not declare
+    /// [`ProviderRegistration::supports_mid_stream_injection`], since core
+    /// then skips the durable queue for it).
+    pub fn take_message_json(&self, plugin_id: &str, input: &str) -> String {
+        let req: SessionIdRequest = match serde_json::from_str(input) {
+            Ok(r) => r,
+            Err(e) => return error_json(format!("invalid request: {e}")),
+        };
+        let turn = match self.owned_turn(plugin_id, &req.session_id) {
+            Ok(t) => t,
+            Err(e) => return error_json(e),
+        };
+        let Ok(mut queue) = turn.injected.lock() else {
+            return error_json("turn state poisoned");
+        };
+        match queue.pop_front() {
+            Some(message) => serde_json::json!({ "message": message }).to_string(),
+            None => serde_json::json!({ "message": serde_json::Value::Null }).to_string(),
+        }
+    }
+
     pub fn get_session_json(&self, plugin_id: &str, input: &str) -> String {
         let req: SessionIdRequest = match serde_json::from_str(input) {
             Ok(r) => r,
@@ -373,6 +459,25 @@ impl PluginProviderRuntime {
     }
 }
 
+/// The `message` object a turn sees: the user's text plus base64 attachments.
+/// Shared by the `provider.send` payload and the mid-stream injection queue so
+/// an injected message is byte-for-byte the shape the plugin already parses.
+fn message_payload(message: &UserMessage) -> serde_json::Value {
+    use base64::Engine as _;
+    let attachments: Vec<serde_json::Value> = message
+        .attachments
+        .iter()
+        .map(|a| {
+            serde_json::json!({
+                "filename": a.filename,
+                "mime_type": a.mime_type,
+                "data_base64": base64::engine::general_purpose::STANDARD.encode(&a.data),
+            })
+        })
+        .collect();
+    serde_json::json!({ "text": message.text, "attachments": attachments })
+}
+
 /// [`AgentProvider`] registered on behalf of a WASM plugin. Bridges every
 /// trait call to the plugin's `provider.send` hook / host-side turn state.
 pub struct PluginProviderAdapter {
@@ -382,6 +487,9 @@ pub struct PluginProviderAdapter {
     runtime: Arc<PluginProviderRuntime>,
     /// model id → (input, output) USD per million tokens.
     pricing: HashMap<String, (f64, f64)>,
+    /// Whether the registration declared mid-stream injection — mirrored
+    /// into [`AgentProvider::supports_mid_stream_injection`].
+    mid_stream: bool,
 }
 
 impl PluginProviderAdapter {
@@ -396,6 +504,7 @@ impl PluginProviderAdapter {
             plugin_id,
             manager,
             runtime,
+            mid_stream: registration.supports_mid_stream_injection,
             pricing: registration
                 .pricing
                 .iter()
@@ -420,7 +529,26 @@ impl AgentProvider for PluginProviderAdapter {
         self.pricing.get(model_id).copied()
     }
 
+    async fn dynamic_models(&self) -> Option<Vec<ModelInfo>> {
+        self.manager.dispatch_provider_models(&self.plugin_id).await
+    }
+
     async fn send_message(&self, ctx: SendMessageContext) -> anyhow::Result<()> {
+        // Mid-stream injection: this adapter promised the SessionManager it
+        // would absorb a message sent while a turn is running, so core did
+        // NOT persist it in `queued_messages`. Hand it to the live turn
+        // instead of trying to begin a second one (which `begin_turn` would
+        // refuse) — dropping it here would lose the user's message outright.
+        if self.mid_stream
+            && self.runtime.queue_injection(
+                &self.plugin_id,
+                &ctx.session_id,
+                message_payload(&ctx.message),
+            )
+        {
+            return Ok(());
+        }
+
         let session = ctx
             .db
             .get_session(&ctx.session_id)
@@ -444,28 +572,16 @@ impl AgentProvider for PluginProviderAdapter {
                     broadcaster: ctx.broadcaster.clone(),
                     rt: tokio::runtime::Handle::current(),
                     snapshot,
+                    injected: std::sync::Mutex::new(std::collections::VecDeque::new()),
                 },
             )
             .map_err(|e| anyhow::anyhow!(e))?;
 
-        use base64::Engine as _;
-        let attachments: Vec<serde_json::Value> = ctx
-            .message
-            .attachments
-            .iter()
-            .map(|a| {
-                serde_json::json!({
-                    "filename": a.filename,
-                    "mime_type": a.mime_type,
-                    "data_base64": base64::engine::general_purpose::STANDARD.encode(&a.data),
-                })
-            })
-            .collect();
         let payload = serde_json::json!({
             "session_id": ctx.session_id,
             "provider_id": self.provider_id,
             "spawn_config": ctx.config,
-            "message": { "text": ctx.message.text, "attachments": attachments },
+            "message": message_payload(&ctx.message),
             "conversation_id": ctx.conversation_id,
         });
 
@@ -525,14 +641,25 @@ impl AgentProvider for PluginProviderAdapter {
     async fn interrupt(&self, session_id: &str) {
         // Cooperative: the plugin polls `peckboard_provider_should_stop`
         // between HTTP chunks; the per-call WASM timeout is the hard
-        // backstop that guarantees the turn terminates regardless.
+        // backstop that guarantees the turn terminates regardless. The
+        // stop flag goes first — the optional `provider.interrupt` hook is
+        // only a cleanup signal and cannot preempt the in-flight call (one
+        // extism instance per plugin).
         self.runtime.request_stop(session_id);
+        self.manager
+            .dispatch_provider_interrupt(&self.plugin_id, session_id, &self.provider_id);
     }
 
     async fn write_stdin(&self, _session_id: &str, _text: &str) -> bool {
         false
     }
 
+    fn supports_mid_stream_injection(&self) -> bool {
+        // Declared per registration. `true` ⇒ the SessionManager dispatches a
+        // mid-turn message straight here and `send_message` hands it to the
+        // live turn's injection queue instead of the DB queue.
+        self.mid_stream
+    }
     async fn is_running(&self, session_id: &str) -> bool {
         self.runtime.is_active(session_id)
     }
@@ -621,6 +748,17 @@ mod tests {
         assert_eq!(caps.interrupt_kind, InterruptKind::Cooperative);
         assert!(!caps.supports_mid_stream_injection);
         assert_eq!(caps.answer_transport, AnswerTransport::NewTurn);
+
+        // Mid-stream injection is read from the dedicated top-level flag, so
+        // the `capabilities` blob above could not switch it on.
+        let midstream: ProviderRegistration = serde_json::from_value(serde_json::json!({
+            "id": "ms",
+            "display_name": "Ms",
+            "models": [{ "id": "m1", "display_name": "M1" }],
+            "supports_mid_stream_injection": true,
+        }))
+        .unwrap();
+        assert!(effective_capabilities(&midstream).supports_mid_stream_injection);
     }
 
     #[test]
@@ -657,6 +795,7 @@ mod tests {
                     plugin_id: "p1".into(),
                     stop: AtomicBool::new(false),
                     terminal: std::sync::Mutex::new(None),
+                    injected: Default::default(),
                     db,
                     broadcaster: Broadcaster::new(),
                     rt: rt.handle().clone(),
@@ -680,6 +819,7 @@ mod tests {
                         plugin_id: "p1".into(),
                         stop: AtomicBool::new(false),
                         terminal: std::sync::Mutex::new(None),
+                        injected: Default::default(),
                         db: Db::in_memory().unwrap(),
                         broadcaster: Broadcaster::new(),
                         rt: rt.handle().clone(),
@@ -732,6 +872,28 @@ mod tests {
             serde_json::from_str(&runtime.should_stop_json("p1", r#"{"session_id":"nope"}"#))
                 .unwrap();
         assert_eq!(unknown["stop"], true);
+
+        // Mid-stream injection: only the owning plugin may enqueue, and the
+        // turn drains its queue FIFO.
+        assert!(!runtime.queue_injection("p2", "s1", serde_json::json!({ "text": "foreign" })));
+        assert!(!runtime.queue_injection("p1", "nope", serde_json::json!({ "text": "gone" })));
+        assert!(runtime.queue_injection("p1", "s1", serde_json::json!({ "text": "first" })));
+        assert!(runtime.queue_injection("p1", "s1", serde_json::json!({ "text": "second" })));
+        for expected in ["first", "second"] {
+            let taken: serde_json::Value =
+                serde_json::from_str(&runtime.take_message_json("p1", r#"{"session_id":"s1"}"#))
+                    .unwrap();
+            assert_eq!(taken["message"]["text"], expected);
+        }
+        let drained: serde_json::Value =
+            serde_json::from_str(&runtime.take_message_json("p1", r#"{"session_id":"s1"}"#))
+                .unwrap();
+        assert!(drained["message"].is_null());
+        assert!(
+            runtime
+                .take_message_json("p2", r#"{"session_id":"s1"}"#)
+                .contains("error")
+        );
 
         assert!(runtime.is_active("s1"));
         assert!(runtime.end_turn("s1").is_none());

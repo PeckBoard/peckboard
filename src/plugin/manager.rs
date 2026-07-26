@@ -10,9 +10,10 @@ use tracing::{error, info, warn};
 use serde::Serialize;
 
 use super::hooks::{
-    HTTP_AUTHED_HOOK, HTTP_REQUEST_HOOK, HookResult, MCP_TOOL_INVOKE_HOOK, PROVIDER_REGISTER_HOOK,
-    PROVIDER_SEND_HOOK, PluginHttpOutcome, PluginHttpResponse, PluginManifest, PluginMcpToolEntry,
-    SidebarItem, SidebarItemEntry, UiPanelEntry, Verdict,
+    HTTP_AUTHED_HOOK, HTTP_REQUEST_HOOK, HookResult, MCP_TOOL_INVOKE_HOOK, PROVIDER_INTERRUPT_HOOK,
+    PROVIDER_MODELS_HOOK, PROVIDER_REGISTER_HOOK, PROVIDER_SEND_HOOK, PluginHttpOutcome,
+    PluginHttpResponse, PluginManifest, PluginMcpToolEntry, SidebarItem, SidebarItemEntry,
+    UiPanelEntry, Verdict,
 };
 use crate::db::Db;
 use crate::db::crud::{APPROVAL_APPROVED, APPROVAL_DENIED};
@@ -91,6 +92,8 @@ pub const ALLOWED_HOOKS: &[&str] = &[
     "mcp.tool.call.failed",
     "mcp.tool.invoke",
     "project.paused",
+    "provider.interrupt",
+    "provider.models",
     "provider.register",
     "provider.send",
     "question.pending",
@@ -910,6 +913,24 @@ impl PluginManager {
             }
         }
 
+        // `provider.models` and `provider.interrupt` only mean anything on a
+        // plugin that actually registers a provider — core dispatches them to
+        // the owner of a registered provider, so a plugin declaring one
+        // without the register hook has silently dead code.
+        for optional in [PROVIDER_MODELS_HOOK, PROVIDER_INTERRUPT_HOOK] {
+            if plugin_manifest.hooks.iter().any(|h| h == optional)
+                && !plugin_manifest
+                    .hooks
+                    .iter()
+                    .any(|h| h == PROVIDER_REGISTER_HOOK)
+            {
+                return Err(anyhow::anyhow!(
+                    "plugin '{name}' declares {optional} but not the \
+                     '{PROVIDER_REGISTER_HOOK}' hook",
+                ));
+            }
+        }
+
         // Resolve the operator's stored approval for this exact hook set.
         // Resolve the operator's stored approval for this exact hook set.
         // A plugin may declare a larger per-call budget than the 2 s default
@@ -1308,6 +1329,147 @@ impl PluginManager {
             Ok(Verdict::Cancel { reason, .. }) => Err(reason),
             _ => Ok(()),
         }
+    }
+
+    /// Ask `plugin_id` for a fresh model catalog through the optional
+    /// `provider.models` hook. Backs the plugin adapter's
+    /// [`crate::provider::agent::AgentProvider::dynamic_models`], so it only
+    /// ever runs on the read-only catalog path (`/api/models`, the MCP
+    /// `list_models` tool) — never on the dispatch hot path.
+    ///
+    /// `None` means "serve the catalog captured at registration": the plugin
+    /// is inactive, doesn't declare the hook, is busy (below), failed,
+    /// answered with anything but a `Verdict::Allow` carrying
+    /// `{ models: [...] }`, or handed back a catalog that would not have
+    /// passed registration validation.
+    ///
+    /// The instance is taken with `try_lock`, never awaited: a plugin running
+    /// a `provider.send` turn holds its single extism instance for up to the
+    /// entire provider-send budget, and listing models must not stall behind
+    /// a turn.
+    pub async fn dispatch_provider_models(
+        &self,
+        plugin_id: &str,
+    ) -> Option<Vec<crate::provider::stream::ModelInfo>> {
+        let target: Arc<Mutex<PluginCell>> = {
+            let plugins = self.plugins.lock().await;
+            plugins
+                .iter()
+                .find(|p| {
+                    p.name == plugin_id
+                        && p.is_active()
+                        && p.manifest.hooks.iter().any(|h| h == PROVIDER_MODELS_HOOK)
+                })
+                .map(|p| p.plugin.clone())?
+        };
+        let provider_id = {
+            let owned = self.plugin_providers.lock().await;
+            owned
+                .iter()
+                .find(|(_, plug)| plug.as_str() == plugin_id)
+                .map(|(prov, _)| prov.clone())?
+        };
+        let call_input = serde_json::json!({
+            "hook": PROVIDER_MODELS_HOOK,
+            "payload": { "provider_id": provider_id },
+        })
+        .to_string();
+        // `try_lock` inside the blocking thread: the wasm call may run for the
+        // whole instance budget, which must never happen on an async worker.
+        let output = tokio::task::spawn_blocking(move || {
+            let mut guard = target.try_lock().ok()?;
+            Some(guard.call_handle(call_input))
+        })
+        .await
+        .ok()??;
+        let output = match output {
+            Ok(o) => o,
+            Err(e) => {
+                warn!("Plugin '{plugin_id}' failed on {PROVIDER_MODELS_HOOK}: {e}");
+                return None;
+            }
+        };
+        let payload = match serde_json::from_str::<Verdict>(&output) {
+            Ok(Verdict::Allow {
+                payload: Some(payload),
+            }) => payload,
+            _ => return None,
+        };
+        let models: Vec<crate::provider::stream::ModelInfo> =
+            serde_json::from_value(payload.get("models")?.clone()).ok()?;
+        if let Err(e) = crate::provider::plugin_provider::validate_models(&models) {
+            warn!("Plugin '{plugin_id}' returned an invalid {PROVIDER_MODELS_HOOK} catalog: {e}");
+            return None;
+        }
+        Some(models)
+    }
+
+    /// Tell `plugin_id` that the user interrupted the turn running on
+    /// `provider_id` for `session_id`, through the optional
+    /// `provider.interrupt` hook. Fire-and-forget: this returns immediately
+    /// and the dispatch runs in a background task. No-op for a plugin that
+    /// doesn't declare the hook (every plugin registered before it existed).
+    ///
+    /// This is NOT what stops the turn. The caller
+    /// (`PluginProviderAdapter::interrupt`) has already set the cooperative
+    /// stop flag the plugin polls, and the per-call WASM timeout is the hard
+    /// backstop. A plugin gets ONE extism instance, so this dispatch waits on
+    /// the same per-plugin mutex the in-flight `provider.send` call holds and
+    /// therefore lands once that call has returned; its job is releasing what
+    /// the turn owns OUTSIDE the wasm (an upstream request, a remote session),
+    /// not preempting it.
+    pub fn dispatch_provider_interrupt(
+        &self,
+        plugin_id: &str,
+        session_id: &str,
+        provider_id: &str,
+    ) {
+        let plugins = self.plugins.clone();
+        let plugin_id = plugin_id.to_string();
+        let call_input = serde_json::json!({
+            "hook": PROVIDER_INTERRUPT_HOOK,
+            "payload": { "session_id": session_id, "provider_id": provider_id },
+        })
+        .to_string();
+        // Same shape as `dispatch_provider_send`: the wasm trap fires at the
+        // instance budget, this window only backstops that failing to fire.
+        let budget = self.provider_send_timeout + Duration::from_secs(15);
+        tokio::spawn(async move {
+            let target: Option<Arc<Mutex<PluginCell>>> = {
+                let loaded = plugins.lock().await;
+                loaded
+                    .iter()
+                    .find(|p| {
+                        p.name == plugin_id
+                            && p.is_active()
+                            && p.manifest
+                                .hooks
+                                .iter()
+                                .any(|h| h == PROVIDER_INTERRUPT_HOOK)
+                    })
+                    .map(|p| p.plugin.clone())
+            };
+            let Some(plugin) = target else {
+                return;
+            };
+            let call = tokio::task::spawn_blocking(move || {
+                let mut guard = plugin.blocking_lock();
+                guard.call_handle(call_input)
+            });
+            match tokio::time::timeout(budget, call).await {
+                Ok(Ok(Ok(_))) => {}
+                Ok(Ok(Err(e))) => {
+                    warn!("Plugin '{plugin_id}' failed on {PROVIDER_INTERRUPT_HOOK}: {e}")
+                }
+                Ok(Err(e)) => {
+                    warn!("Plugin '{plugin_id}' {PROVIDER_INTERRUPT_HOOK} task failed: {e}")
+                }
+                Err(_) => warn!(
+                    "Plugin '{plugin_id}' {PROVIDER_INTERRUPT_HOOK} exceeded its {}s budget",
+                    budget.as_secs()
+                ),
+            }
+        });
     }
 
     /// Reconcile plugin-registered AI providers against the current plugin
@@ -2559,6 +2721,8 @@ mod tests {
             "http.request.before",
             "mcp.tool.call.before",
             "mcp.tool.call.before",
+            "provider.interrupt",
+            "provider.models",
             "provider.register",
             "provider.send",
             "question.pending",
@@ -2578,6 +2742,8 @@ mod tests {
         assert!(ALLOWED_HOOKS.contains(&HTTP_REQUEST_HOOK));
         assert!(ALLOWED_HOOKS.contains(&PROVIDER_REGISTER_HOOK));
         assert!(ALLOWED_HOOKS.contains(&PROVIDER_SEND_HOOK));
+        assert!(ALLOWED_HOOKS.contains(&PROVIDER_MODELS_HOOK));
+        assert!(ALLOWED_HOOKS.contains(&PROVIDER_INTERRUPT_HOOK));
     }
 
     #[test]

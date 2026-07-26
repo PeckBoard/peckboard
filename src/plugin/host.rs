@@ -3217,6 +3217,12 @@ host_fn!(peckboard_provider_should_stop(user_data: HostState; input: String) -> 
     Ok(runtime.should_stop_json(&plugin_id, &input))
 });
 
+host_fn!(peckboard_provider_take_message(user_data: HostState; input: String) -> String {
+    let (plugin_id, ok, runtime, _pending) = state_permission_and_provider(&user_data, "register_provider")?;
+    if !ok { return Ok(error_json("plugin lacks the 'register_provider' permission")); }
+    Ok(runtime.take_message_json(&plugin_id, &input))
+});
+
 host_fn!(peckboard_provider_get_session(user_data: HostState; input: String) -> String {
     let (plugin_id, ok, runtime, _pending) = state_permission_and_provider(&user_data, "register_provider")?;
     if !ok { return Ok(error_json("plugin lacks the 'register_provider' permission")); }
@@ -3336,6 +3342,13 @@ pub(crate) fn host_functions(
             [PTR],
             ud.clone(),
             peckboard_provider_should_stop,
+        ),
+        Function::new(
+            "peckboard_provider_take_message",
+            [PTR],
+            [PTR],
+            ud.clone(),
+            peckboard_provider_take_message,
         ),
         Function::new(
             "peckboard_provider_get_session",

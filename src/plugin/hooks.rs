@@ -399,6 +399,37 @@ pub const PROVIDER_REGISTER_HOOK: &str = "provider.register";
 /// `{ session_id, provider_id, spawn_config, message: { text, attachments },
 /// conversation_id }`.
 pub const PROVIDER_SEND_HOOK: &str = "provider.send";
+
+/// Optional companion to [`PROVIDER_REGISTER_HOOK`]: dispatched on the
+/// read-only catalog path (`/api/models`, the MCP `list_models` tool) so a
+/// provider plugin can refresh its model list from its settings WITHOUT
+/// being re-registered. This is the plugin-side equivalent of
+/// [`crate::provider::agent::AgentProvider::dynamic_models`].
+///
+/// The plugin answers with `Verdict::Allow { payload: { models: [...] } }`
+/// (the same `ModelInfo` shape as `provider.register`); any other verdict,
+/// an empty list, or an invalid model id leaves the statically registered
+/// catalog in place. Payload: `{ provider_id }`.
+///
+/// Dispatch is **non-blocking**: core takes the plugin instance with a
+/// `try_lock`, so a catalog request never waits behind an in-flight
+/// `provider.send` turn (which can hold the instance for the whole
+/// provider-send budget). A busy plugin simply serves its static catalog.
+pub const PROVIDER_MODELS_HOOK: &str = "provider.models";
+
+/// Optional companion to [`PROVIDER_SEND_HOOK`]: dispatched when the user
+/// interrupts a turn running on a plugin-registered provider, so the plugin
+/// can release whatever the turn owns outside the wasm (an upstream job, a
+/// remote session).
+///
+/// It does NOT replace the cooperative stop flag. Core sets that flag first
+/// — it is what actually ends the turn, and the per-call WASM timeout is the
+/// hard backstop. Because extism gives a plugin ONE instance, this hook
+/// necessarily serialises behind the in-flight `provider.send` call on the
+/// per-plugin mutex, so it lands once that call has returned: treat it as a
+/// cleanup/notification signal, not as a way to abort the turn. Payload:
+/// `{ session_id, provider_id }`; the verdict is ignored.
+pub const PROVIDER_INTERRUPT_HOOK: &str = "provider.interrupt";
 /// The request a plugin receives for a plugin-served HTTP route.
 ///
 /// Serialized as the `payload` of the [`HTTP_REQUEST_HOOK`] hook call.

@@ -348,6 +348,106 @@ async fn provider_send_crash_trap_and_interrupt_do_not_wedge_the_session() {
     assert!(!provider.is_running("s1").await);
 
     // And a normal turn still works afterwards — the session isn't wedged.
-    let done = run_turn(&db, &plugins, &registry, &broadcaster, "hello again", None).await;
+    // The `interrupts` script reports what the optional `provider.interrupt`
+    // hook saw: the dispatch queues on the plugin's single extism instance
+    // behind the stalled turn, so by now it has landed.
+    let done = run_turn(
+        &db,
+        &plugins,
+        &registry,
+        &broadcaster,
+        "hello again interrupts",
+        None,
+    )
+    .await;
     assert!(done.completed, "{:?}", done.error);
+    let texts = text_events(&db.events_tail("s1", 8).await.unwrap());
+    assert!(
+        texts.iter().any(|t| t.contains("interrupts:[s1]")),
+        "provider.interrupt must have been dispatched for the session: {texts:?}"
+    );
+}
+
+/// The optional `provider.models` hook backs the plugin adapter's
+/// `dynamic_models`: the read-only catalog path serves the plugin's refreshed
+/// list, while the registration-time catalog on `ProviderInfo` is untouched.
+#[tokio::test(flavor = "multi_thread")]
+async fn provider_models_hook_refreshes_the_catalog() {
+    let Some(_) = plugin_wasm() else {
+        eprintln!("SKIP provider_models_hook_refreshes_the_catalog: wasm not built");
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let (_db, _plugins, registry) = setup(dir.path()).await;
+
+    let info = registry.get_info(PROVIDER_ID).await.unwrap();
+    let static_ids: Vec<&str> = info.models.iter().map(|m| m.id.as_str()).collect();
+    assert_eq!(static_ids, ["echo-1", "echo-mini"]);
+    // The registration's mid-stream flag reached the served capabilities.
+    assert!(info.capabilities.supports_mid_stream_injection);
+
+    let ids: Vec<String> = registry
+        .list_all_models()
+        .await
+        .into_iter()
+        .map(|(id, _)| id)
+        .collect();
+    assert!(ids.contains(&"wasmtest:echo-1".to_string()), "{ids:?}");
+    assert!(
+        ids.contains(&"wasmtest:echo-dynamic".to_string()),
+        "{ids:?}"
+    );
+}
+
+/// A registration declaring `supports_mid_stream_injection` makes the adapter
+/// absorb a second dispatch mid-turn: it reaches the live turn through
+/// `peckboard_provider_take_message` instead of starting a parallel run (which
+/// `begin_turn` refuses) or being persisted in `queued_messages`.
+#[tokio::test(flavor = "multi_thread")]
+async fn mid_stream_injection_reaches_the_live_turn() {
+    let Some(_) = plugin_wasm() else {
+        eprintln!("SKIP mid_stream_injection_reaches_the_live_turn: wasm not built");
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let (db, plugins, registry) = setup(dir.path()).await;
+    let broadcaster = Broadcaster::new();
+    let provider = registry.get_provider(PROVIDER_ID).await.unwrap();
+    assert!(provider.supports_mid_stream_injection());
+
+    let (completion_tx, mut completion_rx) = mpsc::channel(8);
+    let ctx = |text: &str| SendMessageContext {
+        session_id: "s1".into(),
+        message: text.into(),
+        db: db.clone(),
+        broadcaster: broadcaster.clone(),
+        config: SpawnConfig {
+            model: format!("{PROVIDER_ID}:echo-1"),
+            working_dir: "/tmp/pt".into(),
+            ..Default::default()
+        },
+        conversation_id: None,
+        completion_tx: completion_tx.clone(),
+        plugins: plugins.clone(),
+    };
+
+    provider.send_message(ctx("midstream")).await.unwrap();
+    // The turn is in flight, polling for the hand-over.
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert!(provider.is_running("s1").await);
+
+    provider.send_message(ctx("second")).await.unwrap();
+
+    let done = tokio::time::timeout(Duration::from_secs(30), completion_rx.recv())
+        .await
+        .expect("turn completes")
+        .unwrap();
+    assert!(done.completed, "{:?}", done.error);
+    let texts = text_events(&db.events_tail("s1", 32).await.unwrap());
+    assert!(
+        texts.iter().any(|t| t.contains("injected:second")),
+        "the mid-turn message must reach the live turn: {texts:?}"
+    );
+    // One completion only: the injected message never became its own run.
+    assert!(completion_rx.try_recv().is_err());
 }
