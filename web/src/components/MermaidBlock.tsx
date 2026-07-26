@@ -15,7 +15,25 @@ export default function MermaidBlock({ code }: { code: string }) {
     let cancelled = false
     if (!mermaidPromise) {
       mermaidPromise = import('mermaid').then((m) => {
-        m.default.initialize({ startOnLoad: false, securityLevel: 'strict', theme: 'default' })
+        // `base` + explicit variables instead of the stock `default` theme:
+        // the stock palette rendered near-black nodes in the embedded
+        // browser, and pinning the handful of variables we care about keeps
+        // diagrams readable on the app's light surfaces everywhere.
+        m.default.initialize({
+          startOnLoad: false,
+          securityLevel: 'strict',
+          theme: 'base',
+          themeVariables: {
+            primaryColor: '#eef2ff',
+            primaryTextColor: '#1f2430',
+            primaryBorderColor: '#8593c9',
+            lineColor: '#5b6472',
+            secondaryColor: '#f5f7fa',
+            tertiaryColor: '#ffffff',
+            background: '#ffffff',
+            fontFamily: 'inherit',
+          },
+        })
         return m.default
       })
     }

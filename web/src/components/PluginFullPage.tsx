@@ -31,6 +31,12 @@ const ALLOWED_METHODS = new Set(['GET', 'POST', 'PUT', 'PATCH', 'DELETE'])
  */
 export default function PluginFullPage({ title, plugin, path, scope, onBack }: Props) {
   const frameRef = useRef<HTMLIFrameElement | null>(null)
+  // Forward the app URL's query string into the iframe so deep links (e.g.
+  // the chat's replay links: /plugin-page/…?run=<id>) reach the plugin page,
+  // which reads its own location.search. Plugins ignore params they don't
+  // know, so forwarding everything is safe.
+  const search = window.location.search
+  const src = search ? `${path}${path.includes('?') ? '&' : '?'}${search.slice(1)}` : path
   // Keep the latest scope in a ref so the long-lived message listener always
   // injects the current id without being torn down on every scope change.
   const scopeRef = useRef(scope)
@@ -100,7 +106,7 @@ export default function PluginFullPage({ title, plugin, path, scope, onBack }: P
         data-testid="plugin-fullpage-frame"
         data-plugin={plugin}
         title={title}
-        src={path}
+        src={src}
         sandbox="allow-scripts allow-forms allow-popups allow-downloads"
       />
     </div>

@@ -270,6 +270,51 @@
   border: 1px solid var(--border);
 }
 
+/* Fallback palette for mermaid output. The bundled mermaid build (vite 8 /
+   rolldown) currently emits SVGs whose embedded <style> carries no usable
+   theme rules, leaving every shape at SVG-default black — the same version
+   from a CDN styles itself fine, so this is a bundling casualty, not a
+   config one. These class-scoped rules keep diagrams readable either way:
+   when mermaid's own #id-scoped styles ARE present they win on specificity
+   and this block is inert. */
+.plan-mermaid svg {
+  max-width: 100%;
+}
+.plan-mermaid .node rect,
+.plan-mermaid .node circle,
+.plan-mermaid .node ellipse,
+.plan-mermaid .node polygon,
+.plan-mermaid .node path,
+.plan-mermaid .actor {
+  fill: #eef2ff;
+  stroke: #8593c9;
+}
+.plan-mermaid .cluster rect {
+  fill: #f5f7fa;
+  stroke: #b6c2cf;
+}
+.plan-mermaid .edgePaths path,
+.plan-mermaid .flowchart-link,
+.plan-mermaid .messageLine0,
+.plan-mermaid .messageLine1 {
+  stroke: #5b6472;
+  fill: none;
+}
+.plan-mermaid .marker {
+  fill: #5b6472;
+  stroke: #5b6472;
+}
+.plan-mermaid text,
+.plan-mermaid .nodeLabel,
+.plan-mermaid .edgeLabel,
+.plan-mermaid .label {
+  fill: #1f2430;
+  color: #1f2430;
+}
+.plan-mermaid .edgeLabel {
+  background: #ffffff;
+}
+
 .plan-mermaid-error {
   border-left: 3px solid var(--danger);
   padding-left: var(--space-2);

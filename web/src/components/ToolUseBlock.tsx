@@ -207,7 +207,7 @@ export default function ToolUseBlock({
     passedFlag !== undefined && outObj ? parseTestCounts(strField(outObj, 'stdout') ?? '') : ''
   const replayUrl =
     outObj && typeof outObj.run_id === 'string' && bareToolName(toolName).startsWith('browser_')
-      ? `/plugin-api/v1/playwright-video?run=${encodeURIComponent(outObj.run_id as string)}`
+      ? `/plugin-page/playwright-video/playwright-tests?run=${encodeURIComponent(outObj.run_id as string)}`
       : undefined
   const subagentSessionId =
     outObj &&
