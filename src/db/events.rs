@@ -1,9 +1,82 @@
 use diesel::prelude::*;
+use diesel::result::{DatabaseErrorKind, Error as DieselError};
+use diesel::sql_types::{BigInt, Text};
+use diesel::sqlite::SqliteConnection;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use super::Db;
-use super::models::{Event, NewEvent};
+use super::models::Event;
 use super::schema::events;
+
+/// How many times [`insert_event_next_seq`] re-derives a `seq` before giving
+/// up. Each retry costs one failed INSERT; a collision needs a second writer
+/// on the same DB file, so more than a couple of rounds is pathological.
+const APPEND_SEQ_MAX_ATTEMPTS: u32 = 16;
+
+fn now_millis() -> i64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as i64
+}
+
+/// Insert one event row, letting SQLite assign `seq` *inside* the INSERT.
+///
+/// The old shape was read-then-insert: `SELECT MAX(seq)` in one statement,
+/// `INSERT` in the next. Two appenders interleaving there both compute the
+/// same next seq, `UNIQUE(session_id, seq)` fires for the loser, and the
+/// caller's only option is to drop the event. Here `INSERT ... SELECT
+/// COALESCE((SELECT MAX(seq) ...), 0) + 1` derives the number in the same
+/// statement, and the unique index stays as the backstop: on violation we
+/// retry with a freshly computed seq instead of losing the event.
+///
+/// Returns the inserted row (read back by its uuid, so the read-back cannot
+/// pick up a different writer's row).
+fn insert_event_next_seq(
+    conn: &mut SqliteConnection,
+    session_id: &str,
+    kind: &str,
+    data: &str,
+) -> anyhow::Result<Event> {
+    for attempt in 1..=APPEND_SEQ_MAX_ATTEMPTS {
+        let id = uuid::Uuid::new_v4().to_string();
+        let ts = now_millis();
+
+        let inserted = diesel::sql_query(
+            "INSERT INTO events (id, session_id, seq, ts, kind, data) \
+             SELECT ?, ?, COALESCE((SELECT MAX(seq) FROM events WHERE session_id = ?), 0) + 1, ?, ?, ?",
+        )
+        .bind::<Text, _>(&id)
+        .bind::<Text, _>(session_id)
+        .bind::<Text, _>(session_id)
+        .bind::<BigInt, _>(ts)
+        .bind::<Text, _>(kind)
+        .bind::<Text, _>(data)
+        .execute(conn);
+
+        match inserted {
+            Ok(_) => {
+                return events::table
+                    .filter(events::id.eq(&id))
+                    .select(Event::as_select())
+                    .first(conn)
+                    .map_err(Into::into);
+            }
+            Err(DieselError::DatabaseError(DatabaseErrorKind::UniqueViolation, _)) => {
+                tracing::debug!(
+                    session_id = session_id,
+                    attempt = attempt,
+                    "event seq collision, retrying with a fresh seq"
+                );
+            }
+            Err(e) => return Err(e.into()),
+        }
+    }
+
+    anyhow::bail!(
+        "failed to assign an event seq for session {session_id} after {APPEND_SEQ_MAX_ATTEMPTS} attempts"
+    )
+}
 
 impl Db {
     /// Append an event with automatic seq assignment and server-stamped timestamp.
@@ -18,81 +91,25 @@ impl Db {
         let kind = kind.to_string();
         let data_str = serde_json::to_string(&data)?;
 
-        self.with_conn(move |conn| {
-            // Get the next seq for this session.
-            let next_seq: i32 = events::table
-                .filter(events::session_id.eq(&session_id))
-                .select(diesel::dsl::max(events::seq))
-                .first::<Option<i32>>(conn)?
-                .map(|s| s + 1)
-                .unwrap_or(1);
-
-            let ts = SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap()
-                .as_millis() as i64;
-
-            let new_event = NewEvent {
-                id: uuid::Uuid::new_v4().to_string(),
-                session_id,
-                seq: next_seq,
-                ts,
-                kind,
-                data: data_str,
-            };
-
-            diesel::insert_into(events::table)
-                .values(&new_event)
-                .returning(Event::as_returning())
-                .get_result(conn)
-                .map_err(Into::into)
-        })
-        .await
+        self.with_conn(move |conn| insert_event_next_seq(conn, &session_id, &kind, &data_str))
+            .await
     }
 
     /// Synchronous twin of [`append_event`], for WASM plugin host
     /// functions that run inside a blocking extism call. Inserts ONE event
     /// row with the same seq/id/ts scheme as the async path — `seq` is the
-    /// per-session `max(seq) + 1` (or 1 for the first), `id` a fresh uuid,
-    /// `ts` millis since the Unix epoch. `data` is stored verbatim (already
-    /// JSON-encoded by the caller). Does NOT broadcast.
+    /// per-session `max(seq) + 1` (or 1 for the first), assigned atomically
+    /// by [`insert_event_next_seq`], `id` a fresh uuid, `ts` millis since the
+    /// Unix epoch. `data` is stored verbatim (already JSON-encoded by the
+    /// caller). Does NOT broadcast.
     pub(crate) fn append_event_blocking(
         &self,
         session_id: &str,
         kind: &str,
         data: &str,
     ) -> anyhow::Result<()> {
-        let session_id = session_id.to_string();
-        let kind = kind.to_string();
-        let data = data.to_string();
-
-        self.with_conn_blocking(move |conn| {
-            // Get the next seq for this session.
-            let next_seq: i32 = events::table
-                .filter(events::session_id.eq(&session_id))
-                .select(diesel::dsl::max(events::seq))
-                .first::<Option<i32>>(conn)?
-                .map(|s| s + 1)
-                .unwrap_or(1);
-
-            let ts = SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap()
-                .as_millis() as i64;
-
-            let new_event = NewEvent {
-                id: uuid::Uuid::new_v4().to_string(),
-                session_id,
-                seq: next_seq,
-                ts,
-                kind,
-                data,
-            };
-
-            diesel::insert_into(events::table)
-                .values(&new_event)
-                .execute(conn)?;
-            Ok(())
+        self.with_conn_blocking(|conn| {
+            insert_event_next_seq(conn, session_id, kind, data).map(|_| ())
         })
     }
 
@@ -150,6 +167,30 @@ impl Db {
                 .filter(events::seq.gt(since_seq))
                 .select(Event::as_select())
                 .order(events::seq.asc())
+                .load(conn)
+                .map_err(Into::into)
+        })
+        .await
+    }
+    /// One page of a session's events with `seq` greater than `since_seq`,
+    /// ordered by `seq` ascending, at most `limit` rows. Async twin of
+    /// [`events_since_blocking`]; the WS resume path pages through a long
+    /// backlog with it instead of loading (and then truncating) the whole
+    /// tail in one query.
+    pub async fn events_since_page(
+        &self,
+        session_id: &str,
+        since_seq: i32,
+        limit: i64,
+    ) -> anyhow::Result<Vec<Event>> {
+        let session_id = session_id.to_string();
+        self.with_conn(move |conn| {
+            events::table
+                .filter(events::session_id.eq(&session_id))
+                .filter(events::seq.gt(since_seq))
+                .select(Event::as_select())
+                .order(events::seq.asc())
+                .limit(limit)
                 .load(conn)
                 .map_err(Into::into)
         })
@@ -262,10 +303,10 @@ impl Db {
 #[cfg(test)]
 mod tests {
     use crate::db::Db;
-    use crate::db::models::{NewFolder, NewSession};
+    use crate::db::models::{NewEvent, NewFolder, NewSession};
 
-    async fn setup() -> Db {
-        let db = Db::in_memory().unwrap();
+    /// Create the folder + session row `"s1"` every test appends to.
+    async fn seed(db: &Db) {
         let ts = chrono::Utc::now().to_rfc3339();
 
         db.create_folder(NewFolder {
@@ -293,7 +334,11 @@ mod tests {
         })
         .await
         .unwrap();
+    }
 
+    async fn setup() -> Db {
+        let db = Db::in_memory().unwrap();
+        seed(&db).await;
         db
     }
 
@@ -439,5 +484,139 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(db.latest_seq("s1").await.unwrap(), Some(2));
+    }
+
+    /// Concurrent appenders must not collide on `seq`. The old
+    /// read-then-insert shape had both racers compute the same next seq, and
+    /// the loser's event was dropped on the `UNIQUE(session_id, seq)`
+    /// violation. Every task's event has to land, with a unique number.
+    #[tokio::test]
+    async fn test_concurrent_appends_assign_unique_seqs() {
+        const N: usize = 64;
+        let db = setup().await;
+
+        let mut handles = Vec::with_capacity(N);
+        for i in 0..N {
+            let db = db.clone();
+            handles.push(tokio::spawn(async move {
+                db.append_event("s1", "user", serde_json::json!({ "i": i }))
+                    .await
+                    .unwrap()
+            }));
+        }
+
+        let mut seqs: Vec<i32> = Vec::with_capacity(N);
+        for h in handles {
+            seqs.push(h.await.unwrap().seq);
+        }
+        seqs.sort_unstable();
+
+        // Nothing dropped, nothing duplicated: exactly 1..=N.
+        assert_eq!(seqs, (1..=N as i32).collect::<Vec<_>>());
+        assert_eq!(db.events_since("s1", 0).await.unwrap().len(), N);
+        assert_eq!(db.latest_seq("s1").await.unwrap(), Some(N as i32));
+    }
+
+    /// Same race through the synchronous plugin-host path, which shares the
+    /// atomic insert. `append_event_blocking` locks the connection on the
+    /// calling thread, so drive it from blocking tasks.
+    #[tokio::test]
+    async fn test_concurrent_blocking_appends_assign_unique_seqs() {
+        const N: usize = 16;
+        let db = setup().await;
+
+        let mut handles = Vec::with_capacity(N);
+        for _ in 0..N {
+            let db = db.clone();
+            handles.push(tokio::task::spawn_blocking(move || {
+                db.append_event_blocking("s1", "user", r#"{"text":"hi"}"#)
+                    .unwrap()
+            }));
+        }
+        for h in handles {
+            h.await.unwrap();
+        }
+
+        let stored = db.events_since("s1", 0).await.unwrap();
+        assert_eq!(stored.len(), N);
+        let seqs: Vec<i32> = stored.iter().map(|e| e.seq).collect();
+        assert_eq!(seqs, (1..=N as i32).collect::<Vec<_>>());
+    }
+
+    /// The seq is derived inside the INSERT from the committed rows, so it
+    /// continues past a row written with an out-of-band seq instead of
+    /// colliding with it.
+    #[tokio::test]
+    async fn test_append_continues_after_seq_gap() {
+        let db = setup().await;
+
+        db.create_event(NewEvent {
+            id: "manual".into(),
+            session_id: "s1".into(),
+            seq: 42,
+            ts: 1,
+            kind: "user".into(),
+            data: "{}".into(),
+        })
+        .await
+        .unwrap();
+
+        let next = db
+            .append_event("s1", "user", serde_json::json!({}))
+            .await
+            .unwrap();
+        assert_eq!(next.seq, 43);
+    }
+
+    /// Two `Db` handles on the same file are two SQLite connections with
+    /// independent mutexes — the shape where a seq collision is genuinely
+    /// reachable. Appends through either must share one dense seq space.
+    #[tokio::test]
+    async fn test_appends_across_connections_share_one_seq_space() {
+        let dir = tempfile::tempdir().unwrap();
+        let a = Db::open(dir.path()).unwrap();
+        seed(&a).await;
+        let b = Db::open(dir.path()).unwrap();
+
+        let mut seqs = Vec::new();
+        for i in 0..6 {
+            let db = if i % 2 == 0 { &a } else { &b };
+            seqs.push(
+                db.append_event("s1", "user", serde_json::json!({ "i": i }))
+                    .await
+                    .unwrap()
+                    .seq,
+            );
+        }
+        assert_eq!(seqs, vec![1, 2, 3, 4, 5, 6]);
+    }
+
+    /// `events_since_page` is the WS resume pager: ordered ascending, capped,
+    /// and resumable from the last seq it returned.
+    #[tokio::test]
+    async fn test_events_since_page_paginates() {
+        let db = setup().await;
+        for i in 0..7 {
+            db.append_event("s1", "user", serde_json::json!({ "i": i }))
+                .await
+                .unwrap();
+        }
+
+        let page1 = db.events_since_page("s1", 0, 3).await.unwrap();
+        assert_eq!(
+            page1.iter().map(|e| e.seq).collect::<Vec<_>>(),
+            vec![1, 2, 3]
+        );
+
+        let page2 = db.events_since_page("s1", 3, 3).await.unwrap();
+        assert_eq!(
+            page2.iter().map(|e| e.seq).collect::<Vec<_>>(),
+            vec![4, 5, 6]
+        );
+
+        // Short page = caught up.
+        let page3 = db.events_since_page("s1", 6, 3).await.unwrap();
+        assert_eq!(page3.iter().map(|e| e.seq).collect::<Vec<_>>(), vec![7]);
+        assert!(db.events_since_page("s1", 7, 3).await.unwrap().is_empty());
     }
 }

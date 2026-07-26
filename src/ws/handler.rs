@@ -9,12 +9,18 @@ use futures_util::{SinkExt, StreamExt};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
+use tokio::sync::broadcast::error::RecvError;
 use tokio::time::{Duration, timeout};
 
 use crate::auth::token::validate_token;
 use crate::state::AppState;
 
 static NEXT_CLIENT_ID: AtomicU64 = AtomicU64::new(1);
+
+/// Events per page when replaying a `resume` backlog. Bounds the memory a
+/// single resume pulls out of SQLite; the handler keeps paging until the
+/// session is caught up, so a long gap is no longer a permanent hole.
+const RESUME_PAGE_SIZE: i64 = 500;
 
 /// Incoming frame types from the client.
 #[derive(Debug, Deserialize)]
@@ -43,6 +49,19 @@ enum ServerFrame {
     },
     ResumeComplete {
         session_id: String,
+    },
+    /// The client's broadcast slot overflowed and `dropped` events were
+    /// discarded before we could forward them. Nothing can recover them from
+    /// the channel, so the client must re-run its Resume flow. `session_id` /
+    /// `last_seq` name an affected session and the newest seq the server has
+    /// for it; both are omitted when the client has no session subscriptions
+    /// (it still lost global frames and should refetch).
+    Resync {
+        #[serde(skip_serializing_if = "Option::is_none")]
+        session_id: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        last_seq: Option<i32>,
+        dropped: u64,
     },
 }
 
@@ -193,9 +212,33 @@ async fn handle_connection(socket: WebSocket, state: Arc<AppState>) {
                                         )).await;
                                         continue;
                                     }
-                                    // Replay events since last_seq
-                                    if let Ok(events) = state.db.events_since(&session_id, last_seq).await {
-                                        for event in events.iter().take(500) {
+                                    // Replay events since last_seq, page by
+                                    // page. A single capped query left a
+                                    // permanent hole whenever the gap was
+                                    // bigger than the cap, so keep pulling
+                                    // pages until the session is caught up.
+                                    let mut cursor = last_seq;
+                                    loop {
+                                        let page = match state
+                                            .db
+                                            .events_since_page(&session_id, cursor, RESUME_PAGE_SIZE)
+                                            .await
+                                        {
+                                            Ok(page) => page,
+                                            Err(e) => {
+                                                tracing::warn!(
+                                                    "WS client {client_id} resume page failed: {e}"
+                                                );
+                                                break;
+                                            }
+                                        };
+                                        if page.is_empty() {
+                                            break;
+                                        }
+                                        let page_len = page.len() as i64;
+                                        let mut send_failed = false;
+                                        for event in &page {
+                                            cursor = event.seq;
                                             let frame = ServerFrame::Event {
                                                 session_id: session_id.clone(),
                                                 event: serde_json::json!({
@@ -206,9 +249,18 @@ async fn handle_connection(socket: WebSocket, state: Arc<AppState>) {
                                                     "data": serde_json::from_str::<serde_json::Value>(&event.data).unwrap_or_default(),
                                                 }),
                                             };
-                                            let _ = sender.send(Message::Text(
+                                            if sender.send(Message::Text(
                                                 serde_json::to_string(&frame).unwrap().into()
-                                            )).await;
+                                            )).await.is_err() {
+                                                send_failed = true;
+                                                break;
+                                            }
+                                        }
+                                        // A short page means we drained the
+                                        // tail; a full one means there may be
+                                        // more behind it.
+                                        if send_failed || page_len < RESUME_PAGE_SIZE {
+                                            break;
                                         }
                                     }
                                     let _ = sender.send(Message::Text(
@@ -231,7 +283,8 @@ async fn handle_connection(socket: WebSocket, state: Arc<AppState>) {
             }
             // Handle broadcast events
             event = broadcast_rx.recv() => {
-                if let Ok(ws_event) = event {
+                match event {
+                    Ok(ws_event) => {
                     // Global events (card-update, announcement, queue) go to all clients
                     let is_global = matches!(
                         ws_event.event_type.as_str(),
@@ -288,6 +341,56 @@ async fn handle_connection(socket: WebSocket, state: Arc<AppState>) {
                             break;
                         }
                     }
+                    }
+                    // The client's broadcast slot overflowed: `dropped`
+                    // events are gone from the channel for good. Ask the
+                    // client to re-run its Resume flow for every session it
+                    // watches, so the gap is refilled from the event log
+                    // instead of silently persisting until a reload.
+                    Err(RecvError::Lagged(dropped)) => {
+                        tracing::warn!(
+                            "WS client {client_id} lagged, {dropped} event(s) dropped; requesting resync"
+                        );
+                        let sessions = state.broadcaster.sessions_for_client(client_id).await;
+                        let mut frames: Vec<ServerFrame> = Vec::new();
+                        for sid in sessions {
+                            let last_seq = state.db.latest_seq(&sid).await.ok().flatten();
+                            frames.push(ServerFrame::Resync {
+                                session_id: Some(sid),
+                                last_seq,
+                                dropped,
+                            });
+                        }
+                        if frames.is_empty() {
+                            // No session subscriptions, but global frames
+                            // (card updates, announcements) were dropped too
+                            // — the client still needs to refetch.
+                            frames.push(ServerFrame::Resync {
+                                session_id: None,
+                                last_seq: None,
+                                dropped,
+                            });
+                        }
+                        let mut send_failed = false;
+                        for frame in frames {
+                            if sender
+                                .send(Message::Text(
+                                    serde_json::to_string(&frame).unwrap().into(),
+                                ))
+                                .await
+                                .is_err()
+                            {
+                                send_failed = true;
+                                break;
+                            }
+                        }
+                        if send_failed {
+                            break;
+                        }
+                    }
+                    // Broadcaster gone (shutdown): recv() would return
+                    // instantly forever, so stop rather than spin.
+                    Err(RecvError::Closed) => break,
                 }
             }
         }

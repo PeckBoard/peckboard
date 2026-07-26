@@ -28,9 +28,15 @@ export default function SubagentTranscript({ sessionId }: { sessionId: string })
 
   useEffect(() => {
     if (!expanded || finished) return
-    void load()
+    // Both the first fetch and the refreshes go through timers so the effect
+    // body itself never triggers a synchronous setState cascade
+    // (react-hooks/set-state-in-effect).
+    const kick = setTimeout(() => void load(), 0)
     const id = setInterval(() => void load(), 5000)
-    return () => clearInterval(id)
+    return () => {
+      clearTimeout(kick)
+      clearInterval(id)
+    }
   }, [expanded, finished, load])
 
   const items = events ? buildDisplayItems(events) : []

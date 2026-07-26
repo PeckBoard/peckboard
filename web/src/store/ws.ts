@@ -114,6 +114,25 @@ export const useWsStore = create<WsState>((set, get) => ({
         return
       }
 
+      if (msg.type === 'resync') {
+        // The server's broadcast slot for this client overflowed and dropped
+        // events. They are unrecoverable from the socket, so re-run the
+        // Resume flow from our own last-seen seq (0 = full replay) for the
+        // session the server named, or for every subscribed session when it
+        // named none. Dedupe-by-seq below makes the overlap with
+        // already-applied events harmless.
+        const { subscribedSessions, lastSeqBySession } = get()
+        const named = msg.session_id as string | undefined
+        const targets = named ? [named] : [...subscribedSessions]
+        for (const sid of targets) {
+          sendJson({ type: 'resume', session_id: sid, last_seq: lastSeqBySession[sid] ?? 0 })
+        }
+        // Global frames (card updates, announcements) were dropped too and
+        // have no replay log — let listeners refetch.
+        window.dispatchEvent(new CustomEvent('peckboard:resync', { detail: msg }))
+        return
+      }
+
       if (msg.type === 'announcement') {
         // Emit as a custom event that App.tsx can listen to
         window.dispatchEvent(new CustomEvent('peckboard:announcement', { detail: msg }))

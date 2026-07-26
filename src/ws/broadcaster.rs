@@ -78,4 +78,16 @@ impl Broadcaster {
             .map(|c| c.contains(&client_id))
             .unwrap_or(false)
     }
+
+    /// Every session `client_id` is currently subscribed to. Used by the WS
+    /// handler when the broadcast channel reports a lag: the dropped events
+    /// are unrecoverable from the channel, so each affected session has to be
+    /// re-resumed from the event log.
+    pub async fn sessions_for_client(&self, client_id: u64) -> Vec<String> {
+        let subs = self.subscriptions.lock().await;
+        subs.iter()
+            .filter(|(_, clients)| clients.contains(&client_id))
+            .map(|(session_id, _)| session_id.clone())
+            .collect()
+    }
 }
