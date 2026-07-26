@@ -76,21 +76,25 @@ async fn list_models(State(state): State<Arc<AppState>>) -> impl IntoResponse {
                 "display_name": m.display_name,
                 "capabilities": m.capabilities,
                 "tier": m.tier,
+                "thinking": m.is_thinking(),
+                "images_in": p.capabilities.model_images_in(m),
             })).collect::<Vec<_>>(),
             "effort_levels": p.effort_levels.iter().map(|e| serde_json::json!({
                 "id": e.id,
                 "label": e.label,
             })).collect::<Vec<_>>(),
+            "capabilities": p.capabilities,
         })).collect::<Vec<_>>(),
         "models": providers.iter().flat_map(|p| p.models.iter().map(move |m| serde_json::json!({
             "id": format!("{}:{}", p.id, m.id),
             "display_name": m.display_name,
             "capabilities": m.capabilities,
             "tier": m.tier,
+            "thinking": m.is_thinking(),
+            "images_in": p.capabilities.model_images_in(m),
         }))).collect::<Vec<_>>(),
     }))
 }
-
 /// GET /api/workflows — list built-in workflow definitions
 async fn list_workflows() -> impl IntoResponse {
     Json(serde_json::json!({ "workflows": crate::workflow::WORKFLOWS }))

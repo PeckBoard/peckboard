@@ -44,7 +44,9 @@ use std::sync::Arc;
 use crate::plugin::builtin::{BuiltinPlugin, Permission, PluginInitContext, PluginMetadata};
 use crate::plugin::settings::{FieldKind, SettingField, SettingsSchema};
 use crate::provider::ollama::{OllamaProvider, default_models};
-use crate::provider::registry::ProviderInfo;
+use crate::provider::registry::{
+    AnswerTransport, InterruptKind, ProviderCapabilities, ProviderInfo,
+};
 
 pub struct OllamaPlugin;
 
@@ -222,6 +224,21 @@ impl BuiltinPlugin for OllamaPlugin {
                     models: default_models(),
                     // Local models have no reasoning-effort control.
                     effort_levels: vec![],
+                    // HTTP per-turn provider: interrupt aborts the in-flight
+                    // request, answers arrive as a fresh turn, and the full
+                    // history is replayed each turn (resume for free). Image
+                    // support is per-model — the /api/show probe's `vision`
+                    // tag refines this provider-level allow (see
+                    // `ModelInfo::images_in_hint`). No Usage events yet.
+                    capabilities: ProviderCapabilities {
+                        supports_thinking: true,
+                        supports_images_in: true,
+                        supports_usage: false,
+                        supports_resume: true,
+                        interrupt_kind: InterruptKind::HardKill,
+                        supports_mid_stream_injection: false,
+                        answer_transport: AnswerTransport::NewTurn,
+                    },
                 },
             )
             .await;

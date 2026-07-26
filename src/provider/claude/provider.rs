@@ -848,7 +848,25 @@ pub async fn register_claude_provider(registry: &ProviderRegistry) {
                 display_name: "Claude (CLI)".into(),
                 models,
                 effort_levels: crate::provider::registry::standard_effort_levels(),
+                capabilities: claude_capabilities(),
             },
         )
         .await;
+}
+
+/// What the Claude CLI provider actually supports — the long-lived
+/// stream-json child gives it the richest capability set: in-band (soft)
+/// interrupt with a hard-kill fallback, stdin answer delivery, and
+/// mid-stream user-envelope injection.
+pub fn claude_capabilities() -> crate::provider::registry::ProviderCapabilities {
+    use crate::provider::registry::{AnswerTransport, InterruptKind, ProviderCapabilities};
+    ProviderCapabilities {
+        supports_thinking: true,
+        supports_images_in: true,
+        supports_usage: true,
+        supports_resume: true,
+        interrupt_kind: InterruptKind::Soft,
+        supports_mid_stream_injection: true,
+        answer_transport: AnswerTransport::Stdin,
+    }
 }

@@ -192,6 +192,7 @@ async fn provider_plugin_cannot_displace_native_provider() {
                 display_name: "Native".into(),
                 models: vec![],
                 effort_levels: vec![],
+                capabilities: Default::default(),
             },
         )
         .await;

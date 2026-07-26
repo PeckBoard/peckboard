@@ -100,6 +100,7 @@ async fn cursor_auto_turn_completes_end_to_end() {
                 display_name: "Cursor".into(),
                 models: default_models(),
                 effort_levels: vec![],
+                capabilities: Default::default(),
             },
         )
         .await;
@@ -244,6 +245,7 @@ async fn cursor_models_surface_through_catalog_api() {
                 display_name: "Cursor".into(),
                 models: default_models(),
                 effort_levels: vec![],
+                capabilities: Default::default(),
             },
         )
         .await;
@@ -387,6 +389,7 @@ async fn cursor_mcp_tool_roundtrip() {
                 display_name: "Cursor".into(),
                 models: default_models(),
                 effort_levels: vec![],
+                capabilities: Default::default(),
             },
         )
         .await;

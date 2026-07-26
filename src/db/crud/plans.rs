@@ -232,10 +232,12 @@ mod tests {
     }
 
     #[test]
-    fn is_thinking_detects_reasoning_and_id() {
+    fn is_thinking_reads_capability_tags() {
         assert!(info(&["code", "reasoning"], "opus").is_thinking());
         assert!(info(&["thinking"], "llama").is_thinking());
-        assert!(info(&[], "claude-opus-4-8-thinking-high").is_thinking());
+        // The id sniff is retired — providers tag their catalogs instead
+        // (Cursor tags `reasoning` from its id convention at build time).
+        assert!(!info(&[], "claude-opus-4-8-thinking-high").is_thinking());
         assert!(!info(&["code"], "haiku").is_thinking());
         assert!(!info(&[], "sonnet").is_thinking());
     }

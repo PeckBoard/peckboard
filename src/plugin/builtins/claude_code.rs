@@ -70,6 +70,7 @@ impl BuiltinPlugin for ClaudeCodePlugin {
                     // provider's `dynamic_models`, which probes the CLI.
                     models: discover_models(),
                     effort_levels: standard_effort_levels(),
+                    capabilities: crate::provider::claude::provider::claude_capabilities(),
                 },
             )
             .await;

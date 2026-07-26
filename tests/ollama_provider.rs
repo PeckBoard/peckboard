@@ -739,6 +739,7 @@ async fn additional_models_setting_registers_models_by_name() {
                 // must replace this, not append to a stale copy.
                 models: peckboard::provider::ollama::default_models(),
                 effort_levels: vec![],
+                capabilities: Default::default(),
             },
         )
         .await;

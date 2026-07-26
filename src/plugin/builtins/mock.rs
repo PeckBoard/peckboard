@@ -9,7 +9,7 @@ use async_trait::async_trait;
 use std::sync::Arc;
 
 use crate::plugin::builtin::{BuiltinPlugin, Permission, PluginInitContext, PluginMetadata};
-use crate::provider::mock::{MockProvider, mock_model_infos};
+use crate::provider::mock::{MockProvider, mock_capabilities, mock_model_infos};
 use crate::provider::registry::{ProviderInfo, standard_effort_levels};
 
 pub struct MockPlugin;
@@ -48,6 +48,10 @@ impl BuiltinPlugin for MockPlugin {
                     // the deterministic vehicle e2e uses to exercise the
                     // effort picker, so it exposes the standard ladder.
                     effort_levels: standard_effort_levels(),
+                    // Permissive on images/usage/stdin — the mock is the
+                    // deterministic e2e vehicle for those affordances; see
+                    // `mock_capabilities`.
+                    capabilities: mock_capabilities(),
                 },
             )
             .await;

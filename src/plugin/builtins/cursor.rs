@@ -21,7 +21,9 @@ use std::sync::Arc;
 use crate::plugin::builtin::{BuiltinPlugin, Permission, PluginInitContext, PluginMetadata};
 use crate::plugin::settings::{FieldKind, SettingField, SettingsSchema};
 use crate::provider::cursor::{CursorProvider, default_models};
-use crate::provider::registry::ProviderInfo;
+use crate::provider::registry::{
+    AnswerTransport, InterruptKind, ProviderCapabilities, ProviderInfo,
+};
 
 pub struct CursorPlugin;
 
@@ -148,6 +150,21 @@ impl BuiltinPlugin for CursorPlugin {
                     // (e.g. `gpt-5.3-codex-high`), so there's no separate
                     // effort control to expose.
                     effort_levels: vec![],
+                    // Per-turn CLI: attachments are dropped (text-only for
+                    // now), interrupt kills the child, answers arrive as a
+                    // fresh turn. `--resume` continues the conversation and
+                    // the stream carries per-turn Usage events. Thinking is
+                    // per-model, tagged from the id convention in
+                    // `cursor::model_info`.
+                    capabilities: ProviderCapabilities {
+                        supports_thinking: true,
+                        supports_images_in: false,
+                        supports_usage: true,
+                        supports_resume: true,
+                        interrupt_kind: InterruptKind::HardKill,
+                        supports_mid_stream_injection: false,
+                        answer_transport: AnswerTransport::NewTurn,
+                    },
                 },
             )
             .await;

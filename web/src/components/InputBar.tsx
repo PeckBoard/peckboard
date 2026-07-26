@@ -10,6 +10,10 @@ interface InputBarProps {
   /** True while a provider/account model-switch handover is generating its
    *  doc. Sending is blocked (the backend returns 409) until it lands. */
   handoverActive?: boolean
+  /** Non-null ⇒ the session's provider drops attachments; the attach
+   *  button is disabled with this text as its tooltip and pasted files
+   *  are refused with an error chip. */
+  attachDisabledReason?: string | null
 }
 
 interface PendingAttachment {
@@ -31,7 +35,11 @@ function fileToBase64(file: File): Promise<string> {
   })
 }
 
-export default function InputBar({ sessionId, handoverActive = false }: InputBarProps) {
+export default function InputBar({
+  sessionId,
+  handoverActive = false,
+  attachDisabledReason = null,
+}: InputBarProps) {
   const getDraft = useSessionsStore((s) => s.getDraft)
   const setDraft = useSessionsStore((s) => s.setDraft)
   const addPendingUserMessage = useSessionsStore((s) => s.addPendingUserMessage)
@@ -110,6 +118,13 @@ export default function InputBar({ sessionId, handoverActive = false }: InputBar
   const uploadFiles = useCallback(
     async (files: File[]) => {
       if (files.length === 0) return
+      if (attachDisabledReason) {
+        // Reachable via paste or a programmatic file-input set while the
+        // button is disabled — refuse loudly instead of uploading bytes
+        // the provider would silently drop.
+        setUploadErrors([attachDisabledReason])
+        return
+      }
       setUploading(true)
       setUploadErrors([])
       try {
@@ -143,7 +158,7 @@ export default function InputBar({ sessionId, handoverActive = false }: InputBar
         setUploading(false)
       }
     },
-    [sessionId],
+    [sessionId, attachDisabledReason],
   )
 
   const handleFileSelect = useCallback(
@@ -314,9 +329,9 @@ export default function InputBar({ sessionId, handoverActive = false }: InputBar
         <button
           className="upload-btn"
           onClick={() => fileInputRef.current?.click()}
-          disabled={uploading || sending}
+          disabled={uploading || sending || !!attachDisabledReason}
           type="button"
-          title="Attach files"
+          title={attachDisabledReason ?? 'Attach files'}
         >
           <svg
             width="18"

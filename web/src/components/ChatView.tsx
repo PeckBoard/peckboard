@@ -8,7 +8,15 @@ import type { CostTable, Event, Session } from '../types/api'
 import { authedFetch } from '../store/auth'
 import { useWsStore } from '../store/ws'
 import { useSessionsStore, type PendingUserMessage } from '../store/sessions'
-import { effortOptionsForModel, useResourcesStore, type ProviderInfo } from '../store/resources'
+import {
+  effortOptionsForModel,
+  imagesAllowedForModel,
+  interruptAffordanceForModel,
+  modelThinks,
+  providerForModel,
+  useResourcesStore,
+  type ProviderInfo,
+} from '../store/resources'
 import { useUsageStore } from '../store/usage'
 import { usageCost } from '../util/cost'
 import { downloadTranscript } from '../util/transcript'
@@ -1215,6 +1223,18 @@ export default function ChatView({
   // any override.
   const effortOptions = effortOptionsForModel(sessionDetail?.model, availableProviders)
 
+  // Capability-driven affordances for the session's provider: whether
+  // image attachments would actually reach the model, how the interrupt
+  // affordance should read (soft interrupt vs kill), and whether the
+  // working indicator may say "Thinking…". Providers without flags fall
+  // back to today's Claude-shaped assumptions.
+  const sessionModel = sessionDetail?.model
+  const attachDisabledReason = imagesAllowedForModel(sessionModel, availableProviders)
+    ? null
+    : `${providerForModel(sessionModel, availableProviders)?.display_name ?? 'This provider'} doesn't accept image attachments — they would be dropped`
+  const interruptAffordance = interruptAffordanceForModel(sessionModel, availableProviders)
+  const workingLabel = modelThinks(sessionModel, availableProviders) ? 'Thinking...' : 'Working...'
+
   const modelDisplayName = (id: string | null | undefined): string => {
     if (!id) return 'auto'
     const m = availableModels.find((x) => x.id === id)
@@ -1607,16 +1627,16 @@ export default function ChatView({
                 <span />
                 <span />
               </div>
-              <span>Thinking...</span>
+              <span>{workingLabel}</span>
               {workingSince > 0 && <ElapsedSince since={workingSince} />}
               <button
                 className="chat-thinking-interrupt"
                 onClick={() => interruptSession(sessionId)}
                 type="button"
-                aria-label="Interrupt agent"
-                title="Interrupt the agent"
+                aria-label={`${interruptAffordance.label} agent`}
+                title={interruptAffordance.title}
               >
-                Interrupt
+                {interruptAffordance.label}
               </button>
             </div>
           </div>
@@ -1631,6 +1651,7 @@ export default function ChatView({
         sessionId={sessionId}
         agentWorking={agentWorking}
         handoverActive={!!sessionDetail?.handover_to_model}
+        attachDisabledReason={attachDisabledReason}
       />
       {pendingModelSwitch !== null &&
         createPortal(

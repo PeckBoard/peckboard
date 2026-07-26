@@ -39,6 +39,124 @@ pub fn standard_effort_levels() -> Vec<EffortLevel> {
     })
     .collect()
 }
+/// How a provider's `interrupt()` actually stops a run — drives the UI's
+/// interrupt affordance (label + tooltip) so "Interrupt" is only promised
+/// where the provider can settle a turn in-band.
+///
+/// - `Soft`: in-band interrupt; the agent stops cleanly mid-turn and the
+///   session process stays usable (Claude CLI control_request, with a
+///   hard-kill fallback).
+/// - `Cooperative`: a stop flag the run polls between chunks; the turn
+///   halts at the next safe point (WASM plugin providers).
+/// - `HardKill`: the in-flight run/process is terminated outright
+///   (per-turn CLI and HTTP providers).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum InterruptKind {
+    Soft,
+    #[default]
+    Cooperative,
+    HardKill,
+}
+
+/// How an answer to an agent question (`ControlRequest`) reaches the run:
+/// written to the live run's stdin channel mid-turn, or dispatched as a
+/// fresh turn once the current one ends.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum AnswerTransport {
+    Stdin,
+    #[default]
+    NewTurn,
+}
+
+/// What a provider actually supports, declared at registration and served
+/// verbatim through `/api/models` + the MCP `list_models` tool so the UI
+/// can gate affordances instead of rendering every provider as if it were
+/// Claude.
+///
+/// The serde field defaults double as the conservative defaults for
+/// plugin-registered providers that omit the optional `capabilities`
+/// field ([`Default`] matches them): promise nothing the
+/// `PluginProviderAdapter` can't deliver. Native providers always
+/// construct the struct explicitly. The WEB fallback for a provider
+/// entry missing capabilities entirely is the opposite — today's
+/// Claude-shaped assumptions — so old payloads keep current behavior.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ProviderCapabilities {
+    /// At least one of the provider's models can emit extended reasoning
+    /// ("thinking"). Per-model truth stays on `ModelInfo::is_thinking`.
+    #[serde(default)]
+    pub supports_thinking: bool,
+    /// Image attachments on a user turn reach the model. `false` ⇒ the
+    /// provider drops them, so the UI disables the attach button. Vision
+    /// support can additionally be gated per model (see
+    /// `ModelInfo::images_in_hint`).
+    #[serde(default = "default_true")]
+    pub supports_images_in: bool,
+    /// The provider emits per-turn `Usage` events (token counts feed the
+    /// usage tables and rollups).
+    #[serde(default)]
+    pub supports_usage: bool,
+    /// A conversation can be resumed across turns/restarts (a
+    /// `conversation_id` round-trips, or the provider replays history).
+    #[serde(default = "default_true")]
+    pub supports_resume: bool,
+    #[serde(default)]
+    pub interrupt_kind: InterruptKind,
+    /// Mirrors `AgentProvider::supports_mid_stream_injection`: a second
+    /// user message mid-turn is consumed by the same live run instead of
+    /// being queued for the next turn.
+    #[serde(default)]
+    pub supports_mid_stream_injection: bool,
+    #[serde(default)]
+    pub answer_transport: AnswerTransport,
+}
+
+fn default_true() -> bool {
+    true
+}
+
+impl Default for ProviderCapabilities {
+    /// Conservative plugin-provider defaults — identical to the serde
+    /// field defaults above.
+    fn default() -> Self {
+        ProviderCapabilities {
+            supports_thinking: false,
+            supports_images_in: true,
+            supports_usage: false,
+            supports_resume: true,
+            interrupt_kind: InterruptKind::Cooperative,
+            supports_mid_stream_injection: false,
+            answer_transport: AnswerTransport::NewTurn,
+        }
+    }
+}
+
+impl ProviderCapabilities {
+    /// Defaults for a plugin registration that omitted `capabilities`:
+    /// the conservative baseline, with `supports_thinking` derived from
+    /// the registered model catalog's capability tags.
+    pub fn plugin_defaults(models: &[ModelInfo]) -> Self {
+        ProviderCapabilities {
+            supports_thinking: models.iter().any(|m| m.is_thinking()),
+            ..Default::default()
+        }
+    }
+
+    /// Effective image-input answer for one of this provider's models,
+    /// as served per model in `/api/models` / `list_models`: a provider
+    /// that drops images wins (`Some(false)`); otherwise the model's own
+    /// capability-tag hint; `None` = unknown, callers keep the permissive
+    /// provider-level default.
+    pub fn model_images_in(&self, model: &ModelInfo) -> Option<bool> {
+        if !self.supports_images_in {
+            Some(false)
+        } else {
+            model.images_in_hint()
+        }
+    }
+}
 
 /// Registered provider metadata.
 #[derive(Debug, Clone)]
@@ -51,6 +169,9 @@ pub struct ProviderInfo {
     /// where effort is baked into the model id). The UI always prepends a
     /// "Default" option, so an empty list means "Default only".
     pub effort_levels: Vec<EffortLevel>,
+    /// What this provider actually supports — served to the UI so it can
+    /// gate affordances (attach button, interrupt label, thinking UI).
+    pub capabilities: ProviderCapabilities,
 }
 
 struct RegisteredProvider {
@@ -261,6 +382,7 @@ mod tests {
                         },
                     ],
                     effort_levels: standard_effort_levels(),
+                    capabilities: ProviderCapabilities::default(),
                 },
             )
             .await;
@@ -293,6 +415,7 @@ mod tests {
                         tier: 3,
                     }],
                     effort_levels: vec![],
+                    capabilities: ProviderCapabilities::default(),
                 },
             )
             .await;
@@ -357,6 +480,7 @@ mod tests {
                     display_name: "Mock".into(),
                     models: crate::provider::mock::mock_model_infos(),
                     effort_levels: vec![],
+                    capabilities: ProviderCapabilities::default(),
                 },
             )
             .await;

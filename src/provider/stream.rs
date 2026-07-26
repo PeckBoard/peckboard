@@ -279,20 +279,70 @@ pub struct ModelInfo {
 impl ModelInfo {
     /// Whether this model supports extended reasoning ("thinking"). Planning
     /// is gated to thinking models to avoid hallucinated designs. Detection
-    /// is best-effort across providers: Claude/Grok tag reasoning models with
-    /// a `reasoning` capability, Ollama reports `thinking`, and Cursor encodes
-    /// it in the model id (e.g. `claude-opus-4-8-thinking-high`).
+    /// reads capability tags only: Claude/Grok tag reasoning models with a
+    /// `reasoning` capability, Ollama and Kimi report `thinking`, and Cursor
+    /// tags its catalog at build time from its own id convention (see
+    /// `cursor::model_info`). The old fallback of sniffing "thinking" out of
+    /// the model id is retired — each provider owns its tagging.
     pub fn is_thinking(&self) -> bool {
         self.capabilities
             .iter()
             .any(|c| c.eq_ignore_ascii_case("reasoning") || c.eq_ignore_ascii_case("thinking"))
-            || self.id.to_ascii_lowercase().contains("thinking")
+    }
+
+    /// Whether this model is known to accept image input, from capability
+    /// tags. `Some(true)` when it advertises vision (`vision`, or Kimi's
+    /// `image_in`); `Some(false)` when a capability probe succeeded and
+    /// reported no vision — recognizable by Ollama's `/api/show` baseline
+    /// tag `completion`, which every probed model carries; `None` when
+    /// nothing is known, so callers fall back to the provider-level
+    /// `ProviderCapabilities::supports_images_in`.
+    pub fn images_in_hint(&self) -> Option<bool> {
+        let has = |t: &str| self.capabilities.iter().any(|c| c.eq_ignore_ascii_case(t));
+        if has("vision") || has("image_in") {
+            Some(true)
+        } else if has("completion") {
+            Some(false)
+        } else {
+            None
+        }
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn model(caps: &[&str], id: &str) -> ModelInfo {
+        ModelInfo {
+            id: id.into(),
+            display_name: id.into(),
+            capabilities: caps.iter().map(|c| c.to_string()).collect(),
+            tier: 0,
+        }
+    }
+
+    #[test]
+    fn is_thinking_reads_capability_tags_only() {
+        assert!(model(&["code", "reasoning"], "opus").is_thinking());
+        assert!(model(&["thinking"], "qwen3").is_thinking());
+        // The id sniff is retired — an untagged "thinking" id is not enough.
+        assert!(!model(&[], "claude-opus-4-8-thinking-high").is_thinking());
+        assert!(!model(&["code"], "sonnet").is_thinking());
+    }
+
+    #[test]
+    fn images_in_hint_reads_probe_vocabulary() {
+        assert_eq!(model(&["code", "vision"], "m").images_in_hint(), Some(true));
+        assert_eq!(model(&["image_in"], "m").images_in_hint(), Some(true));
+        // Probe succeeded (Ollama baseline `completion`) without vision.
+        assert_eq!(
+            model(&["completion", "tools"], "m").images_in_hint(),
+            Some(false)
+        );
+        // Nothing known — caller falls back to the provider-level flag.
+        assert_eq!(model(&["code"], "m").images_in_hint(), None);
+    }
 
     #[test]
     fn test_event_kind_mapping() {

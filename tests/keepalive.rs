@@ -35,6 +35,7 @@ async fn keep_alive_pings_then_cleans_up_after_itself() {
                     tier: 0,
                 }],
                 effort_levels: vec![],
+                capabilities: Default::default(),
             },
         )
         .await;
@@ -97,6 +98,7 @@ async fn keep_alive_is_noop_when_no_auth_providers_registered() {
                     tier: 0,
                 }],
                 effort_levels: vec![],
+                capabilities: Default::default(),
             },
         )
         .await;

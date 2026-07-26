@@ -33,7 +33,9 @@ use serde::Deserialize;
 use crate::db::Db;
 use crate::plugin::manager::PluginManager;
 use crate::provider::agent::{AgentProvider, ProcessCompletion, SendMessageContext, emit_event};
-use crate::provider::registry::EffortLevel;
+use crate::provider::registry::{
+    AnswerTransport, EffortLevel, InterruptKind, ProviderCapabilities,
+};
 use crate::provider::stream::{ModelInfo, ProviderEvent};
 use crate::ws::broadcaster::Broadcaster;
 
@@ -54,12 +56,37 @@ pub struct ProviderRegistration {
     /// unknown (never free).
     #[serde(default)]
     pub pricing: HashMap<String, ModelPricing>,
+    /// Declared capabilities (optional — older plugins simply omit it and
+    /// get [`ProviderCapabilities::plugin_defaults`]). Transport semantics
+    /// the adapter fixes (cooperative interrupt, no stdin, no mid-stream
+    /// injection, answers as a new turn) are clamped at registration by
+    /// [`effective_capabilities`], so a plugin can only refine what it
+    /// genuinely controls: thinking, image input, usage, resume.
+    #[serde(default)]
+    pub capabilities: Option<ProviderCapabilities>,
 }
 
 #[derive(Debug, Clone, Copy, Deserialize)]
 pub struct ModelPricing {
     pub input_usd_per_mtok: f64,
     pub output_usd_per_mtok: f64,
+}
+
+/// The capabilities a plugin registration actually gets: declared values
+/// (or conservative defaults when omitted), with the adapter-fixed
+/// transport semantics clamped — a plugin provider runs one turn per WASM
+/// call, so interrupt is cooperative, there is no stdin, no mid-stream
+/// injection, and answers arrive as a fresh turn regardless of what the
+/// registration claims.
+pub fn effective_capabilities(reg: &ProviderRegistration) -> ProviderCapabilities {
+    let mut caps = reg
+        .capabilities
+        .clone()
+        .unwrap_or_else(|| ProviderCapabilities::plugin_defaults(&reg.models));
+    caps.interrupt_kind = InterruptKind::Cooperative;
+    caps.supports_mid_stream_injection = false;
+    caps.answer_transport = AnswerTransport::NewTurn;
+    caps
 }
 
 /// Shape-validate a registration payload. Collision with existing providers
@@ -535,6 +562,49 @@ mod tests {
         .unwrap();
         assert!(validate_registration(&r).is_ok());
         assert_eq!(r.pricing["fast-1"].output_usd_per_mtok, 1.5);
+    }
+    #[test]
+    fn effective_capabilities_defaults_and_clamps() {
+        // Omitted capabilities → conservative defaults, with thinking
+        // derived from the model catalog's tags.
+        let plain = reg("plain");
+        let caps = effective_capabilities(&plain);
+        assert!(!caps.supports_thinking);
+        assert!(caps.supports_images_in);
+        assert!(!caps.supports_usage);
+        assert!(caps.supports_resume);
+        assert_eq!(caps.interrupt_kind, InterruptKind::Cooperative);
+        assert_eq!(caps.answer_transport, AnswerTransport::NewTurn);
+
+        let thinking: ProviderRegistration = serde_json::from_value(serde_json::json!({
+            "id": "th",
+            "display_name": "Th",
+            "models": [{ "id": "m1", "display_name": "M1", "capabilities": ["reasoning"] }],
+        }))
+        .unwrap();
+        assert!(effective_capabilities(&thinking).supports_thinking);
+
+        // Declared capabilities are honored where the plugin controls the
+        // behavior, but adapter-fixed transports are clamped.
+        let declared: ProviderRegistration = serde_json::from_value(serde_json::json!({
+            "id": "decl",
+            "display_name": "Decl",
+            "models": [{ "id": "m1", "display_name": "M1" }],
+            "capabilities": {
+                "supports_images_in": false,
+                "supports_usage": true,
+                "interrupt_kind": "soft",
+                "supports_mid_stream_injection": true,
+                "answer_transport": "stdin",
+            },
+        }))
+        .unwrap();
+        let caps = effective_capabilities(&declared);
+        assert!(!caps.supports_images_in);
+        assert!(caps.supports_usage);
+        assert_eq!(caps.interrupt_kind, InterruptKind::Cooperative);
+        assert!(!caps.supports_mid_stream_injection);
+        assert_eq!(caps.answer_transport, AnswerTransport::NewTurn);
     }
 
     #[test]

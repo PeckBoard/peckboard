@@ -23,7 +23,9 @@ use std::sync::Arc;
 use crate::plugin::builtin::{BuiltinPlugin, Permission, PluginInitContext, PluginMetadata};
 use crate::plugin::settings::{FieldKind, SettingField, SettingsSchema};
 use crate::provider::kimi::{KimiProvider, default_models};
-use crate::provider::registry::ProviderInfo;
+use crate::provider::registry::{
+    AnswerTransport, InterruptKind, ProviderCapabilities, ProviderInfo,
+};
 
 pub struct KimiPlugin;
 
@@ -175,6 +177,19 @@ impl BuiltinPlugin for KimiPlugin {
                     // The kimi CLI exposes no reasoning-effort flag; thinking
                     // is a property of the configured model alias.
                     effort_levels: vec![],
+                    // Per-turn CLI: attachments are dropped, no Usage
+                    // events are parsed, interrupt kills the child, and
+                    // answers arrive as a fresh turn. The resume hint id
+                    // resumes the conversation across turns.
+                    capabilities: ProviderCapabilities {
+                        supports_thinking: true,
+                        supports_images_in: false,
+                        supports_usage: false,
+                        supports_resume: true,
+                        interrupt_kind: InterruptKind::HardKill,
+                        supports_mid_stream_injection: false,
+                        answer_transport: AnswerTransport::NewTurn,
+                    },
                 },
             )
             .await;

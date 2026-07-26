@@ -1229,7 +1229,25 @@ pub async fn register_mock_provider(registry: &ProviderRegistry) {
                 // ladder so effort-picker e2e/tests have a deterministic
                 // provider that offers effort levels.
                 effort_levels: crate::provider::registry::standard_effort_levels(),
+                capabilities: mock_capabilities(),
             },
         )
         .await;
+}
+
+/// The mock provider's declared capabilities — shared by the plugin
+/// registration and `register_mock_provider`. Permissive on images/usage/
+/// stdin because the mock is the deterministic vehicle e2e uses to exercise
+/// those affordances; interrupt genuinely terminates the run.
+pub fn mock_capabilities() -> crate::provider::registry::ProviderCapabilities {
+    use crate::provider::registry::{AnswerTransport, InterruptKind, ProviderCapabilities};
+    ProviderCapabilities {
+        supports_thinking: true,
+        supports_images_in: true,
+        supports_usage: true,
+        supports_resume: true,
+        interrupt_kind: InterruptKind::HardKill,
+        supports_mid_stream_injection: false,
+        answer_transport: AnswerTransport::Stdin,
+    }
 }

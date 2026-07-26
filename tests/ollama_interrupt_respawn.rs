@@ -133,6 +133,7 @@ async fn build_state(base_url: String) -> (Arc<AppState>, String) {
                 display_name: "Ollama".into(),
                 models: default_models(),
                 effort_levels: vec![],
+                capabilities: Default::default(),
             },
         )
         .await;

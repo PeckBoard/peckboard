@@ -59,6 +59,7 @@ async fn build_state() -> (Arc<AppState>, String) {
                     tier: 0,
                 }],
                 effort_levels: vec![],
+                capabilities: Default::default(),
             },
         )
         .await;

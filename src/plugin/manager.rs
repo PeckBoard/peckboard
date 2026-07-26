@@ -1445,6 +1445,7 @@ impl PluginManager {
                 display_name: reg.display_name.clone(),
                 models: reg.models.clone(),
                 effort_levels: reg.effort_levels.clone(),
+                capabilities: crate::provider::plugin_provider::effective_capabilities(&reg),
             };
             registry.register(adapter, info).await;
             owned.insert(reg.id.clone(), name.clone());

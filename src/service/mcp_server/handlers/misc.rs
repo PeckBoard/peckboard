@@ -435,6 +435,8 @@ impl McpToolRegistry {
                         "display_name": model.display_name,
                         "capabilities": model.capabilities,
                         "tier": model.tier,
+                        "thinking": model.is_thinking(),
+                        "images_in": p.capabilities.model_images_in(model),
                     })
                 })
             })
@@ -446,6 +448,7 @@ impl McpToolRegistry {
                     "id": p.id,
                     "display_name": p.display_name,
                     "model_count": p.models.len(),
+                    "capabilities": p.capabilities,
                 })
             })
             .collect();
