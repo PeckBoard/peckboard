@@ -78,6 +78,13 @@ pub enum StdinMsg {
     /// `complete_step`, `wont_do_card`) so the tool response can
     /// reach the agent before the process winds down.
     ShutdownAfterTurn,
+    /// Soft-stop the in-flight turn. The loop writes a
+    /// `control_request{subtype:"interrupt"}` frame to the CLI, which
+    /// settles the turn in-band with a normal `result` event (usage
+    /// included) while the child stays alive. A grace timer falls back
+    /// to the hard-kill path when no result arrives, and an error
+    /// `control_response` (CLI too old for the subtype) kills at once.
+    Interrupt,
 }
 
 /// Handle to a running Claude CLI child process.
@@ -217,6 +224,16 @@ pub struct LoopState {
     /// The idle reaper uses this to decide when a quiet, alive
     /// process has been around long enough to recycle.
     pub last_activity: Arc<AtomicU64>,
+    /// Per-turn wall-clock budget from `SpawnConfig.timeout_ms`. A turn
+    /// in flight longer than this gets the child force-killed and a
+    /// `Crashed{turn timeout}` — the idle reaper skips turn-active runs,
+    /// so nothing else reclaims a wedged turn. `None` disables the
+    /// watchdog.
+    pub turn_timeout: Option<std::time::Duration>,
+    /// How long a soft interrupt waits for its settling `result` before
+    /// the loop falls back to hard-killing the child. Production uses
+    /// [`INTERRUPT_GRACE`]; tests shrink it.
+    pub interrupt_grace: std::time::Duration,
 }
 
 fn now_ms() -> u64 {
@@ -227,6 +244,55 @@ fn now_ms() -> u64 {
         .unwrap_or(0)
 }
 
+/// Grace given to an in-band `control_request{subtype:"interrupt"}`
+/// before the loop falls back to hard-killing the child.
+pub(crate) const INTERRUPT_GRACE: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// Cap on retained stderr lines. Stderr is drained concurrently with the
+/// stream loop — an undrained pipe fills its kernel buffer and wedges a
+/// chatty child — but only the tail is worth keeping for crash reporting.
+const STDERR_RING_MAX_LINES: usize = 200;
+
+/// Bounded tail of the child's stderr, filled by the concurrent drain
+/// task and read once at process exit for crash reporting.
+struct StderrRing {
+    lines: std::collections::VecDeque<String>,
+    dropped: usize,
+}
+
+impl StderrRing {
+    fn new() -> Self {
+        StderrRing {
+            lines: std::collections::VecDeque::new(),
+            dropped: 0,
+        }
+    }
+
+    fn push(&mut self, line: String) {
+        if self.lines.len() == STDERR_RING_MAX_LINES {
+            self.lines.pop_front();
+            self.dropped += 1;
+        }
+        self.lines.push_back(line);
+    }
+
+    /// Join the retained tail; `None` when the child wrote nothing.
+    fn take_text(&mut self) -> Option<String> {
+        if self.lines.is_empty() {
+            return None;
+        }
+        let mut buf = String::new();
+        if self.dropped > 0 {
+            buf.push_str(&format!(
+                "[… {} earlier stderr lines dropped]\n",
+                self.dropped
+            ));
+        }
+        let lines: Vec<String> = std::mem::take(&mut self.lines).into();
+        buf.push_str(&lines.join("\n"));
+        Some(buf)
+    }
+}
 /// Read stdout line-by-line from the Claude CLI process, parse each
 /// JSON line into a `ProviderEvent`, persist it to the DB, and
 /// broadcast via WebSocket.
@@ -284,7 +350,21 @@ pub async fn stream_events(
     };
 
     let mut stdin_pipe = process.child.stdin.take();
-    let stderr = process.child.stderr.take();
+    // Drain stderr CONCURRENTLY into a bounded ring. Draining only after
+    // exit (the old behaviour) let a chatty child fill the pipe's kernel
+    // buffer and block — the child wedges on a full pipe while the loop
+    // waits on stdout that never comes. The ring keeps the tail for
+    // crash reporting.
+    let stderr_ring = Arc::new(std::sync::Mutex::new(StderrRing::new()));
+    let stderr_task = process.child.stderr.take().map(|stderr| {
+        let ring = stderr_ring.clone();
+        tokio::spawn(async move {
+            let mut lines = BufReader::new(stderr).lines();
+            while let Ok(Some(line)) = lines.next_line().await {
+                ring.lock().expect("stderr ring poisoned").push(line);
+            }
+        })
+    });
 
     let reader = BufReader::new(stdout);
     let mut lines = reader.lines();
@@ -318,6 +398,29 @@ pub async fn stream_events(
     // guaranteed to still let its own response — and any follow-on
     // assistant text — reach stdout before the loop tears down.
     let mut shutdown_after_turn = false;
+    // Soft-interrupt bookkeeping. `pending_interrupt` holds the
+    // request_id of an in-flight `control_request{subtype:"interrupt"}`
+    // written to the CLI's stdin; `interrupt_deadline` hard-kills the
+    // child if no settling `result` arrives within the grace window.
+    //
+    // Observed CLI behaviour (claude 2.1.220, live smoke test): the CLI
+    // acks with `control_response{subtype:"success",
+    // response:{still_queued:[…]}}`, emits a synthetic user frame
+    // ("[Request interrupted by user]"), then settles the turn with
+    // `result{subtype:"error_during_execution", is_error:true}` carrying
+    // full `usage`/`modelUsage` — tokens settle through the normal
+    // on-result path and the child stays alive for the next turn. A CLI
+    // predating the subtype answers `control_response{subtype:"error",
+    // error:"Unsupported control request subtype: …"}`.
+    let mut pending_interrupt: Option<String> = None;
+    let mut interrupt_deadline: Option<tokio::time::Instant> = None;
+    let mut interrupt_seq: u64 = 0;
+    // Per-turn watchdog armed from `SpawnConfig.timeout_ms` when a user
+    // turn is written, cleared on `result`. The idle reaper skips
+    // turn-active runs, so without this a wedged turn runs until a
+    // manual cancel.
+    let mut turn_deadline: Option<tokio::time::Instant> = None;
+    let mut watchdog_fired = false;
 
     // Per-process token accounting: diffs the result event's cumulative
     // `modelUsage` into per-turn per-model rows, and accumulates per-message
@@ -338,6 +441,13 @@ pub async fn stream_events(
     );
 
     loop {
+        // Nearest armed deadline — per-turn watchdog and/or interrupt
+        // grace. Recomputed every round so arming in one branch takes
+        // effect on the next.
+        let next_deadline = match (turn_deadline, interrupt_deadline) {
+            (Some(a), Some(b)) => Some(a.min(b)),
+            (a, b) => a.or(b),
+        };
         let event_source = tokio::select! {
             _ = cancel.notified() => {
                 tracing::info!(
@@ -345,6 +455,25 @@ pub async fn stream_events(
                     "Cancel signal received; killing claude process"
                 );
                 was_cancelled = true;
+                let _ = process.child.start_kill();
+                break;
+            }
+            _ = tokio::time::sleep_until(next_deadline.unwrap_or_else(tokio::time::Instant::now)),
+                if next_deadline.is_some() =>
+            {
+                if interrupt_deadline.is_some_and(|d| d <= tokio::time::Instant::now()) {
+                    tracing::warn!(
+                        session_id = %session_id,
+                        "Soft-interrupt grace expired without a result; killing claude process"
+                    );
+                    was_cancelled = true;
+                } else {
+                    tracing::warn!(
+                        session_id = %session_id,
+                        "Turn watchdog fired; killing claude process"
+                    );
+                    watchdog_fired = true;
+                }
                 let _ = process.child.start_kill();
                 break;
             }
@@ -365,11 +494,52 @@ pub async fn stream_events(
                         if write_stdin_line(&mut stdin_pipe, &frame, &session_id).await {
                             state.turn_active.store(true, Ordering::Release);
                             state.last_activity.store(now_ms(), Ordering::Release);
+                            turn_deadline = state
+                                .turn_timeout
+                                .map(|t| tokio::time::Instant::now() + t);
                         }
                         continue;
                     }
                     Some(StdinMsg::RawLine(line)) => {
                         write_stdin_line(&mut stdin_pipe, &line, &session_id).await;
+                        continue;
+                    }
+                    Some(StdinMsg::Interrupt) => {
+                        if !state.turn_active.load(Ordering::Acquire) {
+                            tracing::debug!(
+                                session_id = %session_id,
+                                "Interrupt requested with no turn in flight; ignoring"
+                            );
+                        } else if pending_interrupt.is_some() {
+                            tracing::debug!(
+                                session_id = %session_id,
+                                "Interrupt already in flight; ignoring duplicate"
+                            );
+                        } else {
+                            interrupt_seq += 1;
+                            let request_id = format!("pb-interrupt-{interrupt_seq}");
+                            let frame = serde_json::json!({
+                                "type": "control_request",
+                                "request_id": request_id,
+                                "request": { "subtype": "interrupt" },
+                            });
+                            if write_stdin_line(&mut stdin_pipe, &frame.to_string(), &session_id)
+                                .await
+                            {
+                                tracing::info!(
+                                    session_id = %session_id,
+                                    "Sent in-band interrupt; awaiting settling result"
+                                );
+                                pending_interrupt = Some(request_id);
+                                interrupt_deadline =
+                                    Some(tokio::time::Instant::now() + state.interrupt_grace);
+                            } else {
+                                // No stdin to speak through — hard kill.
+                                was_cancelled = true;
+                                let _ = process.child.start_kill();
+                                break;
+                            }
+                        }
                         continue;
                     }
                     Some(StdinMsg::ShutdownAfterTurn) => {
@@ -427,6 +597,9 @@ pub async fn stream_events(
                             if write_stdin_line(&mut stdin_pipe, &frame, &session_id).await {
                                 state.turn_active.store(true, Ordering::Release);
                                 state.last_activity.store(now_ms(), Ordering::Release);
+                                turn_deadline = state
+                                    .turn_timeout
+                                    .map(|t| tokio::time::Instant::now() + t);
                             }
                         }
                     }
@@ -456,6 +629,48 @@ pub async fn stream_events(
             }
         };
 
+        // A `control_response` from the CLI answers a control_request WE
+        // sent (today: the in-band interrupt). Protocol frame, not a
+        // conversation event — consume it here, never hand it to the
+        // parser.
+        if json.get("type").and_then(|v| v.as_str()) == Some("control_response") {
+            let response = json.get("response");
+            let request_id = response
+                .and_then(|r| r.get("request_id"))
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            if pending_interrupt.as_deref() == Some(request_id) {
+                let subtype = response
+                    .and_then(|r| r.get("subtype"))
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
+                if subtype == "error" {
+                    // CLI predates the interrupt subtype ("Unsupported
+                    // control request subtype: interrupt") or refused it —
+                    // hard-kill immediately instead of burning the grace
+                    // window.
+                    let error = response
+                        .and_then(|r| r.get("error"))
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("unknown error");
+                    tracing::warn!(
+                        session_id = %session_id,
+                        "In-band interrupt rejected ({error}); killing claude process"
+                    );
+                    was_cancelled = true;
+                    let _ = process.child.start_kill();
+                    break;
+                }
+                // Success ack (claude 2.1.220 replies with
+                // `response:{still_queued:[…]}`); the settling `result`
+                // follows and clears the pending state.
+                tracing::info!(
+                    session_id = %session_id,
+                    "In-band interrupt acknowledged; awaiting settling result"
+                );
+            }
+            continue;
+        }
         // Handle control_request events directly (need stdin access for auto-allow)
         if json.get("type").and_then(|v| v.as_str()) == Some("control_request") {
             let request = json.get("request");
@@ -676,6 +891,9 @@ pub async fn stream_events(
             )
             .await;
             state.turn_active.store(false, Ordering::Release);
+            turn_deadline = None;
+            pending_interrupt = None;
+            interrupt_deadline = None;
             parser_state.reset_turn();
             // Closing any tools still flagged open at result time
             // — keeps spinner state self-consistent across turn
@@ -775,23 +993,24 @@ pub async fn stream_events(
         }
     }
 
-    let stderr_text = if let Some(stderr) = stderr {
-        let stderr_reader = BufReader::new(stderr);
-        let mut buf = String::new();
-        let mut lines = stderr_reader.lines();
-        while let Ok(Some(line)) = lines.next_line().await {
-            if !buf.is_empty() {
-                buf.push('\n');
-            }
-            buf.push_str(&line);
-        }
-        if buf.is_empty() { None } else { Some(buf) }
-    } else {
-        None
-    };
+    // The drain task ends at stderr EOF, which follows process exit; the
+    // timeout guards against a grandchild inheriting and holding the
+    // write end of the pipe open.
+    if let Some(task) = stderr_task {
+        let _ = tokio::time::timeout(std::time::Duration::from_secs(2), task).await;
+    }
+    let stderr_text = stderr_ring
+        .lock()
+        .expect("stderr ring poisoned")
+        .take_text();
 
     // Decide whether to emit a Crashed on process exit:
     //
+    //   - turn watchdog fired (SpawnConfig.timeout_ms exceeded) →
+    //     Crashed{turn timeout}. Highest priority — the turn never
+    //     settled, even if a graceful shutdown was pending.
+    //   - soft-interrupt grace expired or the CLI rejected the interrupt
+    //     subtype → hard kill via the `was_cancelled` path below.
     //   - graceful shutdown requested (ShutdownAfterTurn) → silent
     //     exit, no Crashed event. Takes priority over the
     //     `turn_was_active` / `!saw_clean_completion` branches so a
@@ -815,7 +1034,25 @@ pub async fn stream_events(
         emit_turn_usage(&db, &broadcaster, &session_id, crash_usages).await;
     }
 
-    let is_completed = if shutdown_after_turn {
+    let is_completed = if watchdog_fired {
+        let exit_code = exit_status.ok().and_then(|s| s.code());
+        let timeout_ms = state
+            .turn_timeout
+            .map(|t| t.as_millis() as u64)
+            .unwrap_or_default();
+        emit_event(
+            &db,
+            &broadcaster,
+            &session_id,
+            ProviderEvent::Crashed {
+                reason: format!("turn timeout after {timeout_ms}ms"),
+                exit_code,
+                stderr: stderr_text,
+            },
+        )
+        .await;
+        false
+    } else if shutdown_after_turn {
         // Graceful exit — but only if the final turn's `result` reported
         // success. An error result (expired login, API failure) means the
         // turn did NOT do its work; reporting completed=false routes a
@@ -1125,6 +1362,24 @@ mod tests {
         Arc<AtomicBool>,
         tokio::task::JoinHandle<StreamOutcome>,
     ) {
+        spawn_loop_with(session_id, Command::new("cat"), None, INTERRUPT_GRACE).await
+    }
+
+    /// `spawn_cat_loop` with an explicit child command and
+    /// watchdog/interrupt-grace knobs, for the stderr-drain, watchdog
+    /// and interrupt tests.
+    async fn spawn_loop_with(
+        session_id: &str,
+        cmd: Command,
+        turn_timeout: Option<std::time::Duration>,
+        interrupt_grace: std::time::Duration,
+    ) -> (
+        Db,
+        mpsc::Sender<StdinMsg>,
+        Arc<Notify>,
+        Arc<AtomicBool>,
+        tokio::task::JoinHandle<StreamOutcome>,
+    ) {
         let db = Db::in_memory().unwrap();
         let ts = chrono::Utc::now().to_rfc3339();
         db.create_folder(crate::db::models::NewFolder {
@@ -1160,10 +1415,12 @@ mod tests {
         let state = LoopState {
             turn_active: turn_active.clone(),
             last_activity,
+            turn_timeout,
+            interrupt_grace,
         };
 
-        let process = ClaudeProcess::from_command_for_test(Command::new("cat"), session_id)
-            .expect("spawn cat");
+        let process =
+            ClaudeProcess::from_command_for_test(cmd, session_id).expect("spawn test child");
 
         let db_clone = db.clone();
         let cancel_clone = cancel.clone();
@@ -1470,5 +1727,224 @@ mod tests {
         let _ = timeout(std::time::Duration::from_secs(5), handle)
             .await
             .expect("stream loop must exit within 5s");
+    }
+
+    #[test]
+    fn stderr_ring_keeps_tail_and_counts_dropped() {
+        let mut ring = StderrRing::new();
+        assert_eq!(ring.take_text(), None);
+        for i in 0..(STDERR_RING_MAX_LINES + 5) {
+            ring.push(format!("line-{i}"));
+        }
+        let text = ring.take_text().expect("ring has content");
+        assert!(
+            text.starts_with("[… 5 earlier stderr lines dropped]\n"),
+            "dropped-count header missing: {text}"
+        );
+        assert!(text.ends_with(&format!("line-{}", STDERR_RING_MAX_LINES + 4)));
+        assert!(!text.contains("line-4\n"), "oldest lines must be dropped");
+        assert!(text.contains("line-5\n"), "first retained line missing");
+        // Ring is consumed by take_text.
+        assert_eq!(ring.take_text(), None);
+    }
+
+    #[tokio::test]
+    async fn stderr_is_drained_concurrently_and_reported_on_crash() {
+        // stderr written long before process exit must land in the ring
+        // (the old code only read the pipe after exit) and ride the
+        // Crashed event for crash reporting.
+        let session = "loop-stderr-drain";
+        let mut cmd = Command::new("sh");
+        cmd.args(["-c", "echo boom >&2; exec cat"]);
+        let (db, tx, cancel, turn_active, handle) =
+            spawn_loop_with(session, cmd, None, INTERRUPT_GRACE).await;
+
+        tx.send(StdinMsg::UserTurn(UserMessage::from_text("hello")))
+            .await
+            .unwrap();
+        wait_for_turn_active(&turn_active, true, 2_000).await;
+        // Give the drain task a beat to consume the stderr line, then
+        // kill mid-turn so the exit path reports Crashed with stderr.
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        cancel.notify_one();
+
+        let outcome = timeout(std::time::Duration::from_secs(5), handle)
+            .await
+            .expect("stream loop must exit within 5s")
+            .expect("task must not panic");
+        assert!(!outcome.completed);
+
+        let events = db.list_events_by_session(session, None).await.unwrap();
+        let crashed = events
+            .iter()
+            .filter_map(|e| {
+                if e.kind != "agent-end" {
+                    return None;
+                }
+                let data: serde_json::Value = serde_json::from_str(&e.data).ok()?;
+                (data.get("status").and_then(|v| v.as_str()) == Some("crashed")).then_some(data)
+            })
+            .next()
+            .expect("crashed agent-end present");
+        assert_eq!(
+            crashed.get("stderr").and_then(|v| v.as_str()),
+            Some("boom"),
+            "stderr tail must ride the Crashed event, got {crashed}"
+        );
+    }
+
+    #[tokio::test]
+    async fn turn_watchdog_kills_wedged_turn_and_reports_timeout() {
+        // SpawnConfig.timeout_ms → LoopState.turn_timeout: a turn whose
+        // `result` never arrives must be force-recycled with a
+        // Crashed{turn timeout}, not run until manual cancel (the idle
+        // reaper skips turn-active runs).
+        let session = "loop-turn-watchdog";
+        let (db, tx, _cancel, turn_active, handle) = spawn_loop_with(
+            session,
+            Command::new("cat"),
+            Some(std::time::Duration::from_millis(200)),
+            INTERRUPT_GRACE,
+        )
+        .await;
+
+        tx.send(StdinMsg::UserTurn(UserMessage::from_text("wedge")))
+            .await
+            .unwrap();
+        wait_for_turn_active(&turn_active, true, 2_000).await;
+
+        let outcome = timeout(std::time::Duration::from_secs(5), handle)
+            .await
+            .expect("watchdog must recycle the wedged turn")
+            .expect("task must not panic");
+        assert!(!outcome.completed);
+
+        let events = db.list_events_by_session(session, None).await.unwrap();
+        assert!(
+            events
+                .iter()
+                .any(|e| e.kind == "agent-end" && e.data.contains("turn timeout after 200ms")),
+            "expected Crashed with turn-timeout reason"
+        );
+    }
+
+    #[tokio::test]
+    async fn interrupt_settles_in_band_and_keeps_child_alive() {
+        // Soft interrupt: the loop writes the control_request frame,
+        // the CLI (here: cat + synthetic frames) settles the turn with
+        // an error `result`, and the child stays alive for a new turn.
+        let session = "loop-interrupt-inband";
+        let (db, tx, cancel, turn_active, handle) = spawn_cat_loop(session).await;
+
+        tx.send(StdinMsg::UserTurn(UserMessage::from_text("hello")))
+            .await
+            .unwrap();
+        wait_for_turn_active(&turn_active, true, 2_000).await;
+
+        tx.send(StdinMsg::Interrupt).await.unwrap();
+        // cat echoes the control_request frame back to the loop, which
+        // must ignore it (not a can_use_tool request). Simulate the
+        // CLI's observed settling result (error_during_execution).
+        tx.send(StdinMsg::RawLine(fake_error_result_frame("conv-i")))
+            .await
+            .unwrap();
+        wait_for_turn_active(&turn_active, false, 2_000).await;
+
+        // Child still alive — a fresh turn is accepted and the grace
+        // timer (cleared by the result) must NOT kill it.
+        tx.send(StdinMsg::UserTurn(UserMessage::from_text("again")))
+            .await
+            .unwrap();
+        wait_for_turn_active(&turn_active, true, 2_000).await;
+
+        let events = db.list_events_by_session(session, None).await.unwrap();
+        assert!(
+            events.iter().any(|e| e.kind == "agent-end"),
+            "interrupted turn must settle with an agent-end"
+        );
+
+        cancel.notify_one();
+        let _ = timeout(std::time::Duration::from_secs(5), handle)
+            .await
+            .expect("stream loop must exit within 5s");
+    }
+
+    #[tokio::test]
+    async fn interrupt_error_response_falls_back_to_hard_kill() {
+        // A CLI that predates the interrupt subtype answers with an
+        // error control_response — the loop must fall back to the kill
+        // path immediately instead of waiting out the grace window.
+        let session = "loop-interrupt-unsupported";
+        let (db, tx, _cancel, turn_active, handle) = spawn_cat_loop(session).await;
+
+        tx.send(StdinMsg::UserTurn(UserMessage::from_text("hello")))
+            .await
+            .unwrap();
+        wait_for_turn_active(&turn_active, true, 2_000).await;
+
+        tx.send(StdinMsg::Interrupt).await.unwrap();
+        // First loop-generated request_id is deterministic.
+        tx.send(StdinMsg::RawLine(
+            serde_json::json!({
+                "type": "control_response",
+                "response": {
+                    "subtype": "error",
+                    "request_id": "pb-interrupt-1",
+                    "error": "Unsupported control request subtype: interrupt",
+                },
+            })
+            .to_string(),
+        ))
+        .await
+        .unwrap();
+
+        let outcome = timeout(std::time::Duration::from_secs(5), handle)
+            .await
+            .expect("loop must fall back to hard kill")
+            .expect("task must not panic");
+        assert!(!outcome.completed);
+
+        let events = db.list_events_by_session(session, None).await.unwrap();
+        assert!(
+            events
+                .iter()
+                .any(|e| e.kind == "agent-end" && e.data.contains("interrupted")),
+            "hard-kill fallback must produce Crashed{{interrupted}}"
+        );
+    }
+
+    #[tokio::test]
+    async fn interrupt_grace_expiry_falls_back_to_hard_kill() {
+        // No control_response and no result within the grace window →
+        // the loop must kill the child rather than hang.
+        let session = "loop-interrupt-grace";
+        let (db, tx, _cancel, turn_active, handle) = spawn_loop_with(
+            session,
+            Command::new("cat"),
+            None,
+            std::time::Duration::from_millis(200),
+        )
+        .await;
+
+        tx.send(StdinMsg::UserTurn(UserMessage::from_text("hello")))
+            .await
+            .unwrap();
+        wait_for_turn_active(&turn_active, true, 2_000).await;
+
+        tx.send(StdinMsg::Interrupt).await.unwrap();
+
+        let outcome = timeout(std::time::Duration::from_secs(5), handle)
+            .await
+            .expect("grace expiry must kill the child")
+            .expect("task must not panic");
+        assert!(!outcome.completed);
+
+        let events = db.list_events_by_session(session, None).await.unwrap();
+        assert!(
+            events
+                .iter()
+                .any(|e| e.kind == "agent-end" && e.data.contains("interrupted")),
+            "grace-expiry fallback must produce Crashed{{interrupted}}"
+        );
     }
 }

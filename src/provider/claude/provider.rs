@@ -11,6 +11,10 @@ use crate::provider::registry::{ProviderInfo, ProviderRegistry};
 
 use super::process::{self, LoopState, StdinMsg};
 
+/// Upper bound on delivering one message into a run's stdin channel.
+/// The channel only backs up when the stream loop stops consuming, so a
+/// timeout here is a real fault to surface, not normal backpressure.
+const STDIN_SEND_TIMEOUT: Duration = Duration::from_secs(5);
 /// Per-session tracking entry for a running Claude CLI invocation.
 ///
 /// The Claude CLI is spawned ONCE per session and persists across
@@ -360,6 +364,8 @@ impl AgentProvider for ClaudeProvider {
                 let state = LoopState {
                     turn_active,
                     last_activity,
+                    turn_timeout: cli_config.timeout_ms.map(Duration::from_millis),
+                    interrupt_grace: process::INTERRUPT_GRACE,
                 };
                 tokio::spawn(async move {
                     let outcome = process::stream_events(
@@ -456,12 +462,32 @@ impl AgentProvider for ClaudeProvider {
     }
 
     async fn interrupt(&self, session_id: &str) {
-        // Claude CLI in stream-json mode does not respond to in-band
-        // interrupt bytes for a hard stop — the only reliable way to
-        // stop a wedged process is to kill it. Reuse the cancel path
-        // so the stream loop exits and a completion notification is
-        // delivered to the orchestrator.
-        self.cancel(session_id).await;
+        // Prefer the CLI's in-band `control_request{subtype:"interrupt"}`
+        // (stream-json mode): the turn settles with a normal `result` —
+        // usage recorded, child kept alive for the next turn — instead of
+        // paying a kill plus a `--resume` respawn. The stream loop owns
+        // the grace timer and the hard-kill fallback (unsupported CLI,
+        // no result within grace); this method only falls back directly
+        // when the loop is unreachable.
+        let stdin_tx = {
+            let runs = self.runs.lock().await;
+            runs.get(session_id).map(|r| r.stdin_tx.clone())
+        };
+        let Some(tx) = stdin_tx else {
+            tracing::debug!(
+                session_id = %session_id,
+                "No tracked claude run to interrupt (may have already exited)"
+            );
+            return;
+        };
+        let send = tokio::time::timeout(STDIN_SEND_TIMEOUT, tx.send(StdinMsg::Interrupt)).await;
+        if !matches!(send, Ok(Ok(()))) {
+            tracing::warn!(
+                session_id = %session_id,
+                "Could not deliver in-band interrupt; falling back to kill"
+            );
+            self.cancel(session_id).await;
+        }
     }
 
     async fn write_stdin(&self, session_id: &str, text: &str) -> bool {
@@ -476,18 +502,35 @@ impl AgentProvider for ClaudeProvider {
             );
             return false;
         };
-        match tx.try_send(StdinMsg::RawLine(text.to_string())) {
-            Ok(()) => {
+        // Awaited send with a timeout instead of `try_send`: control
+        // responses and question answers must not be dropped just because
+        // the channel is momentarily full. A timeout means the stream
+        // loop stopped consuming — surface that as a failure.
+        match tokio::time::timeout(
+            STDIN_SEND_TIMEOUT,
+            tx.send(StdinMsg::RawLine(text.to_string())),
+        )
+        .await
+        {
+            Ok(Ok(())) => {
                 tracing::info!(
                     session_id = %session_id,
                     "Sent raw stdin message to claude process"
                 );
                 true
             }
-            Err(e) => {
+            Ok(Err(e)) => {
                 tracing::warn!(
                     session_id = %session_id,
-                    "Failed to send stdin message: {e}"
+                    "Failed to send stdin message (stream loop gone): {e}"
+                );
+                false
+            }
+            Err(_) => {
+                tracing::warn!(
+                    session_id = %session_id,
+                    timeout = ?STDIN_SEND_TIMEOUT,
+                    "Timed out sending stdin message; stream loop not consuming"
                 );
                 false
             }
@@ -744,6 +787,43 @@ mod tests {
             !cancel_fired,
             "shutdown_after_turn must not trigger the hard-cancel signal"
         );
+    }
+
+    /// In-band interrupt: `interrupt` must deliver `StdinMsg::Interrupt`
+    /// to the stream loop instead of killing the child via cancel.
+    #[tokio::test]
+    async fn interrupt_sends_in_band_message_to_stream_loop() {
+        let provider = ClaudeProvider::new();
+        let mut rx = install_fake_run(&provider, "s-int").await;
+        provider.interrupt("s-int").await;
+        let msg = rx.try_recv().expect("interrupt message delivered");
+        assert!(matches!(msg, StdinMsg::Interrupt));
+    }
+
+    #[tokio::test]
+    async fn interrupt_without_run_is_noop() {
+        let provider = ClaudeProvider::new();
+        // No tracked run — must return without panicking or blocking.
+        provider.interrupt("missing").await;
+    }
+
+    /// `write_stdin` must apply backpressure (awaited send + timeout)
+    /// instead of silently dropping on a full channel.
+    #[tokio::test(start_paused = true)]
+    async fn write_stdin_reports_failure_when_loop_stops_consuming() {
+        let provider = ClaudeProvider::new();
+        let mut rx = install_fake_run(&provider, "s-full").await;
+        // Fill the fake run's channel with no consumer.
+        {
+            let runs = provider.runs.lock().await;
+            let tx = runs.get("s-full").unwrap().stdin_tx.clone();
+            while tx.try_send(StdinMsg::RawLine("x".into())).is_ok() {}
+        }
+        // Paused clock: the awaited send parks, the timeout auto-advances.
+        assert!(!provider.write_stdin("s-full", "{}").await);
+        // A drained channel accepts again.
+        while rx.try_recv().is_ok() {}
+        assert!(provider.write_stdin("s-full", "{}").await);
     }
 }
 
