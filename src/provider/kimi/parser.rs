@@ -27,6 +27,17 @@
 //! cursor parsers.
 //!
 //! The shape isn't formally specified, so every accessor is defensive: an
+//! No `Usage` events: kimi-code 0.27.0's `PromptJsonWriter` — the only
+//! writer used for `--output-format stream-json` — emits just `assistant`
+//! (text + `tool_calls`), `tool`, and `meta` frames
+//! (`system.version`, `turn.step.retrying`, `session.resume_hint`); none
+//! of them carries a token count. The CLI does track usage internally
+//! (it sums OpenAI-style `prompt_tokens` / `completion_tokens` for the
+//! TUI), but never writes it to prompt-mode stream-json, so kimi sessions
+//! cannot feed the `usage_events` cost analytics. Re-check when the CLI
+//! grows a usage frame; the mapping would be one arm here, like the
+//! ollama provider's per-turn rollup.
+//!
 //! unrecognised line yields no events rather than an error.
 
 use crate::provider::stream::ProviderEvent;
@@ -571,5 +582,26 @@ mod tests {
     fn parse_cli_models_rejects_garbage() {
         assert!(parse_cli_models("not json").is_none());
         assert!(parse_cli_models(r#"{"providers":{}}"#).is_none());
+    }
+
+    /// Regression guard for the module header: kimi's prompt-mode frames
+    /// carry no token counts, so none of them yields a `Usage` event.
+    #[test]
+    fn meta_frames_yield_no_usage() {
+        let mut conv = None;
+        for frame in [
+            serde_json::json!({"role":"meta","type":"system.version","version":"0.27.0"}),
+            serde_json::json!({"role":"meta","type":"turn.step.retrying","failed_attempt":1}),
+            serde_json::json!({"type":"goal.summary","goalId":null,"status":null}),
+            serde_json::json!({
+                "role":"meta",
+                "type":"session.resume_hint",
+                "session_id":"abc",
+                "command":"kimi -r abc"
+            }),
+        ] {
+            assert!(parse_stream_json(&frame, &mut conv).is_empty());
+        }
+        assert_eq!(conv.as_deref(), Some("abc"));
     }
 }

@@ -16,6 +16,13 @@
 //! activity surfaces as `ToolStart`/`ToolEnd` events. With tools off (or
 //! none available) the stream is the minimal `Started → Text* →
 //! Completed | Crashed`.
+//! Token usage: the final (`done`) chunk of each `/api/chat` response
+//! carries `prompt_eval_count` / `eval_count`. They are accumulated across
+//! the turn's tool rounds ([`TurnUsage`]) and emitted as one
+//! [`ProviderEvent::Usage`] per turn, so ollama sessions show up in the
+//! `usage_events` cost analytics like Claude and cursor ones. Ollama has
+//! no prompt caching and reports no cache counters, so those fields are 0.
+//!
 //!
 //! Ollama itself exposes no conversation IDs or permission prompts, so
 //! those parts of the event stream stay unused.
@@ -211,6 +218,15 @@ struct ChatStreamChunk {
     /// the cause in the UI instead of a silent hang.
     #[serde(default)]
     error: Option<String>,
+    /// Token counters Ollama attaches to the final (`done`) chunk of a
+    /// response: the prompt it evaluated and the tokens it generated.
+    /// Absent on every streamed delta, and on servers old enough not to
+    /// report them — hence `Option`, not a defaulted `i64`. Rolled up
+    /// across the turn's tool rounds into one [`ProviderEvent::Usage`].
+    #[serde(default)]
+    prompt_eval_count: Option<i64>,
+    #[serde(default)]
+    eval_count: Option<i64>,
 }
 
 #[derive(Deserialize)]
@@ -1114,6 +1130,69 @@ enum RoundOutcome {
     Failed,
 }
 
+/// Per-turn token rollup. Ollama reports counts once per `/api/chat`
+/// response (on its `done` chunk), so a turn that ran tools produces one
+/// set per round; they sum into the single `Usage` event the turn emits.
+#[derive(Default)]
+struct TurnUsage {
+    /// Σ `prompt_eval_count` over the turn's rounds — every prompt token
+    /// the server actually billed, replayed history included.
+    input: i64,
+    /// Σ `eval_count` over the turn's rounds.
+    output: i64,
+    /// `prompt_eval_count` of the last round that reported one: the
+    /// context window at end of turn, per the `ProviderEvent::Usage`
+    /// contract (summing it would double-count the replayed transcript).
+    context: i64,
+}
+
+impl TurnUsage {
+    fn add_round(&mut self, prompt_eval: i64, eval: i64) {
+        self.input += prompt_eval;
+        self.output += eval;
+        if prompt_eval > 0 {
+            self.context = prompt_eval;
+        }
+    }
+
+    fn is_empty(&self) -> bool {
+        self.input == 0 && self.output == 0
+    }
+}
+
+/// Emit the turn's single `Usage` event, or nothing when the server
+/// reported no counts at all. Ollama has no prompt caching and exposes no
+/// cache counters, so both cache fields are 0 and `total` is the context
+/// window plus the generated output — the same convention as the Claude
+/// and cursor providers.
+async fn emit_usage(
+    db: &crate::db::Db,
+    broadcaster: &crate::ws::broadcaster::Broadcaster,
+    session_id: &str,
+    model_label: &str,
+    usage: &TurnUsage,
+) {
+    if usage.is_empty() {
+        return;
+    }
+    emit_event(
+        db,
+        broadcaster,
+        session_id,
+        ProviderEvent::Usage {
+            input_tokens: usage.input,
+            output_tokens: usage.output,
+            cache_read_tokens: 0,
+            cache_creation_tokens: 0,
+            total_tokens: usage.context + usage.output,
+            context_tokens: usage.context,
+            model: Some(model_label.to_string()),
+            turn_seq: None,
+        },
+    )
+    .await;
+}
+
 /// Drive one turn: offer tools (when enabled), stream the model's reply, run
 /// any tool calls it makes, and loop until it answers without calling a tool
 /// or [`MAX_TOOL_ROUNDS`] is reached. Returns `true` on a clean finish.
@@ -1244,6 +1323,9 @@ async fn run_chat_stream(args: ChatStreamArgs<'_>) -> turn::TurnResult {
     // transcript once we finish so the next turn replays the full exchange.
     let mut new_messages: Vec<ChatMessage> = Vec::new();
 
+    // Token counts each round reports, rolled up into the one `Usage`
+    // event this turn emits at whichever exit it takes below.
+    let mut usage = TurnUsage::default();
     for _round in 0..MAX_TOOL_ROUNDS {
         let outcome = stream_one_round(StreamRound {
             client,
@@ -1259,12 +1341,31 @@ async fn run_chat_stream(args: ChatStreamArgs<'_>) -> turn::TurnResult {
             session_id,
             cancel: &cancel,
             errors: &errors,
+            usage: &mut usage,
         })
         .await;
         let (text, tool_calls) = match outcome {
             RoundOutcome::Message { text, tool_calls } => (text, tool_calls),
-            RoundOutcome::Failed => return errors.failure(),
+            RoundOutcome::Failed => {
+                emit_usage(db, broadcaster, session_id, model_label, &usage).await;
+                return errors.failure();
+            }
         };
+
+        // Hand this round's assistant text to any `todo`-hook plugin so it
+        // can drive lifecycle tracking. Once per round rather than per
+        // streamed delta: the deltas are token-sized fragments, the round's
+        // accumulated text is the complete message a plugin can parse.
+        if !text.is_empty() {
+            crate::plugin::todo_hook::emit_plugin_todos(
+                plugins,
+                db,
+                broadcaster,
+                session_id,
+                crate::plugin::todo_hook::assistant_text_payload("ollama", &text),
+            )
+            .await;
+        }
 
         // Record the assistant turn (its text plus the calls it requested)
         // so it replays alongside the tool results on the next round.
@@ -1277,6 +1378,7 @@ async fn run_chat_stream(args: ChatStreamArgs<'_>) -> turn::TurnResult {
         let ctx = match tool_ctx.as_ref() {
             Some(ctx) if !tool_calls.is_empty() => ctx,
             _ => {
+                emit_usage(db, broadcaster, session_id, model_label, &usage).await;
                 finalize(db, broadcaster, session_id, conversations, new_messages).await;
                 return turn::TurnResult {
                     completed: true,
@@ -1290,6 +1392,7 @@ async fn run_chat_stream(args: ChatStreamArgs<'_>) -> turn::TurnResult {
         for call in tool_calls {
             let tool_msg = tokio::select! {
                 _ = cancel.notified() => {
+                    emit_usage(db, broadcaster, session_id, model_label, &usage).await;
                     crash(
                         db,
                         broadcaster,
@@ -1332,6 +1435,7 @@ async fn run_chat_stream(args: ChatStreamArgs<'_>) -> turn::TurnResult {
         history.extend(new_messages);
         trim_history(history, MAX_HISTORY_MESSAGES);
     }
+    emit_usage(db, broadcaster, session_id, model_label, &usage).await;
     crash(
         db,
         broadcaster,
@@ -1362,6 +1466,9 @@ struct StreamRound<'a> {
     cancel: &'a Notify,
     /// Where a `Crashed` reason is recorded for the caller.
     errors: &'a CrashSink,
+    /// Where this round's reported token counts are accumulated; the
+    /// caller owns it across all rounds of the turn.
+    usage: &'a mut TurnUsage,
 }
 
 /// POST one `/api/chat` request and consume its streamed reply: stream text
@@ -1384,6 +1491,7 @@ async fn stream_one_round(round: StreamRound<'_>) -> RoundOutcome {
         session_id,
         cancel,
         errors,
+        usage,
     } = round;
 
     let body = ChatRequest {
@@ -1535,6 +1643,15 @@ async fn stream_one_round(round: StreamRound<'_>) -> RoundOutcome {
                             continue;
                         }
                     };
+                    // Counts ride the final chunk; accumulate before the
+                    // error check so a `done` chunk that also carries an
+                    // error still contributes what the server billed.
+                    if parsed.prompt_eval_count.is_some() || parsed.eval_count.is_some() {
+                        usage.add_round(
+                            parsed.prompt_eval_count.unwrap_or(0),
+                            parsed.eval_count.unwrap_or(0),
+                        );
+                    }
                     if let Some(err) = parsed.error {
                         crash(
                             db,
@@ -1973,6 +2090,62 @@ pub fn default_models() -> Vec<ModelInfo> {
 mod tests {
     use super::*;
 
+    /// The real shape of Ollama's final chunk (`/api/chat`, stream mode):
+    /// an empty message, `done: true`, and the token counters alongside the
+    /// duration fields we ignore.
+    #[test]
+    fn done_chunk_carries_token_counts() {
+        let chunk: ChatStreamChunk = serde_json::from_str(
+            r#"{"model":"llama3.1:8b","created_at":"2024-01-01T00:00:00Z",
+                "message":{"role":"assistant","content":""},"done_reason":"stop",
+                "done":true,"total_duration":1000,"load_duration":10,
+                "prompt_eval_count":26,"prompt_eval_duration":100,
+                "eval_count":298,"eval_duration":900}"#,
+        )
+        .unwrap();
+        assert!(chunk.done);
+        assert_eq!(chunk.prompt_eval_count, Some(26));
+        assert_eq!(chunk.eval_count, Some(298));
+    }
+
+    /// Streamed deltas carry no counters at all — they must not be read as
+    /// zeros that clobber the turn's context figure.
+    #[test]
+    fn delta_chunk_reports_no_counts() {
+        let chunk: ChatStreamChunk = serde_json::from_str(
+            r#"{"model":"llama3.1:8b","message":{"role":"assistant","content":"Hi"},"done":false}"#,
+        )
+        .unwrap();
+        assert_eq!(chunk.prompt_eval_count, None);
+        assert_eq!(chunk.eval_count, None);
+    }
+
+    /// One turn, three tool rounds: input and output sum, but the context
+    /// window is the last round's prompt — summing it would count the
+    /// replayed transcript once per round.
+    #[test]
+    fn turn_usage_sums_rounds_and_keeps_last_context() {
+        let mut usage = TurnUsage::default();
+        assert!(usage.is_empty());
+        usage.add_round(100, 20);
+        usage.add_round(240, 15);
+        usage.add_round(0, 0); // a round the server reported nothing for
+        usage.add_round(500, 30);
+        assert_eq!(usage.input, 840);
+        assert_eq!(usage.output, 65);
+        assert_eq!(usage.context, 500);
+        assert!(!usage.is_empty());
+    }
+
+    /// A round with no counters leaves the previous context standing rather
+    /// than resetting it to zero.
+    #[test]
+    fn empty_round_does_not_reset_context() {
+        let mut usage = TurnUsage::default();
+        usage.add_round(64, 8);
+        usage.add_round(0, 0);
+        assert_eq!(usage.context, 64);
+    }
     #[test]
     fn external_tool_defs_namespace_collide_and_cap() {
         use crate::service::mcp_client::ExternalMcpTool;

@@ -19,6 +19,18 @@
 //! [`ProviderEvent::Thinking`], the same collapsed channel the Claude
 //! provider feeds from its `thinking` blocks.
 //!
+//! No `Usage` events: grok 0.2.77 reports no token counts in either
+//! headless output format. Its own docs list the streaming-json frames as
+//! `text` / `thought` / `tool_call` / `tool` / `attachment` / `error` /
+//! `end`, with the terminal frame being exactly
+//! `{"type":"end","stopReason":…,"sessionId":…,"requestId":…}`, and
+//! `--output-format json` a single object with `text`, `stopReason`,
+//! `sessionId`, `requestId` — token counters appear nowhere in either
+//! (verified against the shipped 0.2.77 binary). So ollama-style cost
+//! analytics can't be populated for grok until the CLI exposes them;
+//! re-check on upgrade, and the mapping is then one accessor here plus a
+//! `ProviderEvent::Usage` push in the `end` arm.
+//!
 //! The exact tool-event shape isn't formally specified, so every accessor is
 //! defensive: an unrecognised shape yields no events rather than an error.
 
@@ -390,5 +402,24 @@ mod tests {
             error_reason(&serde_json::json!({"type":"error"})),
             Some("grok reported an error".to_string())
         );
+    }
+
+    /// Regression guard for the module header: grok's terminal frame
+    /// carries the session id and a stop reason, no token counts — so it
+    /// produces no `Usage` (and no other event either).
+    #[test]
+    fn end_frame_yields_no_usage() {
+        let mut conv = None;
+        let events = parse(
+            serde_json::json!({
+                "type": "end",
+                "stopReason": "EndTurn",
+                "sessionId": "abc123",
+                "requestId": "xyz789"
+            }),
+            &mut conv,
+        );
+        assert!(events.is_empty());
+        assert_eq!(conv.as_deref(), Some("abc123"));
     }
 }
