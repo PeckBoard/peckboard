@@ -57,6 +57,22 @@ use super::manager::PluginManager;
 /// explicit `allow` payload carrying a `todos` array produces an event.
 pub const TODO_HOOK: &str = "todo";
 
+/// Build the raw-output envelope the real (non-mock) providers hand the
+/// `todo` hook for one batch of assistant output.
+///
+/// The payload a plugin receives is opaque as far as the host is concerned,
+/// but every provider that streams plain assistant text — `cursor`, `grok`,
+/// `kimi` (via the shared per-turn harness) and `ollama` (once per tool
+/// round) — uses this one shape, so a single todo-hook plugin can parse all
+/// of them without branching on who called it:
+///
+/// ```json
+/// { "provider": "cursor", "text": "...assistant output..." }
+/// ```
+pub fn assistant_text_payload(provider: &str, text: &str) -> serde_json::Value {
+    serde_json::json!({ "provider": provider, "text": text })
+}
+
 /// Parse the payload a `todo`-hook plugin returned in its `allow` verdict into
 /// the canonical snapshot.
 ///
@@ -115,5 +131,34 @@ pub async fn emit_plugin_todos(
             true
         }
         None => false,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// One envelope for every provider that streams plain assistant text, so
+    /// a todo-hook plugin parses `cursor`, `grok`, `kimi`, `ollama` and
+    /// `mock` with the same code path.
+    #[test]
+    fn assistant_text_payload_is_the_same_shape_for_every_provider() {
+        for provider in ["cursor", "grok", "kimi", "ollama", "mock"] {
+            let payload = assistant_text_payload(provider, "Ship the feature");
+            assert_eq!(payload["provider"], provider);
+            assert_eq!(payload["text"], "Ship the feature");
+            assert!(
+                payload.as_object().map(|o| o.len()) == Some(2),
+                "the envelope carries exactly provider + text: {payload}",
+            );
+        }
+    }
+
+    /// The envelope is what a plugin *reads*; it carries no `todos` array of
+    /// its own, so it can never be mistaken for a snapshot.
+    #[test]
+    fn the_envelope_is_not_itself_a_snapshot() {
+        let payload = assistant_text_payload("cursor", "anything at all");
+        assert!(snapshot_from_plugin_payload(&payload).is_none());
     }
 }

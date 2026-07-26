@@ -21,7 +21,9 @@ use std::sync::Arc;
 use peckboard::db::Db;
 use peckboard::db::models::{NewFolder, NewSession};
 use peckboard::plugin::manager::PluginManager;
-use peckboard::plugin::todo_hook::{emit_plugin_todos, snapshot_from_plugin_payload};
+use peckboard::plugin::todo_hook::{
+    assistant_text_payload, emit_plugin_todos, snapshot_from_plugin_payload,
+};
 use peckboard::provider::agent::emit_event;
 use peckboard::provider::stream::ProviderEvent;
 use peckboard::ws::broadcaster::Broadcaster;
@@ -160,4 +162,59 @@ async fn no_plugin_installed_is_a_silent_no_op() {
     assert!(!emitted, "no plugin -> no todo event emitted");
     let todos = db.latest_event_of_kind("s1", "todo").await.unwrap();
     assert!(todos.is_none(), "no todo events should exist");
+}
+
+/// The second half of the contract the providers rely on: a plugin-reported
+/// snapshot doesn't only land in the event log, `emit_event` mirrors it into
+/// the dedicated `todos` table that the load-time read path serves (the
+/// `/todos` routes behind the sticky TodoPanel and the project todo views).
+#[tokio::test]
+async fn plugin_snapshots_are_mirrored_into_the_todos_table() {
+    let (db, broadcaster) = seed_session().await;
+
+    for status in ["pending", "in_progress"] {
+        emit_from_plugin_payload(&db, &broadcaster, &plugin_snapshot(status)).await;
+    }
+
+    // Replace-all semantics: the table holds the latest snapshot, not the
+    // union of every snapshot seen.
+    let todos = db.list_session_todos("s1").await.unwrap();
+    assert_eq!(todos.len(), 1, "latest snapshot wins: {todos:?}");
+    assert_eq!(todos[0].content, "Ship the feature");
+    assert_eq!(todos[0].status, peckboard::todo::TodoStatus::InProgress);
+
+    emit_from_plugin_payload(&db, &broadcaster, &plugin_snapshot("completed")).await;
+    let todos = db.list_session_todos("s1").await.unwrap();
+    assert_eq!(todos[0].status, peckboard::todo::TodoStatus::Done);
+}
+
+/// Every provider now wired to the hook — `cursor`, `grok` and `kimi` via the
+/// shared per-turn harness, `ollama` once per tool round, `mock` per run —
+/// hands the plugin the one `assistant_text_payload` envelope. On a stock
+/// install (no todo-hook plugin) that call is a silent no-op for each of
+/// them, which is the path every one of those providers takes by default.
+#[tokio::test]
+async fn the_wired_provider_envelope_is_a_no_op_for_each_provider() {
+    let (db, broadcaster) = seed_session().await;
+    let empty = PluginManager::empty();
+
+    for provider in ["cursor", "grok", "kimi", "ollama", "mock"] {
+        let emitted = emit_plugin_todos(
+            &empty,
+            &db,
+            &broadcaster,
+            "s1",
+            assistant_text_payload(provider, "Working on it. Next: ship the feature."),
+        )
+        .await;
+        assert!(!emitted, "{provider}: no plugin -> no todo event emitted");
+    }
+
+    assert!(
+        db.latest_event_of_kind("s1", "todo")
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert!(db.list_session_todos("s1").await.unwrap().is_empty());
 }

@@ -299,9 +299,12 @@ impl AgentProvider for KimiProvider {
             conversation_id,
             completion_tx,
             // kimi runs its own tool loop; the WASM plugin tool host isn't
-            // wired in. Peckboard MCP tools reach the CLI via the workspace
-            // `.kimi-code/mcp.json` instead (see the `mcp` module below).
-            plugins: _,
+            // wired in as a *tool* provider. Peckboard MCP tools reach the
+            // CLI via the workspace `.kimi-code/mcp.json` instead (see the
+            // `mcp` module below). It IS handed to the turn harness so a
+            // `todo`-hook plugin can drive lifecycle tracking off the
+            // assistant text.
+            plugins,
         } = ctx;
 
         // Wind down any prior run on this session before starting a new one.
@@ -423,6 +426,7 @@ impl AgentProvider for KimiProvider {
                     // from (system.version carries no model).
                     started_up_front: true,
                     success_on_output: false,
+                    plugins: Some(plugins.as_ref()),
                 },
                 &mut stream,
             )

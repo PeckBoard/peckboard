@@ -216,9 +216,11 @@ impl AgentProvider for GrokProvider {
             conversation_id,
             completion_tx,
             // grok runs its own tool loop, so the WASM plugin tool host
-            // stays unwired; peckboard MCP tools reach it via the workspace
-            // `.mcp.json` + a per-spawn token env var (see `mcp`).
-            plugins: _,
+            // stays unwired as a *tool* provider; peckboard MCP tools reach
+            // it via the workspace `.mcp.json` + a per-spawn token env var
+            // (see `mcp`). It IS handed to the turn harness so a `todo`-hook
+            // plugin can drive lifecycle tracking off the assistant text.
+            plugins,
         } = ctx;
 
         // Wind down any prior run on this session before starting a new one.
@@ -335,6 +337,7 @@ impl AgentProvider for GrokProvider {
                     // Started from, so the harness emits one up front.
                     started_up_front: true,
                     success_on_output: false,
+                    plugins: Some(plugins.as_ref()),
                 },
                 &mut stream,
             )

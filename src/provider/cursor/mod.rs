@@ -147,10 +147,12 @@ impl AgentProvider for CursorProvider {
             config,
             conversation_id,
             completion_tx,
-            // cursor-agent runs its own tool loop, so the plugin host stays
-            // unwired; peckboard MCP tools reach it via the workspace
-            // `.cursor/mcp.json` + a per-spawn token env var (see `mcp`).
-            plugins: _,
+            // cursor-agent runs its own tool loop, so the plugin host isn't
+            // wired as a *tool* provider; peckboard MCP tools reach it via
+            // the workspace `.cursor/mcp.json` + a per-spawn token env var
+            // (see `mcp`). It IS handed to the turn harness so a `todo`-hook
+            // plugin can drive lifecycle tracking off the assistant text.
+            plugins,
         } = ctx;
 
         // Wind down any prior run on this session before starting a new one.
@@ -261,6 +263,7 @@ impl AgentProvider for CursorProvider {
                     // cursor-agent exits non-zero on some turns that in fact
                     // streamed a complete answer.
                     success_on_output: true,
+                    plugins: Some(plugins.as_ref()),
                 },
                 &mut stream,
             )

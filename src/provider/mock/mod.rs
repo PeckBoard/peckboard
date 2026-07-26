@@ -278,7 +278,7 @@ async fn run_scenario(
         db,
         broadcaster,
         session_id,
-        serde_json::json!({ "message": message }),
+        crate::plugin::todo_hook::assistant_text_payload("mock", message),
     )
     .await;
 

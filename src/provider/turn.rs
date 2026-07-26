@@ -107,8 +107,14 @@ pub struct TurnSpec<'a> {
     /// Treat a non-zero exit that nevertheless produced events as a
     /// completion — `cursor-agent` exits non-zero on some clean turns.
     pub success_on_output: bool,
+    /// Plugin host for this turn, when the dispatching `SessionManager` was
+    /// built with `with_plugins`. Every assistant `Text` event the parser
+    /// produces is additionally handed to any `todo`-hook plugin (see
+    /// [`crate::plugin::todo_hook::emit_plugin_todos`]) so it can drive todo
+    /// lifecycle tracking for a provider that has no native `TodoWrite`.
+    /// `None` (and a plugin host with no `todo` listener) are both no-ops.
+    pub plugins: Option<&'a crate::plugin::manager::PluginManager>,
 }
-
 /// Outcome of one turn: what to report to the session manager.
 pub struct TurnResult {
     /// True only on a clean completion (no crash, no cancel).
@@ -179,6 +185,7 @@ pub async fn run_turn(spec: TurnSpec<'_>, stream: &mut dyn TurnStream) -> TurnRe
         empty_exit_reason,
         started_up_front,
         success_on_output,
+        plugins,
     } = spec;
 
     tracing::info!(
@@ -296,7 +303,26 @@ pub async fn run_turn(spec: TurnSpec<'_>, stream: &mut dyn TurnStream) -> TurnRe
                         };
                         for event in stream.on_line(&json) {
                             saw_any = true;
+                            // Assistant text is the one thing a todo-hook
+                            // plugin can parse; clone it before the event is
+                            // moved into the persistence path.
+                            let todo_text = match (&event, plugins) {
+                                (ProviderEvent::Text { text }, Some(_)) => Some(text.clone()),
+                                _ => None,
+                            };
                             emit_event(db, broadcaster, session_id, event).await;
+                            if let (Some(text), Some(plugins)) = (todo_text, plugins) {
+                                crate::plugin::todo_hook::emit_plugin_todos(
+                                    plugins,
+                                    db,
+                                    broadcaster,
+                                    session_id,
+                                    crate::plugin::todo_hook::assistant_text_payload(
+                                        provider, &text,
+                                    ),
+                                )
+                                .await;
+                            }
                         }
                     }
                     Ok(None) => break TurnOutcome::Eof,
@@ -691,6 +717,7 @@ mod tests {
             empty_exit_reason: "test CLI exited without a successful result",
             started_up_front: true,
             success_on_output: false,
+            plugins: None,
         }
     }
 
@@ -752,6 +779,55 @@ mod tests {
         assert!(
             started.elapsed() < std::time::Duration::from_secs(20),
             "the turn should end at its own deadline, not the child's",
+        );
+    }
+    /// The plugin todo hook on the shared harness — the seam `cursor`,
+    /// `grok` and `kimi` all reach through. Every assistant `Text` event is
+    /// handed to the `todo` hook; with no todo-hook plugin installed that
+    /// dispatch short-circuits, so the turn's event stream is byte-for-byte
+    /// what it was before the wiring existed.
+    ///
+    /// The `allow`-payload → `todo` event half of the seam (which needs a
+    /// live wasm plugin) is covered host-side in
+    /// `tests/plugin_todo_lifecycle.rs`.
+    #[tokio::test]
+    async fn assistant_text_runs_through_the_todo_hook_without_perturbing_the_stream() {
+        let db = session_db().await;
+        let broadcaster = Broadcaster::new();
+        let env = HashMap::new();
+        let args = vec![r#"{"text":"Ship the feature"}"#.to_string()];
+        let mut stream = EchoStream::default();
+        let plugins = crate::plugin::manager::PluginManager::empty();
+
+        let mut turn_spec = spec(
+            "echo",
+            &args,
+            &env,
+            &db,
+            &broadcaster,
+            Arc::new(Notify::new()),
+            30,
+        );
+        turn_spec.plugins = Some(&plugins);
+        let result = run_turn(turn_spec, &mut stream).await;
+
+        assert!(result.completed, "error: {:?}", result.error);
+        assert_eq!(stream.seen, vec!["Ship the feature".to_string()]);
+
+        let kinds: Vec<String> = db
+            .events_tail("s1", 100)
+            .await
+            .unwrap()
+            .iter()
+            .map(|e| e.kind.clone())
+            .collect();
+        assert!(
+            kinds.iter().any(|k| k == "agent-text"),
+            "the assistant text still reaches the transcript: {kinds:?}",
+        );
+        assert!(
+            !kinds.iter().any(|k| k == "todo"),
+            "no todo-hook plugin -> no todo event: {kinds:?}",
         );
     }
 
