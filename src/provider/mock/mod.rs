@@ -667,6 +667,39 @@ async fn run_scenario(
             )
             .await;
         }
+        "thinking" => {
+            // Extended-thinking stream: a collapsed thinking block followed
+            // by the visible answer — drives the chat's thinking-trace UI.
+            emit_event(
+                db,
+                broadcaster,
+                session_id,
+                ProviderEvent::Thinking {
+                    text: "Let me reason about this. ".into(),
+                },
+            )
+            .await;
+            tick().await;
+            emit_event(
+                db,
+                broadcaster,
+                session_id,
+                ProviderEvent::Thinking {
+                    text: "The answer is clearly 42.".into(),
+                },
+            )
+            .await;
+            tick().await;
+            emit_event(
+                db,
+                broadcaster,
+                session_id,
+                ProviderEvent::Text {
+                    text: "The answer is 42.".into(),
+                },
+            )
+            .await;
+        }
         "tool-orphan-crash" => {
             // Emit a ToolStart with no matching ToolEnd, then crash. Used
             // to verify the UI doesn't leave a tool-block spinner running

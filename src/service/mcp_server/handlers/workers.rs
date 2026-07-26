@@ -34,6 +34,15 @@ fn summarize_event(e: &Event) -> Value {
             entry["status"] = data.get("status").cloned().unwrap_or_default();
             entry["reason"] = data.get("reason").cloned().unwrap_or_default();
         }
+        "agent-thinking" => {
+            // Reasoning text can be huge; workers only need that it happened.
+            entry["chars"] = serde_json::json!(
+                data.get("text")
+                    .and_then(|t| t.as_str())
+                    .map(str::len)
+                    .unwrap_or(0)
+            );
+        }
         _ => {
             entry["data"] = data;
         }

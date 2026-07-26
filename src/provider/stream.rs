@@ -27,6 +27,9 @@ pub enum ProviderEvent {
     },
     /// Streamed text chunk.
     Text { text: String },
+    /// Streamed reasoning/thinking chunk (extended-thinking models). Shown
+    /// collapsed in the chat; never part of the assistant's answer text.
+    Thinking { text: String },
     /// Agent invoked a tool.
     ToolStart {
         tool_use_id: String,
@@ -93,6 +96,7 @@ impl ProviderEvent {
         match self {
             ProviderEvent::Started { .. } => "agent-start",
             ProviderEvent::Text { .. } => "agent-text",
+            ProviderEvent::Thinking { .. } => "agent-thinking",
             ProviderEvent::ToolStart { .. } => "agent-tool-start",
             ProviderEvent::ToolEnd { .. } => "agent-tool-end",
             ProviderEvent::Todo { .. } => "todo",
@@ -116,6 +120,7 @@ impl ProviderEvent {
                 "metadata": metadata,
             }),
             ProviderEvent::Text { text } => serde_json::json!({ "text": text }),
+            ProviderEvent::Thinking { text } => serde_json::json!({ "text": text }),
             ProviderEvent::ToolStart {
                 tool_use_id,
                 name,

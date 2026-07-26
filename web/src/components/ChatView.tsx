@@ -1330,6 +1330,18 @@ export default function ChatView({
                   />
                 </div>
               )
+            case 'thinking':
+              return (
+                <div key={item.key} className="chat-row chat-row-system">
+                  <details className="chat-thinking-block" data-testid="chat-thinking-block">
+                    <summary className="chat-thinking-summary">
+                      <span aria-hidden="true">{'\u{1F4AD}'}</span>
+                      <span>Thought process</span>
+                    </summary>
+                    <div className="chat-thinking-body">{item.text}</div>
+                  </details>
+                </div>
+              )
             case 'file-diff':
               return (
                 <div key={item.key} className="chat-row chat-row-tool">

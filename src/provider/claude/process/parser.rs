@@ -217,6 +217,15 @@ pub(super) fn parse_stream_json(
                             }
                         }
                     }
+                    "thinking_delta" => {
+                        if let Some(text) = delta.get("thinking").and_then(|v| v.as_str()) {
+                            if !text.is_empty() {
+                                events.push(ProviderEvent::Thinking {
+                                    text: text.to_string(),
+                                });
+                            }
+                        }
+                    }
                     "input_json_delta" => {
                         // Partial JSON for tool input — we emit as text for now
                         // since the full input comes with content_block_stop or
@@ -255,6 +264,20 @@ pub(super) fn parse_stream_json(
                                         });
                                     }
                                 }
+                            }
+                            "thinking" => {
+                                if let Some(text) = block.get("thinking").and_then(|v| v.as_str()) {
+                                    if !text.is_empty() {
+                                        events.push(ProviderEvent::Thinking {
+                                            text: text.to_string(),
+                                        });
+                                    }
+                                }
+                            }
+                            "redacted_thinking" => {
+                                events.push(ProviderEvent::Thinking {
+                                    text: "[redacted thinking]".to_string(),
+                                });
                             }
                             "tool_use" => {
                                 let tool_id = block
@@ -747,5 +770,39 @@ mod tests {
         assert!(events.is_empty());
         // But should still update model_name
         assert_eq!(model.as_deref(), Some("opus"));
+    }
+
+    #[test]
+    fn test_parse_thinking_blocks() {
+        let mut cid = None;
+        let mut model = None;
+        let mut tool_id = None;
+        let mut started = true;
+
+        // Streaming delta form.
+        let delta = serde_json::json!({
+            "type": "content_block_delta",
+            "delta": { "type": "thinking_delta", "thinking": "hmm, " }
+        });
+        let events = parse_stream_json(&delta, &mut cid, &mut model, &mut tool_id, &mut started);
+        assert_eq!(events.len(), 1);
+        assert!(matches!(&events[0], ProviderEvent::Thinking { text } if text == "hmm, "));
+
+        // Assistant snapshot form, including the redacted variant.
+        let snapshot = serde_json::json!({
+            "type": "assistant",
+            "message": { "content": [
+                { "type": "thinking", "thinking": "reasoning here", "signature": "sig" },
+                { "type": "redacted_thinking", "data": "opaque" },
+                { "type": "text", "text": "answer" }
+            ]}
+        });
+        let events = parse_stream_json(&snapshot, &mut cid, &mut model, &mut tool_id, &mut started);
+        assert_eq!(events.len(), 3, "got: {events:?}");
+        assert!(matches!(&events[0], ProviderEvent::Thinking { text } if text == "reasoning here"));
+        assert!(
+            matches!(&events[1], ProviderEvent::Thinking { text } if text == "[redacted thinking]")
+        );
+        assert!(matches!(&events[2], ProviderEvent::Text { text } if text == "answer"));
     }
 }

@@ -94,6 +94,7 @@ export type DisplayItem =
       key: string
     }
   | { type: 'file-diff'; diff: FileDiff; ts: number; key: string }
+  | { type: 'thinking'; text: string; key: string; ts: number }
   | { type: 'status'; text: string; key: string; ts: number }
   | {
       type: 'system'
@@ -287,8 +288,22 @@ export function buildDisplayItems(events: Event[]): DisplayItem[] {
   let assistantBuffer = ''
   let assistantKey = ''
   let assistantTs = 0
+  let thinkingBuffer = ''
+  let thinkingKey = ''
+  let thinkingTs = 0
+
+  const flushThinking = () => {
+    if (thinkingBuffer) {
+      items.push({ type: 'thinking', text: thinkingBuffer, key: thinkingKey, ts: thinkingTs })
+      thinkingBuffer = ''
+      thinkingKey = ''
+      thinkingTs = 0
+    }
+  }
 
   const flushAssistant = () => {
+    // Thinking precedes the text it produced — keep that order in the feed.
+    flushThinking()
     if (assistantBuffer) {
       items.push({ type: 'assistant', text: assistantBuffer, key: assistantKey, ts: assistantTs })
       assistantBuffer = ''
@@ -348,12 +363,26 @@ export function buildDisplayItems(events: Event[]): DisplayItem[] {
         break
       }
       case 'agent-text': {
+        flushThinking()
         const chunk = (ev.data.text as string) ?? ''
         if (!assistantKey) {
           assistantKey = ev.id
           assistantTs = ev.ts
         }
         assistantBuffer += chunk
+        break
+      }
+      case 'agent-thinking': {
+        // Close any streaming text bubble — thinking starts its own block.
+        // (thinkingBuffer is empty whenever text was streaming, so the
+        // flushThinking inside flushAssistant is a no-op here.)
+        if (assistantBuffer) flushAssistant()
+        const chunk = (ev.data.text as string) ?? ''
+        if (!thinkingKey) {
+          thinkingKey = ev.id
+          thinkingTs = ev.ts
+        }
+        thinkingBuffer += chunk
         break
       }
       case 'agent-tool-start': {
