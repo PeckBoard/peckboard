@@ -13,6 +13,7 @@ import ToolUseBlock from './ToolUseBlock'
 import MermaidBlock from './MermaidBlock'
 import DiffBlock from './DiffBlock'
 import ConfirmDialog from './ConfirmDialog'
+import Modal from './Modal'
 import { MenuButton, type MenuItem } from './Dropdown'
 import ModelPicker from './ModelPicker'
 import TodoPanel from './TodoPanel'
@@ -87,24 +88,109 @@ interface ChatViewProps {
 }
 
 /**
- * Renders the "image attached" indicator chips under a user message. Shown
- * for every provider — the chips come off the persisted `user` event, so a
- * message shows what it carried regardless of which model (Claude, Ollama,
- * mock) actually consumed the bytes. An image-type attachment gets a
- * picture icon, anything else a paperclip.
+ * One image attachment that self-upgrades from a chip to a thumbnail: the
+ * attachments API needs the auth header, so the bytes are fetched and
+ * swapped in as an object URL (no plain <img src>). Any failure leaves the
+ * plain chip. Click opens the shared lightbox.
  */
-function MessageAttachments({ attachments }: { attachments?: MessageAttachment[] }) {
+function AttachmentThumb({
+  sessionId,
+  id,
+  filename,
+}: {
+  sessionId: string
+  id: string
+  filename: string
+}) {
+  const [url, setUrl] = useState<string | null>(null)
+  const [open, setOpen] = useState(false)
+  useEffect(() => {
+    let objectUrl: string | null = null
+    let cancelled = false
+    authedFetch(`/api/sessions/${sessionId}/attachments/${id}`)
+      .then((r) => (r.ok ? r.blob() : Promise.reject(new Error(String(r.status)))))
+      .then((b) => {
+        const u = URL.createObjectURL(b)
+        if (cancelled) {
+          URL.revokeObjectURL(u)
+          return
+        }
+        objectUrl = u
+        setUrl(u)
+      })
+      .catch(() => {
+        // Deleted/stale upload — keep the chip.
+      })
+    return () => {
+      cancelled = true
+      if (objectUrl) URL.revokeObjectURL(objectUrl)
+    }
+  }, [sessionId, id])
+  if (!url) {
+    return (
+      <span className="attachment-chip">
+        <span className="attachment-chip-icon">{'\u{1F5BC}\u{FE0F}'}</span>
+        <span className="attachment-chip-name">{filename}</span>
+      </span>
+    )
+  }
+  return (
+    <>
+      <button
+        type="button"
+        className="tool-image-thumb"
+        onClick={() => setOpen(true)}
+        aria-label={`Open ${filename}`}
+        data-testid="attachment-thumb"
+      >
+        <img src={url} alt={filename} loading="lazy" />
+      </button>
+      {open && (
+        <Modal
+          onClose={() => setOpen(false)}
+          className="image-lightbox"
+          backdropClassName="image-lightbox-backdrop"
+        >
+          <img src={url} alt={filename} className="image-lightbox-img" />
+        </Modal>
+      )}
+    </>
+  )
+}
+
+/**
+ * Attachments under a user message. Image attachments with a recorded id
+ * render as inline thumbnails (fetched with auth); anything else keeps the
+ * filename chip. The chips come off the persisted `user` event, so a
+ * message shows what it carried regardless of provider.
+ */
+function MessageAttachments({
+  sessionId,
+  attachments,
+}: {
+  sessionId: string
+  attachments?: MessageAttachment[]
+}) {
   if (!attachments || attachments.length === 0) return null
   return (
     <div className="attachment-chips chat-attachment-chips" data-testid="message-attachments">
-      {attachments.map((att, i) => (
-        <span key={`${att.filename}-${i}`} className="attachment-chip">
-          <span className="attachment-chip-icon">
-            {att.mimeType.startsWith('image/') ? '\u{1F5BC}\u{FE0F}' : '\u{1F4CE}'}
+      {attachments.map((att, i) =>
+        att.id && att.mimeType.startsWith('image/') ? (
+          <AttachmentThumb
+            key={`${att.id}-${i}`}
+            sessionId={sessionId}
+            id={att.id}
+            filename={att.filename}
+          />
+        ) : (
+          <span key={`${att.filename}-${i}`} className="attachment-chip">
+            <span className="attachment-chip-icon">
+              {att.mimeType.startsWith('image/') ? '\u{1F5BC}\u{FE0F}' : '\u{1F4CE}'}
+            </span>
+            <span className="attachment-chip-name">{att.filename}</span>
           </span>
-          <span className="attachment-chip-name">{att.filename}</span>
-        </span>
-      ))}
+        ),
+      )}
     </div>
   )
 }
@@ -1065,7 +1151,7 @@ export default function ChatView({
                         <div className="chat-prehatch-original-text">{item.preHatchOriginal}</div>
                       </details>
                     )}
-                    <MessageAttachments attachments={item.attachments} />
+                    <MessageAttachments sessionId={sessionId} attachments={item.attachments} />
                     <div className="chat-time chat-time-user">{formatTime(item.ts)}</div>
                   </div>
                 </div>
@@ -1319,7 +1405,7 @@ export default function ChatView({
           <div key={p.tempId} className="chat-row chat-row-user">
             <div className="chat-bubble chat-bubble-user chat-bubble-pending">
               {p.text}
-              <MessageAttachments attachments={p.attachments} />
+              <MessageAttachments sessionId={sessionId} attachments={p.attachments} />
               <div className="chat-time chat-time-user">Sending...</div>
             </div>
           </div>

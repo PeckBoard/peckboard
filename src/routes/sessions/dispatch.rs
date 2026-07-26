@@ -341,7 +341,8 @@ pub(super) async fn send_message(
         user_data["attachments"] = serde_json::json!(
             user_attachments
                 .iter()
-                .map(|a| serde_json::json!({
+                .map(|(aid, a)| serde_json::json!({
+                    "id": aid,
                     "filename": a.filename,
                     "mime_type": a.mime_type,
                 }))
@@ -432,7 +433,7 @@ pub(super) async fn send_message(
             &id,
             UserMessage {
                 text: dispatch_text,
-                attachments: user_attachments,
+                attachments: user_attachments.into_iter().map(|(_, a)| a).collect(),
             },
             &state.db,
             &state.broadcaster,
@@ -891,18 +892,21 @@ async fn load_attachments(
     session_id: &str,
     ids: Option<&[String]>,
     state: &Arc<AppState>,
-) -> Vec<UserAttachment> {
+) -> Vec<(String, UserAttachment)> {
     let Some(ids) = ids else {
         return Vec::new();
     };
     let mut out = Vec::with_capacity(ids.len());
     for aid in ids {
         match load_attachment_payload(&state.config.data_dir, session_id, aid).await {
-            Some(payload) => out.push(UserAttachment {
-                filename: payload.filename,
-                mime_type: payload.mime_type,
-                data: payload.data,
-            }),
+            Some(payload) => out.push((
+                aid.clone(),
+                UserAttachment {
+                    filename: payload.filename,
+                    mime_type: payload.mime_type,
+                    data: payload.data,
+                },
+            )),
             None => tracing::warn!(
                 session_id = %session_id,
                 attachment_id = %aid,

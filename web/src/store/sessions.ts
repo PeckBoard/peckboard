@@ -66,7 +66,7 @@ export interface PendingUserMessage {
   ts: number
   /** Attachments carried by this turn, so the optimistic bubble shows the
    *  same "image attached" indicator the persisted `user` event will. */
-  attachments?: { filename: string; mimeType: string }[]
+  attachments?: { filename: string; mimeType: string; id?: string }[]
 }
 
 /** Cursor returned by `GET /api/sessions`. Pass back as-is to fetch

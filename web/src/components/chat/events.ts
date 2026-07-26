@@ -23,6 +23,8 @@ export interface QuestionItem {
 export interface MessageAttachment {
   filename: string
   mimeType: string
+  /** Attachment id — lets the chat fetch the bytes for an inline preview. */
+  id?: string
 }
 
 /** An image returned by a tool (e.g. a Playwright MCP screenshot), carried
@@ -243,12 +245,17 @@ function readAttachments(ev: Event): MessageAttachment[] | undefined {
       return {
         filename: (obj.filename as string) ?? 'attachment',
         mimeType: (obj.mime_type as string) ?? (obj.mimeType as string) ?? '',
+        id: typeof obj.id === 'string' ? obj.id : undefined,
       }
     })
   }
   const ids = ev.data.attachmentIds
   if (Array.isArray(ids) && ids.length > 0) {
-    return ids.map(() => ({ filename: 'attachment', mimeType: '' }))
+    return ids.map((x) => ({
+      filename: 'attachment',
+      mimeType: '',
+      id: typeof x === 'string' ? x : undefined,
+    }))
   }
   return undefined
 }

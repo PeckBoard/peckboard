@@ -191,7 +191,11 @@ export default function InputBar({ sessionId, handoverActive = false }: InputBar
     const trimmed = text.trim()
     if ((!trimmed && attachments.length === 0) || sending || handoverActive) return
     const attachmentIds = attachments.map((a) => a.id)
-    const attachmentMeta = attachments.map((a) => ({ filename: a.name, mimeType: a.mimeType }))
+    const attachmentMeta = attachments.map((a) => ({
+      filename: a.name,
+      mimeType: a.mimeType,
+      id: a.id,
+    }))
     // Clear the composer up-front: lets the user start typing the next
     // message immediately (matches Slack/Discord/iMessage), and avoids
     // clobbering anything they type during the in-flight request.
