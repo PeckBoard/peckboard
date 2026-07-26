@@ -8,6 +8,9 @@ import { authedFetch } from '../store/auth'
 import { useWsStore } from '../store/ws'
 import { useSessionsStore, type PendingUserMessage } from '../store/sessions'
 import { effortOptionsForModel, useResourcesStore, type ProviderInfo } from '../store/resources'
+import { useUsageStore } from '../store/usage'
+import { usageCost } from '../util/cost'
+import { downloadTranscript } from '../util/transcript'
 import InputBar from './InputBar'
 import ToolUseBlock from './ToolUseBlock'
 import MermaidBlock from './MermaidBlock'
@@ -388,6 +391,11 @@ export default function ChatView({
     (s) => s.pendingUserMessages[sessionId] ?? EMPTY_PENDING_MESSAGES,
   )
   const prunePendingUserMessages = useSessionsStore((s) => s.prunePendingUserMessages)
+  const costTable = useUsageStore((s) => s.costTable)
+  const fetchCostTable = useUsageStore((s) => s.fetchCostTable)
+  useEffect(() => {
+    void fetchCostTable()
+  }, [fetchCostTable])
   const [sessionDetail, setSessionDetail] = useState<Session | null>(null)
   const [planId, setPlanId] = useState<string | null>(null)
   useEffect(() => {
@@ -861,6 +869,22 @@ export default function ChatView({
       disabled: !planId,
       testId: 'chat-menu-plan',
     },
+    {
+      label: 'Export transcript',
+      submenu: [
+        {
+          label: 'Markdown (.md)',
+          onSelect: () =>
+            void downloadTranscript(sessionId, sessionDetail?.name ?? sessionId, 'markdown'),
+        },
+        {
+          label: 'JSON (.json)',
+          onSelect: () =>
+            void downloadTranscript(sessionId, sessionDetail?.name ?? sessionId, 'json'),
+        },
+      ],
+      testId: 'chat-menu-export',
+    },
     ...(onOpenPlugin
       ? (pluginItems ?? []).map((item) => ({
           label: item.label,
@@ -1330,6 +1354,38 @@ export default function ChatView({
                   />
                 </div>
               )
+            case 'turn-usage': {
+              const usd = item.slices.reduce(
+                (sum, s) =>
+                  sum +
+                  usageCost(costTable, s.model || null, {
+                    input_tokens: s.input,
+                    output_tokens: s.output,
+                    cache_read_tokens: s.cacheRead,
+                    cache_creation_tokens: s.cacheCreation,
+                  }),
+                0,
+              )
+              const cost = usd >= 0.005 ? `$${usd.toFixed(2)}` : usd > 0 ? '<$0.01' : ''
+              const out =
+                item.outputTokens >= 1000
+                  ? `${(item.outputTokens / 1000).toFixed(1)}k`
+                  : String(item.outputTokens)
+              return (
+                <div key={item.key} className="chat-row chat-row-usage">
+                  <span
+                    className="chat-turn-usage"
+                    title={item.slices
+                      .map((s) => s.model)
+                      .filter(Boolean)
+                      .join(', ')}
+                  >
+                    {cost && <span>{cost}</span>}
+                    <span>{out} tok out</span>
+                  </span>
+                </div>
+              )
+            }
             case 'thinking':
               return (
                 <div key={item.key} className="chat-row chat-row-system">

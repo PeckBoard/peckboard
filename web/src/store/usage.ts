@@ -92,15 +92,23 @@ interface UsageState {
    *  endpoints degrade to empty rather than erroring). */
   error: string
   fetchUsage: () => Promise<void>
+  /** Fetch just the rate table (cheap) — for the chat's per-turn cost chips
+   *  without pulling the whole dashboard. No-op once populated. */
+  fetchCostTable: () => Promise<void>
 }
 
-export const useUsageStore = create<UsageState>((set) => ({
+export const useUsageStore = create<UsageState>((set, get) => ({
   costTable: EMPTY_COST_TABLE,
   dashboard: EMPTY_DASHBOARD,
   loaded: false,
   loading: false,
   error: '',
 
+  fetchCostTable: async () => {
+    if (Object.keys(get().costTable.rates).length > 0) return
+    const costTable = await getJson<CostTable>('/api/usage/costs', EMPTY_COST_TABLE)
+    set({ costTable })
+  },
   fetchUsage: async () => {
     set({ loading: true, error: '' })
     try {

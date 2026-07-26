@@ -95,6 +95,21 @@ export type DisplayItem =
     }
   | { type: 'file-diff'; diff: FileDiff; ts: number; key: string }
   | { type: 'thinking'; text: string; key: string; ts: number }
+  | {
+      type: 'turn-usage'
+      turnSeq: number | null
+      /** One entry per model that billed in this turn. */
+      slices: {
+        model: string
+        input: number
+        output: number
+        cacheRead: number
+        cacheCreation: number
+      }[]
+      outputTokens: number
+      key: string
+      ts: number
+    }
   | { type: 'status'; text: string; key: string; ts: number }
   | {
       type: 'system'
@@ -383,6 +398,33 @@ export function buildDisplayItems(events: Event[]): DisplayItem[] {
           thinkingTs = ev.ts
         }
         thinkingBuffer += chunk
+        break
+      }
+      case 'agent-usage': {
+        flushAssistant()
+        const turnSeq = typeof ev.data.turnSeq === 'number' ? ev.data.turnSeq : null
+        const slice = {
+          model: (ev.data.model as string) ?? '',
+          input: (ev.data.inputTokens as number) ?? 0,
+          output: (ev.data.outputTokens as number) ?? 0,
+          cacheRead: (ev.data.cacheReadTokens as number) ?? 0,
+          cacheCreation: (ev.data.cacheCreationTokens as number) ?? 0,
+        }
+        const last = items[items.length - 1]
+        if (last?.type === 'turn-usage' && last.turnSeq !== null && last.turnSeq === turnSeq) {
+          // Multi-model turn: fold this model's slice into the same chip.
+          last.slices.push(slice)
+          last.outputTokens += slice.output
+        } else {
+          items.push({
+            type: 'turn-usage',
+            turnSeq,
+            slices: [slice],
+            outputTokens: slice.output,
+            key: ev.id,
+            ts: ev.ts,
+          })
+        }
         break
       }
       case 'agent-tool-start': {

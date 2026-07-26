@@ -933,3 +933,17 @@
   max-height: 260px;
   overflow-y: auto;
 }
+
+/* Per-turn cost/token chip — quiet right-aligned line after a turn. */
+.chat-row-usage {
+  display: flex;
+  justify-content: flex-end;
+}
+.chat-turn-usage {
+  display: inline-flex;
+  gap: 8px;
+  font-size: 10px;
+  color: var(--text3);
+  font-variant-numeric: tabular-nums;
+  padding: 0 2px;
+}
