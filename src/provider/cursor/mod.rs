@@ -34,14 +34,16 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
-use tokio::io::{AsyncBufReadExt, AsyncReadExt, BufReader};
 use tokio::process::Command;
 use tokio::sync::{Mutex, Notify};
 use tokio::task::JoinHandle;
 
 use crate::plugin::settings::PluginSettingsStore;
-use crate::provider::agent::{AgentProvider, ProcessCompletion, SendMessageContext, emit_event};
+use crate::provider::agent::{AgentProvider, ProcessCompletion, SendMessageContext};
 use crate::provider::stream::{ModelInfo, ProviderEvent};
+use crate::provider::turn::{
+    self, TurnSpec, TurnStream, setting_bool, setting_str, setting_str_list,
+};
 
 /// Default CLI binary name; overridable via the `cli_path` setting.
 const DEFAULT_CLI: &str = "cursor-agent";
@@ -50,8 +52,9 @@ const DEFAULT_CLI: &str = "cursor-agent";
 const MODEL_DISCOVERY_TTL: Duration = Duration::from_secs(60);
 /// Bound on how long the discovery subprocess may run.
 const MODEL_DISCOVERY_TIMEOUT_SECS: u64 = 10;
-/// Cap on stderr bytes captured for a crash message.
-const MAX_STDERR_BYTES: usize = 16 * 1024;
+/// Wall-clock bound on a single turn. `cursor-agent` enforces no timeout of
+/// its own, so without this a wedged child pins the session forever.
+const DEFAULT_TIMEOUT_SECS: u64 = turn::DEFAULT_TIMEOUT_SECS;
 
 /// Per-session tracking for an in-flight `cursor-agent` turn.
 struct CursorRun {
@@ -169,11 +172,17 @@ impl AgentProvider for CursorProvider {
             .unwrap_or_else(|| "auto".to_string());
 
         if !message.attachments.is_empty() {
-            tracing::warn!(
-                session_id = %session_id,
-                "cursor: dropping {} attachment(s) — the cursor-agent provider is text-only for now",
-                message.attachments.len()
-            );
+            // `cursor-agent --help` carries no image/attachment flag, so the
+            // honest thing is to say so in the transcript rather than answer
+            // the text alone as though nothing had been attached.
+            turn::notify_attachments_dropped(
+                &db,
+                &broadcaster,
+                &session_id,
+                "cursor-agent",
+                message.attachments.len(),
+            )
+            .await;
         }
 
         // Per-session MCP wiring: a static env-reference entry in the
@@ -193,15 +202,26 @@ impl AgentProvider for CursorProvider {
                 }
             }
         });
-        // cursor has no override concept plumbed, so the shared working-style
-        // rules are the system prompt (used only on the first turn).
+        // cursor-agent has no system-prompt flag, so the composed prompt —
+        // shared working-style rules, then any per-spawn suffix, then any
+        // per-session override — is folded into the first turn's text.
+        let system_prompt = turn::compose_system_prompt(&config);
         let args = build_cli_args(
             &model,
             &message.text,
             conversation_id.as_deref(),
             auto_approve,
-            crate::provider::WORKING_STYLE,
+            &system_prompt,
         );
+
+        // The whole spawn env reaches the child (per-session variables, a
+        // custom PATH, proxy settings); the MCP bearer token rides on top.
+        // Its value must match the turn's — MCP approval hashes the
+        // env-interpolated config.
+        let mut env = config.env.clone();
+        if let Some(wiring) = &mcp_wiring {
+            env.insert(mcp::TOKEN_ENV_VAR.to_string(), wiring.token.clone());
+        }
 
         let cancel = Arc::new(Notify::new());
         let cancel_for_task = cancel.clone();
@@ -212,23 +232,38 @@ impl AgentProvider for CursorProvider {
 
         let handle = tokio::spawn(async move {
             // Approval is sticky per server config but cheap to re-assert.
-            // The token env var must match the turn's — approval hashes the
-            // env-interpolated config.
             if let Some(wiring) = &mcp_wiring {
                 mcp::approve_workspace_servers(wiring, &cli_path, &working_dir).await;
             }
-            let mcp_token = mcp_wiring.as_ref().map(|w| w.token.as_str());
-            let completed = run_turn(TurnArgs {
-                cli_path: &cli_path,
-                args: &args,
-                working_dir: &working_dir,
-                model_label: &model_label,
-                session_id: &sid,
-                db: &db,
-                broadcaster: broadcaster.as_ref(),
-                cancel: cancel_for_task,
-                mcp_token,
-            })
+            let mut stream = CursorStream::default();
+            let result = turn::run_turn(
+                TurnSpec {
+                    provider: "cursor",
+                    cli_path: &cli_path,
+                    args: &args,
+                    env: &env,
+                    working_dir: &working_dir,
+                    model_label: &model_label,
+                    session_id: &sid,
+                    db: &db,
+                    broadcaster: broadcaster.as_ref(),
+                    timeout_secs: DEFAULT_TIMEOUT_SECS,
+                    cancel: cancel_for_task,
+                    // An unauthenticated cursor-agent exits non-zero rather
+                    // than printing an interactive prompt to stderr, so
+                    // there is nothing to watch for.
+                    stderr_markers: &[],
+                    spawn_hint: None,
+                    empty_exit_reason: "cursor-agent exited without output",
+                    // The stream's `system` init frame carries the model, so
+                    // the parser emits `Started` itself.
+                    started_up_front: false,
+                    // cursor-agent exits non-zero on some turns that in fact
+                    // streamed a complete answer.
+                    success_on_output: true,
+                },
+                &mut stream,
+            )
             .await;
 
             runs.lock().await.remove(&sid);
@@ -236,8 +271,8 @@ impl AgentProvider for CursorProvider {
             let _ = completion_tx
                 .send(ProcessCompletion {
                     session_id: sid,
-                    completed,
-                    error: None,
+                    completed: result.completed,
+                    error: result.error,
                 })
                 .await;
         });
@@ -308,252 +343,24 @@ impl AgentProvider for CursorProvider {
     }
 }
 
-/// Arguments for a single `cursor-agent` turn.
-struct TurnArgs<'a> {
-    cli_path: &'a str,
-    args: &'a [String],
-    working_dir: &'a str,
-    model_label: &'a str,
-    session_id: &'a str,
-    db: &'a crate::db::Db,
-    broadcaster: &'a crate::ws::broadcaster::Broadcaster,
-    cancel: Arc<Notify>,
-    /// Per-session MCP bearer token, exported as [`mcp::TOKEN_ENV_VAR`].
-    mcp_token: Option<&'a str>,
-}
+/// Adapts the `cursor-agent` stream-json parser to the shared turn harness.
+#[derive(Default)]
+struct CursorStream(parser::TurnState);
 
-/// Spawn `cursor-agent` for one turn, stream its stdout into provider
-/// events, and emit a terminal `Completed` / `Crashed`. Returns `true` on a
-/// clean completion, `false` on cancel / spawn or runtime error.
-async fn run_turn(args: TurnArgs<'_>) -> bool {
-    let TurnArgs {
-        cli_path,
-        args: cli_args,
-        working_dir,
-        model_label,
-        session_id,
-        db,
-        broadcaster,
-        cancel,
-        mcp_token,
-    } = args;
-
-    tracing::info!(
-        session_id = %session_id,
-        "Spawning cursor-agent: {} {}",
-        cli_path,
-        cli_args.join(" ")
-    );
-
-    let mut cmd = Command::new(cli_path);
-    cmd.args(cli_args)
-        .current_dir(working_dir)
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .kill_on_drop(true);
-    if let Some(token) = mcp_token {
-        cmd.env(mcp::TOKEN_ENV_VAR, token);
+impl TurnStream for CursorStream {
+    fn on_line(&mut self, json: &serde_json::Value) -> Vec<ProviderEvent> {
+        parser::parse_stream_json(json, &mut self.0)
     }
 
-    let mut child = match cmd.spawn() {
-        Ok(c) => c,
-        Err(e) => {
-            // Surface a Started→Crashed pair so the UI shows the failure
-            // rather than a silent no-op.
-            emit_started(db, broadcaster, session_id, model_label).await;
-            crash(
-                db,
-                broadcaster,
-                session_id,
-                &format!("failed to spawn '{cli_path}': {e}"),
-                None,
-            )
-            .await;
-            return false;
-        }
-    };
-
-    let stdout = child.stdout.take().expect("stdout piped");
-    let stderr = child.stderr.take();
-    // Drain stderr concurrently into a bounded buffer for crash reporting.
-    let stderr_task = stderr.map(|mut s| {
-        tokio::spawn(async move {
-            let mut buf = Vec::new();
-            let mut chunk = [0u8; 4096];
-            while let Ok(n) = s.read(&mut chunk).await {
-                if n == 0 {
-                    break;
-                }
-                if buf.len() < MAX_STDERR_BYTES {
-                    buf.extend_from_slice(&chunk[..n.min(MAX_STDERR_BYTES - buf.len())]);
-                }
-            }
-            String::from_utf8_lossy(&buf).trim().to_string()
-        })
-    });
-
-    // Per-turn parser state: chat id, model, Started guard, terminal-tool
-    // denials, and the delta/snapshot text dedup (see `parser::TurnState`).
-    let mut turn = parser::TurnState::default();
-    let mut saw_any = false;
-
-    let mut lines = BufReader::new(stdout).lines();
-
-    let outcome = loop {
-        tokio::select! {
-            _ = cancel.notified() => {
-                let _ = child.start_kill();
-                break TurnOutcome::Cancelled;
-            }
-            line = lines.next_line() => {
-                match line {
-                    Ok(Some(line)) => {
-                        let trimmed = line.trim();
-                        if trimmed.is_empty() {
-                            continue;
-                        }
-                        let Ok(json) = serde_json::from_str::<serde_json::Value>(trimmed) else {
-                            // Non-JSON noise on stdout — log and skip.
-                            tracing::debug!(session_id = %session_id, "cursor: non-JSON stdout line ignored");
-                            continue;
-                        };
-                        let events = parser::parse_stream_json(&json, &mut turn);
-                        for event in events {
-                            saw_any = true;
-                            emit_event(db, broadcaster, session_id, event).await;
-                        }
-                    }
-                    Ok(None) => break TurnOutcome::Eof,
-                    Err(e) => {
-                        tracing::warn!(session_id = %session_id, "cursor: stdout read error: {e}");
-                        let _ = child.start_kill();
-                        break TurnOutcome::ReadError(e.to_string());
-                    }
-                }
-            }
-        }
-    };
-
-    // Let the child fully exit and collect its status + stderr.
-    let status = child.wait().await.ok();
-    let stderr_text = match stderr_task {
-        Some(t) => t.await.unwrap_or_default(),
-        None => String::new(),
-    };
-
-    match outcome {
-        TurnOutcome::Eof => {
-            let ok = status.map(|s| s.success()).unwrap_or(false);
-            if ok || saw_any {
-                if !turn.emitted_start {
-                    emit_started(db, broadcaster, session_id, model_label).await;
-                }
-                emit_event(
-                    db,
-                    broadcaster,
-                    session_id,
-                    ProviderEvent::Completed {
-                        conversation_id: turn.conversation_id.take(),
-                    },
-                )
-                .await;
-                true
-            } else {
-                if !turn.emitted_start {
-                    emit_started(db, broadcaster, session_id, model_label).await;
-                }
-                let reason = if stderr_text.is_empty() {
-                    "cursor-agent exited without output".to_string()
-                } else {
-                    stderr_text.clone()
-                };
-                crash(db, broadcaster, session_id, &reason, exit_code(status)).await;
-                false
-            }
-        }
-        TurnOutcome::Cancelled => {
-            // The interrupt route appends its own `interrupt` event; emit a
-            // Completed so any in-flight tool spinner closes and the
-            // orchestrator sees a clean end.
-            if !turn.emitted_start {
-                emit_started(db, broadcaster, session_id, model_label).await;
-            }
-            emit_event(
-                db,
-                broadcaster,
-                session_id,
-                ProviderEvent::Completed {
-                    conversation_id: turn.conversation_id.take(),
-                },
-            )
-            .await;
-            false
-        }
-        TurnOutcome::ReadError(e) => {
-            if !turn.emitted_start {
-                emit_started(db, broadcaster, session_id, model_label).await;
-            }
-            crash(
-                db,
-                broadcaster,
-                session_id,
-                &format!("stdout read error: {e}"),
-                None,
-            )
-            .await;
-            false
-        }
+    fn take_conversation_id(&mut self) -> Option<String> {
+        self.0.conversation_id.take()
     }
-}
 
-enum TurnOutcome {
-    Eof,
-    Cancelled,
-    ReadError(String),
-}
-
-fn exit_code(status: Option<std::process::ExitStatus>) -> Option<i32> {
-    status.and_then(|s| s.code())
-}
-
-async fn emit_started(
-    db: &crate::db::Db,
-    broadcaster: &crate::ws::broadcaster::Broadcaster,
-    session_id: &str,
-    model_label: &str,
-) {
-    emit_event(
-        db,
-        broadcaster,
-        session_id,
-        ProviderEvent::Started {
-            model: model_label.to_string(),
-            conversation_id: None,
-            metadata: serde_json::json!({ "provider": "cursor" }),
-        },
-    )
-    .await;
-}
-
-async fn crash(
-    db: &crate::db::Db,
-    broadcaster: &crate::ws::broadcaster::Broadcaster,
-    session_id: &str,
-    reason: &str,
-    exit_code: Option<i32>,
-) {
-    emit_event(
-        db,
-        broadcaster,
-        session_id,
-        ProviderEvent::Crashed {
-            reason: reason.to_string(),
-            exit_code,
-            stderr: None,
-        },
-    )
-    .await;
+    /// The CLI's `system` init frame gives the parser everything it needs to
+    /// emit `Started` on its own.
+    fn emitted_start(&self) -> bool {
+        self.0.emitted_start
+    }
 }
 
 /// Build the `cursor-agent` argument vector for one turn.
@@ -666,11 +473,23 @@ fn resolve_model(raw: &str) -> Option<String> {
     }
 }
 
+/// Cursor encodes thinking in the model id itself (e.g.
+/// `claude-opus-4-8-thinking-high`), so the catalog builder is where that
+/// naming convention becomes an explicit `reasoning` capability tag —
+/// `ModelInfo::is_thinking` reads tags only and no longer sniffs ids.
+fn model_capabilities(id: &str) -> Vec<String> {
+    let mut capabilities = vec!["code".to_string()];
+    if id.to_ascii_lowercase().contains("thinking") {
+        capabilities.push("reasoning".to_string());
+    }
+    capabilities
+}
+
 fn model_info(name: String) -> ModelInfo {
     ModelInfo {
         display_name: format!("{name} (Cursor)"),
+        capabilities: model_capabilities(&name),
         id: name,
-        capabilities: vec!["code".into()],
         tier: 0,
     }
 }
@@ -702,7 +521,7 @@ pub fn default_models() -> Vec<ModelInfo> {
     .map(|(id, name)| ModelInfo {
         id: id.into(),
         display_name: name.into(),
-        capabilities: vec!["code".into()],
+        capabilities: model_capabilities(id),
         tier: 0,
     })
     .collect()
@@ -710,37 +529,7 @@ pub fn default_models() -> Vec<ModelInfo> {
 
 /// Append `extras` to `base`, skipping ids already present (preserving order).
 fn merge_additional_models(base: Vec<ModelInfo>, extras: Vec<String>) -> Vec<ModelInfo> {
-    let mut seen: std::collections::HashSet<String> = base.iter().map(|m| m.id.clone()).collect();
-    let mut models = base;
-    for name in extras {
-        if seen.insert(name.clone()) {
-            models.push(model_info(name));
-        }
-    }
-    models
-}
-
-fn setting_str(settings: &HashMap<String, serde_json::Value>, key: &str) -> Option<String> {
-    settings
-        .get(key)
-        .and_then(|v| v.as_str())
-        .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty())
-}
-
-fn setting_bool(settings: &HashMap<String, serde_json::Value>, key: &str) -> Option<bool> {
-    settings.get(key).and_then(|v| v.as_bool())
-}
-
-fn setting_str_list(settings: &HashMap<String, serde_json::Value>, key: &str) -> Vec<String> {
-    let Some(arr) = settings.get(key).and_then(|v| v.as_array()) else {
-        return Vec::new();
-    };
-    arr.iter()
-        .filter_map(|v| v.as_str())
-        .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty())
-        .collect()
+    turn::merge_additional_models(base, extras, model_info)
 }
 
 #[cfg(test)]
@@ -814,6 +603,21 @@ mod tests {
         // "auto" already seeded → not duplicated.
         assert_eq!(ids.iter().filter(|id| **id == "auto").count(), 1);
         assert_eq!(ids.iter().filter(|id| **id == "my-custom").count(), 1);
+    }
+
+    #[test]
+    fn thinking_ids_get_reasoning_capability_tag() {
+        let m = model_info("claude-opus-4-8-thinking-high".into());
+        assert!(m.is_thinking(), "thinking id must be tagged reasoning");
+        let plain = model_info("gpt-5.3-codex".into());
+        assert!(!plain.is_thinking());
+        // The seed catalog carries the tags too.
+        let seeds = default_models();
+        let tagged = seeds
+            .iter()
+            .find(|m| m.id == "claude-4.5-sonnet-thinking")
+            .expect("seed present");
+        assert!(tagged.is_thinking());
     }
 
     #[test]

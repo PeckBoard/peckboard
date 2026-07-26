@@ -52,66 +52,51 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
-use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::Command;
 use tokio::sync::{Mutex, Notify};
 use tokio::task::JoinHandle;
 
 use crate::plugin::settings::PluginSettingsStore;
-use crate::provider::agent::{AgentProvider, ProcessCompletion, SendMessageContext, emit_event};
+use crate::provider::agent::{AgentProvider, ProcessCompletion, SendMessageContext};
 use crate::provider::registry::split_model_account;
 use crate::provider::stream::{ModelInfo, ProviderEvent};
+use crate::provider::turn::{
+    self, StderrMarker, TurnSpec, TurnStream, setting_bool, setting_str, setting_str_list,
+};
 
 /// Default per-turn timeout. Kimi turns can take several tool steps, so this
 /// is generous; an unauthenticated host fails in seconds instead.
-const DEFAULT_TIMEOUT_SECS: u64 = 600;
+const DEFAULT_TIMEOUT_SECS: u64 = turn::DEFAULT_TIMEOUT_SECS;
 /// Default CLI binary name; overridable via the `cli_path` setting.
 const DEFAULT_CLI: &str = "kimi";
 
-/// Resolve the `kimi` executable to spawn. A configured path containing a
-/// `/` is used verbatim. A bare name is kept when it resolves on the
-/// server's PATH; otherwise fall back to the official installer location
-/// (`~/.kimi-code/bin/kimi`) when that exists. This matters because the
-/// PeckBoard server often runs with a service PATH that predates the CLI
-/// install (the installer only extends `~/.bashrc`).
-pub(crate) fn resolve_cli_path(configured: &str) -> String {
-    let path_var = std::env::var("PATH").unwrap_or_default();
-    let home = std::env::var("HOME").ok();
-    resolve_cli_path_with(configured, &path_var, home.as_deref())
-}
+/// Where to look for `kimi` when it isn't on the server's PATH: the official
+/// installer's location. This matters because the PeckBoard server often runs
+/// with a service PATH that predates the CLI install (the installer only
+/// extends `~/.bashrc`).
+const CLI_FALLBACK_DIRS: &[&str] = &["~/.kimi-code/bin"];
 
-fn resolve_cli_path_with(configured: &str, path_var: &str, home: Option<&str>) -> String {
-    if configured.contains('/') {
-        return configured.to_string();
-    }
-    let on_path = std::env::split_paths(path_var).any(|dir| {
-        let candidate = dir.join(configured);
-        candidate.is_file()
-    });
-    if on_path {
-        return configured.to_string();
-    }
-    if let Some(home) = home {
-        let fallback = std::path::Path::new(home)
-            .join(".kimi-code")
-            .join("bin")
-            .join(configured);
-        if fallback.is_file() {
-            return fallback.to_string_lossy().to_string();
-        }
-    }
-    configured.to_string()
+/// Resolve the `kimi` executable to spawn. Shared with the `/api/kimi-accounts`
+/// login route, which spawns `<cli_path> login`.
+pub(crate) fn resolve_cli_path(configured: &str) -> String {
+    turn::resolve_cli_path(configured, CLI_FALLBACK_DIRS)
 }
-/// Cap on stderr bytes captured for a crash message.
-const MAX_STDERR_BYTES: usize = 16 * 1024;
 /// How long a model-discovery probe (success or failure) is cached, so the
 /// picker doesn't shell out on every render.
 const MODEL_DISCOVERY_TTL: Duration = Duration::from_secs(60);
 /// Bound on how long the discovery subprocess may run.
 const MODEL_DISCOVERY_TIMEOUT_SECS: u64 = 10;
-/// Substring of the error kimi prints when no model/credential is configured
-/// ("No model configured. Run `kimi` and use /login to sign in, ...").
-const AUTH_NEEDED_MARKER: &str = "No model configured";
+/// kimi prints this when no model/credential is configured ("No model
+/// configured. Run `kimi` and use /login to sign in, ..."). Unlike grok it
+/// exits straight away rather than waiting on a device prompt, so the marker
+/// only rewrites the crash reason — there is nothing to abort early.
+const STDERR_MARKERS: &[StderrMarker] = &[StderrMarker {
+    marker: "No model configured",
+    message: "Kimi Code isn't signed in on this host. Run `kimi login` (or add a \
+              provider to ~/.kimi-code/config.toml / set an API key in the plugin \
+              settings), then try again.",
+    abort: false,
+}];
 
 /// Per-session tracking for an in-flight `kimi` turn.
 struct KimiRun {
@@ -355,11 +340,16 @@ impl AgentProvider for KimiProvider {
         }
 
         if !message.attachments.is_empty() {
-            tracing::warn!(
-                session_id = %session_id,
-                "kimi: dropping {} attachment(s) — the kimi provider is text-only for now",
-                message.attachments.len()
-            );
+            // `kimi --help` carries no image/attachment flag, so say so in
+            // the transcript rather than silently answering the text alone.
+            turn::notify_attachments_dropped(
+                &db,
+                &broadcaster,
+                &session_id,
+                "kimi",
+                message.attachments.len(),
+            )
+            .await;
         }
         // Wire the peckboard MCP server (and any user-defined servers) into
         // the workspace `.kimi-code/mcp.json` — Kimi Code loads it at session
@@ -387,18 +377,10 @@ impl AgentProvider for KimiProvider {
             env.insert(mcp::TOKEN_ENV_VAR.into(), wiring.token.clone());
         }
 
-        // No system-prompt flag: the shared working-style rules (plus any
-        // per-session override) ride the first turn's prompt, Cursor-style.
-        let mut system_prompt = crate::provider::WORKING_STYLE.to_string();
-        if let Some(custom) = config
-            .system_prompt_override
-            .as_deref()
-            .map(str::trim)
-            .filter(|s| !s.is_empty())
-        {
-            system_prompt.push('\n');
-            system_prompt.push_str(custom);
-        }
+        // No system-prompt flag: the composed prompt (shared working-style
+        // rules, then any per-spawn suffix, then any per-session override)
+        // rides the first turn's text, Cursor-style.
+        let system_prompt = turn::compose_system_prompt(&config);
 
         let args = build_cli_args(
             model.as_deref(),
@@ -415,18 +397,34 @@ impl AgentProvider for KimiProvider {
         let working_dir = config.working_dir.clone();
 
         let handle = tokio::spawn(async move {
-            let completed = run_turn(TurnArgs {
-                cli_path: &cli_path,
-                args: &args,
-                env: &env,
-                working_dir: &working_dir,
-                model_label: &model_label,
-                session_id: &sid,
-                db: &db,
-                broadcaster: broadcaster.as_ref(),
-                timeout_secs: DEFAULT_TIMEOUT_SECS,
-                cancel: cancel_for_task,
-            })
+            let mut stream = KimiStream::default();
+            let result = turn::run_turn(
+                TurnSpec {
+                    provider: "kimi",
+                    cli_path: &cli_path,
+                    args: &args,
+                    env: &env,
+                    working_dir: &working_dir,
+                    model_label: &model_label,
+                    session_id: &sid,
+                    db: &db,
+                    broadcaster: broadcaster.as_ref(),
+                    timeout_secs: DEFAULT_TIMEOUT_SECS,
+                    cancel: cancel_for_task,
+                    stderr_markers: STDERR_MARKERS,
+                    spawn_hint: Some(
+                        "Install Kimi Code with `curl -fsSL \
+                         https://code.kimi.com/kimi-code/install.sh | bash` or point \
+                         the plugin's CLI Path setting at the binary.",
+                    ),
+                    empty_exit_reason: "kimi exited without a successful result",
+                    // kimi's stream has no init frame to derive a Started
+                    // from (system.version carries no model).
+                    started_up_front: true,
+                    success_on_output: false,
+                },
+                &mut stream,
+            )
             .await;
 
             runs.lock().await.remove(&sid);
@@ -434,8 +432,8 @@ impl AgentProvider for KimiProvider {
             let _ = completion_tx
                 .send(ProcessCompletion {
                     session_id: sid,
-                    completed,
-                    error: None,
+                    completed: result.completed,
+                    error: result.error,
                 })
                 .await;
         });
@@ -506,264 +504,20 @@ impl AgentProvider for KimiProvider {
     }
 }
 
-/// Arguments for a single `kimi` turn.
-struct TurnArgs<'a> {
-    cli_path: &'a str,
-    args: &'a [String],
-    env: &'a HashMap<String, String>,
-    working_dir: &'a str,
-    model_label: &'a str,
-    session_id: &'a str,
-    db: &'a crate::db::Db,
-    broadcaster: &'a crate::ws::broadcaster::Broadcaster,
-    timeout_secs: u64,
-    cancel: Arc<Notify>,
+/// Adapts the kimi prompt-mode stream-json parser to the shared turn harness.
+#[derive(Default)]
+struct KimiStream {
+    conversation_id: Option<String>,
 }
 
-/// Spawn `kimi` for one turn, stream its stdout into provider events, and
-/// emit a terminal `Completed` / `Crashed`. Returns `true` on a clean
-/// completion, `false` otherwise.
-async fn run_turn(args: TurnArgs<'_>) -> bool {
-    let TurnArgs {
-        cli_path,
-        args: cli_args,
-        env,
-        working_dir,
-        model_label,
-        session_id,
-        db,
-        broadcaster,
-        timeout_secs,
-        cancel,
-    } = args;
-
-    tracing::info!(
-        session_id = %session_id,
-        "Spawning kimi: {} {}",
-        cli_path,
-        cli_args.join(" ")
-    );
-
-    let mut cmd = Command::new(cli_path);
-    cmd.args(cli_args)
-        .current_dir(working_dir)
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .kill_on_drop(true);
-    for (key, value) in env {
-        cmd.env(key, value);
+impl TurnStream for KimiStream {
+    fn on_line(&mut self, json: &serde_json::Value) -> Vec<ProviderEvent> {
+        parser::parse_stream_json(json, &mut self.conversation_id)
     }
 
-    let mut child = match cmd.spawn() {
-        Ok(c) => c,
-        Err(e) => {
-            emit_started(db, broadcaster, session_id, model_label).await;
-            crash(
-                db,
-                broadcaster,
-                session_id,
-                &format!(
-                    "failed to spawn '{cli_path}': {e}. Install Kimi Code with \
-                     `curl -fsSL https://code.kimi.com/kimi-code/install.sh | bash` \
-                     or point the plugin's CLI Path setting at the binary."
-                ),
-                None,
-            )
-            .await;
-            return false;
-        }
-    };
-
-    let stdout = child.stdout.take().expect("stdout piped");
-    let stderr = child.stderr.take();
-
-    // Drain stderr concurrently into a bounded buffer for crash reporting.
-    // Unlike grok, an unauthenticated kimi doesn't hang on a device prompt —
-    // it exits immediately with "No model configured" — so no auth watcher
-    // is needed here.
-    let stderr_task = stderr.map(|s| {
-        tokio::spawn(async move {
-            let mut buf = String::new();
-            let mut lines = BufReader::new(s).lines();
-            while let Ok(Some(line)) = lines.next_line().await {
-                if buf.len() < MAX_STDERR_BYTES {
-                    if !buf.is_empty() {
-                        buf.push('\n');
-                    }
-                    buf.push_str(&line);
-                }
-            }
-            buf.trim().to_string()
-        })
-    });
-
-    // Emit Started up front so the UI shows an agent-start; kimi's stream has
-    // no init frame to derive one from (system.version carries no model).
-    emit_started(db, broadcaster, session_id, model_label).await;
-
-    let mut conversation_id: Option<String> = None;
-
-    let mut lines = BufReader::new(stdout).lines();
-    let deadline = tokio::time::sleep(Duration::from_secs(timeout_secs));
-    tokio::pin!(deadline);
-
-    let outcome = loop {
-        tokio::select! {
-            _ = cancel.notified() => {
-                let _ = child.start_kill();
-                break TurnOutcome::Cancelled;
-            }
-            _ = &mut deadline => {
-                let _ = child.start_kill();
-                break TurnOutcome::Timeout;
-            }
-            line = lines.next_line() => {
-                match line {
-                    Ok(Some(line)) => {
-                        let trimmed = line.trim();
-                        if trimmed.is_empty() {
-                            continue;
-                        }
-                        let Ok(json) = serde_json::from_str::<serde_json::Value>(trimmed) else {
-                            tracing::debug!(session_id = %session_id, "kimi: non-JSON stdout line ignored");
-                            continue;
-                        };
-                        for event in parser::parse_stream_json(
-                            &json,
-                            &mut conversation_id,
-                        ) {
-                            emit_event(db, broadcaster, session_id, event).await;
-                        }
-                    }
-                    Ok(None) => break TurnOutcome::Eof,
-                    Err(e) => {
-                        let _ = child.start_kill();
-                        break TurnOutcome::ReadError(e.to_string());
-                    }
-                }
-            }
-        }
-    };
-
-    let status = child.wait().await.ok();
-    let stderr_text = match stderr_task {
-        Some(t) => t.await.unwrap_or_default(),
-        None => String::new(),
-    };
-
-    match outcome {
-        TurnOutcome::Eof => {
-            let ok = status.map(|s| s.success()).unwrap_or(false);
-            if ok {
-                emit_event(
-                    db,
-                    broadcaster,
-                    session_id,
-                    ProviderEvent::Completed { conversation_id },
-                )
-                .await;
-                true
-            } else {
-                let reason = if stderr_text.contains(AUTH_NEEDED_MARKER) {
-                    "Kimi Code isn't signed in on this host. Run `kimi login` (or add a \
-                     provider to ~/.kimi-code/config.toml / set an API key in the plugin \
-                     settings), then try again."
-                        .to_string()
-                } else if stderr_text.is_empty() {
-                    "kimi exited without a successful result".to_string()
-                } else {
-                    stderr_text
-                };
-                crash(db, broadcaster, session_id, &reason, exit_code(status)).await;
-                false
-            }
-        }
-        TurnOutcome::Cancelled => {
-            // The interrupt route appends its own `interrupt` event; emit a
-            // Completed so any in-flight tool spinner closes.
-            emit_event(
-                db,
-                broadcaster,
-                session_id,
-                ProviderEvent::Completed { conversation_id },
-            )
-            .await;
-            false
-        }
-        TurnOutcome::Timeout => {
-            crash(
-                db,
-                broadcaster,
-                session_id,
-                &format!("kimi turn exceeded {timeout_secs}s timeout"),
-                None,
-            )
-            .await;
-            false
-        }
-        TurnOutcome::ReadError(e) => {
-            crash(
-                db,
-                broadcaster,
-                session_id,
-                &format!("stdout read error: {e}"),
-                None,
-            )
-            .await;
-            false
-        }
+    fn take_conversation_id(&mut self) -> Option<String> {
+        self.conversation_id.take()
     }
-}
-
-enum TurnOutcome {
-    Eof,
-    Cancelled,
-    Timeout,
-    ReadError(String),
-}
-
-fn exit_code(status: Option<std::process::ExitStatus>) -> Option<i32> {
-    status.and_then(|s| s.code())
-}
-
-async fn emit_started(
-    db: &crate::db::Db,
-    broadcaster: &crate::ws::broadcaster::Broadcaster,
-    session_id: &str,
-    model: &str,
-) {
-    emit_event(
-        db,
-        broadcaster,
-        session_id,
-        ProviderEvent::Started {
-            model: model.to_string(),
-            conversation_id: None,
-            metadata: serde_json::json!({}),
-        },
-    )
-    .await;
-}
-
-async fn crash(
-    db: &crate::db::Db,
-    broadcaster: &crate::ws::broadcaster::Broadcaster,
-    session_id: &str,
-    reason: &str,
-    exit_code: Option<i32>,
-) {
-    emit_event(
-        db,
-        broadcaster,
-        session_id,
-        ProviderEvent::Crashed {
-            reason: reason.to_string(),
-            exit_code,
-            stderr: None,
-        },
-    )
-    .await;
 }
 
 /// Probe the CLI for its configured model aliases via
@@ -893,41 +647,13 @@ pub fn default_models() -> Vec<ModelInfo> {
 
 /// Append `extras` to `base`, skipping ids already present (preserving order).
 fn merge_additional_models(base: Vec<ModelInfo>, extras: Vec<String>) -> Vec<ModelInfo> {
-    let mut seen: std::collections::HashSet<String> = base.iter().map(|m| m.id.clone()).collect();
-    let mut models = base;
-    for name in extras {
-        if seen.insert(name.clone()) {
-            models.push(model_info(parser::CliModel {
-                id: name,
-                display_name: None,
-                capabilities: vec!["code".into()],
-            }));
-        }
-    }
-    models
-}
-
-fn setting_str(settings: &HashMap<String, serde_json::Value>, key: &str) -> Option<String> {
-    settings
-        .get(key)
-        .and_then(|v| v.as_str())
-        .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty())
-}
-
-fn setting_bool(settings: &HashMap<String, serde_json::Value>, key: &str) -> Option<bool> {
-    settings.get(key).and_then(|v| v.as_bool())
-}
-
-fn setting_str_list(settings: &HashMap<String, serde_json::Value>, key: &str) -> Vec<String> {
-    let Some(arr) = settings.get(key).and_then(|v| v.as_array()) else {
-        return Vec::new();
-    };
-    arr.iter()
-        .filter_map(|v| v.as_str())
-        .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty())
-        .collect()
+    turn::merge_additional_models(base, extras, |name| {
+        model_info(parser::CliModel {
+            id: name,
+            display_name: None,
+            capabilities: vec!["code".into()],
+        })
+    })
 }
 
 #[cfg(test)]
@@ -1004,35 +730,36 @@ mod tests {
     }
 
     #[test]
-    fn resolve_cli_path_prefers_path_then_installer_fallback() {
-        let tmp = std::env::temp_dir().join(format!("kimi-cli-res-{}", std::process::id()));
-        let path_dir = tmp.join("onpath");
-        let home = tmp.join("home");
+    fn cli_path_falls_back_to_the_installer_location() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path_dir = tmp.path().join("onpath");
+        let home = tmp.path().join("home");
         let installer_bin = home.join(".kimi-code").join("bin");
         std::fs::create_dir_all(&path_dir).unwrap();
         std::fs::create_dir_all(&installer_bin).unwrap();
         let path_var = path_dir.to_str().unwrap().to_string();
         let home_str = home.to_str();
+        let resolve = |configured: &str, path_var: &str| {
+            turn::resolve_cli_path_in(configured, path_var, home_str, CLI_FALLBACK_DIRS)
+        };
 
         // A path with a slash passes through untouched.
-        assert_eq!(resolve_cli_path_with("/opt/kimi", "", None), "/opt/kimi");
+        assert_eq!(resolve("/opt/kimi", ""), "/opt/kimi");
 
         // Bare name, not on PATH, no installer file → unchanged (spawn will
         // surface the original error).
-        assert_eq!(resolve_cli_path_with("kimi", &path_var, home_str), "kimi");
+        assert_eq!(resolve("kimi", &path_var), "kimi");
 
         // Installer fallback exists → absolute fallback wins.
         std::fs::write(installer_bin.join("kimi"), b"#!").unwrap();
         assert_eq!(
-            resolve_cli_path_with("kimi", &path_var, home_str),
+            resolve("kimi", &path_var),
             installer_bin.join("kimi").to_string_lossy()
         );
 
         // On PATH → bare name kept even with the fallback present.
         std::fs::write(path_dir.join("kimi"), b"#!").unwrap();
-        assert_eq!(resolve_cli_path_with("kimi", &path_var, home_str), "kimi");
-
-        std::fs::remove_dir_all(&tmp).ok();
+        assert_eq!(resolve("kimi", &path_var), "kimi");
     }
     #[test]
     fn default_models_are_prefix_free() {

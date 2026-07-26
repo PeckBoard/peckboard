@@ -83,8 +83,9 @@ pub(super) fn parse_stream_json(
             }
         }
 
-        // A tool finished, carrying its stringified output. The writer has no
-        // error channel — failures arrive as ordinary content text.
+        // A tool finished, carrying its stringified output. Failures used to
+        // render as successes here (`error: None`, always), so a tool that
+        // blew up looked in the chat exactly like one that worked.
         "tool" => {
             let tool_use_id = tool_id(json);
             let output = json
@@ -92,10 +93,11 @@ pub(super) fn parse_stream_json(
                 .and_then(|v| v.as_str())
                 .map(str::to_string)
                 .filter(|s| !s.is_empty());
+            let (output, error) = split_tool_result(json, output);
             events.push(ProviderEvent::ToolEnd {
                 tool_use_id,
                 output,
-                error: None,
+                error,
                 images: Vec::new(),
             });
         }
@@ -142,6 +144,71 @@ fn tool_arguments(function: Option<&serde_json::Value>) -> serde_json::Value {
         return serde_json::Value::Null;
     }
     serde_json::from_str(raw).unwrap_or(serde_json::Value::String(raw.to_string()))
+}
+
+/// Classify a `tool` frame's result as output or error.
+///
+/// kimi-code 0.27.0's prompt-mode writer has no error channel on the frame:
+/// a failed tool's message arrives as ordinary content, so every failure
+/// rendered as a successful tool row. Explicit flags are honoured first
+/// (should the writer grow them — and matching what the grok and cursor
+/// parsers already do); the textual fallback is anchored at the START of
+/// the content and limited to a short marker list, so a result that merely
+/// *mentions* an error further down stays output.
+fn split_tool_result(
+    json: &serde_json::Value,
+    content: Option<String>,
+) -> (Option<String>, Option<String>) {
+    if let Some(explicit) = json
+        .get("error")
+        .and_then(|v| v.as_str())
+        .map(str::to_string)
+        .filter(|s| !s.is_empty())
+    {
+        return (None, Some(explicit));
+    }
+    let is_error = flagged_error(json)
+        .unwrap_or_else(|| content.as_deref().is_some_and(looks_like_tool_error));
+    if is_error {
+        (None, content)
+    } else {
+        (content, None)
+    }
+}
+
+/// Markers a failed kimi tool result opens with. Matched case-insensitively
+/// against the trimmed start of the content only.
+const TOOL_ERROR_PREFIXES: &[&str] = &[
+    "error:",
+    "error -",
+    "tool error",
+    "tool execution failed",
+    "failed to ",
+    "exception:",
+];
+
+fn looks_like_tool_error(content: &str) -> bool {
+    let head: String = content
+        .trim_start()
+        .chars()
+        .take(64)
+        .collect::<String>()
+        .to_ascii_lowercase();
+    TOOL_ERROR_PREFIXES.iter().any(|p| head.starts_with(p))
+}
+
+/// An explicit failure flag on a `tool` frame, under any of the names the
+/// OpenAI-shaped writers use. `None` when the frame carries no flag at all,
+/// which is today's kimi and sends the caller to the textual fallback.
+fn flagged_error(json: &serde_json::Value) -> Option<bool> {
+    json.get("isError")
+        .or_else(|| json.get("is_error"))
+        .and_then(|v| v.as_bool())
+        .or_else(|| {
+            json.get("status")
+                .and_then(|v| v.as_str())
+                .map(|s| s.eq_ignore_ascii_case("error"))
+        })
 }
 
 /// Pull the session id out of a `session.resume_hint` meta frame (tolerating
@@ -312,6 +379,102 @@ mod tests {
                 assert_eq!(tool_use_id, "tc_1");
                 assert_eq!(output.as_deref(), Some("42 lines"));
                 assert!(error.is_none());
+            }
+            other => panic!("expected one ToolEnd, got {other:?}"),
+        }
+    }
+    /// A failed tool used to arrive as `error: None` with the failure text
+    /// in `output`, so the chat rendered it as a success.
+    #[test]
+    fn failed_tool_result_becomes_a_tool_error() {
+        let mut conv = None;
+        for content in [
+            "Error: ENOENT: no such file or directory",
+            "  error: command not found",
+            "Tool execution failed: timed out",
+            "Failed to read /etc/shadow: permission denied",
+        ] {
+            let events = parse(
+                serde_json::json!({"role": "tool", "tool_call_id": "tc_1", "content": content}),
+                &mut conv,
+            );
+            match &events[..] {
+                [ProviderEvent::ToolEnd { output, error, .. }] => {
+                    assert!(output.is_none(), "{content:?} should not read as output");
+                    assert_eq!(error.as_deref(), Some(content));
+                }
+                other => panic!("expected one ToolEnd, got {other:?}"),
+            }
+        }
+    }
+
+    /// The textual fallback is anchored at the start, so a successful result
+    /// that merely mentions an error stays output.
+    #[test]
+    fn error_mentioned_mid_output_is_still_output() {
+        let mut conv = None;
+        let content = "src/main.rs:12: return Err(Error::NotFound)";
+        let events = parse(
+            serde_json::json!({"role": "tool", "tool_call_id": "tc_1", "content": content}),
+            &mut conv,
+        );
+        match &events[..] {
+            [ProviderEvent::ToolEnd { output, error, .. }] => {
+                assert_eq!(output.as_deref(), Some(content));
+                assert!(error.is_none());
+            }
+            other => panic!("expected one ToolEnd, got {other:?}"),
+        }
+    }
+
+    /// An explicit flag wins over the heuristic in both directions.
+    #[test]
+    fn explicit_error_flags_win_over_the_text_heuristic() {
+        let mut conv = None;
+        let flagged = parse(
+            serde_json::json!({
+                "role": "tool", "tool_call_id": "tc_1",
+                "isError": true, "content": "42 lines"
+            }),
+            &mut conv,
+        );
+        match &flagged[..] {
+            [ProviderEvent::ToolEnd { output, error, .. }] => {
+                assert!(output.is_none());
+                assert_eq!(error.as_deref(), Some("42 lines"));
+            }
+            other => panic!("expected one ToolEnd, got {other:?}"),
+        }
+
+        let cleared = parse(
+            serde_json::json!({
+                "role": "tool", "tool_call_id": "tc_1",
+                "is_error": false, "content": "Error: this line is the file's content"
+            }),
+            &mut conv,
+        );
+        match &cleared[..] {
+            [ProviderEvent::ToolEnd { output, error, .. }] => {
+                assert!(error.is_none());
+                assert_eq!(
+                    output.as_deref(),
+                    Some("Error: this line is the file's content")
+                );
+            }
+            other => panic!("expected one ToolEnd, got {other:?}"),
+        }
+
+        let explicit = parse(
+            serde_json::json!({
+                "role": "tool", "tool_call_id": "tc_1",
+                "error": "boom", "content": "partial"
+            }),
+            &mut conv,
+        );
+        match &explicit[..] {
+            [ProviderEvent::ToolEnd { output, error, .. }] => {
+                assert!(output.is_none());
+                assert_eq!(error.as_deref(), Some("boom"));
             }
             other => panic!("expected one ToolEnd, got {other:?}"),
         }

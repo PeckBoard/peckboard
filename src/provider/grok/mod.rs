@@ -29,32 +29,43 @@ mod mcp;
 mod parser;
 
 use std::collections::HashMap;
-use std::process::Stdio;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
-use tokio::io::{AsyncBufReadExt, BufReader};
-use tokio::process::Command;
 use tokio::sync::{Mutex, Notify};
 use tokio::task::JoinHandle;
 
-use crate::provider::agent::{AgentProvider, ProcessCompletion, SendMessageContext, emit_event};
+use crate::plugin::settings::PluginSettingsStore;
+use crate::provider::agent::{AgentProvider, ProcessCompletion, SendMessageContext};
 use crate::provider::registry::split_model_account;
 use crate::provider::stream::{ModelInfo, ProviderEvent};
+use crate::provider::turn::{self, StderrMarker, TurnSpec, TurnStream, setting_str};
 
 /// Default per-turn timeout. Grok turns can take several tool steps, so this
 /// is generous. An unauthenticated account is caught far sooner (the device
 /// prompt on stderr fast-fails the turn), so this only bounds genuine work.
-const DEFAULT_TIMEOUT_SECS: u64 = 600;
-/// CLI binary name.
+const DEFAULT_TIMEOUT_SECS: u64 = turn::DEFAULT_TIMEOUT_SECS;
+/// Default CLI binary name; overridable via the `cli_path` setting.
 const DEFAULT_CLI: &str = "grok";
-/// Cap on stderr bytes captured for a crash message.
-const MAX_STDERR_BYTES: usize = 16 * 1024;
-/// Substring of the device-login URL grok prints to stderr when the account
-/// it's running as isn't signed in. Seeing it means the turn would otherwise
-/// block forever on "Waiting for authorization...", so we fast-fail.
-const DEVICE_LOGIN_MARKER: &str = "accounts.x.ai/oauth2/device";
+/// Where to look for `grok` when it isn't on the server's PATH. The PeckBoard
+/// service PATH often predates the CLI install, since installers only extend
+/// an interactive shell's rc file.
+const CLI_FALLBACK_DIRS: &[&str] = &[
+    "~/.local/bin",
+    "~/.npm-global/bin",
+    "~/.bun/bin",
+    "/usr/local/bin",
+];
+/// Grok prints its device-login URL to stderr when the account it runs as
+/// isn't signed in. Seeing it means the turn would otherwise block forever on
+/// "Waiting for authorization...", so the harness fast-fails on it.
+const STDERR_MARKERS: &[StderrMarker] = &[StderrMarker {
+    marker: "accounts.x.ai/oauth2/device",
+    message: "This Grok account isn't signed in. Open Settings \u{2192} Grok accounts and \
+              complete the browser sign-in, then try again.",
+    abort: true,
+}];
 
 /// Per-session tracking for an in-flight `grok` turn.
 struct GrokRun {
@@ -70,6 +81,9 @@ pub struct GrokProvider {
     /// to inject. `None` in tests / no-DB registrations keeps the
     /// single-(Default-)account behaviour.
     db: Option<crate::db::Db>,
+    /// Plugin settings, for the `cli_path` override. `None` in tests /
+    /// no-plugin registrations, which then use the default binary name.
+    settings: Option<PluginSettingsStore>,
 }
 
 impl GrokProvider {
@@ -77,6 +91,7 @@ impl GrokProvider {
         GrokProvider {
             runs: Arc::new(Mutex::new(HashMap::new())),
             db: None,
+            settings: None,
         }
     }
 
@@ -84,6 +99,32 @@ impl GrokProvider {
     pub fn with_db(mut self, db: crate::db::Db) -> Self {
         self.db = Some(db);
         self
+    }
+
+    /// Attach the plugin settings store so the `cli_path` setting is honoured.
+    pub fn with_settings(mut self, settings: PluginSettingsStore) -> Self {
+        self.settings = Some(settings);
+        self
+    }
+
+    /// The `grok` executable to spawn: the plugin's `cli_path` setting when
+    /// one is configured, else the default name — either way resolved against
+    /// the server's PATH and the usual install locations.
+    async fn cli_path(&self) -> String {
+        let configured = match &self.settings {
+            Some(store) => match store.load().await {
+                Ok(s) => setting_str(&s, "cli_path"),
+                Err(e) => {
+                    tracing::warn!("grok: failed to load settings for cli_path: {e}");
+                    None
+                }
+            },
+            None => None,
+        };
+        turn::resolve_cli_path(
+            &configured.unwrap_or_else(|| DEFAULT_CLI.to_string()),
+            CLI_FALLBACK_DIRS,
+        )
     }
 
     /// Resolve `account_id` to its credential and add the env the spawned
@@ -173,8 +214,9 @@ impl AgentProvider for GrokProvider {
             config,
             conversation_id,
             completion_tx,
-            // grok runs its own tool loop; the plugin host (MCP tool
-            // execution) isn't wired in for v1.
+            // grok runs its own tool loop, so the WASM plugin tool host
+            // stays unwired; peckboard MCP tools reach it via the workspace
+            // `.mcp.json` + a per-spawn token env var (see `mcp`).
             plugins: _,
         } = ctx;
 
@@ -185,6 +227,8 @@ impl AgentProvider for GrokProvider {
                 old.cancel.notify_one();
             }
         }
+
+        let cli_path = self.cli_path().await;
 
         // Strip the `grok:` prefix, then peel off any `@<account_id>` suffix
         // and resolve it to the credential env. A model with no suffix is the
@@ -207,22 +251,45 @@ impl AgentProvider for GrokProvider {
         }
 
         if !message.attachments.is_empty() {
-            tracing::warn!(
-                session_id = %session_id,
-                "grok: dropping {} attachment(s) — the grok provider is text-only for now",
-                message.attachments.len()
-            );
+            // `grok --help` carries no image/attachment flag, so say so in
+            // the transcript rather than silently answering the text alone.
+            turn::notify_attachments_dropped(
+                &db,
+                &broadcaster,
+                &session_id,
+                "grok",
+                message.attachments.len(),
+            )
+            .await;
         }
-        // User-defined MCP servers (Settings → MCP Servers): the per-session
-        // worker-mcp file already carries the grok-applicable entries (merged
-        // at dispatch); mirror them into the workspace `.mcp.json`, which
-        // Grok Build loads as a compatibility source. Best-effort — the turn
-        // runs without extras on any failure.
-        if !config.working_dir.is_empty() {
-            if let Some(path) = config.mcp_config_path.as_deref() {
-                let extras = mcp::extra_servers_from_worker_config(path);
-                if let Err(e) = mcp::ensure_workspace_mcp_json(&config.working_dir, &extras) {
-                    tracing::warn!(session_id = %session_id, "grok: MCP wiring skipped: {e}");
+        // MCP wiring: mirror the peckboard server AND any user-defined
+        // servers (Settings → MCP Servers, already provider-filtered into the
+        // per-session worker-mcp file at dispatch) into the workspace
+        // `.mcp.json`, which Grok Build loads as a compatibility source. The
+        // bearer token stays out of the file — it rides an env var the file
+        // references. Best-effort: the turn runs without MCP on any failure.
+        if !config.working_dir.is_empty()
+            && let Some(path) = config.mcp_config_path.as_deref()
+        {
+            let wiring = mcp::parse_worker_mcp_config(path);
+            // A config without the peckboard entry still contributes its
+            // user-defined servers.
+            let extras = match &wiring {
+                Some(w) => w.extra_servers.clone(),
+                None => mcp::extra_servers_from_worker_config(path),
+            };
+            match mcp::ensure_workspace_mcp_json(
+                &config.working_dir,
+                wiring.as_ref().map(|w| w.url.as_str()),
+                &extras,
+            ) {
+                Ok(_) => {
+                    if let Some(w) = &wiring {
+                        env.insert(mcp::TOKEN_ENV_VAR.to_string(), w.token.clone());
+                    }
+                }
+                Err(e) => {
+                    tracing::warn!(session_id = %session_id, "grok: MCP wiring skipped: {e}")
                 }
             }
         }
@@ -232,7 +299,7 @@ impl AgentProvider for GrokProvider {
             &message.text,
             conversation_id.as_deref(),
             config.effort.as_deref(),
-            config.system_prompt_override.as_deref(),
+            &turn::compose_system_prompt(&config),
         );
 
         let cancel = Arc::new(Notify::new());
@@ -243,17 +310,33 @@ impl AgentProvider for GrokProvider {
         let working_dir = config.working_dir.clone();
 
         let handle = tokio::spawn(async move {
-            let completed = run_turn(TurnArgs {
-                args: &args,
-                env: &env,
-                working_dir: &working_dir,
-                model_label: &model_label,
-                session_id: &sid,
-                db: &db,
-                broadcaster: broadcaster.as_ref(),
-                timeout_secs: DEFAULT_TIMEOUT_SECS,
-                cancel: cancel_for_task,
-            })
+            let mut stream = GrokStream::default();
+            let result = turn::run_turn(
+                TurnSpec {
+                    provider: "grok",
+                    cli_path: &cli_path,
+                    args: &args,
+                    env: &env,
+                    working_dir: &working_dir,
+                    model_label: &model_label,
+                    session_id: &sid,
+                    db: &db,
+                    broadcaster: broadcaster.as_ref(),
+                    timeout_secs: DEFAULT_TIMEOUT_SECS,
+                    cancel: cancel_for_task,
+                    stderr_markers: STDERR_MARKERS,
+                    spawn_hint: Some(
+                        "Install the Grok CLI, or point the plugin's CLI Path setting \
+                         at the binary.",
+                    ),
+                    empty_exit_reason: "grok exited without a successful result",
+                    // grok's streaming-json has no init frame to derive a
+                    // Started from, so the harness emits one up front.
+                    started_up_front: true,
+                    success_on_output: false,
+                },
+                &mut stream,
+            )
             .await;
 
             runs.lock().await.remove(&sid);
@@ -261,8 +344,8 @@ impl AgentProvider for GrokProvider {
             let _ = completion_tx
                 .send(ProcessCompletion {
                     session_id: sid,
-                    completed,
-                    error: None,
+                    completed: result.completed,
+                    error: result.error,
                 })
                 .await;
         });
@@ -333,287 +416,31 @@ impl AgentProvider for GrokProvider {
     }
 }
 
-/// Arguments for a single `grok` turn.
-struct TurnArgs<'a> {
-    args: &'a [String],
-    env: &'a HashMap<String, String>,
-    working_dir: &'a str,
-    model_label: &'a str,
-    session_id: &'a str,
-    db: &'a crate::db::Db,
-    broadcaster: &'a crate::ws::broadcaster::Broadcaster,
-    timeout_secs: u64,
-    cancel: Arc<Notify>,
+/// Adapts the grok streaming-json parser to the shared turn harness.
+#[derive(Default)]
+struct GrokStream {
+    conversation_id: Option<String>,
+    error: Option<String>,
 }
 
-/// Spawn `grok` for one turn, stream its stdout into provider events, and emit
-/// a terminal `Completed` / `Crashed`. Returns `true` on a clean completion,
-/// `false` on cancel / timeout / auth-required / spawn or runtime error.
-async fn run_turn(args: TurnArgs<'_>) -> bool {
-    let TurnArgs {
-        args: cli_args,
-        env,
-        working_dir,
-        model_label,
-        session_id,
-        db,
-        broadcaster,
-        timeout_secs,
-        cancel,
-    } = args;
-
-    tracing::info!(
-        session_id = %session_id,
-        "Spawning grok: {} {}",
-        DEFAULT_CLI,
-        cli_args.join(" ")
-    );
-
-    let mut cmd = Command::new(DEFAULT_CLI);
-    cmd.args(cli_args)
-        .current_dir(working_dir)
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .kill_on_drop(true);
-    for (key, value) in env {
-        cmd.env(key, value);
+impl TurnStream for GrokStream {
+    fn on_line(&mut self, json: &serde_json::Value) -> Vec<ProviderEvent> {
+        if let Some(reason) = parser::error_reason(json) {
+            // grok still emits an `end` frame after an error, so remember the
+            // last one and let the stream finish naturally.
+            self.error = Some(reason);
+            return Vec::new();
+        }
+        parser::parse_stream_json(json, &mut self.conversation_id)
     }
 
-    let mut child = match cmd.spawn() {
-        Ok(c) => c,
-        Err(e) => {
-            emit_started(db, broadcaster, session_id, model_label).await;
-            crash(
-                db,
-                broadcaster,
-                session_id,
-                &format!("failed to spawn '{DEFAULT_CLI}': {e}"),
-                None,
-            )
-            .await;
-            return false;
-        }
-    };
-
-    let stdout = child.stdout.take().expect("stdout piped");
-    let stderr = child.stderr.take();
-
-    // Drain stderr concurrently: accumulate a bounded buffer for crash
-    // reporting AND fire `auth_needed` if grok prints its device-login prompt
-    // (which means the account isn't signed in and the turn would otherwise
-    // hang on "Waiting for authorization...").
-    let auth_needed = Arc::new(Notify::new());
-    let auth_needed_setter = auth_needed.clone();
-    let stderr_task = stderr.map(|s| {
-        tokio::spawn(async move {
-            let mut buf = String::new();
-            let mut saw_auth = false;
-            let mut lines = BufReader::new(s).lines();
-            while let Ok(Some(line)) = lines.next_line().await {
-                if !saw_auth && line.contains(DEVICE_LOGIN_MARKER) {
-                    saw_auth = true;
-                    auth_needed_setter.notify_one();
-                }
-                if buf.len() < MAX_STDERR_BYTES {
-                    if !buf.is_empty() {
-                        buf.push('\n');
-                    }
-                    buf.push_str(&line);
-                }
-            }
-            (buf.trim().to_string(), saw_auth)
-        })
-    });
-
-    // Emit Started up front so the UI shows an agent-start; grok streaming
-    // has no init frame to derive one from.
-    emit_started(db, broadcaster, session_id, model_label).await;
-
-    let mut conversation_id: Option<String> = None;
-    let mut error_reason: Option<String> = None;
-
-    let mut lines = BufReader::new(stdout).lines();
-    let deadline = tokio::time::sleep(Duration::from_secs(timeout_secs));
-    tokio::pin!(deadline);
-
-    let outcome = loop {
-        tokio::select! {
-            _ = cancel.notified() => {
-                let _ = child.start_kill();
-                break TurnOutcome::Cancelled;
-            }
-            _ = auth_needed.notified() => {
-                let _ = child.start_kill();
-                break TurnOutcome::AuthRequired;
-            }
-            _ = &mut deadline => {
-                let _ = child.start_kill();
-                break TurnOutcome::Timeout;
-            }
-            line = lines.next_line() => {
-                match line {
-                    Ok(Some(line)) => {
-                        let trimmed = line.trim();
-                        if trimmed.is_empty() {
-                            continue;
-                        }
-                        let Ok(json) = serde_json::from_str::<serde_json::Value>(trimmed) else {
-                            tracing::debug!(session_id = %session_id, "grok: non-JSON stdout line ignored");
-                            continue;
-                        };
-                        if let Some(reason) = parser::error_reason(&json) {
-                            // Remember the last error; grok still emits an
-                            // `end` frame, so let the stream finish naturally.
-                            error_reason = Some(reason);
-                            continue;
-                        }
-                        for event in parser::parse_stream_json(
-                            &json,
-                            &mut conversation_id,
-                        ) {
-                            emit_event(db, broadcaster, session_id, event).await;
-                        }
-                    }
-                    Ok(None) => break TurnOutcome::Eof,
-                    Err(e) => {
-                        let _ = child.start_kill();
-                        break TurnOutcome::ReadError(e.to_string());
-                    }
-                }
-            }
-        }
-    };
-
-    let status = child.wait().await.ok();
-    let (stderr_text, _saw_auth) = match stderr_task {
-        Some(t) => t.await.unwrap_or_default(),
-        None => (String::new(), false),
-    };
-
-    match outcome {
-        TurnOutcome::Eof => {
-            let ok = status.map(|s| s.success()).unwrap_or(false);
-            if let Some(reason) = error_reason {
-                crash(db, broadcaster, session_id, &reason, exit_code(status)).await;
-                false
-            } else if ok {
-                emit_event(
-                    db,
-                    broadcaster,
-                    session_id,
-                    ProviderEvent::Completed { conversation_id },
-                )
-                .await;
-                true
-            } else {
-                let reason = if stderr_text.is_empty() {
-                    "grok exited without a successful result".to_string()
-                } else {
-                    stderr_text
-                };
-                crash(db, broadcaster, session_id, &reason, exit_code(status)).await;
-                false
-            }
-        }
-        TurnOutcome::AuthRequired => {
-            crash(
-                db,
-                broadcaster,
-                session_id,
-                "This Grok account isn't signed in. Open Settings → Grok accounts and \
-                 complete the browser sign-in, then try again.",
-                None,
-            )
-            .await;
-            false
-        }
-        TurnOutcome::Cancelled => {
-            // The interrupt route appends its own `interrupt` event; emit a
-            // Completed so any in-flight tool spinner closes.
-            emit_event(
-                db,
-                broadcaster,
-                session_id,
-                ProviderEvent::Completed { conversation_id },
-            )
-            .await;
-            false
-        }
-        TurnOutcome::Timeout => {
-            crash(
-                db,
-                broadcaster,
-                session_id,
-                &format!("grok turn exceeded {timeout_secs}s timeout"),
-                None,
-            )
-            .await;
-            false
-        }
-        TurnOutcome::ReadError(e) => {
-            crash(
-                db,
-                broadcaster,
-                session_id,
-                &format!("stdout read error: {e}"),
-                None,
-            )
-            .await;
-            false
-        }
+    fn take_conversation_id(&mut self) -> Option<String> {
+        self.conversation_id.take()
     }
-}
 
-enum TurnOutcome {
-    Eof,
-    Cancelled,
-    AuthRequired,
-    Timeout,
-    ReadError(String),
-}
-
-fn exit_code(status: Option<std::process::ExitStatus>) -> Option<i32> {
-    status.and_then(|s| s.code())
-}
-
-async fn emit_started(
-    db: &crate::db::Db,
-    broadcaster: &crate::ws::broadcaster::Broadcaster,
-    session_id: &str,
-    model_label: &str,
-) {
-    emit_event(
-        db,
-        broadcaster,
-        session_id,
-        ProviderEvent::Started {
-            model: model_label.to_string(),
-            conversation_id: None,
-            metadata: serde_json::json!({ "provider": "grok" }),
-        },
-    )
-    .await;
-}
-
-async fn crash(
-    db: &crate::db::Db,
-    broadcaster: &crate::ws::broadcaster::Broadcaster,
-    session_id: &str,
-    reason: &str,
-    exit_code: Option<i32>,
-) {
-    emit_event(
-        db,
-        broadcaster,
-        session_id,
-        ProviderEvent::Crashed {
-            reason: reason.to_string(),
-            exit_code,
-            stderr: None,
-        },
-    )
-    .await;
+    fn take_error(&mut self) -> Option<String> {
+        self.error.take()
+    }
 }
 
 /// Build the `grok` argument vector for one turn.
@@ -626,7 +453,7 @@ fn build_cli_args(
     prompt: &str,
     conversation_id: Option<&str>,
     effort: Option<&str>,
-    system_prompt_override: Option<&str>,
+    system_prompt: &str,
 ) -> Vec<String> {
     let mut args = vec![
         format!("--single={prompt}"),
@@ -646,17 +473,9 @@ fn build_cli_args(
     if let Some(effort) = effort.map(str::trim).filter(|e| !e.is_empty()) {
         args.push(format!("--effort={effort}"));
     }
-    // Grok's flag takes its whole system prompt, so this mirrors Claude's
-    // extend semantics: every session ships the shared working-style rules,
-    // with any per-session custom prompt appended after them.
-    let mut system_prompt = crate::provider::WORKING_STYLE.to_string();
-    if let Some(custom) = system_prompt_override
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-    {
-        system_prompt.push('\n');
-        system_prompt.push_str(custom);
-    }
+    // Grok's flag takes the whole system prompt, so the caller composes it
+    // (shared working-style rules, then the per-spawn suffix, then any
+    // per-session override) — the same layering Claude applies.
     args.push(format!("--system-prompt-override={system_prompt}"));
     args
 }
@@ -679,10 +498,22 @@ pub fn default_models() -> Vec<ModelInfo> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::provider::stream::SpawnConfig;
+
+    /// The composed prompt a turn ships when nothing custom is configured.
+    fn working_style() -> String {
+        turn::compose_system_prompt(&SpawnConfig::default())
+    }
 
     #[test]
     fn build_args_hardens_prompt_and_sets_streaming() {
-        let args = build_cli_args("grok-build", "--always-approve evil", None, None, None);
+        let args = build_cli_args(
+            "grok-build",
+            "--always-approve evil",
+            None,
+            None,
+            &working_style(),
+        );
         // The whole prompt is the value of --single, never a separate flag.
         assert_eq!(args[0], "--single=--always-approve evil");
         assert!(args.contains(&"--output-format=streaming-json".to_string()));
@@ -695,18 +526,24 @@ mod tests {
     #[test]
     fn build_args_includes_session_effort_and_system_prompt() {
         // A custom prompt EXTENDS the system prompt: the shared working-style
-        // rules stay and the override is appended after them (mirrors Claude).
+        // rules stay, then the per-spawn suffix, then the override (mirrors
+        // Claude). The suffix used to be dropped entirely on grok.
+        let config = SpawnConfig {
+            system_prompt_suffix: Some("# Repeating Task Context".into()),
+            system_prompt_override: Some("be terse".into()),
+            ..Default::default()
+        };
         let args = build_cli_args(
             "grok-build",
             "hi",
             Some("sess-7"),
             Some("high"),
-            Some("be terse"),
+            &turn::compose_system_prompt(&config),
         );
         assert!(args.contains(&"--session-id=sess-7".to_string()));
         assert!(args.contains(&"--effort=high".to_string()));
         assert!(args.contains(&format!(
-            "--system-prompt-override={}\nbe terse",
+            "--system-prompt-override={}\n# Repeating Task Context\nbe terse",
             crate::provider::WORKING_STYLE
         )));
     }
@@ -714,7 +551,7 @@ mod tests {
     #[test]
     fn build_args_sends_working_style_when_no_override() {
         // With no override, every session still ships the shared rules.
-        let args = build_cli_args("grok-build", "hi", None, None, None);
+        let args = build_cli_args("grok-build", "hi", None, None, &working_style());
         assert!(args.contains(&format!(
             "--system-prompt-override={}",
             crate::provider::WORKING_STYLE
@@ -723,11 +560,11 @@ mod tests {
 
     #[test]
     fn build_args_omits_optional_flags_when_absent() {
-        let args = build_cli_args("grok-build", "hi", None, Some("  "), None);
+        let args = build_cli_args("grok-build", "hi", None, Some("  "), &working_style());
         assert!(!args.iter().any(|a| a.starts_with("--session-id")));
         // Whitespace-only effort is treated as absent.
         assert!(!args.iter().any(|a| a.starts_with("--effort")));
-        // The system prompt is ALWAYS sent now (falls back to the shared
+        // The system prompt is ALWAYS sent (falls back to the shared
         // working-style rules), so it's present even with no override.
         assert!(
             args.iter()

@@ -10,6 +10,7 @@ pub mod ollama;
 pub mod plugin_provider;
 pub mod registry;
 pub mod stream;
+pub mod turn;
 
 /// Shared "working style" rules appended to (or, for full-replace providers,
 /// used as) the system prompt of every agent provider's sessions. Single

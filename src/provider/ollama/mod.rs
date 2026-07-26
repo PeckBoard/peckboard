@@ -54,6 +54,7 @@ use crate::plugin::manager::PluginManager;
 use crate::plugin::settings::PluginSettingsStore;
 use crate::provider::agent::{AgentProvider, ProcessCompletion, SendMessageContext, emit_event};
 use crate::provider::stream::{ModelInfo, ProviderEvent};
+use crate::provider::turn::{self, setting_bool, setting_str, setting_str_list};
 use crate::service::mcp_server::{McpToolRegistry, ToolCallContext, dispatch_tool_call};
 
 /// Default request timeout used when the user hasn't set one. Generous
@@ -692,23 +693,15 @@ impl AgentProvider for OllamaProvider {
         let sid = session_id.clone();
         let model_label = config.model.clone();
         let mcp_config_path = config.mcp_config_path.clone();
-        // The per-session override EXTENDS the system prompt: every session
-        // ships the shared working-style rules, with any custom prompt
-        // appended after them rather than replacing them.
-        let mut system_prompt = crate::provider::WORKING_STYLE.to_string();
-        if let Some(custom) = config
-            .system_prompt_override
-            .as_deref()
-            .map(str::trim)
-            .filter(|s| !s.is_empty())
-        {
-            system_prompt.push('\n');
-            system_prompt.push_str(custom);
-        }
+        // The shared working-style rules, then any per-spawn suffix, then any
+        // per-session override — the override EXTENDS the system prompt
+        // rather than replacing it. The suffix (repeating-task context) used
+        // to be dropped here entirely.
+        let system_prompt = turn::compose_system_prompt(&config);
 
         let disallowed_external = config.extra_disallowed_tools.clone();
         let handle = tokio::spawn(async move {
-            let completed = run_chat_stream(ChatStreamArgs {
+            let result = run_chat_stream(ChatStreamArgs {
                 client: &client,
                 endpoint: &endpoint,
                 model: &model,
@@ -737,8 +730,8 @@ impl AgentProvider for OllamaProvider {
             let _ = completion_tx
                 .send(ProcessCompletion {
                     session_id: sid,
-                    completed,
-                    error: None,
+                    completed: result.completed,
+                    error: result.error,
                 })
                 .await;
         });
@@ -920,20 +913,8 @@ fn encode_image_attachments(
     }
 }
 
-fn setting_str(settings: &HashMap<String, serde_json::Value>, key: &str) -> Option<String> {
-    settings
-        .get(key)
-        .and_then(|v| v.as_str())
-        .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty())
-}
-
 fn setting_int(settings: &HashMap<String, serde_json::Value>, key: &str) -> Option<i64> {
     settings.get(key).and_then(|v| v.as_i64())
-}
-
-fn setting_bool(settings: &HashMap<String, serde_json::Value>, key: &str) -> Option<bool> {
-    settings.get(key).and_then(|v| v.as_bool())
 }
 
 /// Parse Ollama's OpenAI-compatible `/v1/models` body into a list of
@@ -983,17 +964,19 @@ fn capability_present(capabilities: Option<&[String]>, cap: &str) -> bool {
 
 /// Build a `ModelInfo`, folding in any capabilities Ollama reported for the
 /// model via `/api/show`. Every Ollama model keeps the baseline `code` tag;
-/// `tools` and `vision` are added only when the server says the model
-/// supports them, so the picker reflects what the model can actually do. A
-/// failed probe (`None`) falls back to the baseline tag alone.
+/// `tools`, `vision` and `thinking` are added only when the server says the
+/// model supports them, so the picker reflects what the model can actually
+/// do. A successful probe also keeps Ollama's own `completion` baseline tag:
+/// that's how `ModelInfo::images_in_hint` distinguishes "probed, no vision"
+/// (image input known-unsupported) from "probe failed, unknown". A failed
+/// probe (`None`) falls back to the `code` tag alone.
 fn model_info_with_caps(name: String, caps: Option<Vec<String>>) -> ModelInfo {
     let mut capabilities = vec!["code".into()];
     if let Some(caps) = caps {
-        if caps.iter().any(|c| c == "tools") {
-            capabilities.push("tools".into());
-        }
-        if caps.iter().any(|c| c == "vision") {
-            capabilities.push("vision".into());
+        for tag in ["completion", "tools", "vision", "thinking"] {
+            if caps.iter().any(|c| c == tag) {
+                capabilities.push(tag.into());
+            }
         }
     }
     ModelInfo {
@@ -1023,20 +1006,6 @@ fn setting_headers(
         .collect()
 }
 
-/// Extract a `StringList` setting (a JSON array of strings) as a flat
-/// `Vec<String>`, trimming entries and dropping blanks. Returns an empty
-/// Vec when unset.
-fn setting_str_list(settings: &HashMap<String, serde_json::Value>, key: &str) -> Vec<String> {
-    let Some(arr) = settings.get(key).and_then(|v| v.as_array()) else {
-        return Vec::new();
-    };
-    arr.iter()
-        .filter_map(|v| v.as_str())
-        .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty())
-        .collect()
-}
-
 /// Merge the user's `additional_models` onto a base catalog (either the
 /// autodiscovered server list or the static seed), as `ModelInfo`s. Skips
 /// any extra whose id already appears in `base` (or earlier in the list)
@@ -1044,14 +1013,7 @@ fn setting_str_list(settings: &HashMap<String, serde_json::Value>, key: &str) ->
 /// display name is derived from the bare name so the user only has to
 /// type the id.
 fn merge_additional_models(base: Vec<ModelInfo>, extras: Vec<String>) -> Vec<ModelInfo> {
-    let mut seen: std::collections::HashSet<String> = base.iter().map(|m| m.id.clone()).collect();
-    let mut models = base;
-    for name in extras {
-        if seen.insert(name.clone()) {
-            models.push(model_info(name));
-        }
-    }
-    models
+    turn::merge_additional_models(base, extras, model_info)
 }
 
 /// Join `base_url` with `path` so we don't end up with a `//api/chat`
@@ -1154,7 +1116,7 @@ enum RoundOutcome {
 /// Drive one turn: offer tools (when enabled), stream the model's reply, run
 /// any tool calls it makes, and loop until it answers without calling a tool
 /// or [`MAX_TOOL_ROUNDS`] is reached. Returns `true` on a clean finish.
-async fn run_chat_stream(args: ChatStreamArgs<'_>) -> bool {
+async fn run_chat_stream(args: ChatStreamArgs<'_>) -> turn::TurnResult {
     let ChatStreamArgs {
         client,
         endpoint,
@@ -1175,6 +1137,10 @@ async fn run_chat_stream(args: ChatStreamArgs<'_>) -> bool {
         disallowed_external,
     } = args;
     let broadcaster: &crate::ws::broadcaster::Broadcaster = broadcaster_arc.as_ref();
+    // Records the last `Crashed` reason so the caller can thread it into
+    // `ProcessCompletion.error`: a non-Claude handover rollback used to show
+    // the user no cause at all.
+    let errors = CrashSink::default();
 
     emit_event(
         db,
@@ -1196,8 +1162,16 @@ async fn run_chat_stream(args: ChatStreamArgs<'_>) -> bool {
         // Shouldn't happen — send_message inserts the user turn before
         // spawning this task — but emit a useful event instead of an
         // empty POST to Ollama.
-        crash(db, broadcaster, session_id, "no messages to send", None).await;
-        return false;
+        crash(
+            db,
+            broadcaster,
+            session_id,
+            "no messages to send",
+            None,
+            &errors,
+        )
+        .await;
+        return errors.failure();
     }
 
     // Prepend the system prompt to THIS request's messages only. It's not
@@ -1282,11 +1256,12 @@ async fn run_chat_stream(args: ChatStreamArgs<'_>) -> bool {
             broadcaster,
             session_id,
             cancel: &cancel,
+            errors: &errors,
         })
         .await;
         let (text, tool_calls) = match outcome {
             RoundOutcome::Message { text, tool_calls } => (text, tool_calls),
-            RoundOutcome::Failed => return false,
+            RoundOutcome::Failed => return errors.failure(),
         };
 
         // Record the assistant turn (its text plus the calls it requested)
@@ -1301,7 +1276,10 @@ async fn run_chat_stream(args: ChatStreamArgs<'_>) -> bool {
             Some(ctx) if !tool_calls.is_empty() => ctx,
             _ => {
                 finalize(db, broadcaster, session_id, conversations, new_messages).await;
-                return true;
+                return turn::TurnResult {
+                    completed: true,
+                    error: None,
+                };
             }
         };
 
@@ -1309,8 +1287,8 @@ async fn run_chat_stream(args: ChatStreamArgs<'_>) -> bool {
         for call in tool_calls {
             let tool_msg = tokio::select! {
                 _ = cancel.notified() => {
-                    crash(db, broadcaster, session_id, "interrupted", None).await;
-                    return false;
+                    crash(db, broadcaster, session_id, "interrupted", None, &errors).await;
+                    return errors.failure();
                 }
                 m = async {
                     match (external_routes.get(&call.function.name), external.as_mut()) {
@@ -1348,9 +1326,10 @@ async fn run_chat_stream(args: ChatStreamArgs<'_>) -> bool {
         session_id,
         &format!("stopped after {MAX_TOOL_ROUNDS} tool rounds without a final answer"),
         None,
+        &errors,
     )
     .await;
-    false
+    errors.failure()
 }
 
 /// Inputs to [`stream_one_round`]. Same rationale as [`ChatStreamArgs`] —
@@ -1368,6 +1347,8 @@ struct StreamRound<'a> {
     broadcaster: &'a crate::ws::broadcaster::Broadcaster,
     session_id: &'a str,
     cancel: &'a Notify,
+    /// Where a `Crashed` reason is recorded for the caller.
+    errors: &'a CrashSink,
 }
 
 /// POST one `/api/chat` request and consume its streamed reply: stream text
@@ -1389,6 +1370,7 @@ async fn stream_one_round(round: StreamRound<'_>) -> RoundOutcome {
         broadcaster,
         session_id,
         cancel,
+        errors,
     } = round;
 
     let body = ChatRequest {
@@ -1425,13 +1407,14 @@ async fn stream_one_round(round: StreamRound<'_>) -> RoundOutcome {
             // crashed" banner when the agent-end reason is exactly
             // "interrupted", so a cancel during the initial request must
             // match or it surfaces as a spurious crash.
-            crash(db, broadcaster, session_id, "interrupted", None).await;
+            crash(db, broadcaster, session_id, "interrupted", None, errors).await;
             return RoundOutcome::Failed;
         }
         r = response_fut => match r {
             Ok(r) => r,
             Err(e) => {
-                crash(db, broadcaster, session_id, &format!("HTTP error: {e}"), None).await;
+                crash(db, broadcaster, session_id, &format!("HTTP error: {e}"), None, errors)
+                    .await;
                 return RoundOutcome::Failed;
             }
         }
@@ -1449,6 +1432,7 @@ async fn stream_one_round(round: StreamRound<'_>) -> RoundOutcome {
             session_id,
             &format!("Ollama returned HTTP {status}"),
             Some(truncated),
+            errors,
         )
         .await;
         return RoundOutcome::Failed;
@@ -1464,7 +1448,7 @@ async fn stream_one_round(round: StreamRound<'_>) -> RoundOutcome {
     while !done {
         tokio::select! {
             _ = cancel.notified() => {
-                crash(db, broadcaster, session_id, "interrupted", None).await;
+                crash(db, broadcaster, session_id, "interrupted", None, errors).await;
                 return RoundOutcome::Failed;
             }
             chunk = stream.next() => {
@@ -1478,6 +1462,7 @@ async fn stream_one_round(round: StreamRound<'_>) -> RoundOutcome {
                             session_id,
                             &format!("stream error: {e}"),
                             None,
+                            errors,
                         )
                         .await;
                         return RoundOutcome::Failed;
@@ -1505,7 +1490,7 @@ async fn stream_one_round(round: StreamRound<'_>) -> RoundOutcome {
                         }
                     };
                     if let Some(err) = parsed.error {
-                        crash(db, broadcaster, session_id, &err, None).await;
+                        crash(db, broadcaster, session_id, &err, None, errors).await;
                         return RoundOutcome::Failed;
                     }
                     if let Some(message) = parsed.message {
@@ -1556,6 +1541,7 @@ async fn stream_one_round(round: StreamRound<'_>) -> RoundOutcome {
             session_id,
             "Ollama closed the stream before producing output",
             None,
+            errors,
         )
         .await;
         return RoundOutcome::Failed;
@@ -1795,15 +1781,40 @@ async fn run_one_external_tool(
         }
     }
 }
+/// Records the reason of the last `Crashed` this turn emitted. The round
+/// loop and the streaming step both report failures, so the slot needs
+/// interior mutability rather than a `&mut` threaded through both.
+#[derive(Clone, Default)]
+struct CrashSink(Arc<std::sync::Mutex<Option<String>>>);
+
+impl CrashSink {
+    fn record(&self, reason: &str) {
+        if let Ok(mut slot) = self.0.lock() {
+            *slot = Some(reason.to_string());
+        }
+    }
+
+    /// The not-completed outcome, carrying whatever reason was recorded.
+    fn failure(&self) -> turn::TurnResult {
+        turn::TurnResult {
+            completed: false,
+            error: self.0.lock().ok().and_then(|mut slot| slot.take()),
+        }
+    }
+}
+
 /// Convenience for emitting a `Crashed` event. Keeps the noisy
-/// `exit_code: None, stderr: None` boilerplate out of every error site.
+/// `exit_code: None, stderr: None` boilerplate out of every error site, and
+/// records the reason in `sink` for `ProcessCompletion.error`.
 async fn crash(
     db: &crate::db::Db,
     broadcaster: &crate::ws::broadcaster::Broadcaster,
     session_id: &str,
     reason: &str,
     stderr: Option<String>,
+    sink: &CrashSink,
 ) {
+    sink.record(reason);
     emit_event(
         db,
         broadcaster,
