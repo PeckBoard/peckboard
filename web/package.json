@@ -21,8 +21,9 @@
     "**/*.{ts,tsx,js,jsx,mjs,cjs,css,html,json,md}": "prettier --check"
   },
   "dependencies": {
-    "react": "^19.2.6",
+    "@tanstack/react-virtual": "^3.14.8",
     "mermaid": "^11.4.1",
+    "react": "^19.2.6",
     "react-dom": "^19.2.6",
     "react-markdown": "^10.1.0",
     "rehype-highlight": "^7.0.2",

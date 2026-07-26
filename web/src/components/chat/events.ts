@@ -74,6 +74,9 @@ export type DisplayItem =
       tempSessionId?: string
       /** The model the research session runs on. */
       model?: string
+      /** Set when a later `user` event superseded this parked message —
+       *  filtered out of the rendered feed. */
+      superseded?: boolean
     }
   | { type: 'assistant'; text: string; key: string; ts: number }
   | {
@@ -152,6 +155,16 @@ export type DisplayItem =
       answers: Record<string, unknown>
       key: string
     }
+  | {
+      /** Fallback for event kinds this build doesn't recognize (plugin
+       *  providers, future backend kinds): rendered as a collapsed row
+       *  instead of being silently dropped. */
+      type: 'unknown'
+      kind: string
+      data: Record<string, unknown>
+      ts: number
+      key: string
+    }
 
 /** Derive agent status from events for the toolbar indicator. */
 export type AgentStatus = 'idle' | 'working' | 'tool' | 'crashed' | 'questioning'
@@ -161,7 +174,6 @@ export function deriveAgentStatus(events: Event[]): AgentStatus {
     const kind = events[i].kind
     if (kind === 'agent-end') return 'idle'
     if (kind === 'pre-hatch' || kind === 'pre-ignite') return 'working'
-    if (kind === 'agent-error' || kind === 'error') return 'crashed'
     if (kind === 'question') {
       // Check if resolved later
       const qId = events[i].id
@@ -298,373 +310,484 @@ function readToolImages(ev: Event): ToolImage[] | undefined {
   return images.length > 0 ? images : undefined
 }
 
-export function buildDisplayItems(events: Event[]): DisplayItem[] {
-  const items: DisplayItem[] = []
-  let assistantBuffer = ''
-  let assistantKey = ''
-  let assistantTs = 0
-  let thinkingBuffer = ''
-  let thinkingKey = ''
-  let thinkingTs = 0
+/** Mutable state threaded through the incremental display fold. Owns the
+ *  `items` array; consumers get a filtered copy from `foldResult` so live
+ *  stream buffers and superseded pre-hatch rows never leak in. */
+interface FoldState {
+  items: DisplayItem[]
+  /** Events consumed so far — the fold resumes from this index. */
+  consumed: number
+  firstEventId: string | null
+  lastEventId: string | null
+  assistantBuffer: string
+  assistantKey: string
+  assistantTs: number
+  thinkingBuffer: string
+  thinkingKey: string
+  thinkingTs: number
+  /** tool_use_id -> index in items, for tool blocks still running. */
+  openTools: Map<string, number>
+  /** Dedupe tool starts from streaming + snapshot. */
+  seenToolIds: Set<string>
+  pendingInterrupt: boolean
+  /** question event id -> index in items, so a later `question-resolved`
+   *  swaps the pending card in place. */
+  questionItems: Map<string, number>
+  /** Indices of pre-hatch items not yet superseded by a later `user`. */
+  livePreHatch: number[]
+}
 
-  const flushThinking = () => {
-    if (thinkingBuffer) {
-      items.push({ type: 'thinking', text: thinkingBuffer, key: thinkingKey, ts: thinkingTs })
-      thinkingBuffer = ''
-      thinkingKey = ''
-      thinkingTs = 0
-    }
+function newFoldState(): FoldState {
+  return {
+    items: [],
+    consumed: 0,
+    firstEventId: null,
+    lastEventId: null,
+    assistantBuffer: '',
+    assistantKey: '',
+    assistantTs: 0,
+    thinkingBuffer: '',
+    thinkingKey: '',
+    thinkingTs: 0,
+    openTools: new Map(),
+    seenToolIds: new Set(),
+    pendingInterrupt: false,
+    questionItems: new Map(),
+    livePreHatch: [],
   }
+}
 
-  const flushAssistant = () => {
-    // Thinking precedes the text it produced — keep that order in the feed.
-    flushThinking()
-    if (assistantBuffer) {
-      items.push({ type: 'assistant', text: assistantBuffer, key: assistantKey, ts: assistantTs })
-      assistantBuffer = ''
-      assistantKey = ''
-      assistantTs = 0
-    }
+function flushThinking(st: FoldState): void {
+  if (st.thinkingBuffer) {
+    st.items.push({
+      type: 'thinking',
+      text: st.thinkingBuffer,
+      key: st.thinkingKey,
+      ts: st.thinkingTs,
+    })
+    st.thinkingBuffer = ''
+    st.thinkingKey = ''
+    st.thinkingTs = 0
   }
+}
 
-  // Collect resolved question ids
-  const resolvedQuestions = new Set<string>()
-  for (const ev of events) {
-    if (ev.kind === 'question-resolved') {
-      const qId = (ev.data.question_id as string) ?? (ev.data.questionId as string) ?? ''
-      if (qId) resolvedQuestions.add(qId)
-    }
+function flushAssistant(st: FoldState): void {
+  // Thinking precedes the text it produced — keep that order in the feed.
+  flushThinking(st)
+  if (st.assistantBuffer) {
+    st.items.push({
+      type: 'assistant',
+      text: st.assistantBuffer,
+      key: st.assistantKey,
+      ts: st.assistantTs,
+    })
+    st.assistantBuffer = ''
+    st.assistantKey = ''
+    st.assistantTs = 0
   }
+}
 
-  // Track open tools by their tool_use_id
-  const openTools = new Map<string, number>() // tool_use_id -> index in items
-  const seenToolIds = new Set<string>() // dedupe tool starts from streaming + snapshot
+/** Event kinds that intentionally render nothing in the chat feed, so the
+ *  unknown-kind fallback must not pick them up:
+ *  - `todo` snapshots drive the TodoPanel;
+ *  - `question-resolved` folds into its `question` card;
+ *  - `session-read` is per-open unread-sync bookkeeping;
+ *  - the `*-requested` worker-intent markers accompany an already-visible
+ *    MCP tool block;
+ *  - `worker-finding` feeds the worker-comms panel;
+ *  - `plan-proposed` / `plan-deleted` drive the plan view;
+ *  - `model-switch` is the autoswitch audit record (the next `agent-start`
+ *    row already shows the new model). */
+const HIDDEN_KINDS = new Set([
+  'todo',
+  'question-resolved',
+  'session-read',
+  'complete-step-requested',
+  'finish-requested',
+  'wont-do-requested',
+  'ask-user-requested',
+  'worker-finding',
+  'plan-proposed',
+  'plan-deleted',
+  'model-switch',
+])
 
-  // When the user hits the Interrupt button we get two events back-to-back:
-  // an `interrupt` (from the HTTP route) and an `agent-end` with status
-  // crashed / reason "interrupted" (from the provider's stream loop winding
-  // down). The dedicated interrupt notice already tells the user what
-  // happened, so suppress the paired crash banner — without this the UI
-  // looks like the agent broke instead of acknowledging the user's action.
-  let pendingInterrupt = false
-
-  // A `pre-hatch` placeholder (a parked message being pre-warmed) is only
-  // live while nothing later has been delivered: any later `user` event —
-  // the enriched delivery, or the user typing past a dead pre-hatch —
-  // supersedes it.
-  let lastUserIdx = -1
-  events.forEach((e, i) => {
-    if (e.kind === 'user') lastUserIdx = i
-  })
-
-  for (let evIdx = 0; evIdx < events.length; evIdx++) {
-    const ev = events[evIdx]
-    switch (ev.kind) {
-      case 'user': {
-        flushAssistant()
-        const text = (ev.data.text as string) ?? JSON.stringify(ev.data)
-        // `pre_ignite` is the legacy spelling from before the pre-hatcher
-        // rename — old transcripts keep rendering.
-        const pi = (ev.data.pre_hatch ?? ev.data.pre_ignite) as Record<string, unknown> | undefined
+function foldEvent(st: FoldState, ev: Event): void {
+  const items = st.items
+  switch (ev.kind) {
+    case 'user': {
+      flushAssistant(st)
+      // Any user turn supersedes earlier parked pre-hatch bubbles — the
+      // enriched delivery, or the user typing past a dead pre-hatch.
+      for (const idx of st.livePreHatch) {
+        const it = items[idx]
+        if (it.type === 'pre-hatch') items[idx] = { ...it, superseded: true }
+      }
+      st.livePreHatch.length = 0
+      const text = (ev.data.text as string) ?? JSON.stringify(ev.data)
+      // `pre_ignite` is the legacy spelling from before the pre-hatcher
+      // rename — old transcripts keep rendering.
+      const pi = (ev.data.pre_hatch ?? ev.data.pre_ignite) as Record<string, unknown> | undefined
+      items.push({
+        type: 'user',
+        text,
+        key: ev.id,
+        ts: ev.ts,
+        attachments: readAttachments(ev),
+        preHatchOriginal: typeof pi?.original === 'string' ? pi.original : undefined,
+        preHatchEnriched: pi?.enriched === true,
+      })
+      break
+    }
+    case 'agent-text': {
+      flushThinking(st)
+      const chunk = (ev.data.text as string) ?? ''
+      if (!st.assistantKey) {
+        st.assistantKey = ev.id
+        st.assistantTs = ev.ts
+      }
+      st.assistantBuffer += chunk
+      break
+    }
+    case 'agent-thinking': {
+      // Close any streaming text bubble — thinking starts its own block.
+      // (thinkingBuffer is empty whenever text was streaming, so the
+      // flushThinking inside flushAssistant is a no-op here.)
+      if (st.assistantBuffer) flushAssistant(st)
+      const chunk = (ev.data.text as string) ?? ''
+      if (!st.thinkingKey) {
+        st.thinkingKey = ev.id
+        st.thinkingTs = ev.ts
+      }
+      st.thinkingBuffer += chunk
+      break
+    }
+    case 'agent-usage': {
+      flushAssistant(st)
+      const turnSeq = typeof ev.data.turnSeq === 'number' ? ev.data.turnSeq : null
+      const slice = {
+        model: (ev.data.model as string) ?? '',
+        input: (ev.data.inputTokens as number) ?? 0,
+        output: (ev.data.outputTokens as number) ?? 0,
+        cacheRead: (ev.data.cacheReadTokens as number) ?? 0,
+        cacheCreation: (ev.data.cacheCreationTokens as number) ?? 0,
+      }
+      const last = items[items.length - 1]
+      if (last?.type === 'turn-usage' && last.turnSeq !== null && last.turnSeq === turnSeq) {
+        // Multi-model turn: fold this model's slice into the same chip.
+        // Replace rather than mutate so the memoized row re-renders.
+        items[items.length - 1] = {
+          ...last,
+          slices: [...last.slices, slice],
+          outputTokens: last.outputTokens + slice.output,
+        }
+      } else {
         items.push({
-          type: 'user',
-          text,
+          type: 'turn-usage',
+          turnSeq,
+          slices: [slice],
+          outputTokens: slice.output,
           key: ev.id,
           ts: ev.ts,
-          attachments: readAttachments(ev),
-          preHatchOriginal: typeof pi?.original === 'string' ? pi.original : undefined,
-          preHatchEnriched: pi?.enriched === true,
         })
-        break
       }
-      case 'agent-text': {
-        flushThinking()
-        const chunk = (ev.data.text as string) ?? ''
-        if (!assistantKey) {
-          assistantKey = ev.id
-          assistantTs = ev.ts
+      break
+    }
+    case 'agent-tool-start': {
+      flushAssistant(st)
+      const toolName = (ev.data.name as string) ?? (ev.data.tool_name as string) ?? 'tool'
+      const input = (ev.data.input as Record<string, unknown>) ?? undefined
+      const toolUseId = (ev.data.toolUseId as string) ?? (ev.data.tool_use_id as string) ?? ev.id
+      // Skip duplicate tool starts (CLI emits both streaming + snapshot events)
+      if (st.seenToolIds.has(toolUseId)) break
+      st.seenToolIds.add(toolUseId)
+      const idx = items.length
+      items.push({ type: 'tool', toolName, input, isRunning: true, key: ev.id, startTs: ev.ts })
+      st.openTools.set(toolUseId, idx)
+      break
+    }
+    case 'agent-tool-end': {
+      flushAssistant(st)
+      const toolUseId = (ev.data.toolUseId as string) ?? (ev.data.tool_use_id as string) ?? ''
+      const images = readToolImages(ev)
+      const idx = st.openTools.get(toolUseId)
+      if (idx !== undefined) {
+        const existing = items[idx] as Extract<DisplayItem, { type: 'tool' }>
+        const errorText = ev.data.error as string | undefined
+        const output = (ev.data.output as Record<string, unknown> | string) ?? undefined
+        items[idx] = {
+          ...existing,
+          isRunning: false,
+          output,
+          error: errorText,
+          images,
+          endTs: ev.ts,
         }
-        assistantBuffer += chunk
-        break
-      }
-      case 'agent-thinking': {
-        // Close any streaming text bubble — thinking starts its own block.
-        // (thinkingBuffer is empty whenever text was streaming, so the
-        // flushThinking inside flushAssistant is a no-op here.)
-        if (assistantBuffer) flushAssistant()
-        const chunk = (ev.data.text as string) ?? ''
-        if (!thinkingKey) {
-          thinkingKey = ev.id
-          thinkingTs = ev.ts
-        }
-        thinkingBuffer += chunk
-        break
-      }
-      case 'agent-usage': {
-        flushAssistant()
-        const turnSeq = typeof ev.data.turnSeq === 'number' ? ev.data.turnSeq : null
-        const slice = {
-          model: (ev.data.model as string) ?? '',
-          input: (ev.data.inputTokens as number) ?? 0,
-          output: (ev.data.outputTokens as number) ?? 0,
-          cacheRead: (ev.data.cacheReadTokens as number) ?? 0,
-          cacheCreation: (ev.data.cacheCreationTokens as number) ?? 0,
-        }
-        const last = items[items.length - 1]
-        if (last?.type === 'turn-usage' && last.turnSeq !== null && last.turnSeq === turnSeq) {
-          // Multi-model turn: fold this model's slice into the same chip.
-          last.slices.push(slice)
-          last.outputTokens += slice.output
-        } else {
-          items.push({
-            type: 'turn-usage',
-            turnSeq,
-            slices: [slice],
-            outputTokens: slice.output,
-            key: ev.id,
-            ts: ev.ts,
-          })
-        }
-        break
-      }
-      case 'agent-tool-start': {
-        flushAssistant()
+        st.openTools.delete(toolUseId)
+      } else {
         const toolName = (ev.data.name as string) ?? (ev.data.tool_name as string) ?? 'tool'
-        const input = (ev.data.input as Record<string, unknown>) ?? undefined
-        const toolUseId = (ev.data.toolUseId as string) ?? (ev.data.tool_use_id as string) ?? ev.id
-        // Skip duplicate tool starts (CLI emits both streaming + snapshot events)
-        if (seenToolIds.has(toolUseId)) break
-        seenToolIds.add(toolUseId)
-        const idx = items.length
-        items.push({ type: 'tool', toolName, input, isRunning: true, key: ev.id, startTs: ev.ts })
-        openTools.set(toolUseId, idx)
+        const errorText = ev.data.error as string | undefined
+        const output = (ev.data.output as Record<string, unknown> | string) ?? undefined
+        items.push({
+          type: 'tool',
+          toolName,
+          output,
+          error: errorText,
+          images,
+          isRunning: false,
+          key: ev.id,
+        })
+      }
+      break
+    }
+    case 'agent-start': {
+      flushAssistant(st)
+      st.pendingInterrupt = false
+      const model = (ev.data.model as string) ?? 'default'
+      // Strip provider prefix for display
+      const displayModel = model.replace(/^claude:/, '')
+      const effort = (ev.data.effort as string) ?? ''
+      items.push({ type: 'agent-start', model: displayModel, effort, ts: ev.ts, key: ev.id })
+      break
+    }
+    case 'agent-end': {
+      flushAssistant(st)
+      closeOpenTools(items, st.openTools, 'agent ended before tool completed', ev.ts)
+      const reason = (ev.data.reason as string) ?? 'unknown error'
+      const wasInterrupted = st.pendingInterrupt && reason === 'interrupted'
+      st.pendingInterrupt = false
+      if (wasInterrupted) {
         break
       }
-      case 'agent-tool-end': {
-        flushAssistant()
-        const toolUseId = (ev.data.toolUseId as string) ?? (ev.data.tool_use_id as string) ?? ''
-        const images = readToolImages(ev)
-        const idx = openTools.get(toolUseId)
-        if (idx !== undefined) {
-          const existing = items[idx] as Extract<DisplayItem, { type: 'tool' }>
-          const errorText = ev.data.error as string | undefined
-          const output = (ev.data.output as Record<string, unknown> | string) ?? undefined
-          items[idx] = {
-            ...existing,
-            isRunning: false,
-            output,
-            error: errorText,
-            images,
-            endTs: ev.ts,
+      if ((ev.data.status as string) === 'crashed') {
+        items.push({
+          type: 'agent-crashed',
+          reason,
+          key: ev.id,
+          ts: ev.ts,
+        })
+      } else {
+        items.push({
+          type: 'status',
+          text: 'Ready for your next message.',
+          key: ev.id,
+          ts: ev.ts,
+        })
+      }
+      break
+    }
+    case 'interrupt': {
+      flushAssistant(st)
+      closeOpenTools(items, st.openTools, 'interrupted', ev.ts)
+      items.push({ type: 'interrupt', ts: ev.ts, key: ev.id })
+      st.pendingInterrupt = true
+      break
+    }
+    case 'handover-start': {
+      flushAssistant(st)
+      const to = (ev.data.to as string) ?? 'the new model'
+      const compaction = (ev.data.compaction as boolean) ?? false
+      items.push({ type: 'handover-start', to, compaction, ts: ev.ts, key: ev.id })
+      break
+    }
+    case 'handover': {
+      flushAssistant(st)
+      items.push({
+        type: 'handover',
+        from: (ev.data.from as string) ?? '',
+        to: (ev.data.to as string) ?? '',
+        doc: (ev.data.doc as string) ?? '',
+        compaction: (ev.data.compaction as boolean) ?? false,
+        ts: ev.ts,
+        key: ev.id,
+      })
+      break
+    }
+    case 'handover-aborted': {
+      flushAssistant(st)
+      items.push({
+        type: 'handover-aborted',
+        from: (ev.data.from as string) ?? '',
+        compaction: (ev.data.compaction as boolean) ?? false,
+        reason: typeof ev.data.reason === 'string' && ev.data.reason !== '' ? ev.data.reason : null,
+        ts: ev.ts,
+        key: ev.id,
+      })
+      break
+    }
+    case 'system': {
+      flushAssistant(st)
+      const text =
+        (ev.data.text as string) ?? (ev.data.message as string) ?? JSON.stringify(ev.data)
+      const reportFolder = ev.data.reportFolder as string | undefined
+      const reportFile = ev.data.reportFile as string | undefined
+      items.push({ type: 'system', text, key: ev.id, reportFolder, reportFile, ts: ev.ts })
+      break
+    }
+    case 'step-change': {
+      flushAssistant(st)
+      const label = (ev.data.step as string) ?? (ev.data.label as string) ?? 'Step'
+      items.push({ type: 'step', label, key: ev.id })
+      break
+    }
+    case 'file-diff': {
+      flushAssistant(st)
+      const d = ev.data as Record<string, unknown>
+      if (typeof d.path !== 'string' || typeof d.diff !== 'string') break
+      const diff: FileDiff = {
+        path: d.path,
+        diff: d.diff,
+        added: typeof d.added === 'number' ? d.added : 0,
+        removed: typeof d.removed === 'number' ? d.removed : 0,
+        truncated: d.truncated === true,
+        created: d.created === true,
+      }
+      // Attach to the most recent edit/write tool card for the same path
+      // (the event lands between that tool's start and end); fall back to
+      // a standalone card when no such card exists.
+      let attached = false
+      for (let i = items.length - 1; i >= 0; i--) {
+        const it = items[i]
+        if (it.type !== 'tool') continue
+        const bare = it.toolName.replace(/^mcp__.+?__/, '')
+        if (bare === 'edit_file' || bare === 'write_file') {
+          const inputPath = it.input?.path
+          if (inputPath === diff.path && !it.diff) {
+            items[i] = { ...it, diff }
+            attached = true
           }
-          openTools.delete(toolUseId)
-        } else {
-          const toolName = (ev.data.name as string) ?? (ev.data.tool_name as string) ?? 'tool'
-          const errorText = ev.data.error as string | undefined
-          const output = (ev.data.output as Record<string, unknown> | string) ?? undefined
-          items.push({
-            type: 'tool',
-            toolName,
-            output,
-            error: errorText,
-            images,
-            isRunning: false,
-            key: ev.id,
-          })
         }
         break
       }
-      case 'agent-start': {
-        flushAssistant()
-        pendingInterrupt = false
-        const model = (ev.data.model as string) ?? 'default'
-        // Strip provider prefix for display
-        const displayModel = model.replace(/^claude:/, '')
-        const effort = (ev.data.effort as string) ?? ''
-        items.push({ type: 'agent-start', model: displayModel, effort, ts: ev.ts, key: ev.id })
-        break
+      if (!attached) {
+        items.push({ type: 'file-diff', diff, ts: ev.ts, key: ev.id })
       }
-      case 'agent-end': {
-        flushAssistant()
-        closeOpenTools(items, openTools, 'agent ended before tool completed', ev.ts)
-        const reason = (ev.data.reason as string) ?? 'unknown error'
-        const wasInterrupted = pendingInterrupt && reason === 'interrupted'
-        pendingInterrupt = false
-        if (wasInterrupted) {
-          break
-        }
-        if ((ev.data.status as string) === 'crashed') {
-          items.push({
-            type: 'agent-crashed',
-            reason,
-            key: ev.id,
-            ts: ev.ts,
-          })
-        } else {
-          items.push({
-            type: 'status',
-            text: 'Ready for your next message.',
-            key: ev.id,
-            ts: ev.ts,
-          })
-        }
-        break
-      }
-      case 'interrupt': {
-        flushAssistant()
-        closeOpenTools(items, openTools, 'interrupted', ev.ts)
-        items.push({ type: 'interrupt', ts: ev.ts, key: ev.id })
-        pendingInterrupt = true
-        break
-      }
-      case 'handover-start': {
-        flushAssistant()
-        const to = (ev.data.to as string) ?? 'the new model'
-        const compaction = (ev.data.compaction as boolean) ?? false
-        items.push({ type: 'handover-start', to, compaction, ts: ev.ts, key: ev.id })
-        break
-      }
-      case 'handover': {
-        flushAssistant()
-        items.push({
-          type: 'handover',
-          from: (ev.data.from as string) ?? '',
-          to: (ev.data.to as string) ?? '',
-          doc: (ev.data.doc as string) ?? '',
-          compaction: (ev.data.compaction as boolean) ?? false,
-          ts: ev.ts,
-          key: ev.id,
-        })
-        break
-      }
-      case 'handover-aborted': {
-        flushAssistant()
-        items.push({
-          type: 'handover-aborted',
-          from: (ev.data.from as string) ?? '',
-          compaction: (ev.data.compaction as boolean) ?? false,
-          reason:
-            typeof ev.data.reason === 'string' && ev.data.reason !== '' ? ev.data.reason : null,
-          ts: ev.ts,
-          key: ev.id,
-        })
-        break
-      }
-      case 'system': {
-        flushAssistant()
+      break
+    }
+    case 'question': {
+      flushAssistant(st)
+      // Parse questions array from event data, falling back to simple text
+      let questions: QuestionItem[]
+      if (Array.isArray(ev.data.questions)) {
+        questions = (ev.data.questions as QuestionItem[]).map((q) => ({
+          question: q.question ?? '',
+          header: q.header,
+          multiSelect: q.multiSelect,
+          options: q.options,
+          optionObjects: q.optionObjects,
+        }))
+      } else {
         const text =
-          (ev.data.text as string) ?? (ev.data.message as string) ?? JSON.stringify(ev.data)
-        const reportFolder = ev.data.reportFolder as string | undefined
-        const reportFile = ev.data.reportFile as string | undefined
-        items.push({ type: 'system', text, key: ev.id, reportFolder, reportFile, ts: ev.ts })
-        break
+          (ev.data.text as string) ?? (ev.data.question as string) ?? JSON.stringify(ev.data)
+        questions = [{ question: text }]
       }
-      case 'step-change': {
-        flushAssistant()
-        const label = (ev.data.step as string) ?? (ev.data.label as string) ?? 'Step'
-        items.push({ type: 'step', label, key: ev.id })
-        break
+      st.questionItems.set(ev.id, items.length)
+      items.push({ type: 'question', questionId: ev.id, questions, key: ev.id })
+      break
+    }
+    case 'question-resolved': {
+      // Swap the pending question card in place. A resolution whose
+      // question sits on an unloaded older page renders nothing — same
+      // as the previous full-rebuild behaviour.
+      const qId = (ev.data.question_id as string) ?? (ev.data.questionId as string) ?? ''
+      const idx = st.questionItems.get(qId)
+      if (idx === undefined) break
+      const existing = items[idx]
+      if (existing.type !== 'question') break
+      items[idx] = {
+        type: 'question-resolved',
+        questionId: existing.questionId,
+        questions: existing.questions,
+        answers: (ev.data.answers as Record<string, unknown>) ?? {},
+        key: existing.key,
       }
-      case 'file-diff': {
-        flushAssistant()
-        const d = ev.data as Record<string, unknown>
-        if (typeof d.path !== 'string' || typeof d.diff !== 'string') break
-        const diff: FileDiff = {
-          path: d.path,
-          diff: d.diff,
-          added: typeof d.added === 'number' ? d.added : 0,
-          removed: typeof d.removed === 'number' ? d.removed : 0,
-          truncated: d.truncated === true,
-          created: d.created === true,
-        }
-        // Attach to the most recent edit/write tool card for the same path
-        // (the event lands between that tool's start and end); fall back to
-        // a standalone card when no such card exists.
-        let attached = false
-        for (let i = items.length - 1; i >= 0; i--) {
-          const it = items[i]
-          if (it.type !== 'tool') continue
-          const bare = it.toolName.replace(/^mcp__.+?__/, '')
-          if (bare === 'edit_file' || bare === 'write_file') {
-            const inputPath = it.input?.path
-            if (inputPath === diff.path && !it.diff) {
-              items[i] = { ...it, diff }
-              attached = true
-            }
-          }
-          break
-        }
-        if (!attached) {
-          items.push({ type: 'file-diff', diff, ts: ev.ts, key: ev.id })
-        }
-        break
-      }
-      case 'question': {
-        flushAssistant()
-        // Parse questions array from event data, falling back to simple text
-        let questions: QuestionItem[]
-        if (Array.isArray(ev.data.questions)) {
-          questions = (ev.data.questions as QuestionItem[]).map((q) => ({
-            question: q.question ?? '',
-            header: q.header,
-            multiSelect: q.multiSelect,
-            options: q.options,
-            optionObjects: q.optionObjects,
-          }))
-        } else {
-          const text =
-            (ev.data.text as string) ?? (ev.data.question as string) ?? JSON.stringify(ev.data)
-          questions = [{ question: text }]
-        }
-
-        if (resolvedQuestions.has(ev.id)) {
-          // Find the matching resolved event to get answers
-          const resolvedEv = events.find(
-            (e) =>
-              e.kind === 'question-resolved' &&
-              ((e.data.question_id as string) === ev.id || (e.data.questionId as string) === ev.id),
-          )
-          const answers = (resolvedEv?.data.answers as Record<string, unknown>) ?? {}
-          items.push({
-            type: 'question-resolved',
-            questionId: ev.id,
-            questions,
-            answers,
-            key: ev.id,
-          })
-        } else {
-          items.push({ type: 'question', questionId: ev.id, questions, key: ev.id })
-        }
-        break
-      }
-      // `pre-ignite` is the legacy event kind from before the pre-hatcher
-      // rename — old transcripts render identically (minus the live feed).
-      case 'pre-hatch':
-      case 'pre-ignite': {
-        flushAssistant()
-        if (evIdx > lastUserIdx) {
-          const text = (ev.data.text as string) ?? ''
-          items.push({
-            type: 'pre-hatch',
-            text,
-            key: ev.id,
-            ts: ev.ts,
-            tempSessionId:
-              typeof ev.data.temp_session_id === 'string' ? ev.data.temp_session_id : undefined,
-            model: typeof ev.data.model === 'string' ? ev.data.model : undefined,
-          })
-        }
-        break
-      }
-      default: {
-        // Unknown event kinds: skip or render as system
-        break
-      }
+      break
+    }
+    // `pre-ignite` is the legacy event kind from before the pre-hatcher
+    // rename — old transcripts render identically (minus the live feed).
+    case 'pre-hatch':
+    case 'pre-ignite': {
+      flushAssistant(st)
+      const text = (ev.data.text as string) ?? ''
+      st.livePreHatch.push(items.length)
+      items.push({
+        type: 'pre-hatch',
+        text,
+        key: ev.id,
+        ts: ev.ts,
+        tempSessionId:
+          typeof ev.data.temp_session_id === 'string' ? ev.data.temp_session_id : undefined,
+        model: typeof ev.data.model === 'string' ? ev.data.model : undefined,
+      })
+      break
+    }
+    default: {
+      if (HIDDEN_KINDS.has(ev.kind)) break
+      // Unknown kinds (plugin providers, future backends) render a
+      // collapsed fallback row instead of disappearing.
+      flushAssistant(st)
+      items.push({ type: 'unknown', kind: ev.kind, data: ev.data, ts: ev.ts, key: ev.id })
+      break
     }
   }
+}
 
-  flushAssistant()
-  return items
+function foldResult(st: FoldState): DisplayItem[] {
+  const out: DisplayItem[] = []
+  for (const it of st.items) {
+    if (it.type === 'pre-hatch' && it.superseded) continue
+    out.push(it)
+  }
+  // Live stream buffers render as trailing rows without being committed,
+  // so the next chunk keeps growing the same bubble. Keys are the first
+  // chunk's event id — stable across renders and across the final flush.
+  if (st.thinkingBuffer) {
+    out.push({ type: 'thinking', text: st.thinkingBuffer, key: st.thinkingKey, ts: st.thinkingTs })
+  }
+  if (st.assistantBuffer) {
+    out.push({
+      type: 'assistant',
+      text: st.assistantBuffer,
+      key: st.assistantKey,
+      ts: st.assistantTs,
+    })
+  }
+  return out
+}
+
+/**
+ * Incremental display-item builder. Returns a function that folds a
+ * session's event list into display items, reusing all work from the
+ * previous call when the new list is an append-only extension (the common
+ * case: one WS event — or one token chunk — at a time). Any other shape
+ * (session switch, "Load older" prepend, snapshot merge) is detected via
+ * the first/last consumed event ids and triggers a full rebuild.
+ *
+ * Item object identity is stable across calls unless the item actually
+ * changed, so `React.memo` rows skip re-rendering untouched history.
+ */
+export function createDisplayItemsFolder(): (events: Event[]) => DisplayItem[] {
+  let st = newFoldState()
+  return (events: Event[]) => {
+    const stale =
+      st.consumed > 0 &&
+      (events.length < st.consumed ||
+        events[0]?.id !== st.firstEventId ||
+        events[st.consumed - 1]?.id !== st.lastEventId)
+    if (stale) st = newFoldState()
+    for (let i = st.consumed; i < events.length; i++) {
+      foldEvent(st, events[i])
+    }
+    st.consumed = events.length
+    st.firstEventId = events.length > 0 ? events[0].id : null
+    st.lastEventId = events.length > 0 ? events[events.length - 1].id : null
+    return foldResult(st)
+  }
+}
+
+/** One-shot build — a fresh fold over the full list. */
+export function buildDisplayItems(events: Event[]): DisplayItem[] {
+  return createDisplayItemsFolder()(events)
 }
 
 export function formatTime(ts: number): string {

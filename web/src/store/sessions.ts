@@ -608,7 +608,7 @@ export const useSessionsStore = create<SessionsState>((set, get) => ({
         next.add(sid)
         set({ processing: next })
       }
-    } else if (event.kind === 'agent-end' || event.kind === 'agent-error') {
+    } else if (event.kind === 'agent-end') {
       if (processing.has(sid)) {
         const next = new Set(processing)
         next.delete(sid)
@@ -616,7 +616,7 @@ export const useSessionsStore = create<SessionsState>((set, get) => ({
       }
       // Mark as unread if completed and not the currently viewed session
       const status = (event.data.status as string) ?? ''
-      if (event.kind === 'agent-end' && status === 'complete' && sid !== activeSessionId) {
+      if (status === 'complete' && sid !== activeSessionId) {
         const nextUnread = new Set(unreadSessions)
         nextUnread.add(sid)
         set({ unreadSessions: nextUnread })

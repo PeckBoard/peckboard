@@ -1,9 +1,10 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
+import { useVirtualizer } from '@tanstack/react-virtual'
 import { createPortal } from 'react-dom'
 import rehypeHighlight from 'rehype-highlight'
 import type { Components } from 'react-markdown'
 import SafeMarkdown from './SafeMarkdown'
-import type { Event, Session } from '../types/api'
+import type { CostTable, Event, Session } from '../types/api'
 import { authedFetch } from '../store/auth'
 import { useWsStore } from '../store/ws'
 import { useSessionsStore, type PendingUserMessage } from '../store/sessions'
@@ -25,11 +26,12 @@ import { fetchPlanId, openPlan } from '../lib/plan'
 import { parseTodoItems, latestTodoSnapshot, type TodoItem } from '../types/todo'
 import {
   EMPTY_EVENTS,
-  buildDisplayItems,
+  createDisplayItemsFolder,
   deriveAgentStatus,
   formatTime,
   getStatusDotClass,
   getStatusLabel,
+  type DisplayItem,
   type MessageAttachment,
   type QuestionItem,
 } from './chat/events'
@@ -369,6 +371,341 @@ interface ModelInfo {
   display_name: string
 }
 
+/**
+ * One feed row. Memoized: the incremental fold keeps item identity stable
+ * for untouched history, so a streamed token chunk re-renders only the
+ * growing bubble instead of every mounted row.
+ */
+const ChatRow = memo(function ChatRow({
+  item,
+  sessionId,
+  costTable,
+}: {
+  item: DisplayItem
+  sessionId: string
+  costTable: CostTable
+}) {
+  switch (item.type) {
+    case 'user':
+      return (
+        <div className="chat-row chat-row-user">
+          <div className="chat-bubble chat-bubble-user">
+            {item.preHatchEnriched && (
+              <div
+                className="chat-prehatch-badge"
+                title="This message was enriched by the pre-hatcher before dispatch"
+              >
+                ⚡ pre-hatched
+              </div>
+            )}
+            {item.text}
+            {item.preHatchEnriched && item.preHatchOriginal && (
+              <details className="chat-prehatch-original" data-testid="chat-prehatch-original">
+                <summary>Original message</summary>
+                <div className="chat-prehatch-original-text">{item.preHatchOriginal}</div>
+              </details>
+            )}
+            <MessageAttachments sessionId={sessionId} attachments={item.attachments} />
+            <div className="chat-time chat-time-user">{formatTime(item.ts)}</div>
+          </div>
+        </div>
+      )
+    case 'pre-hatch':
+      return (
+        <div className="chat-row chat-row-user">
+          <div
+            className="chat-bubble chat-bubble-user chat-bubble-prehatch"
+            data-testid="chat-prehatch"
+          >
+            {item.text}
+            <PreHatchActivity
+              tempSessionId={item.tempSessionId}
+              model={item.model}
+              sessionId={sessionId}
+            />
+            <div className="chat-time chat-time-user">{formatTime(item.ts)}</div>
+          </div>
+        </div>
+      )
+    case 'assistant':
+      return (
+        <div className="chat-row chat-row-assistant">
+          <div className="chat-bubble chat-bubble-assistant">
+            <SafeMarkdown
+              className="chat-markdown"
+              rehypePlugins={[rehypeHighlight]}
+              components={chatMarkdownComponents}
+            >
+              {item.text}
+            </SafeMarkdown>
+            <div className="chat-time">{formatTime(item.ts)}</div>
+          </div>
+        </div>
+      )
+    case 'agent-start':
+      return (
+        <div className="chat-row chat-row-system">
+          <div className="chat-agent-start">
+            <span className="chat-agent-start-label">Agent started</span>
+            <span className="chat-agent-start-detail">
+              {item.model}
+              {item.effort ? `, ${item.effort}` : ''}
+            </span>
+            <span className="chat-agent-start-time">{formatTime(item.ts)}</span>
+          </div>
+        </div>
+      )
+    case 'interrupt':
+      return (
+        <div className="chat-row chat-row-system">
+          <div className="chat-agent-start">
+            <span className="chat-agent-start-label">Agent interrupted</span>
+            <span className="chat-agent-start-time">{formatTime(item.ts)}</span>
+          </div>
+        </div>
+      )
+    case 'agent-crashed':
+      // Plain row, no bubble/icon — mirrors `agent-start` and
+      // `interrupt` so all agent lifecycle notices read the
+      // same. The reason ("process exited with code 1",
+      // "interrupted", etc.) sits in the detail chip; stderr
+      // is intentionally not surfaced here, it's still in the
+      // event payload for debugging via the API.
+      return (
+        <div className="chat-row chat-row-system">
+          <div className="chat-agent-start">
+            <span className="chat-agent-start-label">Agent crashed</span>
+            <span className="chat-agent-start-detail">{item.reason}</span>
+            <span className="chat-agent-start-time">{formatTime(item.ts)}</span>
+          </div>
+        </div>
+      )
+    case 'handover-start':
+      return (
+        <div className="chat-row chat-row-system">
+          <div className="chat-agent-start">
+            <span className="chat-agent-start-label">
+              {item.compaction ? 'Compaction' : 'Handover'}
+            </span>
+            <span className="chat-agent-start-detail">
+              {item.compaction
+                ? 'summarizing context to free the window'
+                : `preparing context for ${item.to.replace(/^claude:/, '')}`}
+            </span>
+            <span className="chat-agent-start-time">{formatTime(item.ts)}</span>
+          </div>
+        </div>
+      )
+    case 'handover-aborted': {
+      // A reason means the doc turn FAILED (e.g. an expired login's
+      // 401) rather than being user-cancelled. The context is safe
+      // either way, but a failed compaction leaves the session
+      // stuck near the window limit — so spell out the ways
+      // forward: log in again from Settings and retry, or clear /
+      // switch sessions at the cost of this context.
+      const failed = item.reason !== null
+      return (
+        <div className="chat-row chat-row-system">
+          <div className="chat-agent-start">
+            <span className="chat-agent-start-label">
+              {item.compaction
+                ? failed
+                  ? 'Compaction failed'
+                  : 'Compaction cancelled'
+                : failed
+                  ? 'Model switch failed'
+                  : 'Switch cancelled'}
+            </span>
+            <span className="chat-agent-start-detail">
+              {item.compaction
+                ? 'context left intact'
+                : `staying on ${item.from.replace(/^claude:/, '')} — context kept`}
+            </span>
+            <span className="chat-agent-start-time">{formatTime(item.ts)}</span>
+          </div>
+          {failed && (
+            <div className="chat-handover-failed" role="alert" data-testid="chat-handover-failed">
+              <span className="chat-handover-failed-reason">{item.reason}</span>
+              <span>
+                {item.compaction
+                  ? 'Nothing was compacted and no context was lost. If your login expired, '
+                  : 'The model was not switched. If your login expired, '}
+                <a href="/settings">log in again from Settings</a>
+                {item.compaction
+                  ? ' and retry the compaction — or clear / switch sessions, accepting that this context will be lost.'
+                  : ' and retry.'}
+              </span>
+            </div>
+          )}
+        </div>
+      )
+    }
+    case 'handover':
+      return (
+        <div className="chat-row chat-row-system">
+          <details className="chat-handover" data-testid="chat-handover">
+            <summary className="chat-handover-summary">
+              <span className="chat-handover-icon" aria-hidden="true">
+                {'↔️'}
+              </span>
+              <span>
+                {item.compaction
+                  ? 'Context compacted'
+                  : `Context handed over to ${item.to.replace(/^claude:/, '')}`}
+              </span>
+              <span className="chat-handover-time">{formatTime(item.ts)}</span>
+            </summary>
+            <SafeMarkdown
+              className="chat-markdown chat-handover-doc"
+              components={chatMarkdownComponents}
+            >
+              {item.doc}
+            </SafeMarkdown>
+          </details>
+        </div>
+      )
+    case 'tool':
+      return (
+        <div className="chat-row chat-row-tool">
+          <ToolUseBlock
+            toolName={item.toolName}
+            input={item.input}
+            output={item.output}
+            error={item.error}
+            images={item.images}
+            isRunning={item.isRunning}
+            startTs={item.startTs}
+            endTs={item.endTs}
+            diff={item.diff}
+          />
+        </div>
+      )
+    case 'turn-usage': {
+      const usd = item.slices.reduce(
+        (sum, s) =>
+          sum +
+          usageCost(costTable, s.model || null, {
+            input_tokens: s.input,
+            output_tokens: s.output,
+            cache_read_tokens: s.cacheRead,
+            cache_creation_tokens: s.cacheCreation,
+          }),
+        0,
+      )
+      const cost = usd >= 0.005 ? `$${usd.toFixed(2)}` : usd > 0 ? '<$0.01' : ''
+      const out =
+        item.outputTokens >= 1000
+          ? `${(item.outputTokens / 1000).toFixed(1)}k`
+          : String(item.outputTokens)
+      return (
+        <div className="chat-row chat-row-usage">
+          <span
+            className="chat-turn-usage"
+            title={item.slices
+              .map((s) => s.model)
+              .filter(Boolean)
+              .join(', ')}
+          >
+            {cost && <span>{cost}</span>}
+            <span>{out} tok out</span>
+          </span>
+        </div>
+      )
+    }
+    case 'thinking':
+      return (
+        <div className="chat-row chat-row-system">
+          <details className="chat-thinking-block" data-testid="chat-thinking-block">
+            <summary className="chat-thinking-summary">
+              <span aria-hidden="true">{'\u{1F4AD}'}</span>
+              <span>Thought process</span>
+            </summary>
+            <div className="chat-thinking-body">{item.text}</div>
+          </details>
+        </div>
+      )
+    case 'file-diff':
+      return (
+        <div className="chat-row chat-row-tool">
+          <DiffBlock diff={item.diff} />
+        </div>
+      )
+    case 'status':
+      return (
+        <div className="chat-row chat-row-system">
+          <div className="chat-ready-notice">
+            <span>{item.text}</span>
+            <span className="chat-ready-time">{formatTime(item.ts)}</span>
+          </div>
+        </div>
+      )
+    case 'system':
+      return (
+        <div className="chat-row chat-row-system">
+          {item.reportFolder && item.reportFile ? (
+            <button
+              className="chat-report-chip"
+              onClick={() => {
+                window.history.pushState({}, '', '/reports')
+                window.dispatchEvent(new PopStateEvent('popstate'))
+              }}
+            >
+              <span className="chat-report-chip-icon">{'\u{1F4C4}'}</span>
+              <span className="chat-report-chip-body">
+                <span className="chat-report-chip-title">{item.text}</span>
+                <span className="chat-report-chip-folder">{item.reportFolder}</span>
+              </span>
+            </button>
+          ) : (
+            <div className="chat-system-notice">
+              <span className="chat-system-notice-icon">{'ℹ️'}</span>
+              <span>{item.text}</span>
+            </div>
+          )}
+        </div>
+      )
+    case 'step':
+      return (
+        <div className="chat-row chat-row-step">
+          <div className="chat-step-divider">
+            <span>{item.label}</span>
+          </div>
+        </div>
+      )
+    case 'question':
+      return (
+        <div className="chat-row chat-row-system">
+          <QuestionCard
+            sessionId={sessionId}
+            questionId={item.questionId}
+            questions={item.questions}
+          />
+        </div>
+      )
+    case 'question-resolved':
+      return (
+        <div className="chat-row chat-row-system">
+          <ResolvedQuestionCard questions={item.questions} answers={item.answers} />
+        </div>
+      )
+    case 'unknown':
+      // Fallback for event kinds this build doesn't recognize (plugin
+      // providers, future backend kinds) — visible, with the payload on
+      // demand instead of a silently dropped event.
+      return (
+        <div className="chat-row chat-row-system">
+          <details className="chat-unknown-event" data-testid="chat-unknown-event">
+            <summary className="chat-unknown-summary">
+              <span className="chat-unknown-kind">{item.kind}</span>
+              <span className="chat-unknown-label">unrecognized event</span>
+              <span className="chat-agent-start-time">{formatTime(item.ts)}</span>
+            </summary>
+            <pre className="chat-unknown-json">{JSON.stringify(item.data, null, 2)}</pre>
+          </details>
+        </div>
+      )
+  }
+})
 export default function ChatView({
   sessionId,
   onOpenTodos,
@@ -609,6 +946,37 @@ export default function ChatView({
     return () => window.clearInterval(tick)
   }, [prunePendingUserMessages])
 
+  // Display items via the incremental fold — appends (one WS event or one
+  // token chunk at a time) reuse all prior work instead of an O(n) rebuild
+  // per render. Session switches and "Load older" prepends are detected by
+  // the folder and trigger a one-off full rebuild.
+  const foldRef = useRef<((evs: Event[]) => DisplayItem[]) | null>(null)
+  if (foldRef.current === null) foldRef.current = createDisplayItemsFolder()
+  const fold = foldRef.current
+  const displayItems = useMemo(() => fold(events), [fold, events])
+
+  // Windowed rendering: only rows near the viewport mount. Rows are
+  // measured (heights vary: markdown, tool blocks, diagrams) and keyed by
+  // item key so measurements survive "Load older" prepends.
+  const listWrapRef = useRef<HTMLDivElement>(null)
+  const [listOffset, setListOffset] = useState(0)
+  const rowVirtualizer = useVirtualizer({
+    count: displayItems.length,
+    getScrollElement: () => scrollRef.current,
+    estimateSize: () => 64,
+    overscan: 12,
+    getItemKey: (i) => displayItems[i].key,
+    scrollMargin: listOffset,
+  })
+  // The virtual list starts below the "Load older" button inside the same
+  // scroll container; keep the virtualizer's origin in sync with it.
+  useLayoutEffect(() => {
+    const el = scrollRef.current
+    const wrap = listWrapRef.current
+    if (!el || !wrap) return
+    setListOffset(wrap.getBoundingClientRect().top - el.getBoundingClientRect().top + el.scrollTop)
+  }, [hasMoreOlderEvents, displayItems.length])
+  const virtualTotal = rowVirtualizer.getTotalSize()
   // Scroll handling
   const handleScroll = useCallback(() => {
     const el = scrollRef.current
@@ -645,7 +1013,7 @@ export default function ChatView({
     if (!userScrolledUp.current) {
       el.scrollTop = el.scrollHeight
     }
-  }, [events])
+  }, [events, virtualTotal])
 
   const handleLoadOlder = useCallback(() => {
     const el = scrollRef.current
@@ -657,7 +1025,36 @@ export default function ChatView({
     void fetchOlderEvents(sessionId)
   }, [fetchOlderEvents, sessionId])
 
-  const displayItems = buildDisplayItems(events)
+  // Queued-turn indicator. The backend broadcasts `queue` WS frames
+  // (store/ws.ts re-dispatches them as `peckboard:queue` window events);
+  // the durable queue is then confirmed via GET so the chip never shows
+  // for a mid-turn message that was already injected into the running
+  // stream (that path broadcasts `set` too, but stores nothing).
+  const [queuedText, setQueuedText] = useState<string | null>(null)
+  useEffect(() => {
+    let cancelled = false
+    setQueuedText(null)
+    const refresh = () => {
+      authedFetch(`/api/sessions/${sessionId}/queue`)
+        .then((res) => (res.ok ? res.json() : null))
+        .then((msg: { text?: string } | null) => {
+          if (!cancelled) setQueuedText(typeof msg?.text === 'string' ? msg.text : null)
+        })
+        .catch(() => {})
+    }
+    refresh()
+    const onQueue = (e: CustomEvent<{ session_id?: string; data?: { action?: string } }>) => {
+      if (e.detail?.session_id !== sessionId) return
+      if (e.detail?.data?.action === 'set') refresh()
+      // `drained` / `deleted` — the message was dispatched or discarded.
+      else setQueuedText(null)
+    }
+    window.addEventListener('peckboard:queue', onQueue as EventListener)
+    return () => {
+      cancelled = true
+      window.removeEventListener('peckboard:queue', onQueue as EventListener)
+    }
+  }, [sessionId])
 
   // Live `todo` events are authoritative once any arrive; before then, fall
   // back to the snapshot fetched at load time. After a clear (events loaded
@@ -1151,319 +1548,29 @@ export default function ChatView({
         {displayItems.length === 0 && (
           <div className="chat-empty">No messages yet. Send one below.</div>
         )}
-        {displayItems.map((item) => {
-          switch (item.type) {
-            case 'user':
-              return (
-                <div key={item.key} className="chat-row chat-row-user">
-                  <div className="chat-bubble chat-bubble-user">
-                    {item.preHatchEnriched && (
-                      <div
-                        className="chat-prehatch-badge"
-                        title="This message was enriched by the pre-hatcher before dispatch"
-                      >
-                        ⚡ pre-hatched
-                      </div>
-                    )}
-                    {item.text}
-                    {item.preHatchEnriched && item.preHatchOriginal && (
-                      <details
-                        className="chat-prehatch-original"
-                        data-testid="chat-prehatch-original"
-                      >
-                        <summary>Original message</summary>
-                        <div className="chat-prehatch-original-text">{item.preHatchOriginal}</div>
-                      </details>
-                    )}
-                    <MessageAttachments sessionId={sessionId} attachments={item.attachments} />
-                    <div className="chat-time chat-time-user">{formatTime(item.ts)}</div>
-                  </div>
-                </div>
-              )
-            case 'pre-hatch':
-              return (
-                <div key={item.key} className="chat-row chat-row-user">
-                  <div
-                    className="chat-bubble chat-bubble-user chat-bubble-prehatch"
-                    data-testid="chat-prehatch"
-                  >
-                    {item.text}
-                    <PreHatchActivity
-                      tempSessionId={item.tempSessionId}
-                      model={item.model}
-                      sessionId={sessionId}
-                    />
-                    <div className="chat-time chat-time-user">{formatTime(item.ts)}</div>
-                  </div>
-                </div>
-              )
-            case 'assistant':
-              return (
-                <div key={item.key} className="chat-row chat-row-assistant">
-                  <div className="chat-bubble chat-bubble-assistant">
-                    <SafeMarkdown
-                      className="chat-markdown"
-                      rehypePlugins={[rehypeHighlight]}
-                      components={chatMarkdownComponents}
-                    >
-                      {item.text}
-                    </SafeMarkdown>
-                    <div className="chat-time">{formatTime(item.ts)}</div>
-                  </div>
-                </div>
-              )
-            case 'agent-start':
-              return (
-                <div key={item.key} className="chat-row chat-row-system">
-                  <div className="chat-agent-start">
-                    <span className="chat-agent-start-label">Agent started</span>
-                    <span className="chat-agent-start-detail">
-                      {item.model}
-                      {item.effort ? `, ${item.effort}` : ''}
-                    </span>
-                    <span className="chat-agent-start-time">{formatTime(item.ts)}</span>
-                  </div>
-                </div>
-              )
-            case 'interrupt':
-              return (
-                <div key={item.key} className="chat-row chat-row-system">
-                  <div className="chat-agent-start">
-                    <span className="chat-agent-start-label">Agent interrupted</span>
-                    <span className="chat-agent-start-time">{formatTime(item.ts)}</span>
-                  </div>
-                </div>
-              )
-            case 'agent-crashed':
-              // Plain row, no bubble/icon — mirrors `agent-start` and
-              // `interrupt` so all agent lifecycle notices read the
-              // same. The reason ("process exited with code 1",
-              // "interrupted", etc.) sits in the detail chip; stderr
-              // is intentionally not surfaced here, it's still in the
-              // event payload for debugging via the API.
-              return (
-                <div key={item.key} className="chat-row chat-row-system">
-                  <div className="chat-agent-start">
-                    <span className="chat-agent-start-label">Agent crashed</span>
-                    <span className="chat-agent-start-detail">{item.reason}</span>
-                    <span className="chat-agent-start-time">{formatTime(item.ts)}</span>
-                  </div>
-                </div>
-              )
-            case 'handover-start':
-              return (
-                <div key={item.key} className="chat-row chat-row-system">
-                  <div className="chat-agent-start">
-                    <span className="chat-agent-start-label">
-                      {item.compaction ? 'Compaction' : 'Handover'}
-                    </span>
-                    <span className="chat-agent-start-detail">
-                      {item.compaction
-                        ? 'summarizing context to free the window'
-                        : `preparing context for ${item.to.replace(/^claude:/, '')}`}
-                    </span>
-                    <span className="chat-agent-start-time">{formatTime(item.ts)}</span>
-                  </div>
-                </div>
-              )
-            case 'handover-aborted': {
-              // A reason means the doc turn FAILED (e.g. an expired login's
-              // 401) rather than being user-cancelled. The context is safe
-              // either way, but a failed compaction leaves the session
-              // stuck near the window limit — so spell out the ways
-              // forward: log in again from Settings and retry, or clear /
-              // switch sessions at the cost of this context.
-              const failed = item.reason !== null
-              return (
-                <div key={item.key} className="chat-row chat-row-system">
-                  <div className="chat-agent-start">
-                    <span className="chat-agent-start-label">
-                      {item.compaction
-                        ? failed
-                          ? 'Compaction failed'
-                          : 'Compaction cancelled'
-                        : failed
-                          ? 'Model switch failed'
-                          : 'Switch cancelled'}
-                    </span>
-                    <span className="chat-agent-start-detail">
-                      {item.compaction
-                        ? 'context left intact'
-                        : `staying on ${item.from.replace(/^claude:/, '')} — context kept`}
-                    </span>
-                    <span className="chat-agent-start-time">{formatTime(item.ts)}</span>
-                  </div>
-                  {failed && (
-                    <div
-                      className="chat-handover-failed"
-                      role="alert"
-                      data-testid="chat-handover-failed"
-                    >
-                      <span className="chat-handover-failed-reason">{item.reason}</span>
-                      <span>
-                        {item.compaction
-                          ? 'Nothing was compacted and no context was lost. If your login expired, '
-                          : 'The model was not switched. If your login expired, '}
-                        <a href="/settings">log in again from Settings</a>
-                        {item.compaction
-                          ? ' and retry the compaction — or clear / switch sessions, accepting that this context will be lost.'
-                          : ' and retry.'}
-                      </span>
-                    </div>
-                  )}
-                </div>
-              )
-            }
-            case 'handover':
-              return (
-                <div key={item.key} className="chat-row chat-row-system">
-                  <details className="chat-handover" data-testid="chat-handover">
-                    <summary className="chat-handover-summary">
-                      <span className="chat-handover-icon" aria-hidden="true">
-                        {'↔️'}
-                      </span>
-                      <span>
-                        {item.compaction
-                          ? 'Context compacted'
-                          : `Context handed over to ${item.to.replace(/^claude:/, '')}`}
-                      </span>
-                      <span className="chat-handover-time">{formatTime(item.ts)}</span>
-                    </summary>
-                    <SafeMarkdown
-                      className="chat-markdown chat-handover-doc"
-                      components={chatMarkdownComponents}
-                    >
-                      {item.doc}
-                    </SafeMarkdown>
-                  </details>
-                </div>
-              )
-            case 'tool':
-              return (
-                <div key={item.key} className="chat-row chat-row-tool">
-                  <ToolUseBlock
-                    toolName={item.toolName}
-                    input={item.input}
-                    output={item.output}
-                    error={item.error}
-                    images={item.images}
-                    isRunning={item.isRunning}
-                    startTs={item.startTs}
-                    endTs={item.endTs}
-                    diff={item.diff}
-                  />
-                </div>
-              )
-            case 'turn-usage': {
-              const usd = item.slices.reduce(
-                (sum, s) =>
-                  sum +
-                  usageCost(costTable, s.model || null, {
-                    input_tokens: s.input,
-                    output_tokens: s.output,
-                    cache_read_tokens: s.cacheRead,
-                    cache_creation_tokens: s.cacheCreation,
-                  }),
-                0,
-              )
-              const cost = usd >= 0.005 ? `$${usd.toFixed(2)}` : usd > 0 ? '<$0.01' : ''
-              const out =
-                item.outputTokens >= 1000
-                  ? `${(item.outputTokens / 1000).toFixed(1)}k`
-                  : String(item.outputTokens)
-              return (
-                <div key={item.key} className="chat-row chat-row-usage">
-                  <span
-                    className="chat-turn-usage"
-                    title={item.slices
-                      .map((s) => s.model)
-                      .filter(Boolean)
-                      .join(', ')}
-                  >
-                    {cost && <span>{cost}</span>}
-                    <span>{out} tok out</span>
-                  </span>
-                </div>
-              )
-            }
-            case 'thinking':
-              return (
-                <div key={item.key} className="chat-row chat-row-system">
-                  <details className="chat-thinking-block" data-testid="chat-thinking-block">
-                    <summary className="chat-thinking-summary">
-                      <span aria-hidden="true">{'\u{1F4AD}'}</span>
-                      <span>Thought process</span>
-                    </summary>
-                    <div className="chat-thinking-body">{item.text}</div>
-                  </details>
-                </div>
-              )
-            case 'file-diff':
-              return (
-                <div key={item.key} className="chat-row chat-row-tool">
-                  <DiffBlock diff={item.diff} />
-                </div>
-              )
-            case 'status':
-              return (
-                <div key={item.key} className="chat-row chat-row-system">
-                  <div className="chat-ready-notice">
-                    <span>{item.text}</span>
-                    <span className="chat-ready-time">{formatTime(item.ts)}</span>
-                  </div>
-                </div>
-              )
-            case 'system':
-              return (
-                <div key={item.key} className="chat-row chat-row-system">
-                  {item.reportFolder && item.reportFile ? (
-                    <button
-                      className="chat-report-chip"
-                      onClick={() => {
-                        window.history.pushState({}, '', '/reports')
-                        window.dispatchEvent(new PopStateEvent('popstate'))
-                      }}
-                    >
-                      <span className="chat-report-chip-icon">{'\u{1F4C4}'}</span>
-                      <span className="chat-report-chip-body">
-                        <span className="chat-report-chip-title">{item.text}</span>
-                        <span className="chat-report-chip-folder">{item.reportFolder}</span>
-                      </span>
-                    </button>
-                  ) : (
-                    <div className="chat-system-notice">
-                      <span className="chat-system-notice-icon">{'\u2139\uFE0F'}</span>
-                      <span>{item.text}</span>
-                    </div>
-                  )}
-                </div>
-              )
-            case 'step':
-              return (
-                <div key={item.key} className="chat-row chat-row-step">
-                  <div className="chat-step-divider">
-                    <span>{item.label}</span>
-                  </div>
-                </div>
-              )
-            case 'question':
-              return (
-                <div key={item.key} className="chat-row chat-row-system">
-                  <QuestionCard
-                    sessionId={sessionId}
-                    questionId={item.questionId}
-                    questions={item.questions}
-                  />
-                </div>
-              )
-            case 'question-resolved':
-              return (
-                <div key={item.key} className="chat-row chat-row-system">
-                  <ResolvedQuestionCard questions={item.questions} answers={item.answers} />
-                </div>
-              )
-          }
-        })}
+        <div
+          ref={listWrapRef}
+          className="chat-virtual"
+          style={{ height: virtualTotal }}
+          data-testid="chat-virtual"
+        >
+          {rowVirtualizer.getVirtualItems().map((vi) => {
+            const item = displayItems[vi.index]
+            return (
+              <div
+                key={item.key}
+                data-index={vi.index}
+                ref={rowVirtualizer.measureElement}
+                className="chat-vrow"
+                style={{
+                  transform: `translateY(${vi.start - rowVirtualizer.options.scrollMargin}px)`,
+                }}
+              >
+                <ChatRow item={item} sessionId={sessionId} costTable={costTable} />
+              </div>
+            )
+          })}
+        </div>
         {/* Optimistic user bubbles — rendered immediately on Send so the
             chat doesn't appear to swallow the message during the WS
             round-trip (especially noticeable for queued turns). The
@@ -1474,10 +1581,20 @@ export default function ChatView({
             <div className="chat-bubble chat-bubble-user chat-bubble-pending">
               {p.text}
               <MessageAttachments sessionId={sessionId} attachments={p.attachments} />
-              <div className="chat-time chat-time-user">Sending...</div>
+              <div className="chat-time chat-time-user">
+                {queuedText === p.text ? 'Queued' : 'Sending...'}
+              </div>
             </div>
           </div>
         ))}
+        {queuedText !== null && (
+          <div className="chat-row chat-row-system">
+            <div className="chat-queued-chip" data-testid="chat-queued-chip" title={queuedText}>
+              <span className="chat-queued-dot" aria-hidden="true" />
+              <span>Queued — sends when the agent finishes</span>
+            </div>
+          </div>
+        )}
         {/* Thinking indicator + inline Interrupt — shown at the end of the
             message log when the agent is working. Combining them keeps the
             "stop the agent" affordance attached to the activity it's
