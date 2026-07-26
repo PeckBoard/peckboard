@@ -47,7 +47,7 @@ use tokio::sync::mpsc;
 use crate::db::Db;
 use crate::provider::agent::emit_event;
 use crate::provider::message::UserMessage;
-use crate::provider::stream::ProviderEvent;
+use crate::provider::stream::{CrashKind, ProviderEvent};
 use crate::ws::broadcaster::{Broadcaster, WsEvent};
 
 use super::build_cli_args;
@@ -336,6 +336,7 @@ pub async fn stream_events(
                 &session_id,
                 ProviderEvent::Crashed {
                     reason: "no stdout handle".into(),
+                    error_kind: CrashKind::SpawnFailed,
                     exit_code: None,
                     stderr: None,
                 },
@@ -345,6 +346,7 @@ pub async fn stream_events(
             return StreamOutcome {
                 completed: false,
                 error: Some("no stdout handle".into()),
+                error_kind: Some(CrashKind::SpawnFailed),
             };
         }
     };
@@ -795,13 +797,7 @@ pub async fn stream_events(
                             todos: snapshot.todos,
                         });
                     }
-                    let file_path = match name.as_str() {
-                        "Write" | "Edit" => input
-                            .get("file_path")
-                            .and_then(|v| v.as_str())
-                            .map(|s| s.to_string()),
-                        _ => None,
-                    };
+                    let file_path = file_change_path(name, input);
                     pending_tool_names.insert(tool_use_id.clone(), (name.clone(), file_path));
                 }
                 ProviderEvent::ToolEnd {
@@ -819,13 +815,9 @@ pub async fn stream_events(
                             todos: snapshot.todos,
                         });
                     }
-                    if let Some((name, file_path)) = pending_tool_names.remove(tool_use_id) {
+                    if let Some((_, Some(path))) = pending_tool_names.remove(tool_use_id) {
                         if error.is_none() {
-                            if let Some(path) = file_path {
-                                if name == "Write" || name == "Edit" {
-                                    pending_file_changes.push(path);
-                                }
-                            }
+                            pending_file_changes.push(path);
                         }
                     }
                 }
@@ -887,6 +879,7 @@ pub async fn stream_events(
                 &session_id,
                 ProviderEvent::Completed {
                     conversation_id: parser_state.conversation_id.clone(),
+                    result_meta: result_meta(&json),
                 },
             )
             .await;
@@ -1034,18 +1027,30 @@ pub async fn stream_events(
         emit_turn_usage(&db, &broadcaster, &session_id, crash_usages).await;
     }
 
+    // The stderr tail often names the real cause (an expired login, a 429)
+    // even when the *shape* of the exit only says "died mid-turn". Classify
+    // it once; each branch falls back to its own structural kind.
+    let stderr_kind = CrashKind::classify(stderr_text.as_deref().unwrap_or_default());
+    // Reason + kind of the crash this exit emitted, if any — threaded into
+    // `StreamOutcome` so the completion listener reports the same thing the
+    // chat shows.
+    let mut crash_report: Option<(String, CrashKind)> = None;
+
     let is_completed = if watchdog_fired {
         let exit_code = exit_status.ok().and_then(|s| s.code());
         let timeout_ms = state
             .turn_timeout
             .map(|t| t.as_millis() as u64)
             .unwrap_or_default();
+        let reason = format!("turn timeout after {timeout_ms}ms");
+        crash_report = Some((reason.clone(), CrashKind::Timeout));
         emit_event(
             &db,
             &broadcaster,
             &session_id,
             ProviderEvent::Crashed {
-                reason: format!("turn timeout after {timeout_ms}ms"),
+                reason,
+                error_kind: CrashKind::Timeout,
                 exit_code,
                 stderr: stderr_text,
             },
@@ -1060,12 +1065,14 @@ pub async fn stream_events(
         // finalize_handover, keeping the conversation intact.
         last_result_error.is_none()
     } else if was_cancelled {
+        crash_report = Some(("interrupted".to_string(), CrashKind::Interrupted));
         emit_event(
             &db,
             &broadcaster,
             &session_id,
             ProviderEvent::Crashed {
                 reason: "interrupted".into(),
+                error_kind: CrashKind::Interrupted,
                 exit_code: exit_status.ok().and_then(|s| s.code()),
                 stderr: stderr_text,
             },
@@ -1074,12 +1081,16 @@ pub async fn stream_events(
         false
     } else if turn_was_active {
         let exit_code = exit_status.ok().and_then(|s| s.code());
+        let error_kind = stderr_kind.or(CrashKind::ExitedMidTurn);
+        let reason = format!("process exited mid-turn (code {})", exit_code.unwrap_or(-1));
+        crash_report = Some((reason.clone(), error_kind));
         emit_event(
             &db,
             &broadcaster,
             &session_id,
             ProviderEvent::Crashed {
-                reason: format!("process exited mid-turn (code {})", exit_code.unwrap_or(-1)),
+                reason,
+                error_kind,
                 exit_code,
                 stderr: stderr_text,
             },
@@ -1088,15 +1099,19 @@ pub async fn stream_events(
         false
     } else if !saw_clean_completion {
         let exit_code = exit_status.ok().and_then(|s| s.code());
+        let error_kind = stderr_kind.or(CrashKind::NoOutput);
+        let reason = format!(
+            "process exited before producing any output (code {})",
+            exit_code.unwrap_or(-1)
+        );
+        crash_report = Some((reason.clone(), error_kind));
         emit_event(
             &db,
             &broadcaster,
             &session_id,
             ProviderEvent::Crashed {
-                reason: format!(
-                    "process exited before producing any output (code {})",
-                    exit_code.unwrap_or(-1)
-                ),
+                reason,
+                error_kind,
                 exit_code,
                 stderr: stderr_text,
             },
@@ -1111,9 +1126,21 @@ pub async fn stream_events(
         true
     };
 
+    // The CLI's own error text wins over the structural crash — it is the
+    // most specific thing we can show the user.
+    let (error, error_kind) = match (last_result_error, crash_report) {
+        (Some(reason), _) => {
+            let kind = CrashKind::classify(&reason);
+            (Some(reason), Some(kind))
+        }
+        (None, Some((reason, kind))) => (Some(reason), Some(kind)),
+        (None, None) => (None, None),
+    };
+
     StreamOutcome {
         completed: is_completed,
-        error: last_result_error,
+        error,
+        error_kind,
     }
 }
 
@@ -1125,6 +1152,10 @@ pub struct StreamOutcome {
     /// failure (`is_error: true` or a non-`"success"` subtype) — e.g.
     /// "Failed to authenticate. API Error: 401 …" from an expired login.
     pub error: Option<String>,
+    /// Classification of `error` — [`CrashKind::AuthExpired`] for the 401
+    /// above, [`CrashKind::Interrupted`] for a cancel, and so on. `None`
+    /// exactly when `error` is `None`.
+    pub error_kind: Option<CrashKind>,
 }
 
 /// Error text of a `result` event; `None` when it reports success. The CLI
@@ -1148,6 +1179,64 @@ fn result_error(json: &serde_json::Value) -> Option<String> {
             .or_else(|| subtype.map(str::to_string))
             .unwrap_or_else(|| "the model reported an error".into()),
     )
+}
+
+/// Additive per-turn metadata from a `result` frame — how long the turn took,
+/// how many model turns it burned, what it cost, and any tool uses the CLI
+/// refused. Merged into the `Completed` event data as extra camelCase keys.
+/// `Null` when the frame carries none of them, so the event data stays
+/// byte-identical to before for CLIs that don't report them.
+fn result_meta(json: &serde_json::Value) -> serde_json::Value {
+    let mut meta = serde_json::Map::new();
+    if let Some(v) = json.get("duration_ms").and_then(|v| v.as_i64()) {
+        meta.insert("durationMs".into(), v.into());
+    }
+    if let Some(v) = json.get("num_turns").and_then(|v| v.as_i64()) {
+        meta.insert("numTurns".into(), v.into());
+    }
+    if let Some(n) = json
+        .get("total_cost_usd")
+        .and_then(|v| v.as_f64())
+        .and_then(serde_json::Number::from_f64)
+    {
+        meta.insert("totalCostUsd".into(), serde_json::Value::Number(n));
+    }
+    if let Some(denials) = json
+        .get("permission_denials")
+        .and_then(|v| v.as_array())
+        .filter(|d| !d.is_empty())
+    {
+        meta.insert(
+            "permissionDenials".into(),
+            serde_json::Value::Array(denials.clone()),
+        );
+    }
+    if meta.is_empty() {
+        serde_json::Value::Null
+    } else {
+        serde_json::Value::Object(meta)
+    }
+}
+
+/// Path a tool call changed on disk, or `None` for tools that don't write
+/// files. Covers Claude's built-in editors AND peckboard's own MCP file
+/// tools: the built-ins are hard-denied whenever those MCP tools are active
+/// (`--disallowedTools`, see `claude::mod`), so keying only on `Write`/`Edit`
+/// left cross-worker change notification inert in exactly the configuration
+/// workers run in.
+fn file_change_path(name: &str, input: &serde_json::Value) -> Option<String> {
+    let key = match name {
+        "Write" | "Edit" | "MultiEdit" => "file_path",
+        "NotebookEdit" => "notebook_path",
+        "mcp__peckboard__write_file" | "mcp__peckboard__edit_file" => "path",
+        _ => return None,
+    };
+    input
+        .get(key)
+        .and_then(|v| v.as_str())
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
 }
 enum EventSource {
     Stdout(String),
@@ -1906,9 +1995,9 @@ mod tests {
 
         let events = db.list_events_by_session(session, None).await.unwrap();
         assert!(
-            events
-                .iter()
-                .any(|e| e.kind == "agent-end" && e.data.contains("interrupted")),
+            events.iter().any(|e| e.kind == "agent-end"
+                && e.data.contains("interrupted")
+                && e.data.contains("\"errorKind\":\"interrupted\"")),
             "hard-kill fallback must produce Crashed{{interrupted}}"
         );
     }
@@ -1941,10 +2030,78 @@ mod tests {
 
         let events = db.list_events_by_session(session, None).await.unwrap();
         assert!(
-            events
-                .iter()
-                .any(|e| e.kind == "agent-end" && e.data.contains("interrupted")),
+            events.iter().any(|e| e.kind == "agent-end"
+                && e.data.contains("interrupted")
+                && e.data.contains("\"errorKind\":\"interrupted\"")),
             "grace-expiry fallback must produce Crashed{{interrupted}}"
         );
+    }
+
+    #[test]
+    fn result_meta_collects_turn_metadata() {
+        let json = serde_json::json!({
+            "type": "result",
+            "subtype": "success",
+            "duration_ms": 12345,
+            "num_turns": 7,
+            "total_cost_usd": 0.1234,
+            "permission_denials": [{ "tool_name": "Bash", "tool_use_id": "tu-1" }],
+        });
+        let meta = result_meta(&json);
+        assert_eq!(meta["durationMs"], 12345);
+        assert_eq!(meta["numTurns"], 7);
+        assert_eq!(meta["totalCostUsd"], 0.1234);
+        assert_eq!(meta["permissionDenials"][0]["tool_name"], "Bash");
+    }
+
+    #[test]
+    fn result_meta_is_null_without_metadata() {
+        let json = serde_json::json!({ "type": "result", "subtype": "success" });
+        assert!(result_meta(&json).is_null());
+        // An empty denial list is noise, not information.
+        let json = serde_json::json!({ "type": "result", "permission_denials": [] });
+        assert!(result_meta(&json).is_null());
+    }
+
+    #[test]
+    fn file_change_path_covers_builtin_and_mcp_file_tools() {
+        let by_file_path = serde_json::json!({ "file_path": "/repo/a.rs" });
+        for tool in ["Write", "Edit", "MultiEdit"] {
+            assert_eq!(
+                file_change_path(tool, &by_file_path).as_deref(),
+                Some("/repo/a.rs"),
+                "{tool} must report its path"
+            );
+        }
+        assert_eq!(
+            file_change_path(
+                "NotebookEdit",
+                &serde_json::json!({ "notebook_path": "/repo/n.ipynb" })
+            )
+            .as_deref(),
+            Some("/repo/n.ipynb")
+        );
+        for tool in ["mcp__peckboard__edit_file", "mcp__peckboard__write_file"] {
+            assert_eq!(
+                file_change_path(tool, &serde_json::json!({ "path": "src/lib.rs" })).as_deref(),
+                Some("src/lib.rs"),
+                "{tool} must report its path"
+            );
+        }
+    }
+
+    #[test]
+    fn file_change_path_ignores_non_writing_tools() {
+        assert!(file_change_path("Read", &serde_json::json!({ "file_path": "/a" })).is_none());
+        assert!(
+            file_change_path(
+                "mcp__peckboard__read_file",
+                &serde_json::json!({ "path": "src/lib.rs" })
+            )
+            .is_none()
+        );
+        // Missing or blank paths must not produce an empty notification entry.
+        assert!(file_change_path("Write", &serde_json::json!({})).is_none());
+        assert!(file_change_path("Write", &serde_json::json!({ "file_path": "  " })).is_none());
     }
 }

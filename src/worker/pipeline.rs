@@ -1,4 +1,5 @@
 use crate::db::models::{Card, Event, Project};
+use crate::provider::stream::CrashKind;
 use std::collections::BTreeMap;
 use std::path::Path;
 
@@ -726,15 +727,23 @@ pub fn find_next_step(current_step: &str, workflow_steps: &[String]) -> Option<S
 /// spin-respawn-crash loop until the user noticed.
 pub const PAUSE_AFTER_CRASHES: u32 = 2;
 
-/// Crash reasons that DON'T count toward [`PAUSE_AFTER_CRASHES`] because
-/// they aren't the agent's fault:
+/// Crashes that DON'T count toward [`PAUSE_AFTER_CRASHES`] because they
+/// aren't the agent's fault:
 ///
-/// - `"interrupted"`: someone called `cancel()` (user, watchdog, project
-///   pause). Retrying isn't going to keep failing.
-/// - `"server-shutdown"`: synthesized by `repair_dangling_sessions` at
-///   startup when an in-flight session was orphaned by a restart. The
-///   underlying agent never failed; the server just stopped.
-fn crash_reason_counts(reason: Option<&str>) -> bool {
+/// - `errorKind: "interrupted"`: someone called `cancel()` (user, watchdog,
+///   project pause). Retrying isn't going to keep failing.
+/// - `reason: "server-shutdown"`: synthesized by `repair_dangling_sessions`
+///   at startup when an in-flight session was orphaned by a restart. The
+///   underlying agent never failed; the server just stopped. It carries no
+///   `errorKind` — there is no taxonomy slot for "the host restarted".
+///
+/// The kind is the contract; the `reason` check is the compatibility path
+/// for `agent-end` rows persisted before `errorKind` existed (and for
+/// `server-shutdown`).
+fn crash_counts(error_kind: Option<&str>, reason: Option<&str>) -> bool {
+    if error_kind == Some(CrashKind::Interrupted.as_str()) {
+        return false;
+    }
     !matches!(reason, Some("interrupted") | Some("server-shutdown"))
 }
 
@@ -742,10 +751,9 @@ fn crash_reason_counts(reason: Option<&str>) -> bool {
 /// consecutive process crashes have happened since the last "reset"
 /// marker: a successful turn (`agent-end status=complete`), a step
 /// change, or an explicit [`PAUSE_CLEARED_KIND`] event appended when the
-/// user resumes the owning project. Crashes whose `reason` is in the
-/// exclusion list (see [`crash_reason_counts`]) are ignored — they
-/// aren't agent failures, so they shouldn't decide whether the card
-/// "keeps failing".
+/// user resumes the owning project. Crashes in the exclusion list (see
+/// [`crash_counts`]) are ignored — they aren't agent failures, so they
+/// shouldn't decide whether the card "keeps failing".
 pub fn count_consecutive_crashes(events: &[Event]) -> u32 {
     let mut crash_count: u32 = 0;
     for event in events {
@@ -757,7 +765,8 @@ pub fn count_consecutive_crashes(events: &[Event]) -> u32 {
                 match data.get("status").and_then(|s| s.as_str()) {
                     Some("crashed") => {
                         let reason = data.get("reason").and_then(|r| r.as_str());
-                        if crash_reason_counts(reason) {
+                        let error_kind = data.get("errorKind").and_then(|k| k.as_str());
+                        if crash_counts(error_kind, reason) {
                             crash_count += 1;
                         }
                     }
@@ -1198,6 +1207,22 @@ mod tests {
             ),
         ];
         // Only the "process exited" crash should count.
+        assert_eq!(count_consecutive_crashes(&events), 1);
+    }
+    /// The taxonomy, not the prose, decides now: a cancel whose `reason`
+    /// is a sentence still doesn't count, and an auth failure does.
+    #[test]
+    fn test_count_consecutive_crashes_uses_the_error_kind() {
+        let events = vec![
+            make_event(
+                "agent-end",
+                r#"{"status":"crashed","reason":"stopped by the watchdog","errorKind":"interrupted"}"#,
+            ),
+            make_event(
+                "agent-end",
+                r#"{"status":"crashed","reason":"Failed to authenticate. API Error: 401","errorKind":"auth_expired"}"#,
+            ),
+        ];
         assert_eq!(count_consecutive_crashes(&events), 1);
     }
 

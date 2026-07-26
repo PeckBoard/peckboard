@@ -64,6 +64,7 @@ const STDERR_MARKERS: &[StderrMarker] = &[StderrMarker {
     marker: "accounts.x.ai/oauth2/device",
     message: "This Grok account isn't signed in. Open Settings \u{2192} Grok accounts and \
               complete the browser sign-in, then try again.",
+    kind: crate::provider::stream::CrashKind::AuthExpired,
     abort: true,
 }];
 
@@ -346,6 +347,7 @@ impl AgentProvider for GrokProvider {
                     session_id: sid,
                     completed: result.completed,
                     error: result.error,
+                    error_kind: result.error_kind,
                 })
                 .await;
         });
@@ -499,6 +501,15 @@ pub fn default_models() -> Vec<ModelInfo> {
 mod tests {
     use super::*;
     use crate::provider::stream::SpawnConfig;
+    /// The device-login marker must classify as an auth failure, so the
+    /// crash row can offer "re-login" rather than "retry".
+    #[test]
+    fn device_login_marker_is_an_auth_failure() {
+        let marker = &STDERR_MARKERS[0];
+        assert_eq!(marker.marker, "accounts.x.ai/oauth2/device");
+        assert_eq!(marker.kind, crate::provider::stream::CrashKind::AuthExpired);
+        assert!(marker.abort);
+    }
 
     /// The composed prompt a turn ships when nothing custom is configured.
     fn working_style() -> String {

@@ -95,6 +95,7 @@ const STDERR_MARKERS: &[StderrMarker] = &[StderrMarker {
     message: "Kimi Code isn't signed in on this host. Run `kimi login` (or add a \
               provider to ~/.kimi-code/config.toml / set an API key in the plugin \
               settings), then try again.",
+    kind: crate::provider::stream::CrashKind::AuthExpired,
     abort: false,
 }];
 
@@ -434,6 +435,7 @@ impl AgentProvider for KimiProvider {
                     session_id: sid,
                     completed: result.completed,
                     error: result.error,
+                    error_kind: result.error_kind,
                 })
                 .await;
         });
@@ -659,6 +661,15 @@ fn merge_additional_models(base: Vec<ModelInfo>, extras: Vec<String>) -> Vec<Mod
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// "No model configured" means unsigned-in, not a generic failure.
+    #[test]
+    fn no_model_configured_marker_is_an_auth_failure() {
+        let marker = &STDERR_MARKERS[0];
+        assert_eq!(marker.marker, "No model configured");
+        assert_eq!(marker.kind, crate::provider::stream::CrashKind::AuthExpired);
+        assert!(!marker.abort);
+    }
     #[test]
     fn resolve_model_and_account_strips_prefix_and_splits_account() {
         assert_eq!(

@@ -25,7 +25,7 @@ use tokio::process::Command;
 use tokio::sync::Notify;
 
 use crate::provider::agent::emit_event;
-use crate::provider::stream::{ModelInfo, ProviderEvent, SpawnConfig};
+use crate::provider::stream::{CrashKind, ModelInfo, ProviderEvent, SpawnConfig};
 
 /// Cap on stderr bytes captured for a crash message.
 pub const MAX_STDERR_BYTES: usize = 16 * 1024;
@@ -48,6 +48,9 @@ pub struct StderrMarker {
     /// `true`: kill the child the moment the marker appears — the CLI is
     /// waiting for an interactive login that will never come. `false`: only
     /// rewrite the crash reason if the turn also exits non-zero.
+    /// Taxonomy slot for the crash this marker describes — most markers
+    /// are auth failures ([`CrashKind::AuthExpired`]).
+    pub kind: CrashKind,
     pub abort: bool,
 }
 
@@ -114,6 +117,10 @@ pub struct TurnResult {
     /// [`crate::provider::agent::ProcessCompletion::error`] so a failed
     /// handover rollback can show the user *why*.
     pub error: Option<String>,
+    /// Classification of `error`, threaded into
+    /// [`crate::provider::agent::ProcessCompletion::error_kind`]. `None`
+    /// whenever `error` is `None`.
+    pub error_kind: Option<CrashKind>,
 }
 
 impl TurnResult {
@@ -121,6 +128,7 @@ impl TurnResult {
         TurnResult {
             completed: true,
             error: None,
+            error_kind: None,
         }
     }
     /// A turn that ended without completing but without a reportable error
@@ -129,12 +137,14 @@ impl TurnResult {
         TurnResult {
             completed: false,
             error: None,
+            error_kind: None,
         }
     }
-    fn failed(reason: impl Into<String>) -> Self {
+    fn failed(reason: impl Into<String>, kind: CrashKind) -> Self {
         TurnResult {
             completed: false,
             error: Some(reason.into()),
+            error_kind: Some(kind),
         }
     }
 }
@@ -200,8 +210,16 @@ pub async fn run_turn(spec: TurnSpec<'_>, stream: &mut dyn TurnStream) -> TurnRe
                 reason.push_str(". ");
                 reason.push_str(hint);
             }
-            crash(db, broadcaster, session_id, &reason, None).await;
-            return TurnResult::failed(reason);
+            crash(
+                db,
+                broadcaster,
+                session_id,
+                &reason,
+                CrashKind::SpawnFailed,
+                None,
+            )
+            .await;
+            return TurnResult::failed(reason, CrashKind::SpawnFailed);
         }
     };
 
@@ -314,8 +332,19 @@ pub async fn run_turn(spec: TurnSpec<'_>, stream: &mut dyn TurnStream) -> TurnRe
         TurnOutcome::Eof => {
             let ok = status.map(|s| s.success()).unwrap_or(false);
             if let Some(reason) = stream.take_error() {
-                crash(db, broadcaster, session_id, &reason, exit_code(status)).await;
-                TurnResult::failed(reason)
+                // An error frame inside the stream: its text is all we have
+                // to go on.
+                let kind = CrashKind::classify(&reason);
+                crash(
+                    db,
+                    broadcaster,
+                    session_id,
+                    &reason,
+                    kind,
+                    exit_code(status),
+                )
+                .await;
+                TurnResult::failed(reason, kind)
             } else if ok || (success_on_output && saw_any) {
                 emit_event(
                     db,
@@ -323,18 +352,35 @@ pub async fn run_turn(spec: TurnSpec<'_>, stream: &mut dyn TurnStream) -> TurnRe
                     session_id,
                     ProviderEvent::Completed {
                         conversation_id: stream.take_conversation_id(),
+                        result_meta: serde_json::Value::Null,
                     },
                 )
                 .await;
                 TurnResult::ok()
             } else {
-                let reason = match matched.iter().find(|m| !m.abort) {
-                    Some(m) => m.message.to_string(),
-                    None if stderr_text.is_empty() => empty_exit_reason.to_string(),
-                    None => stderr_text,
+                // A matched marker carries its own classification;
+                // otherwise sniff the stderr tail, and a silent non-zero
+                // exit is `no_output` by construction.
+                let (reason, kind) = match matched.iter().find(|m| !m.abort) {
+                    Some(m) => (m.message.to_string(), m.kind),
+                    None if stderr_text.is_empty() => {
+                        (empty_exit_reason.to_string(), CrashKind::NoOutput)
+                    }
+                    None => {
+                        let kind = CrashKind::classify(&stderr_text);
+                        (stderr_text, kind)
+                    }
                 };
-                crash(db, broadcaster, session_id, &reason, exit_code(status)).await;
-                TurnResult::failed(reason)
+                crash(
+                    db,
+                    broadcaster,
+                    session_id,
+                    &reason,
+                    kind,
+                    exit_code(status),
+                )
+                .await;
+                TurnResult::failed(reason, kind)
             }
         }
         TurnOutcome::Cancelled => {
@@ -347,29 +393,46 @@ pub async fn run_turn(spec: TurnSpec<'_>, stream: &mut dyn TurnStream) -> TurnRe
                 session_id,
                 ProviderEvent::Completed {
                     conversation_id: stream.take_conversation_id(),
+                    result_meta: serde_json::Value::Null,
                 },
             )
             .await;
             TurnResult::cancelled()
         }
         TurnOutcome::Aborted => {
-            let reason = matched
+            let (reason, kind) = matched
                 .iter()
                 .find(|m| m.abort)
-                .map(|m| m.message.to_string())
-                .unwrap_or_else(|| empty_exit_reason.to_string());
-            crash(db, broadcaster, session_id, &reason, None).await;
-            TurnResult::failed(reason)
+                .map(|m| (m.message.to_string(), m.kind))
+                .unwrap_or_else(|| (empty_exit_reason.to_string(), CrashKind::Unknown));
+            crash(db, broadcaster, session_id, &reason, kind, None).await;
+            TurnResult::failed(reason, kind)
         }
         TurnOutcome::Timeout => {
             let reason = format!("{provider} turn exceeded {timeout_secs}s timeout");
-            crash(db, broadcaster, session_id, &reason, None).await;
-            TurnResult::failed(reason)
+            crash(
+                db,
+                broadcaster,
+                session_id,
+                &reason,
+                CrashKind::Timeout,
+                None,
+            )
+            .await;
+            TurnResult::failed(reason, CrashKind::Timeout)
         }
         TurnOutcome::ReadError(e) => {
             let reason = format!("stdout read error: {e}");
-            crash(db, broadcaster, session_id, &reason, None).await;
-            TurnResult::failed(reason)
+            crash(
+                db,
+                broadcaster,
+                session_id,
+                &reason,
+                CrashKind::Unknown,
+                None,
+            )
+            .await;
+            TurnResult::failed(reason, CrashKind::Unknown)
         }
     }
 }
@@ -403,6 +466,7 @@ async fn crash(
     broadcaster: &crate::ws::broadcaster::Broadcaster,
     session_id: &str,
     reason: &str,
+    error_kind: CrashKind,
     exit_code: Option<i32>,
 ) {
     emit_event(
@@ -411,6 +475,7 @@ async fn crash(
         session_id,
         ProviderEvent::Crashed {
             reason: reason.to_string(),
+            error_kind,
             exit_code,
             stderr: None,
         },
@@ -760,6 +825,7 @@ mod tests {
         const MARKERS: &[StderrMarker] = &[StderrMarker {
             marker: "accounts.example/device",
             message: "This account isn't signed in.",
+            kind: CrashKind::AuthExpired,
             abort: true,
         }];
 
@@ -788,6 +854,7 @@ mod tests {
             result.error.as_deref(),
             Some("This account isn't signed in.")
         );
+        assert_eq!(result.error_kind, Some(CrashKind::AuthExpired));
     }
 
     /// A non-abort marker only rewrites the reason once the CLI has exited
@@ -797,6 +864,7 @@ mod tests {
         const MARKERS: &[StderrMarker] = &[StderrMarker {
             marker: "No model configured",
             message: "Sign in first.",
+            kind: CrashKind::AuthExpired,
             abort: false,
         }];
 

@@ -6,7 +6,7 @@ use tokio::sync::mpsc;
 use crate::db::Db;
 use crate::plugin::manager::PluginManager;
 use crate::provider::message::UserMessage;
-use crate::provider::stream::{ModelInfo, ProviderEvent, SpawnConfig};
+use crate::provider::stream::{CrashKind, ModelInfo, ProviderEvent, SpawnConfig};
 use crate::ws::broadcaster::{Broadcaster, WsEvent};
 
 /// Notification sent when an agent run finishes streaming.
@@ -24,6 +24,12 @@ pub struct ProcessCompletion {
     /// `abort_handover` so a failed compaction/handover shows the user
     /// WHY it was rolled back.
     pub error: Option<String>,
+    /// Classification of `error` — the same taxonomy the `Crashed` event
+    /// carries, so a listener can tell an expired login from a rate limit
+    /// without re-parsing the text. `None` whenever `error` is `None`; a
+    /// provider that reports an error it cannot classify sends
+    /// `Some(CrashKind::Unknown)`.
+    pub error_kind: Option<CrashKind>,
 }
 
 /// Context handed to an `AgentProvider` when a new run is requested.
@@ -276,6 +282,7 @@ pub async fn emit_event(
 
             if let ProviderEvent::Completed {
                 conversation_id: Some(ref cid),
+                ..
             } = event
             {
                 let _ = db

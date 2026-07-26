@@ -36,7 +36,7 @@ use crate::provider::agent::{AgentProvider, ProcessCompletion, SendMessageContex
 use crate::provider::registry::{
     AnswerTransport, EffortLevel, InterruptKind, ProviderCapabilities,
 };
-use crate::provider::stream::{ModelInfo, ProviderEvent};
+use crate::provider::stream::{CrashKind, ModelInfo, ProviderEvent};
 use crate::ws::broadcaster::Broadcaster;
 
 /// What a plugin hands `peckboard_register_provider`: the provider identity
@@ -138,7 +138,13 @@ pub fn validate_registration(reg: &ProviderRegistration) -> Result<(), String> {
 #[derive(Debug, Clone)]
 pub enum Terminal {
     Completed,
-    Crashed { reason: String },
+    Crashed {
+        reason: String,
+        /// Whatever the plugin declared, or the classification sniffed
+        /// from `reason` when it declared nothing (plugin providers
+        /// default to `unknown` on the wire).
+        kind: CrashKind,
+    },
 }
 
 /// Trusted, host-side snapshot of the session a provider turn is running
@@ -292,9 +298,16 @@ impl PluginProviderRuntime {
             }
             match &event {
                 ProviderEvent::Completed { .. } => *terminal = Some(Terminal::Completed),
-                ProviderEvent::Crashed { reason, .. } => {
+                ProviderEvent::Crashed {
+                    reason, error_kind, ..
+                } => {
                     *terminal = Some(Terminal::Crashed {
                         reason: reason.clone(),
+                        kind: if matches!(error_kind, CrashKind::Unknown) {
+                            CrashKind::classify(reason)
+                        } else {
+                            *error_kind
+                        },
                     })
                 }
                 _ => {}
@@ -466,29 +479,31 @@ impl AgentProvider for PluginProviderAdapter {
         tokio::spawn(async move {
             let result = manager.dispatch_provider_send(&plugin_id, payload).await;
             let terminal = runtime.end_turn(&session_id);
-            let (completed, error) = match terminal {
+            let (completed, error, error_kind) = match terminal {
                 // The plugin already reported how the turn ended; a trap
                 // AFTER a terminal event doesn't retroactively fail it.
-                Some(Terminal::Completed) => (true, None),
-                Some(Terminal::Crashed { reason }) => (false, Some(reason)),
+                Some(Terminal::Completed) => (true, None, None),
+                Some(Terminal::Crashed { reason, kind }) => (false, Some(reason), Some(kind)),
                 None => {
                     let reason = match result {
                         Err(e) => e,
                         Ok(()) => "plugin provider returned without emitting Completed or Crashed"
                             .to_string(),
                     };
+                    let error_kind = CrashKind::classify(&reason);
                     emit_event(
                         &db,
                         &broadcaster,
                         &session_id,
                         ProviderEvent::Crashed {
                             reason: reason.clone(),
+                            error_kind,
                             exit_code: None,
                             stderr: None,
                         },
                     )
                     .await;
-                    (false, Some(reason))
+                    (false, Some(reason), Some(error_kind))
                 }
             };
             let _ = completion_tx
@@ -496,6 +511,7 @@ impl AgentProvider for PluginProviderAdapter {
                     session_id,
                     completed,
                     error,
+                    error_kind,
                 })
                 .await;
         });

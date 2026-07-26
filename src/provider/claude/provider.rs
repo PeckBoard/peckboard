@@ -391,6 +391,7 @@ impl AgentProvider for ClaudeProvider {
                             session_id: sid,
                             completed: outcome.completed,
                             error: outcome.error,
+                            error_kind: outcome.error_kind,
                         })
                         .await;
                 });

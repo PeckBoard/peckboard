@@ -53,7 +53,7 @@ use tokio::task::JoinHandle;
 use crate::plugin::manager::PluginManager;
 use crate::plugin::settings::PluginSettingsStore;
 use crate::provider::agent::{AgentProvider, ProcessCompletion, SendMessageContext, emit_event};
-use crate::provider::stream::{ModelInfo, ProviderEvent};
+use crate::provider::stream::{CrashKind, ModelInfo, ProviderEvent};
 use crate::provider::turn::{self, setting_bool, setting_str, setting_str_list};
 use crate::service::mcp_server::{McpToolRegistry, ToolCallContext, dispatch_tool_call};
 
@@ -732,6 +732,7 @@ impl AgentProvider for OllamaProvider {
                     session_id: sid,
                     completed: result.completed,
                     error: result.error,
+                    error_kind: result.error_kind,
                 })
                 .await;
         });
@@ -1167,6 +1168,7 @@ async fn run_chat_stream(args: ChatStreamArgs<'_>) -> turn::TurnResult {
             broadcaster,
             session_id,
             "no messages to send",
+            CrashKind::Unknown,
             None,
             &errors,
         )
@@ -1279,6 +1281,7 @@ async fn run_chat_stream(args: ChatStreamArgs<'_>) -> turn::TurnResult {
                 return turn::TurnResult {
                     completed: true,
                     error: None,
+                    error_kind: None,
                 };
             }
         };
@@ -1287,7 +1290,16 @@ async fn run_chat_stream(args: ChatStreamArgs<'_>) -> turn::TurnResult {
         for call in tool_calls {
             let tool_msg = tokio::select! {
                 _ = cancel.notified() => {
-                    crash(db, broadcaster, session_id, "interrupted", None, &errors).await;
+                    crash(
+                        db,
+                        broadcaster,
+                        session_id,
+                        "interrupted",
+                        CrashKind::Interrupted,
+                        None,
+                        &errors,
+                    )
+                    .await;
                     return errors.failure();
                 }
                 m = async {
@@ -1325,6 +1337,7 @@ async fn run_chat_stream(args: ChatStreamArgs<'_>) -> turn::TurnResult {
         broadcaster,
         session_id,
         &format!("stopped after {MAX_TOOL_ROUNDS} tool rounds without a final answer"),
+        CrashKind::Unknown,
         None,
         &errors,
     )
@@ -1403,18 +1416,35 @@ async fn stream_one_round(round: StreamRound<'_>) -> RoundOutcome {
     let response = tokio::select! {
         _ = cancel.notified() => {
             // Use the same reason ("interrupted") as the streaming/tool-call
-            // cancel branches: the UI only suppresses the paired "Agent
-            // crashed" banner when the agent-end reason is exactly
-            // "interrupted", so a cancel during the initial request must
-            // match or it surfaces as a spurious crash.
-            crash(db, broadcaster, session_id, "interrupted", None, errors).await;
+            // cancel branches, and the matching `CrashKind::Interrupted` —
+            // readers suppress the paired "Agent crashed" banner on that
+            // kind, so a cancel during the initial request must carry it too.
+            crash(
+                db,
+                broadcaster,
+                session_id,
+                "interrupted",
+                CrashKind::Interrupted,
+                None,
+                errors,
+            )
+            .await;
             return RoundOutcome::Failed;
         }
         r = response_fut => match r {
             Ok(r) => r,
             Err(e) => {
-                crash(db, broadcaster, session_id, &format!("HTTP error: {e}"), None, errors)
-                    .await;
+                let reason = format!("HTTP error: {e}");
+                crash(
+                    db,
+                    broadcaster,
+                    session_id,
+                    &reason,
+                    CrashKind::classify(&reason),
+                    None,
+                    errors,
+                )
+                .await;
                 return RoundOutcome::Failed;
             }
         }
@@ -1426,11 +1456,16 @@ async fn stream_one_round(round: StreamRound<'_>) -> RoundOutcome {
         // up the event log.
         let body = response.text().await.unwrap_or_default();
         let truncated: String = body.chars().take(2_000).collect();
+        let reason = format!("Ollama returned HTTP {status}");
+        // The status line classifies a 401/429 on its own; the body is a
+        // fallback for servers that answer 500 with an auth message.
+        let kind = CrashKind::classify_or(&reason, CrashKind::classify(&truncated));
         crash(
             db,
             broadcaster,
             session_id,
-            &format!("Ollama returned HTTP {status}"),
+            &reason,
+            kind,
             Some(truncated),
             errors,
         )
@@ -1448,7 +1483,16 @@ async fn stream_one_round(round: StreamRound<'_>) -> RoundOutcome {
     while !done {
         tokio::select! {
             _ = cancel.notified() => {
-                crash(db, broadcaster, session_id, "interrupted", None, errors).await;
+                crash(
+                    db,
+                    broadcaster,
+                    session_id,
+                    "interrupted",
+                    CrashKind::Interrupted,
+                    None,
+                    errors,
+                )
+                .await;
                 return RoundOutcome::Failed;
             }
             chunk = stream.next() => {
@@ -1456,11 +1500,13 @@ async fn stream_one_round(round: StreamRound<'_>) -> RoundOutcome {
                 let chunk = match chunk {
                     Ok(b) => b,
                     Err(e) => {
+                        let reason = format!("stream error: {e}");
                         crash(
                             db,
                             broadcaster,
                             session_id,
-                            &format!("stream error: {e}"),
+                            &reason,
+                            CrashKind::classify(&reason),
                             None,
                             errors,
                         )
@@ -1490,7 +1536,16 @@ async fn stream_one_round(round: StreamRound<'_>) -> RoundOutcome {
                         }
                     };
                     if let Some(err) = parsed.error {
-                        crash(db, broadcaster, session_id, &err, None, errors).await;
+                        crash(
+                            db,
+                            broadcaster,
+                            session_id,
+                            &err,
+                            CrashKind::classify(&err),
+                            None,
+                            errors,
+                        )
+                        .await;
                         return RoundOutcome::Failed;
                     }
                     if let Some(message) = parsed.message {
@@ -1540,6 +1595,7 @@ async fn stream_one_round(round: StreamRound<'_>) -> RoundOutcome {
             broadcaster,
             session_id,
             "Ollama closed the stream before producing output",
+            CrashKind::NoOutput,
             None,
             errors,
         )
@@ -1781,46 +1837,54 @@ async fn run_one_external_tool(
         }
     }
 }
-/// Records the reason of the last `Crashed` this turn emitted. The round
-/// loop and the streaming step both report failures, so the slot needs
+/// Records the reason and kind of the last `Crashed` this turn emitted. The
+/// round loop and the streaming step both report failures, so the slot needs
 /// interior mutability rather than a `&mut` threaded through both.
 #[derive(Clone, Default)]
-struct CrashSink(Arc<std::sync::Mutex<Option<String>>>);
+struct CrashSink(Arc<std::sync::Mutex<Option<(String, CrashKind)>>>);
 
 impl CrashSink {
-    fn record(&self, reason: &str) {
+    fn record(&self, reason: &str, kind: CrashKind) {
         if let Ok(mut slot) = self.0.lock() {
-            *slot = Some(reason.to_string());
+            *slot = Some((reason.to_string(), kind));
         }
     }
 
     /// The not-completed outcome, carrying whatever reason was recorded.
     fn failure(&self) -> turn::TurnResult {
+        let recorded = self.0.lock().ok().and_then(|mut slot| slot.take());
+        let (error, error_kind) = match recorded {
+            Some((reason, kind)) => (Some(reason), Some(kind)),
+            None => (None, None),
+        };
         turn::TurnResult {
             completed: false,
-            error: self.0.lock().ok().and_then(|mut slot| slot.take()),
+            error,
+            error_kind,
         }
     }
 }
 
 /// Convenience for emitting a `Crashed` event. Keeps the noisy
 /// `exit_code: None, stderr: None` boilerplate out of every error site, and
-/// records the reason in `sink` for `ProcessCompletion.error`.
+/// records the reason + kind in `sink` for `ProcessCompletion`.
 async fn crash(
     db: &crate::db::Db,
     broadcaster: &crate::ws::broadcaster::Broadcaster,
     session_id: &str,
     reason: &str,
+    error_kind: CrashKind,
     stderr: Option<String>,
     sink: &CrashSink,
 ) {
-    sink.record(reason);
+    sink.record(reason, error_kind);
     emit_event(
         db,
         broadcaster,
         session_id,
         ProviderEvent::Crashed {
             reason: reason.to_string(),
+            error_kind,
             exit_code: None,
             stderr,
         },
@@ -1850,6 +1914,7 @@ async fn finalize(
         session_id,
         ProviderEvent::Completed {
             conversation_id: None,
+            result_meta: serde_json::Value::Null,
         },
     )
     .await;

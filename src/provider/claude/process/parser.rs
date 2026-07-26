@@ -269,7 +269,7 @@ pub(super) fn parse_stream_json(
     }
 
     match msg_type {
-        // ── system init ──────────────────────────────────────────
+        // ── system frames (init + notices) ───────────────────────
         "system" => {
             let subtype = json.get("subtype").and_then(|v| v.as_str()).unwrap_or("");
 
@@ -293,6 +293,15 @@ pub(super) fn parse_stream_json(
                         metadata: json.clone(),
                     });
                 }
+            } else if let Some(text) = system_notice_text(subtype, json) {
+                // Non-init system frames (`compact_boundary`, status, …) used
+                // to fall on the floor, so the UI never learned the CLI had
+                // compacted mid-session. Surface them as chat-visible rows.
+                events.push(ProviderEvent::System {
+                    text,
+                    subtype: subtype.to_string(),
+                    detail: json.clone(),
+                });
             }
         }
 
@@ -564,6 +573,44 @@ pub(super) fn normalize_questions(input: Option<&serde_json::Value>) -> serde_js
     }
 
     serde_json::Value::Array(result)
+}
+
+/// Chat label for a non-`init` `system` frame, or `None` when the frame
+/// carries nothing worth showing. The CLI uses these for out-of-band
+/// notices — most importantly `compact_boundary`, the only signal that it
+/// compacted the conversation mid-session.
+fn system_notice_text(subtype: &str, json: &serde_json::Value) -> Option<String> {
+    match subtype {
+        "" => None,
+        "compact_boundary" => {
+            let meta = json.get("compact_metadata");
+            let trigger = meta
+                .and_then(|m| m.get("trigger"))
+                .and_then(|v| v.as_str())
+                .unwrap_or("unknown");
+            let mut text = format!("Claude CLI compacted the conversation (trigger: {trigger}");
+            if let Some(pre) = meta
+                .and_then(|m| m.get("pre_tokens"))
+                .and_then(|v| v.as_i64())
+            {
+                text.push_str(&format!(", {pre} tokens before"));
+            }
+            text.push(')');
+            Some(text)
+        }
+        _ => {
+            let detail = json
+                .get("message")
+                .or_else(|| json.get("text"))
+                .and_then(|v| v.as_str())
+                .map(str::trim)
+                .filter(|s| !s.is_empty());
+            Some(match detail {
+                Some(d) => format!("Claude CLI [{subtype}]: {d}"),
+                None => format!("Claude CLI: {subtype}"),
+            })
+        }
+    }
 }
 
 #[cfg(test)]
@@ -1052,5 +1099,72 @@ mod tests {
         assert_eq!(events.len(), 1);
         assert!(matches!(&events[0], ProviderEvent::Started { .. }));
         assert_eq!(state.conversation_id.as_deref(), Some("conv-1"));
+    }
+
+    #[test]
+    fn compact_boundary_emits_system_event() {
+        let json = serde_json::json!({
+            "type": "system",
+            "subtype": "compact_boundary",
+            "compact_metadata": { "trigger": "auto", "pre_tokens": 145000 },
+        });
+
+        let mut state = started_state();
+        let events = parse_stream_json(&json, &mut state);
+
+        assert_eq!(events.len(), 1);
+        let ProviderEvent::System {
+            text,
+            subtype,
+            detail,
+        } = &events[0]
+        else {
+            panic!("expected System, got {:?}", events[0]);
+        };
+        assert_eq!(subtype, "compact_boundary");
+        assert_eq!(
+            text,
+            "Claude CLI compacted the conversation (trigger: auto, 145000 tokens before)"
+        );
+        assert_eq!(detail["compact_metadata"]["trigger"], "auto");
+    }
+
+    #[test]
+    fn unknown_system_subtype_emits_labelled_system_event() {
+        let json = serde_json::json!({
+            "type": "system",
+            "subtype": "status",
+            "message": "rate limit resets in 4m",
+        });
+
+        let mut state = started_state();
+        let events = parse_stream_json(&json, &mut state);
+
+        assert_eq!(events.len(), 1);
+        assert!(matches!(
+            &events[0],
+            ProviderEvent::System { text, .. }
+                if text == "Claude CLI [status]: rate limit resets in 4m"
+        ));
+    }
+
+    #[test]
+    fn system_init_emits_no_notice() {
+        let json = serde_json::json!({
+            "type": "system",
+            "subtype": "init",
+            "model": "opus",
+            "session_id": "conv-1",
+        });
+
+        let mut state = started_state();
+        assert!(parse_stream_json(&json, &mut state).is_empty());
+    }
+
+    #[test]
+    fn subtypeless_system_frame_is_ignored() {
+        let json = serde_json::json!({ "type": "system" });
+        let mut state = started_state();
+        assert!(parse_stream_json(&json, &mut state).is_empty());
     }
 }

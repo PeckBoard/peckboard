@@ -273,6 +273,7 @@ impl AgentProvider for CursorProvider {
                     session_id: sid,
                     completed: result.completed,
                     error: result.error,
+                    error_kind: result.error_kind,
                 })
                 .await;
         });

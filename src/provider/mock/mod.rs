@@ -9,7 +9,7 @@ use tokio::task::JoinHandle;
 
 use crate::provider::agent::{AgentProvider, ProcessCompletion, SendMessageContext, emit_event};
 use crate::provider::registry::{ProviderInfo, ProviderRegistry};
-use crate::provider::stream::{ModelInfo, ProviderEvent, ToolImage};
+use crate::provider::stream::{CrashKind, ModelInfo, ProviderEvent, ToolImage};
 
 /// Mock agent provider. Emits scripted `ProviderEvent` sequences based on
 /// the model id, which makes it usable as both a dev-mode stand-in (no
@@ -140,6 +140,7 @@ impl AgentProvider for MockProvider {
                     session_id: sid.clone(),
                     completed,
                     error: None,
+                    error_kind: None,
                 })
                 .await;
         });
@@ -722,6 +723,7 @@ async fn run_scenario(
                 session_id,
                 ProviderEvent::Crashed {
                     reason: "mock orphan-tool crash".into(),
+                    error_kind: CrashKind::Unknown,
                     exit_code: Some(1),
                     stderr: None,
                 },
@@ -746,6 +748,7 @@ async fn run_scenario(
                 session_id,
                 ProviderEvent::Crashed {
                     reason: "mock scenario crash".into(),
+                    error_kind: CrashKind::Unknown,
                     exit_code: Some(1),
                     stderr: Some("simulated stderr".into()),
                 },
@@ -804,6 +807,7 @@ async fn run_scenario(
                     session_id,
                     ProviderEvent::Crashed {
                         reason: "interrupted".into(),
+                        error_kind: CrashKind::Interrupted,
                         exit_code: None,
                         stderr: None,
                     },
@@ -846,6 +850,7 @@ async fn run_scenario(
                 session_id,
                 ProviderEvent::Crashed {
                     reason: "interrupted".into(),
+                    error_kind: CrashKind::Interrupted,
                     exit_code: None,
                     stderr: None,
                 },
@@ -1126,6 +1131,7 @@ async fn run_scenario(
         session_id,
         ProviderEvent::Completed {
             conversation_id: Some(conv_id),
+            result_meta: serde_json::Value::Null,
         },
     )
     .await;
