@@ -75,12 +75,57 @@ pub fn edit_file_tool(args: serde_json::Value, ctx: &HostCtx) -> Result<serde_js
         }),
     )?;
 
-    Ok(serde_json::json!({
+    let mut result = serde_json::json!({
         "ok": true,
         "path": path,
         "edits_applied": edits.as_array().map(|a| a.len()).unwrap_or(0),
         "hash": hash_text(&new_content),
         "total_lines": new_content.lines().count(),
+    });
+    // `_diff` is stripped by the handler and emitted as a `file-diff` chat
+    // event — never returned to the model (pure context cost there).
+    if let Some(diff) = build_diff_payload(path, content, &new_content)
+        && let Some(obj) = result.as_object_mut()
+    {
+        obj.insert("_diff".into(), diff);
+    }
+    Ok(result)
+}
+
+/// Unified diff of `old` → `new` for the chat's file-diff card. `None` when
+/// either side is too large to diff cheaply or nothing changed. Capped at
+/// `DIFF_MAX_LINES` so a mega-edit can't bloat the events table.
+pub fn build_diff_payload(path: &str, old: &str, new: &str) -> Option<serde_json::Value> {
+    const MAX_SIDE_BYTES: usize = 512 * 1024;
+    const DIFF_MAX_LINES: usize = 400;
+    if old.len() > MAX_SIDE_BYTES || new.len() > MAX_SIDE_BYTES {
+        return None;
+    }
+    let diff = similar::TextDiff::from_lines(old, new);
+    let mut added = 0usize;
+    let mut removed = 0usize;
+    for change in diff.iter_all_changes() {
+        match change.tag() {
+            similar::ChangeTag::Insert => added += 1,
+            similar::ChangeTag::Delete => removed += 1,
+            similar::ChangeTag::Equal => {}
+        }
+    }
+    if added == 0 && removed == 0 {
+        return None;
+    }
+    let full = diff.unified_diff().context_radius(3).to_string();
+    let mut lines: Vec<&str> = full.lines().collect();
+    let truncated = lines.len() > DIFF_MAX_LINES;
+    if truncated {
+        lines.truncate(DIFF_MAX_LINES);
+    }
+    Some(serde_json::json!({
+        "path": path,
+        "diff": lines.join("\n"),
+        "added": added,
+        "removed": removed,
+        "truncated": truncated,
     }))
 }
 
@@ -486,5 +531,26 @@ mod tests {
         assert!(err.contains("end_line 5"), "{err}");
         let err = apply("a\n", json!([{ "op": "insert", "line": 9, "text": "x" }])).unwrap_err();
         assert!(err.contains("out of range"), "{err}");
+    }
+
+    #[test]
+    fn diff_payload_counts_and_truncates() {
+        let d = super::build_diff_payload("f.txt", "a\nb\nc\n", "a\nX\nc\n").unwrap();
+        assert_eq!(d["added"], 1);
+        assert_eq!(d["removed"], 1);
+        assert_eq!(d["path"], "f.txt");
+        let text = d["diff"].as_str().unwrap();
+        assert!(text.contains("-b"), "got: {text}");
+        assert!(text.contains("+X"), "got: {text}");
+
+        // Unchanged content → no payload at all.
+        assert!(super::build_diff_payload("f.txt", "same\n", "same\n").is_none());
+
+        // A huge rewrite truncates at the line cap.
+        let old: String = (0..600).map(|i| format!("old {i}\n")).collect();
+        let new: String = (0..600).map(|i| format!("new {i}\n")).collect();
+        let d = super::build_diff_payload("f.txt", &old, &new).unwrap();
+        assert_eq!(d["truncated"], true);
+        assert!(d["diff"].as_str().unwrap().lines().count() <= 400);
     }
 }

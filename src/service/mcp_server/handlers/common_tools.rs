@@ -31,7 +31,42 @@ impl McpToolRegistry {
             common_tools::dispatch_sync(&name, args, &hc)
         })
         .await?;
-        result.map_err(|e| anyhow::anyhow!(e))
+        let mut value = result.map_err(|e| anyhow::anyhow!(e))?;
+        // `_diff` is a side channel from edit_file/write_file: strip it from
+        // the model-facing result and surface it to the chat as a `file-diff`
+        // event instead (the model shouldn't pay context for its own diff).
+        if let Some(diff) = value.as_object_mut().and_then(|o| o.remove("_diff")) {
+            self.emit_file_diff(ctx, diff).await;
+        }
+        Ok(value)
+    }
+
+    /// Persist + broadcast a `file-diff` side-channel event so the chat
+    /// renders a diff card beside the tool call. Broadcasts live (unlike the
+    /// `step-change` pattern) — the card should appear as the edit lands.
+    async fn emit_file_diff(&self, ctx: &ToolCallContext, payload: Value) {
+        let event = match ctx
+            .db
+            .append_event(&ctx.session_id, "file-diff", payload.clone())
+            .await
+        {
+            Ok(ev) => ev,
+            Err(e) => {
+                tracing::warn!("failed to persist file-diff event: {e}");
+                return;
+            }
+        };
+        ctx.broadcaster.broadcast(crate::ws::broadcaster::WsEvent {
+            event_type: "event".into(),
+            session_id: ctx.session_id.clone(),
+            data: serde_json::json!({
+                "id": event.id,
+                "seq": event.seq,
+                "ts": event.ts,
+                "kind": "file-diff",
+                "data": payload,
+            }),
+        });
     }
 
     /// `run_command` — approval-gated arbitrary command execution. Worker
@@ -324,5 +359,46 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(out["status"], "awaiting_approval", "got: {out}");
+    }
+
+    #[tokio::test]
+    async fn edit_and_overwrite_emit_file_diff_events() {
+        let (ctx, _dir) = ctx_with_folder(false).await;
+        let reg = McpToolRegistry::new();
+
+        let wrote = reg
+            .handle_common_tool(
+                "write_file",
+                serde_json::json!({ "path": "d.txt", "content": "one\ntwo\n" }),
+                &ctx,
+            )
+            .await
+            .unwrap();
+        // The side channel never reaches the model-facing result.
+        assert!(wrote.get("_diff").is_none(), "got: {wrote}");
+        let hash = wrote["hash"].as_str().unwrap().to_string();
+
+        reg.handle_common_tool(
+            "edit_file",
+            serde_json::json!({
+                "path": "d.txt",
+                "original_hash": hash,
+                "edits": [{ "op": "update", "start_line": 2, "end_line": 2, "text": "TWO" }],
+            }),
+            &ctx,
+        )
+        .await
+        .unwrap();
+
+        let events = ctx.db.events_tail(&ctx.session_id, 50).await.unwrap();
+        let diffs: Vec<_> = events.iter().filter(|e| e.kind == "file-diff").collect();
+        assert_eq!(diffs.len(), 2, "created + edited: {events:?}");
+        let created: serde_json::Value = serde_json::from_str(&diffs[0].data).unwrap();
+        assert_eq!(created["created"], true, "got: {created}");
+        let edited: serde_json::Value = serde_json::from_str(&diffs[1].data).unwrap();
+        assert!(
+            edited["diff"].as_str().unwrap().contains("+TWO"),
+            "got: {edited}"
+        );
     }
 }

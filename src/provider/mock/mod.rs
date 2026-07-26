@@ -602,6 +602,71 @@ async fn run_scenario(
             )
             .await;
         }
+        "diff" => {
+            // An edit_file round-trip plus the `file-diff` side-channel event
+            // the real handler emits — drives the chat's diff-card rendering.
+            let tool_id = format!("tool-{}", uuid::Uuid::new_v4());
+            emit_event(
+                db,
+                broadcaster,
+                session_id,
+                ProviderEvent::ToolStart {
+                    tool_use_id: tool_id.clone(),
+                    name: "mcp__peckboard__edit_file".into(),
+                    input: serde_json::json!({ "path": "src/demo.ts", "original_hash": "abc" }),
+                },
+            )
+            .await;
+            tick().await;
+            let diff_payload = serde_json::json!({
+                "path": "src/demo.ts",
+                "diff": "@@ -1,3 +1,3 @@\n context\n-old line\n+new line\n context",
+                "added": 1,
+                "removed": 1,
+                "truncated": false,
+            });
+            if let Ok(event) = db
+                .append_event(session_id, "file-diff", diff_payload.clone())
+                .await
+            {
+                broadcaster.broadcast(crate::ws::broadcaster::WsEvent {
+                    event_type: "event".into(),
+                    session_id: session_id.to_string(),
+                    data: serde_json::json!({
+                        "id": event.id,
+                        "seq": event.seq,
+                        "ts": event.ts,
+                        "kind": "file-diff",
+                        "data": diff_payload,
+                    }),
+                });
+            }
+            tick().await;
+            emit_event(
+                db,
+                broadcaster,
+                session_id,
+                ProviderEvent::ToolEnd {
+                    tool_use_id: tool_id,
+                    output: Some(
+                        "{\"ok\":true,\"path\":\"src/demo.ts\",\"edits_applied\":1}".into(),
+                    ),
+                    error: None,
+                    images: vec![],
+                },
+            )
+            .await;
+            tick().await;
+            emit_event(
+                db,
+                broadcaster,
+                session_id,
+                ProviderEvent::Text {
+                    text: "Edited src/demo.ts.".into(),
+                },
+            )
+            .await;
+        }
         "tool-orphan-crash" => {
             // Emit a ToolStart with no matching ToolEnd, then crash. Used
             // to verify the UI doesn't leave a tool-block spinner running

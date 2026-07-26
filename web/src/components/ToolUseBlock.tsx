@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react'
 import Modal from './Modal'
-import type { ToolImage } from './chat/events'
+import DiffBlock from './DiffBlock'
+import type { FileDiff, ToolImage } from './chat/events'
 import { getCommandLine, getSummary, getToolLabel, getToolReason } from './chat/toolDisplay'
 
 interface ToolUseBlockProps {
@@ -13,6 +14,8 @@ interface ToolUseBlockProps {
   /** Event timestamps (ms) of tool start/end — drive the duration badge. */
   startTs?: number
   endTs?: number
+  /** Diff payload attached from a `file-diff` event. */
+  diff?: FileDiff
 }
 
 /** Build a `data:` URL from an inline tool image. */
@@ -169,6 +172,7 @@ export default function ToolUseBlock({
   isRunning,
   startTs,
   endTs,
+  diff,
 }: ToolUseBlockProps) {
   const [expanded, setExpanded] = useState(false)
   // Index of the image currently shown full-size in the lightbox, or null.
@@ -265,6 +269,7 @@ export default function ToolUseBlock({
           ))}
         </div>
       )}
+      {diff && <DiffBlock diff={diff} />}
       {expanded && (
         <div className="tool-body">
           {input && Object.keys(input).length > 0 && (

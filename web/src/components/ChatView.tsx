@@ -11,6 +11,7 @@ import { effortOptionsForModel, useResourcesStore, type ProviderInfo } from '../
 import InputBar from './InputBar'
 import ToolUseBlock from './ToolUseBlock'
 import MermaidBlock from './MermaidBlock'
+import DiffBlock from './DiffBlock'
 import ConfirmDialog from './ConfirmDialog'
 import { MenuButton, type MenuItem } from './Dropdown'
 import ModelPicker from './ModelPicker'
@@ -1239,7 +1240,14 @@ export default function ChatView({
                     isRunning={item.isRunning}
                     startTs={item.startTs}
                     endTs={item.endTs}
+                    diff={item.diff}
                   />
+                </div>
+              )
+            case 'file-diff':
+              return (
+                <div key={item.key} className="chat-row chat-row-tool">
+                  <DiffBlock diff={item.diff} />
                 </div>
               )
             case 'status':

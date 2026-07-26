@@ -151,6 +151,18 @@ pub fn write_file_tool(
         .and_then(|v| v.as_bool())
         .unwrap_or(true);
 
+    // Pre-read the old content so an overwrite can carry a `file-diff` chat
+    // event. A failed read means a new file (or an unreadable one — either
+    // way there is nothing to diff against).
+    let old_content = if append {
+        None
+    } else {
+        ctx.call_host(HostFn::ReadFile, &serde_json::json!({ "path": path }))
+            .ok()
+            .filter(|r| !r["truncated"].as_bool().unwrap_or(false))
+            .and_then(|r| r["content"].as_str().map(str::to_string))
+    };
+
     let mut resp = ctx.call_host(
         HostFn::WriteFile,
         &serde_json::json!({
@@ -164,6 +176,22 @@ pub fn write_file_tool(
     // editing what it just wrote. Unknowable cheaply for appends.
     if !append && let Some(obj) = resp.as_object_mut() {
         obj.insert("hash".into(), serde_json::Value::String(hash_text(content)));
+        // `_diff` is stripped by the handler and emitted as a `file-diff`
+        // chat event; a fresh file gets a created marker instead of a body.
+        let diff = match &old_content {
+            Some(old) => super::edit::build_diff_payload(path, old, content),
+            None => Some(serde_json::json!({
+                "path": path,
+                "diff": "",
+                "added": content.lines().count(),
+                "removed": 0,
+                "truncated": false,
+                "created": true,
+            })),
+        };
+        if let Some(d) = diff {
+            obj.insert("_diff".into(), d);
+        }
     }
     Ok(resp)
 }

@@ -32,6 +32,17 @@ export interface ToolImage {
   dataBase64: string
 }
 
+/** Server-computed unified diff for an edit_file / write_file call,
+ *  delivered as a `file-diff` side-channel event. */
+export interface FileDiff {
+  path: string
+  diff: string
+  added: number
+  removed: number
+  truncated?: boolean
+  created?: boolean
+}
+
 /** A display item derived from one or more raw events. */
 export type DisplayItem =
   | {
@@ -76,8 +87,11 @@ export type DisplayItem =
       /** Event ts (ms) of the tool start / end — drives the duration badge. */
       startTs?: number
       endTs?: number
+      /** Unified diff attached from a `file-diff` event (edit/write tools). */
+      diff?: FileDiff
       key: string
     }
+  | { type: 'file-diff'; diff: FileDiff; ts: number; key: string }
   | { type: 'status'; text: string; key: string; ts: number }
   | {
       type: 'system'
@@ -471,6 +485,40 @@ export function buildDisplayItems(events: Event[]): DisplayItem[] {
         flushAssistant()
         const label = (ev.data.step as string) ?? (ev.data.label as string) ?? 'Step'
         items.push({ type: 'step', label, key: ev.id })
+        break
+      }
+      case 'file-diff': {
+        flushAssistant()
+        const d = ev.data as Record<string, unknown>
+        if (typeof d.path !== 'string' || typeof d.diff !== 'string') break
+        const diff: FileDiff = {
+          path: d.path,
+          diff: d.diff,
+          added: typeof d.added === 'number' ? d.added : 0,
+          removed: typeof d.removed === 'number' ? d.removed : 0,
+          truncated: d.truncated === true,
+          created: d.created === true,
+        }
+        // Attach to the most recent edit/write tool card for the same path
+        // (the event lands between that tool's start and end); fall back to
+        // a standalone card when no such card exists.
+        let attached = false
+        for (let i = items.length - 1; i >= 0; i--) {
+          const it = items[i]
+          if (it.type !== 'tool') continue
+          const bare = it.toolName.replace(/^mcp__.+?__/, '')
+          if (bare === 'edit_file' || bare === 'write_file') {
+            const inputPath = it.input?.path
+            if (inputPath === diff.path && !it.diff) {
+              items[i] = { ...it, diff }
+              attached = true
+            }
+          }
+          break
+        }
+        if (!attached) {
+          items.push({ type: 'file-diff', diff, ts: ev.ts, key: ev.id })
+        }
         break
       }
       case 'question': {
