@@ -88,8 +88,9 @@ impl McpToolRegistry {
                     .to_string();
                 let outline = outline(&page_id).await.unwrap_or_default();
                 // Start run recording (playwright-video replay).
+                let mut run_id: Option<String> = None;
                 if let Some(data_dir) = ctx.data_dir.as_deref() {
-                    crate::service::browser_runs::start(
+                    run_id = crate::service::browser_runs::start(
                         data_dir,
                         &page_id,
                         name,
@@ -108,7 +109,15 @@ impl McpToolRegistry {
                     );
                     capture_events(&page_id).await;
                 }
-                Ok(serde_json::json!({ "page_id": page_id, "url": url, "outline": outline }))
+                let mut out =
+                    serde_json::json!({ "page_id": page_id, "url": url, "outline": outline });
+                if let Some(rid) = run_id
+                    && let Some(obj) = out.as_object_mut()
+                {
+                    // Lets the chat card deep-link the recorded replay.
+                    obj.insert("run_id".into(), Value::String(rid));
+                }
+                Ok(out)
             }
 
             "browser_outline" => {
@@ -261,6 +270,11 @@ impl McpToolRegistry {
                     "success": r.get("success").cloned().unwrap_or(Value::Bool(true)),
                     "action": action,
                 });
+                if let Some(rid) = crate::service::browser_runs::run_id(page_id)
+                    && let Some(obj) = out.as_object_mut()
+                {
+                    obj.insert("run_id".into(), Value::String(rid));
+                }
                 // The outline costs ~2k tokens — attach it only on request.
                 if args
                     .get("outline")
@@ -301,12 +315,18 @@ impl McpToolRegistry {
                 capture_events(page_id).await;
                 // `_image_base64` is the routes/mcp.rs convention for
                 // returning an MCP image content block.
-                Ok(serde_json::json!({
+                let mut out = serde_json::json!({
                     "page_id": page_id,
                     "full_page": full,
                     "_image_base64": b64,
                     "_image_mime": "image/png",
-                }))
+                });
+                if let Some(rid) = crate::service::browser_runs::run_id(page_id)
+                    && let Some(obj) = out.as_object_mut()
+                {
+                    obj.insert("run_id".into(), Value::String(rid));
+                }
+                Ok(out)
             }
 
             // Mirror of upstream `listPages`.

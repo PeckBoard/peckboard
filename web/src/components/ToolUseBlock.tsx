@@ -1,8 +1,15 @@
 import { useEffect, useState } from 'react'
 import Modal from './Modal'
 import DiffBlock from './DiffBlock'
+import SubagentTranscript from './SubagentTranscript'
 import type { FileDiff, ToolImage } from './chat/events'
-import { getCommandLine, getSummary, getToolLabel, getToolReason } from './chat/toolDisplay'
+import {
+  bareToolName,
+  getCommandLine,
+  getSummary,
+  getToolLabel,
+  getToolReason,
+} from './chat/toolDisplay'
 
 interface ToolUseBlockProps {
   toolName: string
@@ -198,6 +205,16 @@ export default function ToolUseBlock({
     outObj && typeof outObj.passed === 'boolean' ? (outObj.passed as boolean) : undefined
   const testCounts =
     passedFlag !== undefined && outObj ? parseTestCounts(strField(outObj, 'stdout') ?? '') : ''
+  const replayUrl =
+    outObj && typeof outObj.run_id === 'string' && bareToolName(toolName).startsWith('browser_')
+      ? `/plugin-api/v1/playwright-video?run=${encodeURIComponent(outObj.run_id as string)}`
+      : undefined
+  const subagentSessionId =
+    outObj &&
+    typeof outObj.subagent_session_id === 'string' &&
+    bareToolName(toolName) === 'spawn_subagent'
+      ? (outObj.subagent_session_id as string)
+      : undefined
   const done = !isRunning && !error
 
   const hasDetails = (input && Object.keys(input).length > 0) || out !== undefined || error
@@ -269,6 +286,19 @@ export default function ToolUseBlock({
           ))}
         </div>
       )}
+      {replayUrl && (
+        <div className="tool-replay">
+          <a
+            href={replayUrl}
+            target="_blank"
+            rel="noreferrer noopener"
+            title="Open the recorded replay (Playwright Tests plugin)"
+          >
+            ▶ View replay
+          </a>
+        </div>
+      )}
+      {subagentSessionId && <SubagentTranscript sessionId={subagentSessionId} />}
       {diff && <DiffBlock diff={diff} />}
       {expanded && (
         <div className="tool-body">

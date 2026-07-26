@@ -171,8 +171,9 @@ fn persist(run: &ActiveRun) {
     }
 }
 
-/// Begin recording for `page_id`. Best-effort: any fs failure just disables
-/// recording for this run (browser tools must never fail because of it).
+/// Begin recording for `page_id`, returning the new run id. Best-effort: any
+/// fs failure just disables recording for this run and returns `None`
+/// (browser tools must never fail because of it).
 pub fn start(
     data_dir: &Path,
     page_id: &str,
@@ -181,11 +182,11 @@ pub fn start(
     session_id: &str,
     project_id: Option<&str>,
     card_id: Option<&str>,
-) {
+) -> Option<String> {
     let id = uuid::Uuid::new_v4().to_string();
     let dir = runs_root(data_dir).join(&id);
     if std::fs::create_dir_all(&dir).is_err() {
-        return;
+        return None;
     }
     let run = ActiveRun {
         dir,
@@ -211,8 +212,10 @@ pub fn start(
         net_index: HashMap::new(),
     };
     persist(&run);
+    let ret = run.meta.id.clone();
     let mut map = active().lock().unwrap_or_else(|p| p.into_inner());
     map.insert(page_id.to_string(), run);
+    Some(ret)
 }
 
 /// Append a step (with an optional base64 PNG frame) to `page_id`'s run.
@@ -258,6 +261,14 @@ pub fn record_step(
 pub fn events_cursor(page_id: &str) -> Option<u64> {
     let map = active().lock().unwrap_or_else(|p| p.into_inner());
     map.get(page_id).map(|r| r.events_cursor)
+}
+
+/// The active run id for `page_id`, or None when the page isn't recorded.
+/// Lets browser tool results carry the id so the chat can deep-link the
+/// replay.
+pub fn run_id(page_id: &str) -> Option<String> {
+    let map = active().lock().unwrap_or_else(|p| p.into_inner());
+    map.get(page_id).map(|r| r.meta.id.clone())
 }
 
 fn cap_chars(s: &str, max: usize) -> (String, bool) {

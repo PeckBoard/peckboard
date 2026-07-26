@@ -322,3 +322,78 @@
 .diff-line-hunk {
   color: var(--text3);
 }
+
+/* Replay deep-link under a browser_* tool row. */
+.tool-replay {
+  margin: 2px 0 4px 18px;
+  font-size: var(--text-xs);
+}
+.tool-replay a {
+  color: var(--accent);
+  text-decoration: none;
+}
+.tool-replay a:hover {
+  text-decoration: underline;
+}
+
+/* Subagent transcript — condensed child-session feed under a spawn card. */
+.subagent-block {
+  margin: 2px 0 4px 18px;
+  font-size: var(--text-xs);
+}
+.subagent-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.subagent-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  background: none;
+  border: none;
+  padding: 2px 0;
+  cursor: pointer;
+  font-size: var(--text-xs);
+  color: var(--text2);
+  font-family: inherit;
+}
+.subagent-title {
+  font-weight: 600;
+}
+.subagent-open {
+  margin-left: auto;
+  color: var(--accent);
+  text-decoration: none;
+  flex-shrink: 0;
+}
+.subagent-open:hover {
+  text-decoration: underline;
+}
+.subagent-body {
+  margin: 4px 0 6px;
+  padding: 6px 10px;
+  background: var(--surface2);
+  border-radius: var(--radius);
+  max-height: 280px;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.subagent-row {
+  color: var(--text2);
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+.subagent-row-tool {
+  color: var(--text3);
+  font-family: var(--font-mono);
+}
+.subagent-row-status {
+  color: var(--text3);
+  font-style: italic;
+}
+.subagent-row-error {
+  color: var(--danger);
+}
