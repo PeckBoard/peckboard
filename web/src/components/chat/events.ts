@@ -110,6 +110,13 @@ export type DisplayItem =
         cacheCreation: number
       }[]
       outputTokens: number
+      /** Context-window occupancy reported for this turn (0 = unreported). */
+      contextTokens: number
+      /** Occupancy change vs the previous reporting turn; null when unknown. */
+      contextDelta: number | null
+      /** Wall-clock from the turn's start (user send / agent start) to the
+       *  usage report; null when no anchor was seen. */
+      durationMs: number | null
       key: string
       ts: number
     }
@@ -124,7 +131,16 @@ export type DisplayItem =
     }
   | { type: 'step'; label: string; key: string }
   | { type: 'agent-start'; model: string; effort: string; ts: number; key: string }
-  | { type: 'agent-crashed'; reason: string; ts: number; key: string }
+  | {
+      type: 'agent-crashed'
+      reason: string
+      /** Exit code / stderr tail off the `agent-end` payload — expandable
+       *  in the crash row so debugging doesn't require the API. */
+      exitCode?: number
+      stderr?: string
+      ts: number
+      key: string
+    }
   | {
       type: 'handover-aborted'
       from: string
@@ -147,7 +163,16 @@ export type DisplayItem =
       key: string
     }
   | { type: 'interrupt'; ts: number; key: string }
-  | { type: 'question'; questionId: string; questions: QuestionItem[]; key: string }
+  | {
+      type: 'question'
+      questionId: string
+      /** ControlRequest correlation id — answers echo it as `request_id`. */
+      requestId?: string
+      /** ControlRequest type for generic (non-AskUserQuestion) requests. */
+      requestType?: string
+      questions: QuestionItem[]
+      key: string
+    }
   | {
       type: 'question-resolved'
       questionId: string
@@ -330,6 +355,11 @@ interface FoldState {
   /** Dedupe tool starts from streaming + snapshot. */
   seenToolIds: Set<string>
   pendingInterrupt: boolean
+  /** ts of the latest `user` / `agent-start` — anchors the turn duration
+   *  shown on the usage chip. */
+  turnAnchorTs: number
+  /** contextTokens from the previous usage report — drives the delta. */
+  prevContextTokens: number
   /** question event id -> index in items, so a later `question-resolved`
    *  swaps the pending card in place. */
   questionItems: Map<string, number>
@@ -352,6 +382,8 @@ function newFoldState(): FoldState {
     openTools: new Map(),
     seenToolIds: new Set(),
     pendingInterrupt: false,
+    turnAnchorTs: 0,
+    prevContextTokens: 0,
     questionItems: new Map(),
     livePreHatch: [],
   }
@@ -412,11 +444,16 @@ const HIDDEN_KINDS = new Set([
   'model-switch',
 ])
 
+/** Tool cards a `file-diff` event may attach to, by bare name (Peckboard
+ *  MCP file tools + the native Claude file tools). */
+const EDIT_TOOL_BARE_NAMES = new Set(['edit_file', 'write_file', 'Edit', 'Write', 'MultiEdit'])
+
 function foldEvent(st: FoldState, ev: Event): void {
   const items = st.items
   switch (ev.kind) {
     case 'user': {
       flushAssistant(st)
+      st.turnAnchorTs = ev.ts
       // Any user turn supersedes earlier parked pre-hatch bubbles — the
       // enriched delivery, or the user typing past a dead pre-hatch.
       for (const idx of st.livePreHatch) {
@@ -472,6 +509,11 @@ function foldEvent(st: FoldState, ev: Event): void {
         cacheRead: (ev.data.cacheReadTokens as number) ?? 0,
         cacheCreation: (ev.data.cacheCreationTokens as number) ?? 0,
       }
+      const ctx = typeof ev.data.contextTokens === 'number' ? ev.data.contextTokens : 0
+      const contextDelta = ctx > 0 && st.prevContextTokens > 0 ? ctx - st.prevContextTokens : null
+      if (ctx > 0) st.prevContextTokens = ctx
+      const durationMs =
+        st.turnAnchorTs > 0 && ev.ts >= st.turnAnchorTs ? ev.ts - st.turnAnchorTs : null
       const last = items[items.length - 1]
       if (last?.type === 'turn-usage' && last.turnSeq !== null && last.turnSeq === turnSeq) {
         // Multi-model turn: fold this model's slice into the same chip.
@@ -480,6 +522,9 @@ function foldEvent(st: FoldState, ev: Event): void {
           ...last,
           slices: [...last.slices, slice],
           outputTokens: last.outputTokens + slice.output,
+          contextTokens: ctx > 0 ? ctx : last.contextTokens,
+          contextDelta: contextDelta ?? last.contextDelta,
+          durationMs: durationMs ?? last.durationMs,
         }
       } else {
         items.push({
@@ -487,6 +532,9 @@ function foldEvent(st: FoldState, ev: Event): void {
           turnSeq,
           slices: [slice],
           outputTokens: slice.output,
+          contextTokens: ctx,
+          contextDelta,
+          durationMs,
           key: ev.id,
           ts: ev.ts,
         })
@@ -543,6 +591,7 @@ function foldEvent(st: FoldState, ev: Event): void {
     case 'agent-start': {
       flushAssistant(st)
       st.pendingInterrupt = false
+      st.turnAnchorTs = ev.ts
       const model = (ev.data.model as string) ?? 'default'
       // Strip provider prefix for display
       const displayModel = model.replace(/^claude:/, '')
@@ -560,9 +609,16 @@ function foldEvent(st: FoldState, ev: Event): void {
         break
       }
       if ((ev.data.status as string) === 'crashed') {
+        const exitCode = typeof ev.data.exitCode === 'number' ? ev.data.exitCode : undefined
+        const stderr =
+          typeof ev.data.stderr === 'string' && ev.data.stderr.trim() !== ''
+            ? ev.data.stderr
+            : undefined
         items.push({
           type: 'agent-crashed',
           reason,
+          exitCode,
+          stderr,
           key: ev.id,
           ts: ev.ts,
         })
@@ -592,6 +648,7 @@ function foldEvent(st: FoldState, ev: Event): void {
     }
     case 'handover': {
       flushAssistant(st)
+      st.prevContextTokens = 0
       items.push({
         type: 'handover',
         from: (ev.data.from as string) ?? '',
@@ -642,22 +699,24 @@ function foldEvent(st: FoldState, ev: Event): void {
         truncated: d.truncated === true,
         created: d.created === true,
       }
-      // Attach to the most recent edit/write tool card for the same path
-      // (the event lands between that tool's start and end); fall back to
-      // a standalone card when no such card exists.
+      // Attach to a matching edit/write tool card. Parallel multi-file
+      // edits interleave, so the owner isn't necessarily the most recent
+      // tool row — scan back across the whole open-tool window and match
+      // by path; fall back to a standalone card when nothing matches.
       let attached = false
-      for (let i = items.length - 1; i >= 0; i--) {
+      const openIdxs = [...st.openTools.values()]
+      const floor = openIdxs.length > 0 ? Math.min(...openIdxs) : items.length - 1
+      for (let i = items.length - 1; i >= Math.max(0, floor); i--) {
         const it = items[i]
-        if (it.type !== 'tool') continue
+        if (it.type !== 'tool' || it.diff) continue
         const bare = it.toolName.replace(/^mcp__.+?__/, '')
-        if (bare === 'edit_file' || bare === 'write_file') {
-          const inputPath = it.input?.path
-          if (inputPath === diff.path && !it.diff) {
-            items[i] = { ...it, diff }
-            attached = true
-          }
+        if (!EDIT_TOOL_BARE_NAMES.has(bare)) continue
+        const inputPath = it.input?.path ?? it.input?.file_path
+        if (inputPath === diff.path) {
+          items[i] = { ...it, diff }
+          attached = true
+          break
         }
-        break
       }
       if (!attached) {
         items.push({ type: 'file-diff', diff, ts: ev.ts, key: ev.id })
@@ -666,7 +725,11 @@ function foldEvent(st: FoldState, ev: Event): void {
     }
     case 'question': {
       flushAssistant(st)
-      // Parse questions array from event data, falling back to simple text
+      const requestId = typeof ev.data.requestId === 'string' ? ev.data.requestId : undefined
+      const requestType = typeof ev.data.requestType === 'string' ? ev.data.requestType : undefined
+      // Parse questions array from event data; generic ControlRequests
+      // (no `questions`) carry their text in `payload` instead — render
+      // its fields rather than the raw event JSON.
       let questions: QuestionItem[]
       if (Array.isArray(ev.data.questions)) {
         questions = (ev.data.questions as QuestionItem[]).map((q) => ({
@@ -677,12 +740,36 @@ function foldEvent(st: FoldState, ev: Event): void {
           optionObjects: q.optionObjects,
         }))
       } else {
-        const text =
-          (ev.data.text as string) ?? (ev.data.question as string) ?? JSON.stringify(ev.data)
-        questions = [{ question: text }]
+        const payload =
+          ev.data.payload && typeof ev.data.payload === 'object' && !Array.isArray(ev.data.payload)
+            ? (ev.data.payload as Record<string, unknown>)
+            : undefined
+        const direct =
+          (typeof payload?.text === 'string' && payload.text) ||
+          (typeof payload?.question === 'string' && payload.question) ||
+          (typeof ev.data.text === 'string' && ev.data.text) ||
+          (typeof ev.data.question === 'string' && ev.data.question) ||
+          ''
+        const text = direct
+          ? direct
+          : payload
+            ? Object.entries(payload)
+                .map(([k, v]) => `${k}: ${typeof v === 'string' ? v : JSON.stringify(v)}`)
+                .join('\n')
+            : JSON.stringify(ev.data)
+        const header = requestType && requestType !== 'question' ? requestType : undefined
+        questions = [{ question: text, header }]
       }
       st.questionItems.set(ev.id, items.length)
-      items.push({ type: 'question', questionId: ev.id, questions, key: ev.id })
+      if (requestId) st.questionItems.set(requestId, items.length)
+      items.push({
+        type: 'question',
+        questionId: ev.id,
+        requestId,
+        requestType,
+        questions,
+        key: ev.id,
+      })
       break
     }
     case 'question-resolved': {
@@ -690,7 +777,8 @@ function foldEvent(st: FoldState, ev: Event): void {
       // question sits on an unloaded older page renders nothing — same
       // as the previous full-rebuild behaviour.
       const qId = (ev.data.question_id as string) ?? (ev.data.questionId as string) ?? ''
-      const idx = st.questionItems.get(qId)
+      const reqId = (ev.data.request_id as string) ?? (ev.data.requestId as string) ?? ''
+      const idx = st.questionItems.get(qId) ?? (reqId ? st.questionItems.get(reqId) : undefined)
       if (idx === undefined) break
       const existing = items[idx]
       if (existing.type !== 'question') break

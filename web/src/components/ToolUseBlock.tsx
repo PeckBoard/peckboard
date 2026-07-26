@@ -1,6 +1,8 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
+import rehypeHighlight from 'rehype-highlight'
 import Modal from './Modal'
 import DiffBlock from './DiffBlock'
+import SafeMarkdown from './SafeMarkdown'
 import SubagentTranscript from './SubagentTranscript'
 import type { FileDiff, ToolImage } from './chat/events'
 import {
@@ -9,6 +11,7 @@ import {
   getSummary,
   getToolLabel,
   getToolReason,
+  shortenPath,
 } from './chat/toolDisplay'
 
 interface ToolUseBlockProps {
@@ -89,6 +92,226 @@ function parseTestCounts(text: string): string {
   return parts.join(', ')
 }
 
+/** Lines beyond which an output pane collapses behind a "Show all" toggle
+ *  (with a little slack so a pane never clamps to hide only a few lines). */
+const PRE_CLAMP_LINES = 40
+const PRE_CLAMP_SLACK = 8
+
+function CopyButton({ text }: { text: string }) {
+  const [copied, setCopied] = useState(false)
+  useEffect(() => {
+    if (!copied) return
+    const id = setTimeout(() => setCopied(false), 1500)
+    return () => clearTimeout(id)
+  }, [copied])
+  return (
+    <button
+      type="button"
+      className="tool-mini-btn"
+      title="Copy to clipboard"
+      onClick={() => {
+        void navigator.clipboard?.writeText(text).then(() => setCopied(true))
+      }}
+    >
+      {copied ? 'Copied' : 'Copy'}
+    </button>
+  )
+}
+
+/** Mono pane for tool output. Unbounded text (stdout etc.) is clamped to
+ *  the first PRE_CLAMP_LINES lines with an explicit expand toggle; Copy
+ *  always copies the full text. */
+function ClampedPre({ text, className }: { text: string; className?: string }) {
+  const [showAll, setShowAll] = useState(false)
+  const lines = useMemo(() => text.split('\n'), [text])
+  const clampable = lines.length > PRE_CLAMP_LINES + PRE_CLAMP_SLACK
+  const clamped = clampable && !showAll
+  const visible = clamped ? lines.slice(0, PRE_CLAMP_LINES).join('\n') : text
+  return (
+    <div className="tool-pre-wrap">
+      <div className="tool-pre-toolbar">
+        {clampable && (
+          <button
+            type="button"
+            className="tool-mini-btn"
+            aria-expanded={showAll}
+            onClick={() => setShowAll((v) => !v)}
+          >
+            {showAll ? 'Collapse' : `Show all ${lines.length} lines`}
+          </button>
+        )}
+        <CopyButton text={text} />
+      </div>
+      <pre className={`tool-pre ${className ?? ''}`}>
+        {visible}
+        {clamped ? `\n… ${lines.length - PRE_CLAMP_LINES} more lines` : ''}
+      </pre>
+    </div>
+  )
+}
+
+/** Syntax-highlighted preview of a file's content (write_file / Write
+ *  inputs): the content is fenced as markdown so rehype-highlight colors
+ *  it, with the fence kept longer than any backtick run inside. */
+function CodePreview({ path, content }: { path?: string; content: string }) {
+  const [showAll, setShowAll] = useState(false)
+  const lines = content.split('\n')
+  const clampable = lines.length > PRE_CLAMP_LINES + PRE_CLAMP_SLACK
+  const clamped = clampable && !showAll
+  const visible = clamped ? lines.slice(0, PRE_CLAMP_LINES).join('\n') : content
+  const ext = path?.match(/\.([A-Za-z0-9]+)$/)?.[1]?.toLowerCase() ?? ''
+  const fenceLen = Math.max(3, ...(visible.match(/`+/g) ?? []).map((r) => r.length + 1))
+  const fence = '`'.repeat(fenceLen)
+  return (
+    <div className="tool-pre-wrap">
+      <div className="tool-pre-toolbar">
+        {clampable && (
+          <button
+            type="button"
+            className="tool-mini-btn"
+            aria-expanded={showAll}
+            onClick={() => setShowAll((v) => !v)}
+          >
+            {showAll ? 'Collapse' : `Show all ${lines.length} lines`}
+          </button>
+        )}
+        <CopyButton text={content} />
+      </div>
+      <SafeMarkdown className="chat-markdown tool-code-preview" rehypePlugins={[rehypeHighlight]}>
+        {`${fence}${ext}\n${visible}${clamped ? `\n… ${lines.length - PRE_CLAMP_LINES} more lines` : ''}\n${fence}`}
+      </SafeMarkdown>
+    </div>
+  )
+}
+
+/** Old/new pair from a native Edit (or one MultiEdit entry) as a mini diff. */
+function MiniDiff({ oldText, newText }: { oldText: string; newText: string }) {
+  return (
+    <pre className="tool-pre tool-minidiff">
+      {oldText.split('\n').map((l, i) => (
+        <div key={`o${i}`} className="diff-line-del">
+          - {l || ' '}
+        </div>
+      ))}
+      {newText.split('\n').map((l, i) => (
+        <div key={`n${i}`} className="diff-line-add">
+          + {l || ' '}
+        </div>
+      ))}
+    </pre>
+  )
+}
+
+function strInput(input: Record<string, unknown>, key: string): string | undefined {
+  const v = input[key]
+  return typeof v === 'string' ? v : undefined
+}
+
+/** Per-tool structured input rendering: native Edit/MultiEdit show old/new
+ *  mini-diffs, Peckboard edit_file shows its positional ops, write tools
+ *  show a highlighted content preview; anything unrecognized falls back to
+ *  pretty-printed JSON. */
+function InputSections({ toolName, input }: { toolName: string; input: Record<string, unknown> }) {
+  const bare = bareToolName(toolName)
+  const filePath = strInput(input, 'path') ?? strInput(input, 'file_path')
+  const pathSuffix = filePath ? ` — ${shortenPath(filePath)}` : ''
+
+  if (bare === 'Edit') {
+    const oldStr = strInput(input, 'old_string')
+    const newStr = strInput(input, 'new_string')
+    if (oldStr !== undefined && newStr !== undefined) {
+      return (
+        <div className="tool-section">
+          <div className="tool-section-label">Edit{pathSuffix}</div>
+          <MiniDiff oldText={oldStr} newText={newStr} />
+        </div>
+      )
+    }
+  }
+
+  if (bare === 'MultiEdit' && Array.isArray(input.edits)) {
+    const pairs = (input.edits as unknown[])
+      .map((e) => (e ?? {}) as Record<string, unknown>)
+      .filter((e) => typeof e.old_string === 'string' && typeof e.new_string === 'string')
+    if (pairs.length > 0) {
+      return (
+        <div className="tool-section">
+          <div className="tool-section-label">
+            {pairs.length === 1 ? 'Edit' : `${pairs.length} edits`}
+            {pathSuffix}
+          </div>
+          {pairs.map((e, i) => (
+            <MiniDiff key={i} oldText={e.old_string as string} newText={e.new_string as string} />
+          ))}
+        </div>
+      )
+    }
+  }
+
+  if (bare === 'edit_file' && Array.isArray(input.edits)) {
+    // Peckboard's edit_file is positional (op + line range + text) — show
+    // each op with its target lines instead of the raw JSON envelope.
+    const ops = (input.edits as unknown[]).map((e) => (e ?? {}) as Record<string, unknown>)
+    return (
+      <div className="tool-section">
+        <div className="tool-section-label">
+          {ops.length === 1 ? 'Edit' : `${ops.length} edits`}
+          {pathSuffix}
+        </div>
+        {ops.map((op, i) => {
+          const kind = typeof op.op === 'string' ? op.op : 'edit'
+          const at =
+            op.start_line !== undefined
+              ? `lines ${op.start_line}${
+                  op.end_line !== undefined && op.end_line !== op.start_line
+                    ? `–${op.end_line}`
+                    : ''
+                }`
+              : op.line !== undefined
+                ? `line ${op.line}`
+                : ''
+          const text = typeof op.text === 'string' ? op.text : undefined
+          return (
+            <div key={i} className="tool-editop">
+              <div className="tool-editop-head">
+                {kind}
+                {at ? ` ${at}` : ''}
+              </div>
+              {text !== undefined && (
+                <pre className="tool-pre tool-minidiff">
+                  {text.split('\n').map((l, j) => (
+                    <div key={j} className={kind === 'delete' ? 'diff-line-del' : 'diff-line-add'}>
+                      {kind === 'delete' ? '-' : '+'} {l || ' '}
+                    </div>
+                  ))}
+                </pre>
+              )}
+            </div>
+          )
+        })}
+      </div>
+    )
+  }
+
+  const content =
+    strInput(input, 'content') ?? (bare === 'Write' ? strInput(input, 'file_text') : undefined)
+  if ((bare === 'write_file' || bare === 'Write') && content !== undefined) {
+    return (
+      <div className="tool-section">
+        <div className="tool-section-label">Content{pathSuffix}</div>
+        <CodePreview path={filePath} content={content} />
+      </div>
+    )
+  }
+
+  return (
+    <div className="tool-section">
+      <div className="tool-section-label">Input</div>
+      <ClampedPre text={JSON.stringify(input, null, 2)} />
+    </div>
+  )
+}
+
 /** Purpose-built output sections: exec tools get stdout/stderr panes, file
  *  reads show their content, searches list their matches; anything
  *  unrecognized falls back to pretty-printed JSON. */
@@ -97,7 +320,7 @@ function OutputSections({ out }: { out: Record<string, unknown> | string }) {
     return (
       <div className="tool-section">
         <div className="tool-section-label">Output</div>
-        <pre className="tool-pre">{out}</pre>
+        <ClampedPre text={out} />
       </div>
     )
   }
@@ -109,19 +332,16 @@ function OutputSections({ out }: { out: Record<string, unknown> | string }) {
         {stdout && (
           <div className="tool-section">
             <div className="tool-section-label">Stdout</div>
-            <pre className="tool-pre">
-              {stdout}
-              {out.stdout_truncated === true ? '\n… (truncated)' : ''}
-            </pre>
+            <ClampedPre text={stdout + (out.stdout_truncated === true ? '\n… (truncated)' : '')} />
           </div>
         )}
         {stderr && (
           <div className="tool-section">
             <div className="tool-section-label">Stderr</div>
-            <pre className="tool-pre tool-pre-stderr">
-              {stderr}
-              {out.stderr_truncated === true ? '\n… (truncated)' : ''}
-            </pre>
+            <ClampedPre
+              text={stderr + (out.stderr_truncated === true ? '\n… (truncated)' : '')}
+              className="tool-pre-stderr"
+            />
           </div>
         )}
         {!stdout && !stderr && (
@@ -138,7 +358,7 @@ function OutputSections({ out }: { out: Record<string, unknown> | string }) {
     return (
       <div className="tool-section">
         <div className="tool-section-label">Content</div>
-        <pre className="tool-pre">{content}</pre>
+        <ClampedPre text={content} />
       </div>
     )
   }
@@ -154,7 +374,7 @@ function OutputSections({ out }: { out: Record<string, unknown> | string }) {
       return (
         <div className="tool-section">
           <div className="tool-section-label">Matches ({matches.length})</div>
-          <pre className="tool-pre">{lines.join('\n')}</pre>
+          <ClampedPre text={lines.join('\n')} />
         </div>
       )
     }
@@ -165,7 +385,7 @@ function OutputSections({ out }: { out: Record<string, unknown> | string }) {
   return (
     <div className="tool-section">
       <div className="tool-section-label">Output</div>
-      <pre className="tool-pre">{text}</pre>
+      <ClampedPre text={text} />
     </div>
   )
 }
@@ -224,7 +444,11 @@ export default function ToolUseBlock({
 
   return (
     <div className={`tool-block ${statusClass}`}>
-      <button className="tool-header" onClick={() => hasDetails && setExpanded((v) => !v)}>
+      <button
+        className="tool-header"
+        aria-expanded={hasDetails ? expanded : undefined}
+        onClick={() => hasDetails && setExpanded((v) => !v)}
+      >
         <span
           className={`tool-chevron ${expanded ? 'open' : ''} ${hasDetails ? '' : 'tool-chevron-leaf'}`}
           aria-hidden="true"
@@ -244,7 +468,7 @@ export default function ToolUseBlock({
             {summary && <span className="tool-summary">{summary}</span>}
           </>
         )}
-        {isRunning && <span className="tool-spinner" />}
+        {isRunning && <span className="tool-spinner" role="status" aria-label="Running" />}
         {isRunning && elapsedSec !== null && elapsedSec >= 1 && (
           <span className="tool-elapsed">{formatDuration(elapsedSec * 1000)}</span>
         )}
@@ -303,15 +527,12 @@ export default function ToolUseBlock({
       {expanded && (
         <div className="tool-body">
           {input && Object.keys(input).length > 0 && (
-            <div className="tool-section">
-              <div className="tool-section-label">Input</div>
-              <pre className="tool-pre">{JSON.stringify(input, null, 2)}</pre>
-            </div>
+            <InputSections toolName={toolName} input={input} />
           )}
           {error && (
             <div className="tool-section">
               <div className="tool-section-label">Error</div>
-              <pre className="tool-pre tool-pre-error">{error}</pre>
+              <ClampedPre text={error} className="tool-pre-error" />
             </div>
           )}
           {out !== undefined && !error && <OutputSections out={out} />}

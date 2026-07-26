@@ -1014,3 +1014,63 @@
   word-break: break-word;
   font-size: 11px;
 }
+
+/* Live tail of the streaming thought beside the working dots. */
+.chat-thinking-live {
+  min-width: 0;
+  max-width: 46ch;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--text3);
+}
+
+/* Crash row: lifecycle notice plus an expandable stderr/exit-code pane. */
+.chat-crash-row {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 4px;
+  max-width: 72%;
+  min-width: 0;
+}
+.chat-crash-row .chat-agent-start-label {
+  color: var(--danger);
+}
+.chat-crash-details {
+  align-self: stretch;
+  font-size: var(--text-xs);
+  color: var(--text3);
+}
+.chat-crash-details summary {
+  cursor: pointer;
+  text-align: center;
+  user-select: none;
+}
+.chat-crash-details .tool-pre {
+  margin-top: 4px;
+  text-align: left;
+  max-height: 240px;
+}
+
+/* Markdown inside the user's accent bubble: keep links, inline code and
+   quotes readable against the accent fill. */
+.chat-user-markdown a {
+  color: inherit;
+  text-decoration: underline;
+}
+.chat-user-markdown :not(pre) > code {
+  background: rgba(0, 0, 0, 0.25);
+  border-color: transparent;
+  color: inherit;
+}
+.chat-user-markdown blockquote {
+  border-left-color: rgba(255, 255, 255, 0.4);
+  color: inherit;
+}
+
+/* Thinking body renders markdown now — drop the plain-text italics so
+   code blocks inside a thought stay legible. */
+.chat-thinking-markdown {
+  font-style: normal;
+}

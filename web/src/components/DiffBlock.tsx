@@ -15,6 +15,7 @@ export default function DiffBlock({ diff }: { diff: FileDiff }) {
       <button
         type="button"
         className="diff-header"
+        aria-expanded={hasBody ? expanded : undefined}
         onClick={() => hasBody && setExpanded((v) => !v)}
       >
         <span

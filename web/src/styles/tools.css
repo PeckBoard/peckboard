@@ -397,3 +397,58 @@
 .subagent-row-error {
   color: var(--danger);
 }
+
+/* ── Output-pane chrome: clamp toggle + copy ─────────────────────── */
+.tool-pre-wrap {
+  min-width: 0;
+}
+.tool-pre-toolbar {
+  display: flex;
+  justify-content: flex-end;
+  gap: 6px;
+  margin-bottom: 3px;
+}
+.tool-mini-btn {
+  font-size: 10px;
+  font-weight: 600;
+  padding: 1px 8px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-full);
+  background: var(--surface);
+  color: var(--text2);
+  cursor: pointer;
+  font-family: inherit;
+  transition: all var(--transition);
+}
+.tool-mini-btn:hover {
+  color: var(--text);
+  border-color: var(--accent);
+}
+
+/* Mini old/new diff for edit-tool inputs (native Edit / edit_file ops). */
+.tool-minidiff > div {
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+.tool-editop {
+  margin-bottom: 8px;
+}
+.tool-editop:last-child {
+  margin-bottom: 0;
+}
+.tool-editop-head {
+  font-size: 10px;
+  color: var(--text3);
+  font-family: var(--font-mono);
+  margin-bottom: 2px;
+}
+
+/* Highlighted write_file / Write content preview. */
+.tool-code-preview pre {
+  margin: 0;
+  max-height: 340px;
+  overflow-y: auto;
+}
+.tool-code-preview pre code {
+  font-size: var(--text-xs);
+}

@@ -75,6 +75,19 @@ function ElapsedSince({ since }: { since: number }) {
   return <span className="chat-thinking-elapsed">{mm > 0 ? `${mm}m ${s % 60}s` : `${s}s`}</span>
 }
 
+/** Compact duration for the usage chip: 3s, 1m 12s. */
+function formatTurnDuration(ms: number): string {
+  const s = Math.round(ms / 1000)
+  if (s < 60) return `${s}s`
+  return `${Math.floor(s / 60)}m ${s % 60}s`
+}
+
+/** Heuristic: render a user message as markdown only when it contains
+ *  markdown constructs — plain prose keeps its typed line breaks via the
+ *  bubble's pre-wrap. Raw HTML stays escaped either way (SafeMarkdown). */
+const USER_MARKDOWN_RE =
+  /```|^#{1,6}\s|\*\*|__|^\s*[-*+]\s+\S|^\s*\d+\.\s+\S|\[[^\]]+\]\([^)]+\)|`[^`]+`|^>\s/m
+
 // Interactive-session context prompt: the banner appears once context
 // occupancy reaches this, and after "Continue" reappears each time it grows
 // another CONTEXT_PROMPT_STEP. Interactive sessions are never auto-compacted
@@ -240,10 +253,12 @@ function ResolvedQuestionCard({
 function QuestionCard({
   sessionId,
   questionId,
+  requestId,
   questions,
 }: {
   sessionId: string
   questionId: string
+  requestId?: string
   questions: QuestionItem[]
 }) {
   const [answers, setAnswers] = useState<Record<number, string>>({})
@@ -280,7 +295,11 @@ function QuestionCard({
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           kind: 'question-resolved',
-          data: { question_id: questionId, answers: answerMap },
+          data: {
+            question_id: questionId,
+            ...(requestId ? { request_id: requestId } : {}),
+            answers: answerMap,
+          },
         }),
       })
     } finally {
@@ -297,7 +316,11 @@ function QuestionCard({
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           kind: 'question-resolved',
-          data: { question_id: questionId, rejected: true },
+          data: {
+            question_id: questionId,
+            ...(requestId ? { request_id: requestId } : {}),
+            rejected: true,
+          },
         }),
       })
     } finally {
@@ -406,7 +429,17 @@ const ChatRow = memo(function ChatRow({
                 ⚡ pre-hatched
               </div>
             )}
-            {item.text}
+            {USER_MARKDOWN_RE.test(item.text) ? (
+              <SafeMarkdown
+                className="chat-markdown chat-user-markdown"
+                rehypePlugins={[rehypeHighlight]}
+                components={chatMarkdownComponents}
+              >
+                {item.text}
+              </SafeMarkdown>
+            ) : (
+              item.text
+            )}
             {item.preHatchEnriched && item.preHatchOriginal && (
               <details className="chat-prehatch-original" data-testid="chat-prehatch-original">
                 <summary>Original message</summary>
@@ -472,22 +505,34 @@ const ChatRow = memo(function ChatRow({
           </div>
         </div>
       )
-    case 'agent-crashed':
+    case 'agent-crashed': {
       // Plain row, no bubble/icon — mirrors `agent-start` and
-      // `interrupt` so all agent lifecycle notices read the
-      // same. The reason ("process exited with code 1",
-      // "interrupted", etc.) sits in the detail chip; stderr
-      // is intentionally not surfaced here, it's still in the
-      // event payload for debugging via the API.
+      // `interrupt` so all agent lifecycle notices read the same.
+      // The reason sits in the detail chip; exit code and stderr
+      // (when the `agent-end` payload carried them) expand below
+      // for debugging without leaving the chat.
+      const hasStderr = typeof item.stderr === 'string' && item.stderr !== ''
       return (
         <div className="chat-row chat-row-system">
-          <div className="chat-agent-start">
-            <span className="chat-agent-start-label">Agent crashed</span>
-            <span className="chat-agent-start-detail">{item.reason}</span>
-            <span className="chat-agent-start-time">{formatTime(item.ts)}</span>
+          <div className="chat-crash-row">
+            <div className="chat-agent-start">
+              <span className="chat-agent-start-label">Agent crashed</span>
+              <span className="chat-agent-start-detail">
+                {item.reason}
+                {item.exitCode !== undefined ? ` (exit ${item.exitCode})` : ''}
+              </span>
+              <span className="chat-agent-start-time">{formatTime(item.ts)}</span>
+            </div>
+            {hasStderr && (
+              <details className="chat-crash-details" data-testid="chat-crash-details">
+                <summary>stderr</summary>
+                <pre className="tool-pre tool-pre-stderr">{item.stderr}</pre>
+              </details>
+            )}
           </div>
         </div>
       )
+    }
     case 'handover-start':
       return (
         <div className="chat-row chat-row-system">
@@ -605,6 +650,11 @@ const ChatRow = memo(function ChatRow({
         item.outputTokens >= 1000
           ? `${(item.outputTokens / 1000).toFixed(1)}k`
           : String(item.outputTokens)
+      const kfmt = (n: number) => (n >= 1000 ? `${(n / 1000).toFixed(1)}k` : String(n))
+      const delta =
+        item.contextDelta !== null && item.contextDelta !== 0
+          ? ` (${item.contextDelta > 0 ? '+' : '−'}${kfmt(Math.abs(item.contextDelta))})`
+          : ''
       return (
         <div className="chat-row chat-row-usage">
           <span
@@ -616,6 +666,15 @@ const ChatRow = memo(function ChatRow({
           >
             {cost && <span>{cost}</span>}
             <span>{out} tok out</span>
+            {item.durationMs !== null && item.durationMs >= 1000 && (
+              <span>{formatTurnDuration(item.durationMs)}</span>
+            )}
+            {item.contextTokens > 0 && (
+              <span title="Context-window occupancy after this turn (change vs the previous turn)">
+                {kfmt(item.contextTokens)} ctx
+                {delta}
+              </span>
+            )}
           </span>
         </div>
       )
@@ -628,7 +687,11 @@ const ChatRow = memo(function ChatRow({
               <span aria-hidden="true">{'\u{1F4AD}'}</span>
               <span>Thought process</span>
             </summary>
-            <div className="chat-thinking-body">{item.text}</div>
+            <div className="chat-thinking-body">
+              <SafeMarkdown className="chat-markdown chat-thinking-markdown">
+                {item.text}
+              </SafeMarkdown>
+            </div>
           </details>
         </div>
       )
@@ -686,6 +749,7 @@ const ChatRow = memo(function ChatRow({
           <QuestionCard
             sessionId={sessionId}
             questionId={item.questionId}
+            requestId={item.requestId}
             questions={item.questions}
           />
         </div>
@@ -1129,6 +1193,20 @@ export default function ChatView({
   // is the user's only persistent signal that the session is still busy.
   const showThinking = agentWorking
 
+  // Live tail of the streaming thought — shown beside the working dots so
+  // the user sees progress without expanding the collapsed block.
+  const liveThinkingLine = useMemo(() => {
+    if (!agentWorking) return ''
+    const last = displayItems[displayItems.length - 1]
+    if (!last || last.type !== 'thinking') return ''
+    const lines = last.text.split('\n')
+    for (let i = lines.length - 1; i >= 0; i--) {
+      const t = lines[i].trim()
+      if (t) return t
+    }
+    return ''
+  }, [agentWorking, displayItems])
+
   // Toolbar actions
   const handleRename = async () => {
     const currentName = sessionDetail?.name ?? ''
@@ -1457,7 +1535,7 @@ export default function ChatView({
           testId="chat-toolbar-model"
         />
         <span className="chat-toolbar-status">
-          <span className={getStatusDotClass(agentStatus)} />
+          <span className={getStatusDotClass(agentStatus)} aria-hidden="true" />
           {getStatusLabel(agentStatus)}
         </span>
         {contextTokens > 0 && (
@@ -1546,7 +1624,14 @@ export default function ChatView({
 
       <TodoPanel todos={todos} />
 
-      <div className="chat-messages" ref={scrollRef} onScroll={handleScroll}>
+      <div
+        className="chat-messages"
+        ref={scrollRef}
+        onScroll={handleScroll}
+        role="log"
+        aria-live="polite"
+        aria-label="Conversation"
+      >
         {/* "Load older" button: shown at the top once the initial
             fetch returned a full page (more history likely exists)
             and hidden once a short page proves the user has reached
@@ -1628,6 +1713,11 @@ export default function ChatView({
                 <span />
               </div>
               <span>{workingLabel}</span>
+              {liveThinkingLine && (
+                <span className="chat-thinking-live" title={liveThinkingLine}>
+                  {liveThinkingLine}
+                </span>
+              )}
               {workingSince > 0 && <ElapsedSince since={workingSince} />}
               <button
                 className="chat-thinking-interrupt"
