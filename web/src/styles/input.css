@@ -46,6 +46,14 @@
   background: var(--surface-hover);
 }
 
+/* Keyboard cursor in the @-mention listbox. Focus stays in the textarea
+   (aria-activedescendant), so the active row is the ONLY signal of what
+   Enter will insert — it needs more than a hover tint. */
+.autocomplete-item.is-active {
+  background: var(--surface-hover);
+  box-shadow: inset 2px 0 0 var(--accent);
+}
+
 .autocomplete-item-title {
   font-size: var(--text-sm);
   font-weight: 500;

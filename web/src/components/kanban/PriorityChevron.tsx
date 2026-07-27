@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
+import { focusFirstMenuItem, handleMenuKeys } from '../../hooks/useMenuKeyboard'
 import type { PriorityInfo } from './utils'
 
 interface PriorityChevronProps {
@@ -28,6 +29,8 @@ export default function PriorityChevron({
 }: PriorityChevronProps) {
   const [open, setOpen] = useState(false)
   const wrapRef = useRef<HTMLDivElement>(null)
+  const menuRef = useRef<HTMLDivElement>(null)
+  const triggerRef = useRef<HTMLButtonElement>(null)
 
   useEffect(() => {
     if (!open) return
@@ -38,15 +41,29 @@ export default function PriorityChevron({
     return () => document.removeEventListener('mousedown', onDocMouseDown)
   }, [open])
 
+  // Shared menu keyboard model (see `hooks/useMenuKeyboard`): opening lands
+  // focus on the current priority, so the popover is usable without a mouse.
+  useEffect(() => {
+    if (open) focusFirstMenuItem(menuRef.current)
+  }, [open])
+
+  const closeAndRefocus = () => {
+    setOpen(false)
+    triggerRef.current?.focus()
+  }
+
   const tier = tierOf(value)
 
   return (
     <div className="priority-chevron-wrap" ref={wrapRef}>
       <button
+        ref={triggerRef}
         type="button"
         className={`priority-chevron priority-chevron-${tier}${disabled ? ' is-disabled' : ''}`}
         title={labelOf(value, priorities)}
         aria-label={`Priority ${labelOf(value, priorities)}`}
+        aria-haspopup="menu"
+        aria-expanded={open}
         disabled={disabled}
         onClick={(e) => {
           // The card body listens for clicks to toggle expand/collapse; the
@@ -55,24 +72,51 @@ export default function PriorityChevron({
           e.stopPropagation()
           if (!disabled) setOpen((v) => !v)
         }}
+        onKeyDown={(e) => {
+          if (disabled || open) return
+          if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
+            e.preventDefault()
+            e.stopPropagation()
+            setOpen(true)
+          }
+        }}
       >
         <ChevronGlyph tier={tier} />
       </button>
       {open && (
-        <div className="priority-chevron-menu" role="menu">
+        <div
+          className="priority-chevron-menu"
+          role="menu"
+          ref={menuRef}
+          onKeyDown={(e) => {
+            if (handleMenuKeys(e, menuRef.current)) {
+              e.stopPropagation()
+              return
+            }
+            if (e.key === 'Escape') {
+              e.preventDefault()
+              e.stopPropagation()
+              closeAndRefocus()
+            }
+          }}
+        >
           {priorities.map((p) => {
             const pt = tierOf(p.value)
+            const isCurrent = p.value === value
             return (
               <button
                 key={p.value}
                 type="button"
+                role="menuitemradio"
+                aria-checked={isCurrent}
+                data-menu-active={isCurrent ? 'true' : undefined}
                 className={`priority-chevron-option priority-chevron-${pt}${
-                  p.value === value ? ' is-active' : ''
+                  isCurrent ? ' is-active' : ''
                 }`}
                 onClick={(e) => {
                   e.stopPropagation()
-                  setOpen(false)
-                  if (p.value !== value) onChange(p.value)
+                  closeAndRefocus()
+                  if (!isCurrent) onChange(p.value)
                 }}
               >
                 <ChevronGlyph tier={pt} />

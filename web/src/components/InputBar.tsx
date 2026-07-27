@@ -68,6 +68,10 @@ export default function InputBar({
   } | null>(null)
   const [suggestions, setSuggestions] = useState<MentionItem[]>([])
   const [showAutocomplete, setShowAutocomplete] = useState(false)
+  // Keyboard cursor over the @-mention list. The list is a listbox the
+  // textarea points at via `aria-activedescendant`, so focus never leaves
+  // the composer while the user picks.
+  const [mentionIndex, setMentionIndex] = useState(0)
   // Handover-cancel request in flight / its failure. The interrupt used
   // to be fire-and-forget: a refusal left the banner spinning with no
   // sign anything had gone wrong, and every click stacked another call.
@@ -95,6 +99,14 @@ export default function InputBar({
     resizeTextarea()
   }, [text, resizeTextarea])
 
+  // Keep the keyboard cursor visible in the (scrollable) mention list.
+  useEffect(() => {
+    if (!showAutocomplete) return
+    document
+      .getElementById(`mention-opt-${sessionId}-${mentionIndex}`)
+      ?.scrollIntoView({ block: 'nearest' })
+  }, [showAutocomplete, mentionIndex, sessionId])
+
   const handleChange = (e: ChangeEvent<HTMLTextAreaElement>) => {
     const val = e.target.value
     // Any edit to the draft means the user has moved on from the failure.
@@ -110,6 +122,7 @@ export default function InputBar({
       const filtered = filterMentions(allMentions, atMatch[1])
       setSuggestions(filtered)
       setShowAutocomplete(filtered.length > 0)
+      setMentionIndex(0)
     } else {
       setShowAutocomplete(false)
     }
@@ -124,6 +137,7 @@ export default function InputBar({
     setText(newText)
     setDraft(sessionId, newText)
     setShowAutocomplete(false)
+    setMentionIndex(0)
     textareaRef.current?.focus()
   }
 
@@ -315,6 +329,34 @@ export default function InputBar({
   }, [submitMessage, sendError])
 
   const handleKeyDown = (e: KeyboardEvent<HTMLTextAreaElement>) => {
+    // The @-mention list owns the arrow / Enter / Escape keys while it is
+    // open. This branch MUST come before the send branch below, or Enter
+    // fires off the half-typed "@foo" instead of completing the mention.
+    if (showAutocomplete && suggestions.length > 0) {
+      if (e.key === 'ArrowDown') {
+        e.preventDefault()
+        setMentionIndex((i) => (i + 1) % suggestions.length)
+        return
+      }
+      if (e.key === 'ArrowUp') {
+        e.preventDefault()
+        setMentionIndex((i) => (i - 1 + suggestions.length) % suggestions.length)
+        return
+      }
+      if (e.key === 'Enter' || e.key === 'Tab') {
+        const item = suggestions[mentionIndex]
+        if (item) {
+          e.preventDefault()
+          insertSuggestion(item)
+          return
+        }
+      }
+      if (e.key === 'Escape') {
+        e.preventDefault()
+        setShowAutocomplete(false)
+        return
+      }
+    }
     const isMobile = window.matchMedia('(pointer: coarse)').matches
     if (e.key === 'Enter' && !e.shiftKey && !isMobile) {
       e.preventDefault()
@@ -366,28 +408,38 @@ export default function InputBar({
           )}
         </div>
       )}
-      {/* Autocomplete dropdown for @mentions */}
+      {/* Autocomplete dropdown for @mentions. A listbox the composer points
+          at with `aria-activedescendant`: focus stays in the textarea, so the
+          user keeps typing while arrowing through the matches. */}
       {showAutocomplete && (
         <div className="autocomplete-dropdown">
           <div className="autocomplete-header">@ — reports &amp; sessions</div>
-          {suggestions.map((s, i) => (
-            <button
-              key={`${s.type}-${s.detail}-${i}`}
-              className="autocomplete-item"
-              onMouseDown={(e) => {
-                e.preventDefault()
-                insertSuggestion(s)
-              }}
-            >
-              <span className="autocomplete-item-title">
-                <span className={`autocomplete-type-badge autocomplete-type-${s.type}`}>
-                  {s.type}
+          <div id={`mention-list-${sessionId}`} role="listbox" aria-label="Mention suggestions">
+            {suggestions.map((s, i) => (
+              <button
+                key={`${s.type}-${s.detail}-${i}`}
+                id={`mention-opt-${sessionId}-${i}`}
+                type="button"
+                role="option"
+                aria-selected={i === mentionIndex}
+                tabIndex={-1}
+                className={`autocomplete-item${i === mentionIndex ? ' is-active' : ''}`}
+                onMouseEnter={() => setMentionIndex(i)}
+                onMouseDown={(e) => {
+                  e.preventDefault()
+                  insertSuggestion(s)
+                }}
+              >
+                <span className="autocomplete-item-title">
+                  <span className={`autocomplete-type-badge autocomplete-type-${s.type}`}>
+                    {s.type}
+                  </span>
+                  {s.label}
                 </span>
-                {s.label}
-              </span>
-              <span className="autocomplete-item-path">{s.detail}</span>
-            </button>
-          ))}
+                <span className="autocomplete-item-path">{s.detail}</span>
+              </button>
+            ))}
+          </div>
         </div>
       )}
       {/* A failed send explains itself right above the composer, where
@@ -450,6 +502,13 @@ export default function InputBar({
           value={text}
           onChange={handleChange}
           onKeyDown={handleKeyDown}
+          role="combobox"
+          aria-autocomplete="list"
+          aria-expanded={showAutocomplete}
+          aria-controls={showAutocomplete ? `mention-list-${sessionId}` : undefined}
+          aria-activedescendant={
+            showAutocomplete ? `mention-opt-${sessionId}-${mentionIndex}` : undefined
+          }
           onPaste={handlePaste}
           // Intentionally not disabled while sending: on mobile, disabling
           // a focused textarea blurs it, which closes the soft keyboard

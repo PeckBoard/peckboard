@@ -158,3 +158,13 @@
   background: var(--surface-hover, var(--bg));
   color: var(--text);
 }
+
+/* Keyboard focus inside a menu. The shared menu model (hooks/useMenuKeyboard)
+   moves DOM focus row to row, so the focused row has to read as the current
+   one — the UA default outline disappears against the popup surface. */
+.context-menu-item:focus-visible,
+.dropdown-item:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
+  background: var(--surface-hover, var(--bg));
+}

@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useLayoutEffect, useRef, useState, type ReactNode } from 'react'
 import { createPortal } from 'react-dom'
+import { focusFirstMenuItem, handleMenuKeys } from '../hooks/useMenuKeyboard'
 
 /**
  * Shared menu-item shape used by every dropdown / context menu / 3-dot
@@ -144,40 +145,23 @@ export default function Dropdown({
     }
   }, [onClose])
 
-  // Roving keyboard focus for the plain (non-searchable) menu. `role="menu"`
-  // promises arrow navigation; without it the only way through a popup is
-  // Tab, and a keyboard-only user can never reach a submenu. The searchable
-  // variant keeps its own input-driven highlight model (`onSearchKey`).
+  // Roving keyboard focus for the plain (non-searchable) menu, via the
+  // shared menu model in `hooks/useMenuKeyboard`. `role="menu"` promises
+  // arrow navigation; without it the only way through a popup is Tab, and a
+  // keyboard-only user can never reach a submenu. The searchable variant
+  // keeps its own input-driven highlight model (`onSearchKey`).
   useEffect(() => {
     if (searchable) return
-    ref.current?.querySelector<HTMLElement>('[role="menuitem"]:not(:disabled)')?.focus()
+    focusFirstMenuItem(ref.current)
   }, [searchable])
 
   const onMenuKey = (e: React.KeyboardEvent) => {
-    // A submenu is portalled to <body> but still a React child of this
-    // menu, so its key events bubble here. Only handle keys while focus is
-    // actually inside our own list, or we'd yank focus back out of it.
-    const root = ref.current
-    if (searchable || !root || !root.contains(document.activeElement)) return
-    const els = Array.from(root.querySelectorAll<HTMLElement>('[role="menuitem"]:not(:disabled)'))
-    if (els.length === 0) return
-    const at = els.indexOf(document.activeElement as HTMLElement)
-    if (e.key === 'ArrowDown') {
-      e.preventDefault()
-      els[at < 0 ? 0 : (at + 1) % els.length].focus()
-    } else if (e.key === 'ArrowUp') {
-      e.preventDefault()
-      els[at <= 0 ? els.length - 1 : at - 1].focus()
-    } else if (e.key === 'Home') {
-      e.preventDefault()
-      els[0].focus()
-    } else if (e.key === 'End') {
-      e.preventDefault()
-      els[els.length - 1].focus()
-    } else if (e.key === 'ArrowRight') {
+    if (searchable) return
+    if (handleMenuKeys(e, ref.current)) return
+    if (e.key === 'ArrowRight') {
       // Open a submenu row; the flyout focuses its own first item on mount.
       const el = document.activeElement as HTMLElement | null
-      if (el?.classList.contains('dropdown-item-has-sub')) {
+      if (el?.classList.contains('dropdown-item-has-sub') && ref.current?.contains(el)) {
         e.preventDefault()
         el.click()
       }
@@ -302,6 +286,7 @@ function MenuRow({
             e.stopPropagation()
             open()
           }}
+          data-menu-active={item.active ? 'true' : undefined}
           data-testid={item.testId}
         >
           <span className="dropdown-item-label">{item.label}</span>
@@ -339,6 +324,7 @@ function MenuRow({
         onClose()
         item.onSelect?.()
       }}
+      data-menu-active={item.active ? 'true' : undefined}
       data-testid={item.testId}
     >
       <span className="dropdown-item-row">
@@ -390,7 +376,23 @@ export function MenuButton({
   children,
 }: MenuButtonProps) {
   const [anchor, setAnchor] = useState<{ x: number; y: number } | null>(null)
-  const close = useCallback(() => setAnchor(null), [])
+  const triggerRef = useRef<HTMLButtonElement | null>(null)
+  // Closing hands focus back to the trigger: the popup is portalled to the
+  // end of <body>, so leaving focus there would drop a keyboard user at the
+  // top of the document on the next Tab. An outside click that focused
+  // something else keeps its focus.
+  const close = useCallback(() => {
+    setAnchor(null)
+    const active = document.activeElement as HTMLElement | null
+    if (!active || active === document.body || active.closest('.dropdown-menu')) {
+      triggerRef.current?.focus()
+    }
+  }, [])
+
+  const openAt = (el: HTMLButtonElement) => {
+    const r = el.getBoundingClientRect()
+    setAnchor({ x: align === 'right' ? r.right : r.left, y: r.bottom + 4 })
+  }
 
   const onClick = (e: React.MouseEvent<HTMLButtonElement>) => {
     e.stopPropagation()
@@ -398,19 +400,31 @@ export function MenuButton({
       setAnchor(null)
       return
     }
-    const r = e.currentTarget.getBoundingClientRect()
-    setAnchor({ x: align === 'right' ? r.right : r.left, y: r.bottom + 4 })
+    openAt(e.currentTarget)
+  }
+
+  // ArrowDown/ArrowUp open the menu from the trigger; Enter/Space are the
+  // button's native click. Either way the popup focuses its first item.
+  const onKeyDown = (e: React.KeyboardEvent<HTMLButtonElement>) => {
+    if (!anchor && (e.key === 'ArrowDown' || e.key === 'ArrowUp')) {
+      e.preventDefault()
+      openAt(e.currentTarget)
+    }
   }
 
   return (
     <>
       <button
+        ref={triggerRef}
         type="button"
         className={triggerClassName ?? 'menu-button'}
         aria-label={ariaLabel}
+        aria-haspopup="menu"
+        aria-expanded={!!anchor}
         title={title}
         data-testid={testId}
         onClick={onClick}
+        onKeyDown={onKeyDown}
       >
         {children ?? (
           <svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true">

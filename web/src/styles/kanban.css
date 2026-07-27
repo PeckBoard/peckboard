@@ -668,6 +668,13 @@
   color: var(--accent);
   font-weight: 600;
 }
+/* The popover moves DOM focus between options (hooks/useMenuKeyboard), so
+   the focused row has to be unmistakable on the popover surface. */
+.priority-chevron-option:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
+  background: var(--surface-hover);
+}
 .priority-chevron-option-label {
   flex: 1;
 }

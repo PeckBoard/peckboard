@@ -1,4 +1,5 @@
-import { useLayoutEffect, useRef, useState } from 'react'
+import { useEffect, useLayoutEffect, useRef, useState } from 'react'
+import { focusFirstMenuItem, handleMenuKeys } from '../hooks/useMenuKeyboard'
 
 export interface ContextMenuItem {
   /** Display text. */
@@ -54,10 +55,24 @@ export default function ContextMenuView({
     if (nx !== pos.x || ny !== pos.y) setPos({ x: nx, y: ny })
   }, [anchor.x, anchor.y, pos.x, pos.y])
 
+  // A right-click menu opened from the keyboard (Shift+F10) has to put focus
+  // inside itself, or the roles it claims are a lie — see
+  // `hooks/useMenuKeyboard` for the shared model. `useContextMenu` restores
+  // focus to the trigger on close.
+  useEffect(() => {
+    focusFirstMenuItem(ref.current)
+  }, [])
+
   if (visibleItems.length === 0) return null
 
   return (
-    <div ref={ref} className="context-menu" role="menu" style={{ top: pos.y, left: pos.x }}>
+    <div
+      ref={ref}
+      className="context-menu"
+      role="menu"
+      style={{ top: pos.y, left: pos.x }}
+      onKeyDown={(e) => handleMenuKeys(e, ref.current)}
+    >
       {visibleItems.map((item, idx) => (
         <button
           key={idx}
