@@ -242,6 +242,9 @@ export default function SessionDetail({ id, onBack }: { id: string; onBack: () =
               area
               formatValue={fmtTokens}
               formatX={(x) => `#${Math.round(x)}`}
+              unit="tokens"
+              xUnit="turn"
+              testid="usage-context-trend"
             />
           </div>
         </section>

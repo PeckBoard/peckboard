@@ -251,7 +251,15 @@ export default function ProjectDetail({
             <h3 className="usage-panel-title">Tokens Over Time</h3>
           </header>
           <div className="usage-panel-body">
-            <LineChart series={chartSeries} area formatValue={fmtTokens} formatX={fmtDay} />
+            <LineChart
+              series={chartSeries}
+              area
+              formatValue={fmtTokens}
+              formatX={fmtDay}
+              unit="tokens"
+              xUnit="day"
+              testid="usage-project-trend-chart"
+            />
           </div>
         </section>
       </div>
