@@ -59,6 +59,13 @@ export default function InputBar({
   const [attachments, setAttachments] = useState<PendingAttachment[]>([])
   const [uploading, setUploading] = useState(false)
   const [uploadErrors, setUploadErrors] = useState<string[]>([])
+  // A failed send: why it failed, plus the exact payload so Retry
+  // re-sends what the user actually wrote.
+  const [sendError, setSendError] = useState<{
+    message: string
+    text: string
+    attachments: PendingAttachment[]
+  } | null>(null)
   const [suggestions, setSuggestions] = useState<MentionItem[]>([])
   const [showAutocomplete, setShowAutocomplete] = useState(false)
   // Handover-cancel request in flight / its failure. The interrupt used
@@ -90,6 +97,8 @@ export default function InputBar({
 
   const handleChange = (e: ChangeEvent<HTMLTextAreaElement>) => {
     const val = e.target.value
+    // Any edit to the draft means the user has moved on from the failure.
+    setSendError(null)
     setText(val)
     setDraft(sessionId, val)
 
@@ -208,70 +217,102 @@ export default function InputBar({
     setAttachments((prev) => prev.filter((a) => a.id !== id))
   }, [])
 
-  const handleSend = useCallback(async () => {
-    const trimmed = text.trim()
-    if ((!trimmed && attachments.length === 0) || sending || handoverActive) return
-    const attachmentIds = attachments.map((a) => a.id)
-    const attachmentMeta = attachments.map((a) => ({
-      filename: a.name,
-      mimeType: a.mimeType,
-      id: a.id,
-    }))
-    // Clear the composer up-front: lets the user start typing the next
-    // message immediately (matches Slack/Discord/iMessage), and avoids
-    // clobbering anything they type during the in-flight request.
-    setSending(true)
-    setText('')
-    setDraft(sessionId, '')
-    setAttachments([])
-    // Show the bubble optimistically. When the agent is mid-turn the
-    // backend queues the message and the WS `user` event can lag a few
-    // hundred ms behind the POST returning; without this the composer
-    // empties but nothing visible happens until the round-trip
-    // completes, which felt like the message had vanished. The real
-    // event auto-clears the matching pending entry on arrival.
-    const pendingId = addPendingUserMessage(sessionId, trimmed, attachmentMeta)
-    try {
-      const body: Record<string, unknown> = { text: trimmed }
-      if (attachmentIds.length > 0) {
-        body.attachmentIds = attachmentIds
+  // The send core, parameterised by its payload so Retry can re-send
+  // exactly what failed instead of whatever the composer happens to
+  // hold by then.
+  const submitMessage = useCallback(
+    async (trimmed: string, atts: PendingAttachment[]) => {
+      if ((!trimmed && atts.length === 0) || sending || handoverActive) return
+      const attachmentIds = atts.map((a) => a.id)
+      const attachmentMeta = atts.map((a) => ({
+        filename: a.name,
+        mimeType: a.mimeType,
+        id: a.id,
+      }))
+      // Clear the composer up-front: lets the user start typing the next
+      // message immediately (matches Slack/Discord/iMessage), and avoids
+      // clobbering anything they type during the in-flight request. Only
+      // clear what we're actually sending — on a retry the composer may
+      // already hold a different draft.
+      setSending(true)
+      setSendError(null)
+      if ((textareaRef.current?.value ?? '').trim() === trimmed) {
+        setText('')
+        setDraft(sessionId, '')
       }
-      const res = await authedFetch(`/api/sessions/${sessionId}/message`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(body),
-      })
-      if (!res.ok && pendingId) {
-        rollbackFailedSend(pendingId, trimmed)
+      setAttachments((prev) => prev.filter((a) => !attachmentIds.includes(a.id)))
+      // Show the bubble optimistically. When the agent is mid-turn the
+      // backend queues the message and the WS `user` event can lag a few
+      // hundred ms behind the POST returning; without this the composer
+      // empties but nothing visible happens until the round-trip
+      // completes, which felt like the message had vanished. The real
+      // event auto-clears the matching pending entry on arrival.
+      const pendingId = addPendingUserMessage(sessionId, trimmed, attachmentMeta)
+      try {
+        const body: Record<string, unknown> = { text: trimmed }
+        if (attachmentIds.length > 0) {
+          body.attachmentIds = attachmentIds
+        }
+        const res = await authedFetch(`/api/sessions/${sessionId}/message`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(body),
+        })
+        if (!res.ok) {
+          const detail = (await res.json().catch(() => null))?.error
+          rollbackFailedSend(
+            pendingId,
+            describeActionError(
+              typeof detail === 'string' ? new Error(detail) : null,
+              `Couldn't send your message (${res.status}). It's back in the composer.`,
+            ),
+          )
+        }
+      } catch (e) {
+        rollbackFailedSend(
+          pendingId,
+          describeActionError(
+            e,
+            "Couldn't reach the server. Your message is back in the composer.",
+          ),
+        )
+      } finally {
+        setSending(false)
       }
-    } catch {
-      if (pendingId) rollbackFailedSend(pendingId, trimmed)
-    } finally {
-      setSending(false)
-    }
 
-    // Rolling back a failed send: drop the optimistic bubble, and
-    // restore the user's text only if the composer is still empty.
-    // Stomping over text the user has started typing for the *next*
-    // message would be exactly the clobber the up-front clear set
-    // out to avoid (see comment at the top of this handler).
-    function rollbackFailedSend(tempId: string, original: string) {
-      removePendingUserMessage(sessionId, tempId)
-      if (textareaRef.current?.value === '') {
-        setText(original)
-        setDraft(sessionId, original)
+      // Rolling back a failed send: drop the optimistic bubble, and
+      // restore the user's text only if the composer is still empty.
+      // Stomping over text the user has started typing for the *next*
+      // message would be exactly the clobber the up-front clear set
+      // out to avoid (see comment at the top of this handler).
+      // Attachments always come back — they're already uploaded and
+      // still valid server-side, so dropping them would force the user
+      // to re-pick every file. Merge rather than replace, in case more
+      // were added while the request was in flight.
+      function rollbackFailedSend(tempId: string, message: string) {
+        removePendingUserMessage(sessionId, tempId)
+        if (textareaRef.current?.value === '') {
+          setText(trimmed)
+          setDraft(sessionId, trimmed)
+        }
+        setAttachments((prev) => {
+          const have = new Set(prev.map((a) => a.id))
+          return [...atts.filter((a) => !have.has(a.id)), ...prev]
+        })
+        setSendError({ message, text: trimmed, attachments: atts })
       }
-    }
-  }, [
-    text,
-    sending,
-    handoverActive,
-    sessionId,
-    setDraft,
-    attachments,
-    addPendingUserMessage,
-    removePendingUserMessage,
-  ])
+    },
+    [sending, handoverActive, sessionId, setDraft, addPendingUserMessage, removePendingUserMessage],
+  )
+
+  const handleSend = useCallback(() => {
+    void submitMessage(text.trim(), attachments)
+  }, [submitMessage, text, attachments])
+
+  const handleRetrySend = useCallback(() => {
+    if (!sendError) return
+    void submitMessage(sendError.text, sendError.attachments)
+  }, [submitMessage, sendError])
 
   const handleKeyDown = (e: KeyboardEvent<HTMLTextAreaElement>) => {
     const isMobile = window.matchMedia('(pointer: coarse)').matches
@@ -347,6 +388,30 @@ export default function InputBar({
               <span className="autocomplete-item-path">{s.detail}</span>
             </button>
           ))}
+        </div>
+      )}
+      {/* A failed send explains itself right above the composer, where
+          the restored draft and attachment chips are. */}
+      {sendError && (
+        <div className="send-error" role="alert" data-testid="send-error">
+          <span className="send-error-text">{sendError.message}</span>
+          <button
+            type="button"
+            className="send-error-retry"
+            data-testid="send-error-retry"
+            onClick={handleRetrySend}
+            disabled={sending}
+          >
+            Retry
+          </button>
+          <button
+            type="button"
+            className="send-error-dismiss"
+            aria-label="Dismiss send error"
+            onClick={() => setSendError(null)}
+          >
+            &times;
+          </button>
         </div>
       )}
       <div className="input-bar-inner">
