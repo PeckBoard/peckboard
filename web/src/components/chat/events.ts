@@ -204,7 +204,15 @@ export type AgentStatus = 'idle' | 'working' | 'tool' | 'crashed' | 'questioning
 export function deriveAgentStatus(events: Event[]): AgentStatus {
   for (let i = events.length - 1; i >= 0; i--) {
     const kind = events[i].kind
-    if (kind === 'agent-end') return 'idle'
+    if (kind === 'agent-end') {
+      // A crashed turn ends the process too — reporting it as "Idle" told the
+      // user everything was fine while an "Agent crashed" row sat right below
+      // the pill. `status` is camelCase-free, but tolerate a snake_case
+      // spelling in case a provider ever emits one.
+      const data = events[i].data
+      const status = (data.status as string) ?? (data.agent_status as string)
+      return status === 'crashed' ? 'crashed' : 'idle'
+    }
     if (kind === 'pre-hatch' || kind === 'pre-ignite') return 'working'
     if (kind === 'question') {
       // Check if resolved later
@@ -232,6 +240,10 @@ export function deriveAgentStatus(events: Event[]): AgentStatus {
       if (!ended) return 'tool'
     }
     if (kind === 'agent-start') return 'working'
+    // The user sent a message and the process hasn't reported in yet — that's
+    // the same "working" the thinking indicator shows, and it clears a stale
+    // `crashed` pill as soon as the next turn is dispatched.
+    if (kind === 'user') return 'working'
   }
   return 'idle'
 }

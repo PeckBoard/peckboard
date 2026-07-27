@@ -75,6 +75,30 @@ function ElapsedSince({ since }: { since: number }) {
   const mm = Math.floor(s / 60)
   return <span className="chat-thinking-elapsed">{mm > 0 ? `${mm}m ${s % 60}s` : `${s}s`}</span>
 }
+/** No event at all for this long while the agent is "working" means the turn
+ *  is very likely dead (dispatch failed, the process died before emitting, a
+ *  dropped WS frame) — long enough that a merely slow model never trips it. */
+const STALL_MS = 90_000
+
+/** True once `sinceTs` is older than `thresholdMs` while `active`. `activityKey`
+ *  is the newest event's seq: the stall is stored against the key that produced
+ *  it, so the very next event clears it in the same render as it arrives — no
+ *  setState in the effect body, no cascading render. */
+function useStalled(
+  active: boolean,
+  activityKey: number,
+  sinceTs: number,
+  thresholdMs: number,
+): boolean {
+  const [stalledKey, setStalledKey] = useState<number | null>(null)
+  useEffect(() => {
+    if (!active || sinceTs <= 0) return
+    const remaining = Math.max(0, sinceTs + thresholdMs - Date.now())
+    const id = setTimeout(() => setStalledKey(activityKey), remaining)
+    return () => clearTimeout(id)
+  }, [active, activityKey, sinceTs, thresholdMs])
+  return active && sinceTs > 0 && stalledKey === activityKey
+}
 
 /** Compact duration for the usage chip: 3s, 1m 12s. */
 function formatTurnDuration(ms: number): string {
@@ -1207,6 +1231,16 @@ export default function ChatView({
     return { agentWorking: false, workingSince: 0 }
   })()
 
+  // Newest event drives stall detection: any event at all — text chunk, tool
+  // start, thinking — counts as the agent reporting in. Its seq keys the
+  // stall so a fresh event always clears it, even on a same-millisecond ts.
+  const lastEvent = events.length > 0 ? events[events.length - 1] : null
+  const stalled = useStalled(
+    agentWorking,
+    lastEvent?.seq ?? 0,
+    Math.max(lastEvent?.ts ?? 0, workingSince),
+    STALL_MS,
+  )
   const agentStatus = deriveAgentStatus(events)
 
   // Always show the thinking indicator while the agent is working —
@@ -1598,7 +1632,7 @@ export default function ChatView({
           }}
           testId="chat-toolbar-model"
         />
-        <span className="chat-toolbar-status">
+        <span className="chat-toolbar-status" data-testid="chat-toolbar-status">
           <span className={getStatusDotClass(agentStatus)} aria-hidden="true" />
           {getStatusLabel(agentStatus)}
         </span>
@@ -1788,31 +1822,64 @@ export default function ChatView({
             stopping, instead of a floating toolbar pinned above the input. */}
         {showThinking && (
           <div className="chat-row chat-row-system">
-            <div className="chat-thinking">
-              <div className="chat-thinking-dots">
-                <span />
-                <span />
-                <span />
-              </div>
-              <span>{workingLabel}</span>
-              {liveThinkingLine && (
-                <span className="chat-thinking-live" title={liveThinkingLine}>
-                  {liveThinkingLine}
-                </span>
-              )}
-              {workingSince > 0 && <ElapsedSince since={workingSince} />}
-              <button
-                className="chat-thinking-interrupt"
-                onClick={() => void handleInterrupt()}
-                type="button"
-                disabled={interrupting}
-                aria-busy={interrupting || undefined}
-                aria-label={`${interruptAffordance.label} agent`}
-                title={interruptAffordance.title}
+            {stalled ? (
+              // Nothing has arrived for STALL_MS. Say so instead of animating
+              // dots forever, and give the two moves that actually help:
+              // re-fetch (a dropped WS frame) or terminate the dead process.
+              <div
+                className="chat-thinking chat-thinking-stalled"
+                role="status"
+                data-testid="chat-stall"
               >
-                {interrupting ? 'Stopping…' : interruptAffordance.label}
-              </button>
-            </div>
+                <span className="chat-stall-dot" aria-hidden="true" />
+                <span>No response — the agent may have stopped</span>
+                {workingSince > 0 && <ElapsedSince since={workingSince} />}
+                <button
+                  className="chat-thinking-interrupt"
+                  type="button"
+                  onClick={() => void fetchEvents(sessionId)}
+                  title="Re-fetch this session's events in case an update was missed"
+                  data-testid="chat-stall-retry"
+                >
+                  Retry
+                </button>
+                <button
+                  className="chat-thinking-interrupt"
+                  type="button"
+                  onClick={handleTerminateAgent}
+                  title="Kill the agent process; the next message starts a fresh one"
+                  data-testid="chat-stall-terminate"
+                >
+                  Terminate
+                </button>
+              </div>
+            ) : (
+              <div className="chat-thinking">
+                <div className="chat-thinking-dots">
+                  <span />
+                  <span />
+                  <span />
+                </div>
+                <span>{workingLabel}</span>
+                {liveThinkingLine && (
+                  <span className="chat-thinking-live" title={liveThinkingLine}>
+                    {liveThinkingLine}
+                  </span>
+                )}
+                {workingSince > 0 && <ElapsedSince since={workingSince} />}
+                <button
+                  className="chat-thinking-interrupt"
+                  onClick={() => void handleInterrupt()}
+                  type="button"
+                  disabled={interrupting}
+                  aria-busy={interrupting || undefined}
+                  aria-label={`${interruptAffordance.label} agent`}
+                  title={interruptAffordance.title}
+                >
+                  {interrupting ? 'Stopping…' : interruptAffordance.label}
+                </button>
+              </div>
+            )}
           </div>
         )}
       </div>

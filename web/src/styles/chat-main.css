@@ -708,6 +708,37 @@
 .chat-thinking-elapsed {
   font-variant-numeric: tabular-nums;
 }
+
+/* Stalled turn: no event for STALL_MS. Reads as a warning chip rather than
+   the quiet italic activity line — the point is that nothing is happening.
+   Label colour stays --text (AA on both themes); the amber carries the
+   border and dot only, never the text. */
+.chat-thinking-stalled {
+  font-style: normal;
+  color: var(--text);
+  background: var(--warning-bg);
+  border: 1px solid var(--warning);
+  border-radius: var(--radius-full);
+  padding: 4px 12px;
+  align-self: flex-start;
+}
+.chat-stall-dot {
+  width: 6px;
+  height: 6px;
+  flex: none;
+  border-radius: var(--radius-full);
+  background: var(--warning);
+}
+.chat-thinking-stalled .chat-thinking-interrupt:first-of-type {
+  border-color: var(--border);
+  background: var(--surface2);
+  color: var(--text2);
+}
+.chat-thinking-stalled .chat-thinking-interrupt:first-of-type:hover {
+  background: var(--surface3);
+  color: var(--text);
+  border-color: var(--border-strong);
+}
 .chat-system-notice {
   /* Centered micro-chip, deliberately quieter than a message bubble —
      system info must not read as a participant in the conversation. */
