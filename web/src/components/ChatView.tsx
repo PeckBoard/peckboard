@@ -40,11 +40,41 @@ import {
   formatTime,
   getStatusDotClass,
   getStatusLabel,
+  type AgentStatus,
   type DisplayItem,
   type MessageAttachment,
   type QuestionItem,
 } from './chat/events'
 import 'highlight.js/styles/github-dark.css'
+
+// Coarse announcement key: `working` and `tool` collapse into one "busy"
+// state so an agentic turn that runs ten tools doesn't announce twenty
+// times. Only a change of key is worth speaking.
+type AnnounceKey = 'busy' | 'idle' | 'crashed' | 'questioning'
+function announceKey(status: AgentStatus): AnnounceKey {
+  return status === 'working' || status === 'tool' ? 'busy' : status
+}
+
+function announcementFor(key: AnnounceKey, hasReply: boolean): string {
+  switch (key) {
+    case 'busy':
+      return 'Agent working'
+    case 'idle':
+      // Turn boundary only: the reply itself is NOT echoed here. A polite
+      // region that repeats the message body duplicates every word in the
+      // accessibility tree, and a long agent reply read start-to-finish is
+      // exactly the chattiness this region has to avoid. "There is a reply"
+      // is the cue; the conversation region below holds the text to read.
+      return hasReply ? 'Agent replied' : 'Agent finished'
+    case 'crashed':
+      // Deliberately NOT the visible row's "Agent crashed" wording: the
+      // announcement is a second copy of that string in the DOM, and specs
+      // (plus users searching the page) should not see it twice.
+      return 'The agent stopped unexpectedly'
+    case 'questioning':
+      return 'Agent is awaiting your answer'
+  }
+}
 
 // Stable empty array so the memoized `todos` keeps referential equality
 // when there are no todos (avoids re-renders of TodoPanel and a
@@ -1243,6 +1273,46 @@ export default function ChatView({
   )
   const agentStatus = deriveAgentStatus(events)
 
+  // Screen-reader announcements.
+  //
+  // `.chat-messages` used to carry `role="log" aria-live="polite"`, but it is
+  // the virtualized scroller: rows mount and unmount as the user scrolls, so
+  // a screen reader re-announced old messages on scroll and missed streamed
+  // text that landed outside the rendered window. Announcements now come from
+  // a dedicated, always-mounted region driven by turn boundaries and status
+  // changes — never by the token stream, which must not be read out
+  // character by character.
+  const turnHasReply = useMemo(() => {
+    // Bounded backwards scan: the reply is at or near the end, and this
+    // recomputes on every token chunk.
+    const stop = Math.max(0, displayItems.length - 50)
+    for (let i = displayItems.length - 1; i >= stop; i--) {
+      if (displayItems[i].type === 'assistant') return true
+    }
+    return false
+  }, [displayItems])
+  // Read inside the status effect without making it a dependency — otherwise
+  // every streamed chunk would re-fire it.
+  const turnHasReplyRef = useRef(turnHasReply)
+  turnHasReplyRef.current = turnHasReply
+
+  const [announcement, setAnnouncement] = useState('')
+  const prevAnnounceKeyRef = useRef<AnnounceKey | null>(null)
+  useEffect(() => {
+    // Session switch: forget the previous conversation, so opening a session
+    // never announces the state it happened to be left in.
+    prevAnnounceKeyRef.current = null
+    setAnnouncement('')
+  }, [sessionId])
+  const currentAnnounceKey = announceKey(agentStatus)
+  useEffect(() => {
+    const prev = prevAnnounceKeyRef.current
+    prevAnnounceKeyRef.current = currentAnnounceKey
+    // The first key seen for a session is its state on open, not a change.
+    if (prev === null || prev === currentAnnounceKey) return
+    setAnnouncement(announcementFor(currentAnnounceKey, turnHasReplyRef.current))
+  }, [currentAnnounceKey, sessionId])
+
   // Always show the thinking indicator while the agent is working —
   // even when text or tool blocks are streaming above it. The indicator
   // is the user's only persistent signal that the session is still busy.
@@ -1611,6 +1681,13 @@ export default function ChatView({
 
   return (
     <div className="chat-container">
+      {/* Conversation live region: always mounted and initially empty, so a
+          screen reader is already observing it when the first announcement
+          lands. Fed by the turn-boundary effect above. */}
+      <div className="sr-only" role="status" aria-live="polite" data-testid="chat-live-region">
+        {announcement}
+      </div>
+
       {/* Toolbar */}
       <div className="chat-toolbar">
         <span className="chat-toolbar-name">{sessionDetail?.name ?? 'Session'}</span>
@@ -1726,8 +1803,7 @@ export default function ChatView({
         className="chat-messages"
         ref={scrollRef}
         onScroll={handleScroll}
-        role="log"
-        aria-live="polite"
+        role="region"
         aria-label="Conversation"
       >
         {/* "Load older" button: shown at the top once the initial
