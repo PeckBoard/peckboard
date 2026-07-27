@@ -109,10 +109,12 @@ test('Agent Variables: global + folder-scoped add, shadow badge, edit, delete', 
   await page.getByTestId('agent-var-save-btn').click()
   await expect(page.getByTestId('agent-var-GREETING')).toContainText('bonjour')
 
-  // ── Delete both ───────────────────────────────────────────────────
+  // ── Delete both (each delete is confirmed in a dialog) ────────────
   await page.getByTestId('agent-var-delete-GREETING').click()
+  await page.getByTestId('confirm-dialog-confirm').click()
   await expect(page.getByTestId('agent-var-GREETING')).toHaveCount(0)
   await page.getByTestId('agent-var-delete-TARGET').click()
+  await page.getByTestId('confirm-dialog-confirm').click()
   await expect(page.getByTestId('agent-var-TARGET')).toHaveCount(0)
 })
 
@@ -167,6 +169,7 @@ test('Environment Variables: scope select adds a folder-scoped var; id delete', 
   // Delete both rows (id-based route) — the list drains.
   for (let i = 0; i < 2; i++) {
     await page.getByTestId('env-var-delete-API_HOST').first().click()
+    await page.getByTestId('confirm-dialog-confirm').click()
     await expect(page.getByTestId('env-var-API_HOST')).toHaveCount(1 - i)
   }
 })
