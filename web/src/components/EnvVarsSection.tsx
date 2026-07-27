@@ -253,8 +253,11 @@ export default function EnvVarsSection() {
           </p>
         )}
         <div className="form-field">
-          <label className="form-label">Name</label>
+          <label className="form-label" htmlFor="env-var-name">
+            Name
+          </label>
           <input
+            id="env-var-name"
             className="form-input"
             value={name}
             autoComplete="off"
@@ -264,8 +267,11 @@ export default function EnvVarsSection() {
           />
         </div>
         <div className="form-field">
-          <label className="form-label">Value</label>
+          <label className="form-label" htmlFor="env-var-value">
+            Value
+          </label>
           <SecretInput
+            id="env-var-value"
             // Remount when the form switches target so a revealed value from
             // the previous row can't carry over into the next one.
             key={editing ?? 'new'}
@@ -277,8 +283,11 @@ export default function EnvVarsSection() {
           />
         </div>
         <div className="form-field">
-          <label className="form-label">Scope</label>
+          <label className="form-label" htmlFor="env-var-scope">
+            Scope
+          </label>
           <select
+            id="env-var-scope"
             className="form-input"
             value={folderId}
             onChange={(e) => setFolderId(e.target.value)}
@@ -305,8 +314,11 @@ export default function EnvVarsSection() {
         </div>
         {encrypt && (
           <div className="form-field">
-            <label className="form-label">Your password</label>
+            <label className="form-label" htmlFor="env-var-password">
+              Your password
+            </label>
             <input
+              id="env-var-password"
               className="form-input"
               type="password"
               value={password}

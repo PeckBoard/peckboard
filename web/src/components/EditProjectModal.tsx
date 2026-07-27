@@ -104,8 +104,11 @@ export default function EditProjectModal({ project, onClose }: Props) {
         <h2>Edit Project</h2>
         <form onSubmit={handleSubmit}>
           <div className="form-field">
-            <label className="form-label">Name</label>
+            <label className="form-label" htmlFor="edit-project-name">
+              Name
+            </label>
             <input
+              id="edit-project-name"
               className="form-input"
               value={name}
               onChange={(e) => setName(e.target.value)}
@@ -113,8 +116,11 @@ export default function EditProjectModal({ project, onClose }: Props) {
             />
           </div>
           <div className="form-field">
-            <label className="form-label">Context</label>
+            <label className="form-label" htmlFor="edit-project-context">
+              Context
+            </label>
             <textarea
+              id="edit-project-context"
               className="form-input"
               value={context}
               onChange={(e) => setContext(e.target.value)}
@@ -124,8 +130,11 @@ export default function EditProjectModal({ project, onClose }: Props) {
             />
           </div>
           <div className="form-field">
-            <label className="form-label">Worker count</label>
+            <label className="form-label" htmlFor="edit-project-worker-count">
+              Worker count
+            </label>
             <input
+              id="edit-project-worker-count"
               className="form-input"
               type="number"
               min={1}
@@ -135,8 +144,10 @@ export default function EditProjectModal({ project, onClose }: Props) {
             />
           </div>
           <div className="form-field">
-            <label className="form-label">Default card workflow</label>
-            <WorkflowSelect value={workflow} onChange={setWorkflow} />
+            <label className="form-label" htmlFor="edit-project-workflow">
+              Default card workflow
+            </label>
+            <WorkflowSelect id="edit-project-workflow" value={workflow} onChange={setWorkflow} />
             <p className="form-hint">
               Cards default to this workflow when created here. Each card can still override it
               individually.
@@ -157,8 +168,11 @@ export default function EditProjectModal({ project, onClose }: Props) {
             </div>
           </div>
           <div className="form-field">
-            <label className="form-label">Model</label>
+            <label className="form-label" htmlFor="edit-project-model">
+              Model
+            </label>
             <ModelPicker
+              id="edit-project-model"
               value={model}
               onChange={handleModelChange}
               models={models}
@@ -166,8 +180,11 @@ export default function EditProjectModal({ project, onClose }: Props) {
             />
           </div>
           <div className="form-field">
-            <label className="form-label">Effort</label>
+            <label className="form-label" htmlFor="edit-project-effort">
+              Effort
+            </label>
             <select
+              id="edit-project-effort"
               className="form-input"
               value={effort}
               onChange={(e) => setEffort(e.target.value)}
@@ -199,9 +216,12 @@ export default function EditProjectModal({ project, onClose }: Props) {
               <span>Auto-notify file changes</span>
             </label>
             <div className="form-field">
-              <label className="form-label">Spend budget</label>
+              <label className="form-label" htmlFor="edit-project-budget">
+                Spend budget
+              </label>
               <div style={{ display: 'flex', gap: '8px', alignItems: 'center' }}>
                 <input
+                  id="edit-project-budget"
                   className="form-input"
                   type="number"
                   min={0}
@@ -212,6 +232,7 @@ export default function EditProjectModal({ project, onClose }: Props) {
                   style={{ width: '120px' }}
                 />
                 <select
+                  aria-label="Budget period"
                   className="form-input"
                   value={budgetPeriod}
                   onChange={(e) => setBudgetPeriod(e.target.value)}

@@ -414,6 +414,7 @@ export default function SettingsPage({ onBack, initialSubPage = null }: Props) {
             <h3>Accent Hue</h3>
             <div className="settings-hue">
               <input
+                aria-label="Accent hue"
                 type="range"
                 min={0}
                 max={360}
@@ -485,6 +486,7 @@ export default function SettingsPage({ onBack, initialSubPage = null }: Props) {
               next message.
             </p>
             <select
+              aria-label="Pre-hatcher model"
               className="form-input"
               value={preHatchModel}
               onChange={(e) => changePreHatchModel(e.target.value)}
@@ -532,7 +534,7 @@ export default function SettingsPage({ onBack, initialSubPage = null }: Props) {
             ) : (
               <div className="settings-info-grid">
                 {providerVisibility.map((p) => (
-                  <div className="settings-row" key={p.id}>
+                  <label className="settings-row" key={p.id}>
                     <span className="settings-label">{p.display_name}</span>
                     <input
                       type="checkbox"
@@ -540,7 +542,7 @@ export default function SettingsPage({ onBack, initialSubPage = null }: Props) {
                       data-testid={`provider-toggle-${p.id}`}
                       onChange={(e) => toggleProvider(p.id, !e.target.checked)}
                     />
-                  </div>
+                  </label>
                 ))}
               </div>
             )}

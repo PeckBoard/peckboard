@@ -198,8 +198,11 @@ export default function CardFormModal(props: CardFormProps) {
         <h2>{mode === 'create' ? 'New Card' : 'Edit Card'}</h2>
         <form onSubmit={handleSubmit}>
           <div className="form-field">
-            <label className="form-label">Title</label>
+            <label className="form-label" htmlFor="card-title">
+              Title
+            </label>
             <input
+              id="card-title"
               className="form-input"
               value={title}
               onChange={(e) => setTitle(e.target.value)}
@@ -208,10 +211,11 @@ export default function CardFormModal(props: CardFormProps) {
             />
           </div>
           <div className="form-field">
-            <label className="form-label">
+            <label className="form-label" htmlFor="card-description">
               Description {!isBacklog && <span className="optional">(locked)</span>}
             </label>
             <textarea
+              id="card-description"
               className="form-input card-form-description"
               value={description}
               onChange={(e) => setDescription(e.target.value)}
@@ -220,8 +224,11 @@ export default function CardFormModal(props: CardFormProps) {
             />
           </div>
           <div className="form-field">
-            <label className="form-label">Priority</label>
+            <label className="form-label" htmlFor="card-priority">
+              Priority
+            </label>
             <select
+              id="card-priority"
               className="form-input"
               value={priority}
               onChange={(e) => setPriority(Number(e.target.value))}
@@ -234,10 +241,11 @@ export default function CardFormModal(props: CardFormProps) {
             </select>
           </div>
           <div className="form-field">
-            <label className="form-label">
+            <label className="form-label" htmlFor="card-workflow">
               Workflow {!isBacklog && <span className="optional">(locked)</span>}
             </label>
             <WorkflowSelect
+              id="card-workflow"
               value={workflow}
               onChange={setWorkflow}
               projectWorkflowId={projectWorkflowId ?? undefined}
@@ -246,8 +254,11 @@ export default function CardFormModal(props: CardFormProps) {
             />
           </div>
           <div className="form-field">
-            <label className="form-label">Model</label>
+            <label className="form-label" htmlFor="card-model">
+              Model
+            </label>
             <ModelPicker
+              id="card-model"
               value={model}
               onChange={handleModelChange}
               models={models as ModelInfo[]}
@@ -255,16 +266,22 @@ export default function CardFormModal(props: CardFormProps) {
             />
           </div>
           <div className="form-field">
-            <label className="form-label">System prompt</label>
+            <label className="form-label" htmlFor="card-system-prompt">
+              System prompt
+            </label>
             <SystemPromptPicker
+              id="card-system-prompt"
               value={systemPromptName}
               onChange={setSystemPromptName}
               testId="card-system-prompt"
             />
           </div>
           <div className="form-field">
-            <label className="form-label">Effort</label>
+            <label className="form-label" htmlFor="card-effort">
+              Effort
+            </label>
             <select
+              id="card-effort"
               className="form-input"
               value={effort}
               onChange={(e) => setEffort(e.target.value)}
@@ -304,6 +321,7 @@ export default function CardFormModal(props: CardFormProps) {
               <input
                 className="form-input"
                 style={{ marginTop: 6 }}
+                aria-label="Block reason"
                 placeholder="Block reason..."
                 value={blockReason}
                 onChange={(e) => setBlockReason(e.target.value)}
@@ -312,7 +330,7 @@ export default function CardFormModal(props: CardFormProps) {
           </div>
           {dependencyCandidates.length > 0 && (
             <div className="form-field">
-              <label className="form-label">Depends On</label>
+              <span className="form-label">Depends On</span>
               <p className="form-hint" style={{ marginTop: 0, marginBottom: 6 }}>
                 A worker only starts this card once every selected card is done.
               </p>

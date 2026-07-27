@@ -6,6 +6,8 @@ interface SecretInputProps {
   placeholder?: string
   /** Extra classes for the <input> itself (the wrapper keeps its own). */
   className?: string
+  /** id for the <input>, so a sibling <label htmlFor> can address it. */
+  id?: string
   /** What the toggle announces, e.g. "value" → "Reveal value". */
   label?: string
   testId?: string
@@ -26,6 +28,7 @@ export default function SecretInput({
   onChange,
   placeholder,
   className,
+  id,
   label = 'value',
   testId,
   revealTestId,
@@ -35,6 +38,7 @@ export default function SecretInput({
   return (
     <span className="secret-input">
       <input
+        id={id}
         className={className}
         type={shown ? 'text' : 'password'}
         value={value}

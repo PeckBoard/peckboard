@@ -147,8 +147,11 @@ export default function NewProjectModal({ onClose }: Props) {
         <h2>New Project</h2>
         <form onSubmit={handleSubmit}>
           <div className="form-field">
-            <label className="form-label">Name</label>
+            <label className="form-label" htmlFor="new-project-name">
+              Name
+            </label>
             <input
+              id="new-project-name"
               className="form-input"
               value={name}
               onChange={(e) => setName(e.target.value)}
@@ -158,9 +161,12 @@ export default function NewProjectModal({ onClose }: Props) {
             />
           </div>
           <div className="form-field">
-            <label className="form-label">Folder</label>
+            <label className="form-label" htmlFor="new-project-folder">
+              Folder
+            </label>
             {folders.length > 0 ? (
               <select
+                id="new-project-folder"
                 className="form-input"
                 value={folderId}
                 onChange={(e) => setChosenFolderId(e.target.value)}
@@ -178,8 +184,10 @@ export default function NewProjectModal({ onClose }: Props) {
             )}
           </div>
           <div className="form-field">
-            <label className="form-label">Default card workflow</label>
-            <WorkflowSelect value={workflow} onChange={setWorkflow} />
+            <label className="form-label" htmlFor="new-project-workflow">
+              Default card workflow
+            </label>
+            <WorkflowSelect id="new-project-workflow" value={workflow} onChange={setWorkflow} />
             <p className="form-hint">
               Cards default to this workflow when created here. Each card can still override it
               individually.
@@ -200,10 +208,11 @@ export default function NewProjectModal({ onClose }: Props) {
             </div>
           </div>
           <div className="form-field">
-            <label className="form-label">
+            <label className="form-label" htmlFor="new-project-context">
               Context <span className="optional">(optional)</span>
             </label>
             <textarea
+              id="new-project-context"
               className="form-input"
               value={context}
               onChange={(e) => setContext(e.target.value)}
@@ -224,8 +233,11 @@ export default function NewProjectModal({ onClose }: Props) {
           {showAdvanced && (
             <div className="form-advanced-section">
               <div className="form-field">
-                <label className="form-label">Worker count</label>
+                <label className="form-label" htmlFor="new-project-worker-count">
+                  Worker count
+                </label>
                 <input
+                  id="new-project-worker-count"
                   className="form-input"
                   type="number"
                   min={1}
@@ -239,9 +251,12 @@ export default function NewProjectModal({ onClose }: Props) {
                 </p>
               </div>
               <div className="form-field">
-                <label className="form-label">Spend budget</label>
+                <label className="form-label" htmlFor="new-project-budget">
+                  Spend budget
+                </label>
                 <div style={{ display: 'flex', gap: '8px', alignItems: 'center' }}>
                   <input
+                    id="new-project-budget"
                     className="form-input"
                     type="number"
                     min={0}
@@ -252,6 +267,7 @@ export default function NewProjectModal({ onClose }: Props) {
                     style={{ width: '120px' }}
                   />
                   <select
+                    aria-label="Budget period"
                     className="form-input"
                     value={budgetPeriod}
                     onChange={(e) =>
@@ -270,8 +286,11 @@ export default function NewProjectModal({ onClose }: Props) {
                 </p>
               </div>
               <div className="form-field">
-                <label className="form-label">Model</label>
+                <label className="form-label" htmlFor="new-project-model">
+                  Model
+                </label>
                 <ModelPicker
+                  id="new-project-model"
                   value={model}
                   onChange={handleModelChange}
                   models={models}
@@ -282,8 +301,11 @@ export default function NewProjectModal({ onClose }: Props) {
                 </p>
               </div>
               <div className="form-field">
-                <label className="form-label">Effort</label>
+                <label className="form-label" htmlFor="new-project-effort">
+                  Effort
+                </label>
                 <select
+                  id="new-project-effort"
                   className="form-input"
                   value={effort}
                   onChange={(e) => setEffort(e.target.value)}

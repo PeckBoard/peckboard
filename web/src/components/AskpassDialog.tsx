@@ -120,8 +120,11 @@ export default function AskpassDialog() {
         }}
       >
         <div className="form-field">
-          <label className="form-label">{ask.prompt}</label>
+          <label className="form-label" htmlFor="askpass-input">
+            {ask.prompt}
+          </label>
           <input
+            id="askpass-input"
             className="form-input"
             type="password"
             value={password}

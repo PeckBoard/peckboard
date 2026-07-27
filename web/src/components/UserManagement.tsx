@@ -138,8 +138,11 @@ export default function UserManagement() {
         {showCreate && (
           <form onSubmit={handleCreate} className="form-inline-card" style={{ marginBottom: 16 }}>
             <div className="form-field">
-              <label className="form-label">Username</label>
+              <label className="form-label" htmlFor="new-user-username">
+                Username
+              </label>
               <input
+                id="new-user-username"
                 className="form-input"
                 value={newUsername}
                 onChange={(e) => setNewUsername(e.target.value)}
@@ -148,8 +151,11 @@ export default function UserManagement() {
               />
             </div>
             <div className="form-field">
-              <label className="form-label">Password</label>
+              <label className="form-label" htmlFor="new-user-password">
+                Password
+              </label>
               <input
+                id="new-user-password"
                 className="form-input"
                 type="password"
                 value={newPassword}
@@ -159,10 +165,11 @@ export default function UserManagement() {
               />
             </div>
             <div className="form-field">
-              <label className="form-label">
+              <label className="form-label" htmlFor="new-user-email">
                 Email <span className="optional">(optional)</span>
               </label>
               <input
+                id="new-user-email"
                 className="form-input"
                 type="email"
                 value={newEmail}
@@ -171,8 +178,11 @@ export default function UserManagement() {
               />
             </div>
             <div className="form-field">
-              <label className="form-label">Role</label>
+              <label className="form-label" htmlFor="new-user-role">
+                Role
+              </label>
               <select
+                id="new-user-role"
                 className="form-input"
                 value={newRole}
                 onChange={(e) => setNewRole(e.target.value)}

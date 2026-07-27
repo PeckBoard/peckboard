@@ -37,8 +37,11 @@ export default function RepeatingTaskScheduleEditor({
   return (
     <>
       <div className="form-field">
-        <label className="form-label">Schedule</label>
+        <label className="form-label" htmlFor="schedule-kind">
+          Schedule
+        </label>
         <select
+          id="schedule-kind"
           className="form-input"
           value={kind}
           onChange={(e) => {
@@ -54,8 +57,11 @@ export default function RepeatingTaskScheduleEditor({
 
       {kind === 'interval' && (
         <div className="form-field">
-          <label className="form-label">Every (minutes)</label>
+          <label className="form-label" htmlFor="schedule-minutes">
+            Every (minutes)
+          </label>
           <input
+            id="schedule-minutes"
             type="number"
             className="form-input"
             value={minutes}
@@ -75,8 +81,11 @@ export default function RepeatingTaskScheduleEditor({
       {kind === 'daily' && (
         <div className="form-field-row">
           <div className="form-field">
-            <label className="form-label">Hour (UTC)</label>
+            <label className="form-label" htmlFor="schedule-hour">
+              Hour (UTC)
+            </label>
             <input
+              id="schedule-hour"
               type="number"
               className="form-input"
               value={hour}
@@ -91,8 +100,11 @@ export default function RepeatingTaskScheduleEditor({
             />
           </div>
           <div className="form-field">
-            <label className="form-label">Minute</label>
+            <label className="form-label" htmlFor="schedule-minute">
+              Minute
+            </label>
             <input
+              id="schedule-minute"
               type="number"
               className="form-input"
               value={minute}
@@ -112,8 +124,11 @@ export default function RepeatingTaskScheduleEditor({
       {kind === 'weekly' && (
         <>
           <div className="form-field">
-            <label className="form-label">Day of week</label>
+            <label className="form-label" htmlFor="schedule-weekday">
+              Day of week
+            </label>
             <select
+              id="schedule-weekday"
               className="form-input"
               value={weekday}
               onChange={(e) =>
@@ -129,8 +144,11 @@ export default function RepeatingTaskScheduleEditor({
           </div>
           <div className="form-field-row">
             <div className="form-field">
-              <label className="form-label">Hour (UTC)</label>
+              <label className="form-label" htmlFor="schedule-hour">
+                Hour (UTC)
+              </label>
               <input
+                id="schedule-hour"
                 type="number"
                 className="form-input"
                 value={hour}
@@ -146,8 +164,11 @@ export default function RepeatingTaskScheduleEditor({
               />
             </div>
             <div className="form-field">
-              <label className="form-label">Minute</label>
+              <label className="form-label" htmlFor="schedule-minute">
+                Minute
+              </label>
               <input
+                id="schedule-minute"
                 type="number"
                 className="form-input"
                 value={minute}

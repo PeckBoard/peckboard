@@ -118,8 +118,11 @@ export default function NewRepeatingTaskModal({ initial, onClose, onSaved }: Pro
       <h2>{editing ? 'Edit Repeating Task' : 'New Repeating Task'}</h2>
       <form onSubmit={handleSubmit}>
         <div className="form-field">
-          <label className="form-label">Name</label>
+          <label className="form-label" htmlFor="repeating-task-name">
+            Name
+          </label>
           <input
+            id="repeating-task-name"
             className="form-input"
             value={name}
             onChange={(e) => setName(e.target.value)}
@@ -131,10 +134,11 @@ export default function NewRepeatingTaskModal({ initial, onClose, onSaved }: Pro
         </div>
 
         <div className="form-field">
-          <label className="form-label">
+          <label className="form-label" htmlFor="repeating-task-description">
             Description <span className="optional">(optional)</span>
           </label>
           <textarea
+            id="repeating-task-description"
             className="form-input"
             value={description}
             onChange={(e) => setDescription(e.target.value)}
@@ -146,11 +150,14 @@ export default function NewRepeatingTaskModal({ initial, onClose, onSaved }: Pro
         </div>
 
         <div className="form-field">
-          <label className="form-label">Folder</label>
+          <label className="form-label" htmlFor="repeating-task-folder">
+            Folder
+          </label>
           {editing ? (
             <p className="form-help">{folders.find((f) => f.id === folderId)?.name ?? folderId}</p>
           ) : folders.length > 0 ? (
             <select
+              id="repeating-task-folder"
               className="form-input"
               value={folderId}
               onChange={(e) => setChosenFolderId(e.target.value)}
@@ -167,8 +174,11 @@ export default function NewRepeatingTaskModal({ initial, onClose, onSaved }: Pro
         </div>
 
         <div className="form-field">
-          <label className="form-label">Prompt</label>
+          <label className="form-label" htmlFor="repeating-task-prompt">
+            Prompt
+          </label>
           <textarea
+            id="repeating-task-prompt"
             className="form-input"
             value={prompt}
             onChange={(e) => setPrompt(e.target.value)}

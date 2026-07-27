@@ -138,8 +138,11 @@ export default function EnvUnlockDialog() {
         }}
       >
         <div className="form-field">
-          <label className="form-label">Password</label>
+          <label className="form-label" htmlFor="env-unlock-input">
+            Password
+          </label>
           <input
+            id="env-unlock-input"
             className="form-input"
             type="password"
             value={password}

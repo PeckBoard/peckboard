@@ -160,8 +160,11 @@ export default function NewSessionModal({ onClose }: Props) {
         {/* Temp sessions are auto-named — the field would be dead weight. */}
         {!isTemp && (
           <div className="form-field">
-            <label className="form-label">Name</label>
+            <label className="form-label" htmlFor="new-session-name">
+              Name
+            </label>
             <input
+              id="new-session-name"
               className="form-input"
               value={name}
               onChange={(e) => setName(e.target.value)}
@@ -172,9 +175,12 @@ export default function NewSessionModal({ onClose }: Props) {
           </div>
         )}
         <div className="form-field">
-          <label className="form-label">Folder</label>
+          <label className="form-label" htmlFor="new-session-folder">
+            Folder
+          </label>
           {folders.length > 0 ? (
             <select
+              id="new-session-folder"
               className="form-input"
               value={folderId}
               onChange={(e) => setChosenFolderId(e.target.value)}
@@ -201,12 +207,14 @@ export default function NewSessionModal({ onClose }: Props) {
         {showNewFolder && (
           <div className="form-inline-card">
             <input
+              aria-label="New folder name"
               className="form-input"
               placeholder="Folder name"
               value={newFolderName}
               onChange={(e) => setNewFolderName(e.target.value)}
             />
             <input
+              aria-label="New folder path"
               className="form-input"
               placeholder="/path/to/folder"
               value={newFolderPath}
@@ -223,8 +231,11 @@ export default function NewSessionModal({ onClose }: Props) {
           </div>
         )}
         <div className="form-field">
-          <label className="form-label">Model</label>
+          <label className="form-label" htmlFor="new-session-model">
+            Model
+          </label>
           <ModelPicker
+            id="new-session-model"
             value={model}
             onChange={handleModelChange}
             models={models}
@@ -234,8 +245,15 @@ export default function NewSessionModal({ onClose }: Props) {
           />
         </div>
         <div className="form-field">
-          <label className="form-label">Effort</label>
-          <select className="form-input" value={effort} onChange={(e) => setEffort(e.target.value)}>
+          <label className="form-label" htmlFor="new-session-effort">
+            Effort
+          </label>
+          <select
+            id="new-session-effort"
+            className="form-input"
+            value={effort}
+            onChange={(e) => setEffort(e.target.value)}
+          >
             {effortOptions.map((o) => (
               <option key={o.value} value={o.value}>
                 {o.label}
@@ -244,16 +262,22 @@ export default function NewSessionModal({ onClose }: Props) {
           </select>
         </div>
         <div className="form-field">
-          <label className="form-label">System prompt</label>
+          <label className="form-label" htmlFor="new-session-system-prompt">
+            System prompt
+          </label>
           <SystemPromptPicker
+            id="new-session-system-prompt"
             value={systemPromptName}
             onChange={setSystemPromptName}
             testId="new-session-system-prompt"
           />
         </div>
         <div className="form-field">
-          <label className="form-label">Preset prompt</label>
+          <label className="form-label" htmlFor="new-session-preset">
+            Preset prompt
+          </label>
           <select
+            id="new-session-preset"
             className="form-input"
             value={presetId}
             onChange={(e) => setPresetId(e.target.value)}
@@ -269,8 +293,11 @@ export default function NewSessionModal({ onClose }: Props) {
         </div>
         {preset?.needsTopic && (
           <div className="form-field">
-            <label className="form-label">{preset.topicLabel ?? 'Topic'}</label>
+            <label className="form-label" htmlFor="new-session-preset-topic">
+              {preset.topicLabel ?? 'Topic'}
+            </label>
             <input
+              id="new-session-preset-topic"
               className="form-input"
               value={topic}
               onChange={(e) => setTopic(e.target.value)}

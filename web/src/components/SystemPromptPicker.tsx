@@ -6,6 +6,8 @@ interface SystemPromptPickerProps {
   value: string | null
   onChange: (name: string | null) => void
   testId?: string
+  /** id passed through to the trigger button for label association. */
+  id?: string
   disabled?: boolean
 }
 
@@ -18,6 +20,7 @@ export default function SystemPromptPicker({
   value,
   onChange,
   testId,
+  id,
   disabled,
 }: SystemPromptPickerProps) {
   const systemPrompts = useResourcesStore((s) => s.systemPrompts)
@@ -33,12 +36,13 @@ export default function SystemPromptPicker({
   return (
     <ModelPicker
       value={value ?? ''}
-      onChange={(id) => onChange(id || null)}
+      onChange={(next) => onChange(next || null)}
       models={models}
       defaultLabel="(none)"
       ariaLabel="Select system prompt"
       emptyHint="Loading system prompts…"
       testId={testId}
+      id={id}
       disabled={disabled}
     />
   )

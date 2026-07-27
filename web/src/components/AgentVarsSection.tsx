@@ -198,8 +198,11 @@ export default function AgentVarsSection() {
       >
         <h4>{editing ? `Edit ${editing}` : 'Add variable'}</h4>
         <div className="form-field">
-          <label className="form-label">Name</label>
+          <label className="form-label" htmlFor="agent-var-name">
+            Name
+          </label>
           <input
+            id="agent-var-name"
             className="form-input"
             value={name}
             autoComplete="off"
@@ -209,8 +212,11 @@ export default function AgentVarsSection() {
           />
         </div>
         <div className="form-field">
-          <label className="form-label">Value</label>
+          <label className="form-label" htmlFor="agent-var-value">
+            Value
+          </label>
           <input
+            id="agent-var-value"
             className="form-input"
             value={value}
             autoComplete="off"
@@ -219,8 +225,11 @@ export default function AgentVarsSection() {
           />
         </div>
         <div className="form-field">
-          <label className="form-label">Scope</label>
+          <label className="form-label" htmlFor="agent-var-scope">
+            Scope
+          </label>
           <select
+            id="agent-var-scope"
             className="form-input"
             value={folderId}
             onChange={(e) => setFolderId(e.target.value)}
