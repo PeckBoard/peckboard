@@ -48,6 +48,10 @@ async function authenticate(
 async function loadAt(page: Page, token: string, route: string) {
   await page.addInitScript((t) => {
     localStorage.setItem('peckboard_token', t)
+    // Leaving Backlog is confirmation-gated (it starts a paid worker and
+    // freezes the card). These tests are about drag mechanics, so opt out
+    // of the dialog — `kanban-backlog-start-confirm.spec.ts` owns it.
+    localStorage.setItem('peckboard_skip_backlog_confirm', '1')
   }, token)
   await page.goto(route)
 }

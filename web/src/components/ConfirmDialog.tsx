@@ -15,6 +15,11 @@ interface ConfirmDialogProps {
    *  backdrop clicks are ignored, so the request can't be stacked. */
   busy?: boolean
   busyLabel?: string
+  /** Optional opt-out row between the message and the actions (e.g.
+   *  "Don't ask again"). Supply all three checkbox props together. */
+  checkboxLabel?: string
+  checked?: boolean
+  onCheckedChange?: (checked: boolean) => void
   testId?: string
   onConfirm: () => void
   onCancel: () => void
@@ -29,6 +34,9 @@ export default function ConfirmDialog({
   error = null,
   busy = false,
   busyLabel = 'Working…',
+  checkboxLabel,
+  checked = false,
+  onCheckedChange,
   testId,
   onConfirm,
   onCancel,
@@ -61,8 +69,29 @@ export default function ConfirmDialog({
             {error}
           </p>
         )}
+        {checkboxLabel && onCheckedChange && (
+          <label className="confirm-dialog-checkbox">
+            <input
+              type="checkbox"
+              checked={checked}
+              disabled={busy}
+              onChange={(e) => onCheckedChange(e.target.checked)}
+              data-testid="confirm-dialog-checkbox"
+            />
+            <span>{checkboxLabel}</span>
+          </label>
+        )}
         <div className="confirm-dialog-actions">
-          <button className="btn-secondary" onClick={onCancel} disabled={busy}>
+          {/* A danger dialog opens with focus on the safe action, so an Enter
+              or Space pressed straight after it appears cancels rather than
+              destroys. */}
+          <button
+            className="btn-secondary"
+            onClick={onCancel}
+            disabled={busy}
+            autoFocus={danger}
+            data-testid="confirm-dialog-cancel"
+          >
             {cancelLabel}
           </button>
           <button

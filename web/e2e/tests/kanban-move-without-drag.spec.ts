@@ -32,6 +32,10 @@ async function authenticate(
 async function loadAt(page: Page, token: string, route: string) {
   await page.addInitScript((t) => {
     localStorage.setItem('peckboard_token', t)
+    // These tests are about reaching the step-change without a pointer;
+    // the backlog confirmation is covered by
+    // `kanban-backlog-start-confirm.spec.ts`, so opt out of it here.
+    localStorage.setItem('peckboard_skip_backlog_confirm', '1')
   }, token)
   await page.goto(route)
 }

@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react'
 import { useAuthStore, authedFetch } from '../store/auth'
 import { useResourcesStore } from '../store/resources'
+import { useUiStore } from '../store/ui'
 import type { Theme } from '../util/themeColor'
 import {
   THEME_KEY,
@@ -24,6 +25,7 @@ import PluginRegistryPanel from './PluginRegistryPanel'
 import McpServersSection from './McpServersSection'
 import EnvVarsSection from './EnvVarsSection'
 import AgentVarsSection from './AgentVarsSection'
+import ConfirmDialog from './ConfirmDialog'
 
 interface KeepAliveRun {
   provider: string
@@ -84,7 +86,7 @@ type SubPage =
  * under Providers, same form either way).
  */
 const SUB_PAGES: { id: SubPage; title: string; blurb: string }[] = [
-  { id: 'appearance', title: 'Appearance', blurb: 'Theme and accent color' },
+  { id: 'appearance', title: 'Appearance', blurb: 'Theme, accent color and confirmations' },
   { id: 'chat', title: 'Chat', blurb: 'Caveman mode and the pre-hatcher model' },
   {
     id: 'prompts',
@@ -144,9 +146,15 @@ export default function SettingsPage({ onBack, initialSubPage = null }: Props) {
   const [subPage, setSubPage] = useState<SubPage | null>(initialSubPage)
   const [theme, setTheme] = useState<Theme>(getStoredTheme)
   const [hue, setHue] = useState<number>(getStoredHue)
+  const skipBacklogConfirm = useUiStore((s) => s.skipBacklogConfirm)
+  const setSkipBacklogConfirm = useUiStore((s) => s.setSkipBacklogConfirm)
   const [serverConfig, setServerConfig] = useState<ServerConfig | null>(null)
   const [caveman, setCaveman] = useState<string>('off')
   const [claudeBypass, setClaudeBypass] = useState<boolean>(false)
+  // Enforced → Bypass is a host-wide loosening of the permission gate, so it
+  // goes through a confirm. The other direction (back to Enforced) is safe
+  // and stays a single click.
+  const [confirmBypass, setConfirmBypass] = useState(false)
   const [preHatchModel, setPreHatchModel] = useState<string>('')
   const models = useResourcesStore((s) => s.models)
   const providers = useResourcesStore((s) => s.providers)
@@ -367,7 +375,14 @@ export default function SettingsPage({ onBack, initialSubPage = null }: Props) {
                 data-testid={`settings-nav-${p.id}`}
                 onClick={() => setSubPage(p.id)}
               >
-                <span className="settings-nav-title">{p.title}</span>
+                <span className="settings-nav-title">
+                  {p.title}
+                  {p.id === 'server' && claudeBypass && (
+                    <span className="settings-nav-badge" data-testid="settings-bypass-badge">
+                      Tool permissions bypassed
+                    </span>
+                  )}
+                </span>
                 <span className="settings-nav-blurb">{p.blurb}</span>
                 <span className="settings-nav-chevron" aria-hidden>
                   ›
@@ -408,6 +423,28 @@ export default function SettingsPage({ onBack, initialSubPage = null }: Props) {
               />
               <span className="hue-value">{hue}</span>
               <span className="hue-preview" style={{ backgroundColor: `hsl(${hue}, 72%, 50%)` }} />
+            </div>
+          </section>
+
+          <section className="settings-section" data-testid="confirmations-section">
+            <h3>Confirmations</h3>
+            <p className="form-hint">
+              Moving a card out of Backlog starts a paid worker and locks the card&apos;s
+              description and workflow. Re-enable the warning here if you dismissed it with
+              &ldquo;Don&apos;t ask again&rdquo;.
+            </p>
+            <div className="settings-info-grid">
+              <label className="settings-row settings-row-toggle">
+                <input
+                  type="checkbox"
+                  checked={!skipBacklogConfirm}
+                  data-testid="backlog-confirm-toggle"
+                  onChange={(e) => setSkipBacklogConfirm(!e.target.checked)}
+                />
+                <span className="settings-label">
+                  Confirm before starting work on a Backlog card
+                </span>
+              </label>
             </div>
           </section>
         </>
@@ -620,12 +657,14 @@ export default function SettingsPage({ onBack, initialSubPage = null }: Props) {
               <button
                 className={`theme-btn ${!claudeBypass ? 'active' : ''}`}
                 onClick={() => changeClaudeBypass(false)}
+                data-testid="claude-permissions-enforced"
               >
                 Enforced
               </button>
               <button
                 className={`theme-btn ${claudeBypass ? 'active' : ''}`}
-                onClick={() => changeClaudeBypass(true)}
+                onClick={() => (claudeBypass ? changeClaudeBypass(true) : setConfirmBypass(true))}
+                data-testid="claude-permissions-bypass"
               >
                 Bypass
               </button>
@@ -640,6 +679,22 @@ export default function SettingsPage({ onBack, initialSubPage = null }: Props) {
               </p>
             )}
           </section>
+
+          {confirmBypass && (
+            <ConfirmDialog
+              testId="claude-bypass-confirm"
+              danger
+              title="Turn off the permission gate for this host?"
+              message="Newly spawned Claude agents run with --dangerously-skip-permissions: tool calls are no longer checked server-side, file reads and writes outside the project folder are allowed, and the terminal tool is unblocked. It applies to every project and every user on this host until someone sets it back to Enforced."
+              confirmLabel="Bypass permissions"
+              cancelLabel="Keep enforced"
+              onConfirm={() => {
+                setConfirmBypass(false)
+                changeClaudeBypass(true)
+              }}
+              onCancel={() => setConfirmBypass(false)}
+            />
+          )}
 
           <SoftwareUpdate />
 

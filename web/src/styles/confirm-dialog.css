@@ -59,6 +59,31 @@
   text-align: center;
 }
 
+/* Optional opt-out row ("Don't ask again"), between the message and the
+   actions. Pulled up slightly so it reads as a rider on the message
+   rather than a third block. */
+.confirm-dialog-checkbox {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: -8px 0 20px;
+  font-size: var(--text-sm);
+  color: var(--text2);
+  cursor: pointer;
+}
+
+.confirm-dialog-checkbox input {
+  width: 15px;
+  height: 15px;
+  flex-shrink: 0;
+  accent-color: var(--accent);
+  cursor: pointer;
+}
+
+.confirm-dialog-checkbox input:disabled {
+  cursor: default;
+}
+
 .confirm-dialog-actions {
   display: flex;
   justify-content: flex-end;

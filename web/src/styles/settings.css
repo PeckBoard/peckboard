@@ -63,6 +63,23 @@
   color: var(--text2);
   min-width: 100px;
 }
+/* A whole settings row that is one checkbox — the <label> wrapper makes
+   the text itself the hit target and the accessible name. */
+.settings-row-toggle {
+  align-items: center;
+  cursor: pointer;
+}
+.settings-row-toggle input {
+  width: 15px;
+  height: 15px;
+  accent-color: var(--accent);
+  cursor: pointer;
+}
+.settings-row-toggle .settings-label {
+  min-width: 0;
+  font-weight: 500;
+  color: var(--text);
+}
 .settings-update-actions {
   display: flex;
   align-items: center;
@@ -341,12 +358,43 @@
   color: var(--text3);
   font-style: italic;
 }
+/* Masked secret field with a Reveal/Hide toggle (SecretInput). Sized to sit
+   in a form-field column or as a cell of a .plugin-setting-kv-row. */
+.secret-input {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex: 1;
+  min-width: 0;
+}
+.secret-input > input {
+  flex: 1;
+  min-width: 0;
+}
+.secret-input-toggle {
+  flex: none;
+  font-size: var(--text-xs);
+  padding: 4px 8px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: transparent;
+  color: var(--text2);
+  cursor: pointer;
+}
+.secret-input-toggle:hover:not(:disabled) {
+  background: var(--surface-hover, rgba(0, 0, 0, 0.04));
+}
+.secret-input-toggle:disabled {
+  opacity: 0.6;
+  cursor: default;
+}
 .plugin-setting-kv-row {
   display: flex;
   gap: 6px;
   align-items: center;
 }
-.plugin-setting-kv-row > input {
+.plugin-setting-kv-row > input,
+.plugin-setting-kv-row .secret-input > input {
   font: inherit;
   padding: 6px 8px;
   border: 1px solid var(--border);
@@ -1007,6 +1055,21 @@ a.wasm-plugin-repo:hover {
   font-size: var(--text-sm);
   font-weight: 600;
   color: var(--text);
+}
+/* Standing warning on the hub row that owns a host-wide unsafe mode.
+   Text stays --text (AA on the tinted background); the red carries the
+   meaning through the tint and border, not through low-contrast text. */
+.settings-nav-badge {
+  display: inline-block;
+  margin-left: 8px;
+  padding: 1px 8px;
+  border-radius: 999px;
+  font-size: var(--text-xs);
+  font-weight: 600;
+  color: var(--text);
+  background: var(--danger-bg);
+  border: 1px solid var(--danger-border);
+  vertical-align: middle;
 }
 .settings-nav-blurb {
   grid-area: blurb;

@@ -2,12 +2,14 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 import { useProjectsStore, type PendingQuestion } from '../store/projects'
 import { useResourcesStore } from '../store/resources'
 import { useWsStore } from '../store/ws'
+import { useUiStore } from '../store/ui'
 import { authedFetch } from '../store/auth'
 import { useMentions, filterMentions } from '../hooks/useMentions'
 import type { Card, Event, Project } from '../types/api'
 import CardFormModal from './CardFormModal'
 import EditProjectModal from './EditProjectModal'
 import Dropdown, { MenuButton, type MenuItem } from './Dropdown'
+import ConfirmDialog from './ConfirmDialog'
 import Modal from './Modal'
 import WorkerComms from './WorkerComms'
 import ProjectTodoSummary from './ProjectTodoSummary'
@@ -84,6 +86,20 @@ export default function KanbanBoard({
   // Last card-delete failure, shown inside the confirm modal so a failed
   // DELETE cannot look like a silent success.
   const [deleteError, setDeleteError] = useState<string | null>(null)
+  // A card awaiting "Cancel as Won't Do" confirmation. The move stops the
+  // worker and lands the card in a terminal, read-only step, so it is gated
+  // the same way Delete is.
+  const [confirmWontDo, setConfirmWontDo] = useState<Card | null>(null)
+  const [wontDoError, setWontDoError] = useState<string | null>(null)
+  const [wontDoBusy, setWontDoBusy] = useState(false)
+  // A pending backlog → work move awaiting confirmation, and the state of
+  // that dialog's "don't ask again" tick.
+  const [pendingMove, setPendingMove] = useState<{ cardId: string; targetStep: string } | null>(
+    null,
+  )
+  const [dontAskAgain, setDontAskAgain] = useState(false)
+  const skipBacklogConfirm = useUiStore((s) => s.skipBacklogConfirm)
+  const setSkipBacklogConfirm = useUiStore((s) => s.setSkipBacklogConfirm)
   const [draggingCardId, setDraggingCardId] = useState<string | null>(null)
   // Active drop target. `insertIdx` is set only for an in-row reorder hover
   // (mouse is over a sibling card in the same row); a null `insertIdx` means
@@ -545,11 +561,23 @@ export default function KanbanBoard({
   }
 
   const handleCancelWontDo = async (card: Card) => {
-    closeCardMenu()
-    await authedFetch(`/api/projects/${projectId}/cards/${card.id}/cancel-wont-do`, {
-      method: 'POST',
-    })
-    fetchCards(projectId)
+    setWontDoError(null)
+    setWontDoBusy(true)
+    try {
+      const res = await authedFetch(`/api/projects/${projectId}/cards/${card.id}/cancel-wont-do`, {
+        method: 'POST',
+      })
+      if (!res.ok) {
+        const data = await res.json().catch(() => ({}))
+        throw new Error(data?.error || `HTTP ${res.status}`)
+      }
+      setConfirmWontDo(null)
+      fetchCards(projectId)
+    } catch (e) {
+      setWontDoError(e instanceof Error ? e.message : 'Failed to cancel card')
+    } finally {
+      setWontDoBusy(false)
+    }
   }
   // Single step-change path, shared by the drag-and-drop drop handler and
   // the card menu's "Move to" submenu. HTML5 drag-and-drop never fires on
@@ -566,6 +594,32 @@ export default function KanbanBoard({
     } catch {
       fetchCards(projectId)
     }
+  }
+
+  // Gate in front of `moveCardToStep` for the one transition that isn't
+  // undoable: leaving Backlog spawns a paid worker straight away and
+  // permanently freezes the card's description and workflow (enforced
+  // server-side in `src/routes/projects/cards.rs`). Every step-change
+  // affordance — the drop handler and the "Move to" submenu — goes
+  // through here, so the warning can't be dodged by using the other one.
+  const requestMoveCardToStep = async (cardId: string, targetStep: string) => {
+    const card = cards.find((c) => c.id === cardId)
+    const leavingBacklog =
+      card != null && normalizeStep(card.step) === 'backlog' && targetStep !== 'backlog'
+    if (!leavingBacklog || skipBacklogConfirm) {
+      await moveCardToStep(cardId, targetStep)
+      return
+    }
+    setDontAskAgain(false)
+    setPendingMove({ cardId, targetStep })
+  }
+
+  const confirmPendingMove = async () => {
+    const pending = pendingMove
+    if (!pending) return
+    setPendingMove(null)
+    if (dontAskAgain) setSkipBacklogConfirm(true)
+    await moveCardToStep(pending.cardId, pending.targetStep)
   }
 
   // Steps the "Move to" submenu offers for a card. The board only renders
@@ -661,7 +715,7 @@ export default function KanbanBoard({
 
     // Cross-row drop → step change. Shared with the "Move to" menu.
     if (normalizeStep(fromStep) !== targetStep) {
-      await moveCardToStep(cardId, targetStep)
+      await requestMoveCardToStep(cardId, targetStep)
       return
     }
 
@@ -1134,7 +1188,7 @@ export default function KanbanBoard({
                                       disabled: cardStep === key,
                                       hint: cardStep === key ? 'Current' : undefined,
                                       testId: `card-menu-move-${key}`,
-                                      onSelect: () => moveCardToStep(card.id, key),
+                                      onSelect: () => requestMoveCardToStep(card.id, key),
                                     })),
                                   },
                                   {
@@ -1155,7 +1209,12 @@ export default function KanbanBoard({
                                     label: "Cancel as Won't Do",
                                     danger: true,
                                     hidden: card.step === 'done' || card.step === 'wont_do',
-                                    onSelect: () => handleCancelWontDo(card),
+                                    testId: 'card-menu-wont-do',
+                                    onSelect: () => {
+                                      closeCardMenu()
+                                      setWontDoError(null)
+                                      setConfirmWontDo(card)
+                                    },
                                   },
                                   {
                                     label: 'Delete',
@@ -1317,6 +1376,42 @@ export default function KanbanBoard({
           Docked at the bottom of the board, outside the scroll area —
           same pattern as the chat-side TodoPanel. */}
       <ProjectTodoSummary cards={cards} todosByCard={todosByCard} />
+
+      {confirmWontDo && (
+        <ConfirmDialog
+          testId="card-wont-do-confirm"
+          danger
+          title={`Cancel "${confirmWontDo.title}" as Won't Do?`}
+          message={`Any worker on this card is stopped and the card moves to Won't Do, a terminal step: it can no longer be worked, and the only way back is to recreate it. Cards that depend on it keep waiting — Won't Do never satisfies a dependency.`}
+          confirmLabel="Cancel as Won't Do"
+          cancelLabel="Keep the card"
+          error={wontDoError}
+          busy={wontDoBusy}
+          busyLabel="Cancelling…"
+          onConfirm={() => void handleCancelWontDo(confirmWontDo)}
+          onCancel={() => {
+            setConfirmWontDo(null)
+            setWontDoError(null)
+          }}
+        />
+      )}
+
+      {pendingMove && (
+        <ConfirmDialog
+          testId="backlog-start-confirm"
+          title="Start work on this card?"
+          message={`Moving it to ${
+            STEPS.find((s) => s.key === pendingMove.targetStep)?.label ?? pendingMove.targetStep
+          } starts a worker now, which runs an agent and costs money. Once that worker picks the card up, its description and workflow lock and can no longer be edited.`}
+          confirmLabel="Start work"
+          cancelLabel="Keep in Backlog"
+          checkboxLabel="Don't ask again on this device"
+          checked={dontAskAgain}
+          onCheckedChange={setDontAskAgain}
+          onConfirm={confirmPendingMove}
+          onCancel={() => setPendingMove(null)}
+        />
+      )}
 
       {confirmDeleteId && (
         <Modal
