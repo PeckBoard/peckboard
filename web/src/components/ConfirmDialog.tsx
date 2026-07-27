@@ -1,6 +1,5 @@
-import { useEffect, useId } from 'react'
-import { createPortal } from 'react-dom'
-import useDialogFocus from '../hooks/useDialogFocus'
+import { useId } from 'react'
+import Modal from './Modal'
 
 interface ConfirmDialogProps {
   title: string
@@ -21,11 +20,24 @@ interface ConfirmDialogProps {
   checkboxLabel?: string
   checked?: boolean
   onCheckedChange?: (checked: boolean) => void
+  /** Optional third button, rendered between Cancel and Confirm, for a
+   *  dialog that offers two ways forward rather than one (e.g. hand over
+   *  the context vs clear it). */
+  secondaryAction?: { label: string; onSelect: () => void; testId?: string }
   testId?: string
+  /** Override the confirm button's testid. Defaults to the shared
+   *  `confirm-dialog-confirm`. */
+  confirmTestId?: string
   onConfirm: () => void
   onCancel: () => void
 }
 
+/**
+ * The app's confirmation dialog. A thin skin over `Modal` — the backdrop,
+ * portal, Escape handling and focus trap/restore all live there, so this
+ * file only owns the title/message/actions layout. Never hand-roll a
+ * second confirmation dialog; extend this one.
+ */
 export default function ConfirmDialog({
   title,
   message,
@@ -38,90 +50,85 @@ export default function ConfirmDialog({
   checkboxLabel,
   checked = false,
   onCheckedChange,
+  secondaryAction,
   testId,
+  confirmTestId,
   onConfirm,
   onCancel,
 }: ConfirmDialogProps) {
-  const panelRef = useDialogFocus<HTMLDivElement>()
   const titleId = useId()
   const messageId = useId()
-  useEffect(() => {
-    const handleKey = (e: KeyboardEvent) => {
-      if (e.key === 'Escape' && !busy) onCancel()
-    }
-    document.addEventListener('keydown', handleKey)
-    return () => document.removeEventListener('keydown', handleKey)
-  }, [onCancel, busy])
 
-  return createPortal(
-    <div
-      className="modal-backdrop"
-      onMouseDown={(e) => {
-        if (e.target === e.currentTarget && !busy) onCancel()
-      }}
+  return (
+    <Modal
+      className="confirm-dialog"
+      // `alertdialog` for the destructive variant: it tells a screen
+      // reader this is an interruption that needs an answer, not just
+      // another panel.
+      role={danger ? 'alertdialog' : 'dialog'}
+      labelledBy={titleId}
+      describedBy={messageId}
+      onClose={onCancel}
+      closeOnEscape={!busy}
+      closeOnBackdropClick={!busy}
+      data-testid={testId}
     >
-      <div
-        ref={panelRef}
-        className="confirm-dialog"
-        // `alertdialog` for the destructive variant: it tells a screen
-        // reader this is an interruption that needs an answer, not just
-        // another panel.
-        role={danger ? 'alertdialog' : 'dialog'}
-        aria-modal="true"
-        aria-labelledby={titleId}
-        aria-describedby={messageId}
-        data-testid={testId}
-        onMouseDown={(e) => e.stopPropagation()}
-        onClick={(e) => e.stopPropagation()}
-      >
-        <h3 className="confirm-dialog-title" id={titleId}>
-          {title}
-        </h3>
-        <p className="confirm-dialog-message" id={messageId}>
-          {message}
+      <h3 className="confirm-dialog-title" id={titleId}>
+        {title}
+      </h3>
+      <p className="confirm-dialog-message" id={messageId}>
+        {message}
+      </p>
+      {error && (
+        <p className="confirm-dialog-error" role="alert" data-testid="confirm-dialog-error">
+          {error}
         </p>
-        {error && (
-          <p className="confirm-dialog-error" role="alert" data-testid="confirm-dialog-error">
-            {error}
-          </p>
-        )}
-        {checkboxLabel && onCheckedChange && (
-          <label className="confirm-dialog-checkbox">
-            <input
-              type="checkbox"
-              checked={checked}
-              disabled={busy}
-              onChange={(e) => onCheckedChange(e.target.checked)}
-              data-testid="confirm-dialog-checkbox"
-            />
-            <span>{checkboxLabel}</span>
-          </label>
-        )}
-        <div className="confirm-dialog-actions">
-          {/* A danger dialog opens with focus on the safe action, so an Enter
-              or Space pressed straight after it appears cancels rather than
-              destroys. */}
+      )}
+      {checkboxLabel && onCheckedChange && (
+        <label className="confirm-dialog-checkbox">
+          <input
+            type="checkbox"
+            checked={checked}
+            disabled={busy}
+            onChange={(e) => onCheckedChange(e.target.checked)}
+            data-testid="confirm-dialog-checkbox"
+          />
+          <span>{checkboxLabel}</span>
+        </label>
+      )}
+      <div className="confirm-dialog-actions">
+        {/* A danger dialog opens with focus on the safe action, so an Enter
+            or Space pressed straight after it appears cancels rather than
+            destroys. */}
+        <button
+          className="btn-secondary"
+          onClick={onCancel}
+          disabled={busy}
+          autoFocus={danger}
+          data-testid="confirm-dialog-cancel"
+        >
+          {cancelLabel}
+        </button>
+        {secondaryAction && (
           <button
             className="btn-secondary"
-            onClick={onCancel}
+            onClick={secondaryAction.onSelect}
             disabled={busy}
-            autoFocus={danger}
-            data-testid="confirm-dialog-cancel"
+            data-testid={secondaryAction.testId}
           >
-            {cancelLabel}
+            {secondaryAction.label}
           </button>
-          <button
-            className={danger ? 'btn-primary confirm-dialog-danger' : 'btn-primary'}
-            onClick={onConfirm}
-            disabled={busy}
-            aria-busy={busy || undefined}
-            data-testid="confirm-dialog-confirm"
-          >
-            {busy ? busyLabel : confirmLabel}
-          </button>
-        </div>
+        )}
+        <button
+          className={danger ? 'btn-primary confirm-dialog-danger' : 'btn-primary'}
+          onClick={onConfirm}
+          disabled={busy}
+          aria-busy={busy || undefined}
+          data-testid={confirmTestId ?? 'confirm-dialog-confirm'}
+        >
+          {busy ? busyLabel : confirmLabel}
+        </button>
       </div>
-    </div>,
-    document.body,
+    </Modal>
   )
 }

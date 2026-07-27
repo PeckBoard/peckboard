@@ -1,6 +1,5 @@
 import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import { useVirtualizer } from '@tanstack/react-virtual'
-import { createPortal } from 'react-dom'
 import rehypeHighlight from 'rehype-highlight'
 import type { Components } from 'react-markdown'
 import SafeMarkdown from './SafeMarkdown'
@@ -26,6 +25,7 @@ import MermaidBlock from './MermaidBlock'
 import DiffBlock from './DiffBlock'
 import ConfirmDialog from './ConfirmDialog'
 import Modal from './Modal'
+import RenameModal from './RenameModal'
 import { MenuButton, type MenuItem } from './Dropdown'
 import ModelPicker from './ModelPicker'
 import TodoPanel from './TodoPanel'
@@ -893,6 +893,7 @@ export default function ChatView({
   // close the dialog silently, which looked exactly like success.
   const [confirmBusy, setConfirmBusy] = useState(false)
   const [confirmError, setConfirmError] = useState<string | null>(null)
+  const [renameOpen, setRenameOpen] = useState(false)
   // Inline interrupt request in flight — locks the button so repeated
   // clicking can't stack interrupts on the agent.
   const [interrupting, setInterrupting] = useState(false)
@@ -1333,13 +1334,11 @@ export default function ChatView({
   }, [agentWorking, displayItems])
 
   // Toolbar actions
-  const handleRename = async () => {
-    const currentName = sessionDetail?.name ?? ''
-    const newName = window.prompt('Rename session:', currentName)
-    if (newName && newName !== currentName) {
-      await renameSession(sessionId, newName)
-      setSessionDetail((prev) => (prev ? { ...prev, name: newName } : prev))
-    }
+  const handleRename = () => setRenameOpen(true)
+
+  const submitRename = async (newName: string) => {
+    await renameSession(sessionId, newName)
+    setSessionDetail((prev) => (prev ? { ...prev, name: newName } : prev))
   }
 
   // Opening a dialog always starts from a clean slate — a stale error
@@ -1971,62 +1970,41 @@ export default function ChatView({
         handoverActive={!!sessionDetail?.handover_to_model}
         attachDisabledReason={attachDisabledReason}
       />
-      {pendingModelSwitch !== null &&
-        createPortal(
-          <div
-            className="modal-backdrop"
-            onMouseDown={(e) => {
-              if (e.target === e.currentTarget) setPendingModelSwitch(null)
-            }}
-          >
-            <div
-              className="confirm-dialog"
-              data-testid="model-switch-prompt"
-              onMouseDown={(e) => e.stopPropagation()}
-            >
-              <h3 className="confirm-dialog-title">Switch model?</h3>
-              <p className="confirm-dialog-message">
-                {`Switching to ${modelDisplayName(pendingModelSwitch)} crosses a provider or account boundary — the new model starts with no memory of this conversation. Hand over a summary, or clear the context and switch fresh.`}
-              </p>
-              <div className="confirm-dialog-actions">
-                <button className="btn-secondary" onClick={() => setPendingModelSwitch(null)}>
-                  Cancel
-                </button>
-                <button
-                  className="btn-secondary"
-                  data-testid="model-switch-clear"
-                  onClick={async () => {
-                    const target = pendingModelSwitch
-                    setPendingModelSwitch(null)
-                    try {
-                      await clearSession(sessionId)
-                    } catch (e) {
-                      setPatchError(
-                        describeActionError(e, "Couldn't clear this session. Please try again."),
-                      )
-                      return
-                    }
-                    patchSession({ model: target })
-                  }}
-                >
-                  Clear &amp; switch
-                </button>
-                <button
-                  className="btn-primary"
-                  data-testid="model-switch-handover"
-                  onClick={() => {
-                    const target = pendingModelSwitch
-                    setPendingModelSwitch(null)
-                    patchSession({ model: target })
-                  }}
-                >
-                  Hand over context
-                </button>
-              </div>
-            </div>
-          </div>,
-          document.body,
-        )}
+      {pendingModelSwitch !== null && (
+        <ConfirmDialog
+          title="Switch model?"
+          message={`Switching to ${modelDisplayName(pendingModelSwitch)} crosses a provider or account boundary — the new model starts with no memory of this conversation. Hand over a summary, or clear the context and switch fresh.`}
+          cancelLabel="Cancel"
+          secondaryAction={{
+            label: 'Clear & switch',
+            testId: 'model-switch-clear',
+            onSelect: () => {
+              const target = pendingModelSwitch
+              setPendingModelSwitch(null)
+              void (async () => {
+                try {
+                  await clearSession(sessionId)
+                } catch (e) {
+                  setPatchError(
+                    describeActionError(e, "Couldn't clear this session. Please try again."),
+                  )
+                  return
+                }
+                patchSession({ model: target })
+              })()
+            },
+          }}
+          confirmLabel="Hand over context"
+          confirmTestId="model-switch-handover"
+          testId="model-switch-prompt"
+          onConfirm={() => {
+            const target = pendingModelSwitch
+            setPendingModelSwitch(null)
+            patchSession({ model: target })
+          }}
+          onCancel={() => setPendingModelSwitch(null)}
+        />
+      )}
       {confirmAction && (
         <ConfirmDialog
           title={confirmAction.title}
@@ -2043,6 +2021,15 @@ export default function ChatView({
             setConfirmAction(null)
             setConfirmError(null)
           }}
+        />
+      )}
+      {renameOpen && (
+        <RenameModal
+          title="Rename session"
+          label="Session name"
+          initialValue={sessionDetail?.name ?? ''}
+          onSubmit={submitRename}
+          onClose={() => setRenameOpen(false)}
         />
       )}
     </div>

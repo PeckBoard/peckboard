@@ -1,4 +1,12 @@
-import { useCallback, useEffect, useLayoutEffect, useRef, useState, type ReactNode } from 'react'
+import {
+  useCallback,
+  useEffect,
+  useId,
+  useLayoutEffect,
+  useRef,
+  useState,
+  type ReactNode,
+} from 'react'
 import { createPortal } from 'react-dom'
 import { focusFirstMenuItem, handleMenuKeys } from '../hooks/useMenuKeyboard'
 
@@ -62,6 +70,16 @@ interface DropdownProps {
   /** Render a filter input above the items; rows are matched on label, hint,
    *  and `searchText`. Set via `searchable: true` on a submenu item. */
   searchable?: boolean
+  /** Minimum popup width in px. The model picker uses it to keep the popup
+   *  at least as wide as the trigger it hangs off. */
+  minWidth?: number
+  /** Testid for the searchable variant's filter input. */
+  searchTestId?: string
+  /** Row shown when the list is empty BEFORE filtering (e.g. "Loading
+   *  models…"). A filter that matches nothing always says "No matches". */
+  emptyLabel?: string
+  /** Accessible name for the searchable variant's option list. */
+  listLabel?: string
   searchPlaceholder?: string
 }
 
@@ -81,6 +99,10 @@ export default function Dropdown({
   className,
   searchable,
   searchPlaceholder,
+  minWidth,
+  searchTestId,
+  emptyLabel,
+  listLabel,
 }: DropdownProps) {
   const ref = useRef<HTMLDivElement | null>(null)
   const [pos, setPos] = useState<{ left: number; top: number }>(() => ({
@@ -107,6 +129,21 @@ export default function Dropdown({
       selectable.findIndex((i) => i.active),
     ),
   )
+  // Ids for the searchable (listbox) variant: the filter input is the
+  // combobox, the rows are its options, and `aria-activedescendant` points
+  // at the keyboard cursor — so a screen reader follows Arrow keys while
+  // focus stays in the input where the user is typing.
+  // (`useId` hands back `:r3:`-shaped strings; the colons are stripped so
+  // the ids are usable in a CSS selector.)
+  const baseId = useId().replace(/:/g, '')
+  const listId = `${baseId}-list`
+  const activeOptionId = selectable.length > 0 ? `${baseId}-opt-${highlight}` : undefined
+
+  // Keep the keyboard cursor in view when arrowing through a long list.
+  useEffect(() => {
+    if (!searchable) return
+    ref.current?.querySelector('.model-picker-item-highlight')?.scrollIntoView({ block: 'nearest' })
+  }, [searchable, highlight, query])
 
   useLayoutEffect(() => {
     const el = ref.current
@@ -134,14 +171,21 @@ export default function Dropdown({
       if (target?.closest('.dropdown-menu')) return
       onClose()
     }
+    // Escape closes only this popup. Capture phase + stopPropagation is
+    // deliberate: a picker opened from inside a Modal must swallow the key,
+    // otherwise the dialog's own document-level Escape handler fires on the
+    // same keystroke and the user loses the whole form behind the popup.
     const onKey = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') onClose()
+      if (e.key !== 'Escape') return
+      e.stopPropagation()
+      e.preventDefault()
+      onClose()
     }
     document.addEventListener('mousedown', onDown)
-    document.addEventListener('keydown', onKey)
+    document.addEventListener('keydown', onKey, true)
     return () => {
       document.removeEventListener('mousedown', onDown)
-      document.removeEventListener('keydown', onKey)
+      document.removeEventListener('keydown', onKey, true)
     }
   }, [onClose])
 
@@ -197,6 +241,8 @@ export default function Dropdown({
         key={idx}
         item={item}
         onClose={onClose}
+        listbox={!!searchable}
+        id={searchable && isSelectable ? `${baseId}-opt-${at}` : undefined}
         highlighted={searchable && isSelectable && at === highlight}
         onHover={searchable && isSelectable ? () => setHighlight(at) : undefined}
       />
@@ -207,12 +253,16 @@ export default function Dropdown({
     <div
       ref={ref}
       className={`dropdown-menu${searchable ? ' model-picker-popup' : ''}${className ? ` ${className}` : ''}`}
-      role="menu"
+      // The searchable variant is a combobox + listbox, not a menu: mixing
+      // `role="menu"` with `role="option"` rows is invalid, and the listbox
+      // model is the one ModelPicker proved out.
+      role={searchable ? undefined : 'menu'}
       onKeyDown={onMenuKey}
       style={{
         position: 'fixed',
         left: pos.left,
         top: pos.top,
+        minWidth,
         maxWidth: `calc(100vw - ${MENU_MARGIN * 2}px)`,
       }}
     >
@@ -221,22 +271,33 @@ export default function Dropdown({
           <input
             className="model-picker-search"
             type="text"
+            role="combobox"
             autoFocus
             value={query}
             placeholder={searchPlaceholder ?? 'Search…'}
             aria-label={searchPlaceholder ?? 'Search'}
+            aria-expanded="true"
+            aria-controls={listId}
+            aria-activedescendant={activeOptionId}
+            aria-autocomplete="list"
+            data-testid={searchTestId}
             onChange={(e) => {
               setQuery(e.target.value)
               setHighlight(0)
             }}
             onKeyDown={onSearchKey}
           />
-          <div className="model-picker-list">
+          <div
+            className="model-picker-list"
+            id={listId}
+            role="listbox"
+            aria-label={listLabel ?? searchPlaceholder ?? 'Options'}
+          >
             {rows.length > 0 ? (
               rows
             ) : (
               <button type="button" className="dropdown-item" disabled>
-                No matches
+                {visible.length === 0 && emptyLabel ? emptyLabel : 'No matches'}
               </button>
             )}
           </div>
@@ -252,11 +313,18 @@ export default function Dropdown({
 function MenuRow({
   item,
   onClose,
+  listbox,
+  id,
   highlighted,
   onHover,
 }: {
   item: MenuItem
   onClose: () => void
+  /** Render as a listbox `option` rather than a `menuitem` — the searchable
+   *  variant is a combobox, so its rows carry option semantics. */
+  listbox?: boolean
+  /** Element id, referenced by the combobox's `aria-activedescendant`. */
+  id?: string
   /** Keyboard cursor from a searchable parent — visual only. */
   highlighted?: boolean
   /** Sync the keyboard cursor when the mouse moves over this row. */
@@ -314,7 +382,9 @@ function MenuRow({
 
   return (
     <button
-      role="menuitem"
+      id={id}
+      role={listbox ? 'option' : 'menuitem'}
+      aria-selected={listbox ? !!item.active : undefined}
       type="button"
       className={`dropdown-item${item.danger ? ' dropdown-item-danger' : ''}${item.active ? ' dropdown-item-active' : ''}${item.description ? ' dropdown-item-with-desc' : ''}${highlighted ? ' model-picker-item-highlight' : ''}`}
       disabled={item.disabled}
@@ -355,6 +425,25 @@ interface MenuButtonProps {
   searchable?: boolean
   /** Placeholder for the searchable popup's filter input. */
   searchPlaceholder?: string
+  /** Testid for the searchable popup's filter input. */
+  searchTestId?: string
+  /** Row shown when `items` is empty before filtering (e.g. "Loading models…"). */
+  emptyLabel?: string
+  /** Accessible name for the searchable popup's option list. */
+  listLabel?: string
+  /** What the trigger announces it opens: `listbox` for a single-choice
+   *  searchable picker, `menu` (the default) for an action menu. */
+  haspopup?: 'menu' | 'listbox'
+  /** Open the popup at least as wide as the trigger. */
+  matchTriggerWidth?: boolean
+  /** Floor for the popup width in px (combines with `matchTriggerWidth`). */
+  minWidth?: number
+  /** Id forwarded to the trigger, so a `<label htmlFor>` can point at it. */
+  id?: string
+  /** Disable the trigger. */
+  disabled?: boolean
+  /** Fired when the popup opens — e.g. to (re)fetch the list it shows. */
+  onOpen?: () => void
   /** Trigger glyph. Defaults to the 3-dot SVG. */
   children?: ReactNode
 }
@@ -373,9 +462,19 @@ export function MenuButton({
   align = 'right',
   searchable,
   searchPlaceholder,
+  searchTestId,
+  emptyLabel,
+  listLabel,
+  haspopup = 'menu',
+  matchTriggerWidth,
+  minWidth,
+  id,
+  disabled,
+  onOpen,
   children,
 }: MenuButtonProps) {
   const [anchor, setAnchor] = useState<{ x: number; y: number } | null>(null)
+  const [triggerWidth, setTriggerWidth] = useState(0)
   const triggerRef = useRef<HTMLButtonElement | null>(null)
   // Closing hands focus back to the trigger: the popup is portalled to the
   // end of <body>, so leaving focus there would drop a keyboard user at the
@@ -391,7 +490,9 @@ export function MenuButton({
 
   const openAt = (el: HTMLButtonElement) => {
     const r = el.getBoundingClientRect()
+    if (matchTriggerWidth) setTriggerWidth(r.width)
     setAnchor({ x: align === 'right' ? r.right : r.left, y: r.bottom + 4 })
+    onOpen?.()
   }
 
   const onClick = (e: React.MouseEvent<HTMLButtonElement>) => {
@@ -417,10 +518,12 @@ export function MenuButton({
       <button
         ref={triggerRef}
         type="button"
+        id={id}
         className={triggerClassName ?? 'menu-button'}
         aria-label={ariaLabel}
-        aria-haspopup="menu"
+        aria-haspopup={haspopup}
         aria-expanded={!!anchor}
+        disabled={disabled}
         title={title}
         data-testid={testId}
         onClick={onClick}
@@ -442,6 +545,10 @@ export function MenuButton({
           align={align}
           searchable={searchable}
           searchPlaceholder={searchPlaceholder}
+          searchTestId={searchTestId}
+          emptyLabel={emptyLabel}
+          listLabel={listLabel}
+          minWidth={matchTriggerWidth ? Math.max(triggerWidth, minWidth ?? 0) : minWidth}
         />
       )}
     </>

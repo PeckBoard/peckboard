@@ -218,6 +218,13 @@
     max-width: calc(100vw - 32px) !important;
   }
 
+  /* ConfirmDialog renders through Modal (one backdrop + focus trap for
+     every overlay), so it inherits `.modal`'s mobile overrides. Keep the
+     narrower confirmation panel it has always had. */
+  .modal.confirm-dialog {
+    max-width: 380px !important;
+  }
+
   /* Question dialog */
   .question-dialog {
     max-width: calc(100vw - 32px) !important;
@@ -299,6 +306,9 @@
   }
   .modal {
     padding: 16px !important;
+  }
+  .modal.confirm-dialog {
+    padding: 24px 28px !important;
   }
 }
 

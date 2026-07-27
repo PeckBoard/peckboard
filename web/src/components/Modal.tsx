@@ -34,6 +34,12 @@ interface ModalProps {
   /** Id of an existing element that names the modal. Overrides the
    *  heading auto-detection below. */
   labelledBy?: string
+  /** Id of an element that describes the modal (e.g. its body copy),
+   *  announced after the name. */
+  describedBy?: string
+  /** `alertdialog` marks an interruption that needs an answer before the
+   *  user can go on (destructive confirmations); `dialog` otherwise. */
+  role?: 'dialog' | 'alertdialog'
   /** Passed through to the inner `.modal` panel. */
   'data-testid'?: string
   children: ReactNode
@@ -62,6 +68,8 @@ export default function Modal({
   closeOnEscape,
   ariaLabel,
   labelledBy,
+  describedBy,
+  role = 'dialog',
   children,
   ...rest
 }: ModalProps) {
@@ -118,9 +126,10 @@ export default function Modal({
       <div
         ref={panelRef}
         className={panelClasses}
-        role="dialog"
+        role={role}
         aria-modal="true"
         aria-labelledby={labelId ?? undefined}
+        aria-describedby={describedBy}
         aria-label={labelId ? undefined : (ariaLabel ?? 'Dialog')}
         onMouseDown={(e) => e.stopPropagation()}
         onClick={(e) => e.stopPropagation()}
