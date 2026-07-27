@@ -192,6 +192,12 @@ export interface RegistryPlugin {
   homepage?: string | null
   version: string
   hooks: string[]
+  /**
+   * Host permissions the publisher declares for this entry, shown BEFORE the
+   * download. Advisory — the authoritative list is the manifest read from the
+   * verified `.wasm`; absent/empty means the index declares none.
+   */
+  permissions?: string[]
   /** Freeform discovery tags from the registry entry. */
   tags?: string[]
   /** Curated category (e.g. dev-tools, infrastructure). */
@@ -202,6 +208,10 @@ export interface RegistryPlugin {
   repository_label: string
   /** Whether a plugin with this id is already loaded in this instance. */
   installed: boolean
+  /** Approval state of the loaded copy — an install is inert until approved. */
+  installed_status?: WasmPlugin['status'] | null
+  /** Permissions the loaded manifest actually requests, once installed. */
+  installed_permissions?: string[] | null
   /** Version of the loaded plugin, when installed (for the upgrade delta). */
   installed_version?: string | null
   /** Minimum Peckboard version this entry declares, if any. */

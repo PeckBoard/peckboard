@@ -382,14 +382,16 @@ async fn list_registry(State(state): State<Arc<AppState>>) -> impl IntoResponse 
         }
     };
 
-    // Installed wasm plugins, keyed name → version, so each registry entry can
-    // be tagged with the installed version and whether a newer one is on offer.
-    let installed: std::collections::HashMap<String, String> = state
+    // Installed wasm plugins, keyed name → what's loaded, so each registry
+    // entry can be tagged with the installed version, whether a newer one is
+    // on offer, and — crucially — whether the installed copy is actually
+    // running or still sitting inert awaiting approval.
+    let installed: std::collections::HashMap<String, (String, &'static str, Vec<String>)> = state
         .plugins
         .wasm_plugins()
         .await
         .into_iter()
-        .map(|p| (p.name, p.version))
+        .map(|p| (p.name, (p.version, p.status, p.permissions)))
         .collect();
     let running = registry::peckboard_version();
 
@@ -404,7 +406,8 @@ async fn list_registry(State(state): State<Arc<AppState>>) -> impl IntoResponse 
                     "label": label, "url": url, "removable": removable, "ok": true,
                 }));
                 for e in index.plugins {
-                    let installed_version = installed.get(&e.id).cloned();
+                    let loaded = installed.get(&e.id);
+                    let installed_version = loaded.map(|(v, _, _)| v.clone());
                     let compatible = registry::is_compatible(running, e.min_peckboard.as_deref());
                     // An upgrade is offered only when installed AND the index
                     // version is strictly newer than what's loaded.
@@ -420,12 +423,23 @@ async fn list_registry(State(state): State<Arc<AppState>>) -> impl IntoResponse 
                         "homepage": e.homepage,
                         "version": e.version,
                         "hooks": e.hooks,
+                        // Declared by the publisher in the index — shown
+                        // before the download so the capability ask isn't a
+                        // post-install surprise.
+                        "permissions": e.permissions,
                         "tags": e.tags,
                         "category": e.category,
                         "repository": url,
                         "repository_label": label,
                         "installed": installed_version.is_some(),
                         "installed_version": installed_version,
+                        // Approval state of the loaded copy: an installed
+                        // plugin is inert until its hooks + permissions are
+                        // approved, so the UI must not just say "Installed".
+                        "installed_status": loaded.map(|(_, s, _)| *s),
+                        // What the loaded manifest actually asks for — the
+                        // truth that supersedes the index's declaration.
+                        "installed_permissions": loaded.map(|(_, _, p)| p.clone()),
                         "min_peckboard": e.min_peckboard,
                         "compatible": compatible,
                         "upgrade_available": upgrade_available,

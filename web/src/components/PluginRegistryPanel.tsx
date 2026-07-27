@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import HookList from './HookList'
+import PermissionList from './PermissionList'
 import Modal from './Modal'
 import { MenuButton } from './Dropdown'
 import {
@@ -38,7 +39,12 @@ type Detail = { kind: 'plugin'; plugin: RegistryPlugin } | { kind: 'mcp'; mcp: R
  * adding an MCP server opens the Settings → MCP Servers editor prefilled
  * from the template (nothing is downloaded).
  */
-export default function PluginRegistryPanel() {
+export default function PluginRegistryPanel({
+  onManagePlugins,
+}: {
+  /** Jump to Settings → Plugins, where a pending install is approved. */
+  onManagePlugins?: () => void
+}) {
   const [tab, setTab] = useState<Tab>('browse')
   const [data, setData] = useState<RegistryData | null>(null)
   const [error, setError] = useState<string | null>(null)
@@ -89,7 +95,13 @@ export default function PluginRegistryPanel() {
       {data === null && !error && <p className="settings-loading">Loading…</p>}
 
       {data && tab === 'browse' && (
-        <BrowseTab data={data} query={query} setQuery={setQuery} onChanged={load} />
+        <BrowseTab
+          data={data}
+          query={query}
+          setQuery={setQuery}
+          onChanged={load}
+          onManagePlugins={onManagePlugins}
+        />
       )}
       {data && tab === 'repositories' && <RepositoriesTab data={data} onChanged={load} />}
     </div>
@@ -198,6 +210,36 @@ function DetailChips({
 }
 
 /**
+ * What an installed registry entry's state actually is. "Installed" on its
+ * own would be a half-truth: a freshly downloaded plugin is loaded **inert**
+ * and runs nothing until its hooks and permissions are approved in
+ * Settings → Plugins.
+ */
+function installedLabel(p: RegistryPlugin): string {
+  switch (p.installed_status) {
+    case 'pending':
+      return 'Awaiting approval'
+    case 'denied':
+      return 'Denied'
+    case 'init_failed':
+      return 'Init failed'
+    default:
+      return 'Installed'
+  }
+}
+
+/**
+ * The permissions to show for a registry entry: once installed, what the
+ * loaded manifest actually asks for; before that, what the publisher
+ * declared in the index. Either may be empty — an index entry predating the
+ * `permissions` field declares nothing.
+ */
+function detailPermissions(p: RegistryPlugin): string[] {
+  const loaded = p.installed ? p.installed_permissions : null
+  return loaded ?? p.permissions ?? []
+}
+
+/**
  * The action control for one registry plugin: Install / Upgrade / Installed,
  * or a disabled "needs a newer Peckboard" state when the entry's
  * `min_peckboard` floor isn't met. Rendered both on the row and in the
@@ -244,17 +286,20 @@ function renderAction(
       </button>
     )
   }
-  // Installed and current.
+  // Installed — but installed is not running: report the approval state
+  // rather than a flat "Installed" the plugin hasn't earned yet.
   if (p.installed) {
+    const status = p.installed_status ?? 'approved'
+    const approved = status === 'approved'
     return (
       <button
         type="button"
-        className="plugin-approval-approve"
+        className={approved ? 'plugin-approval-approve' : 'plugin-approval-deny'}
         data-testid={testid}
-        data-action="installed"
+        data-action={approved ? 'installed' : status}
         disabled
       >
-        Installed
+        {installedLabel(p)}
       </button>
     )
   }
@@ -358,6 +403,8 @@ function RegistryDetailModal({
   onAdd,
   onTag,
   onCategory,
+  onManagePlugins,
+  installError,
 }: {
   detail: Detail
   busy: string | null
@@ -368,9 +415,14 @@ function RegistryDetailModal({
   onAdd: (m: RegistryMcpServer) => void
   onTag: (t: string) => void
   onCategory: (c: string) => void
+  /** Jump to Settings → Plugins, where a pending install is approved. */
+  onManagePlugins?: () => void
+  /** Failure text from the last install attempt, shown where the click was. */
+  installError?: string | null
 }) {
   if (detail.kind === 'plugin') {
     const p = detail.plugin
+    const perms = detailPermissions(p)
     return (
       <Modal
         onClose={onClose}
@@ -385,7 +437,9 @@ function RegistryDetailModal({
             {p.upgrade_available ? (
               <span className="plugin-badge plugin-badge--pending">Update available</span>
             ) : p.installed ? (
-              <span className="plugin-badge plugin-badge--approved">Installed</span>
+              <span className={`plugin-badge plugin-badge--${p.installed_status ?? 'approved'}`}>
+                {installedLabel(p)}
+              </span>
             ) : null}
           </div>
         </header>
@@ -419,14 +473,57 @@ function RegistryDetailModal({
           onCategory={onCategory}
         />
         <HookList hooks={p.hooks} title="Hooks" />
+        {perms.length > 0 ? (
+          <>
+            <PermissionList
+              permissions={perms}
+              title="Permissions"
+              testId="registry-detail-permissions"
+            />
+            <p className="registry-setup-note" data-testid="registry-permissions-note">
+              Third-party code from {p.repository_label}. Installing downloads and checksum-verifies
+              it; it can reach those capabilities only once you approve them, and does nothing
+              before that.
+            </p>
+          </>
+        ) : (
+          <p className="registry-setup-note" data-testid="registry-permissions-none">
+            This entry declares no host permissions. Whatever its manifest does request is listed
+            for approval in Settings → Plugins after install — it runs nothing until then.
+          </p>
+        )}
         {p.compatible === false && (
           <p className="registry-setup-note">
             Requires Peckboard ≥ {p.min_peckboard ?? '?'} — update Peckboard to install this
             version.
           </p>
         )}
+        {p.installed && p.installed_status === 'pending' && (
+          <p className="registry-setup-note" data-testid="registry-awaiting-approval">
+            Downloaded and checksum-verified, but not running: it stays inert until you approve its
+            hooks and permissions.
+          </p>
+        )}
+        {installError && (
+          <p className="plugin-card-error" data-testid="registry-modal-install-error">
+            {installError}
+          </p>
+        )}
         <div className="form-actions">
           {renderAction(p, busy === p.id, onInstall, 'registry-modal-install-')}
+          {p.installed && p.installed_status === 'pending' && onManagePlugins && (
+            <button
+              type="button"
+              className="plugin-panel-open"
+              data-testid="registry-open-plugin-settings"
+              onClick={() => {
+                onClose()
+                onManagePlugins()
+              }}
+            >
+              Approve in Settings → Plugins
+            </button>
+          )}
           <button type="button" className="btn-secondary" onClick={onClose}>
             Close
           </button>
@@ -506,11 +603,13 @@ function BrowseTab({
   query,
   setQuery,
   onChanged,
+  onManagePlugins,
 }: {
   data: RegistryData
   query: string
   setQuery: (q: string) => void
   onChanged: () => void
+  onManagePlugins?: () => void
 }) {
   const [busy, setBusy] = useState<string | null>(null)
   const [installError, setInstallError] = useState<string | null>(null)
@@ -647,6 +746,19 @@ function BrowseTab({
   }
 
   const detailAdded = detail?.kind === 'mcp' ? addedNames.has(detail.mcp.id.toLowerCase()) : false
+  // The open modal must reflect the LATEST registry data, not the snapshot it
+  // was opened from: installing keeps it open so the resulting
+  // awaiting-approval state and its next step appear where the click happened.
+  const liveDetail: Detail | null =
+    detail?.kind === 'plugin'
+      ? {
+          kind: 'plugin',
+          plugin:
+            data.plugins.find(
+              (p) => p.id === detail.plugin.id && p.repository === detail.plugin.repository,
+            ) ?? detail.plugin,
+        }
+      : detail
 
   return (
     <div className="registry-panel" data-testid="registry-plugins-tab">
@@ -825,18 +937,20 @@ function BrowseTab({
         </>
       )}
 
-      {detail && (
+      {liveDetail && (
         <RegistryDetailModal
-          detail={detail}
+          detail={liveDetail}
           busy={busy}
           added={detailAdded}
           activeTags={selTags}
-          onClose={() => setDetail(null)}
-          onInstall={(p) => {
+          installError={installError}
+          onClose={() => {
             setDetail(null)
-            install(p)
+            setInstallError(null)
           }}
+          onInstall={install}
           onAdd={beginAdd}
+          onManagePlugins={onManagePlugins}
           onTag={(t) => {
             toggleTag(t)
             setDetail(null)

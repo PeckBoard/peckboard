@@ -731,7 +731,9 @@ export default function SettingsPage({ onBack, initialSubPage = null }: Props) {
       {subPage === 'variables' && <AgentVarsSection />}
       {subPage === 'plugins' && <PluginsSection onBrowseRegistry={() => setSubPage('registry')} />}
       {subPage === 'plugin-settings' && <PluginSettingsSection />}
-      {subPage === 'registry' && <PluginRegistryPanel />}
+      {subPage === 'registry' && (
+        <PluginRegistryPanel onManagePlugins={() => setSubPage('plugins')} />
+      )}
       {subPage === 'prompts' && <SystemPromptsSection />}
     </div>
   )

@@ -43,10 +43,28 @@ async function mockRegistry(page: Page) {
     lastRemove: null as { url?: string } | null,
   }
 
+  // Settings → Plugins: once installed, the demo plugin shows up there
+  // awaiting approval — the destination the registry links to.
   await page.route('**/api/plugins', async (route) => {
     await route.fulfill({
       contentType: 'application/json',
-      body: JSON.stringify({ plugins: [], ui_panels: [], wasm_plugins: [] }),
+      body: JSON.stringify({
+        plugins: [],
+        ui_panels: [],
+        wasm_plugins: state.installed
+          ? [
+              {
+                name: 'demo',
+                description: 'A demo plugin from the registry.',
+                version: '1.0.0',
+                repository: REPO_URL,
+                hooks: ['http.request.before'],
+                permissions: ['http_request', 'data_store'],
+                status: 'pending',
+              },
+            ]
+          : [],
+      }),
     })
   })
 
@@ -63,9 +81,12 @@ async function mockRegistry(page: Page) {
             author: 'PeckBoard',
             version: '1.0.0',
             hooks: ['http.request.before'],
+            permissions: ['http_request', 'data_store'],
             repository: REPO_URL,
             repository_label: 'PeckBoard/plugins',
             installed: state.installed,
+            installed_status: state.installed ? 'pending' : null,
+            installed_permissions: state.installed ? ['http_request', 'data_store'] : null,
           },
         ],
       }),
@@ -136,6 +157,9 @@ test('browse → search → install from the registry page', async ({ request, p
   await expect(detail).toBeVisible()
   await expect(detail).toContainText('A demo plugin from the registry.')
   await expect(detail.locator('[data-hook="http.request.before"]')).toBeVisible()
+  // The capability ask is on screen BEFORE the download, not after it.
+  await expect(detail.getByTestId('registry-detail-permissions')).toBeVisible()
+  await expect(detail.locator('[data-permission="data_store"]')).toContainText('Store plugin data')
   await detail.getByRole('button', { name: 'Close' }).click()
   await expect(detail).toHaveCount(0)
 
@@ -145,12 +169,50 @@ test('browse → search → install from the registry page', async ({ request, p
   await page.getByTestId('registry-search').fill('demo')
   await expect(page.getByTestId('registry-plugin-demo')).toBeVisible()
 
-  // Install posts id + source repository, then flips to Installed.
+  // Install posts id + source repository, then reports the state it's really
+  // in: loaded but inert until the operator approves it.
   await page.getByTestId('registry-install-demo').click()
-  await expect(page.getByTestId('registry-install-demo')).toHaveText('Installed')
+  await expect(page.getByTestId('registry-install-demo')).toHaveText('Awaiting approval')
   await expect(page.getByTestId('registry-install-demo')).toBeDisabled()
   expect(state.lastInstall?.id).toBe('demo')
   expect(state.lastInstall?.repository).toBe(REPO_URL)
+})
+
+test('registry detail shows permissions up front and links to the approval', async ({
+  request,
+  page,
+  baseURL,
+}) => {
+  expect(baseURL).toBeTruthy()
+  const token = await authenticate(request)
+  await mockRegistry(page)
+
+  await loadAppAt(page, token, '/plugins')
+  await expect(page.getByTestId('plugins-section')).toBeVisible({ timeout: 10_000 })
+  await page.getByTestId('browse-plugins').click()
+  await expect(page.getByTestId('plugin-registry-panel')).toBeVisible()
+
+  await page.getByTestId('registry-open-demo').click()
+  const detail = page.getByTestId('registry-detail-modal')
+  await expect(detail).toBeVisible()
+
+  // Permissions + the plain-language risk line, above an offered Install.
+  await expect(detail.getByTestId('registry-detail-permissions')).toBeVisible()
+  await expect(detail.locator('[data-permission="data_store"]')).toContainText('Store plugin data')
+  await expect(detail.getByTestId('registry-permissions-note')).toContainText('PeckBoard/plugins')
+  await expect(detail.getByTestId('registry-modal-install-demo')).toHaveText('Install')
+
+  // Installing keeps the modal open and stops claiming the plugin is running.
+  await detail.getByTestId('registry-modal-install-demo').click()
+  await expect(detail.getByTestId('registry-modal-install-demo')).toHaveText('Awaiting approval')
+  await expect(detail.getByTestId('registry-awaiting-approval')).toBeVisible()
+
+  // The offered next step resolves to Settings → Plugins, where it's approved.
+  await detail.getByTestId('registry-open-plugin-settings').click()
+  await expect(detail).toHaveCount(0)
+  const plugins = page.getByTestId('plugins-section')
+  await expect(plugins).toBeVisible()
+  await expect(plugins.locator('.plugin-badge--pending').first()).toContainText('Awaiting approval')
 })
 test('back from the registry tab returns to the settings hub', async ({
   request,

@@ -89,6 +89,13 @@ pub struct RegistryEntry {
     /// running Peckboard is older. Absent ⇒ no floor declared ⇒ compatible.
     #[serde(default)]
     pub min_peckboard: Option<String>,
+    /// Host permissions the plugin's manifest requests, declared up-front by
+    /// the publisher so the registry UI can show the capability ask *before*
+    /// the download. Advisory: the authoritative list is the manifest read
+    /// from the verified `.wasm`, which is what the approval prompt gates on.
+    /// Absent ⇒ nothing declared (older indexes).
+    #[serde(default)]
+    pub permissions: Vec<String>,
     /// Freeform discovery tags (kebab-case) for registry search.
     #[serde(default)]
     pub tags: Vec<String>,
@@ -365,6 +372,25 @@ mod tests {
         assert_eq!(e.id, "api");
         assert_eq!(e.hooks, vec!["http.request.before"]);
         assert!(e.homepage.is_none());
+        // An entry that declares no permissions parses as "none declared".
+        assert!(e.permissions.is_empty());
+    }
+
+    #[test]
+    fn permissions_parse_from_the_index() {
+        let json = r#"{
+            "schema_version": 1,
+            "plugins": [{
+                "id": "api", "name": "API", "description": "d", "author": "PeckBoard",
+                "version": "0.2.0", "hooks": [], "url": "https://e/a.wasm", "sha256": "00",
+                "permissions": ["http_request", "data_store"]
+            }]
+        }"#;
+        let index: RegistryIndex = serde_json::from_str(json).unwrap();
+        assert_eq!(
+            index.plugins[0].permissions,
+            vec!["http_request", "data_store"]
+        );
     }
 
     #[test]
