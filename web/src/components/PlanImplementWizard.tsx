@@ -12,12 +12,19 @@ interface AccountLite {
   id: string
   name: string
 }
-
 interface PlanImplementWizardProps {
   sessionId: string
   onClose: () => void
   /** Navigate to the authoring session once the instruction is sent. */
   onSent: (sessionId: string) => void
+}
+
+/** Best available message for a failed response: the API's `error` field when
+ *  there is one, else a status-bearing fallback. */
+async function readableError(res: Response): Promise<string> {
+  const body = (await res.json().catch(() => null)) as { error?: unknown } | null
+  if (body && typeof body.error === 'string' && body.error) return body.error
+  return `Failed to create cards (HTTP ${res.status})`
 }
 
 /** Multi-step wizard that turns a proposed plan into worker cards: pick the
@@ -39,6 +46,7 @@ export default function PlanImplementWizard({
   const [projectId, setProjectId] = useState('')
   const [providerId, setProviderId] = useState('')
   const [accountId, setAccountId] = useState('')
+  const [error, setError] = useState<string | null>(null)
   const [busy, setBusy] = useState(false)
 
   useEffect(() => {
@@ -77,6 +85,7 @@ export default function PlanImplementWizard({
 
   const submit = async () => {
     if (!projectId || !providerId) return
+    setError(null)
     setBusy(true)
     const acct = accountId ? `@${accountId}` : ''
     const scope = `${providerId}${acct}`
@@ -97,12 +106,19 @@ export default function PlanImplementWizard({
       `SAME rules above (best model, system_prompt_name, depends_on), then return to step 1. Repeat monitor → verify ` +
       `until verification passes and the plan is deleted.`
     try {
-      await authedFetch(`/api/sessions/${sessionId}/message`, {
+      const res = await authedFetch(`/api/sessions/${sessionId}/message`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ text: message }),
       })
+      if (!res.ok) {
+        // Keep the wizard open so the selections survive a retry.
+        setError(await readableError(res))
+        return
+      }
       onSent(sessionId)
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Failed to create cards')
     } finally {
       setBusy(false)
     }
@@ -175,6 +191,11 @@ export default function PlanImplementWizard({
           provider and account.
         </p>
 
+        {error && (
+          <p className="form-error" role="alert" data-testid="plan-wizard-error">
+            {error}
+          </p>
+        )}
         <div className="form-actions">
           <button className="btn-secondary" onClick={onClose}>
             Cancel
