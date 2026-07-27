@@ -7,7 +7,7 @@ import { useMentions, filterMentions } from '../hooks/useMentions'
 import type { Card, Event, Project } from '../types/api'
 import CardFormModal from './CardFormModal'
 import EditProjectModal from './EditProjectModal'
-import { MenuButton, type MenuItem } from './Dropdown'
+import Dropdown, { MenuButton, type MenuItem } from './Dropdown'
 import Modal from './Modal'
 import WorkerComms from './WorkerComms'
 import ProjectTodoSummary from './ProjectTodoSummary'
@@ -432,6 +432,8 @@ export default function KanbanBoard({
     fetchCards(projectId)
   }, [projectId, fetchCards])
 
+  // Workflow definitions back the card menu's "Move to" step list.
+  const workflows = useResourcesStore((s) => s.workflows)
   const fetchWorkflows = useResourcesStore((s) => s.fetchWorkflows)
   const fetchModels = useResourcesStore((s) => s.fetchModels)
   useEffect(() => {
@@ -549,6 +551,37 @@ export default function KanbanBoard({
     })
     fetchCards(projectId)
   }
+  // Single step-change path, shared by the drag-and-drop drop handler and
+  // the card menu's "Move to" submenu. HTML5 drag-and-drop never fires on
+  // touch and is unreachable by keyboard, so the menu is the only way a
+  // phone or keyboard-only user can move a card — it must behave
+  // identically to a drop, including the optimistic patch and the
+  // refetch-on-failure rollback.
+  const moveCardToStep = async (cardId: string, targetStep: string) => {
+    useProjectsStore.setState((s) => ({
+      cards: s.cards.map((c) => (c.id === cardId ? { ...c, step: targetStep } : c)),
+    }))
+    try {
+      await updateCard(projectId, cardId, { step: targetStep })
+    } catch {
+      fetchCards(projectId)
+    }
+  }
+
+  // Steps the "Move to" submenu offers for a card. The board only renders
+  // the STEPS columns, so a target outside them would make the card
+  // vanish; every built-in workflow's steps are a subset of STEPS, so the
+  // card's own workflow is the right list, with the board's columns as the
+  // fallback for an unknown workflow id. `wont_do` is deliberately absent —
+  // "Cancel as Won't Do" is the sanctioned path and hits its own endpoint.
+  const moveTargetKeys = STEPS.filter((s) => s.key !== 'wont_do').map((s) => s.key as string)
+  const moveTargetsFor = (card: Card): string[] => {
+    const wf = workflows.find((w) => w.id === card.workflow)
+    const steps = (wf?.steps ?? [])
+      .map((s) => normalizeStep(typeof s === 'string' ? s : s.step))
+      .filter((s) => moveTargetKeys.includes(s))
+    return steps.length > 0 ? steps : moveTargetKeys
+  }
 
   // Step the currently-dragged card originates from, or null when no drag
   // is active. Read during dragover (when dataTransfer is locked for
@@ -626,16 +659,9 @@ export default function KanbanBoard({
     const fromStep = e.dataTransfer.getData('fromStep')
     if (!cardId) return
 
-    // Cross-row drop → step change. Existing persistence.
+    // Cross-row drop → step change. Shared with the "Move to" menu.
     if (normalizeStep(fromStep) !== targetStep) {
-      useProjectsStore.setState((s) => ({
-        cards: s.cards.map((c) => (c.id === cardId ? { ...c, step: targetStep } : c)),
-      }))
-      try {
-        await updateCard(projectId, cardId, { step: targetStep })
-      } catch {
-        fetchCards(projectId)
-      }
+      await moveCardToStep(cardId, targetStep)
       return
     }
 
@@ -1071,78 +1097,76 @@ export default function KanbanBoard({
                               ...
                             </button>
                             {cardMenuId === card.id && cardMenuRect && (
-                              <div
+                              <Dropdown
+                                anchor={{ x: cardMenuRect.right, y: cardMenuRect.bottom + 4 }}
                                 className="kanban-card-menu"
-                                data-no-toggle
-                                style={{
-                                  top: cardMenuRect.bottom + 4,
-                                  right: Math.max(8, window.innerWidth - cardMenuRect.right),
-                                }}
-                              >
-                                <button
-                                  onClick={() => {
-                                    closeCardMenu()
-                                    setSelectedCard(card)
-                                  }}
-                                >
-                                  View
-                                </button>
-                                <button
-                                  disabled={!cardMenuPlanId}
-                                  onClick={() => {
-                                    if (!cardMenuPlanId) return
-                                    closeCardMenu()
-                                    openPlan(cardMenuPlanId)
-                                  }}
-                                  data-testid="card-menu-plan"
-                                >
-                                  Plan
-                                </button>
-                                {sessionVisible && (
-                                  <button onClick={() => handleViewSession(sessionForCard!)}>
-                                    View Session
-                                  </button>
-                                )}
-                                <button
-                                  onClick={() => {
-                                    closeCardMenu()
-                                    setEditingCard(card)
-                                  }}
-                                >
-                                  Edit
-                                </button>
-                                {card.worker_session_id && cardStep !== 'backlog' && (
-                                  <button onClick={() => handleStopWorker(card)}>
-                                    Stop Worker
-                                  </button>
-                                )}
-                                {!card.worker_session_id &&
-                                  cardStep !== 'backlog' &&
-                                  cardStep !== 'done' &&
-                                  cardStep !== 'wont_do' && (
-                                    <button onClick={() => handleRestartWorker(card)}>
-                                      Restart Worker
-                                    </button>
-                                  )}
-                                {card.step !== 'done' && card.step !== 'wont_do' && (
-                                  <button
-                                    className="danger"
-                                    onClick={() => handleCancelWontDo(card)}
-                                  >
-                                    Cancel as Won't Do
-                                  </button>
-                                )}
-                                <button
-                                  className="danger"
-                                  onClick={() => {
-                                    closeCardMenu()
-                                    setDeleteError(null)
-                                    setConfirmDeleteId(card.id)
-                                  }}
-                                >
-                                  Delete
-                                </button>
-                              </div>
+                                onClose={closeCardMenu}
+                                items={[
+                                  {
+                                    label: 'View',
+                                    onSelect: () => setSelectedCard(card),
+                                  },
+                                  {
+                                    label: 'Plan',
+                                    disabled: !cardMenuPlanId,
+                                    testId: 'card-menu-plan',
+                                    onSelect: () => {
+                                      if (cardMenuPlanId) openPlan(cardMenuPlanId)
+                                    },
+                                  },
+                                  {
+                                    label: 'View Session',
+                                    hidden: !sessionVisible,
+                                    onSelect: () => handleViewSession(sessionForCard!),
+                                  },
+                                  {
+                                    label: 'Edit',
+                                    onSelect: () => setEditingCard(card),
+                                  },
+                                  {
+                                    // The only step-change affordance that works
+                                    // on touch or from the keyboard.
+                                    label: 'Move to',
+                                    testId: 'card-menu-move',
+                                    submenu: moveTargetsFor(card).map((key) => ({
+                                      label: STEPS.find((s) => s.key === key)?.label ?? key,
+                                      active: cardStep === key,
+                                      disabled: cardStep === key,
+                                      hint: cardStep === key ? 'Current' : undefined,
+                                      testId: `card-menu-move-${key}`,
+                                      onSelect: () => moveCardToStep(card.id, key),
+                                    })),
+                                  },
+                                  {
+                                    label: 'Stop Worker',
+                                    hidden: !card.worker_session_id || cardStep === 'backlog',
+                                    onSelect: () => handleStopWorker(card),
+                                  },
+                                  {
+                                    label: 'Restart Worker',
+                                    hidden:
+                                      !!card.worker_session_id ||
+                                      cardStep === 'backlog' ||
+                                      cardStep === 'done' ||
+                                      cardStep === 'wont_do',
+                                    onSelect: () => handleRestartWorker(card),
+                                  },
+                                  {
+                                    label: "Cancel as Won't Do",
+                                    danger: true,
+                                    hidden: card.step === 'done' || card.step === 'wont_do',
+                                    onSelect: () => handleCancelWontDo(card),
+                                  },
+                                  {
+                                    label: 'Delete',
+                                    danger: true,
+                                    onSelect: () => {
+                                      setDeleteError(null)
+                                      setConfirmDeleteId(card.id)
+                                    },
+                                  },
+                                ]}
+                              />
                             )}
                           </div>
                         </div>

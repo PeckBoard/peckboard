@@ -530,37 +530,11 @@
   background: var(--surface2);
   color: var(--text);
 }
-/* Fixed-positioned so the dropdown escapes the per-row overflow box.
-   `top`/`right` are set inline from the trigger button's bounding rect. */
+/* The card menu is the shared `<Dropdown>` primitive (portalled, so it
+   escapes the per-row overflow box) — `.kanban-card-menu` is only a
+   scoping hook on top of `.dropdown-menu`, which carries the styling. */
 .kanban-card-menu {
-  position: fixed;
-  z-index: 100;
-  background: var(--surface);
-  border: 1px solid var(--border);
-  border-radius: var(--radius-md);
-  box-shadow: var(--shadow-md);
-  min-width: 140px;
-  overflow: hidden;
-}
-.kanban-card-menu button {
-  display: block;
-  width: 100%;
-  text-align: left;
-  padding: 8px 12px;
-  border: none;
-  background: transparent;
-  font-size: var(--text-sm);
-  color: var(--text);
-  cursor: pointer;
-}
-.kanban-card-menu button:hover {
-  background: var(--surface-hover);
-}
-.kanban-card-menu button.danger {
-  color: var(--danger);
-}
-.kanban-card-menu button.danger:hover {
-  background: var(--danger-bg);
+  min-width: 168px;
 }
 
 /* Priority badge — kept for the detail modal, where the full label

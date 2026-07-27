@@ -144,6 +144,46 @@ export default function Dropdown({
     }
   }, [onClose])
 
+  // Roving keyboard focus for the plain (non-searchable) menu. `role="menu"`
+  // promises arrow navigation; without it the only way through a popup is
+  // Tab, and a keyboard-only user can never reach a submenu. The searchable
+  // variant keeps its own input-driven highlight model (`onSearchKey`).
+  useEffect(() => {
+    if (searchable) return
+    ref.current?.querySelector<HTMLElement>('[role="menuitem"]:not(:disabled)')?.focus()
+  }, [searchable])
+
+  const onMenuKey = (e: React.KeyboardEvent) => {
+    // A submenu is portalled to <body> but still a React child of this
+    // menu, so its key events bubble here. Only handle keys while focus is
+    // actually inside our own list, or we'd yank focus back out of it.
+    const root = ref.current
+    if (searchable || !root || !root.contains(document.activeElement)) return
+    const els = Array.from(root.querySelectorAll<HTMLElement>('[role="menuitem"]:not(:disabled)'))
+    if (els.length === 0) return
+    const at = els.indexOf(document.activeElement as HTMLElement)
+    if (e.key === 'ArrowDown') {
+      e.preventDefault()
+      els[at < 0 ? 0 : (at + 1) % els.length].focus()
+    } else if (e.key === 'ArrowUp') {
+      e.preventDefault()
+      els[at <= 0 ? els.length - 1 : at - 1].focus()
+    } else if (e.key === 'Home') {
+      e.preventDefault()
+      els[0].focus()
+    } else if (e.key === 'End') {
+      e.preventDefault()
+      els[els.length - 1].focus()
+    } else if (e.key === 'ArrowRight') {
+      // Open a submenu row; the flyout focuses its own first item on mount.
+      const el = document.activeElement as HTMLElement | null
+      if (el?.classList.contains('dropdown-item-has-sub')) {
+        e.preventDefault()
+        el.click()
+      }
+    }
+  }
+
   const onSearchKey = (e: React.KeyboardEvent) => {
     if (e.key === 'ArrowDown') {
       e.preventDefault()
@@ -184,6 +224,7 @@ export default function Dropdown({
       ref={ref}
       className={`dropdown-menu${searchable ? ' model-picker-popup' : ''}${className ? ` ${className}` : ''}`}
       role="menu"
+      onKeyDown={onMenuKey}
       style={{
         position: 'fixed',
         left: pos.left,

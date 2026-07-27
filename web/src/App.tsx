@@ -340,7 +340,11 @@ function App() {
   // Anchor for the portaled user-menu dropdown when the rail is the
   // desktop left sidebar: captured from the avatar's rect at open time.
   // The top-bar (mobile) layout anchors purely in CSS (see mobile.css).
-  const userMenuAnchor = useRef<{ left: number; bottom: number } | null>(null)
+  // State, not a ref: the popup reads it during render, and reading a ref
+  // there is both a lint error and a stale-value hazard.
+  const [userMenuAnchor, setUserMenuAnchor] = useState<{ left: number; bottom: number } | null>(
+    null,
+  )
   const railIsTopbar = useMediaQuery('(max-width: 768px)')
 
   // Load the plugin UI-panel catalog once authenticated so each declared
@@ -1206,10 +1210,10 @@ function App() {
               className="rail-btn rail-avatar"
               onClick={(e) => {
                 const rect = e.currentTarget.getBoundingClientRect()
-                userMenuAnchor.current = {
+                setUserMenuAnchor({
                   left: rect.right + 8,
                   bottom: window.innerHeight - rect.top + 8,
-                }
+                })
                 setUserMenuOpen((open) => !open)
               }}
               title={user?.username}
@@ -1224,7 +1228,7 @@ function App() {
                 <div
                   className="user-menu-dropdown"
                   role="menu"
-                  style={railIsTopbar ? undefined : (userMenuAnchor.current ?? undefined)}
+                  style={railIsTopbar ? undefined : (userMenuAnchor ?? undefined)}
                 >
                   <div className="user-menu-header">
                     <div className="user-menu-name">{user?.username}</div>
