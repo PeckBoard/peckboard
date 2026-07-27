@@ -782,6 +782,17 @@ const ChatRow = memo(function ChatRow({
                 <span className="chat-report-chip-folder">{item.reportFolder}</span>
               </span>
             </button>
+          ) : item.detail ? (
+            // The event carried no human-readable text. Show a label, not the
+            // stringified payload — that stays one click away.
+            <details className="chat-unknown-event" data-testid="chat-system-detail">
+              <summary className="chat-unknown-summary">
+                <span className="chat-unknown-kind">{'ℹ️'}</span>
+                <span className="chat-unknown-label">{item.text}</span>
+                <span className="chat-agent-start-time">{formatTime(item.ts)}</span>
+              </summary>
+              <pre className="chat-unknown-json">{JSON.stringify(item.detail, null, 2)}</pre>
+            </details>
           ) : (
             <div className="chat-system-notice">
               <span className="chat-system-notice-icon">{'ℹ️'}</span>

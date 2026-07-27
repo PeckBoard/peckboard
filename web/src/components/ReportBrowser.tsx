@@ -49,6 +49,11 @@ export default function ReportBrowser({ onOpenReport }: ReportBrowserProps) {
 
   // Folders expanded by default once reports load; track which the user
   // has explicitly collapsed so a re-fetch doesn't undo their action.
+  // `folder/file` of the download in flight, and the last failure. A
+  // download is a fetch + synthetic <a> click, so nothing in the browser
+  // reports its progress or its failure on its own.
+  const [downloadingKey, setDownloadingKey] = useState<string | null>(null)
+  const [downloadError, setDownloadError] = useState<string | null>(null)
   const [collapsedFolders, setCollapsedFolders] = useState<Set<string>>(new Set())
 
   useEffect(() => {
@@ -98,17 +103,27 @@ export default function ReportBrowser({ onOpenReport }: ReportBrowserProps) {
   }
 
   const downloadReport = async (folder: string, file: string) => {
-    const res = await authedFetch(
-      `/api/reports/${encodeURIComponent(folder)}/${encodeURIComponent(file)}/download`,
-    )
-    if (!res.ok) return
-    const blob = await res.blob()
-    const url = URL.createObjectURL(blob)
-    const a = document.createElement('a')
-    a.href = url
-    a.download = file
-    a.click()
-    URL.revokeObjectURL(url)
+    const key = `${folder}/${file}`
+    if (downloadingKey) return
+    setDownloadingKey(key)
+    setDownloadError(null)
+    try {
+      const res = await authedFetch(
+        `/api/reports/${encodeURIComponent(folder)}/${encodeURIComponent(file)}/download`,
+      )
+      if (!res.ok) throw new Error(`HTTP ${res.status}`)
+      const blob = await res.blob()
+      const url = URL.createObjectURL(blob)
+      const a = document.createElement('a')
+      a.href = url
+      a.download = file
+      a.click()
+      URL.revokeObjectURL(url)
+    } catch {
+      setDownloadError(`Couldn't download ${file}. Please try again.`)
+    } finally {
+      setDownloadingKey(null)
+    }
   }
 
   // Group the visible (already filtered + sorted) reports by date folder.
@@ -206,6 +221,11 @@ export default function ReportBrowser({ onOpenReport }: ReportBrowserProps) {
         )}
         {error && <p className="form-error">{error}</p>}
 
+        {downloadError && (
+          <p className="form-error" role="alert" data-testid="report-download-error">
+            {downloadError}
+          </p>
+        )}
         {!loading && reports.length === 0 && !error && (
           <div className="list-view-empty">
             <p>No reports found</p>
@@ -240,8 +260,9 @@ export default function ReportBrowser({ onOpenReport }: ReportBrowserProps) {
                 bodyClassName="list-view-rows"
                 getMenuItems={(r) => [
                   {
-                    label: 'Download',
-                    onSelect: () => downloadReport(r.folder, r.file),
+                    label: downloadingKey === `${r.folder}/${r.file}` ? 'Downloading…' : 'Download',
+                    disabled: downloadingKey !== null,
+                    onSelect: () => void downloadReport(r.folder, r.file),
                   },
                 ]}
                 renderItem={(r) => (

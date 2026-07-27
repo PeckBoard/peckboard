@@ -129,6 +129,9 @@ export type DisplayItem =
   | {
       type: 'system'
       text: string
+      /** Raw event payload when the event carried no human-readable text —
+       *  rendered behind a <details> instead of inline. */
+      detail?: Record<string, unknown>
       /** Consecutive identical notices coalesced into one row (×N badge). */
       count?: number
       key: string
@@ -697,16 +700,42 @@ function foldEvent(st: FoldState, ev: Event): void {
     }
     case 'system': {
       flushAssistant(st)
-      const text =
-        (ev.data.text as string) ?? (ev.data.message as string) ?? JSON.stringify(ev.data)
+      const rawText =
+        typeof ev.data.text === 'string'
+          ? ev.data.text
+          : typeof ev.data.message === 'string'
+            ? ev.data.message
+            : undefined
+      // A plugin provider (or a future backend kind) can emit a `system`
+      // event carrying neither field. Stringifying the payload dumps a raw
+      // object blob into the feed next to an ℹ️ icon; label the row instead
+      // and park the payload behind the same <details> treatment the
+      // unrecognized-event row uses.
+      const text = rawText ?? 'System notice'
+      const detail = rawText === undefined ? ev.data : undefined
       const reportFolder = ev.data.reportFolder as string | undefined
       const reportFile = ev.data.reportFile as string | undefined
       const last = items[items.length - 1]
-      if (last?.type === 'system' && last.text === text && !last.reportFolder && !reportFolder) {
+      if (
+        last?.type === 'system' &&
+        last.text === text &&
+        !last.detail &&
+        !detail &&
+        !last.reportFolder &&
+        !reportFolder
+      ) {
         // Coalesce runs of identical notices — N heartbeats become one row.
         items[items.length - 1] = { ...last, count: (last.count ?? 1) + 1, ts: ev.ts }
       } else {
-        items.push({ type: 'system', text, key: ev.id, reportFolder, reportFile, ts: ev.ts })
+        items.push({
+          type: 'system',
+          text,
+          detail,
+          key: ev.id,
+          reportFolder,
+          reportFile,
+          ts: ev.ts,
+        })
       }
       break
     }

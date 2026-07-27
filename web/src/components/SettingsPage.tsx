@@ -18,6 +18,7 @@ import ApprovedCommandsSection from './ApprovedCommandsSection'
 import SoftwareUpdate from './SoftwareUpdate'
 import PluginSettingsForm from './PluginSettingsForm'
 import SystemPromptsSection from './SystemPromptsSection'
+import ModelPicker from './ModelPicker'
 import OllamaPullModel from './OllamaPullModel'
 import PluginsSection from './PluginsSection'
 import PluginSettingsSection from './PluginSettingsSection'
@@ -157,7 +158,6 @@ export default function SettingsPage({ onBack, initialSubPage = null }: Props) {
   const [confirmBypass, setConfirmBypass] = useState(false)
   const [preHatchModel, setPreHatchModel] = useState<string>('')
   const models = useResourcesStore((s) => s.models)
-  const providers = useResourcesStore((s) => s.providers)
   const fetchModels = useResourcesStore((s) => s.fetchModels)
   const [providerVisibility, setProviderVisibility] = useState<ProviderInfo[]>([])
   const [backupStatus, setBackupStatus] = useState<BackupStatus | null>(null)
@@ -485,33 +485,16 @@ export default function SettingsPage({ onBack, initialSubPage = null }: Props) {
               model. Auto uses the session provider&apos;s cheapest priced model. Applies from the
               next message.
             </p>
-            <select
-              aria-label="Pre-hatcher model"
-              className="form-input"
+            <ModelPicker
               value={preHatchModel}
-              onChange={(e) => changePreHatchModel(e.target.value)}
-              data-testid="prehatch-model-select"
-            >
-              <option value="">Auto — provider&apos;s cheapest model</option>
-              {preHatchModel !== '' && !models.some((m) => m.id === preHatchModel) && (
-                <option value={preHatchModel}>{preHatchModel}</option>
-              )}
-              {providers.length > 0
-                ? providers.map((p) => (
-                    <optgroup key={p.id} label={p.display_name}>
-                      {p.models.map((m) => (
-                        <option key={m.id} value={m.id}>
-                          {m.display_name}
-                        </option>
-                      ))}
-                    </optgroup>
-                  ))
-                : models.map((m) => (
-                    <option key={m.id} value={m.id}>
-                      {m.display_name}
-                    </option>
-                  ))}
-            </select>
+              onChange={changePreHatchModel}
+              models={models}
+              defaultLabel="Auto — provider's cheapest model"
+              ariaLabel="Pre-hatcher model"
+              testId="prehatch-model"
+              emptyHint="Loading models…"
+              onOpen={fetchModels}
+            />
             {saveError?.scope === 'prehatch' && (
               <p className="form-error" role="alert" data-testid="settings-error-prehatch">
                 {saveError.message}

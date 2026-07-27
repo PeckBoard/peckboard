@@ -25,6 +25,9 @@ use crate::provider::stream::{CrashKind, ModelInfo, ProviderEvent, ToolImage};
 ///   ToolStart/ToolEnd → Usage(token rollup) → Completed. Drives the usage
 ///   dashboard (entity rollups, file_update + ask_expert cost breakdowns,
 ///   token/cost trends) deterministically.
+/// * `tool-error` — Started → ToolStart/ToolEnd(error) → Completed
+/// * `system-blob` — Started → raw `system` event with no `text`/`message` →
+///   Completed
 /// * `crash` — Started → Text → Crashed
 /// * `ask` — Started → ControlRequest, waits for stdin → Text(reply) → Completed
 /// * `todo` — Started → ToolStart/ToolEnd(TodoWrite) → Todo(snapshot) → Completed
@@ -546,6 +549,70 @@ async fn run_scenario(
                 },
             )
             .await;
+        }
+        "tool-error" => {
+            // A tool that fails. Drives the chat's errored-tool rendering: the
+            // card must open itself, so a long autonomous run doesn't leave the
+            // user expanding every collapsed row to find what broke.
+            let tool_id = format!("tool-{}", uuid::Uuid::new_v4());
+            emit_event(
+                db,
+                broadcaster,
+                session_id,
+                ProviderEvent::ToolStart {
+                    tool_use_id: tool_id.clone(),
+                    name: "run_command".into(),
+                    input: serde_json::json!({
+                        "command": "nope",
+                        "reason": "check the thing",
+                    }),
+                },
+            )
+            .await;
+            tick().await;
+            emit_event(
+                db,
+                broadcaster,
+                session_id,
+                ProviderEvent::ToolEnd {
+                    tool_use_id: tool_id,
+                    output: None,
+                    error: Some("command not found: nope".into()),
+                    images: Vec::new(),
+                },
+            )
+            .await;
+        }
+        "system-blob" => {
+            // A `system` event whose payload carries neither `text` nor
+            // `message` — what a plugin provider or a future backend kind can
+            // emit. The chat must show a label with the payload behind a
+            // <details>, not a raw object blob in the feed. Appended directly
+            // because `ProviderEvent::System` always carries text.
+            if let Ok(db_event) = db
+                .append_event(
+                    session_id,
+                    "system",
+                    serde_json::json!({
+                        "code": 42,
+                        "payload": { "reason": "mock system blob" },
+                    }),
+                )
+                .await
+            {
+                broadcaster.broadcast(crate::ws::broadcaster::WsEvent {
+                    event_type: "event".into(),
+                    session_id: session_id.to_string(),
+                    data: serde_json::json!({
+                        "id": db_event.id,
+                        "seq": db_event.seq,
+                        "ts": db_event.ts,
+                        "kind": db_event.kind,
+                        "data": serde_json::from_str::<serde_json::Value>(&db_event.data)
+                            .unwrap_or_default(),
+                    }),
+                });
+            }
         }
         "screenshot" => {
             // A tool call that returns an image, like the Playwright MCP's
@@ -1192,6 +1259,18 @@ pub fn mock_model_infos() -> Vec<ModelInfo> {
             display_name: "Mock: tool start without end then crash".into(),
             capabilities: vec!["mock".into(), "tools".into()],
             tier: 2,
+        },
+        ModelInfo {
+            id: "tool-error".into(),
+            display_name: "Mock: tool error".into(),
+            capabilities: vec!["mock".into(), "tools".into()],
+            tier: 2,
+        },
+        ModelInfo {
+            id: "system-blob".into(),
+            display_name: "Mock: system notice without text".into(),
+            capabilities: vec!["mock".into()],
+            tier: 1,
         },
         ModelInfo {
             id: "ask".into(),

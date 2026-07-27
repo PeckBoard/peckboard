@@ -327,6 +327,9 @@ function App() {
   const [uiPanels, setUiPanels] = useState<UiPanel[]>([])
   // Plugin-contributed left-rail entries (generic; same /api/plugins catalog).
   const [sidebarItems, setSidebarItems] = useState<SidebarItem[]>([])
+  // False until /api/plugins answers. A deep link to a plugin page must not
+  // flash "no longer available" while the catalog is still in flight.
+  const [pluginsLoaded, setPluginsLoaded] = useState(false)
   // `plugin:itemId` composite of the open plugin full page (rail entries
   // below Sessions). Lazily seeded from the URL so a bookmarked
   // /plugin-page/<plugin>/<item> reload lands back on the page.
@@ -377,6 +380,7 @@ function App() {
           setSidebarItems(data.sidebar_items ?? [])
           setProjectItems(data.project_items ?? [])
           setSessionItems(data.session_items ?? [])
+          setPluginsLoaded(true)
         },
       )
       .catch(() => {
@@ -385,6 +389,7 @@ function App() {
           setSidebarItems([])
           setProjectItems([])
           setSessionItems([])
+          setPluginsLoaded(true)
         }
       })
     return () => {
@@ -1495,8 +1500,30 @@ function App() {
                     scope={{}}
                     onBack={() => navigate('sessions', null)}
                   />
+                ) : pluginsLoaded ? (
+                  // The plugin was uninstalled (or its page id changed) while
+                  // a tab/bookmark still pointed at it. Say so and offer a way
+                  // out instead of rendering an unexplained blank pane.
+                  <div className="list-view">
+                    <div className="list-view-empty" data-testid="plugin-page-missing">
+                      <p>That page is no longer available.</p>
+                      <p>The plugin that provided it was removed or renamed.</p>
+                      <button
+                        type="button"
+                        className="list-view-empty-action"
+                        data-testid="plugin-page-missing-back"
+                        onClick={() => navigate('sessions', null)}
+                      >
+                        Go to Sessions
+                      </button>
+                    </div>
+                  </div>
                 ) : (
-                  <div className="list-view" />
+                  <div className="list-view">
+                    <div className="chat-loading">
+                      <div className="loading-spinner" />
+                    </div>
+                  </div>
                 )
               })()}
             {view === 'folders' && <FoldersPage />}

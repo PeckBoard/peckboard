@@ -480,6 +480,7 @@ export default function InputBar({
           disabled={uploading || sending || !!attachDisabledReason}
           type="button"
           title={attachDisabledReason ?? 'Attach files'}
+          aria-label="Attach files"
         >
           <svg
             width="18"
@@ -563,10 +564,20 @@ export default function InputBar({
           </button>
         </div>
       )}
-      {attachments.length > 0 && (
+      {/* The uploading chip lives OUTSIDE the attachments guard: the first
+          attachment has no chip to sit next to yet, and without this the only
+          feedback for a multi-second upload is the attach button greying out
+          — so users re-click, thinking nothing happened. */}
+      {(uploading || attachments.length > 0) && (
         <div className="attachment-chips">
           {uploading && (
-            <span className="attachment-chip attachment-chip-uploading">Uploading...</span>
+            <span
+              className="attachment-chip attachment-chip-uploading"
+              data-testid="uploading-chip"
+              role="status"
+            >
+              Uploading...
+            </span>
           )}
           {attachments.map((a) => (
             <span key={a.id} className="attachment-chip">
@@ -576,6 +587,7 @@ export default function InputBar({
                 className="attachment-chip-remove"
                 onClick={() => removeAttachment(a.id)}
                 type="button"
+                aria-label={`Remove ${a.name}`}
               >
                 &times;
               </button>

@@ -478,7 +478,13 @@ export default function ToolUseBlock({
   endTs,
   diff,
 }: ToolUseBlockProps) {
-  const [expanded, setExpanded] = useState(false)
+  // The user's explicit toggle; null means "follow the default". A tool that
+  // errored defaults to open: during a long autonomous run the feed is a wall
+  // of collapsed cards, and the failure is invisible until each one is
+  // expanded. Derived rather than an effect, so the error arriving on the
+  // tool-end event flips the card open without a second render pass.
+  const [userExpanded, setUserExpanded] = useState<boolean | null>(null)
+  const expanded = userExpanded ?? !!error
   // Index of the image currently shown full-size in the lightbox, or null.
   const [lightboxIdx, setLightboxIdx] = useState<number | null>(null)
   const elapsedSec = useElapsedSeconds(startTs, !!isRunning)
@@ -525,7 +531,7 @@ export default function ToolUseBlock({
       <button
         className="tool-header"
         aria-expanded={hasDetails ? expanded : undefined}
-        onClick={() => hasDetails && setExpanded((v) => !v)}
+        onClick={() => hasDetails && setUserExpanded(!expanded)}
       >
         <span
           className={`tool-chevron ${expanded ? 'open' : ''} ${hasDetails ? '' : 'tool-chevron-leaf'}`}

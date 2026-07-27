@@ -82,12 +82,16 @@ test('toggling a provider off hides its section and models; toggle on restores; 
   expect(modelsHidden.providers.find((p) => p.id === 'ollama')).toBeUndefined()
   expect(modelsHidden.models.some((m) => m.id.startsWith('ollama:'))).toBe(false)
 
-  // Pre-hatcher dropdown on Chat sub-page: no Ollama optgroup.
+  // Pre-hatcher picker on the Chat sub-page: no Ollama model in the
+  // catalogue. It is the searchable ModelPicker (a flat list, no optgroups),
+  // so the check is on the option ids.
   await settingsPage.getByRole('button', { name: 'Back' }).click()
   await settingsPage.getByTestId('settings-nav-chat').click()
-  const preHatchSelect = settingsPage.getByTestId('prehatch-model-select')
-  await expect(preHatchSelect).toBeVisible()
-  await expect(preHatchSelect.locator('optgroup[label="Ollama"]')).toHaveCount(0)
+  const preHatchPicker = settingsPage.getByTestId('prehatch-model')
+  await expect(preHatchPicker).toBeVisible()
+  await preHatchPicker.click()
+  await expect(page.locator('[data-testid^="prehatch-model-option-ollama:"]')).toHaveCount(0)
+  await page.keyboard.press('Escape')
 
   // --- Toggle back ON ---
   await settingsPage.getByRole('button', { name: 'Back' }).click()
@@ -100,12 +104,15 @@ test('toggling a provider off hides its section and models; toggle on restores; 
   // /api/models should include ollama again.
   const modelsRestored = await fetchModels(request, authHeader)
   expect(modelsRestored.providers.find((p) => p.id === 'ollama')).toBeTruthy()
-
-  // Pre-hatcher dropdown: Ollama optgroup restored.
+  // Pre-hatcher picker still renders the live catalogue. Ollama exposes no
+  // models without a local ollama daemon, so its restoration isn't visible
+  // in a flat model list — the /api/models assertion above is what pins it.
   await settingsPage.getByRole('button', { name: 'Back' }).click()
   await settingsPage.getByTestId('settings-nav-chat').click()
-  await expect(preHatchSelect).toBeVisible()
-  await expect(preHatchSelect.locator('optgroup[label="Ollama"]')).toHaveCount(1)
+  await expect(settingsPage.getByTestId('prehatch-model')).toBeVisible()
+  await settingsPage.getByTestId('prehatch-model').click()
+  await expect(page.getByRole('option', { name: 'Mock: happy path' })).toBeVisible()
+  await page.keyboard.press('Escape')
 
   // --- Persist across reload ---
   await settingsPage.getByRole('button', { name: 'Back' }).click()
