@@ -1,6 +1,7 @@
-import { useState, type FormEvent } from 'react'
+import { useRef, useState, type FormEvent } from 'react'
 import { useClaudeAccountsStore } from '../store/claudeAccounts'
 import type { ClaudeAccount, ClaudeAccountKind } from '../types/api'
+import ConfirmDialog from './ConfirmDialog'
 import Modal from './Modal'
 
 interface Props {
@@ -55,6 +56,8 @@ export default function ClaudeAccountModal({ account, onClose }: Props) {
   const [loginState, setLoginState] = useState('')
   const [loginCode, setLoginCode] = useState('')
   const [startingLogin, setStartingLogin] = useState(false)
+  const [confirmDiscard, setConfirmDiscard] = useState(false)
+  const loginCodeRef = useRef<HTMLInputElement>(null)
   const [windowHours, setWindowHours] = useState<number | null>(
     account?.budget_window_hours ?? null,
   )
@@ -75,6 +78,16 @@ export default function ClaudeAccountModal({ account, onClose }: Props) {
   // A finished browser login is ready to submit once a code has been pasted
   // against a generated PKCE pair.
   const hasLogin = Boolean(loginCode.trim() && loginVerifier && loginState)
+  // The PKCE verifier lives only in this component's state, so dismissing the
+  // modal after a login URL was generated throws the sign-in away — the user
+  // comes back from the browser with a code and nothing to paste it into.
+  const loginPending = kind === 'oauth_token' && Boolean(loginUrl)
+
+  /** Escape / backdrop dismissal: confirm first when a sign-in is in flight. */
+  const requestClose = () => {
+    if (loginPending) setConfirmDiscard(true)
+    else onClose()
+  }
 
   /** Switch credential type, discarding any in-progress login/paste so the
    *  two paths never bleed into each other. */
@@ -162,7 +175,12 @@ export default function ClaudeAccountModal({ account, onClose }: Props) {
   }
 
   return (
-    <Modal onClose={onClose} data-testid="claude-account-modal">
+    <Modal
+      onClose={requestClose}
+      closeOnEscape={!confirmDiscard}
+      closeOnBackdropClick={!confirmDiscard}
+      data-testid="claude-account-modal"
+    >
       <h2>{editing ? `Edit ${account.name}` : 'Add Claude Account'}</h2>
       <form onSubmit={handleSubmit}>
         <div className="form-field">
@@ -251,7 +269,10 @@ export default function ClaudeAccountModal({ account, onClose }: Props) {
                 <span className="form-hint">
                   Sign in, then paste the code Claude shows you back here.
                 </span>
+                {/* Autofocused: the user is coming back from the browser with
+                    a code on the clipboard — put the caret where they paste it. */}
                 <input
+                  ref={loginCodeRef}
                   id="acct-login-code"
                   className="form-input"
                   type="text"
@@ -259,6 +280,7 @@ export default function ClaudeAccountModal({ account, onClose }: Props) {
                   onChange={(e) => setLoginCode(e.target.value)}
                   placeholder="Paste code here"
                   autoComplete="off"
+                  autoFocus
                   data-testid="acct-login-code"
                 />
               </>
@@ -370,6 +392,22 @@ export default function ClaudeAccountModal({ account, onClose }: Props) {
           </button>
         </div>
       </form>
+      {confirmDiscard && (
+        <ConfirmDialog
+          title="Discard this sign-in?"
+          message="You will need to start over."
+          confirmLabel="Discard"
+          cancelLabel="Keep signing in"
+          danger
+          testId="acct-discard-login-confirm"
+          onConfirm={onClose}
+          onCancel={() => {
+            setConfirmDiscard(false)
+            // Put the caret back on the paste target the confirm stole it from.
+            requestAnimationFrame(() => loginCodeRef.current?.focus())
+          }}
+        />
+      )}
     </Modal>
   )
 }

@@ -174,3 +174,116 @@ test('browser login flow: generate URL, paste code, forward the PKCE login', asy
   await page.unroute('**/api/claude-accounts')
   expect(await accountModelLabels(request, token)).not.toContain('[E2E Sub] Claude Opus 4.8')
 })
+
+test('dismissing mid-login is guarded: Escape confirms, cancelling keeps the pasted code', async ({
+  request,
+  page,
+}) => {
+  const token = await authenticate(request)
+  await loadApp(page, token)
+
+  await page.route('**/api/claude-accounts/login/start', async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify({
+        url: 'https://claude.com/cai/oauth/authorize?code=true&state=STATE456',
+        verifier: 'VERIFIER456',
+        state: 'STATE456',
+      }),
+    })
+  })
+
+  let createdBody: { login?: unknown } | null = null
+  await page.route('**/api/claude-accounts', async (route) => {
+    if (route.request().method() === 'POST') {
+      createdBody = route.request().postDataJSON()
+      await route.fulfill({ status: 201, contentType: 'application/json', body: '{}' })
+    } else {
+      await route.continue()
+    }
+  })
+
+  const settings = await openSettings(page)
+  await settings.getByTestId('claude-accounts-section').getByTestId('acct-add').click()
+  const modal = page.getByTestId('claude-account-modal')
+  await expect(modal).toBeVisible()
+  await modal.getByTestId('acct-name').fill('E2E Guard')
+
+  // Before a login URL exists there is nothing to lose — Escape just closes.
+  await page.keyboard.press('Escape')
+  await expect(modal).toBeHidden()
+
+  await settings.getByTestId('claude-accounts-section').getByTestId('acct-add').click()
+  await expect(modal).toBeVisible()
+  await modal.getByTestId('acct-name').fill('E2E Guard')
+  await modal.getByTestId('acct-login-start').click()
+  await expect(modal.getByTestId('acct-login-url')).toBeVisible()
+
+  // The code field takes focus so the round-trip paste lands in it.
+  await expect(modal.getByTestId('acct-login-code')).toBeFocused()
+
+  // Escape now routes through the discard confirm instead of nuking the PKCE
+  // verifier that only lives in the modal's state.
+  await page.keyboard.press('Escape')
+  const confirm = page.getByTestId('acct-discard-login-confirm')
+  await expect(confirm).toBeVisible()
+  await expect(confirm).toContainText('Discard this sign-in?')
+  await expect(modal).toBeVisible()
+
+  // Cancelling keeps the modal, and the login still works end to end.
+  await confirm.getByTestId('confirm-dialog-cancel').click()
+  await expect(confirm).toBeHidden()
+  await expect(modal).toBeVisible()
+
+  // A backdrop click is guarded the same way — discard this time.
+  await modal.getByTestId('acct-login-code').fill('AUTHCODE#STATE456')
+  await page
+    .locator('.modal-backdrop')
+    .first()
+    .click({ position: { x: 5, y: 5 } })
+  await expect(page.getByTestId('acct-discard-login-confirm')).toBeVisible()
+  await page.getByTestId('acct-discard-login-confirm').getByTestId('confirm-dialog-cancel').click()
+
+  // Still the same PKCE pair after two near-misses: the save forwards it.
+  await modal.getByTestId('acct-save').click()
+  await expect(modal).toBeHidden()
+  expect(createdBody).not.toBeNull()
+  expect(createdBody!.login).toEqual({
+    code: 'AUTHCODE#STATE456',
+    verifier: 'VERIFIER456',
+    state: 'STATE456',
+  })
+
+  await page.unroute('**/api/claude-accounts')
+})
+
+test('discarding a guarded sign-in closes the modal', async ({ request, page }) => {
+  const token = await authenticate(request)
+  await loadApp(page, token)
+
+  await page.route('**/api/claude-accounts/login/start', async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify({
+        url: 'https://claude.com/cai/oauth/authorize?code=true&state=STATE789',
+        verifier: 'VERIFIER789',
+        state: 'STATE789',
+      }),
+    })
+  })
+
+  const settings = await openSettings(page)
+  await settings.getByTestId('claude-accounts-section').getByTestId('acct-add').click()
+  const modal = page.getByTestId('claude-account-modal')
+  await modal.getByTestId('acct-name').fill('E2E Discard')
+  await modal.getByTestId('acct-login-start').click()
+  await expect(modal.getByTestId('acct-login-url')).toBeVisible()
+
+  await page.keyboard.press('Escape')
+  const confirm = page.getByTestId('acct-discard-login-confirm')
+  await expect(confirm).toBeVisible()
+  await confirm.getByTestId('confirm-dialog-confirm').click()
+  await expect(modal).toBeHidden()
+})
