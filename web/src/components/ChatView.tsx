@@ -732,6 +732,9 @@ const ChatRow = memo(function ChatRow({
             <div className="chat-system-notice">
               <span className="chat-system-notice-icon">{'ℹ️'}</span>
               <span>{item.text}</span>
+              {(item.count ?? 1) > 1 && (
+                <span className="chat-system-notice-count">×{item.count}</span>
+              )}
             </div>
           )}
         </div>

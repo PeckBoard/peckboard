@@ -83,17 +83,22 @@ test('run_command rows show the command line and the reason', async ({
   const toolBlock = page.locator('.tool-block').first()
   await expect(toolBlock).toBeVisible({ timeout: 10_000 })
 
-  // Primary text is the real command line, not the tool name.
-  await expect(toolBlock.locator('.tool-cmd')).toHaveText('cargo build --release')
-  await expect(toolBlock.locator('.tool-reason')).toHaveText(
+  // Reason-first: the model's why is the primary text; the raw command
+  // follows, dimmed — and never the tool name.
+  await expect(toolBlock.locator('.tool-reason-primary')).toHaveText(
     'Build the release binary to verify the change compiles.',
   )
+  await expect(toolBlock.locator('.tool-cmd')).toHaveText('cargo build --release')
   await expect(toolBlock).not.toContainText('run_command')
   await expect(toolBlock).not.toContainText('run command')
   await expect(toolBlock).not.toContainText('mcp__')
-
-  // Expand the row so the screenshot also shows the input details.
+  // Expanding reveals the full command with a Copy button (via ClampedPre).
   await toolBlock.locator('.tool-header').click()
+  const cmdSection = toolBlock.locator('.tool-section', {
+    has: page.locator('.tool-section-label', { hasText: /^Command$/ }),
+  })
+  await expect(cmdSection).toContainText('cargo build --release')
+  await expect(cmdSection.getByRole('button', { name: 'Copy' })).toBeVisible()
   await page.screenshot({ path: 'test-results/tool-command-display.png', fullPage: true })
 })
 
@@ -121,7 +126,9 @@ test('native shell (Bash) rows show the command line and the description', async
   const toolBlock = page.locator('.tool-block').first()
   await expect(toolBlock).toBeVisible({ timeout: 10_000 })
 
+  await expect(toolBlock.locator('.tool-reason-primary')).toHaveText(
+    'Say hello to prove the shell works.',
+  )
   await expect(toolBlock.locator('.tool-cmd')).toHaveText('echo hello')
-  await expect(toolBlock.locator('.tool-reason')).toHaveText('Say hello to prove the shell works.')
   await expect(toolBlock).not.toContainText('Terminal')
 })

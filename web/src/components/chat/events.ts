@@ -129,6 +129,8 @@ export type DisplayItem =
   | {
       type: 'system'
       text: string
+      /** Consecutive identical notices coalesced into one row (×N badge). */
+      count?: number
       key: string
       reportFolder?: string
       reportFile?: string
@@ -687,7 +689,13 @@ function foldEvent(st: FoldState, ev: Event): void {
         (ev.data.text as string) ?? (ev.data.message as string) ?? JSON.stringify(ev.data)
       const reportFolder = ev.data.reportFolder as string | undefined
       const reportFile = ev.data.reportFile as string | undefined
-      items.push({ type: 'system', text, key: ev.id, reportFolder, reportFile, ts: ev.ts })
+      const last = items[items.length - 1]
+      if (last?.type === 'system' && last.text === text && !last.reportFolder && !reportFolder) {
+        // Coalesce runs of identical notices — N heartbeats become one row.
+        items[items.length - 1] = { ...last, count: (last.count ?? 1) + 1, ts: ev.ts }
+      } else {
+        items.push({ type: 'system', text, key: ev.id, reportFolder, reportFile, ts: ev.ts })
+      }
       break
     }
     case 'step-change': {

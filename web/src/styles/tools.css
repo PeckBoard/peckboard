@@ -50,8 +50,9 @@
   white-space: nowrap;
   min-width: 0;
 }
-/* Exec-like tools (run_command, git, run_tests, native shells): the real
-   command line is the row's primary text, the model's why-sentence follows. */
+/* Exec-like tools (run_command, git, run_tests, native shells): when the
+   model supplied a reason it is the row's primary text and the command
+   line follows, middle-ellipsized; reasonless rows lead with the command. */
 .tool-cmd {
   font-family: var(--font-mono);
   font-weight: 600;
@@ -60,16 +61,21 @@
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  flex-shrink: 0;
-  max-width: 75%;
+  min-width: 0;
 }
-.tool-reason {
+.tool-cmd-secondary {
+  font-weight: 400;
   color: var(--text3);
-  font-size: var(--text-xs);
+  flex-shrink: 1;
+}
+.tool-reason-primary {
+  font-weight: 600;
+  color: inherit;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  min-width: 0;
+  flex-shrink: 0;
+  max-width: 60%;
 }
 
 .tool-chevron {

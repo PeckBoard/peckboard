@@ -108,6 +108,15 @@ function formatDuration(ms: number): string {
   return `${Math.floor(s / 60)}m ${s % 60}s`
 }
 
+/** Middle-ellipsize long command lines: keeps the program at the head and
+ *  the decisive trailing args (tag names, paths) at the tail. */
+function middleEllipsis(s: string, max: number): string {
+  if (s.length <= max) return s
+  const head = Math.ceil((max - 1) * 0.6)
+  const tail = max - 1 - head
+  return s.slice(0, head) + '…' + s.slice(s.length - tail)
+}
+
 /** Seconds since `startTs`, ticking once a second while the tool runs. */
 function useElapsedSeconds(startTs: number | undefined, running: boolean): number | null {
   const [now, setNow] = useState(() => Date.now())
@@ -525,12 +534,22 @@ export default function ToolUseBlock({
           &#9654;
         </span>
         {commandLine ? (
-          <>
+          reason ? (
+            // Reason-first: the why is the scannable text; the raw command
+            // is secondary and middle-ellipsized so it can't set row width.
+            <>
+              <span className="tool-reason-primary" title={reason}>
+                {reason}
+              </span>
+              <span className="tool-cmd tool-cmd-secondary" title={commandLine}>
+                {middleEllipsis(commandLine, 72)}
+              </span>
+            </>
+          ) : (
             <span className="tool-cmd" title={commandLine}>
-              {commandLine.length > 120 ? commandLine.slice(0, 117) + '...' : commandLine}
+              {middleEllipsis(commandLine, 110)}
             </span>
-            {reason && <span className="tool-reason">{reason}</span>}
-          </>
+          )
         ) : (
           <>
             <span className="tool-label">{label}</span>
@@ -591,6 +610,13 @@ export default function ToolUseBlock({
       {diff && <DiffBlock diff={diff} />}
       {expanded && (
         <div className="tool-body">
+          {commandLine && (
+            <div className="tool-section">
+              <div className="tool-section-label">Command</div>
+              {/* ClampedPre brings its own Copy button. */}
+              <ClampedPre text={commandLine} />
+            </div>
+          )}
           {input && Object.keys(input).length > 0 && (
             <InputSections toolName={toolName} input={input} />
           )}

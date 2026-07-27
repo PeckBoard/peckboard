@@ -605,10 +605,11 @@ fn system_notice_text(subtype: &str, json: &serde_json::Value) -> Option<String>
                 .and_then(|v| v.as_str())
                 .map(str::trim)
                 .filter(|s| !s.is_empty());
-            Some(match detail {
-                Some(d) => format!("Claude CLI [{subtype}]: {d}"),
-                None => format!("Claude CLI: {subtype}"),
-            })
+            // Only surface frames that carry a human-readable message
+            // (e.g. rate-limit notices). Bare heartbeat frames (`status`,
+            // `thinking_tokens`, …) are harness chatter — a chat row that
+            // just says "Claude CLI: status" is noise, so drop them.
+            detail.map(|d| format!("Claude CLI [{subtype}]: {d}"))
         }
     }
 }
@@ -1148,6 +1149,17 @@ mod tests {
         ));
     }
 
+    #[test]
+    fn bare_heartbeat_system_frames_are_dropped() {
+        for subtype in ["status", "thinking_tokens"] {
+            let json = serde_json::json!({ "type": "system", "subtype": subtype });
+            let mut state = started_state();
+            assert!(
+                parse_stream_json(&json, &mut state).is_empty(),
+                "bare `{subtype}` frame must not emit a notice"
+            );
+        }
+    }
     #[test]
     fn system_init_emits_no_notice() {
         let json = serde_json::json!({
