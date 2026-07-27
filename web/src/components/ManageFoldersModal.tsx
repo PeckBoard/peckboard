@@ -3,6 +3,7 @@ import { useFoldersStore } from '../store/folders'
 import { authedFetch } from '../store/auth'
 import type { Folder } from '../types/api'
 import Modal from './Modal'
+import ConfirmDialog from './ConfirmDialog'
 
 export default function FoldersPage() {
   const folders = useFoldersStore((s) => s.folders)
@@ -18,6 +19,12 @@ export default function FoldersPage() {
   const [deleteSessionCount, setDeleteSessionCount] = useState<number | null>(null)
   const [moveTargetId, setMoveTargetId] = useState('')
   const [deleting, setDeleting] = useState(false)
+  // Confirm gate in front of the DELETE. A folder with sessions still gets
+  // the choice modal below (the 409 path); an empty one no longer vanishes
+  // on a single click.
+  const [confirmFolder, setConfirmFolder] = useState<Folder | null>(null)
+  const [confirmError, setConfirmError] = useState<string | null>(null)
+  const [confirmBusy, setConfirmBusy] = useState(false)
 
   useEffect(() => {
     fetchFolders()
@@ -39,24 +46,34 @@ export default function FoldersPage() {
     }
   }
 
-  const handleDeleteClick = async (folder: Folder) => {
+  const performDelete = async (folder: Folder) => {
     setError('')
-    // Try to delete — if 409, it has sessions
-    const res = await authedFetch(`/api/folders/${folder.id}`, { method: 'DELETE' })
-    if (res.ok) {
-      fetchFolders()
-      return
-    }
-    if (res.status === 409) {
-      const data = await res.json()
-      setDeleteTarget(folder)
-      setDeleteSessionCount(data.session_count ?? 0)
-      // Pre-select a different folder for move target
-      const other = folders.find((f) => f.id !== folder.id)
-      setMoveTargetId(other?.id ?? '')
-    } else {
+    setConfirmError(null)
+    setConfirmBusy(true)
+    try {
+      // Try to delete — if 409, it has sessions and the choice modal takes over
+      const res = await authedFetch(`/api/folders/${folder.id}`, { method: 'DELETE' })
+      if (res.ok) {
+        setConfirmFolder(null)
+        fetchFolders()
+        return
+      }
+      if (res.status === 409) {
+        const data = await res.json()
+        setConfirmFolder(null)
+        setDeleteTarget(folder)
+        setDeleteSessionCount(data.session_count ?? 0)
+        // Pre-select a different folder for move target
+        const other = folders.find((f) => f.id !== folder.id)
+        setMoveTargetId(other?.id ?? '')
+        return
+      }
       const data = await res.json().catch(() => ({ error: 'Failed to delete' }))
-      setError(data.error || 'Failed to delete folder')
+      setConfirmError(data.error || 'Failed to delete folder')
+    } catch {
+      setConfirmError('Failed to delete folder')
+    } finally {
+      setConfirmBusy(false)
     }
   }
 
@@ -111,7 +128,16 @@ export default function FoldersPage() {
                 <strong>{f.name}</strong>
                 <span className="folder-path">{f.path}</span>
               </div>
-              <button className="folder-delete" onClick={() => handleDeleteClick(f)} title="Delete">
+              <button
+                className="folder-delete"
+                onClick={() => {
+                  setConfirmError(null)
+                  setConfirmFolder(f)
+                }}
+                title="Delete folder"
+                aria-label={`Delete folder ${f.name}`}
+                data-testid={`folder-delete-${f.name}`}
+              >
                 &times;
               </button>
             </div>
@@ -165,6 +191,24 @@ export default function FoldersPage() {
       </section>
 
       {/* Delete folder dialog — shown when folder has sessions */}
+      {confirmFolder && (
+        <ConfirmDialog
+          testId="folder-delete-confirm"
+          danger
+          title={`Delete folder "${confirmFolder.name}"?`}
+          message={`"${confirmFolder.name}" (${confirmFolder.path}) is unregistered from PeckBoard, together with its repeating tasks and folder-scoped variables. The directory on disk is left alone. If the folder still holds sessions, you choose what happens to them next.`}
+          confirmLabel="Delete folder"
+          error={confirmError}
+          busy={confirmBusy}
+          busyLabel="Deleting…"
+          onConfirm={() => void performDelete(confirmFolder)}
+          onCancel={() => {
+            setConfirmFolder(null)
+            setConfirmError(null)
+          }}
+        />
+      )}
+
       {deleteTarget && (
         <Modal onClose={() => setDeleteTarget(null)}>
           <h2>Delete "{deleteTarget.name}"</h2>

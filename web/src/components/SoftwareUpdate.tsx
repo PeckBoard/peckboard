@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useState } from 'react'
 import { authedFetch } from '../store/auth'
+import ConfirmDialog from './ConfirmDialog'
 
 /** Mirrors the backend `UpdateStatus` from `/api/update/check`. */
 interface UpdateStatus {
@@ -25,6 +26,11 @@ export default function SoftwareUpdate() {
   const [error, setError] = useState<string | null>(null)
   const [applying, setApplying] = useState(false)
   const [restarting, setRestarting] = useState(false)
+  // Applying an update re-execs the server, so it goes through a confirm.
+  // `applyError` is the dialog's own error slot: a failed apply keeps the
+  // dialog open instead of dropping the user back to the section.
+  const [confirmApply, setConfirmApply] = useState(false)
+  const [applyError, setApplyError] = useState<string | null>(null)
 
   const check = useCallback(async () => {
     setLoading(true)
@@ -86,14 +92,16 @@ export default function SoftwareUpdate() {
   const apply = useCallback(async () => {
     setApplying(true)
     setError(null)
+    setApplyError(null)
     try {
       const res = await authedFetch('/api/update/apply', { method: 'POST' })
       const data = await res.json().catch(() => ({}))
       if (!res.ok) throw new Error(data?.error || `HTTP ${res.status}`)
+      setConfirmApply(false)
       setRestarting(true)
       void waitForRestartThenReload()
     } catch (e) {
-      setError(e instanceof Error ? e.message : String(e))
+      setApplyError(e instanceof Error ? e.message : String(e))
     } finally {
       setApplying(false)
     }
@@ -144,7 +152,10 @@ export default function SoftwareUpdate() {
           <button
             type="button"
             className="btn-primary"
-            onClick={() => void apply()}
+            onClick={() => {
+              setApplyError(null)
+              setConfirmApply(true)
+            }}
             disabled={applying}
             data-testid="update-apply"
           >
@@ -158,6 +169,24 @@ export default function SoftwareUpdate() {
             Check again
           </button>
         </div>
+      )}
+      {confirmApply && (
+        <ConfirmDialog
+          testId="update-apply-confirm"
+          danger
+          title={`Upgrade to ${status?.latest_version ?? 'the latest release'} and restart?`}
+          message="PeckBoard replaces its own binary and restarts the server. Everyone connected is disconnected, and any agent run in flight is killed. Sessions, projects and cards on disk are kept."
+          confirmLabel="Upgrade & restart"
+          cancelLabel="Not now"
+          error={applyError}
+          busy={applying}
+          busyLabel="Starting…"
+          onConfirm={() => void apply()}
+          onCancel={() => {
+            setConfirmApply(false)
+            setApplyError(null)
+          }}
+        />
       )}
     </section>
   )

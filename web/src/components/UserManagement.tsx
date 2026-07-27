@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react'
 import { useAuthStore } from '../store/auth'
 import { useUsersStore } from '../store/users'
 import ChangePasswordModal from './ChangePasswordModal'
+import ConfirmDialog from './ConfirmDialog'
 
 export default function UserManagement() {
   const currentUser = useAuthStore((s) => s.user)
@@ -23,8 +24,11 @@ export default function UserManagement() {
   const [newRole, setNewRole] = useState('user')
   const [creating, setCreating] = useState(false)
 
-  // Delete confirm
-  const [deleteTarget, setDeleteTarget] = useState<string | null>(null)
+  // Delete confirm. Carries the username so the dialog can name who is
+  // about to be deleted without re-looking it up.
+  const [deleteTarget, setDeleteTarget] = useState<{ id: string; username: string } | null>(null)
+  const [deleteError, setDeleteError] = useState<string | null>(null)
+  const [deleting, setDeleting] = useState(false)
 
   // Password reset target (admin-mode modal). Carries username so the
   // modal can render "Reset password for <name>" without re-looking up.
@@ -71,11 +75,15 @@ export default function UserManagement() {
 
   const handleDelete = async (id: string) => {
     setLocalError('')
+    setDeleteError(null)
+    setDeleting(true)
     try {
       await deleteUserAction(id)
       setDeleteTarget(null)
     } catch (err) {
-      setLocalError(err instanceof Error ? err.message : 'Failed to delete user')
+      setDeleteError(err instanceof Error ? err.message : 'Failed to delete user')
+    } finally {
+      setDeleting(false)
     }
   }
 
@@ -212,54 +220,52 @@ export default function UserManagement() {
                   </span>
                 </div>
                 {u.id !== currentUser?.id && (
-                  <>
-                    {deleteTarget === u.id ? (
-                      <div style={{ display: 'flex', gap: 4 }}>
-                        <button
-                          className="btn-primary"
-                          style={{
-                            fontSize: 'var(--text-xs)',
-                            padding: '4px 10px',
-                            background: 'var(--danger)',
-                          }}
-                          onClick={() => handleDelete(u.id)}
-                        >
-                          Confirm
-                        </button>
-                        <button
-                          className="btn-secondary"
-                          style={{ fontSize: 'var(--text-xs)', padding: '4px 10px' }}
-                          onClick={() => setDeleteTarget(null)}
-                        >
-                          Cancel
-                        </button>
-                      </div>
-                    ) : (
-                      <div style={{ display: 'flex', gap: 4, alignItems: 'center' }}>
-                        <button
-                          className="btn-secondary"
-                          style={{ fontSize: 'var(--text-xs)', padding: '4px 10px' }}
-                          onClick={() => setPasswordTarget({ id: u.id, username: u.username })}
-                          title="Reset this user's password"
-                        >
-                          Reset password
-                        </button>
-                        <button
-                          className="folder-delete"
-                          onClick={() => setDeleteTarget(u.id)}
-                          title="Delete user"
-                        >
-                          &times;
-                        </button>
-                      </div>
-                    )}
-                  </>
+                  <div style={{ display: 'flex', gap: 4, alignItems: 'center' }}>
+                    <button
+                      className="btn-secondary"
+                      style={{ fontSize: 'var(--text-xs)', padding: '4px 10px' }}
+                      onClick={() => setPasswordTarget({ id: u.id, username: u.username })}
+                      title="Reset this user's password"
+                    >
+                      Reset password
+                    </button>
+                    <button
+                      className="btn-secondary"
+                      style={{ fontSize: 'var(--text-xs)', padding: '4px 10px' }}
+                      onClick={() => {
+                        setDeleteError(null)
+                        setDeleteTarget({ id: u.id, username: u.username })
+                      }}
+                      title="Delete this user"
+                      data-testid={`user-delete-${u.username}`}
+                    >
+                      Delete
+                    </button>
+                  </div>
                 )}
               </div>
             ))}
           </div>
         )}
       </section>
+
+      {deleteTarget && (
+        <ConfirmDialog
+          testId="user-delete-confirm"
+          danger
+          title={`Delete ${deleteTarget.username}?`}
+          message={`${deleteTarget.username} can no longer sign in — the account is removed for good. Work they created (chat sessions, projects, cards) stays behind. This cannot be undone.`}
+          confirmLabel="Delete user"
+          error={deleteError}
+          busy={deleting}
+          busyLabel="Deleting…"
+          onConfirm={() => void handleDelete(deleteTarget.id)}
+          onCancel={() => {
+            setDeleteTarget(null)
+            setDeleteError(null)
+          }}
+        />
+      )}
 
       {passwordTarget && (
         <ChangePasswordModal

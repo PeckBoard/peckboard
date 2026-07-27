@@ -2,6 +2,7 @@ import { useCallback, useEffect, useState } from 'react'
 import { authedFetch } from '../store/auth'
 import { useFoldersStore } from '../store/folders'
 import type { AgentVar } from '../types/api'
+import ConfirmDialog from './ConfirmDialog'
 
 /**
  * Settings section for agent variables — shared key/value state agents read
@@ -26,6 +27,10 @@ export default function AgentVarsSection() {
   const [folderId, setFolderId] = useState<string>('')
   const [formError, setFormError] = useState<string | null>(null)
   const [saving, setSaving] = useState(false)
+  // Delete confirmation. The dialog stays open on failure so the user reads
+  // what happened instead of watching it vanish as if it had worked.
+  const [confirmDelete, setConfirmDelete] = useState<AgentVar | null>(null)
+  const [deleteError, setDeleteError] = useState<string | null>(null)
 
   const load = useCallback(async () => {
     try {
@@ -113,6 +118,7 @@ export default function AgentVarsSection() {
 
   const remove = async (v: AgentVar) => {
     setError(null)
+    setDeleteError(null)
     setDeleting(v.id)
     try {
       const res = await authedFetch(`/api/agent-vars/${encodeURIComponent(v.id)}`, {
@@ -120,9 +126,10 @@ export default function AgentVarsSection() {
       })
       if (!res.ok) throw new Error(`HTTP ${res.status}`)
       if (editing === v.name) clearForm()
+      setConfirmDelete(null)
       await load()
     } catch {
-      setError(`Could not delete "${v.name}".`)
+      setDeleteError(`Could not delete "${v.name}".`)
     } finally {
       setDeleting(null)
     }
@@ -167,7 +174,10 @@ export default function AgentVarsSection() {
                 <button
                   type="button"
                   className="btn-secondary btn-sm"
-                  onClick={() => void remove(v)}
+                  onClick={() => {
+                    setDeleteError(null)
+                    setConfirmDelete(v)
+                  }}
                   disabled={deleting === v.id}
                   data-testid={`agent-var-delete-${v.name}`}
                 >
@@ -241,6 +251,23 @@ export default function AgentVarsSection() {
           </button>
         </div>
       </form>
+      {confirmDelete && (
+        <ConfirmDialog
+          testId="agent-var-delete-confirm"
+          danger
+          title={`Delete ${confirmDelete.name}?`}
+          message={`${confirmDelete.name} (${confirmDelete.folder_name ?? 'Global'}) is removed for good. Agents reading it with list_variables get nothing back until someone re-creates it.`}
+          confirmLabel="Delete variable"
+          error={deleteError}
+          busy={deleting === confirmDelete.id}
+          busyLabel="Deleting…"
+          onConfirm={() => void remove(confirmDelete)}
+          onCancel={() => {
+            setConfirmDelete(null)
+            setDeleteError(null)
+          }}
+        />
+      )}
     </section>
   )
 }

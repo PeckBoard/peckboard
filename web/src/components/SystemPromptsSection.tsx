@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react'
 import { authedFetch } from '../store/auth'
+import ConfirmDialog from './ConfirmDialog'
 
 interface SystemPrompt {
   id: string
@@ -27,6 +28,9 @@ export default function SystemPromptsSection() {
   const [importName, setImportName] = useState('')
   const [importUrl, setImportUrl] = useState('')
   const [importing, setImporting] = useState(false)
+  const [confirmDelete, setConfirmDelete] = useState<SystemPrompt | null>(null)
+  const [deleteError, setDeleteError] = useState<string | null>(null)
+  const [deleting, setDeleting] = useState(false)
 
   const load = () => {
     setLoading(true)
@@ -90,14 +94,19 @@ export default function SystemPromptsSection() {
     }
   }
 
-  const remove = async (id: string) => {
+  const remove = async (p: SystemPrompt) => {
     setError('')
+    setDeleteError(null)
+    setDeleting(true)
     try {
-      const res = await authedFetch(`/api/system-prompts/${id}`, { method: 'DELETE' })
+      const res = await authedFetch(`/api/system-prompts/${p.id}`, { method: 'DELETE' })
       if (!res.ok) throw new Error('Failed to delete')
+      setConfirmDelete(null)
       load()
     } catch (e) {
-      setError(e instanceof Error ? e.message : 'Failed to delete')
+      setDeleteError(e instanceof Error ? e.message : 'Failed to delete')
+    } finally {
+      setDeleting(false)
     }
   }
 
@@ -164,7 +173,15 @@ export default function SystemPromptsSection() {
                 >
                   Edit
                 </button>
-                <button type="button" className="btn-secondary" onClick={() => remove(p.id)}>
+                <button
+                  type="button"
+                  className="btn-secondary"
+                  onClick={() => {
+                    setDeleteError(null)
+                    setConfirmDelete(p)
+                  }}
+                  data-testid={`system-prompt-delete-${p.name}`}
+                >
                   Delete
                 </button>
               </div>
@@ -247,6 +264,23 @@ export default function SystemPromptsSection() {
           </button>
         </div>
       </div>
+      {confirmDelete && (
+        <ConfirmDialog
+          testId="system-prompt-delete-confirm"
+          danger
+          title={`Delete "${confirmDelete.name}"?`}
+          message={`The "${confirmDelete.name}" system prompt is deleted for good. Sessions that use it lose it, and the cost-aware auto-switch can no longer apply it when it downgrades a worker.`}
+          confirmLabel="Delete prompt"
+          error={deleteError}
+          busy={deleting}
+          busyLabel="Deleting…"
+          onConfirm={() => void remove(confirmDelete)}
+          onCancel={() => {
+            setConfirmDelete(null)
+            setDeleteError(null)
+          }}
+        />
+      )}
     </section>
   )
 }

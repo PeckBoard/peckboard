@@ -2,6 +2,8 @@ import { useCallback, useEffect, useState } from 'react'
 import { authedFetch } from '../store/auth'
 import { useFoldersStore } from '../store/folders'
 import type { EnvVar } from '../types/api'
+import ConfirmDialog from './ConfirmDialog'
+import SecretInput from './SecretInput'
 
 /**
  * Settings section for user-defined environment variables injected into the
@@ -32,6 +34,10 @@ export default function EnvVarsSection() {
   const [folderId, setFolderId] = useState<string>('')
   const [formError, setFormError] = useState<string | null>(null)
   const [saving, setSaving] = useState(false)
+  // Delete confirmation. The dialog stays open on failure so the user reads
+  // what happened instead of watching it vanish as if it had worked.
+  const [confirmDelete, setConfirmDelete] = useState<EnvVar | null>(null)
+  const [deleteError, setDeleteError] = useState<string | null>(null)
 
   const load = useCallback(async () => {
     try {
@@ -128,6 +134,7 @@ export default function EnvVarsSection() {
 
   const remove = async (v: EnvVar) => {
     setError(null)
+    setDeleteError(null)
     setDeleting(v.id)
     try {
       const res = await authedFetch(`/api/env-vars/${encodeURIComponent(v.id)}`, {
@@ -135,9 +142,10 @@ export default function EnvVarsSection() {
       })
       if (!res.ok) throw new Error(`HTTP ${res.status}`)
       if (editing === v.name) clearForm()
+      setConfirmDelete(null)
       await load()
     } catch {
-      setError(`Could not delete "${v.name}".`)
+      setDeleteError(`Could not delete "${v.name}".`)
     } finally {
       setDeleting(null)
     }
@@ -215,7 +223,10 @@ export default function EnvVarsSection() {
                 <button
                   type="button"
                   className="btn-secondary btn-sm"
-                  onClick={() => void remove(v)}
+                  onClick={() => {
+                    setDeleteError(null)
+                    setConfirmDelete(v)
+                  }}
                   disabled={deleting === v.id}
                   data-testid={`env-var-delete-${v.name}`}
                 >
@@ -254,12 +265,15 @@ export default function EnvVarsSection() {
         </div>
         <div className="form-field">
           <label className="form-label">Value</label>
-          <input
+          <SecretInput
+            // Remount when the form switches target so a revealed value from
+            // the previous row can't carry over into the next one.
+            key={editing ?? 'new'}
             className="form-input"
             value={value}
-            autoComplete="off"
-            onChange={(e) => setValue(e.target.value)}
-            data-testid="env-var-value-input"
+            onChange={setValue}
+            testId="env-var-value-input"
+            revealTestId="env-var-value-reveal"
           />
         </div>
         <div className="form-field">
@@ -334,6 +348,27 @@ export default function EnvVarsSection() {
           Clears unlocked values from server memory; sessions will prompt again.
         </p>
       </div>
+      {confirmDelete && (
+        <ConfirmDialog
+          testId="env-var-delete-confirm"
+          danger
+          title={`Delete ${confirmDelete.name}?`}
+          message={`${confirmDelete.name} (${confirmDelete.folder_name ?? 'Global'}) is removed for good, and commands agents run stop receiving it.${
+            confirmDelete.encrypted
+              ? ' The encrypted value can’t be recovered — restoring it means re-entering the value and the owner’s password.'
+              : ''
+          }`}
+          confirmLabel="Delete variable"
+          error={deleteError}
+          busy={deleting === confirmDelete.id}
+          busyLabel="Deleting…"
+          onConfirm={() => void remove(confirmDelete)}
+          onCancel={() => {
+            setConfirmDelete(null)
+            setDeleteError(null)
+          }}
+        />
+      )}
     </section>
   )
 }
