@@ -31,6 +31,7 @@ import ModelPicker from './ModelPicker'
 import TodoPanel from './TodoPanel'
 import PreHatchActivity from './chat/PreHatchActivity'
 import { fetchPlanId, openPlan } from '../lib/plan'
+import { openReport } from '../lib/reports'
 import { describeActionError } from '../utils/actionError'
 import { parseTodoItems, latestTodoSnapshot, type TodoItem } from '../types/todo'
 import {
@@ -772,10 +773,8 @@ const ChatRow = memo(function ChatRow({
           {item.reportFolder && item.reportFile ? (
             <button
               className="chat-report-chip"
-              onClick={() => {
-                window.history.pushState({}, '', '/reports')
-                window.dispatchEvent(new PopStateEvent('popstate'))
-              }}
+              data-testid="chat-report-chip"
+              onClick={() => openReport(item.reportFolder!, item.reportFile!)}
             >
               <span className="chat-report-chip-icon">{'\u{1F4C4}'}</span>
               <span className="chat-report-chip-body">

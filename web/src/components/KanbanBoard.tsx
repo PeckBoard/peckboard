@@ -15,6 +15,7 @@ import WorkerComms from './WorkerComms'
 import ProjectTodoSummary from './ProjectTodoSummary'
 import SafeMarkdown from './SafeMarkdown'
 import { fetchPlanId, openPlan } from '../lib/plan'
+import { openReport } from '../lib/reports'
 import { useProjectTodos } from '../hooks/useProjectTodos'
 import {
   EMPTY_QUESTIONS,
@@ -1563,9 +1564,8 @@ export default function KanbanBoard({
                     <button
                       key={`${r.folder}/${r.file}`}
                       className="card-report-link"
-                      onClick={() => {
-                        window.location.assign('/reports')
-                      }}
+                      data-testid="card-report-link"
+                      onClick={() => openReport(r.folder, r.file)}
                     >
                       <span className="card-report-title">{r.title}</span>
                       <span className="card-report-date">{r.date?.split('T')[0] ?? r.folder}</span>
