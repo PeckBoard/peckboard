@@ -60,7 +60,11 @@ function CostPanel({
     <section className="usage-panel usage-cost-panel" data-testid={testid}>
       <header className="usage-panel-header">
         <h4 className="usage-panel-title">{meta.title}</h4>
-        <span className="usage-cost-subtotal" data-testid={`${testid}-subtotal`}>
+        <span
+          className="usage-cost-subtotal"
+          data-testid={`${testid}-subtotal`}
+          title="Estimated cost (USD) of every operation of this kind"
+        >
           {failed ? '—' : fmtUsd(subtotal)}
         </span>
       </header>
@@ -120,7 +124,7 @@ export default function CostBreakdownSection({
 }) {
   return (
     <section className="usage-section" data-testid="usage-cost-breakdown">
-      <h3 className="usage-section-title">Cost Breakdown</h3>
+      <h3 className="usage-section-title">Cost Breakdown — est. cost (USD)</h3>
       <div className="usage-subgrid">
         {KINDS.map((meta) => (
           <CostPanel

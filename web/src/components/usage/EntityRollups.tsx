@@ -1,5 +1,6 @@
 import { useMemo } from 'react'
 import type { EntityUsage } from '../../types/api'
+import { billedTokens } from '../../util/cost'
 import { fmtInt, fmtTokens, fmtUsd } from '../../util/format'
 
 /** One entity row (project / card / expert): name, token + cost figures, and
@@ -58,14 +59,15 @@ function EntityRow({
   )
 }
 
-/** Largest `total_tokens` in a set, floored at 1 so a share is never divided
- *  by zero. */
+/** Largest billed-token total in a set, floored at 1 so a share is never
+ *  divided by zero. Billed — not the provider-reported `total_tokens` — so
+ *  these rows are the same figure as the header card and the session rows. */
 function maxTokens(rows: EntityUsage[]): number {
-  return rows.reduce((m, r) => Math.max(m, r.total_tokens), 1)
+  return rows.reduce((m, r) => Math.max(m, billedTokens(r)), 1)
 }
 
 function byTokensDesc(a: EntityUsage, b: EntityUsage): number {
-  return b.total_tokens - a.total_tokens
+  return billedTokens(b) - billedTokens(a)
 }
 
 /** Projects panel body. Clicking a project opens its per-project usage page
@@ -86,9 +88,9 @@ export function ProjectsPanelBody({
           key={p.id}
           testid="usage-project-row"
           name={p.name}
-          tokens={p.total_tokens}
+          tokens={billedTokens(p)}
           cost={p.est_cost}
-          share={p.total_tokens / max}
+          share={billedTokens(p) / max}
           onClick={onOpen ? () => onOpen(p.id) : undefined}
         />
       ))}
@@ -112,9 +114,9 @@ export function CardsPanelBody({ cards }: { cards: EntityUsage[] }) {
             key={c.id}
             testid="usage-card-row"
             name={c.name}
-            tokens={c.total_tokens}
+            tokens={billedTokens(c)}
             cost={c.est_cost}
-            share={c.total_tokens / max}
+            share={billedTokens(c) / max}
           />
         ))
       )}
@@ -141,9 +143,9 @@ export function ExpertsPanelBody({
           key={e.id}
           testid="usage-expert-row"
           name={e.name}
-          tokens={e.total_tokens}
+          tokens={billedTokens(e)}
           cost={e.est_cost}
-          share={e.total_tokens / max}
+          share={billedTokens(e) / max}
           onClick={onOpen ? () => onOpen(e.id) : undefined}
         />
       ))}

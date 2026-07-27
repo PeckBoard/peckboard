@@ -1,7 +1,13 @@
 import { useEffect, useState } from 'react'
-import { fetchOperationCosts, fetchSessionTurns, fetchSessionUsage } from '../../store/usage'
+import {
+  fetchOperationCosts,
+  fetchSessionTurns,
+  fetchSessionUsage,
+  useUsageStore,
+} from '../../store/usage'
 import type { OperationCost, SessionUsage, TurnUsage } from '../../types/api'
-import { contextWindowFor } from '../../util/cost'
+import { contextWindowInfo } from '../../util/cost'
+import CostFootnote from './CostFootnote'
 import { fmtInt, fmtTokens, fmtUsd } from '../../util/format'
 import LineChart, { type ChartSeries } from './LineChart'
 
@@ -36,24 +42,46 @@ function latestModel(turns: TurnUsage[]): string | null {
   return null
 }
 
-function ContextGauge({ context, model }: { context: number; model: string | null }) {
-  const limit = contextWindowFor(model)
+function ContextGauge({
+  context,
+  model,
+  sessionModel,
+}: {
+  context: number
+  /** Model of the most recent turn — the one that produced this snapshot. */
+  model: string | null
+  /** The session's configured model, used when the turn's model resolves to no
+   *  known window, so this page shows the same denominator as the sessions
+   *  list rather than silently disagreeing with it. */
+  sessionModel: string | null
+}) {
+  const costTable = useUsageStore((s) => s.costTable)
+  const turnWindow = contextWindowInfo(model, costTable)
+  const sessionWindow = contextWindowInfo(sessionModel, costTable)
+  const useTurn = turnWindow.known || !sessionWindow.known
+  const { limit, known } = useTurn ? turnWindow : sessionWindow
+  const shownModel = useTurn ? model : sessionModel
   const pct = limit > 0 ? Math.min(1, context / limit) : 0
   const pctLabel = Math.round(pct * 100)
   const level = pct >= 0.9 ? 'is-danger' : pct >= 0.7 ? 'is-warn' : ''
+  // An unresolvable model gets the default window, but says so: presenting
+  // 200K as this model's limit is how a 1M-context session ends up drawn as
+  // a full red bar.
+  const denom = known ? `${fmtInt(limit)} for ${bareModel(shownModel)}` : `${fmtInt(limit)} default`
   return (
     <div className="usage-detail-context" data-testid="usage-detail-context">
       <div className="usage-row-head">
-        <span className="usage-row-name">Context window ({bareModel(model)})</span>
+        <span className="usage-row-name">Context window ({bareModel(shownModel)})</span>
         <span className="usage-row-figs">
-          {fmtTokens(context)} / {fmtTokens(limit)} ({pctLabel}%)
+          {fmtTokens(context)} / {fmtTokens(limit)}
+          {known ? '' : ' default'} ({pctLabel}%)
         </span>
       </div>
       <div
         className="usage-gauge"
         role="img"
-        aria-label={`Context ${fmtInt(context)} of ${fmtInt(limit)} tokens, ${pctLabel}%`}
-        title={`${fmtInt(context)} / ${fmtInt(limit)} context tokens (${pctLabel}%)`}
+        aria-label={`Context ${fmtInt(context)} of ${denom} tokens, ${pctLabel}%`}
+        title={`${fmtInt(context)} / ${denom} context tokens (${pctLabel}%)`}
       >
         <span className={`usage-gauge-fill ${level}`} style={{ width: `${pct * 100}%` }} />
       </div>
@@ -186,8 +214,10 @@ export default function SessionDetail({ id, onBack }: { id: string; onBack: () =
 
   const stats = usage
     ? [
-        { label: 'Est. Cost', value: fmtUsd(usage.est_cost) },
-        { label: 'Total Tokens', value: fmtTokens(usage.total_tokens_used) },
+        { label: 'Est. cost (USD)', value: fmtUsd(usage.est_cost) },
+        // Billed sum, the same field the sessions panel row shows, so the
+        // two pages agree on what “tokens” means.
+        { label: 'Billed Tokens', value: fmtTokens(usage.total_tokens_used) },
         { label: 'Input', value: fmtTokens(usage.input_tokens) },
         { label: 'Output', value: fmtTokens(usage.output_tokens) },
         { label: 'Cache Read', value: fmtTokens(usage.cache_read_tokens) },
@@ -229,7 +259,7 @@ export default function SessionDetail({ id, onBack }: { id: string; onBack: () =
         ))}
       </div>
 
-      <ContextGauge context={latestContext} model={model} />
+      <ContextGauge context={latestContext} model={model} sessionModel={usage?.model ?? null} />
 
       {turns.length > 1 && (
         <section className="usage-panel" data-testid="usage-context-chart">
@@ -301,6 +331,7 @@ export default function SessionDetail({ id, onBack }: { id: string; onBack: () =
           )}
         </div>
       </section>
+      <CostFootnote />
     </div>
   )
 }

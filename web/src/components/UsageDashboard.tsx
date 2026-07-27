@@ -1,6 +1,9 @@
 import { useEffect, useMemo, useState, type ReactNode } from 'react'
 import { USAGE_PANEL_LABELS, useUsageStore, type UsagePanelKey } from '../store/usage'
-import type { UsageTotals } from '../types/api'
+import type { SessionUsage, UsageTotals } from '../types/api'
+import { billedTokens } from '../util/cost'
+import { fmtTokens, fmtUsd } from '../util/format'
+import CostFootnote from './usage/CostFootnote'
 import CostBreakdownSection from './usage/CostBreakdownSection'
 import ProjectDetail from './usage/ProjectDetail'
 import SessionDetail from './usage/SessionDetail'
@@ -9,43 +12,62 @@ import SessionsPanelBody from './usage/SessionsPanel'
 import { CardsPanelBody, ExpertsPanelBody, ProjectsPanelBody } from './usage/EntityRollups'
 import RangeBar from './usage/RangeBar'
 
-/** Compact token formatter: 1_234_567 -> "1.23M". Keeps the stat cards and
- *  panel counts readable without a charting lib. */
-function fmtTokens(n: number): string {
-  if (!Number.isFinite(n)) return '0'
-  const abs = Math.abs(n)
-  if (abs >= 1_000_000_000) return `${(n / 1_000_000_000).toFixed(2)}B`
-  if (abs >= 1_000_000) return `${(n / 1_000_000).toFixed(2)}M`
-  if (abs >= 1_000) return `${(n / 1_000).toFixed(1)}K`
-  return `${Math.round(n)}`
-}
-
-/** USD formatter that keeps small estimates legible (sub-cent costs still show
- *  a non-zero figure). Mirrors the backend's `est_cost`, which is already
- *  computed — the client never re-prices here. */
-function fmtUsd(n: number): string {
-  if (!Number.isFinite(n)) return '$0.00'
-  if (n > 0 && n < 0.01) return '<$0.01'
-  return `$${n.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`
-}
-
 /** The header's overall-totals cards. Each is a labelled figure summed across
  *  every session. When the sessions request failed the figures are unknown, so
  *  every card reads “—” — rendering $0.00 would be a lie the user reads as
- *  “I spent nothing”. */
+ *  “I spent nothing”.
+ *
+ *  Two of these figures were previously misleading and are deliberately
+ *  shaped now: the tokens card is the BILLED sum, which is the same figure
+ *  the per-session rows report, so the header reconciles with the panels; and
+ *  the context card is the single largest session rather than a sum, because
+ *  context occupancy is a snapshot and adding snapshots across sessions
+ *  produced a number that meant nothing sitting next to real spend. */
 function totalsCards(
   totals: UsageTotals,
+  sessions: SessionUsage[],
   unavailable: boolean,
-): { label: string; value: string }[] {
+): { label: string; value: string; hint: string; testid: string }[] {
   const usd = (n: number) => (unavailable ? '—' : fmtUsd(n))
   const tok = (n: number) => (unavailable ? '—' : fmtTokens(n))
+  const largestContext = sessions.reduce((m, s) => Math.max(m, s.total_context_tokens), 0)
   return [
-    { label: 'Est. Cost', value: usd(totals.est_cost) },
-    { label: 'Total Tokens', value: tok(totals.total_tokens) },
-    { label: 'Input', value: tok(totals.input_tokens) },
-    { label: 'Output', value: tok(totals.output_tokens) },
-    { label: 'Cache Read', value: tok(totals.cache_read_tokens) },
-    { label: 'Context', value: tok(totals.context_tokens) },
+    {
+      label: 'Est. cost (USD)',
+      value: usd(totals.est_cost),
+      hint: 'Estimate in USD, priced from the per-model rate table served by /api/usage/costs',
+      testid: 'usage-stat-cost',
+    },
+    {
+      label: 'Billed Tokens',
+      value: tok(billedTokens(totals)),
+      hint: 'Input + output + cache read + cache write, summed across every session',
+      testid: 'usage-stat-billed-tokens',
+    },
+    {
+      label: 'Input',
+      value: tok(totals.input_tokens),
+      hint: 'Input tokens across every session',
+      testid: 'usage-stat-input',
+    },
+    {
+      label: 'Output',
+      value: tok(totals.output_tokens),
+      hint: 'Output tokens across every session',
+      testid: 'usage-stat-output',
+    },
+    {
+      label: 'Cache Read',
+      value: tok(totals.cache_read_tokens),
+      hint: 'Cache-read tokens across every session',
+      testid: 'usage-stat-cache-read',
+    },
+    {
+      label: 'Largest Context',
+      value: tok(largestContext),
+      hint: 'Peak context occupancy of the fullest single session — a snapshot, not spend',
+      testid: 'usage-stat-largest-context',
+    },
   ]
 }
 
@@ -206,10 +228,12 @@ export default function UsageDashboard() {
       )}
 
       <div className="usage-stat-grid" data-testid="usage-totals">
-        {totalsCards(totals, failed('sessions')).map((c) => (
-          <div className="usage-stat-card" key={c.label}>
+        {totalsCards(totals, sessions, failed('sessions')).map((c) => (
+          <div className="usage-stat-card" key={c.label} title={c.hint} data-testid={c.testid}>
             <div className="usage-stat-label">{c.label}</div>
-            <div className="usage-stat-value">{c.value}</div>
+            <div className="usage-stat-value" data-testid={`${c.testid}-value`}>
+              {c.value}
+            </div>
           </div>
         ))}
       </div>
@@ -268,6 +292,7 @@ export default function UsageDashboard() {
         onRetry={fetchUsage}
       />
       <TrendsSection />
+      <CostFootnote />
     </div>
   )
 }

@@ -751,6 +751,28 @@
   font-variant-numeric: tabular-nums;
 }
 
+/* The model that sized a row's context gauge — a quiet trailing chip, so the
+   denominator is attributable without competing with the figures. */
+.usage-row-model {
+  color: var(--text3);
+  font-variant-numeric: normal;
+}
+
+/* Standing "these dollars are estimates, and here is the rate table" note
+   under a page of costs. */
+.usage-footnote {
+  margin: var(--space-4) 0 0;
+  font-size: var(--text-xs);
+  color: var(--text3);
+}
+
+.usage-footnote code {
+  padding: 1px 4px;
+  border-radius: var(--radius-sm);
+  background: var(--surface2);
+  font-size: inherit;
+}
+
 /* Single-value gauge bar — context fill (sessions) or share-of-max (entities). */
 .usage-gauge {
   width: 100%;

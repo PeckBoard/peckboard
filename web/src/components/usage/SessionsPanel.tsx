@@ -1,6 +1,7 @@
 import { useMemo, useState } from 'react'
 import type { SessionUsage } from '../../types/api'
-import { contextWindowFor } from '../../util/cost'
+import { useUsageStore } from '../../store/usage'
+import { contextWindowInfo } from '../../util/cost'
 import { fmtInt, fmtTokens, fmtUsd } from '../../util/format'
 
 /** Which figure the session list sorts on, biggest first. */
@@ -18,11 +19,19 @@ function sortValue(s: SessionUsage, key: SessionSort): number {
   return s.total_tokens_used
 }
 
+/** Display form of a session's model id: no provider prefix, no `@account`
+ *  suffix, so the row shows `opus[1m]` rather than `claude:opus[1m]@work`. */
+function bareModelLabel(model: string | null): string {
+  if (!model) return 'unknown model'
+  return model.split('@')[0].replace(/^claude:/, '')
+}
+
 /** Body of the Sessions panel: a sortable list of sessions, each showing its
- *  lifetime tokens, est. cost, and a gauge of how full its context window is.
- *  Context has no model on the row, so the gauge measures against the shared
- *  default window from the cost module. Rows open the per-session detail
- *  page via `onOpen`. */
+ *  lifetime billed tokens, est. cost, and a gauge of how full its context
+ *  window is. The gauge is sized from the session's own model — measuring a
+ *  1M-context session against the 200K default drew a full red bar that was
+ *  simply false — and falls back to the default only with the denominator
+ *  labelled as such. Rows open the per-session detail page via `onOpen`. */
 export default function SessionsPanelBody({
   sessions,
   onOpen,
@@ -30,6 +39,10 @@ export default function SessionsPanelBody({
   sessions: SessionUsage[]
   onOpen?: (id: string) => void
 }) {
+  // The rate table doubles as the set of models the running binary
+  // advertises, which is how `contextWindowInfo` tells a standard 200K tier
+  // apart from a model it has never heard of.
+  const costTable = useUsageStore((s) => s.costTable)
   const [sort, setSort] = useState<SessionSort>('tokens')
   const sorted = useMemo(
     () => [...sessions].sort((a, b) => sortValue(b, sort) - sortValue(a, sort)),
@@ -54,7 +67,15 @@ export default function SessionsPanelBody({
       </div>
 
       {sorted.map((s) => {
-        const limit = contextWindowFor(null)
+        // Size the gauge from the session's own model. `known` is false when
+        // the model is missing or unrecognized, and the row then labels the
+        // denominator as the default instead of implying it is this model's
+        // real window.
+        const { limit, known } = contextWindowInfo(s.model, costTable)
+        const bare = bareModelLabel(s.model)
+        const denom = known
+          ? `${fmtInt(limit)} for ${bare}`
+          : `${fmtInt(limit)} default — model unknown`
         const ctx = s.total_context_tokens
         const pct = limit > 0 ? Math.min(1, ctx / limit) : 0
         const pctLabel = Math.round(pct * 100)
@@ -89,13 +110,15 @@ export default function SessionsPanelBody({
             <div
               className="usage-gauge"
               role="img"
-              aria-label={`Context ${fmtInt(ctx)} of ${fmtInt(limit)} tokens, ${pctLabel}%`}
-              title={`${fmtInt(ctx)} / ${fmtInt(limit)} context tokens (${pctLabel}%)`}
+              aria-label={`Context ${fmtInt(ctx)} of ${fmtInt(limit)} tokens (${denom}), ${pctLabel}%`}
+              title={`${fmtInt(ctx)} / ${fmtInt(limit)} context tokens (${pctLabel}%) — ${denom}`}
             >
               <span className={`usage-gauge-fill ${level}`} style={{ width: `${pct * 100}%` }} />
             </div>
             <div className="usage-row-sub">
-              Context {fmtTokens(ctx)} / {fmtTokens(limit)} ({pctLabel}%)
+              Context {fmtTokens(ctx)} / {fmtTokens(limit)}
+              {known ? '' : ' default'} ({pctLabel}%)
+              {known && <span className="usage-row-model"> · {bare}</span>}
             </div>
           </div>
         )

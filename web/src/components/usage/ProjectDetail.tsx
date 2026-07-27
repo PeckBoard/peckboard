@@ -1,7 +1,9 @@
 import { useEffect, useMemo, useState } from 'react'
 import { fetchOperationCosts, fetchTrendSeries } from '../../store/usage'
 import type { EntityUsage, OperationCost, SessionUsage, TrendSeries } from '../../types/api'
+import { billedTokens } from '../../util/cost'
 import { fmtTokens, fmtUsd } from '../../util/format'
+import CostFootnote from './CostFootnote'
 import LineChart, { type ChartSeries } from './LineChart'
 
 function fmtDay(ts: number): string {
@@ -164,8 +166,11 @@ export default function ProjectDetail({
 
   const stats = project
     ? [
-        { label: 'Est. Cost', value: fmtUsd(project.est_cost) },
-        { label: 'Total Tokens', value: fmtTokens(project.total_tokens) },
+        { label: 'Est. cost (USD)', value: fmtUsd(project.est_cost) },
+        // The billed sum, not the provider-reported `total_tokens` roll-up:
+        // the session rows below report billed tokens, so the header card has
+        // to be the same figure to add up.
+        { label: 'Billed Tokens', value: fmtTokens(billedTokens(project)) },
         { label: 'Input', value: fmtTokens(project.input_tokens) },
         { label: 'Output', value: fmtTokens(project.output_tokens) },
         { label: 'Cache Read', value: fmtTokens(project.cache_read_tokens) },
@@ -180,7 +185,7 @@ export default function ProjectDetail({
     points: s.points.map((p) => ({ x: p.bucket_ts, y: p.tokens })),
   }))
 
-  const maxCardTokens = projectCards.reduce((m, c) => Math.max(m, c.total_tokens), 1)
+  const maxCardTokens = projectCards.reduce((m, c) => Math.max(m, billedTokens(c)), 1)
 
   return (
     <div className="usage-detail" data-testid="usage-project-detail">
@@ -231,13 +236,17 @@ export default function ProjectDetail({
                         {c.name || 'Untitled'}
                       </span>
                       <span className="usage-row-figs">
-                        {fmtTokens(c.total_tokens)} · {fmtUsd(c.est_cost)}
+                        {fmtTokens(billedTokens(c))} · {fmtUsd(c.est_cost)}
                       </span>
                     </div>
-                    <div className="usage-gauge" role="img" aria-label={`${c.total_tokens} tokens`}>
+                    <div
+                      className="usage-gauge"
+                      role="img"
+                      aria-label={`${billedTokens(c)} tokens`}
+                    >
                       <span
                         className="usage-gauge-fill"
-                        style={{ width: `${(c.total_tokens / maxCardTokens) * 100}%` }}
+                        style={{ width: `${(billedTokens(c) / maxCardTokens) * 100}%` }}
                       />
                     </div>
                   </div>
@@ -268,6 +277,7 @@ export default function ProjectDetail({
         <OpsPanel title="File Updates" ops={ops.updates} testid="usage-project-file-updates" />
         <OpsPanel title="Cache Reads by File" ops={ops.reads} testid="usage-project-file-reads" />
       </div>
+      <CostFootnote />
     </div>
   )
 }

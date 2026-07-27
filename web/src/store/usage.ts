@@ -185,7 +185,15 @@ async function getJson<T>(url: string, fallback: T): Promise<T> {
 /** Roll the per-session rows up into install-wide totals. The backend has no
  *  single totals endpoint yet; summing the per-session rows is the
  *  non-double-counting source of truth, since the project/card/expert rollups
- *  are just re-groupings of the same underlying session spend. */
+ *  are just re-groupings of the same underlying session spend.
+ *
+ *  Two summed fields here must NOT be displayed as-is. `context_tokens` is a
+ *  per-session occupancy snapshot, so its sum is meaningless — the dashboard
+ *  shows the largest single session's context instead. `total_tokens` is the
+ *  provider-reported roll-up, which is not the figure the session rows show;
+ *  every “tokens” label goes through `billedTokens` (the four billed slices)
+ *  so the header card reconciles with the panels. Both are still summed to
+ *  keep this a complete `UsageTotals`. */
 function sumTotals(sessions: SessionUsage[]): UsageTotals {
   return sessions.reduce<UsageTotals>(
     (acc, s) => ({

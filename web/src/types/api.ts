@@ -469,7 +469,12 @@ export interface EntityUsage {
   cache_read_tokens: number
   cache_creation_tokens: number
   /** Provider-reported turn total. Overlaps the four billed slices, so it
-   *  is a display roll-up only and is never re-priced. */
+   *  is a display roll-up only and is never re-priced. NOT what the
+   *  dashboard labels “Billed Tokens” — that is the sum of the four slices
+   *  (`billedTokens` in `util/cost`, `SessionUsage.total_tokens_used` on the
+   *  wire). The two fields differ, so mixing them made a header card that
+   *  did not add up to its panel rows; display code must pick the billed
+   *  sum. */
   total_tokens: number
   /** Latest context-window occupancy snapshot for the entity. */
   context_tokens: number
@@ -482,13 +487,23 @@ export interface EntityUsage {
   project_id?: string | null
 }
 
-/** A session row: `EntityUsage` plus its explicit lifetime totals and role
- *  flags (so the dashboard can split chats / workers / experts and route to
- *  the right detail page). For session rows `project_id` is the owning
- *  project, when any. */
+/** A session row: `EntityUsage` plus its explicit lifetime totals, its
+ *  configured model, and role flags (so the dashboard can split chats /
+ *  workers / experts and route to the right detail page). For session rows
+ *  `project_id` is the owning project, when any. */
 export interface SessionUsage extends EntityUsage {
+  /** Sum of the four billed slices over the session's lifetime. THIS is the
+   *  field behind every “Billed Tokens” figure on the dashboard — header
+   *  card, session rows and session detail all use it (via `billedTokens`
+   *  for the entity rollups, which carry no `total_tokens_used`), so the
+   *  panel rows reconcile with the header. `total_tokens` is the
+   *  provider-reported roll-up and is never displayed under that label. */
   total_tokens_used: number
   total_context_tokens: number
+  /** The model the session runs on (`sessions.model`), `null` when unset.
+   *  Sizes the context gauge via `contextWindowInfo` — without it every row
+   *  would be measured against the 200K default. */
+  model: string | null
   is_worker: boolean
   is_expert: boolean
 }

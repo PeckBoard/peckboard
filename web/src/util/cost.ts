@@ -11,30 +11,69 @@ import type { CostTable, ModelRates } from '../types/api'
  *  four billed columns on `usage_events`. */
 export type TokenKind = 'input' | 'output' | 'cache_read' | 'cache_creation'
 
-/** Usable context-window size (tokens) when a usage row carries no model, or
- *  one that isn't in `CONTEXT_WINDOWS`. Every shipping Claude tier exposes a
- *  200K-token window today, so this is the value the session context gauge
- *  measures occupancy against. Lives here, next to the rate table, so the
- *  limit is part of the shared cost/model module rather than hardcoded in a
+/** Usable context-window size (tokens) assumed when a row carries no model,
+ *  or one we hold no window for. Every standard Claude tier exposes a 200K
+ *  window, so it is the safe assumption — but callers must LABEL it as a
+ *  default rather than presenting it as the model's real limit (see
+ *  [`contextWindowInfo`]). Lives here, next to the rate table, so the limit
+ *  is part of the shared cost/model module rather than hardcoded in a
  *  component. */
 export const DEFAULT_CONTEXT_WINDOW = 200_000
 
+/** Window of the long-context model aliases the registry advertises. Those
+ *  ids are spelled with a `[1m]` suffix on every tier (`opus[1m]`,
+ *  `claude-fable-5[1m]`), so the suffix — not an id list that churns with
+ *  each model release — is what [`contextWindowInfo`] matches on. */
+export const LONG_CONTEXT_WINDOW = 1_000_000
+
 /** Per-model context-window overrides, keyed by bare model id. Empty today —
- *  all current Claude models share the 200K default — but kept as the single
- *  place a future wider-window tier is registered, mirroring how `ratesFor`
- *  resolves per-model rates. */
+ *  standard tiers share the 200K default and long-context tiers are matched
+ *  by their `[1m]` suffix — but kept as the single place a model with some
+ *  other window is registered, mirroring how `ratesFor` resolves rates. */
 const CONTEXT_WINDOWS: Record<string, number> = {}
 
-/** Usable context-window size (tokens) for a model id, tolerating the
- *  `claude:` provider prefix. Falls back to [`DEFAULT_CONTEXT_WINDOW`] for an
- *  unknown or missing model so the gauge always has a denominator. */
-export function contextWindowFor(model: string | null | undefined): number {
+/** Normalize a model id to its bare form: usage rows and `sessions.model`
+ *  may carry a `claude:` provider prefix and an `@account` suffix. Mirrors
+ *  the Rust `split_model_account` + `claude:` strip in
+ *  `src/routes/usage/cost.rs`. */
+function bareModel(model: string): string {
+  const withoutAccount = model.split('@')[0]
+  return withoutAccount.startsWith('claude:')
+    ? withoutAccount.slice('claude:'.length)
+    : withoutAccount
+}
+
+/** The context window to measure a session's occupancy against, plus whether
+ *  it is the model's actual window (`known: true`) or just
+ *  [`DEFAULT_CONTEXT_WINDOW`] standing in for a model we can't resolve.
+ *  Callers MUST surface that distinction: a 1M-context session measured
+ *  against 200K renders a full, red gauge that is simply false, and an
+ *  unlabelled 200K denominator claims a certainty we don't have.
+ *
+ *  Pass the fetched `CostTable` to recognize the standard 200K tiers: the
+ *  table is keyed by the ids the running binary actually advertises (see the
+ *  Rust `cost_table`), so membership in it — rather than a model list
+ *  duplicated here and left to rot — is what makes a window known. */
+export function contextWindowInfo(
+  model: string | null | undefined,
+  table?: CostTable,
+): { limit: number; known: boolean } {
   if (model) {
-    const bare = model.startsWith('claude:') ? model.slice('claude:'.length) : model
-    const w = CONTEXT_WINDOWS[bare]
-    if (w) return w
+    const bare = bareModel(model)
+    const override = CONTEXT_WINDOWS[bare]
+    if (override) return { limit: override, known: true }
+    if (bare.endsWith('[1m]')) return { limit: LONG_CONTEXT_WINDOW, known: true }
+    if (table && (table.rates[bare] || table.rates[model])) {
+      return { limit: DEFAULT_CONTEXT_WINDOW, known: true }
+    }
   }
-  return DEFAULT_CONTEXT_WINDOW
+  return { limit: DEFAULT_CONTEXT_WINDOW, known: false }
+}
+
+/** Just the denominator from [`contextWindowInfo`], for callers that already
+ *  show the model alongside it. */
+export function contextWindowFor(model: string | null | undefined, table?: CostTable): number {
+  return contextWindowInfo(model, table).limit
 }
 
 const RATE_FIELD: Record<TokenKind, keyof ModelRates> = {
@@ -84,6 +123,19 @@ export interface BilledTokens {
   output_tokens: number
   cache_read_tokens: number
   cache_creation_tokens: number
+}
+/** Sum of the four billed slices — the figure the dashboard labels “Billed
+ *  Tokens”. Deliberately NOT the provider-reported `total_tokens` roll-up:
+ *  only this sum is guaranteed to reconcile with the Input / Output / Cache
+ *  figures shown beside it and with the per-session rows, so every tokens
+ *  total on the dashboard is computed from here. */
+export function billedTokens(slices: BilledTokens): number {
+  return (
+    slices.input_tokens +
+    slices.output_tokens +
+    slices.cache_read_tokens +
+    slices.cache_creation_tokens
+  )
 }
 
 /** Total USD cost of one usage record's four billed slices. Mirrors the Rust
