@@ -5,6 +5,7 @@ import DiffBlock from './DiffBlock'
 import SafeMarkdown from './SafeMarkdown'
 import SubagentTranscript from './SubagentTranscript'
 import type { FileDiff, ToolImage } from './chat/events'
+import { authedFetch } from '../store/auth'
 import {
   bareToolName,
   getCommandLine,
@@ -15,6 +16,8 @@ import {
 } from './chat/toolDisplay'
 
 interface ToolUseBlockProps {
+  /** Session the tool event belongs to — scopes blob-image fetches. */
+  sessionId: string
   toolName: string
   input?: Record<string, unknown>
   output?: Record<string, unknown> | string
@@ -28,10 +31,74 @@ interface ToolUseBlockProps {
   diff?: FileDiff
 }
 
-/** Build a `data:` URL from an inline tool image. */
-function imageDataUrl(img: ToolImage): string {
+/** Build a `data:` URL from a legacy inline tool image, or null when the
+ *  image is a blob reference. */
+function inlineDataUrl(img: ToolImage): string | null {
+  if (!img.dataBase64) return null
   const mime = img.mimeType || 'image/png'
   return `data:${mime};base64,${img.dataBase64}`
+}
+
+/** Resolve a tool image to a displayable URL. Legacy inline images become
+ *  `data:` URLs; blob references are fetched with auth (the tool-images
+ *  route needs the Authorization header, so no plain <img src>) and swapped
+ *  in as an object URL. Null while loading or on a missing blob. */
+function useToolImageUrl(sessionId: string, img?: ToolImage): string | null {
+  const [fetchedUrl, setFetchedUrl] = useState<string | null>(null)
+  // Only blob references need the fetch; inline images resolve in render.
+  const blobId = img && !img.dataBase64 ? img.id : undefined
+  useEffect(() => {
+    if (!blobId) return
+    let objectUrl: string | null = null
+    let cancelled = false
+    authedFetch(`/api/sessions/${sessionId}/tool-images/${blobId}`)
+      .then((r) => (r.ok ? r.blob() : Promise.reject(new Error(String(r.status)))))
+      .then((b) => {
+        const u = URL.createObjectURL(b)
+        if (cancelled) {
+          URL.revokeObjectURL(u)
+          return
+        }
+        objectUrl = u
+        setFetchedUrl(u)
+      })
+      .catch(() => {
+        // Deleted/stale blob — leave the slot empty.
+      })
+    return () => {
+      cancelled = true
+      if (objectUrl) URL.revokeObjectURL(objectUrl)
+    }
+  }, [sessionId, blobId])
+  if (!img) return null
+  const inline = inlineDataUrl(img)
+  if (inline) return inline
+  return blobId ? fetchedUrl : null
+}
+
+/** One screenshot thumbnail; renders nothing until its URL resolves. */
+function ToolImageThumb({
+  sessionId,
+  img,
+  onOpen,
+}: {
+  sessionId: string
+  img: ToolImage
+  onOpen: () => void
+}) {
+  const url = useToolImageUrl(sessionId, img)
+  if (!url) return null
+  return (
+    <button
+      type="button"
+      className="tool-image-thumb"
+      onClick={onOpen}
+      aria-label="Open screenshot"
+      data-testid="tool-image-thumb"
+    >
+      <img src={url} alt="Screenshot" loading="lazy" />
+    </button>
+  )
 }
 
 /** Compact human duration: 3s, 1m 12s. */
@@ -391,6 +458,7 @@ function OutputSections({ out }: { out: Record<string, unknown> | string }) {
 }
 
 export default function ToolUseBlock({
+  sessionId,
   toolName,
   input,
   output,
@@ -441,6 +509,7 @@ export default function ToolUseBlock({
 
   const statusClass = error ? 'tool-error' : isRunning ? 'tool-running' : ''
   const lightboxImage = lightboxIdx !== null ? images?.[lightboxIdx] : undefined
+  const lightboxUrl = useToolImageUrl(sessionId, lightboxImage)
 
   return (
     <div className={`tool-block ${statusClass}`}>
@@ -497,16 +566,12 @@ export default function ToolUseBlock({
       {hasImages && (
         <div className="tool-images" data-testid="tool-images">
           {images!.map((img, i) => (
-            <button
-              key={i}
-              type="button"
-              className="tool-image-thumb"
-              onClick={() => setLightboxIdx(i)}
-              aria-label="Open screenshot"
-              data-testid="tool-image-thumb"
-            >
-              <img src={imageDataUrl(img)} alt="Screenshot" loading="lazy" />
-            </button>
+            <ToolImageThumb
+              key={img.id ?? i}
+              sessionId={sessionId}
+              img={img}
+              onOpen={() => setLightboxIdx(i)}
+            />
           ))}
         </div>
       )}
@@ -538,14 +603,14 @@ export default function ToolUseBlock({
           {out !== undefined && !error && <OutputSections out={out} />}
         </div>
       )}
-      {lightboxImage && (
+      {lightboxImage && lightboxUrl && (
         <Modal
           onClose={() => setLightboxIdx(null)}
           className="image-lightbox"
           backdropClassName="image-lightbox-backdrop"
           data-testid="tool-image-lightbox"
         >
-          <img src={imageDataUrl(lightboxImage)} alt="Screenshot" className="image-lightbox-img" />
+          <img src={lightboxUrl} alt="Screenshot" className="image-lightbox-img" />
         </Modal>
       )}
     </div>

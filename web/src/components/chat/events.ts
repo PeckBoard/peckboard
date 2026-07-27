@@ -27,11 +27,16 @@ export interface MessageAttachment {
   id?: string
 }
 
-/** An image returned by a tool (e.g. a Playwright MCP screenshot), carried
- *  inline on the `agent-tool-end` event as base64. */
+/** An image returned by a tool (e.g. a Playwright MCP screenshot). New
+ *  events carry a blob reference `id` (served by
+ *  `/api/sessions/:id/tool-images/:imageId`); legacy events persisted before
+ *  the blob offload carry the base64 payload inline. */
 export interface ToolImage {
   mimeType: string
-  dataBase64: string
+  /** Inline base64 payload — legacy events only. */
+  dataBase64?: string
+  /** Blob reference id — fetched with auth from the tool-images route. */
+  id?: string
 }
 
 /** Server-computed unified diff for an edit_file / write_file call,
@@ -316,8 +321,10 @@ function readAttachments(ev: Event): MessageAttachment[] | undefined {
 /**
  * Pull any images off an `agent-tool-end` event. Tools that return images
  * (Playwright MCP `browser_take_screenshot`, any image-returning MCP server)
- * carry them inline as `[{mimeType, dataBase64}]`. Returns undefined when the
- * tool returned no images, so the tool block renders exactly as before.
+ * carry them as `[{mimeType, id}]` blob references — or inline as
+ * `[{mimeType, dataBase64}]` on legacy events, which must keep rendering.
+ * Returns undefined when the tool returned no images, so the tool block
+ * renders exactly as before.
  */
 function readToolImages(ev: Event): ToolImage[] | undefined {
   const raw = ev.data.images
@@ -326,10 +333,12 @@ function readToolImages(ev: Event): ToolImage[] | undefined {
   for (const entry of raw) {
     const obj = (entry ?? {}) as Record<string, unknown>
     const dataBase64 = (obj.dataBase64 as string) ?? (obj.data_base64 as string)
-    if (!dataBase64) continue
+    const id = typeof obj.id === 'string' && obj.id !== '' ? obj.id : undefined
+    if (!dataBase64 && !id) continue
     images.push({
       mimeType: (obj.mimeType as string) ?? (obj.mime_type as string) ?? 'image/png',
-      dataBase64,
+      dataBase64: dataBase64 || undefined,
+      id,
     })
   }
   return images.length > 0 ? images : undefined

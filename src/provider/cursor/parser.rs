@@ -33,12 +33,6 @@
 
 use crate::provider::stream::{ProviderEvent, ToolImage};
 
-/// Cap on tool output carried on a `ToolEnd`. Cursor `completed` frames
-/// embed entire tool payloads (a `readToolCall` result holds the whole
-/// file), so an uncapped copy would balloon the event log and every WS
-/// broadcast.
-const MAX_TOOL_OUTPUT_BYTES: usize = 64 * 1024;
-
 /// Mutable per-turn parser state, owned by the run loop and threaded
 /// through [`parse_stream_json`] one stdout line at a time.
 #[derive(Default)]
@@ -316,8 +310,8 @@ fn push_tool_call(json: &serde_json::Value, events: &mut Vec<ProviderEvent>) {
 
 /// Split a `tool_call.result` into `(output, error)` for `ToolEnd`.
 /// `error.errorMessage` wins; `success` prefers its `content` string (file
-/// reads) over a pretty-JSON dump of the whole payload. Everything is
-/// capped at [`MAX_TOOL_OUTPUT_BYTES`].
+/// reads) over a pretty-JSON dump of the whole payload. Output is not
+/// capped here — the central budget in `emit_event` truncates.
 fn tool_call_outcome(result: Option<&serde_json::Value>) -> (Option<String>, Option<String>) {
     let Some(result) = result else {
         return (None, None);
@@ -329,7 +323,7 @@ fn tool_call_outcome(result: Option<&serde_json::Value>) -> (Option<String>, Opt
             .map(str::to_string)
             .or_else(|| err.as_str().map(str::to_string))
             .unwrap_or_else(|| err.to_string());
-        return (None, Some(cap_output(msg)));
+        return (None, Some(msg));
     }
     if let Some(success) = result.get("success") {
         let text = success
@@ -338,30 +332,14 @@ fn tool_call_outcome(result: Option<&serde_json::Value>) -> (Option<String>, Opt
             .map(str::to_string)
             .or_else(|| success.as_str().map(str::to_string))
             .unwrap_or_else(|| serde_json::to_string_pretty(success).unwrap_or_default());
-        let output = if text.is_empty() {
-            None
-        } else {
-            Some(cap_output(text))
-        };
+        let output = if text.is_empty() { None } else { Some(text) };
         return (output, None);
     }
     // Unknown result shape — carry it verbatim so nothing is silently lost.
     match result {
         serde_json::Value::Null => (None, None),
-        other => (Some(cap_output(other.to_string())), None),
+        other => (Some(other.to_string()), None),
     }
-}
-
-/// Cap `s` at [`MAX_TOOL_OUTPUT_BYTES`], appending a truncation marker.
-fn cap_output(s: String) -> String {
-    if s.len() <= MAX_TOOL_OUTPUT_BYTES {
-        return s;
-    }
-    let mut end = MAX_TOOL_OUTPUT_BYTES;
-    while !s.is_char_boundary(end) {
-        end -= 1;
-    }
-    format!("{}\n… [truncated {} bytes]", &s[..end], s.len() - end)
 }
 
 /// Build a `Usage` event from a result frame's `usage` rollup
@@ -983,8 +961,11 @@ mod tests {
     }
 
     #[test]
-    fn oversized_tool_output_is_capped() {
-        let big = "x".repeat(MAX_TOOL_OUTPUT_BYTES + 10);
+    fn oversized_tool_output_passes_through_uncapped() {
+        // The 64KB cap moved to the central budget in `emit_event`
+        // (`service::tool_images`); the parser must no longer truncate,
+        // or the output would be double-marked.
+        let big = "x".repeat(70 * 1024);
         let mut state = started_state();
         let events = parse(
             serde_json::json!({
@@ -998,9 +979,7 @@ mod tests {
         let ProviderEvent::ToolEnd { output, .. } = &events[0] else {
             panic!("expected ToolEnd, got {:?}", events[0]);
         };
-        let out = output.as_deref().unwrap();
-        assert!(out.len() <= MAX_TOOL_OUTPUT_BYTES + 64);
-        assert!(out.contains("truncated"));
+        assert_eq!(output.as_deref(), Some(big.as_str()));
     }
 
     #[test]

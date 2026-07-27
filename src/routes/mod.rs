@@ -24,6 +24,7 @@ pub mod reports;
 pub mod sessions;
 pub mod settings;
 pub mod system_prompts;
+pub mod tool_images;
 pub mod update;
 pub mod usage;
 
@@ -56,6 +57,7 @@ pub fn api_router(state: Arc<AppState>) -> Router<Arc<AppState>> {
         .merge(repeating_tasks::router(state.clone()))
         .merge(reports::router(state.clone()))
         .merge(attachments::router(state.clone()))
+        .merge(tool_images::router(state.clone()))
         .merge(notifications::router(state.clone()))
         .merge(me::router(state.clone()))
         .merge(agent_vars::router(state.clone()))

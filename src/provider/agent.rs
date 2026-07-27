@@ -195,9 +195,23 @@ pub async fn emit_event(
     event: ProviderEvent,
 ) {
     let kind = event.event_kind().to_string();
-    let data = event.event_data();
+    // Central payload budget: cap ToolEnd output/error at the shared byte
+    // budget (with an explicit truncation marker + original byte count) and
+    // offload inline tool images to blob storage, so no provider can push an
+    // unbounded payload into the event log or the WS broadcast.
+    let data = match &event {
+        ProviderEvent::ToolEnd { .. } => {
+            crate::service::tool_images::prepare_tool_end_payload(
+                event.event_data(),
+                db.data_dir(),
+                session_id,
+            )
+            .await
+        }
+        _ => event.event_data(),
+    };
 
-    match db.append_event(session_id, &kind, data.clone()).await {
+    match db.append_event(session_id, &kind, data).await {
         Ok(db_event) => {
             let now = chrono::Utc::now().to_rfc3339();
             let _ = db
@@ -312,6 +326,16 @@ pub async fn emit_event(
                     .await;
             }
 
+            // Oversized-frame guard: the tool-end budget above bounds the
+            // common case, but any other kind carrying a huge string (a
+            // monster text delta, a bloated question payload) gets its
+            // top-level string fields truncated for the broadcast copy only
+            // — the stored event stays authoritative.
+            let mut ws_data =
+                serde_json::from_str::<serde_json::Value>(&db_event.data).unwrap_or_default();
+            if db_event.data.len() > crate::service::tool_images::MAX_WS_EVENT_DATA_BYTES {
+                crate::service::tool_images::cap_ws_event_data(&mut ws_data);
+            }
             broadcaster.broadcast(WsEvent {
                 event_type: "event".into(),
                 session_id: session_id.to_string(),
@@ -320,7 +344,7 @@ pub async fn emit_event(
                     "seq": db_event.seq,
                     "ts": db_event.ts,
                     "kind": db_event.kind,
-                    "data": serde_json::from_str::<serde_json::Value>(&db_event.data).unwrap_or_default(),
+                    "data": ws_data,
                 }),
             });
 

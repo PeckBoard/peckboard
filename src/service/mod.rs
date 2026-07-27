@@ -11,5 +11,6 @@ pub mod questions;
 pub mod redact;
 pub mod secret_mask;
 pub mod tls;
+pub mod tool_images;
 pub mod update;
 pub mod wake;

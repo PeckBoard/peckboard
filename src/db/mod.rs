@@ -22,6 +22,11 @@ pub const MIGRATIONS: EmbeddedMigrations = embed_migrations!();
 #[derive(Clone)]
 pub struct Db {
     conn: Arc<Mutex<SqliteConnection>>,
+    /// Root data directory this database was opened from — `None` for
+    /// in-memory test databases. Lets the event path derive sibling blob
+    /// storage (`tool-images/`) without threading config through every
+    /// `emit_event` caller.
+    data_dir: Option<std::path::PathBuf>,
 }
 
 impl Db {
@@ -54,6 +59,7 @@ impl Db {
 
         Ok(Db {
             conn: Arc::new(Mutex::new(conn)),
+            data_dir: Some(data_dir.to_path_buf()),
         })
     }
 
@@ -73,7 +79,13 @@ impl Db {
 
         Ok(Db {
             conn: Arc::new(Mutex::new(conn)),
+            data_dir: None,
         })
+    }
+
+    /// The data directory this database lives in, when file-backed.
+    pub fn data_dir(&self) -> Option<&Path> {
+        self.data_dir.as_deref()
     }
 
     /// Run a closure with access to the underlying Diesel connection.

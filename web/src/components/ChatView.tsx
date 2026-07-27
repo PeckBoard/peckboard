@@ -621,6 +621,7 @@ const ChatRow = memo(function ChatRow({
       return (
         <div className="chat-row chat-row-tool">
           <ToolUseBlock
+            sessionId={sessionId}
             toolName={item.toolName}
             input={item.input}
             output={item.output}
