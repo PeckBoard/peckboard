@@ -53,6 +53,16 @@
   opacity: 0.6;
   cursor: default;
 }
+/* A failed "load older" page. The store leaves `hasMoreOlderEvents` alone on
+   failure, so the affordance stays put and reads as an error + Retry instead
+   of silently vanishing as if history were exhausted. */
+.chat-load-older-error {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+  color: var(--danger);
+  font-size: var(--text-sm);
+}
 
 /* Todo / task panel — pinned below the toolbar, above the message log. */
 .todo-panel {
@@ -683,10 +693,16 @@
   cursor: pointer;
   transition: all var(--transition);
 }
-.chat-thinking-interrupt:hover {
+.chat-thinking-interrupt:hover:not(:disabled) {
   background: var(--danger);
   color: var(--text-inverse);
   border-color: var(--danger);
+}
+/* Locked while the interrupt request is in flight — clicking again would
+   only stack another call on an agent that is already being stopped. */
+.chat-thinking-interrupt:disabled {
+  opacity: 0.6;
+  cursor: default;
 }
 
 .chat-thinking-elapsed {

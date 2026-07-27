@@ -31,6 +31,7 @@ import ModelPicker from './ModelPicker'
 import TodoPanel from './TodoPanel'
 import PreHatchActivity from './chat/PreHatchActivity'
 import { fetchPlanId, openPlan } from '../lib/plan'
+import { describeActionError } from '../utils/actionError'
 import { parseTodoItems, latestTodoSnapshot, type TodoItem } from '../types/todo'
 import {
   EMPTY_EVENTS,
@@ -782,6 +783,18 @@ const ChatRow = memo(function ChatRow({
       )
   }
 })
+/** A confirm-gated session action. `run` rejects on failure; the dialog
+ *  stays open and shows the reason (or `failMessage` when the thrown
+ *  value isn't human-readable) so the user can retry in place. */
+type ConfirmActionState = {
+  title: string
+  message: string
+  confirmLabel?: string
+  testId?: string
+  failMessage: string
+  run: () => Promise<void>
+}
+
 export default function ChatView({
   sessionId,
   onOpenTodos,
@@ -799,6 +812,7 @@ export default function ChatView({
   const hasMoreOlderEvents = useSessionsStore(
     (s) => s.hasMoreOlderEventsBySession[sessionId] ?? false,
   )
+  const olderEventsError = useSessionsStore((s) => s.olderEventsErrorBySession[sessionId] ?? false)
   const appendEvent = useSessionsStore((s) => s.appendEvent)
   const pendingUserMessages = useSessionsStore(
     (s) => s.pendingUserMessages[sessionId] ?? EMPTY_PENDING_MESSAGES,
@@ -820,11 +834,14 @@ export default function ChatView({
       cancelled = true
     }
   }, [sessionId, events.length])
-  const [confirmAction, setConfirmAction] = useState<{
-    title: string
-    message: string
-    onConfirm: () => void
-  } | null>(null)
+  const [confirmAction, setConfirmAction] = useState<ConfirmActionState | null>(null)
+  // In-flight / failed state of the confirmed action. A failure used to
+  // close the dialog silently, which looked exactly like success.
+  const [confirmBusy, setConfirmBusy] = useState(false)
+  const [confirmError, setConfirmError] = useState<string | null>(null)
+  // Inline interrupt request in flight — locks the button so repeated
+  // clicking can't stack interrupts on the agent.
+  const [interrupting, setInterrupting] = useState(false)
   const [availableModels, setAvailableModels] = useState<ModelInfo[]>([])
   const [availableProviders, setAvailableProviders] = useState<ProviderInfo[]>([])
   const [modelsError, setModelsError] = useState(false)
@@ -1221,12 +1238,39 @@ export default function ChatView({
     }
   }
 
+  // Opening a dialog always starts from a clean slate — a stale error
+  // from the previous action must never greet the next one.
+  const openConfirm = (action: ConfirmActionState) => {
+    setConfirmError(null)
+    setConfirmBusy(false)
+    setConfirmAction(action)
+  }
+
+  // Drives the confirm dialog's primary button: success closes it,
+  // failure keeps it mounted with a readable reason and re-enables the
+  // buttons so the same click retries.
+  const runConfirm = async () => {
+    if (!confirmAction || confirmBusy) return
+    setConfirmBusy(true)
+    setConfirmError(null)
+    try {
+      await confirmAction.run()
+      setConfirmAction(null)
+    } catch (e) {
+      setConfirmError(describeActionError(e, confirmAction.failMessage))
+    } finally {
+      setConfirmBusy(false)
+    }
+  }
+
   const handleClear = () => {
-    setConfirmAction({
+    openConfirm({
       title: 'Clear session',
       message: 'Clear all messages in this session?',
-      onConfirm: async () => {
-        setConfirmAction(null)
+      confirmLabel: 'Clear',
+      testId: 'confirm-clear',
+      failMessage: "Couldn't clear this session. Please try again.",
+      run: async () => {
         await clearSession(sessionId)
         fetchEvents(sessionId)
       },
@@ -1234,46 +1278,62 @@ export default function ChatView({
   }
 
   const handleTerminateAgent = () => {
-    setConfirmAction({
+    openConfirm({
       title: 'Terminate agent',
       message:
         'Terminate the agent process? Any in-flight turn will be interrupted. The next message will start a fresh process (picking up any new skills or config).',
-      onConfirm: async () => {
-        setConfirmAction(null)
-        await terminateAgent(sessionId)
-      },
+      confirmLabel: 'Terminate',
+      testId: 'confirm-terminate',
+      failMessage: "Couldn't terminate the agent. Please try again.",
+      run: () => terminateAgent(sessionId),
     })
   }
 
   const handleCompact = () => {
-    setConfirmAction({
+    openConfirm({
       title: 'Compact context',
       message:
         'Summarize the conversation and drop earlier history from the context window? The transcript stays intact.',
-      onConfirm: async () => {
-        setConfirmAction(null)
-        try {
-          const res = await authedFetch(`/api/sessions/${sessionId}/compact`, { method: 'POST' })
-          if (!res.ok) {
-            const err = (await res.json().catch(() => null)) as { error?: string } | null
-            setPatchError(err?.error ?? `compaction failed (${res.status})`)
-          }
-        } catch {
-          /* ignore */
+      confirmLabel: 'Compact',
+      testId: 'confirm-compact',
+      failMessage: "Couldn't compact the context. Please try again.",
+      run: async () => {
+        const res = await authedFetch(`/api/sessions/${sessionId}/compact`, { method: 'POST' })
+        if (!res.ok) {
+          const err = (await res.json().catch(() => null)) as { error?: string } | null
+          throw new Error(err?.error ?? `Compaction failed (${res.status}).`)
         }
       },
     })
   }
 
   const handleDelete = () => {
-    setConfirmAction({
+    openConfirm({
       title: 'Delete session',
       message: 'Delete this session and all its events?',
-      onConfirm: async () => {
-        setConfirmAction(null)
-        await deleteSession(sessionId)
-      },
+      confirmLabel: 'Delete',
+      testId: 'confirm-delete',
+      failMessage: "Couldn't delete this session. Please try again.",
+      run: () => deleteSession(sessionId),
     })
+  }
+
+  // Inline interrupt: the store throws on a non-2xx, which used to be an
+  // unhandled rejection — the agent kept running with no sign anything
+  // had failed. Surface it in the existing error banner instead.
+  const handleInterrupt = async () => {
+    if (interrupting) return
+    setInterrupting(true)
+    try {
+      await interruptSession(sessionId)
+      setPatchError(null)
+    } catch (e) {
+      setPatchError(
+        describeActionError(e, `Couldn't ${interruptAffordance.label.toLowerCase()} the agent.`),
+      )
+    } finally {
+      setInterrupting(false)
+    }
   }
 
   const patchSession = async (patch: Record<string, unknown>) => {
@@ -1644,14 +1704,32 @@ export default function ChatView({
             one extra page. */}
         {hasMoreOlderEvents && displayItems.length > 0 && (
           <div className="chat-load-older">
-            <button
-              className="chat-load-older-btn"
-              data-testid="chat-load-older"
-              onClick={handleLoadOlder}
-              disabled={loadingOlderEvents}
-            >
-              {loadingOlderEvents ? 'Loading…' : 'Load older messages'}
-            </button>
+            {olderEventsError ? (
+              <span
+                className="chat-load-older-error"
+                role="alert"
+                data-testid="chat-load-older-error"
+              >
+                Couldn’t load older messages.
+                <button
+                  className="chat-load-older-btn"
+                  data-testid="chat-load-older-retry"
+                  onClick={handleLoadOlder}
+                  disabled={loadingOlderEvents}
+                >
+                  Retry
+                </button>
+              </span>
+            ) : (
+              <button
+                className="chat-load-older-btn"
+                data-testid="chat-load-older"
+                onClick={handleLoadOlder}
+                disabled={loadingOlderEvents}
+              >
+                {loadingOlderEvents ? 'Loading…' : 'Load older messages'}
+              </button>
+            )}
           </div>
         )}
         {displayItems.length === 0 && (
@@ -1725,12 +1803,14 @@ export default function ChatView({
               {workingSince > 0 && <ElapsedSince since={workingSince} />}
               <button
                 className="chat-thinking-interrupt"
-                onClick={() => interruptSession(sessionId)}
+                onClick={() => void handleInterrupt()}
                 type="button"
+                disabled={interrupting}
+                aria-busy={interrupting || undefined}
                 aria-label={`${interruptAffordance.label} agent`}
                 title={interruptAffordance.title}
               >
-                {interruptAffordance.label}
+                {interrupting ? 'Stopping…' : interruptAffordance.label}
               </button>
             </div>
           </div>
@@ -1774,7 +1854,14 @@ export default function ChatView({
                   onClick={async () => {
                     const target = pendingModelSwitch
                     setPendingModelSwitch(null)
-                    await clearSession(sessionId)
+                    try {
+                      await clearSession(sessionId)
+                    } catch (e) {
+                      setPatchError(
+                        describeActionError(e, "Couldn't clear this session. Please try again."),
+                      )
+                      return
+                    }
                     patchSession({ model: target })
                   }}
                 >
@@ -1800,11 +1887,18 @@ export default function ChatView({
         <ConfirmDialog
           title={confirmAction.title}
           message={confirmAction.message}
-          confirmLabel="Confirm"
+          confirmLabel={confirmAction.confirmLabel ?? 'Confirm'}
           cancelLabel="Cancel"
           danger
-          onConfirm={confirmAction.onConfirm}
-          onCancel={() => setConfirmAction(null)}
+          testId={confirmAction.testId}
+          error={confirmError}
+          busy={confirmBusy}
+          onConfirm={() => void runConfirm()}
+          onCancel={() => {
+            if (confirmBusy) return
+            setConfirmAction(null)
+            setConfirmError(null)
+          }}
         />
       )}
     </div>

@@ -113,6 +113,7 @@
   display: flex;
   align-items: center;
   gap: 8px;
+  flex-wrap: wrap;
   margin-bottom: 8px;
   padding: 6px 12px;
   font-size: var(--text-xs);
@@ -138,6 +139,17 @@
   .handover-cancel-btn:hover {
     background: var(--surface-hover);
     color: var(--text);
+  }
+  .handover-cancel-btn:disabled {
+    opacity: 0.6;
+    cursor: default;
+  }
+  /* A refused cancel drops onto its own line under the banner text so the
+     reason is readable instead of squeezed beside the button. */
+  .handover-cancel-error {
+    flex-basis: 100%;
+    color: var(--danger);
+    font-weight: 600;
   }
 }
 .handover-spinner {

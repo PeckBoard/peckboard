@@ -3,6 +3,7 @@ import type { KeyboardEvent, ChangeEvent, ClipboardEvent } from 'react'
 import { authedFetch } from '../store/auth'
 import { useSessionsStore } from '../store/sessions'
 import { useMentions, filterMentions, type MentionItem } from '../hooks/useMentions'
+import { describeActionError } from '../utils/actionError'
 
 interface InputBarProps {
   sessionId: string
@@ -60,6 +61,11 @@ export default function InputBar({
   const [uploadErrors, setUploadErrors] = useState<string[]>([])
   const [suggestions, setSuggestions] = useState<MentionItem[]>([])
   const [showAutocomplete, setShowAutocomplete] = useState(false)
+  // Handover-cancel request in flight / its failure. The interrupt used
+  // to be fire-and-forget: a refusal left the banner spinning with no
+  // sign anything had gone wrong, and every click stacked another call.
+  const [cancellingHandover, setCancellingHandover] = useState(false)
+  const [handoverCancelError, setHandoverCancelError] = useState<string | null>(null)
   const textareaRef = useRef<HTMLTextAreaElement>(null)
   const fileInputRef = useRef<HTMLInputElement>(null)
 
@@ -274,6 +280,20 @@ export default function InputBar({
       handleSend()
     }
   }
+  const handleHandoverCancel = async () => {
+    if (cancellingHandover) return
+    setCancellingHandover(true)
+    setHandoverCancelError(null)
+    try {
+      await interruptSession(sessionId)
+    } catch (e) {
+      setHandoverCancelError(
+        describeActionError(e, "Couldn't cancel the switch. Please try again."),
+      )
+    } finally {
+      setCancellingHandover(false)
+    }
+  }
 
   const canSend = (text.trim().length > 0 || attachments.length > 0) && !sending && !handoverActive
 
@@ -287,11 +307,22 @@ export default function InputBar({
             type="button"
             className="handover-cancel-btn"
             data-testid="handover-cancel"
-            onClick={() => interruptSession(sessionId)}
+            onClick={() => void handleHandoverCancel()}
+            disabled={cancellingHandover}
+            aria-busy={cancellingHandover || undefined}
             title="Cancel the switch and keep the current model and context"
           >
-            Cancel
+            {cancellingHandover ? 'Cancelling…' : 'Cancel'}
           </button>
+          {handoverCancelError && (
+            <span
+              className="handover-cancel-error"
+              role="alert"
+              data-testid="handover-cancel-error"
+            >
+              {handoverCancelError}
+            </span>
+          )}
         </div>
       )}
       {/* Autocomplete dropdown for @mentions */}

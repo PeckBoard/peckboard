@@ -110,6 +110,11 @@ interface SessionsState {
    *  true on first load so the "Load older" button shows; flipped to
    *  false the first time a partial page arrives. */
   hasMoreOlderEventsBySession: Record<string, boolean>
+  /** True when the last "Load older" request for a session failed. The
+   *  request deliberately leaves `hasMoreOlderEventsBySession` alone in that
+   *  case, so ChatView can offer a Retry instead of silently retiring the
+   *  affordance as if history were exhausted. */
+  olderEventsErrorBySession: Record<string, boolean>
   pendingUserMessages: Record<string, PendingUserMessage[]>
   fetchSessions: () => Promise<void>
   fetchMoreSessions: () => Promise<void>
@@ -197,6 +202,7 @@ export const useSessionsStore = create<SessionsState>((set, get) => ({
   eventsErrorBySession: {},
   loadingOlderEventsBySession: {},
   hasMoreOlderEventsBySession: {},
+  olderEventsErrorBySession: {},
   pendingUserMessages: {},
 
   fetchSessions: async () => {
@@ -300,11 +306,23 @@ export const useSessionsStore = create<SessionsState>((set, get) => ({
     const oldestSeq = existing.reduce((min, e) => (e.seq < min ? e.seq : min), existing[0].seq)
     set((s) => ({
       loadingOlderEventsBySession: { ...s.loadingOlderEventsBySession, [sessionId]: true },
+      olderEventsErrorBySession: { ...s.olderEventsErrorBySession, [sessionId]: false },
     }))
     try {
       const url = `/api/sessions/${sessionId}/events?before_seq=${oldestSeq}&limit=${EVENTS_PAGE_SIZE}`
       const res = await authedFetch(url)
-      const older: Event[] = res.ok ? await res.json() : []
+      if (!res.ok) {
+        // Treating a failed page as an empty one would set
+        // `hasMoreOlderEvents` to false and permanently retire the "Load
+        // older" affordance on a single transient 500. Leave the flag
+        // untouched and surface the failure instead.
+        set((s) => ({
+          loadingOlderEventsBySession: { ...s.loadingOlderEventsBySession, [sessionId]: false },
+          olderEventsErrorBySession: { ...s.olderEventsErrorBySession, [sessionId]: true },
+        }))
+        return
+      }
+      const older: Event[] = await res.json()
       set((s) => {
         const current = s.eventsBySession[sessionId] ?? []
         const seen = new Set(current.map((e) => e.id))
@@ -321,7 +339,8 @@ export const useSessionsStore = create<SessionsState>((set, get) => ({
             [sessionId]: false,
           },
           // A short page (less than what we asked for) is the
-          // unambiguous "end of history" signal.
+          // unambiguous "end of history" signal. Only a page that
+          // actually arrived may set this.
           hasMoreOlderEventsBySession: {
             ...s.hasMoreOlderEventsBySession,
             [sessionId]: older.length >= EVENTS_PAGE_SIZE,
@@ -331,6 +350,7 @@ export const useSessionsStore = create<SessionsState>((set, get) => ({
     } catch {
       set((s) => ({
         loadingOlderEventsBySession: { ...s.loadingOlderEventsBySession, [sessionId]: false },
+        olderEventsErrorBySession: { ...s.olderEventsErrorBySession, [sessionId]: true },
       }))
     }
   },
