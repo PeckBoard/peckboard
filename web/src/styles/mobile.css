@@ -513,8 +513,37 @@
   background: var(--accent);
   color: var(--text-inverse);
 }
+/* Off-screen-tab overflow trigger. Sits between the scrolling strip and
+   `+`, mirroring the `+` pill so the two read as one trailing control
+   cluster. Only in the DOM while chips are actually clipped; `+` stays
+   the last child of the bar either way. */
+.tab-overflow {
+  flex-shrink: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 32px;
+  height: 32px;
+  padding: 0;
+  border: 0;
+  border-radius: var(--radius-full);
+  background: var(--surface2);
+  color: var(--text2);
+  font-size: 18px;
+  line-height: 1;
+  cursor: pointer;
+  transition:
+    background 0.12s ease,
+    color 0.12s ease;
+}
+.tab-overflow:hover,
+.tab-overflow[aria-expanded='true'] {
+  background: var(--surface3);
+  color: var(--text);
+}
 @media (max-width: 768px) {
-  .tab-new {
+  .tab-new,
+  .tab-overflow {
     width: 36px;
     height: 36px;
     font-size: 20px;

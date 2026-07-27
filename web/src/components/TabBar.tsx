@@ -1,7 +1,7 @@
-import { useRef, useState } from 'react'
-import { useTabsStore } from '../store/tabs'
+import { useCallback, useLayoutEffect, useRef, useState } from 'react'
+import { useTabsStore, type Tab } from '../store/tabs'
 import { useContextMenu } from '../hooks/useContextMenu'
-import { type MenuItem } from './Dropdown'
+import { MenuButton, type MenuItem } from './Dropdown'
 import { tabDefaultLabel, type TabKindRegistry } from './tabKinds'
 
 interface TabBarProps {
@@ -107,6 +107,83 @@ export default function TabBar({ kinds, onNewSession }: TabBarProps) {
     // moves the roving tabindex — no separate bookkeeping.
     all[next].focus()
   }
+  // Chip text. `||` (not `??`) is intentional: openTab's optimistic insert
+  // stores `name: ''` for the brief window between the local insert and the
+  // upsert response landing, and the empty string must fall through to the
+  // placeholder rather than render as a label-less chip. Same reason the
+  // live name falls back to `t.name`.
+  const labelOf = (t: Tab) =>
+    kinds[t.itemType]?.getLiveName(t) || t.name || tabDefaultLabel[t.itemType]
+
+  // Overflow menu. The strip scrolls horizontally, so past roughly eight
+  // tabs some chips sit outside its box with nothing saying so — scrubbing
+  // sideways is the only way to find them. `hiddenKeys` is the set of chips
+  // the current scroll position clips; the `»` trigger beside `+` lists
+  // them and jumps straight to one.
+  const [hiddenKeys, setHiddenKeys] = useState<string[]>([])
+
+  const measureOverflow = useCallback(() => {
+    const strip = stripRef.current
+    const bar = strip?.parentElement
+    if (!strip || !bar) return
+    const box = strip.getBoundingClientRect()
+    // The `»` trigger takes its width out of the strip only once it is
+    // rendered. Measuring against the raw box while it is hidden would
+    // flip-flop forever: show the trigger → the strip narrows → the chip
+    // that fits no longer does. So reserve the space it is about to claim
+    // (it is sized like `.tab-new`, plus the bar's gap). Over-reserving is
+    // safe; under-reserving is what oscillates.
+    const reserve = bar.querySelector('.tab-overflow')
+      ? 0
+      : (bar.querySelector('.tab-new')?.getBoundingClientRect().width ?? 32) + 8
+    const right = box.right - reserve
+    const next: string[] = []
+    for (const el of Array.from(strip.querySelectorAll<HTMLElement>('[data-tab-id]'))) {
+      const key = el.dataset.tabId
+      if (!key) continue
+      const r = el.getBoundingClientRect()
+      // 1px slack: sub-pixel layout rounding otherwise reports a fully
+      // visible edge chip as clipped.
+      if (r.left < box.left - 1 || r.right > right + 1) next.push(key)
+    }
+    // Same-value guard — this runs on every scroll frame, and a fresh array
+    // identity each time would re-render the whole strip.
+    setHiddenKeys((prev) =>
+      prev.length === next.length && prev.every((k, i) => k === next[i]) ? prev : next,
+    )
+  }, [])
+
+  // Re-subscribe whenever the chip set changes: the observer watches the
+  // individual chips, which is what catches a label arriving late from
+  // `getLiveName` and re-flowing the row.
+  const shownKeysSig = shownKeys.join('|')
+  useLayoutEffect(() => {
+    const strip = stripRef.current
+    if (!strip) return
+    measureOverflow()
+    strip.addEventListener('scroll', measureOverflow, { passive: true })
+    const ro = new ResizeObserver(measureOverflow)
+    ro.observe(strip)
+    for (const child of Array.from(strip.children)) ro.observe(child)
+    return () => {
+      strip.removeEventListener('scroll', measureOverflow)
+      ro.disconnect()
+    }
+  }, [measureOverflow, shownKeysSig])
+
+  const hiddenSet = new Set(hiddenKeys)
+  const hiddenTabs = tabs.filter(
+    (t) => kinds[t.itemType] && hiddenSet.has(`${t.itemType}:${t.itemId}`),
+  )
+
+  // Jumping to a clipped tab both activates it and scrolls it into view —
+  // activating alone would leave the chip off screen.
+  const revealTab = (t: Tab) => {
+    kinds[t.itemType]?.onActivate(t)
+    stripRef.current
+      ?.querySelector<HTMLElement>(`[data-tab-id="${CSS.escape(`${t.itemType}:${t.itemId}`)}"]`)
+      ?.scrollIntoView({ inline: 'nearest', block: 'nearest' })
+  }
 
   // Always render the strip — even with zero tabs — so the trailing `+`
   // button stays reachable as the user's entry point to creating a new
@@ -134,13 +211,7 @@ export default function TabBar({ kinds, onNewSession }: TabBarProps) {
         {tabs.map((t, i) => {
           const kind = kinds[t.itemType]
           if (!kind) return null
-          const live = kind.getLiveName(t)
-          // `||` (not `??`) is intentional: openTab's optimistic insert
-          // stores `name: ''` for the brief window between local insert
-          // and the upsert response landing, and the empty string must
-          // fall through to the placeholder rather than render as a
-          // label-less chip. Same reason `live` falls back to `t.name`.
-          const label = live || t.name || tabDefaultLabel[t.itemType]
+          const label = labelOf(t)
           const active = kind.isActive(t)
           const badges = kind.getBadges(t, active)
           const closeTitle = kind.getCloseTitle?.(t) ?? 'Close tab'
@@ -192,6 +263,20 @@ export default function TabBar({ kinds, onNewSession }: TabBarProps) {
           )
         })}
       </div>
+      {/* Off-screen tabs. Rendered only while the strip is actually
+          clipping something, and BEFORE `+` so the new-session button
+          stays the last child of the bar. */}
+      {hiddenTabs.length > 0 && (
+        <MenuButton
+          items={hiddenTabs.map((t) => ({ label: labelOf(t), onSelect: () => revealTab(t) }))}
+          ariaLabel={`${hiddenTabs.length} ${hiddenTabs.length === 1 ? 'tab' : 'tabs'} off screen`}
+          title="Tabs off screen"
+          testId="tab-overflow"
+          triggerClassName="tab-overflow"
+        >
+          &raquo;
+        </MenuButton>
+      )}
       <button
         type="button"
         className="tab-new"
