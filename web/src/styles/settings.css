@@ -1143,7 +1143,7 @@ a.wasm-plugin-repo:hover {
   transition: border-color 0.15s ease;
 }
 .mcp-server-card:hover {
-  border-color: var(--ring);
+  border-color: var(--accent-muted);
 }
 .mcp-server-card--off {
   opacity: 0.6;
@@ -1222,7 +1222,7 @@ a.wasm-plugin-repo:hover {
     border-color 0.12s ease;
 }
 .mcp-chip--toggle:hover {
-  border-color: var(--ring);
+  border-color: var(--accent-muted);
 }
 .mcp-chip--on {
   background: var(--accent-subtle);
@@ -1654,7 +1654,7 @@ a.wasm-plugin-repo:hover {
   font-weight: 600;
 }
 .registry-cat-chip:hover {
-  border-color: var(--ring);
+  border-color: var(--accent-muted);
 }
 .registry-setup-note {
   font-size: var(--text-xs);
