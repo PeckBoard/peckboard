@@ -107,6 +107,20 @@ test('MCP server editor: add, import, validate, toggle, delete', async ({
   await expect(linearCard).toContainText('HTTP')
   await expect(linearCard).toContainText('https://linear.app/mcp')
 
+  // ── Header values are secrets: masked, with a Reveal toggle ──────
+  await linearCard.getByRole('button', { name: 'Edit' }).click()
+  await expect(page.getByTestId('mcp-server-modal')).toBeVisible()
+  await page.getByTestId('mcp-header-add').click()
+  await page.getByTestId('mcp-header-key-0').fill('Authorization')
+  const headerValue = page.getByTestId('mcp-header-value-0')
+  await headerValue.fill('Bearer e2e-secret')
+  await expect(headerValue).toHaveAttribute('type', 'password')
+  await page.getByTestId('mcp-header-value-reveal-0').click()
+  await expect(headerValue).toHaveAttribute('type', 'text')
+  await expect(headerValue).toHaveValue('Bearer e2e-secret')
+  await page.keyboard.press('Escape')
+  await expect(page.getByTestId('mcp-server-modal')).toHaveCount(0)
+
   // Visual proof for review: the populated list, then the edit modal.
   await page.screenshot({ path: 'e2e/test-results/mcp-servers-list.png', fullPage: true })
   await githubEditShot(page)

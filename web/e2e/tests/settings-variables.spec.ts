@@ -131,6 +131,15 @@ test('Environment Variables: scope select adds a folder-scoped var; id delete', 
   const section = page.getByTestId('env-vars-section')
   await expect(section).toBeVisible({ timeout: 10_000 })
 
+  // The Value field holds a secret: masked until Reveal is pressed.
+  const valueInput = page.getByTestId('env-var-value-input')
+  const revealValue = page.getByTestId('env-var-value-reveal')
+  await expect(valueInput).toHaveAttribute('type', 'password')
+  await revealValue.click()
+  await expect(valueInput).toHaveAttribute('type', 'text')
+  await revealValue.click()
+  await expect(valueInput).toHaveAttribute('type', 'password')
+
   // Folder-scoped plaintext var through the form.
   await page.getByTestId('env-var-name-input').fill('API_HOST')
   await page.getByTestId('env-var-value-input').fill('folder.example')
@@ -147,6 +156,13 @@ test('Environment Variables: scope select adds a folder-scoped var; id delete', 
   await page.getByTestId('env-var-scope-select').selectOption('')
   await page.getByTestId('env-var-save-btn').click()
   await expect(page.getByTestId('env-var-API_HOST')).toHaveCount(2)
+
+  // Editing an existing var re-opens the form masked, not in cleartext.
+  await page.getByTestId('env-var-edit-API_HOST').first().click()
+  await expect(valueInput).toHaveValue(/^(folder|global)\.example$/)
+  await expect(valueInput).toHaveAttribute('type', 'password')
+  await revealValue.click()
+  await expect(valueInput).toHaveAttribute('type', 'text')
 
   // Delete both rows (id-based route) — the list drains.
   for (let i = 0; i < 2; i++) {

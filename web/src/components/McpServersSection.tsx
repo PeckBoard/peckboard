@@ -18,6 +18,7 @@ import {
   type UrlOption,
 } from '../utils/mcpServers'
 import { startInstallSession } from '../utils/installSession'
+import SecretInput from './SecretInput'
 import { fetchRegistry, type RegistryMcpServer } from '../utils/pluginApproval'
 
 /**
@@ -854,6 +855,7 @@ export function ServerModal({
     keyPlaceholder: string,
     valuePlaceholder: string,
     addLabel: string,
+    testIdPrefix: string,
   ) => (
     <>
       {list.map((kv, i) => (
@@ -867,16 +869,18 @@ export function ServerModal({
               next[i] = { ...next[i], key: e.target.value }
               onChange(next)
             }}
+            data-testid={`${testIdPrefix}-key-${i}`}
           />
-          <input
-            type="text"
+          <SecretInput
             placeholder={valuePlaceholder}
             value={kv.value}
-            onChange={(e) => {
+            onChange={(v) => {
               const next = [...list]
-              next[i] = { ...next[i], value: e.target.value }
+              next[i] = { ...next[i], value: v }
               onChange(next)
             }}
+            testId={`${testIdPrefix}-value-${i}`}
+            revealTestId={`${testIdPrefix}-value-reveal-${i}`}
           />
           <button
             type="button"
@@ -890,6 +894,7 @@ export function ServerModal({
       <button
         type="button"
         className="plugin-setting-kv-add"
+        data-testid={`${testIdPrefix}-add`}
         onClick={() => onChange([...list, { key: '', value: '' }])}
       >
         {addLabel}
@@ -1024,7 +1029,14 @@ export function ServerModal({
               <span className="plugin-setting-desc">
                 Stored as configured and passed to the command (e.g. API tokens).
               </span>
-              {rows(draft.env, (env) => set({ env }), 'GITHUB_TOKEN', 'Value', '+ Add variable')}
+              {rows(
+                draft.env,
+                (env) => set({ env }),
+                'GITHUB_TOKEN',
+                'Value',
+                '+ Add variable',
+                'mcp-env',
+              )}
             </div>
           </>
         ) : (
@@ -1080,6 +1092,7 @@ export function ServerModal({
                   'Authorization',
                   'Bearer …',
                   '+ Add header',
+                  'mcp-header',
                 )}
                 {/* Always offered: discovery needs no pre-config, so any
                     remote server — including ones saved before OAuth sign-in
