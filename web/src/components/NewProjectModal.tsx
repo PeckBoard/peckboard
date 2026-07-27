@@ -9,6 +9,7 @@ import WorkflowSelect from './WorkflowSelect'
 import WorkflowInstructionsModal, {
   type WorkflowInstructionsDraft,
 } from './WorkflowInstructionsModal'
+import FolderManager from './ManageFoldersModal'
 
 interface Props {
   onClose: () => void
@@ -49,6 +50,9 @@ export default function NewProjectModal({ onClose }: Props) {
   const [instructionDrafts, setInstructionDrafts] = useState<WorkflowInstructionsDraft>({})
   const [showInstructions, setShowInstructions] = useState(false)
   const [showAdvanced, setShowAdvanced] = useState(false)
+  // Folder manager stacked on top of this modal, so a first-run user with
+  // no folders can create one without losing the form they started.
+  const [showFolders, setShowFolders] = useState(false)
 
   useEffect(() => {
     fetchFolders()
@@ -141,6 +145,16 @@ export default function NewProjectModal({ onClose }: Props) {
     }
   }
 
+  // Why Create is disabled, shown next to the button — a disabled control
+  // with no stated reason leaves the user hunting for the bad field.
+  const disabledReason = !name.trim()
+    ? 'Enter a name'
+    : !folderId
+      ? 'Add a folder first'
+      : !workflow
+        ? 'Pick a workflow'
+        : ''
+
   return (
     <>
       <Modal onClose={onClose} maxWidth={520}>
@@ -178,9 +192,20 @@ export default function NewProjectModal({ onClose }: Props) {
                 ))}
               </select>
             ) : (
-              <p style={{ fontSize: 'var(--text-sm)', color: 'var(--text3)' }}>
-                No folders. Create one from the folder manager first.
-              </p>
+              <>
+                <button
+                  type="button"
+                  className="btn-secondary btn-small"
+                  data-testid="new-project-add-folder"
+                  onClick={() => setShowFolders(true)}
+                >
+                  Add a folder…
+                </button>
+                <p className="form-hint">
+                  A project lives inside a folder on disk. Add one here — you keep your place in
+                  this form.
+                </p>
+              </>
             )}
           </div>
           <div className="form-field">
@@ -380,6 +405,11 @@ export default function NewProjectModal({ onClose }: Props) {
 
           {error && <p className="form-error">{error}</p>}
           <div className="form-actions">
+            {!loading && disabledReason && (
+              <span className="form-actions-reason" data-testid="new-project-disabled-reason">
+                {disabledReason}
+              </span>
+            )}
             <button type="button" className="btn-secondary" onClick={onClose}>
               Cancel
             </button>
@@ -401,6 +431,21 @@ export default function NewProjectModal({ onClose }: Props) {
           onCommit={(next) => setInstructionDrafts(next)}
           onClose={() => setShowInstructions(false)}
         />
+      )}
+      {showFolders && (
+        <Modal onClose={() => setShowFolders(false)} maxWidth={560}>
+          <FolderManager />
+          <div className="form-actions">
+            <button
+              type="button"
+              className="btn-primary"
+              data-testid="new-project-folders-done"
+              onClick={() => setShowFolders(false)}
+            >
+              Done
+            </button>
+          </div>
+        </Modal>
       )}
     </>
   )

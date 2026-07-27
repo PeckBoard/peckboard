@@ -48,6 +48,11 @@ interface ProjectsState {
   /** Non-empty when the last `fetchCards` failed — same reasoning as
    *  `projectsError`, for the board's per-step "No cards in …" placeholders. */
   cardsError: string
+  /** Project id whose cards are in `cards`, set once a `fetchCards` for it
+   *  has succeeded. The board's “No cards yet” state is a claim about a
+   *  known-empty project — without this it would flash while the first
+   *  fetch is still in flight. */
+  cardsLoadedProjectId: string | null
   cardReportsByCard: Record<string, CardReport[]>
   pendingQuestionsByProject: Record<string, PendingQuestion[]>
   fetchProjects: () => Promise<void>
@@ -73,6 +78,7 @@ export const useProjectsStore = create<ProjectsState>((set) => ({
   pendingQuestionsByProject: {},
   projectsError: '',
   cardsError: '',
+  cardsLoadedProjectId: null,
 
   fetchProjects: async () => {
     try {
@@ -138,7 +144,7 @@ export const useProjectsStore = create<ProjectsState>((set) => ({
     const current = useProjectsStore.getState().activeProjectId
     // Don't clear cards if re-selecting the same project
     if (id === current) return
-    set({ activeProjectId: id, cards: [], cardsError: '' })
+    set({ activeProjectId: id, cards: [], cardsError: '', cardsLoadedProjectId: null })
   },
 
   fetchCards: async (projectId: string) => {
@@ -149,7 +155,7 @@ export const useProjectsStore = create<ProjectsState>((set) => ({
         return
       }
       const cards: Card[] = await res.json()
-      set({ cards, cardsError: '' })
+      set({ cards, cardsError: '', cardsLoadedProjectId: projectId })
     } catch {
       set({ cardsError: 'Couldn’t load cards.' })
     }

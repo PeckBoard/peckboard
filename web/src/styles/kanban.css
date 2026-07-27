@@ -195,6 +195,30 @@
   padding: 0 4px;
   white-space: nowrap;
 }
+/* Whole-board empty state for a project with no cards at all. Replaces the
+   per-column placeholders so a first visit has one obvious next step. */
+.kanban-empty {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  flex: 1;
+  padding: 48px 24px;
+  text-align: center;
+}
+.kanban-empty-title {
+  margin: 0;
+  font-size: var(--text-lg);
+  font-weight: 600;
+  color: var(--text);
+}
+.kanban-empty-hint {
+  margin: 0 0 8px;
+  max-width: 42ch;
+  font-size: var(--text-sm);
+  color: var(--text2);
+}
 .kanban-card {
   background: var(--kanban-card-bg);
   /* Border tracks the card fill so the edge reads as a soft outline

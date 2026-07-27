@@ -634,6 +634,20 @@
   font-family: inherit;
   cursor: pointer;
 }
+/* Filter box in a list header's `extras` slot (Projects). Mirrors
+   `.report-search` so every list view filters with the same control. */
+.list-view-search {
+  margin-left: auto;
+  margin-right: 8px;
+  padding: 5px 10px;
+  background: var(--surface2, var(--surface));
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  font-size: var(--text-sm);
+  font-family: inherit;
+  min-width: 160px;
+}
 .report-toolbar {
   display: flex;
   align-items: center;

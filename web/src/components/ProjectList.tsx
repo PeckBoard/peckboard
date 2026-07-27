@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import { useProjectsStore } from '../store/projects'
 import { useTabsStore } from '../store/tabs'
 import ConfirmDialog from './ConfirmDialog'
@@ -14,6 +14,7 @@ interface ProjectListProps {
 
 export default function ProjectList({ onNewProject }: ProjectListProps) {
   const projects = useProjectsStore((s) => s.projects)
+  const projectsLoaded = useProjectsStore((s) => s.projectsLoaded)
   const activeProjectId = useProjectsStore((s) => s.activeProjectId)
   const fetchProjects = useProjectsStore((s) => s.fetchProjects)
   const setActiveProject = useProjectsStore((s) => s.setActiveProject)
@@ -25,6 +26,13 @@ export default function ProjectList({ onNewProject }: ProjectListProps) {
 
   const [confirmDelete, setConfirmDelete] = useState<string | null>(null)
   const [editingProject, setEditingProject] = useState<string | null>(null)
+  const [filter, setFilter] = useState('')
+
+  const visibleProjects = useMemo(() => {
+    const query = filter.trim().toLowerCase()
+    if (query === '') return projects
+    return projects.filter((p) => p.name.toLowerCase().includes(query))
+  }, [projects, filter])
 
   useEffect(() => {
     fetchProjects()
@@ -68,6 +76,19 @@ export default function ProjectList({ onNewProject }: ProjectListProps) {
         title="Projects"
         actionLabel={onNewProject ? '+ New project' : undefined}
         onAction={onNewProject}
+        extras={
+          projects.length > 0 ? (
+            <input
+              className="list-view-search"
+              type="search"
+              placeholder="Filter projects…"
+              aria-label="Filter projects by name"
+              data-testid="project-filter"
+              value={filter}
+              onChange={(e) => setFilter(e.target.value)}
+            />
+          ) : undefined
+        }
       />
       {projectsError && projects.length > 0 && (
         <div className="fetch-error-banner" role="alert" data-testid="projects-error">
@@ -77,49 +98,66 @@ export default function ProjectList({ onNewProject }: ProjectListProps) {
           </button>
         </div>
       )}
-      <List<Project>
-        items={projects}
-        getKey={(p) => p.id}
-        activeId={activeProjectId}
-        onActivate={(p) => {
-          setActiveProject(p.id)
-          useTabsStore.getState().openTab('project', p.id)
-        }}
-        getMenuItems={buildMenu}
-        renderItem={(project) => (
-          <>
-            {project.status !== 'active' && (
-              <span className={`status-badge status-${project.status}`}>{project.status}</span>
-            )}
-            <span className="list-view-name">{project.name}</span>
-            <span className="list-view-meta">
-              {project.id === activeProjectId && (
-                <span className="list-view-tag">{cards.length} cards</span>
+      {!projectsLoaded && !projectsError ? (
+        // An unfinished first fetch is not “no projects” — hold the empty
+        // state back until the list is actually known.
+        <div className="list-view-body">
+          <div className="list-view-empty" data-testid="projects-loading">
+            Loading…
+          </div>
+        </div>
+      ) : (
+        <List<Project>
+          items={visibleProjects}
+          getKey={(p) => p.id}
+          activeId={activeProjectId}
+          onActivate={(p) => {
+            setActiveProject(p.id)
+            useTabsStore.getState().openTab('project', p.id)
+          }}
+          getMenuItems={buildMenu}
+          renderItem={(project) => (
+            <>
+              {project.status !== 'active' && (
+                <span className={`status-badge status-${project.status}`}>{project.status}</span>
               )}
-            </span>
-          </>
-        )}
-        emptyState={
-          // Only a request that actually succeeded may claim “no projects”.
-          projectsError ? (
-            <div className="list-view-empty" role="alert" data-testid="projects-error">
-              <p>{projectsError}</p>
-              <button className="list-view-empty-action" onClick={() => fetchProjects()}>
-                Retry
-              </button>
-            </div>
-          ) : (
-            <div className="list-view-empty">
-              <p>No projects yet</p>
-              {onNewProject && (
-                <button className="list-view-empty-action" onClick={onNewProject}>
-                  Create your first project
+              <span className="list-view-name">{project.name}</span>
+              <span className="list-view-meta">
+                {project.id === activeProjectId && (
+                  <span className="list-view-tag">{cards.length} cards</span>
+                )}
+              </span>
+            </>
+          )}
+          emptyState={
+            // Only a request that actually succeeded may claim “no projects”.
+            projectsError ? (
+              <div className="list-view-empty" role="alert" data-testid="projects-error">
+                <p>{projectsError}</p>
+                <button className="list-view-empty-action" onClick={() => fetchProjects()}>
+                  Retry
                 </button>
-              )}
-            </div>
-          )
-        }
-      />
+              </div>
+            ) : filter.trim() ? (
+              <div className="list-view-empty" data-testid="projects-filter-empty">
+                <p>No projects match “{filter.trim()}”</p>
+                <button className="list-view-empty-action" onClick={() => setFilter('')}>
+                  Clear filter
+                </button>
+              </div>
+            ) : (
+              <div className="list-view-empty">
+                <p>No projects yet</p>
+                {onNewProject && (
+                  <button className="list-view-empty-action" onClick={onNewProject}>
+                    Create your first project
+                  </button>
+                )}
+              </div>
+            )
+          }
+        />
+      )}
 
       {editingProject &&
         (() => {

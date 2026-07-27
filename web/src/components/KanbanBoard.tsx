@@ -57,6 +57,7 @@ export default function KanbanBoard({
   const cards = useProjectsStore((s) => s.cards)
   const fetchCards = useProjectsStore((s) => s.fetchCards)
   const cardsError = useProjectsStore((s) => s.cardsError)
+  const cardsLoadedProjectId = useProjectsStore((s) => s.cardsLoadedProjectId)
   const updateCard = useProjectsStore((s) => s.updateCard)
   const deleteCard = useProjectsStore((s) => s.deleteCard)
 
@@ -1038,285 +1039,338 @@ export default function KanbanBoard({
           </div>
         )}
 
-        <div className="kanban-columns">
-          {visibleSteps.map((step) => {
-            const rowCards = cardsByStep(step.key)
-            const dragOverRow = dragOver?.step === step.key
-            const showInsertIndicator = dragOverRow && dragOver?.insertIdx != null
-            const showAcceptBand = dragOverRow && dragOver?.insertIdx == null
-            return (
-              <div
-                key={step.key}
-                className={`kanban-column${showAcceptBand ? ' drag-over' : ''}`}
-                onDragOver={(e) => handleColumnDragOver(e, step.key, rowCards.length)}
-                onDragLeave={(e) => handleDragLeave(e, step.key)}
-                onDrop={(e) => handleDrop(e, step.key)}
-              >
-                <header className="kanban-column-header">
-                  <h3>{step.label}</h3>
-                  <span className="kanban-count" aria-label={`${rowCards.length} cards`}>
-                    {rowCards.length}
-                  </span>
-                </header>
-                <div className="kanban-cards">
-                  {/* Only a fetch that succeeded may claim the step is empty;
+        {/* A brand-new project gets one board-level next step instead of a
+            placeholder repeated in every column. Only a finished fetch for
+            THIS project may claim the board is empty. */}
+        {cards.length === 0 && !cardsError && cardsLoadedProjectId === projectId ? (
+          <div className="kanban-empty" data-testid="kanban-empty">
+            <p className="kanban-empty-title">No cards yet</p>
+            <p className="kanban-empty-hint">
+              A card is one unit of work. Add one and a worker picks it up from the first step.
+            </p>
+            <button
+              type="button"
+              className="btn-primary"
+              data-testid="kanban-empty-add"
+              onClick={() => setShowAddForm(true)}
+            >
+              Add your first card
+            </button>
+          </div>
+        ) : (
+          <div className="kanban-columns">
+            {visibleSteps.map((step) => {
+              const rowCards = cardsByStep(step.key)
+              const dragOverRow = dragOver?.step === step.key
+              const showInsertIndicator = dragOverRow && dragOver?.insertIdx != null
+              const showAcceptBand = dragOverRow && dragOver?.insertIdx == null
+              return (
+                <div
+                  key={step.key}
+                  className={`kanban-column${showAcceptBand ? ' drag-over' : ''}`}
+                  onDragOver={(e) => handleColumnDragOver(e, step.key, rowCards.length)}
+                  onDragLeave={(e) => handleDragLeave(e, step.key)}
+                  onDrop={(e) => handleDrop(e, step.key)}
+                >
+                  <header className="kanban-column-header">
+                    <h3>{step.label}</h3>
+                    <span className="kanban-count" aria-label={`${rowCards.length} cards`}>
+                      {rowCards.length}
+                    </span>
+                  </header>
+                  <div className="kanban-cards">
+                    {/* Only a fetch that succeeded may claim the step is empty;
                       a failed one shows the banner above instead. */}
-                  {rowCards.length === 0 && !cardsError && (
-                    <span className="kanban-cards-empty">No cards in {step.label}</span>
-                  )}
-                  {rowCards.map((card, cardIndex) => {
-                    const todos = todosByCard[card.id]
-                    const todoDone = todos ? todos.filter((t) => t.status === 'done').length : 0
-                    const pendingDeps =
-                      !card.worker_session_id && card.step !== 'done' && card.step !== 'wont_do'
-                        ? unmetDeps(card)
-                        : []
-                    const description = (card.description ?? '').trim()
-                    const sessionForCard = card.worker_session_id || card.last_worker_session_id
-                    const sessionVisible =
-                      !!sessionForCard && normalizeStep(card.step) !== 'backlog'
-                    const dropBefore =
-                      showInsertIndicator &&
-                      dragOver?.insertIdx === cardIndex &&
-                      draggingCardId !== card.id
-                    // Last card carries the trailing indicator when the drop
-                    // would land at the end of the row.
-                    const dropAfter =
-                      showInsertIndicator &&
-                      cardIndex === rowCards.length - 1 &&
-                      dragOver?.insertIdx === rowCards.length &&
-                      draggingCardId !== card.id
-                    const cardStep = normalizeStep(card.step)
-                    const priorityLocked = cardStep === 'done' || cardStep === 'wont_do'
-                    // Worker context badge: live value falls back to the
-                    // fetch-time seed; hidden once the card is terminal.
-                    const workerCtx = priorityLocked
-                      ? 0
-                      : (ctxByCard[card.id] ?? card.context_tokens ?? 0)
-                    const expanded = expandedCardIds.has(card.id)
-                    return (
-                      <div
-                        key={`${card.id}-${card.step}`}
-                        className={`kanban-card ${card.blocked ? 'blocked' : ''}${
-                          draggingCardId === card.id ? ' dragging' : ''
-                        }${expanded ? ' expanded' : ''}`}
-                        data-drop-before={dropBefore ? 'true' : undefined}
-                        data-drop-after={dropAfter ? 'true' : undefined}
-                        data-expanded={expanded ? 'true' : 'false'}
-                        draggable={true}
-                        onDragStart={(e) => handleDragStart(e, card)}
-                        onDragEnd={handleDragEnd}
-                        onDragOver={(e) =>
-                          handleCardDragOver(e, step.key, cardIndex, e.currentTarget as HTMLElement)
-                        }
-                        onClick={(e) => {
-                          // Clicks bubbling up from interactive descendants
-                          // (priority picker, action buttons, 3-dot menu)
-                          // already call `stopPropagation`. Anything that
-                          // reaches the card root is a "tap the card body"
-                          // intent — toggle the expand state.
-                          if ((e.target as HTMLElement).closest('[data-no-toggle]')) return
-                          toggleCardExpanded(card.id)
-                        }}
-                      >
-                        {bubbles[card.id] && (
-                          <div
-                            key={bubbles[card.id].key}
-                            className="card-thought-bubble"
-                            title={bubbles[card.id].text}
-                          >
-                            {bubbles[card.id].text}
-                          </div>
-                        )}
-                        <div className="kanban-card-header">
-                          <PriorityChevron
-                            value={card.priority}
-                            disabled={priorityLocked}
-                            priorities={priorities}
-                            onChange={(next) => updateCard(projectId, card.id, { priority: next })}
-                          />
-                          <span className="kanban-card-title" title={card.title}>
-                            {card.title}
-                          </span>
-                          {card.blocked && (
-                            <span
-                              className="kanban-card-blocked-chip"
-                              data-testid="card-blocked-chip"
-                              title={card.block_reason || 'Blocked'}
+                    {rowCards.length === 0 && !cardsError && (
+                      <span className="kanban-cards-empty">No cards in {step.label}</span>
+                    )}
+                    {rowCards.map((card, cardIndex) => {
+                      const todos = todosByCard[card.id]
+                      const todoDone = todos ? todos.filter((t) => t.status === 'done').length : 0
+                      const pendingDeps =
+                        !card.worker_session_id && card.step !== 'done' && card.step !== 'wont_do'
+                          ? unmetDeps(card)
+                          : []
+                      const description = (card.description ?? '').trim()
+                      const sessionForCard = card.worker_session_id || card.last_worker_session_id
+                      const sessionVisible =
+                        !!sessionForCard && normalizeStep(card.step) !== 'backlog'
+                      const dropBefore =
+                        showInsertIndicator &&
+                        dragOver?.insertIdx === cardIndex &&
+                        draggingCardId !== card.id
+                      // Last card carries the trailing indicator when the drop
+                      // would land at the end of the row.
+                      const dropAfter =
+                        showInsertIndicator &&
+                        cardIndex === rowCards.length - 1 &&
+                        dragOver?.insertIdx === rowCards.length &&
+                        draggingCardId !== card.id
+                      const cardStep = normalizeStep(card.step)
+                      const priorityLocked = cardStep === 'done' || cardStep === 'wont_do'
+                      // Worker context badge: live value falls back to the
+                      // fetch-time seed; hidden once the card is terminal.
+                      const workerCtx = priorityLocked
+                        ? 0
+                        : (ctxByCard[card.id] ?? card.context_tokens ?? 0)
+                      const expanded = expandedCardIds.has(card.id)
+                      return (
+                        <div
+                          key={`${card.id}-${card.step}`}
+                          className={`kanban-card ${card.blocked ? 'blocked' : ''}${
+                            draggingCardId === card.id ? ' dragging' : ''
+                          }${expanded ? ' expanded' : ''}`}
+                          data-drop-before={dropBefore ? 'true' : undefined}
+                          data-drop-after={dropAfter ? 'true' : undefined}
+                          data-expanded={expanded ? 'true' : 'false'}
+                          draggable={true}
+                          onDragStart={(e) => handleDragStart(e, card)}
+                          onDragEnd={handleDragEnd}
+                          onDragOver={(e) =>
+                            handleCardDragOver(
+                              e,
+                              step.key,
+                              cardIndex,
+                              e.currentTarget as HTMLElement,
+                            )
+                          }
+                          onClick={(e) => {
+                            // Clicks bubbling up from interactive descendants
+                            // (priority picker, action buttons, 3-dot menu)
+                            // already call `stopPropagation`. Anything that
+                            // reaches the card root is a "tap the card body"
+                            // intent — toggle the expand state.
+                            if ((e.target as HTMLElement).closest('[data-no-toggle]')) return
+                            toggleCardExpanded(card.id)
+                          }}
+                        >
+                          {bubbles[card.id] && (
+                            <div
+                              key={bubbles[card.id].key}
+                              className="card-thought-bubble"
+                              title={bubbles[card.id].text}
                             >
-                              Blocked
-                            </span>
+                              {bubbles[card.id].text}
+                            </div>
                           )}
-                          <div className="kanban-card-actions" data-no-toggle>
-                            {workerCtx > 0 && (
+                          <div className="kanban-card-header">
+                            <PriorityChevron
+                              value={card.priority}
+                              disabled={priorityLocked}
+                              priorities={priorities}
+                              onChange={(next) =>
+                                updateCard(projectId, card.id, { priority: next })
+                              }
+                            />
+                            <span className="kanban-card-title" title={card.title}>
+                              {card.title}
+                            </span>
+                            {card.blocked && (
                               <span
-                                className={`kanban-card-ctx${
-                                  workerCtx >= 200_000
-                                    ? ' over'
-                                    : workerCtx >= 170_000
-                                      ? ' warn'
-                                      : ''
-                                }`}
-                                title={`Worker context: ${workerCtx.toLocaleString()} tokens (auto-compacts at 200k)`}
+                                className="kanban-card-blocked-chip"
+                                data-testid="card-blocked-chip"
+                                title={card.block_reason || 'Blocked'}
                               >
-                                {Math.round(workerCtx / 1000)}k
+                                Blocked
                               </span>
                             )}
-                            <button
-                              className="kanban-card-menu-btn"
-                              aria-label="Card menu"
-                              onClick={(e) => {
-                                e.stopPropagation()
-                                openCardMenu(card.id, e.currentTarget as HTMLElement)
-                              }}
-                            >
-                              ...
-                            </button>
-                            {cardMenuId === card.id && cardMenuRect && (
-                              <Dropdown
-                                anchor={{ x: cardMenuRect.right, y: cardMenuRect.bottom + 4 }}
-                                className="kanban-card-menu"
-                                onClose={closeCardMenu}
-                                items={[
-                                  {
-                                    label: 'View',
-                                    onSelect: () => setSelectedCard(card),
-                                  },
-                                  {
-                                    label: 'Plan',
-                                    disabled: !cardMenuPlanId,
-                                    testId: 'card-menu-plan',
-                                    onSelect: () => {
-                                      if (cardMenuPlanId) openPlan(cardMenuPlanId)
-                                    },
-                                  },
-                                  {
-                                    label: 'View Session',
-                                    hidden: !sessionVisible,
-                                    onSelect: () => handleViewSession(sessionForCard!),
-                                  },
-                                  {
-                                    label: 'Edit',
-                                    onSelect: () => setEditingCard(card),
-                                  },
-                                  {
-                                    label: 'Unblock',
-                                    // Terminal cards reject every field but
-                                    // `step`, so unblocking them can only 400.
-                                    hidden: !card.blocked || priorityLocked,
-                                    testId: 'card-menu-unblock',
-                                    onSelect: () => void handleUnblock(card),
-                                  },
-                                  {
-                                    // The only step-change affordance that works
-                                    // on touch or from the keyboard.
-                                    label: 'Move to',
-                                    testId: 'card-menu-move',
-                                    submenu: moveTargetsFor(card).map((key) => ({
-                                      label: STEPS.find((s) => s.key === key)?.label ?? key,
-                                      active: cardStep === key,
-                                      disabled: cardStep === key,
-                                      hint: cardStep === key ? 'Current' : undefined,
-                                      testId: `card-menu-move-${key}`,
-                                      onSelect: () => requestMoveCardToStep(card.id, key),
-                                    })),
-                                  },
-                                  {
-                                    label: 'Stop Worker',
-                                    hidden: !card.worker_session_id || cardStep === 'backlog',
-                                    onSelect: () => handleStopWorker(card),
-                                  },
-                                  {
-                                    label: 'Restart Worker',
-                                    hidden:
-                                      !!card.worker_session_id ||
-                                      cardStep === 'backlog' ||
-                                      cardStep === 'done' ||
-                                      cardStep === 'wont_do',
-                                    onSelect: () => handleRestartWorker(card),
-                                  },
-                                  {
-                                    label: "Cancel as Won't Do",
-                                    danger: true,
-                                    hidden: card.step === 'done' || card.step === 'wont_do',
-                                    testId: 'card-menu-wont-do',
-                                    onSelect: () => {
-                                      closeCardMenu()
-                                      setWontDoError(null)
-                                      setConfirmWontDo(card)
-                                    },
-                                  },
-                                  {
-                                    label: 'Delete',
-                                    danger: true,
-                                    onSelect: () => {
-                                      setDeleteError(null)
-                                      setConfirmDeleteId(card.id)
-                                    },
-                                  },
-                                ]}
-                              />
-                            )}
-                          </div>
-                        </div>
-                        {expanded && (
-                          <div className="kanban-card-body">
-                            {description ? (
-                              <div className="kanban-card-desc" data-testid="card-description">
-                                <SafeMarkdown className="kanban-card-desc-markdown">
-                                  {description}
-                                </SafeMarkdown>
-                              </div>
-                            ) : (
-                              <div className="kanban-card-desc kanban-card-desc-empty">
-                                No description
-                              </div>
-                            )}
-                            {card.blocked && (
-                              <div className="kanban-card-blocked">
-                                <strong>Blocked</strong>
-                                {card.block_reason ? `: ${card.block_reason}` : ''}
-                              </div>
-                            )}
-                            <div className="kanban-card-meta">
-                              {todos && todos.length > 0 && (
+                            <div className="kanban-card-actions" data-no-toggle>
+                              {workerCtx > 0 && (
                                 <span
-                                  className="card-todo-badge"
-                                  data-testid="card-todo-badge"
-                                  title={`${todoDone} of ${todos.length} tasks done`}
+                                  className={`kanban-card-ctx${
+                                    workerCtx >= 200_000
+                                      ? ' over'
+                                      : workerCtx >= 170_000
+                                        ? ' warn'
+                                        : ''
+                                  }`}
+                                  title={`Worker context: ${workerCtx.toLocaleString()} tokens (auto-compacts at 200k)`}
                                 >
-                                  {todoDone}/{todos.length}
+                                  {Math.round(workerCtx / 1000)}k
                                 </span>
                               )}
-                              {card.worker_session_id && cardStep !== 'backlog' && (
-                                <span className="kanban-card-worker" title="Worker active">
-                                  <span className="kanban-card-worker-dot" />
-                                  Worker
-                                </span>
-                              )}
-                              {pendingDeps.length > 0 && (
-                                <span
-                                  className="waiting-indicator"
-                                  title={`Waiting on: ${pendingDeps
-                                    .map((c) => c.title)
-                                    .join(', ')}`}
-                                >
-                                  Waiting on {pendingDeps.length}{' '}
-                                  {pendingDeps.length === 1 ? 'dep' : 'deps'}
-                                </span>
+                              <button
+                                className="kanban-card-menu-btn"
+                                aria-label="Card menu"
+                                onClick={(e) => {
+                                  e.stopPropagation()
+                                  openCardMenu(card.id, e.currentTarget as HTMLElement)
+                                }}
+                              >
+                                ...
+                              </button>
+                              {cardMenuId === card.id && cardMenuRect && (
+                                <Dropdown
+                                  anchor={{ x: cardMenuRect.right, y: cardMenuRect.bottom + 4 }}
+                                  className="kanban-card-menu"
+                                  onClose={closeCardMenu}
+                                  items={[
+                                    {
+                                      label: 'View',
+                                      onSelect: () => setSelectedCard(card),
+                                    },
+                                    {
+                                      label: 'Plan',
+                                      disabled: !cardMenuPlanId,
+                                      testId: 'card-menu-plan',
+                                      onSelect: () => {
+                                        if (cardMenuPlanId) openPlan(cardMenuPlanId)
+                                      },
+                                    },
+                                    {
+                                      label: 'View Session',
+                                      hidden: !sessionVisible,
+                                      onSelect: () => handleViewSession(sessionForCard!),
+                                    },
+                                    {
+                                      label: 'Edit',
+                                      onSelect: () => setEditingCard(card),
+                                    },
+                                    {
+                                      label: 'Unblock',
+                                      // Terminal cards reject every field but
+                                      // `step`, so unblocking them can only 400.
+                                      hidden: !card.blocked || priorityLocked,
+                                      testId: 'card-menu-unblock',
+                                      onSelect: () => void handleUnblock(card),
+                                    },
+                                    {
+                                      // The only step-change affordance that works
+                                      // on touch or from the keyboard.
+                                      label: 'Move to',
+                                      testId: 'card-menu-move',
+                                      submenu: moveTargetsFor(card).map((key) => ({
+                                        label: STEPS.find((s) => s.key === key)?.label ?? key,
+                                        active: cardStep === key,
+                                        disabled: cardStep === key,
+                                        hint: cardStep === key ? 'Current' : undefined,
+                                        testId: `card-menu-move-${key}`,
+                                        onSelect: () => requestMoveCardToStep(card.id, key),
+                                      })),
+                                    },
+                                    {
+                                      label: 'Stop Worker',
+                                      hidden: !card.worker_session_id || cardStep === 'backlog',
+                                      onSelect: () => handleStopWorker(card),
+                                    },
+                                    {
+                                      label: 'Restart Worker',
+                                      hidden:
+                                        !!card.worker_session_id ||
+                                        cardStep === 'backlog' ||
+                                        cardStep === 'done' ||
+                                        cardStep === 'wont_do',
+                                      onSelect: () => handleRestartWorker(card),
+                                    },
+                                    {
+                                      label: "Cancel as Won't Do",
+                                      danger: true,
+                                      hidden: card.step === 'done' || card.step === 'wont_do',
+                                      testId: 'card-menu-wont-do',
+                                      onSelect: () => {
+                                        closeCardMenu()
+                                        setWontDoError(null)
+                                        setConfirmWontDo(card)
+                                      },
+                                    },
+                                    {
+                                      label: 'Delete',
+                                      danger: true,
+                                      onSelect: () => {
+                                        setDeleteError(null)
+                                        setConfirmDeleteId(card.id)
+                                      },
+                                    },
+                                  ]}
+                                />
                               )}
                             </div>
-                            <div className="kanban-card-buttons" data-no-toggle>
-                              {sessionVisible && (
+                          </div>
+                          {expanded && (
+                            <div className="kanban-card-body">
+                              {description ? (
+                                <div className="kanban-card-desc" data-testid="card-description">
+                                  <SafeMarkdown className="kanban-card-desc-markdown">
+                                    {description}
+                                  </SafeMarkdown>
+                                </div>
+                              ) : (
+                                <div className="kanban-card-desc kanban-card-desc-empty">
+                                  No description
+                                </div>
+                              )}
+                              {card.blocked && (
+                                <div className="kanban-card-blocked">
+                                  <strong>Blocked</strong>
+                                  {card.block_reason ? `: ${card.block_reason}` : ''}
+                                </div>
+                              )}
+                              <div className="kanban-card-meta">
+                                {todos && todos.length > 0 && (
+                                  <span
+                                    className="card-todo-badge"
+                                    data-testid="card-todo-badge"
+                                    title={`${todoDone} of ${todos.length} tasks done`}
+                                  >
+                                    {todoDone}/{todos.length}
+                                  </span>
+                                )}
+                                {card.worker_session_id && cardStep !== 'backlog' && (
+                                  <span className="kanban-card-worker" title="Worker active">
+                                    <span className="kanban-card-worker-dot" />
+                                    Worker
+                                  </span>
+                                )}
+                                {pendingDeps.length > 0 && (
+                                  <span
+                                    className="waiting-indicator"
+                                    title={`Waiting on: ${pendingDeps
+                                      .map((c) => c.title)
+                                      .join(', ')}`}
+                                  >
+                                    Waiting on {pendingDeps.length}{' '}
+                                    {pendingDeps.length === 1 ? 'dep' : 'deps'}
+                                  </span>
+                                )}
+                              </div>
+                              <div className="kanban-card-buttons" data-no-toggle>
+                                {sessionVisible && (
+                                  <button
+                                    type="button"
+                                    className="kanban-card-action-btn"
+                                    data-testid="card-quick-session"
+                                    title="Open session"
+                                    aria-label="Open session"
+                                    onClick={(e) => {
+                                      e.stopPropagation()
+                                      handleViewSession(sessionForCard!)
+                                    }}
+                                  >
+                                    <svg
+                                      width="14"
+                                      height="14"
+                                      viewBox="0 0 24 24"
+                                      fill="none"
+                                      stroke="currentColor"
+                                      strokeWidth="2"
+                                      strokeLinecap="round"
+                                      strokeLinejoin="round"
+                                      aria-hidden="true"
+                                    >
+                                      <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z" />
+                                    </svg>
+                                    <span>Open</span>
+                                  </button>
+                                )}
                                 <button
                                   type="button"
                                   className="kanban-card-action-btn"
-                                  data-testid="card-quick-session"
-                                  title="Open session"
-                                  aria-label="Open session"
+                                  data-testid="card-quick-view"
+                                  title="View details"
+                                  aria-label="View details"
                                   onClick={(e) => {
                                     e.stopPropagation()
-                                    handleViewSession(sessionForCard!)
+                                    setSelectedCard(card)
                                   }}
                                 >
                                   <svg
@@ -1330,76 +1384,50 @@ export default function KanbanBoard({
                                     strokeLinejoin="round"
                                     aria-hidden="true"
                                   >
-                                    <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z" />
+                                    <path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z" />
+                                    <circle cx="12" cy="12" r="3" />
                                   </svg>
-                                  <span>Open</span>
+                                  <span>View</span>
                                 </button>
-                              )}
-                              <button
-                                type="button"
-                                className="kanban-card-action-btn"
-                                data-testid="card-quick-view"
-                                title="View details"
-                                aria-label="View details"
-                                onClick={(e) => {
-                                  e.stopPropagation()
-                                  setSelectedCard(card)
-                                }}
-                              >
-                                <svg
-                                  width="14"
-                                  height="14"
-                                  viewBox="0 0 24 24"
-                                  fill="none"
-                                  stroke="currentColor"
-                                  strokeWidth="2"
-                                  strokeLinecap="round"
-                                  strokeLinejoin="round"
-                                  aria-hidden="true"
+                                <button
+                                  type="button"
+                                  className="kanban-card-action-btn"
+                                  data-testid="card-quick-edit"
+                                  title="Edit card"
+                                  aria-label="Edit card"
+                                  onClick={(e) => {
+                                    e.stopPropagation()
+                                    setEditingCard(card)
+                                  }}
                                 >
-                                  <path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z" />
-                                  <circle cx="12" cy="12" r="3" />
-                                </svg>
-                                <span>View</span>
-                              </button>
-                              <button
-                                type="button"
-                                className="kanban-card-action-btn"
-                                data-testid="card-quick-edit"
-                                title="Edit card"
-                                aria-label="Edit card"
-                                onClick={(e) => {
-                                  e.stopPropagation()
-                                  setEditingCard(card)
-                                }}
-                              >
-                                <svg
-                                  width="14"
-                                  height="14"
-                                  viewBox="0 0 24 24"
-                                  fill="none"
-                                  stroke="currentColor"
-                                  strokeWidth="2"
-                                  strokeLinecap="round"
-                                  strokeLinejoin="round"
-                                  aria-hidden="true"
-                                >
-                                  <path d="M12 20h9" />
-                                  <path d="M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4 12.5-12.5z" />
-                                </svg>
-                                <span>Edit</span>
-                              </button>
+                                  <svg
+                                    width="14"
+                                    height="14"
+                                    viewBox="0 0 24 24"
+                                    fill="none"
+                                    stroke="currentColor"
+                                    strokeWidth="2"
+                                    strokeLinecap="round"
+                                    strokeLinejoin="round"
+                                    aria-hidden="true"
+                                  >
+                                    <path d="M12 20h9" />
+                                    <path d="M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4 12.5-12.5z" />
+                                  </svg>
+                                  <span>Edit</span>
+                                </button>
+                              </div>
                             </div>
-                          </div>
-                        )}
-                      </div>
-                    )
-                  })}
+                          )}
+                        </div>
+                      )
+                    })}
+                  </div>
                 </div>
-              </div>
-            )
-          })}
-        </div>
+              )
+            })}
+          </div>
+        )}
       </div>
 
       {/* Project-level todo roll-up across every card's worker session.
