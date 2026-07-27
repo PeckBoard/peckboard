@@ -132,9 +132,12 @@
 }
 
 .user-menu-dropdown {
-  position: absolute;
-  bottom: calc(100% + 8px);
-  left: calc(100% + 8px);
+  /* Portaled to <body> (App.tsx) so no rail ancestor can clip it —
+     WebKit wrongly clips fixed descendants of the mobile rail's
+     overflow-x scroller (bugs.webkit.org/show_bug.cgi?id=160953),
+     which made the menu invisible on iPhone. Desktop coords come from
+     an inline style (anchored to the avatar); mobile from mobile.css. */
+  position: fixed;
   z-index: 40;
   min-width: 200px;
   background: var(--surface);

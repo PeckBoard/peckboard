@@ -1,4 +1,5 @@
 import { useEffect, useState, useMemo, useCallback, useRef } from 'react'
+import { createPortal } from 'react-dom'
 import { useAuthStore, authedFetch } from './store/auth'
 import type { Announcement } from './types/api'
 import { useUiStore } from './store/ui'
@@ -31,6 +32,7 @@ import UsageDashboard from './components/UsageDashboard'
 import UserManagement from './components/UserManagement'
 import ChangePasswordModal from './components/ChangePasswordModal'
 import TabBar from './components/TabBar'
+import { useMediaQuery } from './hooks/useMediaQuery'
 import {
   parseReportTabId,
   reportTabId,
@@ -335,6 +337,11 @@ function App() {
   const [sessionItems, setSessionItems] = useState<SidebarItem[]>([])
   const [openPanel, setOpenPanel] = useState<UiPanel | null>(null)
   const userMenuRef = useRef<HTMLDivElement | null>(null)
+  // Anchor for the portaled user-menu dropdown when the rail is the
+  // desktop left sidebar: captured from the avatar's rect at open time.
+  // The top-bar (mobile) layout anchors purely in CSS (see mobile.css).
+  const userMenuAnchor = useRef<{ left: number; bottom: number } | null>(null)
+  const railIsTopbar = useMediaQuery('(max-width: 768px)')
 
   // Load the plugin UI-panel catalog once authenticated so each declared
   // panel can appear as a link in the user dropdown menu.
@@ -375,6 +382,10 @@ function App() {
   useEffect(() => {
     if (!userMenuOpen) return
     const onClick = (e: MouseEvent) => {
+      // The dropdown is portaled to <body>, so it is not inside
+      // userMenuRef — clicks within it must not count as outside.
+      const target = e.target as HTMLElement | null
+      if (target?.closest('.user-menu-dropdown')) return
       if (userMenuRef.current && !userMenuRef.current.contains(e.target as Node)) {
         setUserMenuOpen(false)
       }
@@ -1193,7 +1204,14 @@ function App() {
           <div className="user-menu" ref={userMenuRef}>
             <button
               className="rail-btn rail-avatar"
-              onClick={() => setUserMenuOpen((open) => !open)}
+              onClick={(e) => {
+                const rect = e.currentTarget.getBoundingClientRect()
+                userMenuAnchor.current = {
+                  left: rect.right + 8,
+                  bottom: window.innerHeight - rect.top + 8,
+                }
+                setUserMenuOpen((open) => !open)
+              }}
               title={user?.username}
               aria-label="User menu"
               aria-haspopup="menu"
@@ -1201,60 +1219,66 @@ function App() {
             >
               {user?.username?.charAt(0).toUpperCase() || '?'}
             </button>
-            {userMenuOpen && (
-              <div className="user-menu-dropdown" role="menu">
-                <div className="user-menu-header">
-                  <div className="user-menu-name">{user?.username}</div>
-                  <div className="user-menu-role">{user?.role}</div>
-                </div>
-                <button
-                  type="button"
-                  role="menuitem"
-                  onClick={() => {
-                    setUserMenuOpen(false)
-                    setSettingsSub(null)
-                    navigate('settings')
-                  }}
+            {userMenuOpen &&
+              createPortal(
+                <div
+                  className="user-menu-dropdown"
+                  role="menu"
+                  style={railIsTopbar ? undefined : (userMenuAnchor.current ?? undefined)}
                 >
-                  Settings
-                </button>
-                {uiPanels.map((panel) => (
+                  <div className="user-menu-header">
+                    <div className="user-menu-name">{user?.username}</div>
+                    <div className="user-menu-role">{user?.role}</div>
+                  </div>
                   <button
-                    key={`${panel.plugin}:${panel.id}`}
                     type="button"
                     role="menuitem"
-                    data-testid={`user-menu-plugin-${panel.plugin}-${panel.id}`}
                     onClick={() => {
                       setUserMenuOpen(false)
-                      setOpenPanel(panel)
+                      setSettingsSub(null)
+                      navigate('settings')
                     }}
                   >
-                    {panel.title}
+                    Settings
                   </button>
-                ))}
-                <button
-                  type="button"
-                  role="menuitem"
-                  onClick={() => {
-                    setUserMenuOpen(false)
-                    setShowChangePassword(true)
-                  }}
-                >
-                  Change password
-                </button>
-                <button
-                  type="button"
-                  role="menuitem"
-                  className="user-menu-danger"
-                  onClick={() => {
-                    setUserMenuOpen(false)
-                    logout()
-                  }}
-                >
-                  Sign out
-                </button>
-              </div>
-            )}
+                  {uiPanels.map((panel) => (
+                    <button
+                      key={`${panel.plugin}:${panel.id}`}
+                      type="button"
+                      role="menuitem"
+                      data-testid={`user-menu-plugin-${panel.plugin}-${panel.id}`}
+                      onClick={() => {
+                        setUserMenuOpen(false)
+                        setOpenPanel(panel)
+                      }}
+                    >
+                      {panel.title}
+                    </button>
+                  ))}
+                  <button
+                    type="button"
+                    role="menuitem"
+                    onClick={() => {
+                      setUserMenuOpen(false)
+                      setShowChangePassword(true)
+                    }}
+                  >
+                    Change password
+                  </button>
+                  <button
+                    type="button"
+                    role="menuitem"
+                    className="user-menu-danger"
+                    onClick={() => {
+                      setUserMenuOpen(false)
+                      logout()
+                    }}
+                  >
+                    Sign out
+                  </button>
+                </div>,
+                document.body,
+              )}
           </div>
         </div>
       </nav>
