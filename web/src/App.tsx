@@ -334,6 +334,13 @@ function App() {
     const r = parseRoute()
     return r.view === 'pluginPage' ? r.activeId : null
   })
+  // Id of the plan open in the full-page viewer. Held in state (not read
+  // from parseRoute() during render) so back/forward between two plans
+  // actually re-renders: the view stays 'plan', so only this changing can
+  // tell React the page is different.
+  const [activePlanId, setActivePlanId] = useState<string | null>(
+    initialRoute.view === 'plan' ? initialRoute.activeId : null,
+  )
   // Plugin-contributed full-page entries for the project / session pages.
   const [projectItems, setProjectItems] = useState<SidebarItem[]>([])
   const [sessionItems, setSessionItems] = useState<SidebarItem[]>([])
@@ -448,6 +455,8 @@ function App() {
         setActiveReportId(route.activeId)
       } else if (route.view === 'pluginPage') {
         setActivePluginPageId(route.activeId)
+      } else if (route.view === 'plan') {
+        setActivePlanId(route.activeId)
       }
     }
     window.addEventListener('popstate', onPopState)
@@ -1528,7 +1537,7 @@ function App() {
               ))}
             {view === 'plan' && (
               <PlanView
-                planId={parseRoute().activeId}
+                planId={activePlanId}
                 onBack={() => window.history.back()}
                 onOpenSession={(sid) => {
                   setActiveSession(sid)

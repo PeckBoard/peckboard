@@ -143,7 +143,12 @@ export default function PlanView({ planId, onBack, onOpenSession }: PlanViewProp
     }
   }, [planId, onOpenSession, load])
 
-  if (loading) return <div className="plan-view plan-view--loading">Loading plan…</div>
+  // `plan` still holds the previous plan until the fetch for a newly
+  // requested `planId` resolves — back/forward between two plans must show
+  // the loader, never the old plan under the new URL.
+  const stale = plan !== null && plan.id !== planId
+  if (!error && (loading || stale))
+    return <div className="plan-view plan-view--loading">Loading plan…</div>
   if (error || !plan)
     return (
       <div className="plan-view plan-view--error">
@@ -191,7 +196,7 @@ export default function PlanView({ planId, onBack, onOpenSession }: PlanViewProp
     }
   }
   return (
-    <div className="plan-view" data-testid="plan-view">
+    <div className="plan-view" data-testid="plan-view" data-plan-id={plan.id}>
       <header className="plan-view__header">
         <button className="plan-view__back" onClick={onBack} data-testid="plan-back">
           ← Back
