@@ -763,7 +763,7 @@ export default function KanbanBoard({
   return (
     <div className="kanban-board">
       <div className="kanban-board-header chat-toolbar">
-        <span className="chat-toolbar-name">{project?.name ?? 'Project'}</span>
+        <h1 className="chat-toolbar-name">{project?.name ?? 'Project'}</h1>
         {project && project.status !== 'active' && (
           <span className={`status-badge status-${project.status}`}>{project.status}</span>
         )}

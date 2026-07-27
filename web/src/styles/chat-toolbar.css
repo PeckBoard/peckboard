@@ -14,6 +14,8 @@
 }
 
 .chat-toolbar-name {
+  /* Rendered as the view's `h1` — reset the UA heading margin. */
+  margin: 0;
   font-size: var(--text-sm);
   font-weight: 700;
   color: var(--text);

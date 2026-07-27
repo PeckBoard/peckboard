@@ -113,7 +113,7 @@ export default function SessionTodosView({ sessionId, onBack }: SessionTodosView
             <polyline points="15 18 9 12 15 6" />
           </svg>
         </button>
-        <span className="chat-toolbar-name">{sessionDetail?.name ?? 'Session'} — Tasks</span>
+        <h1 className="chat-toolbar-name">{sessionDetail?.name ?? 'Session'} — Tasks</h1>
       </div>
 
       <div className="session-todos-body">

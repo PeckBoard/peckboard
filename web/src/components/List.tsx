@@ -94,9 +94,15 @@ export default function List<T>({
         </div>
       )}
       <div className={bodyClassName ?? 'list-view-body'} onScroll={onScroll}>
-        {items.length === 0
-          ? emptyState
-          : items.map((item) => {
+        {items.length === 0 ? (
+          emptyState
+        ) : (
+          // `role="list"` / `role="listitem"` rather than `ul`/`li`: the rows
+          // carry flex chrome that list markup would fight. The wrapper is
+          // `display: contents`, and it exists so the empty state and the
+          // footer slot stay outside the list.
+          <div className="list-view-rowgroup" role="list">
+            {items.map((item) => {
               const key = getKey(item)
               const isActive = activeId === key
               const isSelected = selectedIds?.has(key) ?? false
@@ -116,6 +122,8 @@ export default function List<T>({
                 </ListRow>
               )
             })}
+          </div>
+        )}
         {footer}
       </div>
     </>
@@ -156,16 +164,20 @@ function ListRow({
   const hasMenu = menuItems.some((m) => !m.divider && !m.hidden)
   const className = `list-view-row${isActive ? ' active' : ''}${isSelected ? ' selected' : ''}`
   return (
-    <div className={className} data-row-id={rowKey} {...triggerProps}>
+    <div className={className} role="listitem" data-row-id={rowKey} {...triggerProps}>
       {selectable && (
-        <input
-          type="checkbox"
-          className="list-view-select"
-          checked={isSelected}
-          onClick={(e) => e.stopPropagation()}
-          onChange={onToggleSelected}
-          aria-label="Select row"
-        />
+        // The label is the 24x24 tap target (WCAG 2.5.8); the box inside
+        // stays 16x16. Pseudo-elements don't render on a checkbox, so the
+        // hit area has to come from a real element around it.
+        <label className="list-view-select-hit" onClick={(e) => e.stopPropagation()}>
+          <input
+            type="checkbox"
+            className="list-view-select"
+            checked={isSelected}
+            onChange={onToggleSelected}
+            aria-label="Select row"
+          />
+        </label>
       )}
       <button
         type="button"

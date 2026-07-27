@@ -166,9 +166,9 @@ export default function RepeatingTasksView({ activeTaskId, onNavigate, onOpenSes
             <button className="btn-secondary" onClick={() => onNavigate(null)}>
               ← Back
             </button>
-            <h2 className="list-view-title" style={{ flex: 1, minWidth: 0 }}>
+            <h1 className="list-view-title" style={{ flex: 1, minWidth: 0 }}>
               {task.name}
-            </h2>
+            </h1>
           </div>
           <div style={{ display: 'flex', gap: 8 }}>
             <button className="btn-secondary" onClick={() => handleToggleEnabled(task)}>

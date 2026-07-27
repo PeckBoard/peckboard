@@ -309,19 +309,29 @@
 .tabbar {
   display: flex;
   align-items: center;
-  flex-wrap: nowrap;
-  overflow-x: auto;
-  overflow-y: visible;
   gap: 6px;
   padding: 6px 10px;
   border-bottom: 1px solid var(--border);
   background: var(--surface);
-  scrollbar-width: thin;
   flex-shrink: 0;
   /* Keep the strip inside the content column so it doesn't push the
      page horizontally on mobile. */
   max-width: 100%;
   width: 100%;
+}
+/* The `tablist` proper: chips only. The trailing `+` is a sibling, not a
+   child, because a tablist may not own non-tab children — so the
+   horizontal scrolling that used to live on `.tabbar` lives here. */
+.tab-strip {
+  display: flex;
+  align-items: center;
+  flex-wrap: nowrap;
+  flex: 1;
+  min-width: 0;
+  gap: 6px;
+  overflow-x: auto;
+  overflow-y: visible;
+  scrollbar-width: thin;
   /* Native momentum scrolling on iOS for the tab strip. */
   -webkit-overflow-scrolling: touch;
   /* Allow horizontal scroll on the strip without taking over the
@@ -360,6 +370,7 @@
   box-shadow: inset 2px 0 0 var(--accent);
 }
 .tab-close {
+  position: relative;
   display: inline-flex;
   align-items: center;
   justify-content: center;
@@ -378,6 +389,13 @@
   transition:
     opacity 0.12s ease,
     background 0.12s ease;
+}
+/* WCAG 2.5.8: the glyph stays visually 20×20, but a transparent overlay
+   bleeding 2px past every edge gives it a 24×24 pointer target. */
+.tab-close::before {
+  content: '';
+  position: absolute;
+  inset: -2px;
 }
 .tab-wrap:hover .tab-close,
 .tab-wrap:focus-within .tab-close,
@@ -398,6 +416,9 @@
     gap: 8px;
     padding: 0 12px;
     min-height: 44px;
+  }
+  .tab-strip {
+    gap: 8px;
   }
   .tab-wrap {
     height: 32px;
@@ -637,6 +658,12 @@
   flex-direction: column;
   gap: 8px;
 }
+/* Semantic-only wrapper: carries `role="list"` around the rows so the
+   empty state and the footer slot stay OUT of the list, while
+   `display: contents` keeps the rows direct flex children of the body. */
+.list-view-rowgroup {
+  display: contents;
+}
 /* `.list-view-rows` is a non-scrolling stack of list rows — use it
    when you want the same row styling inside a wider parent (e.g. the
    sessions list embedded in a repeating-task detail view). */
@@ -674,13 +701,24 @@
   box-shadow: inset 2px 0 0 var(--accent);
 }
 /* Left-edge multi-select checkbox. Sits outside the clickable item button
-   so toggling selection never opens the session. */
-.list-view-select {
+   so toggling selection never opens the session. The wrapping label is the
+   hit target — WCAG 2.5.8 wants 24×24 and pseudo-elements don't render on
+   an `input[type='checkbox']`, so the box stays 16×16 inside a 24×24 label. */
+.list-view-select-hit {
   flex: 0 0 auto;
   align-self: center;
-  margin-left: 12px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  margin-left: 8px;
+  width: 24px;
+  height: 24px;
+  cursor: pointer;
+}
+.list-view-select {
   width: 16px;
   height: 16px;
+  margin: 0;
   cursor: pointer;
   accent-color: var(--accent);
 }

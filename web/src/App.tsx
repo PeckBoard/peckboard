@@ -1017,7 +1017,7 @@ function App() {
       {/* Navigation Rail. Sessions / Projects live here so the top tab
           strip can use all of its horizontal space for opened tabs —
           critical on mobile, where the rail becomes a bottom toolbar. */}
-      <nav className="rail">
+      <nav className="rail" aria-label="Primary">
         <div className="rail-top">
           <div className="rail-brand">
             <img src="/favicon.svg" alt="Peckboard" width="24" height="24" />
@@ -1304,238 +1304,242 @@ function App() {
         <ConnectionBanner connected={connected} />
         <AskpassDialog />
         <EnvUnlockDialog />
-        <ErrorBoundary
-          label="view"
-          resetKey={`${view}:${activeSessionId}:${activeProjectId}:${sessionSub}`}
-        >
-          {view === 'sessions' &&
-            (activeSessionId ? (
-              sessionSub === 'todos' ? (
-                <SessionTodosView
-                  sessionId={activeSessionId}
-                  onBack={() => navigate('sessions', activeSessionId, 'chat')}
-                />
-              ) : pluginSubItemId(sessionSub) &&
-                sessionItems.find((i) => i.id === pluginSubItemId(sessionSub)) ? (
-                (() => {
-                  const item = sessionItems.find((i) => i.id === pluginSubItemId(sessionSub))!
-                  return (
-                    <PluginFullPage
-                      title={item.label}
-                      plugin={item.plugin}
-                      path={item.path}
-                      scope={{ sessionId: activeSessionId }}
-                      onBack={() => navigate('sessions', activeSessionId, 'chat')}
-                    />
-                  )
-                })()
-              ) : (
-                <ChatView
-                  sessionId={activeSessionId}
-                  onOpenTodos={() => navigate('sessions', activeSessionId, 'todos')}
-                  pluginItems={sessionItems}
-                  onOpenPlugin={(id) => navigate('sessions', activeSessionId, `plugin:${id}`)}
-                />
-              )
-            ) : (
-              <div className="list-view">
-                <ListViewHeader
-                  title="Sessions"
-                  actionLabel="+ New session"
-                  onAction={() => setShowNewSession(true)}
-                />
-                <List
-                  items={chatSessions}
-                  getKey={(s) => s.id}
-                  activeId={activeSessionId}
-                  onActivate={(s) => {
-                    setActiveSession(s.id)
-                    useTabsStore.getState().openTab('session', s.id)
-                  }}
-                  selectedIds={selectedSessions}
-                  onToggleSelected={(s) => toggleSessionSelected(s.id)}
-                  onClearSelection={() => setSelectedSessions(new Set())}
-                  bulkActions={[
-                    // No destructive actions in the list — delete lives on the
-                    // chat-toolbar 3-dot menu and tab right-click menu, where
-                    // the user has the session open and can act intentionally.
-                    {
-                      label: 'Mark as read',
-                      onClick: () => {
-                        for (const id of Array.from(selectedSessions)) markSessionRead(id)
-                        setSelectedSessions(new Set())
-                      },
-                      hidden: ![...selectedSessions].some((id) => unreadSessions.has(id)),
-                    },
-                  ]}
-                  renderItem={(s) => (
-                    <>
-                      {processing.has(s.id) && <span className="processing-dot" />}
-                      {!processing.has(s.id) && unreadSessions.has(s.id) && (
-                        <span className="unread-dot" />
-                      )}
-                      <span className="list-view-name">{s.name}</span>
-                      <span className="list-view-meta">
-                        {s.is_temp && <span className="list-view-tag">temp</span>}
-                        {folderMap.get(s.folder_id) && (
-                          <span className="list-view-tag">{folderMap.get(s.folder_id)}</span>
-                        )}
-                        <span className="list-view-time">
-                          {formatRelativeTime(s.last_activity)}
-                        </span>
-                      </span>
-                    </>
-                  )}
-                  onScroll={(e) => {
-                    if (!sessionsNextCursor || sessionsLoadingMore) return
-                    const el = e.currentTarget
-                    if (el.scrollHeight - el.scrollTop - el.clientHeight < 200) {
-                      void fetchMoreSessions()
-                    }
-                  }}
-                  emptyState={
-                    <div className="list-view-empty">
-                      <p>No sessions yet</p>
-                      <button
-                        className="list-view-empty-action"
-                        onClick={() => setShowNewSession(true)}
-                      >
-                        Create your first session
-                      </button>
-                    </div>
-                  }
-                  footer={
-                    sessionsLoadingMore ? (
-                      <div className="list-view-loading-more" data-testid="sessions-loading-more">
-                        Loading more sessions…
-                      </div>
-                    ) : null
-                  }
-                />
-              </div>
-            ))}
-          {view === 'projects' &&
-            (activeProjectId ? (
-              sessionSub === 'todos' ? (
-                <ProjectTodosView
-                  projectId={activeProjectId}
-                  onClose={() => navigate('projects', activeProjectId, 'chat')}
-                />
-              ) : pluginSubItemId(sessionSub) &&
-                projectItems.find((i) => i.id === pluginSubItemId(sessionSub)) ? (
-                (() => {
-                  const item = projectItems.find((i) => i.id === pluginSubItemId(sessionSub))!
-                  return (
-                    <PluginFullPage
-                      title={item.label}
-                      plugin={item.plugin}
-                      path={item.path}
-                      scope={{ projectId: activeProjectId }}
-                      onBack={() => navigate('projects', activeProjectId, 'chat')}
-                    />
-                  )
-                })()
-              ) : (
-                <KanbanBoard
-                  projectId={activeProjectId}
-                  onOpenTodos={() => navigate('projects', activeProjectId, 'todos')}
-                  pluginItems={projectItems}
-                  onOpenPlugin={(id) => navigate('projects', activeProjectId, `plugin:${id}`)}
-                />
-              )
-            ) : (
-              <div className="list-view">
-                <ProjectList onNewProject={() => setShowNewProject(true)} />
-              </div>
-            ))}
-          {view === 'repeatingTasks' && (
-            <RepeatingTasksView
-              activeTaskId={activeRepeatingTaskId}
-              onNavigate={(id) => {
-                setActiveRepeatingTaskId(id)
-                navigate('repeatingTasks', id)
-                if (id) useTabsStore.getState().openTab('repeating_task', id)
-              }}
-              onOpenSession={(id) => {
-                setActiveSession(id)
-                navigate('sessions', id)
-                useTabsStore.getState().openTab('session', id)
-              }}
-            />
-          )}
-          {view === 'usage' && <UsageDashboard />}
-          {view === 'pluginPage' &&
-            (() => {
-              const [pl, itemId] = (activePluginPageId ?? '').split(':')
-              const item = sidebarItems.find((i) => i.plugin === pl && i.id === itemId)
-              return item ? (
-                <PluginFullPage
-                  title={item.label}
-                  plugin={item.plugin}
-                  path={item.path}
-                  scope={{}}
-                  onBack={() => navigate('sessions', null)}
-                />
-              ) : (
-                <div className="list-view" />
-              )
-            })()}
-          {view === 'folders' && <FoldersPage />}
-          {view === 'reports' &&
-            (activeReportId ? (
-              (() => {
-                const parsed = parseReportTabId(activeReportId)
-                if (!parsed) {
-                  // Malformed id: drop back to the index.
-                  setActiveReportId(null)
-                  return null
-                }
-                return (
-                  <ReportView
-                    folder={parsed.folder}
-                    file={parsed.file}
-                    onBack={() => {
-                      setActiveReportId(null)
-                      navigate('reports', null)
-                    }}
-                    onOpenSession={(id) => {
-                      setActiveSession(id)
-                      navigate('sessions', id)
-                      useTabsStore.getState().openTab('session', id)
-                    }}
+        {/* The tab strip's panel. Every chip's `aria-controls` points at
+            this id, so AT can jump from a tab to the view it opened. */}
+        <div id="view-panel" className="view-panel" role="tabpanel" aria-label="Current view">
+          <ErrorBoundary
+            label="view"
+            resetKey={`${view}:${activeSessionId}:${activeProjectId}:${sessionSub}`}
+          >
+            {view === 'sessions' &&
+              (activeSessionId ? (
+                sessionSub === 'todos' ? (
+                  <SessionTodosView
+                    sessionId={activeSessionId}
+                    onBack={() => navigate('sessions', activeSessionId, 'chat')}
+                  />
+                ) : pluginSubItemId(sessionSub) &&
+                  sessionItems.find((i) => i.id === pluginSubItemId(sessionSub)) ? (
+                  (() => {
+                    const item = sessionItems.find((i) => i.id === pluginSubItemId(sessionSub))!
+                    return (
+                      <PluginFullPage
+                        title={item.label}
+                        plugin={item.plugin}
+                        path={item.path}
+                        scope={{ sessionId: activeSessionId }}
+                        onBack={() => navigate('sessions', activeSessionId, 'chat')}
+                      />
+                    )
+                  })()
+                ) : (
+                  <ChatView
+                    sessionId={activeSessionId}
+                    onOpenTodos={() => navigate('sessions', activeSessionId, 'todos')}
+                    pluginItems={sessionItems}
+                    onOpenPlugin={(id) => navigate('sessions', activeSessionId, `plugin:${id}`)}
                   />
                 )
-              })()
-            ) : (
-              <ReportBrowser
-                onOpenReport={(folder, file) => {
-                  const id = reportTabId(folder, file)
-                  setActiveReportId(id)
-                  navigate('reports', id)
-                  useTabsStore.getState().openTab('report', id)
+              ) : (
+                <div className="list-view">
+                  <ListViewHeader
+                    title="Sessions"
+                    actionLabel="+ New session"
+                    onAction={() => setShowNewSession(true)}
+                  />
+                  <List
+                    items={chatSessions}
+                    getKey={(s) => s.id}
+                    activeId={activeSessionId}
+                    onActivate={(s) => {
+                      setActiveSession(s.id)
+                      useTabsStore.getState().openTab('session', s.id)
+                    }}
+                    selectedIds={selectedSessions}
+                    onToggleSelected={(s) => toggleSessionSelected(s.id)}
+                    onClearSelection={() => setSelectedSessions(new Set())}
+                    bulkActions={[
+                      // No destructive actions in the list — delete lives on the
+                      // chat-toolbar 3-dot menu and tab right-click menu, where
+                      // the user has the session open and can act intentionally.
+                      {
+                        label: 'Mark as read',
+                        onClick: () => {
+                          for (const id of Array.from(selectedSessions)) markSessionRead(id)
+                          setSelectedSessions(new Set())
+                        },
+                        hidden: ![...selectedSessions].some((id) => unreadSessions.has(id)),
+                      },
+                    ]}
+                    renderItem={(s) => (
+                      <>
+                        {processing.has(s.id) && <span className="processing-dot" />}
+                        {!processing.has(s.id) && unreadSessions.has(s.id) && (
+                          <span className="unread-dot" />
+                        )}
+                        <span className="list-view-name">{s.name}</span>
+                        <span className="list-view-meta">
+                          {s.is_temp && <span className="list-view-tag">temp</span>}
+                          {folderMap.get(s.folder_id) && (
+                            <span className="list-view-tag">{folderMap.get(s.folder_id)}</span>
+                          )}
+                          <span className="list-view-time">
+                            {formatRelativeTime(s.last_activity)}
+                          </span>
+                        </span>
+                      </>
+                    )}
+                    onScroll={(e) => {
+                      if (!sessionsNextCursor || sessionsLoadingMore) return
+                      const el = e.currentTarget
+                      if (el.scrollHeight - el.scrollTop - el.clientHeight < 200) {
+                        void fetchMoreSessions()
+                      }
+                    }}
+                    emptyState={
+                      <div className="list-view-empty">
+                        <p>No sessions yet</p>
+                        <button
+                          className="list-view-empty-action"
+                          onClick={() => setShowNewSession(true)}
+                        >
+                          Create your first session
+                        </button>
+                      </div>
+                    }
+                    footer={
+                      sessionsLoadingMore ? (
+                        <div className="list-view-loading-more" data-testid="sessions-loading-more">
+                          Loading more sessions…
+                        </div>
+                      ) : null
+                    }
+                  />
+                </div>
+              ))}
+            {view === 'projects' &&
+              (activeProjectId ? (
+                sessionSub === 'todos' ? (
+                  <ProjectTodosView
+                    projectId={activeProjectId}
+                    onClose={() => navigate('projects', activeProjectId, 'chat')}
+                  />
+                ) : pluginSubItemId(sessionSub) &&
+                  projectItems.find((i) => i.id === pluginSubItemId(sessionSub)) ? (
+                  (() => {
+                    const item = projectItems.find((i) => i.id === pluginSubItemId(sessionSub))!
+                    return (
+                      <PluginFullPage
+                        title={item.label}
+                        plugin={item.plugin}
+                        path={item.path}
+                        scope={{ projectId: activeProjectId }}
+                        onBack={() => navigate('projects', activeProjectId, 'chat')}
+                      />
+                    )
+                  })()
+                ) : (
+                  <KanbanBoard
+                    projectId={activeProjectId}
+                    onOpenTodos={() => navigate('projects', activeProjectId, 'todos')}
+                    pluginItems={projectItems}
+                    onOpenPlugin={(id) => navigate('projects', activeProjectId, `plugin:${id}`)}
+                  />
+                )
+              ) : (
+                <div className="list-view">
+                  <ProjectList onNewProject={() => setShowNewProject(true)} />
+                </div>
+              ))}
+            {view === 'repeatingTasks' && (
+              <RepeatingTasksView
+                activeTaskId={activeRepeatingTaskId}
+                onNavigate={(id) => {
+                  setActiveRepeatingTaskId(id)
+                  navigate('repeatingTasks', id)
+                  if (id) useTabsStore.getState().openTab('repeating_task', id)
+                }}
+                onOpenSession={(id) => {
+                  setActiveSession(id)
+                  navigate('sessions', id)
+                  useTabsStore.getState().openTab('session', id)
                 }}
               />
-            ))}
-          {view === 'plan' && (
-            <PlanView
-              planId={parseRoute().activeId}
-              onBack={() => window.history.back()}
-              onOpenSession={(sid) => {
-                setActiveSession(sid)
-                navigate('sessions', sid)
-                useTabsStore.getState().openTab('session', sid)
-              }}
-            />
-          )}
-          {view === 'users' && <UserManagement />}
-          {view === 'settings' && (
-            <SettingsPage
-              key={settingsSub ?? 'root'}
-              onBack={() => navigate('sessions')}
-              initialSubPage={settingsSub}
-            />
-          )}
-        </ErrorBoundary>
+            )}
+            {view === 'usage' && <UsageDashboard />}
+            {view === 'pluginPage' &&
+              (() => {
+                const [pl, itemId] = (activePluginPageId ?? '').split(':')
+                const item = sidebarItems.find((i) => i.plugin === pl && i.id === itemId)
+                return item ? (
+                  <PluginFullPage
+                    title={item.label}
+                    plugin={item.plugin}
+                    path={item.path}
+                    scope={{}}
+                    onBack={() => navigate('sessions', null)}
+                  />
+                ) : (
+                  <div className="list-view" />
+                )
+              })()}
+            {view === 'folders' && <FoldersPage />}
+            {view === 'reports' &&
+              (activeReportId ? (
+                (() => {
+                  const parsed = parseReportTabId(activeReportId)
+                  if (!parsed) {
+                    // Malformed id: drop back to the index.
+                    setActiveReportId(null)
+                    return null
+                  }
+                  return (
+                    <ReportView
+                      folder={parsed.folder}
+                      file={parsed.file}
+                      onBack={() => {
+                        setActiveReportId(null)
+                        navigate('reports', null)
+                      }}
+                      onOpenSession={(id) => {
+                        setActiveSession(id)
+                        navigate('sessions', id)
+                        useTabsStore.getState().openTab('session', id)
+                      }}
+                    />
+                  )
+                })()
+              ) : (
+                <ReportBrowser
+                  onOpenReport={(folder, file) => {
+                    const id = reportTabId(folder, file)
+                    setActiveReportId(id)
+                    navigate('reports', id)
+                    useTabsStore.getState().openTab('report', id)
+                  }}
+                />
+              ))}
+            {view === 'plan' && (
+              <PlanView
+                planId={parseRoute().activeId}
+                onBack={() => window.history.back()}
+                onOpenSession={(sid) => {
+                  setActiveSession(sid)
+                  navigate('sessions', sid)
+                  useTabsStore.getState().openTab('session', sid)
+                }}
+              />
+            )}
+            {view === 'users' && <UserManagement />}
+            {view === 'settings' && (
+              <SettingsPage
+                key={settingsSub ?? 'root'}
+                onBack={() => navigate('sessions')}
+                initialSubPage={settingsSub}
+              />
+            )}
+          </ErrorBoundary>
+        </div>
       </main>
 
       {showNewSession && <NewSessionModal onClose={() => setShowNewSession(false)} />}

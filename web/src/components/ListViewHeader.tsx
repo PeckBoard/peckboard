@@ -30,7 +30,9 @@ export default function ListViewHeader({
 }: ListViewHeaderProps) {
   return (
     <div className="list-view-header">
-      <h2 className="list-view-title">{title}</h2>
+      {/* `h1`, not `h2`: this is the top-level heading of a list view, and
+          heading-jump navigation should start at level 1. */}
+      <h1 className="list-view-title">{title}</h1>
       {extras}
       {actionLabel && onAction && (
         <button className="list-view-action" onClick={onAction}>

@@ -1690,7 +1690,8 @@ export default function ChatView({
 
       {/* Toolbar */}
       <div className="chat-toolbar">
-        <span className="chat-toolbar-name">{sessionDetail?.name ?? 'Session'}</span>
+        {/* The session name is this view's `h1` — one per view. */}
+        <h1 className="chat-toolbar-name">{sessionDetail?.name ?? 'Session'}</h1>
         <ModelPicker
           value={sessionDetail?.model ?? ''}
           onChange={(id) => requestModelChange(id)}
