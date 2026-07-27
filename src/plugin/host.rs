@@ -3253,13 +3253,15 @@ fn state_permission_and_data_dir(
     Ok((ok, state.data_dir.clone()))
 }
 
-// `peckboard_browser_runs` — list recorded browser test runs (newest first,
-// steps included; frame bytes fetched separately). Gated by
-// `browser_runs_read`.
+// `peckboard_browser_runs` — list recorded browser test runs (newest first)
+// as bounded summaries: slim steps + precomputed request/error counts, no
+// network/console/pointer payloads (full metas OOM the wasm instance once
+// enough runs accumulate — the player fetches one full run via
+// `peckboard_browser_run`). Gated by `browser_runs_read`.
 host_fn!(peckboard_browser_runs(user_data: HostState; _input: String) -> String {
     let (ok, data_dir) = state_permission_and_data_dir(&user_data, "browser_runs_read")?;
     if !ok { return Ok(error_json("plugin lacks the 'browser_runs_read' permission")); }
-    let runs = crate::service::browser_runs::list_runs(&data_dir);
+    let runs = crate::service::browser_runs::list_run_summaries(&data_dir);
     Ok(serde_json::json!({ "runs": runs }).to_string())
 });
 

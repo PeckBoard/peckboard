@@ -496,6 +496,76 @@ pub fn list_runs(data_dir: &Path) -> Vec<RunMeta> {
     out
 }
 
+/// One run's list-view summary: identity, timing, steps slimmed to their
+/// action/frame skeleton, and precomputed list-badge counts. This is what
+/// `peckboard_browser_runs` hands the plugin instead of full metas: serving
+/// every run's network bodies, console text and pointer samples in one JSON
+/// blob OOMed the plugin's 128 MB wasm instance once ~170 runs (~23 MB of
+/// meta.json) had accumulated. The player refetches one full run on open via
+/// [`get_run`].
+#[derive(Serialize, Clone)]
+pub struct RunSummary {
+    pub id: String,
+    pub name: String,
+    pub url: String,
+    pub session_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub project_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub card_id: Option<String>,
+    pub started_ms: i64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ended_ms: Option<i64>,
+    /// Steps without `target`/`detail` (the free-text bulk). Kept as an array
+    /// so a pre-0.4.2 playwright-video plugin can still derive its step and
+    /// frame counts from `steps`.
+    pub steps: Vec<RunStep>,
+    /// `network.len()` of the full meta (the list's "N reqs" badge).
+    pub request_count: u32,
+    /// Failed/4xx/5xx requests plus `error`-level console lines (the list's
+    /// red badge). Mirrors the plugin's own pre-0.4.2 computation.
+    pub error_count: u32,
+}
+
+fn summarize(meta: RunMeta) -> RunSummary {
+    let net_errs = meta
+        .network
+        .iter()
+        .filter(|n| n.failure.is_some() || n.status.unwrap_or(0) >= 400)
+        .count();
+    let con_errs = meta
+        .console_events
+        .iter()
+        .filter(|c| c.level == "error")
+        .count();
+    RunSummary {
+        id: meta.id,
+        name: meta.name,
+        url: meta.url,
+        session_id: meta.session_id,
+        project_id: meta.project_id,
+        card_id: meta.card_id,
+        started_ms: meta.started_ms,
+        ended_ms: meta.ended_ms,
+        request_count: meta.network.len() as u32,
+        error_count: (net_errs + con_errs) as u32,
+        steps: meta
+            .steps
+            .into_iter()
+            .map(|s| RunStep {
+                target: None,
+                detail: None,
+                ..s
+            })
+            .collect(),
+    }
+}
+
+/// Every run's list summary, newest first — bounded regardless of run count.
+pub fn list_run_summaries(data_dir: &Path) -> Vec<RunSummary> {
+    list_runs(data_dir).into_iter().map(summarize).collect()
+}
+
 pub fn get_run(data_dir: &Path, run_id: &str) -> Option<RunMeta> {
     if !safe_component(run_id) {
         return None;
@@ -782,5 +852,67 @@ mod tests {
         let run = &runs[0];
         assert_eq!(run.network.len(), MAX_NET_EVENTS);
         assert_eq!(run.network_truncated, 10);
+    }
+
+    #[test]
+    fn list_summaries_are_slim_with_correct_counts() {
+        let dir = tempfile::tempdir().unwrap();
+        start(
+            dir.path(),
+            "page-5",
+            "summary test",
+            "https://app.example",
+            "s-3",
+            None,
+            None,
+        );
+        let png_b64 = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==";
+        record_step("page-5", "open", None, None, Some(png_b64));
+        record_step(
+            "page-5",
+            "fill",
+            Some("e2"),
+            Some(serde_json::json!({ "text": "hello" })),
+            None,
+        );
+        ingest_events(
+            "page-5",
+            &serde_json::json!({
+                "next": 4,
+                "events": [
+                    { "seq": 1, "kind": "net-req", "id": 1, "ts": 1000, "method": "GET",
+                      "url": "https://api.example/ok", "resourceType": "xhr", "headers": {} },
+                    { "seq": 2, "kind": "net-fin", "id": 1, "ts": 1100, "status": 500,
+                      "headers": {}, "body": "oops" },
+                    { "seq": 3, "kind": "console", "ts": 1200, "level": "error", "text": "boom" },
+                    { "seq": 4, "kind": "pointer", "ts": 1250, "t": "move", "x": 5, "y": 6,
+                      "vw": 100, "vh": 100 }
+                ]
+            }),
+        );
+        finish("page-5");
+
+        let summaries = list_run_summaries(dir.path());
+        assert_eq!(summaries.len(), 1);
+        let s = &summaries[0];
+        assert_eq!(s.name, "summary test");
+        assert_eq!(s.request_count, 1);
+        // One 5xx response + one error console line.
+        assert_eq!(s.error_count, 2);
+        // Steps keep count + frame but shed the free-text bulk.
+        assert_eq!(s.steps.len(), 2);
+        assert_eq!(s.steps[0].frame.as_deref(), Some("0000.png"));
+        assert!(
+            s.steps
+                .iter()
+                .all(|st| st.target.is_none() && st.detail.is_none())
+        );
+
+        // The serialized payload carries no heavy per-event arrays at all.
+        let json = serde_json::to_string(s).unwrap();
+        assert!(!json.contains("\"network\""), "got: {json}");
+        assert!(!json.contains("\"console_events\""), "got: {json}");
+        assert!(!json.contains("\"pointer_events\""), "got: {json}");
+        assert!(json.contains("\"request_count\":1"), "got: {json}");
     }
 }
