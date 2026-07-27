@@ -560,6 +560,18 @@ export default function KanbanBoard({
     fetchCards(projectId)
   }
 
+  /* Clears the blocked flag and its reason — the recovery path for a card
+     the money-loop defence auto-blocked. On failure we refetch so the card
+     falls back to whatever the server actually holds. */
+  const handleUnblock = async (card: Card) => {
+    closeCardMenu()
+    try {
+      await updateCard(projectId, card.id, { blocked: false, block_reason: null })
+    } catch {
+      fetchCards(projectId)
+    }
+  }
+
   const handleCancelWontDo = async (card: Card) => {
     setWontDoError(null)
     setWontDoBusy(true)
@@ -1125,6 +1137,15 @@ export default function KanbanBoard({
                           <span className="kanban-card-title" title={card.title}>
                             {card.title}
                           </span>
+                          {card.blocked && (
+                            <span
+                              className="kanban-card-blocked-chip"
+                              data-testid="card-blocked-chip"
+                              title={card.block_reason || 'Blocked'}
+                            >
+                              Blocked
+                            </span>
+                          )}
                           <div className="kanban-card-actions" data-no-toggle>
                             {workerCtx > 0 && (
                               <span
@@ -1176,6 +1197,14 @@ export default function KanbanBoard({
                                   {
                                     label: 'Edit',
                                     onSelect: () => setEditingCard(card),
+                                  },
+                                  {
+                                    label: 'Unblock',
+                                    // Terminal cards reject every field but
+                                    // `step`, so unblocking them can only 400.
+                                    hidden: !card.blocked || priorityLocked,
+                                    testId: 'card-menu-unblock',
+                                    onSelect: () => void handleUnblock(card),
                                   },
                                   {
                                     // The only step-change affordance that works
@@ -1485,7 +1514,11 @@ export default function KanbanBoard({
             </div>
             {selectedCard.block_reason && (
               <div className="card-detail-row">
-                <span className="card-detail-label">Block Reason</span>
+                <span className="card-detail-label">
+                  {normalizeStep(selectedCard.step) === 'wont_do'
+                    ? "Won't-do reason"
+                    : 'Block reason'}
+                </span>
                 <span>{selectedCard.block_reason}</span>
               </div>
             )}

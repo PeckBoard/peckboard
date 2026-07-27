@@ -50,6 +50,9 @@ pub(super) struct UpdateCardRequest {
     last_worker_session_id: Option<Option<String>>,
     handoff_context: Option<Option<String>>,
     blocked: Option<bool>,
+    /// Explicit `null` clears the reason (see `explicit_null`) — that is how
+    /// the kanban's Unblock action wipes the stale text.
+    #[serde(default, deserialize_with = "explicit_null")]
     block_reason: Option<Option<String>>,
     /// Name of a library system prompt to attach. Non-empty is validated to
     /// exist; empty string clears it.
@@ -57,6 +60,20 @@ pub(super) struct UpdateCardRequest {
     model_autoswitch: Option<Option<bool>>,
     /// When present, replaces the card's full dependency set.
     depends_on: Option<Vec<String>>,
+}
+
+/// Deserialize an `Option<Option<T>>` so an explicit JSON `null` survives.
+///
+/// Serde collapses `null` into the OUTER `None`, which makes "clear this
+/// field" indistinguishable from "leave it alone" — the update then silently
+/// keeps the old value. With this, an absent key stays `None` (serde's
+/// `default`) and `null` arrives as `Some(None)`.
+fn explicit_null<'de, D, T>(de: D) -> Result<Option<Option<T>>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: serde::Deserialize<'de>,
+{
+    Option::<T>::deserialize(de).map(Some)
 }
 
 /// POST /api/projects/:id/cards

@@ -361,6 +361,25 @@
   white-space: nowrap;
   min-width: 0;
 }
+/* Blocked marker on the always-visible header, so a collapsed card says
+   why it is stalled instead of relying on the 3px left border alone.
+   Danger-toned but muted — it labels a state, it does not shout. */
+.kanban-card-blocked-chip {
+  flex-shrink: 0;
+  padding: 1px 6px;
+  background: var(--danger-bg);
+  border: 1px solid var(--danger-border);
+  border-radius: var(--radius);
+  /* `--danger` straight on `--danger-bg` is only 3.4:1 in light theme.
+     Mixing a quarter of `--text` in pulls it to ~5:1 in light and keeps
+     ~5.5:1 in dark, where `--text` is near-white. */
+  color: color-mix(in srgb, var(--danger) 75%, var(--text));
+  font-size: var(--text-xs);
+  font-weight: 600;
+  line-height: 1.4;
+  white-space: nowrap;
+  cursor: help;
+}
 /* Worker context-occupancy badge, mirroring the chat toolbar's: amber as
    it nears the auto-compaction threshold, red past it. */
 .kanban-card-ctx {
