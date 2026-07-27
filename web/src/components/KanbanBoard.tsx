@@ -53,6 +53,7 @@ export default function KanbanBoard({
   const updateProject = useProjectsStore((s) => s.updateProject)
   const cards = useProjectsStore((s) => s.cards)
   const fetchCards = useProjectsStore((s) => s.fetchCards)
+  const cardsError = useProjectsStore((s) => s.cardsError)
   const updateCard = useProjectsStore((s) => s.updateCard)
   const deleteCard = useProjectsStore((s) => s.deleteCard)
 
@@ -80,6 +81,9 @@ export default function KanbanBoard({
   const [showAddForm, setShowAddForm] = useState(false)
   const [editingProject, setEditingProject] = useState(false)
   const [confirmDeleteId, setConfirmDeleteId] = useState<string | null>(null)
+  // Last card-delete failure, shown inside the confirm modal so a failed
+  // DELETE cannot look like a silent success.
+  const [deleteError, setDeleteError] = useState<string | null>(null)
   const [draggingCardId, setDraggingCardId] = useState<string | null>(null)
   // Active drop target. `insertIdx` is set only for an in-row reorder hover
   // (mouse is over a sibling card in the same row); a null `insertIdx` means
@@ -506,13 +510,15 @@ export default function KanbanBoard({
   }
 
   const handleDeleteCard = async (cardId: string) => {
+    setDeleteError(null)
     try {
       await deleteCard(projectId, cardId)
       setSelectedCard(null)
       setConfirmDeleteId(null)
       closeCardMenu()
-    } catch {
-      /* ignore */
+    } catch (err) {
+      // Keep the modal open with the Delete button enabled so the user can retry.
+      setDeleteError(err instanceof Error ? err.message : 'Failed to delete card')
     }
   }
 
@@ -930,6 +936,15 @@ export default function KanbanBoard({
           />
         )}
 
+        {cardsError && (
+          <div className="fetch-error-banner" role="alert" data-testid="kanban-cards-error">
+            <span>{cardsError}</span>
+            <button type="button" onClick={() => fetchCards(projectId)}>
+              Retry
+            </button>
+          </div>
+        )}
+
         <div className="kanban-columns">
           {visibleSteps.map((step) => {
             const rowCards = cardsByStep(step.key)
@@ -951,7 +966,9 @@ export default function KanbanBoard({
                   </span>
                 </header>
                 <div className="kanban-cards">
-                  {rowCards.length === 0 && (
+                  {/* Only a fetch that succeeded may claim the step is empty;
+                      a failed one shows the banner above instead. */}
+                  {rowCards.length === 0 && !cardsError && (
                     <span className="kanban-cards-empty">No cards in {step.label}</span>
                   )}
                   {rowCards.map((card, cardIndex) => {
@@ -1119,6 +1136,7 @@ export default function KanbanBoard({
                                   className="danger"
                                   onClick={() => {
                                     closeCardMenu()
+                                    setDeleteError(null)
                                     setConfirmDeleteId(card.id)
                                   }}
                                 >
@@ -1277,13 +1295,30 @@ export default function KanbanBoard({
       <ProjectTodoSummary cards={cards} todosByCard={todosByCard} />
 
       {confirmDeleteId && (
-        <Modal onClose={() => setConfirmDeleteId(null)} maxWidth={360}>
+        <Modal
+          onClose={() => {
+            setConfirmDeleteId(null)
+            setDeleteError(null)
+          }}
+          maxWidth={360}
+        >
           <h2>Delete card?</h2>
           <p style={{ fontSize: 'var(--text-sm)', color: 'var(--text2)' }}>
             This will stop any active worker and permanently delete the card.
           </p>
+          {deleteError && (
+            <p className="form-error" role="alert" data-testid="card-delete-error">
+              {deleteError}
+            </p>
+          )}
           <div className="form-actions" style={{ marginTop: 16 }}>
-            <button className="btn-secondary" onClick={() => setConfirmDeleteId(null)}>
+            <button
+              className="btn-secondary"
+              onClick={() => {
+                setConfirmDeleteId(null)
+                setDeleteError(null)
+              }}
+            >
               Cancel
             </button>
             <button className="btn-danger" onClick={() => handleDeleteCard(confirmDeleteId)}>

@@ -42,18 +42,47 @@ const EMPTY_COST_TABLE: CostTable = { rates: {} }
  *  request per kind and concatenates. */
 const OPERATION_KINDS: UsageOperationKind[] = ['file_update', 'file_read', 'ask_expert', 'qa']
 
-/** GET a usage endpoint, falling back to `fallback` on any non-2xx or network
- *  error. The usage dashboard ships ahead of (and in parallel with) the
- *  backend aggregation, so a route that isn't serving data yet must degrade to
- *  an empty panel rather than crash the whole view. */
-async function getJson<T>(url: string, fallback: T): Promise<T> {
+/** The dashboard's independently-fetched panels. `fetchUsage` records the ones
+ *  whose request failed so each can render an error instead of an empty state. */
+export type UsagePanelKey =
+  | 'costs'
+  | 'sessions'
+  | 'projects'
+  | 'cards'
+  | 'experts'
+  | 'trends'
+  | 'operations'
+
+/** Human labels for the partial-failure strip. */
+export const USAGE_PANEL_LABELS: Record<UsagePanelKey, string> = {
+  costs: 'cost rates',
+  sessions: 'sessions',
+  projects: 'projects',
+  cards: 'cards',
+  experts: 'experts',
+  trends: 'trends',
+  operations: 'cost breakdown',
+}
+
+/** GET a usage endpoint: the parsed body (or `fallback`) plus whether the
+ *  request actually failed. The dashboard fans out across many endpoints and
+ *  one dead route must not sink the others — but a failed leg has to stay
+ *  distinguishable from a leg that legitimately returned nothing, or the view
+ *  claims "no data" when the truth is "we could not load it". */
+async function getJsonResult<T>(url: string, fallback: T): Promise<{ data: T; failed: boolean }> {
   try {
     const res = await authedFetch(url)
-    if (!res.ok) return fallback
-    return (await res.json()) as T
+    if (!res.ok) return { data: fallback, failed: true }
+    return { data: (await res.json()) as T, failed: false }
   } catch {
-    return fallback
+    return { data: fallback, failed: true }
   }
+}
+
+/** `getJsonResult` for the one-shot helpers below, whose callers handle an
+ *  empty result themselves. */
+async function getJson<T>(url: string, fallback: T): Promise<T> {
+  return (await getJsonResult(url, fallback)).data
 }
 
 /** Roll the per-session rows up into install-wide totals. The backend has no
@@ -88,9 +117,13 @@ interface UsageState {
   loaded: boolean
   /** True while a fetch is in flight — drives the spinner. */
   loading: boolean
-  /** Last hard error (only set if the whole assembly throws; individual
-   *  endpoints degrade to empty rather than erroring). */
+  /** Last hard error (only set if the whole assembly throws). Individual
+   *  endpoint failures are reported through `failedPanels` instead. */
   error: string
+  /** Which panels' backing requests failed on the last `fetchUsage`. Non-empty
+   *  means those panels must show an error + Retry rather than an empty state
+   *  the user would read as "I have no spend". */
+  failedPanels: UsagePanelKey[]
   fetchUsage: () => Promise<void>
   /** Fetch just the rate table (cheap) — for the chat's per-turn cost chips
    *  without pulling the whole dashboard. No-op once populated. */
@@ -103,6 +136,7 @@ export const useUsageStore = create<UsageState>((set, get) => ({
   loaded: false,
   loading: false,
   error: '',
+  failedPanels: [],
 
   fetchCostTable: async () => {
     if (Object.keys(get().costTable.rates).length > 0) return
@@ -113,31 +147,43 @@ export const useUsageStore = create<UsageState>((set, get) => ({
     set({ loading: true, error: '' })
     try {
       const [costTable, sessions, projects, cards, experts, trends] = await Promise.all([
-        getJson<CostTable>('/api/usage/costs', EMPTY_COST_TABLE),
-        getJson<SessionUsage[]>('/api/usage/sessions', []),
-        getJson<EntityUsage[]>('/api/usage/projects', []),
-        getJson<EntityUsage[]>('/api/usage/cards', []),
-        getJson<EntityUsage[]>('/api/usage/experts', []),
-        getJson<TrendSeries[]>('/api/usage/trends', []),
+        getJsonResult<CostTable>('/api/usage/costs', EMPTY_COST_TABLE),
+        getJsonResult<SessionUsage[]>('/api/usage/sessions', []),
+        getJsonResult<EntityUsage[]>('/api/usage/projects', []),
+        getJsonResult<EntityUsage[]>('/api/usage/cards', []),
+        getJsonResult<EntityUsage[]>('/api/usage/experts', []),
+        getJsonResult<TrendSeries[]>('/api/usage/trends', []),
       ])
       const opLists = await Promise.all(
         OPERATION_KINDS.map((kind) =>
-          getJson<OperationCost[]>(`/api/usage/operations?kind=${kind}`, []),
+          getJsonResult<OperationCost[]>(`/api/usage/operations?kind=${kind}`, []),
         ),
       )
-      const operations = opLists.flat()
+      const operations = opLists.flatMap((r) => r.data)
+
+      // One entry per panel whose request failed, so the view can name what is
+      // missing instead of rendering a confident zero.
+      const failedPanels: UsagePanelKey[] = []
+      if (costTable.failed) failedPanels.push('costs')
+      if (sessions.failed) failedPanels.push('sessions')
+      if (projects.failed) failedPanels.push('projects')
+      if (cards.failed) failedPanels.push('cards')
+      if (experts.failed) failedPanels.push('experts')
+      if (trends.failed) failedPanels.push('trends')
+      if (opLists.some((r) => r.failed)) failedPanels.push('operations')
 
       set({
-        costTable,
+        costTable: costTable.data,
         dashboard: {
-          totals: sumTotals(sessions),
-          sessions,
-          projects,
-          cards,
-          experts,
+          totals: sumTotals(sessions.data),
+          sessions: sessions.data,
+          projects: projects.data,
+          cards: cards.data,
+          experts: experts.data,
           operations,
-          trends,
+          trends: trends.data,
         },
+        failedPanels,
         loaded: true,
         loading: false,
         error: '',

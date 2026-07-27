@@ -21,6 +21,7 @@ export default function ProjectList({ onNewProject }: ProjectListProps) {
   const updateProject = useProjectsStore((s) => s.updateProject)
   const cards = useProjectsStore((s) => s.cards)
   const fetchCards = useProjectsStore((s) => s.fetchCards)
+  const projectsError = useProjectsStore((s) => s.projectsError)
 
   const [confirmDelete, setConfirmDelete] = useState<string | null>(null)
   const [editingProject, setEditingProject] = useState<string | null>(null)
@@ -68,6 +69,14 @@ export default function ProjectList({ onNewProject }: ProjectListProps) {
         actionLabel={onNewProject ? '+ New project' : undefined}
         onAction={onNewProject}
       />
+      {projectsError && projects.length > 0 && (
+        <div className="fetch-error-banner" role="alert" data-testid="projects-error">
+          <span>{projectsError}</span>
+          <button type="button" onClick={() => fetchProjects()}>
+            Retry
+          </button>
+        </div>
+      )}
       <List<Project>
         items={projects}
         getKey={(p) => p.id}
@@ -91,14 +100,24 @@ export default function ProjectList({ onNewProject }: ProjectListProps) {
           </>
         )}
         emptyState={
-          <div className="list-view-empty">
-            <p>No projects yet</p>
-            {onNewProject && (
-              <button className="list-view-empty-action" onClick={onNewProject}>
-                Create your first project
+          // Only a request that actually succeeded may claim “no projects”.
+          projectsError ? (
+            <div className="list-view-empty" role="alert" data-testid="projects-error">
+              <p>{projectsError}</p>
+              <button className="list-view-empty-action" onClick={() => fetchProjects()}>
+                Retry
               </button>
-            )}
-          </div>
+            </div>
+          ) : (
+            <div className="list-view-empty">
+              <p>No projects yet</p>
+              {onNewProject && (
+                <button className="list-view-empty-action" onClick={onNewProject}>
+                  Create your first project
+                </button>
+              )}
+            </div>
+          )
         }
       />
 

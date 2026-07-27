@@ -39,8 +39,15 @@ interface ProjectsState {
    *  matters — without it, the empty initial state is indistinguishable
    *  from "no projects exist". */
   projectsLoaded: boolean
+  /** Non-empty when the last `fetchProjects` failed. An empty list is a claim
+   *  ("you have no projects") and a failed request cannot make it — the sidebar
+   *  shows an error + Retry instead. */
+  projectsError: string
   activeProjectId: string | null
   cards: Card[]
+  /** Non-empty when the last `fetchCards` failed — same reasoning as
+   *  `projectsError`, for the board's per-step "No cards in …" placeholders. */
+  cardsError: string
   cardReportsByCard: Record<string, CardReport[]>
   pendingQuestionsByProject: Record<string, PendingQuestion[]>
   fetchProjects: () => Promise<void>
@@ -64,12 +71,20 @@ export const useProjectsStore = create<ProjectsState>((set) => ({
   cards: [],
   cardReportsByCard: {},
   pendingQuestionsByProject: {},
+  projectsError: '',
+  cardsError: '',
 
   fetchProjects: async () => {
-    const res = await authedFetch('/api/projects')
-    if (res.ok) {
+    try {
+      const res = await authedFetch('/api/projects')
+      if (!res.ok) {
+        set({ projectsError: 'Couldn’t load projects.' })
+        return
+      }
       const projects: Project[] = await res.json()
-      set({ projects, projectsLoaded: true })
+      set({ projects, projectsLoaded: true, projectsError: '' })
+    } catch {
+      set({ projectsError: 'Couldn’t load projects.' })
     }
   },
 
@@ -123,14 +138,20 @@ export const useProjectsStore = create<ProjectsState>((set) => ({
     const current = useProjectsStore.getState().activeProjectId
     // Don't clear cards if re-selecting the same project
     if (id === current) return
-    set({ activeProjectId: id, cards: [] })
+    set({ activeProjectId: id, cards: [], cardsError: '' })
   },
 
   fetchCards: async (projectId: string) => {
-    const res = await authedFetch(`/api/projects/${projectId}/cards`)
-    if (res.ok) {
+    try {
+      const res = await authedFetch(`/api/projects/${projectId}/cards`)
+      if (!res.ok) {
+        set({ cardsError: 'Couldn’t load cards.' })
+        return
+      }
       const cards: Card[] = await res.json()
-      set({ cards })
+      set({ cards, cardsError: '' })
+    } catch {
+      set({ cardsError: 'Couldn’t load cards.' })
     }
   },
 

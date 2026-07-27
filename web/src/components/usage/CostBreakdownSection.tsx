@@ -37,7 +37,19 @@ const KINDS: KindMeta[] = [
   { kind: 'qa', title: 'Questions & Answers', mono: false, empty: 'No Q&A recorded' },
 ]
 
-function CostPanel({ meta, ops }: { meta: KindMeta; ops: OperationCost[] }) {
+function CostPanel({
+  meta,
+  ops,
+  failed,
+  onRetry,
+}: {
+  meta: KindMeta
+  ops: OperationCost[]
+  /** The operations fetch failed — a $0.00 subtotal would read as “nothing was
+   *  spent here”, so the panel shows an error + Retry instead. */
+  failed?: boolean
+  onRetry?: () => void
+}) {
   const rows = [...ops].sort((a, b) => b.est_cost - a.est_cost)
   const subtotal = rows.reduce((s, r) => s + r.est_cost, 0)
   const top = rows.slice(0, TOP_N)
@@ -49,11 +61,18 @@ function CostPanel({ meta, ops }: { meta: KindMeta; ops: OperationCost[] }) {
       <header className="usage-panel-header">
         <h4 className="usage-panel-title">{meta.title}</h4>
         <span className="usage-cost-subtotal" data-testid={`${testid}-subtotal`}>
-          {fmtUsd(subtotal)}
+          {failed ? '—' : fmtUsd(subtotal)}
         </span>
       </header>
       <div className="usage-cost-body">
-        {top.length === 0 ? (
+        {failed ? (
+          <div className="usage-panel-error" role="alert" data-testid={`${testid}-error`}>
+            <span>Couldn’t load this panel.</span>
+            <button type="button" onClick={onRetry}>
+              Retry
+            </button>
+          </div>
+        ) : top.length === 0 ? (
           <div className="usage-panel-empty">{meta.empty}</div>
         ) : (
           <ol className="usage-op-list">
@@ -79,7 +98,9 @@ function CostPanel({ meta, ops }: { meta: KindMeta; ops: OperationCost[] }) {
             ))}
           </ol>
         )}
-        {rows.length > TOP_N && <div className="usage-op-more">+{rows.length - TOP_N} more</div>}
+        {!failed && rows.length > TOP_N && (
+          <div className="usage-op-more">+{rows.length - TOP_N} more</div>
+        )}
       </div>
     </section>
   )
@@ -88,7 +109,15 @@ function CostPanel({ meta, ops }: { meta: KindMeta; ops: OperationCost[] }) {
 /** The cost-and-trends card's first half: a top-N "where the spend went" panel
  *  for each operation kind, fed by the operations the store already fetched
  *  from `/api/usage/operations`. */
-export default function CostBreakdownSection({ operations }: { operations: OperationCost[] }) {
+export default function CostBreakdownSection({
+  operations,
+  failed,
+  onRetry,
+}: {
+  operations: OperationCost[]
+  failed?: boolean
+  onRetry?: () => void
+}) {
   return (
     <section className="usage-section" data-testid="usage-cost-breakdown">
       <h3 className="usage-section-title">Cost Breakdown</h3>
@@ -98,6 +127,8 @@ export default function CostBreakdownSection({ operations }: { operations: Opera
             key={meta.kind}
             meta={meta}
             ops={operations.filter((o) => o.kind === meta.kind)}
+            failed={failed}
+            onRetry={onRetry}
           />
         ))}
       </div>

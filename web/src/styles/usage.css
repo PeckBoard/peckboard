@@ -112,6 +112,40 @@
   font-size: var(--text-sm);
 }
 
+/* A panel whose backing request failed. Deliberately distinct from
+   `.usage-panel-empty`: an empty panel is a fact, this is a missing answer. */
+.usage-panel-error {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: var(--space-2);
+  color: var(--danger);
+  font-size: var(--text-sm);
+  text-align: center;
+}
+
+.usage-panel-error button {
+  padding: 3px 12px;
+  border: 1px solid var(--accent);
+  border-radius: 6px;
+  background: var(--accent-subtle);
+  color: var(--accent);
+  cursor: pointer;
+  font-size: var(--text-sm);
+}
+
+.usage-panel-error button:hover {
+  background: var(--accent-muted);
+}
+
+/* The dashboard's partial-failure strip sits inside a scrolling page rather
+   than pinned under a toolbar, so it carries a full border. */
+.usage-page .fetch-error-banner {
+  margin-bottom: var(--space-4);
+  border: 1px solid var(--danger-border);
+  border-radius: 8px;
+}
+
 .usage-panel-placeholder {
   color: var(--text2);
   font-size: var(--text-sm);
