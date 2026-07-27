@@ -7,6 +7,7 @@ import SessionDetail from './usage/SessionDetail'
 import TrendsSection from './usage/TrendsSection'
 import SessionsPanelBody from './usage/SessionsPanel'
 import { CardsPanelBody, ExpertsPanelBody, ProjectsPanelBody } from './usage/EntityRollups'
+import RangeBar from './usage/RangeBar'
 
 /** Compact token formatter: 1_234_567 -> "1.23M". Keeps the stat cards and
  *  panel counts readable without a charting lib. */
@@ -99,6 +100,9 @@ type UsagePage =
   | { kind: 'session'; id: string }
   | { kind: 'project'; id: string }
 
+/** How old the figures must be before returning to the tab refetches them. */
+const STALE_AFTER_MS = 60_000
+
 export default function UsageDashboard() {
   const dashboard = useUsageStore((s) => s.dashboard)
   const loaded = useUsageStore((s) => s.loaded)
@@ -111,6 +115,21 @@ export default function UsageDashboard() {
 
   useEffect(() => {
     fetchUsage()
+  }, [fetchUsage])
+
+  // A dashboard left open all day would otherwise keep showing the morning's
+  // numbers. Rather than polling on a timer (cost with nobody looking), the
+  // data is refreshed when the tab becomes visible again and what's on screen
+  // has gone stale.
+  useEffect(() => {
+    const onVisible = () => {
+      if (document.visibilityState !== 'visible') return
+      const { lastUpdated, loading: busy } = useUsageStore.getState()
+      if (busy || Date.now() - lastUpdated < STALE_AFTER_MS) return
+      void fetchUsage()
+    }
+    document.addEventListener('visibilitychange', onVisible)
+    return () => document.removeEventListener('visibilitychange', onVisible)
   }, [fetchUsage])
 
   const { totals, sessions, projects, cards, experts, operations } = dashboard
@@ -171,6 +190,7 @@ export default function UsageDashboard() {
     <div className="usage-page" data-testid="usage-view">
       <div className="usage-header">
         <h2 className="usage-title">Usage</h2>
+        <RangeBar />
       </div>
 
       {failedPanels.length > 0 && (

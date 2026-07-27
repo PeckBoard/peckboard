@@ -36,6 +36,103 @@ export const EMPTY_DASHBOARD: UsageDashboard = {
 }
 
 const EMPTY_COST_TABLE: CostTable = { rates: {} }
+/* ─── Date range ──────────────────────────────────────────────────────── */
+
+/** Presets for the dashboard's date-range picker. `all` restores the
+ *  historical all-time view; `custom` reads the explicit day bounds. */
+export type RangePreset = '24h' | '7d' | '30d' | 'all' | 'custom'
+
+export interface UsageRange {
+  preset: RangePreset
+  /** Local calendar days (`YYYY-MM-DD`) for `custom`; ignored otherwise. */
+  fromDay?: string
+  toDay?: string
+}
+
+/** A range resolved against a concrete "now": epoch ms, `from` inclusive and
+ *  `to` exclusive — the same semantics the backend applies. `from` is
+ *  undefined only for `all`, which deliberately sends no lower bound. */
+export interface ResolvedRange {
+  from?: number
+  to: number
+}
+
+/** Button labels for the preset picker, in display order. */
+export const RANGE_PRESETS: { value: RangePreset; label: string; title: string }[] = [
+  { value: '24h', label: '24h', title: 'Last 24 hours' },
+  { value: '7d', label: '7d', title: 'Last 7 days' },
+  { value: '30d', label: '30d', title: 'Last 30 days' },
+  { value: 'all', label: 'All', title: 'All recorded usage' },
+  { value: 'custom', label: 'Custom', title: 'Pick a start and end date' },
+]
+
+const PRESET_SPAN_MS: Partial<Record<RangePreset, number>> = {
+  '24h': 24 * 60 * 60 * 1000,
+  '7d': 7 * 24 * 60 * 60 * 1000,
+  '30d': 30 * 24 * 60 * 60 * 1000,
+}
+
+const RANGE_STORAGE_KEY = 'peckboard_usage_range'
+
+/** The range the dashboard opens on. 30 days rather than all-time: the
+ *  figures are now labelled with the window they describe, and a recent
+ *  window is the question people actually ask. `All` stays one click away. */
+const DEFAULT_RANGE: UsageRange = { preset: '30d' }
+
+const DAY_RE = /^(\d{4})-(\d{2})-(\d{2})$/
+
+/** Midnight local time at the start of a `YYYY-MM-DD` day, `offsetDays` days
+ *  later. Built from the parts rather than `Date.parse`, because
+ *  `new Date('2026-07-27')` is parsed as UTC and would shift the window by
+ *  the viewer's offset; stepping the calendar date also keeps it correct
+ *  across a DST boundary, where a day is not 24h. */
+function dayStartMs(day: string, offsetDays = 0): number | undefined {
+  const m = DAY_RE.exec(day)
+  if (!m) return undefined
+  return new Date(Number(m[1]), Number(m[2]) - 1, Number(m[3]) + offsetDays).getTime()
+}
+
+/** Resolve a range against `now`. For `custom`, `toDay` is inclusive to the
+ *  user (they picked a day, not an instant), so the exclusive bound is the
+ *  start of the following day. */
+export function resolveRange(range: UsageRange, now: number): ResolvedRange {
+  if (range.preset === 'custom') {
+    return {
+      from: range.fromDay ? dayStartMs(range.fromDay) : undefined,
+      to: (range.toDay ? dayStartMs(range.toDay, 1) : undefined) ?? now,
+    }
+  }
+  const span = PRESET_SPAN_MS[range.preset]
+  return { from: span == null ? undefined : now - span, to: now }
+}
+
+/** Write the resolved window onto a query string. */
+function appendRange(params: URLSearchParams, r: ResolvedRange) {
+  if (r.from != null) params.set('from', String(r.from))
+  params.set('to', String(r.to))
+}
+
+/** The range is a per-browser view preference, so it lives in localStorage —
+ *  not the DB (see AGENTS.md on what actually deserves a migration). */
+function loadRange(): UsageRange {
+  try {
+    const raw = localStorage.getItem(RANGE_STORAGE_KEY)
+    if (!raw) return DEFAULT_RANGE
+    const parsed = JSON.parse(raw) as UsageRange
+    if (parsed && RANGE_PRESETS.some((p) => p.value === parsed.preset)) return parsed
+  } catch {
+    // Corrupt JSON or unavailable storage: fall back to the default.
+  }
+  return DEFAULT_RANGE
+}
+
+function saveRange(range: UsageRange) {
+  try {
+    localStorage.setItem(RANGE_STORAGE_KEY, JSON.stringify(range))
+  } catch {
+    // Private-mode storage failures must not break the dashboard.
+  }
+}
 
 /** The operation kinds the cost-breakdown panel aggregates. `GET
  *  /api/usage/operations` takes one `kind` per call, so the store fans out a
@@ -124,6 +221,17 @@ interface UsageState {
    *  means those panels must show an error + Retry rather than an empty state
    *  the user would read as "I have no spend". */
   failedPanels: UsagePanelKey[]
+  /** The date range every panel is scoped to. Persisted per browser. */
+  range: UsageRange
+  /** The window `range` resolved to on the last fetch — what the figures on
+   *  screen actually describe. The caption reads this, not `range`, so it can
+   *  never claim a window the data was not fetched for. */
+  resolved: ResolvedRange
+  /** When the currently-displayed figures were fetched (epoch ms; 0 = never).
+   *  Drives the "updated HH:MM:SS" stamp. */
+  lastUpdated: number
+  /** Swap the range and refetch everything scoped to it. */
+  setRange: (range: UsageRange) => void
   fetchUsage: () => Promise<void>
   /** Fetch just the rate table (cheap) — for the chat's per-turn cost chips
    *  without pulling the whole dashboard. No-op once populated. */
@@ -137,6 +245,15 @@ export const useUsageStore = create<UsageState>((set, get) => ({
   loading: false,
   error: '',
   failedPanels: [],
+  range: loadRange(),
+  resolved: resolveRange(loadRange(), Date.now()),
+  lastUpdated: 0,
+
+  setRange: (range) => {
+    saveRange(range)
+    set({ range })
+    void get().fetchUsage()
+  },
 
   fetchCostTable: async () => {
     if (Object.keys(get().costTable.rates).length > 0) return
@@ -144,19 +261,29 @@ export const useUsageStore = create<UsageState>((set, get) => ({
     set({ costTable })
   },
   fetchUsage: async () => {
+    // Resolve the window once per fetch and keep it: every panel is then
+    // fetched for exactly the window the caption will name, even though
+    // "now" moves while the requests are in flight.
+    const resolved = resolveRange(get().range, Date.now())
+    const params = new URLSearchParams()
+    appendRange(params, resolved)
+    const win = `?${params.toString()}`
     set({ loading: true, error: '' })
     try {
       const [costTable, sessions, projects, cards, experts, trends] = await Promise.all([
         getJsonResult<CostTable>('/api/usage/costs', EMPTY_COST_TABLE),
-        getJsonResult<SessionUsage[]>('/api/usage/sessions', []),
-        getJsonResult<EntityUsage[]>('/api/usage/projects', []),
-        getJsonResult<EntityUsage[]>('/api/usage/cards', []),
-        getJsonResult<EntityUsage[]>('/api/usage/experts', []),
-        getJsonResult<TrendSeries[]>('/api/usage/trends', []),
+        getJsonResult<SessionUsage[]>(`/api/usage/sessions${win}`, []),
+        getJsonResult<EntityUsage[]>(`/api/usage/projects${win}`, []),
+        getJsonResult<EntityUsage[]>(`/api/usage/cards${win}`, []),
+        getJsonResult<EntityUsage[]>(`/api/usage/experts${win}`, []),
+        getJsonResult<TrendSeries[]>(`/api/usage/trends${win}`, []),
       ])
       const opLists = await Promise.all(
         OPERATION_KINDS.map((kind) =>
-          getJsonResult<OperationCost[]>(`/api/usage/operations?kind=${kind}`, []),
+          getJsonResult<OperationCost[]>(
+            `/api/usage/operations?kind=${kind}&${params.toString()}`,
+            [],
+          ),
         ),
       )
       const operations = opLists.flatMap((r) => r.data)
@@ -183,6 +310,8 @@ export const useUsageStore = create<UsageState>((set, get) => ({
           operations,
           trends: trends.data,
         },
+        resolved,
+        lastUpdated: Date.now(),
         failedPanels,
         loaded: true,
         loading: false,

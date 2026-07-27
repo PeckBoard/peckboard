@@ -1,5 +1,10 @@
 import { useEffect, useMemo, useState } from 'react'
-import { fetchTrendSeries, useUsageStore, type TrendEntity } from '../../store/usage'
+import {
+  fetchTrendSeries,
+  useUsageStore,
+  type ResolvedRange,
+  type TrendEntity,
+} from '../../store/usage'
 import type { TrendSeries, UsageDashboard } from '../../types/api'
 import { fmtTokens, fmtUsd } from '../../util/format'
 import LineChart, { type ChartSeries } from './LineChart'
@@ -63,13 +68,17 @@ function makeNameResolver(dashboard: UsageDashboard) {
   }
 }
 
-function shortLabel(ts: number, bucket: Bucket): string {
+/** Axis tick label. The timezone is stated once in the dashboard caption
+ *  rather than on every tick; the year appears only when the selected range
+ *  makes `MM/DD` ambiguous (`showYear`), which keeps the axis readable. */
+function shortLabel(ts: number, bucket: Bucket, showYear: boolean): string {
   const d = new Date(ts)
   const mm = `${d.getMonth() + 1}`.padStart(2, '0')
   const dd = `${d.getDate()}`.padStart(2, '0')
-  if (bucket === 'day') return `${mm}/${dd}`
+  const yy = showYear ? `/${`${d.getFullYear()}`.slice(2)}` : ''
+  if (bucket === 'day') return `${mm}/${dd}${yy}`
   const hh = `${d.getHours()}`.padStart(2, '0')
-  return `${mm}/${dd} ${hh}:00`
+  return `${mm}/${dd}${yy} ${hh}:00`
 }
 
 function seriesValue(s: TrendSeries, metric: Metric): number {
@@ -80,10 +89,16 @@ function TrendWidget({
   metric,
   title,
   nameFor,
+  range,
+  showYear,
 }: {
   metric: Metric
   title: string
   nameFor: (entity: TrendEntity, id: string) => string
+  /** The dashboard's resolved date range — the same window every other panel
+   *  is scoped to, so the charts and the totals describe one period. */
+  range: ResolvedRange
+  showYear: boolean
 }) {
   const [bucket, setBucket] = useState<Bucket>('day')
   const [entity, setEntity] = useState<TrendEntity>('overall')
@@ -95,19 +110,20 @@ function TrendWidget({
     series: [],
   })
 
-  const queryKey = `${metric}|${entity}|${bucket}`
+  const { from, to } = range
+  const queryKey = `${metric}|${entity}|${bucket}|${from ?? ''}|${to}`
 
   useEffect(() => {
     let cancelled = false
-    const key = `${metric}|${entity}|${bucket}`
+    const key = `${metric}|${entity}|${bucket}|${from ?? ''}|${to}`
     // fetchTrendSeries degrades to [] on error and never rejects.
-    fetchTrendSeries({ metric, entity, bucket }).then((data) => {
+    fetchTrendSeries({ metric, entity, bucket, from, to }).then((data) => {
       if (!cancelled) setLoaded({ key, series: data })
     })
     return () => {
       cancelled = true
     }
-  }, [metric, entity, bucket])
+  }, [metric, entity, bucket, from, to])
 
   const loading = loaded.key !== queryKey
 
@@ -179,7 +195,7 @@ function TrendWidget({
               series={chartSeries}
               area={chartSeries.length === 1}
               formatValue={format}
-              formatX={(x) => shortLabel(x, bucket)}
+              formatX={(x) => shortLabel(x, bucket, showYear)}
               unit={metric === 'tokens' ? 'tokens' : 'USD'}
               xUnit={bucket}
               testid={`${testid}-chart`}
@@ -230,17 +246,38 @@ function TrendWidget({
  *  a live `/api/usage/trends` query. */
 export default function TrendsSection() {
   // Each widget re-queries `/api/usage/trends` from its own bucket/entity
-  // controls, so the section owns no series state — it only resolves entity
-  // ids to names from the dashboard the store already loaded.
+  // controls plus the dashboard's shared date range, so the section owns no
+  // series state — it only resolves entity ids to names from the dashboard
+  // the store already loaded.
   const dashboard = useUsageStore((s) => s.dashboard)
+  const range = useUsageStore((s) => s.resolved)
   const nameFor = useMemo(() => makeNameResolver(dashboard), [dashboard])
+
+  // `MM/DD` alone is ambiguous once the window leaves the current year or
+  // straddles a year boundary — then, and only then, the ticks carry a year.
+  const endYear = new Date(range.to - 1).getFullYear()
+  const showYear =
+    endYear !== new Date().getFullYear() ||
+    (range.from != null && new Date(range.from).getFullYear() !== endYear)
 
   return (
     <section className="usage-section" data-testid="usage-trends">
       <h3 className="usage-section-title">Trends</h3>
       <div className="usage-subgrid usage-trend-grid">
-        <TrendWidget metric="tokens" title="Tokens Over Time" nameFor={nameFor} />
-        <TrendWidget metric="cost" title="Cost Over Time" nameFor={nameFor} />
+        <TrendWidget
+          metric="tokens"
+          title="Tokens Over Time"
+          nameFor={nameFor}
+          range={range}
+          showYear={showYear}
+        />
+        <TrendWidget
+          metric="cost"
+          title="Est. Cost Over Time (USD)"
+          nameFor={nameFor}
+          range={range}
+          showYear={showYear}
+        />
       </div>
     </section>
   )

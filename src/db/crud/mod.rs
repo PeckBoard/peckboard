@@ -34,7 +34,7 @@ pub use claude_accounts::AccountModelUsage;
 pub use folders::{MoveFolderOutcome, ProjectMoveReport, RepeatingTaskMoveReport};
 pub use plugin_approvals::{APPROVAL_APPROVED, APPROVAL_DENIED};
 pub use todos::ProjectCardTodos;
-pub use usage::UsageRollupRow;
+pub use usage::{UsageRollupRow, UsageWindow};
 
 /// Outcome of `Db::delete_folder_if_empty`. Avoids the older check-then-
 /// act pattern (`list_sessions_by_folder().await` + `delete_folder().await`)

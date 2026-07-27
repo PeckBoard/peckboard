@@ -188,16 +188,20 @@ async fn seed(state: &AppState) {
         .unwrap();
     }
 
-    // Worker sessions tied to project + card.
-    for (id, name, project, card) in [
-        ("w1", "Worker One", "p1", "c1"),
-        ("w2", "Worker Two", "p2", "c2"),
+    // Worker sessions tied to project + card. w1 carries an explicit
+    // long-context model and w2 none, so the rollups are covered for both the
+    // "gauge has a real window" and "gauge must fall back to the default"
+    // cases the frontend distinguishes.
+    for (id, name, project, card, model) in [
+        ("w1", "Worker One", "p1", "c1", Some("claude:opus[1m]")),
+        ("w2", "Worker Two", "p2", "c2", None),
     ] {
         db.create_session(NewSession {
             id: id.into(),
             name: name.into(),
             folder_id: "f1".into(),
             is_worker: true,
+            model: model.map(str::to_string),
             project_id: Some(project.into()),
             card_id: Some(card.into()),
             created_at: ts.clone(),
@@ -372,6 +376,30 @@ async fn card_and_session_rollups_carry_project_id_projects_do_not() {
 }
 
 #[tokio::test]
+async fn session_rollups_carry_the_configured_model() {
+    let (state, token) = build_state().await;
+    seed(&state).await;
+
+    // The frontend sizes each session's context gauge from this field. Without
+    // it every row is measured against the 200K default, which renders a
+    // 1M-context session as a full red bar reading 100%.
+    let (_, sessions) = get_json(state.clone(), &token, "/api/usage/sessions").await;
+    assert_eq!(find(&sessions, "w1")["model"], "claude:opus[1m]");
+    // A session with no model set reports null, so the gauge can label its
+    // denominator as the default instead of implying certainty.
+    assert!(find(&sessions, "w2")["model"].is_null());
+
+    // The single-session endpoint agrees with the list.
+    let (_, w1) = get_json(state.clone(), &token, "/api/usage/sessions/w1").await;
+    assert_eq!(w1["model"], "claude:opus[1m]");
+
+    // Entity rollups fold many sessions together, so a single model would be a
+    // fiction: they carry none.
+    let (_, projects) = get_json(state.clone(), &token, "/api/usage/projects").await;
+    assert!(find(&projects, "p1").get("model").is_none());
+}
+
+#[tokio::test]
 async fn single_session_breakdown_and_unknown_session() {
     let (state, token) = build_state().await;
     seed(&state).await;
@@ -462,4 +490,51 @@ async fn zero_usage_sessions_appear_in_listings() {
     let idle_e = find(&experts, "idleE");
     assert_eq!(idle_e["input_tokens"], 0);
     assert_eq!(idle_e["est_cost"], 0.0);
+}
+
+/// The dashboard's date-range picker sends `from`/`to` (epoch ms, `from`
+/// inclusive / `to` exclusive) to every rollup endpoint. Only usage inside
+/// the window may count — but a *session* outside it must still be listed,
+/// or narrowing the range would make sessions vanish from the dashboard
+/// instead of just zeroing their figures.
+#[tokio::test]
+async fn rollups_respect_the_from_to_window() {
+    let (state, token) = build_state().await;
+    seed(&state).await;
+
+    // w1's two turns are at ts 10 and 20. `from=15` keeps only the second.
+    let (status, sessions) = get_json(state.clone(), &token, "/api/usage/sessions?from=15").await;
+    assert_eq!(status, StatusCode::OK);
+    let w1 = find(&sessions, "w1");
+    assert_eq!(w1["input_tokens"], 600);
+    assert_eq!(w1["output_tokens"], 200);
+    assert_eq!(w1["context_tokens"], 3000);
+    // w2 only spent at ts 10 — outside the window, so zeroed but still listed.
+    let w2 = find(&sessions, "w2");
+    assert_eq!(w2["input_tokens"], 0);
+    assert_eq!(w2["est_cost"], 0.0);
+    assert_eq!(sessions.as_array().unwrap().len(), 4);
+
+    // `to` is exclusive: to=20 keeps the ts-10 turn and drops the ts-20 one.
+    let (_, sessions) = get_json(state.clone(), &token, "/api/usage/sessions?to=20").await;
+    assert_eq!(find(&sessions, "w1")["input_tokens"], 1000);
+
+    // Projects/cards are inner joins: an entity with no spend in the window
+    // drops out of the list entirely (it has no all-time page to keep).
+    let (_, projects) = get_json(state.clone(), &token, "/api/usage/projects?from=15").await;
+    assert_eq!(projects.as_array().unwrap().len(), 1);
+    assert_eq!(find(&projects, "p1")["input_tokens"], 600);
+
+    let (_, cards) = get_json(state.clone(), &token, "/api/usage/cards?from=15").await;
+    assert_eq!(cards.as_array().unwrap().len(), 1);
+    assert_eq!(find(&cards, "c1")["input_tokens"], 600);
+
+    // Experts keep their LEFT JOIN listing, zeroed outside the window.
+    let (_, experts) = get_json(state.clone(), &token, "/api/usage/experts?from=15").await;
+    assert_eq!(experts.as_array().unwrap().len(), 2);
+    assert_eq!(find(&experts, "e1")["input_tokens"], 0);
+
+    // Omitting both bounds is unchanged all-time behaviour.
+    let (_, sessions) = get_json(state.clone(), &token, "/api/usage/sessions").await;
+    assert_eq!(find(&sessions, "w1")["input_tokens"], 1600);
 }

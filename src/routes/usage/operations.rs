@@ -496,16 +496,21 @@ pub async fn all_operation_costs(
 
 /// Query params for `GET /api/usage/operations`. `kind` is required; the scope
 /// narrows to a session or project when given, else the whole install.
+/// `from`/`to` (epoch ms, `from` inclusive / `to` exclusive) narrow the time
+/// window, matching the rollup list endpoints.
 #[derive(Debug, Deserialize)]
 pub struct OperationsQuery {
     pub kind: String,
     pub session_id: Option<String>,
     pub project_id: Option<String>,
+    pub from: Option<i64>,
+    pub to: Option<i64>,
 }
 
 /// `GET /api/usage/operations?kind=file_update|ask_expert|qa` — per-operation
-/// cost list, optionally scoped by `session_id` or `project_id`. Auth-protected
-/// by the usage router's `require_auth` layer.
+/// cost list, optionally scoped by `session_id` or `project_id` and by a
+/// `from`/`to` time window. Auth-protected by the usage router's
+/// `require_auth` layer.
 pub async fn get_operations(
     State(state): State<Arc<AppState>>,
     Query(q): Query<OperationsQuery>,
@@ -530,9 +535,18 @@ pub async fn get_operations(
         (None, Some(pid)) => OperationScope::Project(pid),
         (None, None) => OperationScope::Global,
     };
+    let (from, to) = (q.from, q.to);
 
     match operation_costs(&state.db, kind, &scope).await {
-        Ok(ops) => Json(ops).into_response(),
+        // Operations are derived from the session transcripts, not aggregated
+        // in SQL, so the window is applied to the derived list — the same
+        // `ts >= from && ts < to` semantics the rollups use.
+        Ok(ops) => Json(
+            ops.into_iter()
+                .filter(|o| from.is_none_or(|f| o.ts >= f) && to.is_none_or(|t| o.ts < t))
+                .collect::<Vec<_>>(),
+        )
+        .into_response(),
         Err(e) => {
             tracing::error!("usage operations derivation failed: {e}");
             (

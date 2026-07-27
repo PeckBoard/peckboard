@@ -18,16 +18,16 @@ use std::sync::Arc;
 
 use axum::{
     Json, Router,
-    extract::{Path, State},
+    extract::{Path, Query, State},
     http::StatusCode,
     middleware,
     response::IntoResponse,
     routing::get,
 };
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use crate::auth::middleware::require_auth;
-use crate::db::crud::UsageRollupRow;
+use crate::db::crud::{UsageRollupRow, UsageWindow};
 use crate::state::AppState;
 
 pub mod cost;
@@ -78,16 +78,24 @@ pub struct EntityUsage {
 
 /// A session row, which surfaces its lifetime token + context totals
 /// explicitly on top of the shared [`EntityUsage`] fields (flattened, so the
-/// wire shape is `EntityUsage` plus the two extra fields). The TS mirror is
+/// wire shape is `EntityUsage` plus the extra fields). The TS mirror is
 /// `interface SessionUsage extends EntityUsage`.
 #[derive(Debug, Clone, Serialize)]
 pub struct SessionUsage {
     #[serde(flatten)]
     pub usage: EntityUsage,
-    /// Sum of all billed tokens across the session's lifetime.
+    /// Sum of the four billed token slices across the session's lifetime
+    /// (input + output + cache-read + cache-creation). This — not the
+    /// provider-reported `total_tokens` roll-up — is what the dashboard
+    /// labels "Billed Tokens", so the header card and the panel rows add up.
     pub total_tokens_used: i64,
     /// Most recent context-window occupancy for the session.
     pub total_context_tokens: i64,
+    /// The model the session is configured to run on (`sessions.model`), or
+    /// `None` when it has never been set. Carried so the frontend can size
+    /// the context gauge against that model's real window instead of the
+    /// shared 200K default.
+    pub model: Option<String>,
     /// Session role flags, so the dashboard can split chats / workers /
     /// experts and route each to the right detail page.
     pub is_worker: bool,
@@ -281,11 +289,13 @@ fn fold_entities(rows: Vec<UsageRollupRow>, kind: EntityKind) -> Vec<EntityUsage
 /// Build a [`SessionUsage`] from a session's per-model rows. `total_tokens_used`
 /// is the sum of the four billed slices (distinct from the provider-reported
 /// `total_tokens` roll-up); `total_context_tokens` mirrors the peak context
-/// snapshot.
+/// snapshot. `model` is the session's configured model — the context gauge's
+/// denominator — not the model any individual usage row was billed under.
 fn session_usage(
     id: String,
     name: String,
     flags: (bool, bool),
+    model: Option<String>,
     rows: Vec<UsageRollupRow>,
 ) -> SessionUsage {
     let mut acc = UsageAccumulator {
@@ -302,6 +312,7 @@ fn session_usage(
         usage: acc.into_entity(id, EntityKind::Session),
         total_tokens_used,
         total_context_tokens: context,
+        model,
         is_worker: flags.0,
         is_expert: flags.1,
     }
@@ -314,10 +325,36 @@ fn db_error(e: anyhow::Error) -> (StatusCode, Json<serde_json::Value>) {
     )
 }
 
+/// The date-range window shared by every rollup list endpoint: `from`
+/// inclusive, `to` exclusive, both epoch milliseconds. Both are optional, so
+/// a caller that omits them still gets the all-time figures.
+#[derive(Debug, Deserialize)]
+pub struct WindowQuery {
+    pub from: Option<i64>,
+    pub to: Option<i64>,
+}
+
+impl From<WindowQuery> for UsageWindow {
+    fn from(q: WindowQuery) -> Self {
+        UsageWindow {
+            from: q.from,
+            to: q.to,
+        }
+    }
+}
+
 /// GET /api/usage/sessions — per-session token totals + cost, one row per
-/// session that has recorded usage.
-async fn list_session_usage(State(state): State<Arc<AppState>>) -> impl IntoResponse {
-    let rows = state.db.usage_rollup_by_session().await.map_err(db_error)?;
+/// session that has recorded usage. `from`/`to` narrow the window; every
+/// session is still listed (with zeros) when its spend falls outside it.
+async fn list_session_usage(
+    State(state): State<Arc<AppState>>,
+    Query(window): Query<WindowQuery>,
+) -> impl IntoResponse {
+    let rows = state
+        .db
+        .usage_rollup_by_session(window.into())
+        .await
+        .map_err(db_error)?;
     let sessions: Vec<SessionUsage> = fold_session_rows(rows);
     Ok::<_, (StatusCode, Json<serde_json::Value>)>(Json(sessions))
 }
@@ -325,8 +362,9 @@ async fn list_session_usage(State(state): State<Arc<AppState>>) -> impl IntoResp
 /// Group the flat per-(session, model) rows into one [`SessionUsage`] per
 /// session, cost-sorted like the entity rollups.
 fn fold_session_rows(rows: Vec<UsageRollupRow>) -> Vec<SessionUsage> {
-    /// Per-session grouping slot: name, (is_worker, is_expert), rows.
-    type Slot = (String, (bool, bool), Vec<UsageRollupRow>);
+    /// Per-session grouping slot: name, (is_worker, is_expert), configured
+    /// model, rows.
+    type Slot = (String, (bool, bool), Option<String>, Vec<UsageRollupRow>);
     let mut order: Vec<String> = Vec::new();
     let mut grouped: HashMap<String, Slot> = HashMap::new();
     for row in rows {
@@ -335,16 +373,18 @@ fn fold_session_rows(rows: Vec<UsageRollupRow>) -> Vec<SessionUsage> {
             (
                 row.entity_name.clone(),
                 (row.is_worker, row.is_expert),
+                row.session_model.clone(),
                 Vec::new(),
             )
         });
-        entry.2.push(row);
+        entry.3.push(row);
     }
     let mut out: Vec<SessionUsage> = order
         .into_iter()
         .map(|id| {
-            let (name, flags, rows) = grouped.remove(&id).expect("id was inserted into order");
-            session_usage(id, name, flags, rows)
+            let (name, flags, model, rows) =
+                grouped.remove(&id).expect("id was inserted into order");
+            session_usage(id, name, flags, model, rows)
         })
         .collect();
     out.sort_by(|a, b| {
@@ -369,11 +409,14 @@ async fn get_session_usage(
         .usage_rollup_for_session(&id)
         .await
         .map_err(db_error)?;
-    if let Some((name, flags)) = rows
-        .first()
-        .map(|r| (r.entity_name.clone(), (r.is_worker, r.is_expert)))
-    {
-        return Ok(Json(session_usage(id, name, flags, rows)));
+    if let Some((name, flags, model)) = rows.first().map(|r| {
+        (
+            r.entity_name.clone(),
+            (r.is_worker, r.is_expert),
+            r.session_model.clone(),
+        )
+    }) {
+        return Ok(Json(session_usage(id, name, flags, model, rows)));
     }
     // No usage rows: fall back to the session record for its name, or 404.
     match state.db.get_session(&id).await.map_err(db_error)? {
@@ -381,6 +424,7 @@ async fn get_session_usage(
             id,
             session.name,
             (session.is_worker, session.is_expert),
+            session.model,
             Vec::new(),
         ))),
         None => Err((
@@ -390,20 +434,44 @@ async fn get_session_usage(
     }
 }
 
-/// GET /api/usage/projects — per-project token totals + cost.
-async fn list_project_usage(State(state): State<Arc<AppState>>) -> impl IntoResponse {
-    let rows = state.db.usage_rollup_by_project().await.map_err(db_error)?;
+/// GET /api/usage/projects — per-project token totals + cost, restricted to
+/// the `from`/`to` window when given.
+async fn list_project_usage(
+    State(state): State<Arc<AppState>>,
+    Query(window): Query<WindowQuery>,
+) -> impl IntoResponse {
+    let rows = state
+        .db
+        .usage_rollup_by_project(window.into())
+        .await
+        .map_err(db_error)?;
     Ok::<_, (StatusCode, Json<serde_json::Value>)>(Json(fold_entities(rows, EntityKind::Project)))
 }
 
-/// GET /api/usage/cards — per-card token totals + cost.
-async fn list_card_usage(State(state): State<Arc<AppState>>) -> impl IntoResponse {
-    let rows = state.db.usage_rollup_by_card().await.map_err(db_error)?;
+/// GET /api/usage/cards — per-card token totals + cost, restricted to the
+/// `from`/`to` window when given.
+async fn list_card_usage(
+    State(state): State<Arc<AppState>>,
+    Query(window): Query<WindowQuery>,
+) -> impl IntoResponse {
+    let rows = state
+        .db
+        .usage_rollup_by_card(window.into())
+        .await
+        .map_err(db_error)?;
     Ok::<_, (StatusCode, Json<serde_json::Value>)>(Json(fold_entities(rows, EntityKind::Card)))
 }
 
-/// GET /api/usage/experts — per-expert-session token totals + cost.
-async fn list_expert_usage(State(state): State<Arc<AppState>>) -> impl IntoResponse {
-    let rows = state.db.usage_rollup_by_expert().await.map_err(db_error)?;
+/// GET /api/usage/experts — per-expert-session token totals + cost,
+/// restricted to the `from`/`to` window when given.
+async fn list_expert_usage(
+    State(state): State<Arc<AppState>>,
+    Query(window): Query<WindowQuery>,
+) -> impl IntoResponse {
+    let rows = state
+        .db
+        .usage_rollup_by_expert(window.into())
+        .await
+        .map_err(db_error)?;
     Ok::<_, (StatusCode, Json<serde_json::Value>)>(Json(fold_entities(rows, EntityKind::Expert)))
 }

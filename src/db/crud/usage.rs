@@ -23,6 +23,14 @@ pub struct UsageRollupRow {
     pub entity_name: String,
     #[diesel(sql_type = Nullable<Text>)]
     pub model: Option<String>,
+    /// The session's *configured* model (`sessions.model`) for
+    /// session-grained rollups (session / expert / single-session); `NULL`
+    /// for project/card rollups, where many sessions are folded together.
+    /// Distinct from `model` above: `model` is the model a given usage row
+    /// was billed under, `session_model` is what the session runs on now —
+    /// which is what sizes the frontend's context-window gauge.
+    #[diesel(sql_type = Nullable<Text>)]
+    pub session_model: Option<String>,
     /// Owning project: the card's `project_id` for the per-card rollup, the
     /// session's `project_id` for the per-session rollups; `NULL` for the
     /// project rollup itself, where it has no meaning. Lets the frontend
@@ -61,6 +69,38 @@ const ROLLUP_AGG_COLS: &str = "\
     COALESCE(SUM(u.cache_creation_tokens), 0) AS cache_creation_tokens, \
     COALESCE(SUM(u.total_tokens), 0) AS total_tokens, \
     COALESCE(MAX(u.context_tokens), 0) AS context_tokens";
+/// The time window a usage rollup is restricted to: `from` inclusive, `to`
+/// exclusive, both epoch milliseconds. `None` on either end means unbounded,
+/// so [`UsageWindow::ALL`] reproduces the pre-window all-time behaviour.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct UsageWindow {
+    pub from: Option<i64>,
+    pub to: Option<i64>,
+}
+
+impl UsageWindow {
+    /// Unbounded — every recorded usage row.
+    pub const ALL: Self = Self {
+        from: None,
+        to: None,
+    };
+
+    /// SQL predicate fragment over `u.ts`, e.g. `" AND u.ts >= 1 AND u.ts < 2"`,
+    /// empty when unbounded. Both bounds are `i64` and can never carry
+    /// caller-supplied text, so interpolating them is injection-safe — the
+    /// same reasoning as the inlined bucket width in
+    /// [`crate::routes::usage::trends`].
+    fn predicate(&self) -> String {
+        let mut sql = String::new();
+        if let Some(from) = self.from {
+            sql.push_str(&format!(" AND u.ts >= {from}"));
+        }
+        if let Some(to) = self.to {
+            sql.push_str(&format!(" AND u.ts < {to}"));
+        }
+        sql
+    }
+}
 
 impl Db {
     /// Latest recorded context-window occupancy for a session: the newest
@@ -179,13 +219,23 @@ impl Db {
     /// row (model NULL) via the LEFT JOIN, so each session has a usage page
     /// regardless of type. Aggregation happens in SQL — rows are never
     /// loaded individually.
-    pub async fn usage_rollup_by_session(&self) -> anyhow::Result<Vec<UsageRollupRow>> {
+    ///
+    /// `window` restricts which usage rows count. It is applied in the JOIN's
+    /// ON clause, not a WHERE: a session whose spend all falls outside the
+    /// window must still be listed (with zeros), or narrowing the dashboard's
+    /// date range would make sessions disappear from the list entirely.
+    pub async fn usage_rollup_by_session(
+        &self,
+        window: UsageWindow,
+    ) -> anyhow::Result<Vec<UsageRollupRow>> {
+        let ts = window.predicate();
         let sql = format!(
             "SELECT s.id AS entity_id, s.name AS entity_name, u.model AS model, \
-             s.project_id AS project_id, s.is_worker AS is_worker, s.is_expert AS is_expert, \
+             s.model AS session_model, s.project_id AS project_id, \
+             s.is_worker AS is_worker, s.is_expert AS is_expert, \
              {ROLLUP_AGG_COLS} \
              FROM sessions s \
-             LEFT JOIN usage_events u ON u.session_id = s.id \
+             LEFT JOIN usage_events u ON u.session_id = s.id{ts} \
              GROUP BY s.id, u.model"
         );
         self.with_conn(move |conn| {
@@ -198,15 +248,23 @@ impl Db {
 
     /// Per-project usage (sessions joined through `sessions.project_id`), one
     /// row per (project, model). Sessions with a null `project_id` are
-    /// excluded by the join.
-    pub async fn usage_rollup_by_project(&self) -> anyhow::Result<Vec<UsageRollupRow>> {
+    /// excluded by the join. `window` restricts which usage rows count; a
+    /// project with no spend in the window drops out of the list (unlike
+    /// sessions, a project has no all-time usage page of its own to keep).
+    pub async fn usage_rollup_by_project(
+        &self,
+        window: UsageWindow,
+    ) -> anyhow::Result<Vec<UsageRollupRow>> {
+        let ts = window.predicate();
         let sql = format!(
             "SELECT s.project_id AS entity_id, p.name AS entity_name, u.model AS model, \
+             CAST(NULL AS TEXT) AS session_model, \
              CAST(NULL AS TEXT) AS project_id, 0 AS is_worker, 0 AS is_expert, \
              {ROLLUP_AGG_COLS} \
              FROM usage_events u \
              JOIN sessions s ON s.id = u.session_id \
              JOIN projects p ON p.id = s.project_id \
+             WHERE 1 = 1{ts} \
              GROUP BY s.project_id, u.model"
         );
         self.with_conn(move |conn| {
@@ -219,14 +277,21 @@ impl Db {
 
     /// Per-card usage (sessions joined through `sessions.card_id`), one row
     /// per (card, model). Sessions with a null `card_id` are excluded.
-    pub async fn usage_rollup_by_card(&self) -> anyhow::Result<Vec<UsageRollupRow>> {
+    /// `window` restricts which usage rows count.
+    pub async fn usage_rollup_by_card(
+        &self,
+        window: UsageWindow,
+    ) -> anyhow::Result<Vec<UsageRollupRow>> {
+        let ts = window.predicate();
         let sql = format!(
             "SELECT s.card_id AS entity_id, c.title AS entity_name, u.model AS model, \
+             CAST(NULL AS TEXT) AS session_model, \
              c.project_id AS project_id, 0 AS is_worker, 0 AS is_expert, \
              {ROLLUP_AGG_COLS} \
              FROM usage_events u \
              JOIN sessions s ON s.id = u.session_id \
              JOIN cards c ON c.id = s.card_id \
+             WHERE 1 = 1{ts} \
              GROUP BY s.card_id, u.model"
         );
         self.with_conn(move |conn| {
@@ -241,14 +306,20 @@ impl Db {
     /// entity (id = session id, name = session name) — experts are distinct
     /// long-lived sessions, not pooled by `expert_kind`. One row per
     /// (expert session, model); an expert with no usage yet gets a single
-    /// all-zero row via the LEFT JOIN so it still has a usage page.
-    pub async fn usage_rollup_by_expert(&self) -> anyhow::Result<Vec<UsageRollupRow>> {
+    /// all-zero row via the LEFT JOIN so it still has a usage page. `window`
+    /// goes in the ON clause for the same reason as the session rollup.
+    pub async fn usage_rollup_by_expert(
+        &self,
+        window: UsageWindow,
+    ) -> anyhow::Result<Vec<UsageRollupRow>> {
+        let ts = window.predicate();
         let sql = format!(
             "SELECT s.id AS entity_id, s.name AS entity_name, u.model AS model, \
-             s.project_id AS project_id, s.is_worker AS is_worker, s.is_expert AS is_expert, \
+             s.model AS session_model, s.project_id AS project_id, \
+             s.is_worker AS is_worker, s.is_expert AS is_expert, \
              {ROLLUP_AGG_COLS} \
              FROM sessions s \
-             LEFT JOIN usage_events u ON u.session_id = s.id \
+             LEFT JOIN usage_events u ON u.session_id = s.id{ts} \
              WHERE s.is_expert = 1 \
              GROUP BY s.id, u.model"
         );
@@ -270,7 +341,8 @@ impl Db {
         let session_id = session_id.to_string();
         let sql = format!(
             "SELECT u.session_id AS entity_id, s.name AS entity_name, u.model AS model, \
-             s.project_id AS project_id, s.is_worker AS is_worker, s.is_expert AS is_expert, \
+             s.model AS session_model, s.project_id AS project_id, \
+             s.is_worker AS is_worker, s.is_expert AS is_expert, \
              {ROLLUP_AGG_COLS} \
              FROM usage_events u \
              JOIN sessions s ON s.id = u.session_id \
