@@ -13,6 +13,8 @@ interface GrokAccountsState {
   updateAccount: (id: string, input: GrokAccountInput) => Promise<void>
   deleteAccount: (id: string) => Promise<void>
   /** Begin a device login for an account; returns the sign-in URL to open. */
+  /** Surface a mutation failure in the section's inline error slot. */
+  setError: (message: string | null) => void
   startLogin: (id: string) => Promise<GrokLoginStart>
 }
 
@@ -38,6 +40,8 @@ export const useGrokAccountsStore = create<GrokAccountsState>((set, get) => ({
   loaded: false,
   loading: false,
   error: null,
+
+  setError: (message) => set({ error: message }),
 
   fetchAccounts: async () => {
     set({ loading: true })

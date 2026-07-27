@@ -22,6 +22,8 @@ interface ClaudeAccountsState {
   startLogin: () => Promise<ClaudeLoginStart>
   createAccount: (input: ClaudeAccountInput) => Promise<void>
   updateAccount: (id: string, input: ClaudeAccountInput) => Promise<void>
+  /** Surface a mutation failure in the section's inline error slot. */
+  setError: (message: string | null) => void
   deleteAccount: (id: string) => Promise<void>
 }
 
@@ -48,6 +50,8 @@ export const useClaudeAccountsStore = create<ClaudeAccountsState>((set, get) => 
   loading: false,
   error: null,
   planUsage: {},
+
+  setError: (message) => set({ error: message }),
   planUsageRefreshing: false,
 
   fetchPlanUsage: async () => {

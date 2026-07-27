@@ -399,6 +399,11 @@
   font-size: var(--text-xs);
   color: rgb(0, 130, 65);
 }
+.plugin-settings-autosave,
+.plugin-settings-saving {
+  font-size: var(--text-xs);
+  color: var(--text3);
+}
 
 /* ── Plugin hook-approval status badges ───────────────────────────── */
 .plugin-badge--approved {

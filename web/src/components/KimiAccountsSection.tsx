@@ -116,6 +116,7 @@ export default function KimiAccountsSection() {
   const error = useKimiAccountsStore((s) => s.error)
   const fetchAccounts = useKimiAccountsStore((s) => s.fetchAccounts)
   const deleteAccount = useKimiAccountsStore((s) => s.deleteAccount)
+  const setError = useKimiAccountsStore((s) => s.setError)
 
   const [modal, setModal] = useState<{ account: KimiAccount | null } | null>(null)
   const [signIn, setSignIn] = useState<KimiAccount | null>(null)
@@ -181,8 +182,12 @@ export default function KimiAccountsSection() {
           confirmLabel="Delete"
           danger
           onConfirm={() => {
-            void deleteAccount(confirmDelete.id)
+            const target = confirmDelete
             setConfirmDelete(null)
+            setError(null)
+            // A rejected delete must not vanish silently: the row stays and
+            // the reason lands in this section's inline error slot.
+            void deleteAccount(target.id).catch((e: Error) => setError(e.message))
           }}
           onCancel={() => setConfirmDelete(null)}
         />

@@ -116,6 +116,7 @@ export default function GrokAccountsSection() {
   const error = useGrokAccountsStore((s) => s.error)
   const fetchAccounts = useGrokAccountsStore((s) => s.fetchAccounts)
   const deleteAccount = useGrokAccountsStore((s) => s.deleteAccount)
+  const setError = useGrokAccountsStore((s) => s.setError)
 
   const [modal, setModal] = useState<{ account: GrokAccount | null } | null>(null)
   const [signIn, setSignIn] = useState<GrokAccount | null>(null)
@@ -181,8 +182,12 @@ export default function GrokAccountsSection() {
           confirmLabel="Delete"
           danger
           onConfirm={() => {
-            void deleteAccount(confirmDelete.id)
+            const target = confirmDelete
             setConfirmDelete(null)
+            setError(null)
+            // A rejected delete must not vanish silently: the row stays and
+            // the reason lands in this section's inline error slot.
+            void deleteAccount(target.id).catch((e: Error) => setError(e.message))
           }}
           onCancel={() => setConfirmDelete(null)}
         />

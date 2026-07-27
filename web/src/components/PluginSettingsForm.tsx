@@ -129,10 +129,32 @@ function seedForm(payload: SettingsPayload): FormState {
   return { values, dirty: {} }
 }
 
+/** Encode one form value into the wire shape its field type expects. */
+function encodeField(field: SchemaField, raw: FormValue): unknown {
+  switch (field.type) {
+    case 'string':
+    case 'url':
+    case 'enum':
+      return typeof raw === 'string' ? raw : ''
+    case 'integer':
+      return typeof raw === 'number' ? raw : Number(raw) || 0
+    case 'boolean':
+      return Boolean(raw)
+    case 'key_value_list':
+      return (Array.isArray(raw) ? (raw as KvPair[]) : [])
+        .filter((p) => p.key.trim() !== '')
+        .map((p) => ({ key: p.key.trim(), value: p.value }))
+    case 'string_list':
+      return (Array.isArray(raw) ? (raw as string[]) : [])
+        .map((s) => s.trim())
+        .filter((s) => s !== '')
+  }
+}
+
 export default function PluginSettingsForm({ pluginId }: { pluginId: string }) {
   const [payload, setPayload] = useState<SettingsPayload | null>(null)
   const [form, setForm] = useState<FormState>({ values: {}, dirty: {} })
-  const [saving, setSaving] = useState(false)
+  const [savingKey, setSavingKey] = useState<string | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [saved, setSaved] = useState(false)
 
@@ -176,6 +198,7 @@ export default function PluginSettingsForm({ pluginId }: { pluginId: string }) {
   if (payload.schema.fields.length === 0) {
     return null
   }
+  const settings = payload
 
   const update = (key: string, value: FormValue) => {
     setSaved(false)
@@ -185,68 +208,60 @@ export default function PluginSettingsForm({ pluginId }: { pluginId: string }) {
     }))
   }
 
-  const handleSave = async () => {
-    setSaving(true)
+  /**
+   * Persist one field. Settings auto-save on commit — toggles and selects
+   * on change, typed fields on blur — matching the rest of Settings; there
+   * is no Save button. Only the committed field is sent, so untouched
+   * secrets keep their stored value.
+   */
+  const commit = async (field: SchemaField, raw: FormValue) => {
+    setSavingKey(field.key)
     setError(null)
     setSaved(false)
-    // Only send fields the user actually touched. For secret fields,
-    // this preserves the stored value when the input is left untouched
-    // (typing into a secret string field marks it dirty and replaces
-    // the stored value).
-    const updates: Record<string, unknown> = {}
-    for (const field of payload.schema.fields) {
-      if (!form.dirty[field.key]) continue
-      const raw = form.values[field.key]
-      switch (field.type) {
-        case 'string':
-        case 'url':
-        case 'enum':
-          updates[field.key] = typeof raw === 'string' ? raw : ''
-          break
-        case 'integer':
-          updates[field.key] = typeof raw === 'number' ? raw : Number(raw) || 0
-          break
-        case 'boolean':
-          updates[field.key] = Boolean(raw)
-          break
-        case 'key_value_list':
-          updates[field.key] = (Array.isArray(raw) ? (raw as KvPair[]) : [])
-            .filter((p) => p.key.trim() !== '')
-            .map((p) => ({ key: p.key.trim(), value: p.value }))
-          break
-        case 'string_list':
-          updates[field.key] = (Array.isArray(raw) ? (raw as string[]) : [])
-            .map((s) => s.trim())
-            .filter((s) => s !== '')
-          break
-      }
-    }
-
     try {
       const res = await authedFetch(`/api/plugins/${encodeURIComponent(pluginId)}/settings`, {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ updates }),
+        body: JSON.stringify({ updates: { [field.key]: encodeField(field, raw) } }),
       })
       const data = await res.json().catch(() => ({}))
       if (!res.ok) {
         const message = (typeof data?.error === 'string' && data.error) || `HTTP ${res.status}`
-        const field = typeof data?.field === 'string' ? data.field : ''
-        setError(field ? `${field}: ${message}` : message)
+        const badField = typeof data?.field === 'string' ? data.field : ''
+        setError(badField ? `${badField}: ${message}` : message)
+        // A refused save must not leave the control showing a value the
+        // server never accepted. Discrete controls snap back to the last
+        // stored value; typed text is left alone so a rejection doesn't
+        // destroy what the user wrote (the error says what to fix).
+        if (field.type === 'boolean' || field.type === 'enum') {
+          const restored = initialValue(field, storedByKey.get(field.key))
+          setForm((prev) => ({
+            values: { ...prev.values, [field.key]: restored },
+            dirty: { ...prev.dirty, [field.key]: false },
+          }))
+        }
         return
       }
-      applyPayload(data as SettingsPayload)
+      // Re-seed only the saved field (masked secrets come back redacted);
+      // other fields may hold edits still in flight.
+      const next = data as SettingsPayload
+      const seeded = seedForm(next)
+      setPayload(next)
+      setForm((prev) => ({
+        values: { ...prev.values, [field.key]: seeded.values[field.key] },
+        dirty: { ...prev.dirty, [field.key]: false },
+      }))
       setSaved(true)
     } catch (e) {
       setError(e instanceof Error ? e.message : 'Network error')
     } finally {
-      setSaving(false)
+      setSavingKey(null)
     }
   }
 
   return (
     <div className="plugin-settings" data-testid={`plugin-settings-${pluginId}`}>
-      {payload.schema.fields.map((field) => (
+      {settings.schema.fields.map((field) => (
         <FieldRow
           key={field.key}
           field={field}
@@ -254,19 +269,21 @@ export default function PluginSettingsForm({ pluginId }: { pluginId: string }) {
           stored={storedByKey.get(field.key)}
           dirty={Boolean(form.dirty[field.key])}
           onChange={(v) => update(field.key, v)}
+          onCommit={(v) => void commit(field, v)}
+          onCommitIfDirty={(v) => {
+            if (form.dirty[field.key]) void commit(field, v)
+          }}
         />
       ))}
-      <div className="plugin-settings-actions">
-        <button
-          type="button"
-          className="plugin-settings-save"
-          onClick={handleSave}
-          disabled={saving || Object.keys(form.dirty).length === 0}
-        >
-          {saving ? 'Saving…' : 'Save settings'}
-        </button>
-        {error && <span className="plugin-settings-error">{error}</span>}
-        {saved && !error && <span className="plugin-settings-success">Saved.</span>}
+      <div className="plugin-settings-actions" aria-live="polite">
+        <span className="plugin-settings-autosave">Changes save automatically.</span>
+        {savingKey && <span className="plugin-settings-saving">Saving…</span>}
+        {error && (
+          <span className="plugin-settings-error" role="alert">
+            {error}
+          </span>
+        )}
+        {saved && !error && !savingKey && <span className="plugin-settings-success">Saved.</span>}
       </div>
     </div>
   )
@@ -278,12 +295,18 @@ function FieldRow({
   stored,
   dirty,
   onChange,
+  onCommit,
+  onCommitIfDirty,
 }: {
   field: SchemaField
   value: FormValue
   stored: StoredField | undefined
   dirty: boolean
   onChange: (v: FormValue) => void
+  /** Persist this field now (discrete controls: toggles, selects, row removal). */
+  onCommit: (v: FormValue) => void
+  /** Persist on blur, but only when the value actually changed. */
+  onCommitIfDirty: (v: FormValue) => void
 }) {
   const labelNode = (
     <span className="plugin-setting-label">
@@ -317,6 +340,10 @@ function FieldRow({
             value={typeof value === 'string' ? value : ''}
             placeholder={placeholder}
             onChange={(e) => onChange(e.target.value)}
+            onBlur={(e) => onCommitIfDirty(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === 'Enter') e.currentTarget.blur()
+            }}
           />
           {secretHint}
         </label>
@@ -334,6 +361,10 @@ function FieldRow({
             max={field.max}
             value={typeof value === 'number' ? value : Number(value) || 0}
             onChange={(e) => onChange(e.target.value === '' ? 0 : Number(e.target.value))}
+            onBlur={(e) => onCommitIfDirty(e.target.value === '' ? 0 : Number(e.target.value))}
+            onKeyDown={(e) => {
+              if (e.key === 'Enter') e.currentTarget.blur()
+            }}
           />
         </label>
       )
@@ -344,7 +375,10 @@ function FieldRow({
           <input
             type="checkbox"
             checked={Boolean(value)}
-            onChange={(e) => onChange(e.target.checked)}
+            onChange={(e) => {
+              onChange(e.target.checked)
+              onCommit(e.target.checked)
+            }}
           />
           {labelNode}
           {descNode}
@@ -360,7 +394,10 @@ function FieldRow({
           <select
             className="plugin-setting-select"
             value={typeof value === 'string' ? value : ''}
-            onChange={(e) => onChange(e.target.value)}
+            onChange={(e) => {
+              onChange(e.target.value)
+              onCommit(e.target.value)
+            }}
           >
             {options.map((opt) => (
               <option key={opt.value} value={opt.value}>
@@ -388,6 +425,7 @@ function FieldRow({
                   next[i] = { ...next[i], key: e.target.value }
                   onChange(next)
                 }}
+                onBlur={() => onCommitIfDirty(pairs)}
               />
               <input
                 type={field.secret_values ? 'password' : 'text'}
@@ -398,6 +436,7 @@ function FieldRow({
                   next[i] = { ...next[i], value: e.target.value }
                   onChange(next)
                 }}
+                onBlur={() => onCommitIfDirty(pairs)}
               />
               <button
                 type="button"
@@ -405,6 +444,7 @@ function FieldRow({
                 onClick={() => {
                   const next = pairs.filter((_, idx) => idx !== i)
                   onChange(next)
+                  onCommit(next)
                 }}
               >
                 Remove
@@ -439,11 +479,16 @@ function FieldRow({
                   next[i] = e.target.value
                   onChange(next)
                 }}
+                onBlur={() => onCommitIfDirty(items)}
               />
               <button
                 type="button"
                 className="plugin-setting-kv-remove"
-                onClick={() => onChange(items.filter((_, idx) => idx !== i))}
+                onClick={() => {
+                  const next = items.filter((_, idx) => idx !== i)
+                  onChange(next)
+                  onCommit(next)
+                }}
               >
                 Remove
               </button>

@@ -196,6 +196,7 @@ export default function ClaudeAccountsSection() {
   const fetchPlanUsage = useClaudeAccountsStore((s) => s.fetchPlanUsage)
   const refreshPlanUsage = useClaudeAccountsStore((s) => s.refreshPlanUsage)
   const deleteAccount = useClaudeAccountsStore((s) => s.deleteAccount)
+  const setError = useClaudeAccountsStore((s) => s.setError)
 
   const [modal, setModal] = useState<{ account: ClaudeAccount | null } | null>(null)
   const [confirmDelete, setConfirmDelete] = useState<ClaudeAccount | null>(null)
@@ -258,8 +259,12 @@ export default function ClaudeAccountsSection() {
           confirmLabel="Delete"
           danger
           onConfirm={() => {
-            void deleteAccount(confirmDelete.id)
+            const target = confirmDelete
             setConfirmDelete(null)
+            setError(null)
+            // A rejected delete must not vanish silently: the row stays and
+            // the reason lands in this section's inline error slot.
+            void deleteAccount(target.id).catch((e: Error) => setError(e.message))
           }}
           onCancel={() => setConfirmDelete(null)}
         />

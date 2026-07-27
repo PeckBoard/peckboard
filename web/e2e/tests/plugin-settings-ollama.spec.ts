@@ -77,7 +77,9 @@ test('Ollama plugin renders its settings form and round-trips saves', async ({
   await kvRow.locator('input').first().fill('X-Test-Header')
   await kvRow.locator('input').nth(1).fill('test-value-do-not-leak')
 
-  await settings.locator('.plugin-settings-save').click()
+  // Settings auto-save on commit (toggles on change, typed fields on blur)
+  // — there is no Save button.
+  await kvRow.locator('input').nth(1).blur()
   await expect(settings.locator('.plugin-settings-success')).toBeVisible({ timeout: 5_000 })
 
   // Reload the page to verify the base URL persisted, and that the header
@@ -128,8 +130,7 @@ test('additional models registered in settings appear in the model catalog', asy
   // reject it the way the header-name list would.
   await modelsField.locator('.plugin-setting-kv-add').click()
   await modelsField.locator('.plugin-setting-kv-row input').first().fill('llama3.1:8b')
-
-  await settings.locator('.plugin-settings-save').click()
+  await modelsField.locator('.plugin-setting-kv-row input').first().blur()
   await expect(settings.locator('.plugin-settings-success')).toBeVisible({ timeout: 5_000 })
 
   // The new model shows up in the catalog the picker reads, registered by

@@ -13,6 +13,8 @@ interface KimiAccountsState {
   updateAccount: (id: string, input: KimiAccountInput) => Promise<void>
   deleteAccount: (id: string) => Promise<void>
   /** Begin a device login for an account; returns the sign-in URL to open. */
+  /** Surface a mutation failure in the section's inline error slot. */
+  setError: (message: string | null) => void
   startLogin: (id: string) => Promise<KimiLoginStart>
 }
 
@@ -38,6 +40,8 @@ export const useKimiAccountsStore = create<KimiAccountsState>((set, get) => ({
   loaded: false,
   loading: false,
   error: null,
+
+  setError: (message) => set({ error: message }),
 
   fetchAccounts: async () => {
     set({ loading: true })

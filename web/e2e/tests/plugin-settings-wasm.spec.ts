@@ -97,10 +97,12 @@ test('WASM plugin settings live on Plugin Settings and save through the shared f
 
   // Settings endpoint: GET serves the schema + empty values; PUT captures
   // the update and echoes the post-save wire shape (secret masked).
-  let putBody: { updates?: Record<string, unknown> } | null = null
+  const putUpdates: Record<string, unknown>[] = []
   await page.route('**/api/plugins/nginx-manager/settings', async (route) => {
     if (route.request().method() === 'PUT') {
-      putBody = route.request().postDataJSON() as { updates?: Record<string, unknown> }
+      putUpdates.push(
+        (route.request().postDataJSON() as { updates: Record<string, unknown> }).updates,
+      )
       await route.fulfill({
         contentType: 'application/json',
         body: JSON.stringify({
@@ -140,18 +142,18 @@ test('WASM plugin settings live on Plugin Settings and save through the shared f
   await expect(form.locator('[data-field="base_url"]')).toContainText('Nginx Proxy Manager URL')
   await expect(form.locator('[data-field="api_key"]')).toContainText('API key')
 
-  // Fill URL + token and save; the PUT carries exactly the two updates.
+  // Settings auto-save on commit, one PUT per field: typing into api_key
+  // blurs (and saves) base_url, then blurring api_key saves the secret.
   await form.locator('[data-field="base_url"] input').fill('http://npm.local:81')
   await form.locator('[data-field="api_key"] input').fill('npm_e2e_secret_token')
   await page.screenshot({ path: 'e2e/test-results/wasm-plugin-settings-form.png' })
-  await form.locator('.plugin-settings-save').click()
+  await form.locator('[data-field="api_key"] input').blur()
   await expect(form.locator('.plugin-settings-success')).toBeVisible({ timeout: 5_000 })
 
-  expect(putBody).not.toBeNull()
-  expect(putBody!.updates).toEqual({
-    base_url: 'http://npm.local:81',
-    api_key: 'npm_e2e_secret_token',
-  })
+  expect(putUpdates).toEqual([
+    { base_url: 'http://npm.local:81' },
+    { api_key: 'npm_e2e_secret_token' },
+  ])
 
   // After the save the secret input is empty again (never echoed) but the
   // form shows the "currently set" hint.

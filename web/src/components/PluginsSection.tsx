@@ -164,28 +164,52 @@ function WasmPluginList({
   const [busy, setBusy] = useState<string | null>(null)
   const [confirmRemove, setConfirmRemove] = useState<string | null>(null)
   const [detailsFor, setDetailsFor] = useState<WasmPlugin | null>(null)
+  // A refused approve/deny/remove parks its reason here and leaves the
+  // details modal open, so the operator can't mistake a 4xx/5xx for a
+  // decision that took effect (same contract as PluginApprovalPrompt).
+  const [error, setError] = useState<string | null>(null)
 
-  const decide = (pluginId: string, decision: 'approve' | 'deny') => {
+  const run = async (pluginId: string, call: () => Promise<Response>, verb: string) => {
     setBusy(pluginId)
-    decidePluginApproval(pluginId, decision)
-      .then(() => onDecided())
-      .finally(() => {
-        setBusy(null)
-        setDetailsFor(null)
-      })
+    setError(null)
+    try {
+      const res = await call()
+      if (!res.ok) {
+        const body = (await res.json().catch(() => null)) as { error?: unknown } | null
+        throw new Error(typeof body?.error === 'string' ? body.error : `HTTP ${res.status}`)
+      }
+      onDecided()
+      setDetailsFor(null)
+    } catch (e) {
+      const detail = e instanceof Error ? e.message : 'network error'
+      setError(`Could not ${verb} “${pluginId}”: ${detail}`)
+    } finally {
+      setBusy(null)
+    }
+  }
+
+  /** Dismiss the details modal, dropping any error it was showing. */
+  const closeDetails = () => {
+    setDetailsFor(null)
+    setError(null)
+  }
+  const decide = (pluginId: string, decision: 'approve' | 'deny') => {
+    void run(pluginId, () => decidePluginApproval(pluginId, decision), decision)
   }
 
   const remove = (pluginId: string) => {
     setConfirmRemove(null)
-    setBusy(pluginId)
-    uninstallPlugin(pluginId)
-      .then(() => onDecided())
-      .finally(() => setBusy(null))
+    void run(pluginId, () => uninstallPlugin(pluginId), 'remove')
   }
 
   return (
     <div className="wasm-plugins" data-testid="wasm-plugins">
       <div className="plugin-panels-title">Installed Plugins</div>
+      {error && (
+        <p className="plugin-card-error" role="alert" data-testid="wasm-plugin-error">
+          {error}
+        </p>
+      )}
       <ul className="wasm-plugins-list">
         {plugins.map((p) => (
           <li
@@ -218,7 +242,7 @@ function WasmPluginList({
       </ul>
       {detailsFor && (
         <Modal
-          onClose={() => setDetailsFor(null)}
+          onClose={() => closeDetails()}
           className="plugin-details-modal"
           maxWidth={560}
           data-testid={`plugin-details-${detailsFor.name}`}
@@ -239,6 +263,11 @@ function WasmPluginList({
           <HookList hooks={detailsFor.hooks} title="Hooks" />
           <PermissionList permissions={detailsFor.permissions} title="Permissions" />
           <PluginPanelList panels={panels.filter((panel) => panel.plugin === detailsFor.name)} />
+          {error && (
+            <p className="plugin-card-error" role="alert" data-testid="plugin-details-error">
+              {error}
+            </p>
+          )}
           <div className="form-actions">
             {detailsFor.status !== 'approved' && (
               <button
@@ -262,7 +291,7 @@ function WasmPluginList({
                 {detailsFor.status === 'approved' ? 'Revoke' : 'Deny'}
               </button>
             )}
-            <button type="button" className="btn-secondary" onClick={() => setDetailsFor(null)}>
+            <button type="button" className="btn-secondary" onClick={() => closeDetails()}>
               Close
             </button>
           </div>

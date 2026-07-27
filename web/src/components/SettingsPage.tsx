@@ -153,6 +153,9 @@ export default function SettingsPage({ onBack, initialSubPage = null }: Props) {
   const fetchModels = useResourcesStore((s) => s.fetchModels)
   const [providerVisibility, setProviderVisibility] = useState<ProviderInfo[]>([])
   const [backupStatus, setBackupStatus] = useState<BackupStatus | null>(null)
+  // One inline save error at a time, tagged with the section that owns the
+  // control. A failed PUT reverts the control and parks the reason here.
+  const [saveError, setSaveError] = useState<{ scope: string; message: string } | null>(null)
 
   useEffect(() => {
     authedFetch('/api/config')
@@ -212,31 +215,68 @@ export default function SettingsPage({ onBack, initialSubPage = null }: Props) {
       })
       .catch(() => {})
   }, [user])
+  /**
+   * PUT one settings value, rejecting with a readable message on any
+   * non-2xx or network failure. Callers revert their optimistic state in
+   * the rejection handler — a save the server refused must never be left
+   * on screen as if it stuck.
+   */
+  const putSetting = async (url: string, body: unknown, fallback: string): Promise<void> => {
+    let res: Response
+    try {
+      res = await authedFetch(url, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+      })
+    } catch {
+      throw new Error(`${fallback}: network error`)
+    }
+    if (!res.ok) {
+      const data = (await res.json().catch(() => null)) as { error?: unknown } | null
+      const detail = typeof data?.error === 'string' ? data.error : `HTTP ${res.status}`
+      throw new Error(`${fallback}: ${detail}`)
+    }
+  }
+
   const changeCaveman = (level: string) => {
+    const prev = caveman
     setCaveman(level)
-    authedFetch('/api/settings/caveman', {
-      method: 'PUT',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ level }),
-    }).catch(() => {})
+    setSaveError(null)
+    void putSetting('/api/settings/caveman', { level }, 'Could not save caveman mode').catch(
+      (e: Error) => {
+        setCaveman(prev)
+        setSaveError({ scope: 'caveman', message: e.message })
+      },
+    )
   }
 
   const changeClaudeBypass = (bypass: boolean) => {
+    const prev = claudeBypass
     setClaudeBypass(bypass)
-    authedFetch('/api/settings/claude-permissions', {
-      method: 'PUT',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ bypass }),
-    }).catch(() => {})
+    setSaveError(null)
+    void putSetting(
+      '/api/settings/claude-permissions',
+      { bypass },
+      'Could not save permission mode',
+    ).catch((e: Error) => {
+      setClaudeBypass(prev)
+      setSaveError({ scope: 'claude-permissions', message: e.message })
+    })
   }
 
   const changePreHatchModel = (model: string) => {
+    const prev = preHatchModel
     setPreHatchModel(model)
-    authedFetch('/api/settings/pre-hatcher', {
-      method: 'PUT',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ model }),
-    }).catch(() => {})
+    setSaveError(null)
+    void putSetting(
+      '/api/settings/pre-hatcher',
+      { model },
+      'Could not save pre-hatcher model',
+    ).catch((e: Error) => {
+      setPreHatchModel(prev)
+      setSaveError({ scope: 'prehatch', message: e.message })
+    })
   }
   const changeTheme = (t: Theme) => {
     setTheme(t)
@@ -251,13 +291,11 @@ export default function SettingsPage({ onBack, initialSubPage = null }: Props) {
   }
 
   const toggleProvider = (id: string, hidden: boolean) => {
-    authedFetch(`/api/settings/providers/${id}`, {
-      method: 'PUT',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ hidden }),
-    })
-      .then((res) => {
-        if (!res.ok) return
+    setSaveError(null)
+    // `providerVisibility` is only ever set from a server read, so a failed
+    // PUT leaves the checkbox showing the server's state on re-render.
+    void putSetting(`/api/settings/providers/${id}`, { hidden }, 'Could not update provider')
+      .then(() => {
         authedFetch('/api/settings/providers')
           .then((r) => (r.ok ? r.json() : null))
           .then((data: { providers?: ProviderInfo[] } | null) => {
@@ -266,7 +304,7 @@ export default function SettingsPage({ onBack, initialSubPage = null }: Props) {
           .catch(() => {})
         fetchModels()
       })
-      .catch(() => {})
+      .catch((e: Error) => setSaveError({ scope: 'providers', message: e.message }))
   }
 
   const downloadBackup = async () => {
@@ -395,6 +433,11 @@ export default function SettingsPage({ onBack, initialSubPage = null }: Props) {
                 </button>
               ))}
             </div>
+            {saveError?.scope === 'caveman' && (
+              <p className="form-error" role="alert" data-testid="settings-error-caveman">
+                {saveError.message}
+              </p>
+            )}
           </section>
 
           <section className="settings-section" data-testid="prehatch-section">
@@ -430,6 +473,11 @@ export default function SettingsPage({ onBack, initialSubPage = null }: Props) {
                     </option>
                   ))}
             </select>
+            {saveError?.scope === 'prehatch' && (
+              <p className="form-error" role="alert" data-testid="settings-error-prehatch">
+                {saveError.message}
+              </p>
+            )}
           </section>
         </>
       )}
@@ -458,6 +506,11 @@ export default function SettingsPage({ onBack, initialSubPage = null }: Props) {
                   </div>
                 ))}
               </div>
+            )}
+            {saveError?.scope === 'providers' && (
+              <p className="form-error" role="alert" data-testid="settings-error-providers">
+                {saveError.message}
+              </p>
             )}
           </section>
 
@@ -577,6 +630,15 @@ export default function SettingsPage({ onBack, initialSubPage = null }: Props) {
                 Bypass
               </button>
             </div>
+            {saveError?.scope === 'claude-permissions' && (
+              <p
+                className="form-error"
+                role="alert"
+                data-testid="settings-error-claude-permissions"
+              >
+                {saveError.message}
+              </p>
+            )}
           </section>
 
           <SoftwareUpdate />
