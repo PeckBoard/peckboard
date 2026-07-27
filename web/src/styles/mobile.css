@@ -1138,3 +1138,49 @@
   font-family: var(--font-mono, monospace);
   color: var(--text2, var(--text));
 }
+
+/* ── Report viewer: table of contents ──────────────────────────────── */
+/* A permanent TOC column would eat a phone screen, so it becomes a
+   collapsed disclosure above the report. `.report-toc` keeps its own
+   scroll so a report with dozens of headings can't push the body away. */
+@media (max-width: 768px) {
+  /* Back / Copy / Download share the first row; the title + meta drop
+     onto their own line instead of colliding with the buttons. */
+  .report-viewer-header {
+    flex-wrap: wrap;
+    gap: 8px;
+    margin-bottom: 16px;
+  }
+  .report-viewer-meta {
+    order: 4;
+    flex: 1 1 100%;
+  }
+  .report-copy {
+    order: 2;
+  }
+  .report-download {
+    order: 3;
+    margin-left: auto;
+  }
+  .report-body {
+    flex-direction: column;
+    gap: 12px;
+  }
+  .report-toc {
+    width: auto;
+    align-self: auto;
+    max-height: 45vh;
+    padding-right: 0;
+    border-right: none;
+  }
+  .report-toc-list {
+    margin-top: 8px;
+  }
+  .report-toc-link {
+    padding: 10px 8px;
+    font-size: var(--text-sm);
+  }
+  .report-heading-anchor {
+    opacity: 1;
+  }
+}

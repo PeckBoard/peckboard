@@ -232,6 +232,14 @@
   margin-bottom: 24px;
   flex-shrink: 0;
 }
+/* Download button plus the inline failure message under it. */
+.report-download {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 6px;
+  flex-shrink: 0;
+}
 
 .report-viewer-meta {
   flex: 1;
@@ -268,10 +276,121 @@
   text-decoration: underline;
 }
 
+/* Report body: table-of-contents column + the scrolling markdown pane.
+   The TOC is its own column and does not scroll with the report, so it
+   stays put while a long report moves under it. */
+.report-body {
+  flex: 1;
+  display: flex;
+  gap: 24px;
+  min-height: 0;
+}
+
+.report-toc {
+  width: 220px;
+  flex-shrink: 0;
+  align-self: stretch;
+  overflow-y: auto;
+  padding-right: 12px;
+  border-right: 1px solid var(--border);
+}
+
+.report-toc-heading {
+  margin: 0 0 8px;
+  padding: 0 8px;
+  font-size: var(--text-xs);
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--text3);
+}
+
+.report-toc-toggle {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  width: 100%;
+  min-height: 44px;
+  margin: 0;
+  padding: 0 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: var(--surface);
+  color: var(--text2);
+  font-size: var(--text-xs);
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  cursor: pointer;
+}
+
+.report-toc-chevron {
+  font-size: var(--text-xs);
+}
+
+.report-toc-list {
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  margin: 0;
+  padding: 0;
+}
+
+.report-toc-link {
+  display: block;
+  padding: 6px 8px;
+  border-left: 2px solid transparent;
+  border-radius: var(--radius-sm);
+  color: var(--text2);
+  font-size: var(--text-xs);
+  line-height: 1.4;
+  text-decoration: none;
+}
+
+.report-toc-link:hover {
+  background: var(--surface2);
+  color: var(--text);
+}
+
+.report-toc-link.active {
+  border-left-color: var(--accent);
+  color: var(--accent);
+  font-weight: 600;
+}
+
+.report-toc-depth-3 .report-toc-link {
+  padding-left: 20px;
+}
+
+.report-scroll {
+  flex: 1;
+  min-width: 0;
+  overflow-y: auto;
+}
+
+/* Heading permalink — quiet until the heading is hovered or the anchor
+   itself is focused, so it never competes with the heading text. */
+.report-heading-anchor {
+  margin-left: 8px;
+  color: var(--text3);
+  font-weight: 400;
+  text-decoration: none;
+  opacity: 0;
+}
+
+.report-heading:hover .report-heading-anchor,
+.report-heading-anchor:focus-visible {
+  opacity: 1;
+}
+
+.report-copy {
+  flex-shrink: 0;
+}
+
 /* Markdown rendered content */
 .report-content {
-  flex: 1;
-  overflow-y: auto;
   font-size: var(--text-sm);
   line-height: 1.7;
   color: var(--text);
