@@ -30,3 +30,6 @@
 @import './styles/usage.css';
 @import './styles/feedback.css';
 @import './styles/mobile.css';
+/* Last: its static, non-!important replacements must win over the
+   animated rules above. */
+@import './styles/reduced-motion.css';

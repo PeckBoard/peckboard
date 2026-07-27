@@ -1,0 +1,71 @@
+/* ═══════════════════════════════════════════════════
+   Reduced Motion
+   ═══════════════════════════════════════════════════
+   Imported last so the static replacements below win over the animated
+   rules they stand in for.
+
+   Users with vestibular sensitivity get every animation and transition
+   collapsed to ~0. Where an animation was the ONLY signal for a state
+   (a session is processing, the socket is down, a tab's agent is
+   running), the pulse is replaced by a permanent static halo so the
+   signal survives the motion being removed. */
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    /* A negative delay starts (and so finishes) the animation in the past.
+       Without it, the staggered thinking dots sit in their delay phase and
+       count as "running" forever even at a 0.01ms duration. */
+    animation-delay: -1ms !important;
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-delay: 0s !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+
+  /* ─── Non-motion equivalents for meaning-carrying animation ─── */
+
+  /* Session is processing (sessions list). Without the pulse it differs
+     from `.unread-dot` by hue alone; the halo restores the "live" read. */
+  .processing-dot {
+    box-shadow: 0 0 0 2px rgba(16, 185, 129, 0.35);
+  }
+
+  /* Chat toolbar working state — same treatment, same palette. */
+  .status-dot-working {
+    box-shadow: 0 0 0 2px rgba(16, 185, 129, 0.35);
+  }
+
+  /* Connection lost. The banner carries text too, but the dot should
+     still read as "not idle". */
+  .connection-banner-dot {
+    box-shadow: 0 0 0 2px rgba(245, 158, 11, 0.4);
+  }
+
+  /* Running agent on a tab: pin the glow keyframe's 0% state, including
+     the inverse skin used on the active tab. */
+  .tab-dot-running {
+    box-shadow:
+      0 0 4px var(--accent),
+      0 0 8px var(--accent);
+  }
+  .tab-wrap:has(.tab-active) .tab-dot-running {
+    box-shadow:
+      0 0 4px rgba(255, 255, 255, 0.7),
+      0 0 8px rgba(255, 255, 255, 0.45);
+  }
+
+  /* Pending worker questions: static ring instead of the pulse. */
+  .worker-questions-trigger {
+    box-shadow: 0 0 0 3px var(--accent-subtle);
+  }
+
+  /* The thinking row's label and elapsed timer carry the meaning; keep
+     the dots from resting at the keyframe's faded 0.6-scale state. */
+  .chat-thinking-dots span {
+    transform: none;
+    opacity: 1;
+  }
+}
