@@ -1,5 +1,6 @@
-import { useEffect } from 'react'
+import { useEffect, useId } from 'react'
 import { createPortal } from 'react-dom'
+import useDialogFocus from '../hooks/useDialogFocus'
 
 interface ConfirmDialogProps {
   title: string
@@ -41,6 +42,9 @@ export default function ConfirmDialog({
   onConfirm,
   onCancel,
 }: ConfirmDialogProps) {
+  const panelRef = useDialogFocus<HTMLDivElement>()
+  const titleId = useId()
+  const messageId = useId()
   useEffect(() => {
     const handleKey = (e: KeyboardEvent) => {
       if (e.key === 'Escape' && !busy) onCancel()
@@ -57,13 +61,25 @@ export default function ConfirmDialog({
       }}
     >
       <div
+        ref={panelRef}
         className="confirm-dialog"
+        // `alertdialog` for the destructive variant: it tells a screen
+        // reader this is an interruption that needs an answer, not just
+        // another panel.
+        role={danger ? 'alertdialog' : 'dialog'}
+        aria-modal="true"
+        aria-labelledby={titleId}
+        aria-describedby={messageId}
         data-testid={testId}
         onMouseDown={(e) => e.stopPropagation()}
         onClick={(e) => e.stopPropagation()}
       >
-        <h3 className="confirm-dialog-title">{title}</h3>
-        <p className="confirm-dialog-message">{message}</p>
+        <h3 className="confirm-dialog-title" id={titleId}>
+          {title}
+        </h3>
+        <p className="confirm-dialog-message" id={messageId}>
+          {message}
+        </p>
         {error && (
           <p className="confirm-dialog-error" role="alert" data-testid="confirm-dialog-error">
             {error}
