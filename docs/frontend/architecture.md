@@ -1,138 +1,261 @@
 # Frontend Architecture
 
-React + Zustand SPA, built with Vite, served as static files from the backend.
+React 19 + Zustand SPA, built with Vite, embedded into the Rust binary and
+served as static files (`src/frontend.rs` — `rust_embed` over `web/dist/`,
+with an `index.html` SPA fallback for any unmatched path).
 
-## Store Structure (Zustand)
+Bootstrap (`web/src/main.tsx`):
 
-10 slices combined into a single store:
+1. `initAppearance()` runs **before** the first render so the persisted
+   theme + accent hue are applied on the first frame.
+2. `<App />` renders inside a top-level `ErrorBoundary`.
+3. `navigator.serviceWorker.register('/sw.js')` when supported.
 
-### AuthSlice
-- `authed` flag, `loginError`, `loginPending`
-- `login(password, rememberMe)`, `logout()`, `changePassword()`, `logoutOtherSessions()`
-- Token stored in localStorage (Remember Me) or sessionStorage (tab-only)
+## Stores (Zustand)
 
-### SessionSlice
-- `sessions[]`, `activeSessionId`
-- `eventsBySession[sid]` — raw event log per session
-- `lastSeqBySession[sid]` — for WS resume (persisted to sessionStorage)
-- `inputDrafts[sid]` — unsent text (persisted to localStorage)
-- `pendingAttachments[sid]` — uploaded but not sent
-- `pendingQuestions[sid]` — AskUserQuestion prompts
-- `sessionTodos[sid]` — latest TodoWrite snapshot
-- `processing` — memoized set of session IDs with open agent-start
-- `workerSessionInfo` — worker metadata from server broadcasts
+There is **no single combined store**. `web/src/store/` holds 16
+independent `create<...>()` stores; components subscribe to whichever
+they need.
 
-### WsSlice
-- `ws` socket, `connected` flag
-- Reconnect backoff (exponential with ±25% jitter, max 30s)
-- Event append/update operations
-- `sendMessage`, `cancelMessage`, `interruptMessage`, `terminateSession`
-- `answerQuestion`, `rejectQuestion`
-- `resyncAll()` — full state bootstrap after reconnect
+| Store                    | File                | Holds                                                                                                                                                                                                                                                                                                                                                           |
+| ------------------------ | ------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `useAuthStore`           | `auth.ts`           | `initialized`, `authenticated`, `user`; `checkAuth`, `login`, `logout`, `changePassword`. Also exports `authedFetch`.                                                                                                                                                                                                                                           |
+| `useSessionsStore`       | `sessions.ts`       | `sessions`, `sessionsLoaded`, `sessionsNextCursor`/`sessionsLoadingMore` (cursor paging), `activeSessionId`, `eventsBySession`, per-session load/error flags, `inputDrafts`, `pendingUserMessages`, `processing`, `unreadSessions`; session CRUD + lifecycle actions (`clearSession`, `cancelSession`, `interruptSession`, `terminateAgent`, `cancelPreHatch`). |
+| `useWsStore`             | `ws.ts`             | `eventsBySession`, `lastSeqBySession`, `subscribedSessions`; `connect`/`disconnect`/`subscribe`/`unsubscribe`/`resume` and the raw-event listener registry.                                                                                                                                                                                                     |
+| `useUiStore`             | `ui.ts`             | `connected`, `sidebarOpen`, `skipBacklogConfirm`. That is the whole store — theme, menus and modals are **not** here.                                                                                                                                                                                                                                           |
+| `useTabsStore`           | `tabs.ts`           | `tabs` (the top tab strip), `loaded`; `fetchTabs`, `openTab`, `closeTab`, `removeTabsForItem`, `moveTab`. Also exports `startTabsAutoSync()`.                                                                                                                                                                                                                   |
+| `useProjectsStore`       | `projects.ts`       | `projects`, `activeProjectId`, `cards`, `cardReportsByCard`, `pendingQuestionsByProject`, loaded/error flags; project + card CRUD.                                                                                                                                                                                                                              |
+| `useFoldersStore`        | `folders.ts`        | `folders`; fetch/create/delete.                                                                                                                                                                                                                                                                                                                                 |
+| `useReportsStore`        | `reports.ts`        | `reports`, `loading`, `error`; `fetchReports`.                                                                                                                                                                                                                                                                                                                  |
+| `useResourcesStore`      | `resources.ts`      | `workflows`, `models`, `providers`, `systemPrompts`.                                                                                                                                                                                                                                                                                                            |
+| `useRepeatingTasksStore` | `repeatingTasks.ts` | `tasks`, `sessionsByTask`; CRUD, `runNow`, `applyChange` (WS-driven).                                                                                                                                                                                                                                                                                           |
+| `useWorkerCommsStore`    | `workerComms.ts`    | `workersByProject`, `messagesByProject`.                                                                                                                                                                                                                                                                                                                        |
+| `useUsageStore`          | `usage.ts`          | `costTable`, `dashboard`, `range`/`resolved`, `failedPanels`, `lastUpdated`.                                                                                                                                                                                                                                                                                    |
+| `useUsersStore`          | `users.ts`          | `users`; admin user management.                                                                                                                                                                                                                                                                                                                                 |
+| `useClaudeAccountsStore` | `claudeAccounts.ts` | `accounts`, `planUsage`; login start + account CRUD.                                                                                                                                                                                                                                                                                                            |
+| `useGrokAccountsStore`   | `grokAccounts.ts`   | Same shape for Grok accounts.                                                                                                                                                                                                                                                                                                                                   |
+| `useKimiAccountsStore`   | `kimiAccounts.ts`   | Same shape for Kimi accounts.                                                                                                                                                                                                                                                                                                                                   |
 
-### ProjectSlice
-- `projects[]`, `activeProjectId`, `activeCardId`
-- `projectCards`, `projectSteps`, `workflows`, `modelRegistry`
-- CRUD for projects and cards
-- Card kanban updates
+State that is deliberately _not_ in a store:
 
-### UiSlice
-- `view` — active tab: chat/diffs/commits/projects/reports/docs
-- `drawerOpen` — session drawer visibility
-- Modal flags: newSession, addCard, editProject, editCard, renameSession, options
-- `theme` (auto/light/dark), `primaryHue` (0-360 for accent color)
-- Sound/notification toggles (6 toggles for session/worker/card/send/tab-switch)
-- `notification`, `confirmDialog`, `announcement`, `statusLine`, `keepAwake`
-
-### UiControllerSlice
-- `activePopoverId` — single popover exclusivity
-- `contextMenu` state
-- `claimPopover`/`releasePopover`
-
-### GitSlice
-- `repos[]`, `selectedRepo`, `currentDiff`, `commits`, `commitDiff`
-
-### ReportsSlice
-- `reports[]`, `attachments[]`, `selectedReportFolder`, `activeReport`
-- Report fetch/open/download/edit operations
-
-### DocsSlice
-- `docsTree`, `activeDocsPath`, `activeDocsMarkdown`, `docsHistory`
-
-### ConfigSlice
-- `projectsDir`, `defaultSessionEffort`, `defaultProjectEffort`
+- **Theme + accent hue** — `util/appearance.ts`, persisted to localStorage
+  (`peckboard_theme`, `peckboard_hue`) and applied to
+  `document.documentElement`.
+- **Context menus / dropdowns** — `hooks/useContextMenu.tsx` +
+  `components/ContextMenuView.tsx`, local to the trigger.
+- **View, active ids, modal visibility** — `useState` in `App.tsx`,
+  seeded from the URL.
+- **Todos** — derived from the session's events
+  (`types/todo.ts` → `latestTodoSnapshot`), seeded by
+  `GET /api/sessions/:id/todos`.
 
 ## Event Log Rendering Pipeline
 
-Raw events → `buildDisplayItems(events)` → DisplayItem[] → `EventLogRenderer`
+Raw `Event[]` → `buildDisplayItems` / `createDisplayItemsFolder`
+(`components/chat/events.ts`) → `DisplayItem[]` → rendered inline by
+`ChatView`.
 
-`buildDisplayItems`:
-- Groups consecutive `agent` chunks into streaming turns
-- Extracts ChatMessages from user/agent/system events
-- Marks step-change, agent-start, agent-end lifecycle events
-- Output is memoized so re-renders don't rebuild
+`DisplayItem` is a discriminated union covering `user`, `pre-hatch`,
+`assistant`, `tool`, `file-diff`, `thinking`, `turn-usage`, `status`,
+`system`, `step`, `agent-start`, `agent-crashed`, `handover-start`,
+`handover`, `handover-aborted`, `interrupt`, `question`,
+`question-resolved`, and an `unknown` fallback so unrecognized event
+kinds render as a collapsed row instead of being dropped.
 
-`EventLogRenderer`:
-- Virtualized with @tanstack/react-virtual
-- Renders message bodies (AssistantBody, UserBody, SystemBody, SegmentsBody)
-- Renders WorkerStepHeader for step-change events with repeat counters
-- Project/card chips are live references (current name, not snapshot)
-- TodoWrite integration: synced from raw tool_use events in real time
+The fold (`foldEvent` over a `FoldState`):
+
+- Coalesces consecutive assistant / thinking chunks into one streaming
+  bubble; live buffers render as trailing rows without being committed,
+  so the next chunk grows the same bubble.
+- Pairs `tool_use` with its result, attaches `file-diff` payloads and
+  tool images, and closes still-open tools on turn end.
+- Coalesces consecutive identical system notices into one row with a
+  `×N` count.
+
+`createDisplayItemsFolder()` returns an **incremental** builder: it reuses
+all prior work when the new event list is an append-only extension (the
+common case — one WS event or token chunk at a time) and rebuilds from
+scratch when the list shape changed (session switch, "Load older"
+prepend, snapshot merge), detected via the first/last consumed event ids.
+Item object identity is stable across calls, so `React.memo` rows skip
+re-rendering untouched history. `buildDisplayItems(events)` is the
+one-shot form, used by `SubagentTranscript` and `util/transcript.ts`.
+
+`ChatView` virtualizes the resulting rows with `useVirtualizer`
+(`@tanstack/react-virtual`, `estimateSize: () => 64`).
+
+## WebSocket Layer
+
+`store/ws.ts` owns a single socket to `/ws`.
+
+- On `open`: sends `{type:'auth', token}`; on `auth_ok` it marks
+  `connected` and re-sends `subscribe` (plus `resume` with the stored
+  `last_seq`) for every tracked session.
+- `lastSeqBySession` is persisted to sessionStorage
+  (`peckboard_last_seq`) so a reload resumes rather than replays.
+- Reconnect backoff is exponential with ±25% jitter, capped at 30s.
+- A server `resync` frame (broadcast slot overflow) re-runs `resume` from
+  the last-seen seq for the named session — or every subscribed session
+  when unnamed — and dispatches `peckboard:resync` so listeners can
+  refetch global state that has no replay log.
+- Non-event frames are fanned out as `window` CustomEvents named
+  `peckboard:<type>`: `announcement`, `queue`, `card-update`,
+  `project-update`, `card-delete`, `worker-question`, `plugin-approval`,
+  `repeating-task-changed`, `repeating-task-run`, `pm-decisions-changed`,
+  `askpass-request`/`askpass-resolved`,
+  `env-unlock-request`/`env-unlock-resolved`.
+- `session-deleted` is handled in-store: it drops cached events and seqs
+  and calls `useSessionsStore.applySessionDeleted(id)`.
 
 ## URL Routing
 
-No React Router — URL is parsed/serialized directly in App.tsx:
+No React Router — the URL is parsed and serialized directly in `App.tsx`
+by `parseRoute()` (`App.tsx:109`) and `buildPath()` (`App.tsx:181`).
 
-- `/` — welcome
-- `/sessions/:id` — chat view
-- `/sessions/:id/diffs|commits|reports` — session-scoped views
-- `/projects/:projectId` — kanban board
-- `/projects/:projectId/cards/:cardId/session` — card-addressed session
-- `/reports`, `/docs` — app-level views
+The `View` union (`App.tsx:52`):
+`sessions | repeatingTasks | projects | usage | folders | reports |
+users | settings | pluginPage | plan`.
+
+`SessionSub` (`App.tsx:94`) is ``'chat' | 'todos' | `plugin:${string}` ``
+and is only meaningful for the `sessions` and `projects` views.
+
+| Path                                               | View                                |
+| -------------------------------------------------- | ----------------------------------- |
+| `/`                                                | sessions (list)                     |
+| `/sessions/:id`                                    | session chat                        |
+| `/sessions/:id/todos`                              | session todos                       |
+| `/sessions/:id/plugin/:itemId`                     | plugin full page, session-scoped    |
+| `/projects/:id`                                    | kanban board                        |
+| `/projects/:id/todos`                              | project todos                       |
+| `/projects/:id/plugin/:itemId`                     | plugin full page, project-scoped    |
+| `/repeating-tasks`, `/repeating-tasks/:id`         | repeating tasks                     |
+| `/usage`                                           | usage dashboard                     |
+| `/folders`                                         | folders page                        |
+| `/reports`, `/reports/:folder/:file`               | report browser / viewer             |
+| `/plan/:id`                                        | plan viewer                         |
+| `/users`                                           | user management (admin)             |
+| `/settings`                                        | settings                            |
+| `/plugins`, `/plugin-settings`, `/plugin-registry` | settings, deep-linked to a sub-page |
+| `/plugin-page/:plugin/:itemId`                     | plugin full page, rail entry        |
+
+Unknown first segments fall back to `sessions`. For the reports view the
+`activeId` is the encoded `<folder>/<file>` pair — the same id used as the
+report tab's `item_id`.
 
 ## Component Hierarchy
 
-- **App.tsx** — URL routing, auth bootstrap, theme application
-- **Header** — tab bar with roving-tabindex navigation
-- **SessionDrawer** — slide-in sidebar with session/project list
-- **ChatView** — event log + InputBar (read-only for card sessions, interactive for chat sessions)
-- **KanbanBoard** — cards in pipeline columns; each card's 3-dot menu has a "Session" action to view its worker session
-- **ReportBrowser** — folder accordion + ReportViewer
-- **InputBar** — auto-resize textarea, file upload, mic button, send
-- **Modals** — LoginModal, NewSessionModal, NewProjectModal, AddCardModal, OptionsModal, ConfirmDialog
-- **Global** — AnnouncementBanner, Notification toast, StatusLine, ContextMenu
+`App.tsx` renders `div.shell`:
+
+- `PluginApprovalPrompt` — prompts for any WASM plugin awaiting hook
+  approval.
+- `nav.rail` (`aria-label="Primary"`) — the navigation rail; the shell
+  stacks and the rail becomes a horizontal top bar under 768px
+  (`useMediaQuery` in `App.tsx`, layout in `styles/mobile.css`). Contains the brand
+  mark, Sessions, plugin-contributed rail entries, Repeating Tasks,
+  Projects, Reports, Usage, a separator, Folders, Users (admin only), the
+  connection status dot, and the avatar button whose menu is portaled to
+  `document.body` (Settings, plugin UI panels, Change password, Sign out).
+- `main.content`
+  - `TabBar` — the tab strip, driven by `useTabsStore` and the tab-kind
+    registry in `components/tabKinds.tsx`.
+  - Announcement banner, `ConnectionBanner`, `AskpassDialog`,
+    `EnvUnlockDialog`.
+  - `div#view-panel` (`role="tabpanel"`) wrapping an `ErrorBoundary` and
+    the view switch:
+    - `sessions` → `ChatView` / `SessionTodosView` / `PluginFullPage`, or
+      the session `List` under a `ListViewHeader`.
+    - `projects` → `KanbanBoard` / `ProjectTodosView` /
+      `PluginFullPage`, or `ProjectList`.
+    - `repeatingTasks` → `RepeatingTasksView`
+    - `usage` → `UsageDashboard` (charts in `components/usage/`)
+    - `folders` → `FoldersPage` (`components/ManageFoldersModal.tsx`)
+    - `reports` → `ReportBrowser` / `ReportView`
+    - `plan` → `PlanView`
+    - `users` → `UserManagement`
+    - `settings` → `SettingsPage`
+    - `pluginPage` → `PluginFullPage`
+- Modals rendered as siblings: `NewSessionModal`, `NewProjectModal`,
+  `ChangePasswordModal`, `PluginPanelModal`, `RenameModal`, and one
+  `ConfirmDialog` per destructive action (delete session / delete project
+  / clear session / terminate agent / delete repeating task).
+
+When `!authenticated`, `App` short-circuits to `<LoginModal />` before
+rendering the shell.
+
+`ChatView` composes the virtualized log, `TodoPanel` and `InputBar`
+(auto-resizing textarea, `useMentions` autocomplete, attachment upload
+and paste-to-upload, send). Worker sessions get the same composer; what
+changes is the toolbar — the context-pressure banner and several 3-dot
+actions are hidden when `sessionDetail.is_worker` is set. A tool row that
+spawned a subagent renders `SubagentTranscript` inside `ToolUseBlock`.
+
+## Shared Primitives
+
+Reuse these rather than hand-rolling a second copy:
+
+- `Modal` — dialog shell (`useDialogFocus` for focus trapping).
+- `ConfirmDialog` — destructive-action confirmation.
+- `List` + `ListViewHeader` — list views with a 3-dot menu, right-click /
+  long-press context menu, multi-select and bulk actions.
+- `Dropdown` / `MenuButton` — menus and searchable pickers.
+- `useContextMenu` (+ `ContextMenuView`) — right-click on desktop,
+  long-press on touch; both share `useMenuKeyboard`.
+- `ModelPicker` (searchable), `SystemPromptPicker` (wraps `ModelPicker`)
+  and `WorkflowSelect` — pickers over the resource catalogues, all built
+  on `Dropdown`.
+- `SafeMarkdown`, `MermaidBlock`, `DiffBlock`, `ToolUseBlock` — content
+  rendering.
 
 ## Theming
 
-CSS custom properties on `:root` (light) with `:root[data-theme="dark"]` overrides.
+CSS custom properties in `web/src/index.css`, in three blocks that must be
+kept in sync: `:root` (light), `:root[data-theme='dark']`, and an
+`@media (prefers-color-scheme: dark)` block scoped to
+`:root:not([data-theme='light']):not([data-theme='dark'])` for auto mode.
 
-- `--primary-hue` (0-360) drives accent color
-- `--accent` derived from hue via HSL
-- Layered backgrounds: `--bg` > `--surface` > `--surface2` > `--surface3`
-- Text layers: `--text` (primary) > `--text2` > `--text3`
-- Dark mode: IntelliJ Darcula-inspired indigo/violet palette
-- Auto mode: respects `prefers-color-scheme` media query
-- Persisted to localStorage
+- `--primary-hue` (0–360) drives `--accent`, `--accent-hover`,
+  `--accent-subtle`, `--accent-muted` and `--ring` via HSL.
+- Layered backgrounds `--bg` → `--surface` → `--surface2` → `--surface3`;
+  text layers `--text` → `--text2` → `--text3`. Contrast ratios for the
+  muted/ring tokens are recorded inline in `index.css` — re-measure before
+  changing them.
+- `--chart-1`…`--chart-6` are a separate categorical ramp, deliberately
+  not derived from `--primary-hue`; slot order is the colour-blind-safety
+  mechanism and must not be reordered.
+- Plus tokens for semantic colours, borders, shadows, radii, spacing,
+  typography, transitions and layout (`--header-h`, `--sidebar-w`,
+  `--safe-bottom`, `--app-height`).
+- Applied by `util/appearance.ts`: `applyTheme` sets/removes
+  `data-theme`, `applyHue` sets `--primary-hue` inline; both persist to
+  localStorage. `util/themeColor.ts` syncs the `theme-color` meta tag.
+- Per-area styles live in `web/src/styles/*.css` and `App.css`.
 
 ## Mobile Patterns
 
-- Touch: 48px+ tap targets, long-press context menus (500ms), synthetic click suppression
-- Keyboard: `pointer: coarse` detection — Enter=newline on mobile, Enter=submit on desktop
-- Viewport: `position: fixed` app prevents iOS Safari keyboard drift; `--app-height` from `visualViewport.height`
-- Layout: SessionDrawer max-width 85vw, fluid sizing, no fixed breakpoints
-
-## Shared Code
-
-`@shared/util/*` path alias maps to backend `src/util/` — shared validation rules:
-- cardEditPolicy, passwordPolicy, effectiveModel, effectiveEffort
-- pipelineSteps, workflows, effortLevels
-
-These modules have zero Node.js dependencies so they run in both environments.
+- Touch: 48px minimum tap targets (`styles/mobile.css`), long-press
+  context menus at `LONG_PRESS_MS = 450` (`hooks/useContextMenu.tsx`),
+  with synthetic-click suppression after the press fires.
+- Keyboard: `window.matchMedia('(pointer: coarse)')` in `InputBar` —
+  Enter inserts a newline on touch devices, submits on desktop.
+- Viewport: `--app-height` is kept in sync with `window.visualViewport`
+  in `App.tsx` so the app shrinks above the on-screen keyboard instead of
+  drifting; it defaults to `100dvh` for the pre-JS paint.
+- Layout: under 768px the shell stacks, the rail becomes a horizontal top
+  bar, and the tab strip below it replaces the old session/project
+  sidebar. Sizing is fluid; safe-area insets are honoured on both bars.
 
 ## Auth Flow
 
-1. On load: check localStorage/sessionStorage for valid token
-2. If expired or missing: show LoginModal
-3. On login: POST /api/auth/login → store token → `connectWs()` → `resyncAll()`
-4. On 401 from any API call: clear token → show LoginModal
-5. On password change: server revokes all tokens, issues fresh one → reconnect WS
+1. On mount `App` calls `checkAuth()`, which probes
+   `GET /api/auth/me` with the stored token.
+2. No valid token → `App` renders `<LoginModal />` instead of the shell.
+3. `login()` POSTs `/api/auth/login`, then stores the token in
+   localStorage (Remember Me) or sessionStorage (tab-only).
+4. Once `authenticated`, `App` runs `connect()` (WS), `fetchSessions()`,
+   `fetchProjects()`, `fetchFolders()`, `fetchTabs()` and
+   `startTabsAutoSync()`, and pulls `/api/announcements`.
+5. `authedFetch` attaches the bearer token; any 401 clears the token and
+   the auth store, dropping back to the login screen.
+6. `changePassword()` — the server revokes all sessions and mints a fresh
+   token, which is written back into the same storage tier the user
+   originally chose, so the current tab stays signed in.
