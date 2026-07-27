@@ -7,20 +7,26 @@ import LineChart, { type ChartSeries } from './LineChart'
 type Metric = 'tokens' | 'cost'
 type Bucket = 'hour' | 'day'
 
-/** Series-color rotation. Semantic tokens only, so charts auto-theme; the
- *  first (accent) is used for the single `overall` series. */
-const PALETTE = [
-  'var(--accent)',
-  'var(--success)',
-  'var(--warning)',
-  'var(--danger)',
-  'var(--accent-muted)',
-  'var(--text3)',
+/** Series styles in fixed slot order. Colour comes from the dedicated chart
+ *  ramp in `index.css` — never the semantic tokens, because a series is an
+ *  identity ("which project") and not a good/bad state — and every slot also
+ *  carries a dash pattern, so a reader who cannot separate the hues can still
+ *  trace a line and match it to its legend entry. The ORDER is the
+ *  colour-blind-safety mechanism (it is what the palette was validated on):
+ *  never reorder it, and never cycle past the last slot. */
+const SERIES_STYLES: { color: string; dash?: string; pattern: string }[] = [
+  { color: 'var(--chart-1)', pattern: 'solid' },
+  { color: 'var(--chart-2)', dash: '6 4', pattern: 'dashed' },
+  { color: 'var(--chart-3)', dash: '1 4', pattern: 'dotted' },
+  { color: 'var(--chart-4)', dash: '12 4', pattern: 'long dash' },
+  { color: 'var(--chart-5)', dash: '10 3 2 3', pattern: 'dash-dot' },
+  { color: 'var(--chart-6)', dash: '6 3 1 3 1 3', pattern: 'dash-dot-dot' },
 ]
 
 /** Cap on lines drawn at once — beyond a handful, an overlaid line chart is
- *  unreadable. We keep the highest-volume series and note the remainder. */
-const MAX_SERIES = 6
+ *  unreadable, and there is no seventh style to hand out. We keep the
+ *  highest-volume series and note the remainder. */
+const MAX_SERIES = SERIES_STYLES.length
 
 const ENTITY_OPTIONS: { value: TrendEntity; label: string }[] = [
   { value: 'overall', label: 'Overall' },
@@ -114,10 +120,14 @@ function TrendWidget({
   const shown = ranked.slice(0, MAX_SERIES)
   const hidden = ranked.length - shown.length
 
-  const chartSeries: ChartSeries[] = shown.map((s, i) => ({
+  // `shown` is capped at SERIES_STYLES.length, so slot `i` always exists — no
+  // modulo, because a repeated hue would make two series indistinguishable.
+  const chartSeries: (ChartSeries & { pattern: string })[] = shown.map((s, i) => ({
     id: s.entity_id,
     label: nameFor(entity, s.entity_id),
-    color: PALETTE[i % PALETTE.length],
+    color: SERIES_STYLES[i].color,
+    dash: SERIES_STYLES[i].dash,
+    pattern: SERIES_STYLES[i].pattern,
     points: s.points.map((p) => ({
       x: p.bucket_ts,
       y: metric === 'tokens' ? p.tokens : p.est_cost,
@@ -170,14 +180,37 @@ function TrendWidget({
               area={chartSeries.length === 1}
               formatValue={format}
               formatX={(x) => shortLabel(x, bucket)}
+              unit={metric === 'tokens' ? 'tokens' : 'USD'}
+              xUnit={bucket}
               testid={`${testid}-chart`}
             />
             {chartSeries.length > 0 && (
               <ul className="usage-legend" data-testid={`${testid}-legend`}>
                 {chartSeries.map((s) => (
                   <li className="usage-legend-item" key={s.id}>
-                    <span className="usage-legend-swatch" style={{ background: s.color }} />
-                    <span className="usage-legend-label" title={s.label}>
+                    {/* The swatch draws the series' line, not a colour chip:
+                        it repeats the dash pattern so the legend still maps to
+                        the chart when the hues are indistinguishable. */}
+                    <svg
+                      className="usage-legend-swatch"
+                      viewBox="0 0 28 10"
+                      width="28"
+                      height="10"
+                      aria-hidden="true"
+                      data-pattern={s.pattern}
+                    >
+                      <line
+                        x1="1"
+                        y1="5"
+                        x2="27"
+                        y2="5"
+                        stroke={s.color}
+                        strokeWidth="2"
+                        strokeLinecap="round"
+                        strokeDasharray={s.dash}
+                      />
+                    </svg>
+                    <span className="usage-legend-label" title={`${s.label} — ${s.pattern} line`}>
                       {s.label}
                     </span>
                   </li>

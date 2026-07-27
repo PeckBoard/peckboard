@@ -25,6 +25,26 @@
   --accent-subtle: hsl(var(--primary-hue), 60%, 95%);
   --accent-muted: hsl(var(--primary-hue), 40%, 88%);
 
+  /* Chart series ramp — a dedicated categorical palette. Deliberately NOT the
+     semantic tokens (a series is an identity, not a good/bad state) and NOT
+     derived from `--primary-hue` (that slider is free; series identity is
+     not). Six hue families at OKLCH h 250/40/350/90/300/150, chroma capped at
+     0.18 so the set stays professional. Both themes pass all six checks of
+     the dataviz validator on the adjacent pairlist (the one lines use):
+     CVD ΔE 13.5 light / 14.6 dark (deuteranopia), normal-vision ΔE 16.4 /
+     17.4, and every step clears 3:1 against `--surface` — light
+     5.28/6.76/4.91/4.30/8.13/7.06, dark 3.32/3.34/4.73/4.76/4.83/3.28.
+     The slot ORDER is the colour-blind-safety mechanism: never reorder, never
+     cycle. Past six series we drop the tail (`MAX_SERIES`) rather than reuse a
+     hue. Hue is paired with a per-slot dash pattern in `TrendsSection.tsx`, so
+     the chart is still readable with no colour vision at all. */
+  --chart-1: #006ebe;
+  --chart-2: #a43600;
+  --chart-3: #c03e86;
+  --chart-4: #967600;
+  --chart-5: #6731a8;
+  --chart-6: #00672c;
+
   /* Semantic */
   --danger: #ef4444;
   --danger-bg: #fef2f2;
@@ -120,6 +140,15 @@
   --accent-subtle: hsl(var(--primary-hue), 30%, 16%);
   --accent-muted: hsl(var(--primary-hue), 25%, 22%);
 
+  /* Chart series ramp — the same six hues re-stepped for the dark surface
+     (rationale + measurements in the light block above). */
+  --chart-1: #0071c3;
+  --chart-2: #c54300;
+  --chart-3: #db589e;
+  --chart-4: #a78400;
+  --chart-5: #a170eb;
+  --chart-6: #007f38;
+
   --danger: #f87171;
   --danger-bg: rgba(239, 68, 68, 0.1);
   --danger-border: rgba(239, 68, 68, 0.25);
@@ -162,6 +191,12 @@
     --accent-hover: hsl(var(--primary-hue), 65%, 56%);
     --accent-subtle: hsl(var(--primary-hue), 30%, 16%);
     --accent-muted: hsl(var(--primary-hue), 25%, 22%);
+    --chart-1: #0071c3;
+    --chart-2: #c54300;
+    --chart-3: #db589e;
+    --chart-4: #a78400;
+    --chart-5: #a170eb;
+    --chart-6: #007f38;
     --danger: #f87171;
     --danger-bg: rgba(239, 68, 68, 0.1);
     --danger-border: rgba(239, 68, 68, 0.25);
