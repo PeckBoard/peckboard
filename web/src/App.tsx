@@ -24,6 +24,7 @@ import NewSessionModal from './components/NewSessionModal'
 import NewProjectModal from './components/NewProjectModal'
 import FoldersPage from './components/ManageFoldersModal'
 import ConfirmDialog from './components/ConfirmDialog'
+import RenameModal from './components/RenameModal'
 import ReportBrowser from './components/ReportBrowser'
 import ReportView from './components/ReportView'
 import PlanView from './components/PlanView'
@@ -313,6 +314,7 @@ function App() {
   const [confirmDeleteRepeatingTaskId, setConfirmDeleteRepeatingTaskId] = useState<string | null>(
     null,
   )
+  const [renameTarget, setRenameTarget] = useState<{ type: TabType; id: string } | null>(null)
   const [announcement, setAnnouncement] = useState<Announcement | null>(null)
   const [userMenuOpen, setUserMenuOpen] = useState(false)
   const [showChangePassword, setShowChangePassword] = useState(false)
@@ -820,40 +822,45 @@ function App() {
     }
   }
 
-  const handleRenameItem = async (type: TabType, id: string) => {
+  // The rename dialog is one shared modal; the tab kind decides its
+  // wording and which store call it commits through.
+  const handleRenameItem = (type: TabType, id: string) => {
+    // Reports are file-backed and named at write time; no rename path.
+    if (type === 'session' || type === 'project' || type === 'repeating_task') {
+      setRenameTarget({ type, id })
+    }
+  }
+
+  const renameSpec = (() => {
+    if (!renameTarget) return null
+    const { type, id } = renameTarget
     if (type === 'session') {
-      const current = sessions.find((s) => s.id === id)?.name ?? ''
-      const next = window.prompt('Rename session:', current)
-      if (next && next !== current) {
-        try {
-          await renameSession(id, next)
-        } catch {
-          /* ignore */
-        }
-      }
-    } else if (type === 'project') {
-      const current = projects.find((p) => p.id === id)?.name ?? ''
-      const next = window.prompt('Rename project:', current)
-      if (next && next !== current) {
-        try {
-          await updateProject(id, { name: next })
-        } catch {
-          /* ignore */
-        }
-      }
-    } else if (type === 'repeating_task') {
-      const current = repeatingTasks.find((t) => t.id === id)?.name ?? ''
-      const next = window.prompt('Rename task:', current)
-      if (next && next !== current) {
-        try {
-          await useRepeatingTasksStore.getState().updateTask(id, { name: next })
-        } catch {
-          /* ignore */
-        }
+      return {
+        title: 'Rename session',
+        label: 'Session name',
+        current: sessions.find((s) => s.id === id)?.name ?? '',
+        submit: (name: string) => renameSession(id, name),
       }
     }
-    // Reports are file-backed and named at write time; no rename path.
-  }
+    if (type === 'project') {
+      return {
+        title: 'Rename project',
+        label: 'Project name',
+        current: projects.find((p) => p.id === id)?.name ?? '',
+        submit: async (name: string) => {
+          await updateProject(id, { name })
+        },
+      }
+    }
+    return {
+      title: 'Rename repeating task',
+      label: 'Task name',
+      current: repeatingTasks.find((t) => t.id === id)?.name ?? '',
+      submit: async (name: string) => {
+        await useRepeatingTasksStore.getState().updateTask(id, { name })
+      },
+    }
+  })()
 
   // Assemble the per-kind glue the TabBar uses. Adding a new tab kind
   // = adding a new entry here; the TabBar is purely presentational and
@@ -1608,6 +1615,15 @@ function App() {
           danger
           onConfirm={confirmDeleteRepeatingTask}
           onCancel={() => setConfirmDeleteRepeatingTaskId(null)}
+        />
+      )}
+      {renameSpec && (
+        <RenameModal
+          title={renameSpec.title}
+          label={renameSpec.label}
+          initialValue={renameSpec.current}
+          onSubmit={renameSpec.submit}
+          onClose={() => setRenameTarget(null)}
         />
       )}
     </div>

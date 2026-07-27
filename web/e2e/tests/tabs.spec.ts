@@ -333,16 +333,17 @@ test.describe('tabs', () => {
     await loadAt(page, token, `/sessions/${sessionId}`)
     const tab = page.locator('.tab-opened', { hasText: 'old-name' })
     await expect(tab).toBeVisible()
-
-    // Answer the window.prompt() with the new name before triggering it.
-    page.once('dialog', (dialog) => {
-      void dialog.accept('new-name')
-    })
-
     await tab.click({ button: 'right' })
     const renameBtn = page.locator('.context-menu button', { hasText: 'Rename' })
     await expect(renameBtn).toBeVisible()
     await renameBtn.click()
+
+    // The rename dialog prefills the current name, selected for typing.
+    const input = page.getByTestId('rename-input')
+    await expect(input).toHaveValue('old-name')
+    await input.fill('new-name')
+    await page.getByTestId('rename-submit').click()
+    await expect(page.getByTestId('rename-modal')).toHaveCount(0)
 
     // Tab label flips to the new name; server agrees.
     await expect(page.locator('.tab-opened', { hasText: 'new-name' })).toBeVisible({
