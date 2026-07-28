@@ -789,6 +789,51 @@ pub fn count_consecutive_crashes(events: &[Event]) -> u32 {
 /// of the [`PAUSE_AFTER_CRASHES`] budget the threshold advertises.
 pub const PAUSE_CLEARED_KIND: &str = "auto-pause-cleared";
 
+/// Block threshold: a card whose worker completes this many consecutive
+/// turns without any state change — no step advance, no finish, no
+/// wont-do — gets blocked instead of respawned forever. Unlike crashes,
+/// these are clean process exits (`agent-end status=complete`), so
+/// [`count_consecutive_crashes`] never sees them; this is the equivalent
+/// defense for a model that stops mid-task without calling a
+/// card-lifecycle tool (`complete_step` / `finish_card` / `wont_do_card`).
+pub const BLOCK_AFTER_NO_PROGRESS: u32 = 4;
+
+/// Event kind appended by `handle_worker_done` each time a worker's turn
+/// completes with [`crate::worker::scheduler::WorkerIntent::Continue`] (or
+/// no intent at all) — a clean completion that didn't advance the card.
+pub const NO_PROGRESS_KIND: &str = "worker-no-progress";
+
+/// Walk a card's lifecycle events oldest-first and return how many
+/// consecutive no-progress completions have happened since the last reset
+/// marker: a step change, a `handover` (model switch/compaction), or an
+/// explicit [`PAUSE_CLEARED_KIND`] event appended when the user unblocks
+/// the card. Deliberately NOT reset by `agent-end status=complete` — a
+/// no-progress turn IS a clean completion, so treating it as a reset would
+/// zero the counter on every single iteration and defeat the defense.
+pub fn count_consecutive_no_progress(events: &[Event]) -> u32 {
+    let mut count: u32 = 0;
+    for event in events {
+        match event.kind.as_str() {
+            k if k == NO_PROGRESS_KIND => count += 1,
+            "step-change" | "handover" => count = 0,
+            k if k == PAUSE_CLEARED_KIND => count = 0,
+            _ => {}
+        }
+    }
+    count
+}
+
+/// Backoff (seconds) before the orchestrator will re-dispatch a card after
+/// `count` consecutive no-progress completions: 5, 10, 20, 40, ... capped
+/// at 5 minutes. `count == 0` needs no backoff.
+pub fn no_progress_backoff_secs(count: u32) -> i64 {
+    if count == 0 {
+        return 0;
+    }
+    let shift = count.saturating_sub(1).min(20);
+    (5i64.saturating_mul(1i64 << shift)).min(300)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1244,5 +1289,66 @@ mod tests {
             make_event("agent-end", r#"{"status":"crashed","reason":"x"}"#),
         ];
         assert_eq!(count_consecutive_crashes(&events), 1);
+    }
+
+    #[test]
+    fn test_count_consecutive_no_progress_counts_and_resets_on_step_change() {
+        let events = vec![
+            make_event(NO_PROGRESS_KIND, r#"{"card_id":"c1"}"#),
+            make_event(NO_PROGRESS_KIND, r#"{"card_id":"c1"}"#),
+            make_event("step-change", r#"{"from":"todo","to":"in-progress"}"#),
+            make_event(NO_PROGRESS_KIND, r#"{"card_id":"c1"}"#),
+        ];
+        assert_eq!(count_consecutive_no_progress(&events), 1);
+    }
+
+    #[test]
+    fn test_count_consecutive_no_progress_not_reset_by_agent_end_complete() {
+        // A no-progress turn IS a clean `agent-end status=complete` --
+        // that must NOT zero the counter, or the defense never triggers.
+        let events = vec![
+            make_event("agent-end", r#"{"status":"complete"}"#),
+            make_event(NO_PROGRESS_KIND, r#"{"card_id":"c1"}"#),
+            make_event("agent-end", r#"{"status":"complete"}"#),
+            make_event(NO_PROGRESS_KIND, r#"{"card_id":"c1"}"#),
+        ];
+        assert_eq!(count_consecutive_no_progress(&events), 2);
+    }
+
+    #[test]
+    fn test_count_consecutive_no_progress_reset_on_handover() {
+        let events = vec![
+            make_event(NO_PROGRESS_KIND, r#"{"card_id":"c1"}"#),
+            make_event(NO_PROGRESS_KIND, r#"{"card_id":"c1"}"#),
+            make_event("handover", r#"{"from":"mock:echo","to":"mock:echo"}"#),
+            make_event(NO_PROGRESS_KIND, r#"{"card_id":"c1"}"#),
+        ];
+        assert_eq!(count_consecutive_no_progress(&events), 1);
+    }
+
+    #[test]
+    fn test_count_consecutive_no_progress_reset_on_pause_cleared() {
+        let events = vec![
+            make_event(NO_PROGRESS_KIND, r#"{"card_id":"c1"}"#),
+            make_event(NO_PROGRESS_KIND, r#"{"card_id":"c1"}"#),
+            make_event(PAUSE_CLEARED_KIND, r#"{"card_id":"c1"}"#),
+            make_event(NO_PROGRESS_KIND, r#"{"card_id":"c1"}"#),
+        ];
+        assert_eq!(count_consecutive_no_progress(&events), 1);
+    }
+
+    #[test]
+    fn test_count_consecutive_no_progress_empty() {
+        assert_eq!(count_consecutive_no_progress(&[]), 0);
+    }
+
+    #[test]
+    fn test_no_progress_backoff_secs_curve() {
+        assert_eq!(no_progress_backoff_secs(0), 0);
+        assert_eq!(no_progress_backoff_secs(1), 5);
+        assert_eq!(no_progress_backoff_secs(2), 10);
+        assert_eq!(no_progress_backoff_secs(3), 20);
+        assert_eq!(no_progress_backoff_secs(4), 40);
+        assert_eq!(no_progress_backoff_secs(20), 300);
     }
 }

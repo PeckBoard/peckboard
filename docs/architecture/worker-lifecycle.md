@@ -98,6 +98,44 @@ Pure function over the session's event log tail (bounded, default 64 events):
 - Spawn-phase timeout also blocks immediately
 - Strictly safer than loop-forever
 
+## No-Progress Defense
+
+The crash-loop defense above only counts _crashes_ — it never fires for a
+worker whose turn ends cleanly (`agent-end{complete}`) without calling a
+card-lifecycle tool (`complete_step` / `finish_card` / `wont_do_card`).
+Left unchecked, that case respawns the same card on every orchestrator
+tick, forever, with no backoff and no cap (see
+`worker::pipeline::{NO_PROGRESS_KIND, BLOCK_AFTER_NO_PROGRESS,
+count_consecutive_no_progress, no_progress_backoff_secs}` and
+`worker::orchestrator::handle_worker_done`).
+
+### Counting
+
+- `handle_worker_done`'s no-special-intent arm appends a `worker-no-progress`
+  event on every clean completion that didn't advance the card.
+- `count_consecutive_no_progress` walks the card's cross-session lifecycle
+  events (same query as the crash counter,
+  `Db::card_lifecycle_events`) and counts consecutive
+  `worker-no-progress` events since the last reset marker: `step-change`,
+  `handover`, or the `auto-pause-cleared` resume sentinel.
+- Deliberately NOT reset by `agent-end{complete}` — a no-progress turn IS a
+  clean completion, so treating it as a reset would zero the counter every
+  single iteration and defeat the defense.
+
+### Backoff + Blocking
+
+- Before respawning a card with prior no-progress history,
+  `check_and_spawn_workers_at` computes `no_progress_backoff_secs(count)`
+  (5s, 10s, 20s, ... capped at 300s) and skips the card until that much
+  time has passed since its last no-progress completion.
+- At `BLOCK_AFTER_NO_PROGRESS` (4) consecutive no-progress completions, the
+  CARD is blocked (`blocked = true`, `block_reason` naming the count) —
+  this does not pause the whole project, unlike the crash defense.
+- Operator unblock (`restart_card_worker`, or an explicit `blocked: false`
+  PATCH) calls `mark_card_unblocked`, which appends the same
+  `auto-pause-cleared` sentinel the crash defense uses, resetting both
+  counters for a fresh attempt budget.
+
 ## Worker Watchdog (sweepOrphanWorkers)
 
 Runs every 60 seconds. Handles four cases:

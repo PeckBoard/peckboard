@@ -364,10 +364,12 @@ pub const CARD_STEP_AFTER_HOOK: &str = "card.step.after";
 /// crashes.
 pub const SESSION_AGENT_ENDED_HOOK: &str = "session.agent.ended";
 
-/// Fired when a project is auto-paused due to repeated worker crashes. Pairs
-/// with `project.paused` (source `"crash"`) — both fire together, letting a
-/// plugin react to the specific card that triggered the pause.
-/// Payload: `{ card_id, card_title, project_id, project_name, reason }`.
+/// Fired when a worker is blocked from further automatic dispatch: either
+/// the owning project auto-pauses after repeated crashes (pairs with
+/// `project.paused`, source `"crash"`) or a single card is blocked after
+/// too many consecutive turns that completed without advancing it (no
+/// project-level effect in that case). Payload:
+/// `{ card_id, card_title, project_id, project_name, reason }`.
 pub const WORKER_BLOCKED_HOOK: &str = "worker.blocked";
 
 /// Fired after a project is paused: manually (source `"manual"`), by the

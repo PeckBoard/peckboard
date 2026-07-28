@@ -426,6 +426,11 @@ pub(super) async fn update_card(
     let stale_worker_writer = stale_worker_cell.clone();
     let prev_step_cell = std::sync::Arc::new(std::sync::Mutex::new(None::<String>));
     let prev_step_writer = prev_step_cell.clone();
+    // Set when this update flips `blocked` true -> false, so a fresh
+    // attempt budget can be granted after the atomic update succeeds (see
+    // `mark_card_unblocked`) -- same treatment as the restart-worker route.
+    let unblocked_cell = std::sync::Arc::new(std::sync::Mutex::new(false));
+    let unblocked_writer = unblocked_cell.clone();
     let card = state
         .db
         .update_card_atomic(&card_id, move |existing| {
@@ -482,6 +487,9 @@ pub(super) async fn update_card(
                 worker_session_id = Some(None);
                 last_worker_session_id = Some(Some(sid));
             }
+            if existing.blocked && body.blocked == Some(false) {
+                *unblocked_writer.lock().unwrap() = true;
+            }
 
             Ok(UpdateCard {
                 title: body.title,
@@ -533,6 +541,13 @@ pub(super) async fn update_card(
             Json(serde_json::json!({ "error": "card not found" })),
         ));
     };
+
+    if *unblocked_cell.lock().unwrap() {
+        if let Err(e) = crate::worker::orchestrator::mark_card_unblocked(&state.db, &card_id).await
+        {
+            tracing::warn!(card_id = %card_id, "Failed to reset crash/no-progress counters on unblock: {e}");
+        }
+    }
 
     // Apply dependency replacements after the card row update has
     // succeeded. `apply_dependencies` validates unknown ids / cycles
@@ -724,7 +739,10 @@ pub(super) async fn restart_card_worker(
             })?;
     }
 
-    // Unblock if blocked
+    // Unblock if blocked. Also resets the crash / no-progress counters
+    // (`mark_card_unblocked`) so this manual retry gets a fresh attempt
+    // budget instead of immediately re-tripping on the next crash or
+    // no-progress completion.
     if card.blocked {
         state
             .db
@@ -743,6 +761,10 @@ pub(super) async fn restart_card_worker(
                     Json(serde_json::json!({ "error": e.to_string() })),
                 )
             })?;
+        if let Err(e) = crate::worker::orchestrator::mark_card_unblocked(&state.db, &card_id).await
+        {
+            tracing::warn!(card_id = %card_id, "Failed to reset crash/no-progress counters on unblock: {e}");
+        }
     }
 
     // The watchdog/orchestrator will pick up the unassigned card on next cycle

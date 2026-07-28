@@ -154,10 +154,16 @@ pub async fn clear_session_todos(
 /// gate keeps the slot arithmetic itself accurate.
 static SPAWN_GATE: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
+/// Thin wrapper around [`check_and_spawn_workers_at`] using the real
+/// clock. Tests inject a virtual `now` directly so the no-progress
+/// backoff below can be exercised deterministically, without sleeping.
 pub async fn check_and_spawn_workers(state: &Arc<AppState>) {
+    check_and_spawn_workers_at(state, chrono::Utc::now()).await;
+}
+
+pub async fn check_and_spawn_workers_at(state: &Arc<AppState>, now: chrono::DateTime<chrono::Utc>) {
     let _gate = SPAWN_GATE.lock().await;
     let projects = state.db.list_projects().await.unwrap_or_default();
-    let now = chrono::Utc::now();
     for project in &projects {
         if project.status != "active" {
             continue;
@@ -260,7 +266,7 @@ pub async fn check_and_spawn_workers(state: &Arc<AppState>) {
 
         // Find unassigned, unblocked cards not in terminal states whose
         // dependencies are all satisfied.
-        let available: Vec<&Card> = cards
+        let mut available: Vec<&Card> = cards
             .iter()
             .filter(|c| {
                 c.worker_session_id.is_none()
@@ -270,6 +276,43 @@ pub async fn check_and_spawn_workers(state: &Arc<AppState>) {
                     && deps_satisfied(&c.id)
             })
             .collect();
+
+        // No-progress backoff: a card that just had a clean-but-unproductive
+        // completion (worker exited without calling complete_step /
+        // finish_card / wont_do_card -- see `pipeline::NO_PROGRESS_KIND` /
+        // `handle_worker_done`) waits an increasing interval before the next
+        // respawn attempt instead of being redispatched on the very next
+        // tick. Only cards with prior worker history can have a no-progress
+        // streak, so this only costs a query for cards that already passed
+        // every other filter above.
+        let mut backing_off: std::collections::HashSet<&str> = std::collections::HashSet::new();
+        for card in &available {
+            if card.last_worker_session_id.is_none() {
+                continue;
+            }
+            let events = state
+                .db
+                .card_lifecycle_events(&card.id, 256)
+                .await
+                .unwrap_or_default();
+            let count = pipeline::count_consecutive_no_progress(&events);
+            if count == 0 {
+                continue;
+            }
+            let Some(last_ts) = events
+                .iter()
+                .rev()
+                .find(|e| e.kind == pipeline::NO_PROGRESS_KIND)
+                .map(|e| e.ts)
+            else {
+                continue;
+            };
+            let elapsed_secs = (now.timestamp_millis() - last_ts) / 1000;
+            if elapsed_secs < pipeline::no_progress_backoff_secs(count) {
+                backing_off.insert(card.id.as_str());
+            }
+        }
+        available.retain(|c| !backing_off.contains(c.id.as_str()));
 
         let slots = (project.worker_count as usize) - active_workers;
         tracing::info!(
@@ -1076,7 +1119,7 @@ pub async fn handle_worker_done(state: &Arc<AppState>, session_id: &str) {
                     UpdateCard {
                         worker_session_id: Some(None),
                         last_worker_session_id: Some(Some(session_id.to_string())),
-                        updated_at: Some(now),
+                        updated_at: Some(now.clone()),
                         ..Default::default()
                     },
                 )
@@ -1086,6 +1129,76 @@ pub async fn handle_worker_done(state: &Arc<AppState>, session_id: &str) {
                 card_id = %card_id,
                 "Worker completed with no special intent, clearing assignment"
             );
+
+            // Money-loop defense for turns that neither crash nor advance
+            // the card: without this, a worker that ends its turn without
+            // calling complete_step/finish_card/wont_do_card gets resumed
+            // by the very next orchestrator tick, forever, with no backoff
+            // and no cap. The crash counter above never sees these —
+            // the process exits cleanly — so this is a separate counter
+            // (see `pipeline::count_consecutive_no_progress`).
+            let _ = state
+                .db
+                .append_event(
+                    session_id,
+                    pipeline::NO_PROGRESS_KIND,
+                    serde_json::json!({ "cardId": card_id, "step": card.step }),
+                )
+                .await;
+
+            let no_progress_count = match state.db.card_lifecycle_events(&card_id, 256).await {
+                Ok(events) => pipeline::count_consecutive_no_progress(&events),
+                Err(e) => {
+                    tracing::warn!(
+                        card_id = %card_id,
+                        "handle_worker_done: failed to load lifecycle events for no-progress check: {e}"
+                    );
+                    0
+                }
+            };
+
+            if no_progress_count >= pipeline::BLOCK_AFTER_NO_PROGRESS {
+                let reason = format!(
+                    "Worker for \"{}\" ended {} turns in a row without advancing the card (no complete_step/finish_card/wont_do_card call).",
+                    card.title, no_progress_count
+                );
+                tracing::warn!(
+                    card_id = %card_id,
+                    no_progress_count,
+                    "Blocking card after repeated no-progress completions"
+                );
+                let _ = state
+                    .db
+                    .update_card(
+                        &card_id,
+                        UpdateCard {
+                            blocked: Some(true),
+                            block_reason: Some(Some(reason.clone())),
+                            updated_at: Some(now),
+                            ..Default::default()
+                        },
+                    )
+                    .await;
+
+                let project_name = state
+                    .db
+                    .get_project(&project_id)
+                    .await
+                    .ok()
+                    .flatten()
+                    .map(|p| p.name)
+                    .unwrap_or_default();
+                crate::plugin::manager::notify(
+                    crate::plugin::hooks::WORKER_BLOCKED_HOOK,
+                    crate::plugin::notify::worker_blocked_payload(
+                        &card_id,
+                        &card.title,
+                        &project_id,
+                        &project_name,
+                        &reason,
+                    ),
+                );
+            }
         }
     }
 
@@ -1372,6 +1485,30 @@ pub async fn mark_project_resumed(db: &crate::db::Db, project_id: &str) -> anyho
         )
         .await?;
     }
+    Ok(())
+}
+
+/// Append a [`pipeline::PAUSE_CLEARED_KIND`] sentinel event to a single
+/// card's last worker session. Both [`pipeline::count_consecutive_crashes`]
+/// and [`pipeline::count_consecutive_no_progress`] treat this as a reset
+/// marker, so a card a human unblocks (`restart_card_worker`, or an
+/// explicit `blocked: false` PATCH) gets a fresh attempt budget instead of
+/// immediately re-tripping on the very next crash or no-progress
+/// completion. Cards that never had a worker assigned have no session to
+/// anchor against and are skipped -- they had nothing to reset anyway.
+pub async fn mark_card_unblocked(db: &crate::db::Db, card_id: &str) -> anyhow::Result<()> {
+    let Some(card) = db.get_card(card_id).await? else {
+        return Ok(());
+    };
+    let Some(session_id) = card.last_worker_session_id.as_ref() else {
+        return Ok(());
+    };
+    db.append_event(
+        session_id,
+        pipeline::PAUSE_CLEARED_KIND,
+        serde_json::json!({ "card_id": card.id }),
+    )
+    .await?;
     Ok(())
 }
 

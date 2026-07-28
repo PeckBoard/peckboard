@@ -81,10 +81,11 @@ impl Db {
     /// Lifecycle events across every session that has ever been assigned
     /// to this card, ordered oldest-first by wall-clock `ts` (per-session
     /// `seq` is monotonic only within a session so it can't order
-    /// cross-session events). Used by the auto-pause counter, which
-    /// recognizes three reset markers — `agent-end status=complete`,
-    /// `step-change`, and the resume sentinel `auto-pause-cleared`
-    /// (see `pipeline::PAUSE_CLEARED_KIND`).
+    /// cross-session events). Used by the auto-pause crash counter and the
+    /// no-progress counter, which recognize reset markers -- `agent-end
+    /// status=complete`, `step-change`, `handover`, and the resume sentinel
+    /// `auto-pause-cleared` (see `pipeline::PAUSE_CLEARED_KIND`) -- plus
+    /// `pipeline::NO_PROGRESS_KIND` for the no-progress counter itself.
     pub async fn card_lifecycle_events(
         &self,
         card_id: &str,
@@ -98,7 +99,9 @@ impl Db {
                 .filter(events::kind.eq_any([
                     "agent-end",
                     "step-change",
+                    "handover",
                     crate::worker::pipeline::PAUSE_CLEARED_KIND,
+                    crate::worker::pipeline::NO_PROGRESS_KIND,
                 ]))
                 .select(Event::as_select())
                 .order((events::ts.desc(), events::seq.desc()))
