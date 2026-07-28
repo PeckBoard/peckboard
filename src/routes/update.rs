@@ -3,7 +3,8 @@
 //! `GET /api/update/check` reports the running version and whether a newer
 //! release exists. `POST /api/update/apply` downloads + checksum-verifies the
 //! new binary, atomically swaps it in, sends its response, then re-execs into
-//! it. Both are behind `require_auth` (same bar as installing a plugin).
+//! it. Both replace the binary every user on this host runs and restart the
+//! server, so both are admin-only.
 
 use std::sync::Arc;
 
@@ -16,7 +17,7 @@ use axum::{
     routing::{get, post},
 };
 
-use crate::auth::middleware::require_auth;
+use crate::auth::middleware::{require_admin, require_auth};
 use crate::service::update;
 use crate::state::AppState;
 
@@ -24,6 +25,10 @@ pub fn router(state: Arc<AppState>) -> Router<Arc<AppState>> {
     Router::new()
         .route("/api/update/check", get(check_update))
         .route("/api/update/apply", post(apply_update))
+        // Layers run outer-to-inner, so `require_admin` is appended before
+        // `require_auth` and therefore executes after it has put `AuthUser`
+        // into the request extensions.
+        .route_layer(middleware::from_fn(require_admin))
         .route_layer(middleware::from_fn_with_state(state, require_auth))
 }
 

@@ -11,6 +11,11 @@
 //! - Pre-hatcher model: which model the pre-hatcher plugin researches on
 //!   (`{"model": ...}`; empty = auto, the provider's cheapest priced model),
 //!   read per turn by the `session.message.before` dispatch path.
+//!
+//! The surface is split in two: [`admin_router`] holds everything that reads
+//! or mutates host-wide state (the Claude permission gate, the approved-command
+//! list, the MCP server list and its program-spawning probe routes) and is
+//! admin-only; [`user_router`] holds the rest, open to any authenticated user.
 
 use axum::{
     Json, Router,
@@ -23,7 +28,7 @@ use axum::{
 use std::collections::HashSet;
 use std::sync::Arc;
 
-use crate::auth::middleware::require_auth;
+use crate::auth::middleware::{require_admin, require_auth};
 use crate::db::Db;
 use crate::service::mcp_server::user_servers;
 use crate::state::AppState;
@@ -61,17 +66,51 @@ const HIDDEN_PROVIDERS_KEY: &str = "hidden_providers";
 const CLAUDE_BYPASS_KEY: &str = "claude_bypass_permissions";
 
 pub fn router(state: Arc<AppState>) -> Router<Arc<AppState>> {
+    admin_router()
+        .merge(user_router())
+        .route_layer(middleware::from_fn_with_state(state, require_auth))
+}
+
+/// Settings that read or mutate **host-wide** state: the Claude permission
+/// gate (`--dangerously-skip-permissions` for every project and every user on
+/// this host), the persistent `run_command` approval list, and the global MCP
+/// server list — whose probe/check-command routes spawn a program named in the
+/// request body. None of that is partitioned per user, so an admin-created
+/// non-admin must not be able to reach it.
+///
+/// Layers run outer-to-inner on the request, so `require_admin` is appended
+/// here and `require_auth` in [`router`] afterwards, which puts `AuthUser`
+/// into the extensions before this middleware reads it.
+fn admin_router() -> Router<Arc<AppState>> {
     Router::new()
         .route("/api/settings/approved-commands", get(list_approved))
         .route(
             "/api/settings/approved-commands/{program}",
             delete(delete_approved),
         )
-        .route("/api/settings/caveman", get(get_caveman).put(set_caveman))
         .route(
             "/api/settings/claude-permissions",
             get(get_claude_permissions).put(set_claude_permissions),
         )
+        .route(
+            "/api/settings/mcp-servers",
+            get(get_mcp_servers).put(set_mcp_servers),
+        )
+        .route(
+            "/api/settings/mcp-servers/check-command",
+            post(check_mcp_command),
+        )
+        .route("/api/settings/mcp-servers/probe", post(probe_mcp_server))
+        .route_layer(middleware::from_fn(require_admin))
+}
+
+/// Settings any authenticated user may read and change. These are still
+/// host-wide values rather than per-user preferences (see
+/// `docs/auth-security.md`), but they only steer agent output style and model
+/// pickers — they can't loosen a security boundary or execute anything.
+fn user_router() -> Router<Arc<AppState>> {
+    Router::new()
+        .route("/api/settings/caveman", get(get_caveman).put(set_caveman))
         .route(
             "/api/settings/pre-hatcher",
             get(get_pre_hatcher).put(set_pre_hatcher),
@@ -82,16 +121,6 @@ pub fn router(state: Arc<AppState>) -> Router<Arc<AppState>> {
         )
         .route("/api/settings/providers", get(get_providers))
         .route("/api/settings/providers/{id}", put(set_provider_hidden))
-        .route(
-            "/api/settings/mcp-servers",
-            get(get_mcp_servers).put(set_mcp_servers),
-        )
-        .route(
-            "/api/settings/mcp-servers/check-command",
-            post(check_mcp_command),
-        )
-        .route("/api/settings/mcp-servers/probe", post(probe_mcp_server))
-        .route_layer(middleware::from_fn_with_state(state, require_auth))
 }
 
 /// GET /api/settings/caveman → `{"level":"off|lite|full"}` (default "off").

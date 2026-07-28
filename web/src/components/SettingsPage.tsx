@@ -85,8 +85,14 @@ type SubPage =
  * approvals, the registry) is its own sub-page; plugin settings are
  * edited on Plugin Settings (the Ollama and Cursor forms also appear
  * under Providers, same form either way).
+ *
+ * `adminOnly` sub-pages are hidden from non-admins because everything on
+ * them mutates host-wide state (the Claude permission gate, the approved
+ * command list, the global MCP server list, the binary itself). The
+ * routes behind them are admin-gated server-side — this only keeps the
+ * UI honest about what the API will accept.
  */
-const SUB_PAGES: { id: SubPage; title: string; blurb: string }[] = [
+const SUB_PAGES: { id: SubPage; title: string; blurb: string; adminOnly?: boolean }[] = [
   { id: 'appearance', title: 'Appearance', blurb: 'Theme, accent color and confirmations' },
   { id: 'chat', title: 'Chat', blurb: 'Caveman mode and the pre-hatcher model' },
   {
@@ -103,6 +109,7 @@ const SUB_PAGES: { id: SubPage; title: string; blurb: string }[] = [
     id: 'mcp',
     title: 'MCP Servers',
     blurb: 'External tool servers injected into agent sessions',
+    adminOnly: true,
   },
   {
     id: 'env',
@@ -133,6 +140,7 @@ const SUB_PAGES: { id: SubPage; title: string; blurb: string }[] = [
     id: 'server',
     title: 'Server',
     blurb: 'Ports, data directory, approved commands, software updates',
+    adminOnly: true,
   },
 ]
 
@@ -144,7 +152,13 @@ interface Props {
 
 export default function SettingsPage({ onBack, initialSubPage = null }: Props) {
   const user = useAuthStore((s) => s.user)
+  const isAdmin = user?.role === 'admin'
+  const visibleSubPages = SUB_PAGES.filter((p) => isAdmin || !p.adminOnly)
   const [subPage, setSubPage] = useState<SubPage | null>(initialSubPage)
+  // A non-admin must not land on — or stay on — an admin-only sub-page, even
+  // through the `initialSubPage` deep link. Everything below renders off
+  // `activeSubPage`, so an out-of-reach id falls back to the hub.
+  const activeSubPage = visibleSubPages.some((p) => p.id === subPage) ? subPage : null
   const [theme, setTheme] = useState<Theme>(getStoredTheme)
   const [hue, setHue] = useState<number>(getStoredHue)
   const skipBacklogConfirm = useUiStore((s) => s.skipBacklogConfirm)
@@ -184,13 +198,17 @@ export default function SettingsPage({ onBack, initialSubPage = null }: Props) {
   }, [])
 
   useEffect(() => {
+    // Admin-only route (it reads the host-wide permission gate), and the
+    // only consumer is the Server sub-page plus its nav badge — both hidden
+    // from non-admins.
+    if (!isAdmin) return
     authedFetch('/api/settings/claude-permissions')
       .then((res) => (res.ok ? res.json() : null))
       .then((data: { bypass?: boolean } | null) => {
         if (typeof data?.bypass === 'boolean') setClaudeBypass(data.bypass)
       })
       .catch(() => {})
-  }, [])
+  }, [isAdmin])
 
   useEffect(() => {
     fetchModels()
@@ -333,7 +351,7 @@ export default function SettingsPage({ onBack, initialSubPage = null }: Props) {
     }
   }
 
-  const current = SUB_PAGES.find((p) => p.id === subPage)
+  const current = visibleSubPages.find((p) => p.id === activeSubPage)
 
   return (
     <div className="settings-page" data-testid="settings-page">
@@ -341,14 +359,14 @@ export default function SettingsPage({ onBack, initialSubPage = null }: Props) {
         <button
           type="button"
           className="btn-secondary settings-back"
-          onClick={() => (subPage ? setSubPage(null) : onBack())}
+          onClick={() => (activeSubPage ? setSubPage(null) : onBack())}
         >
           ← Back
         </button>
         <h2>{current ? `Settings · ${current.title}` : 'Settings'}</h2>
       </div>
 
-      {subPage === null && (
+      {activeSubPage === null && (
         <>
           <section className="settings-section">
             <h3>User Info</h3>
@@ -367,7 +385,7 @@ export default function SettingsPage({ onBack, initialSubPage = null }: Props) {
           </section>
 
           <nav className="settings-nav" aria-label="Settings sections">
-            {SUB_PAGES.map((p) => (
+            {visibleSubPages.map((p) => (
               <button
                 key={p.id}
                 type="button"
@@ -393,7 +411,7 @@ export default function SettingsPage({ onBack, initialSubPage = null }: Props) {
         </>
       )}
 
-      {subPage === 'appearance' && (
+      {activeSubPage === 'appearance' && (
         <>
           <section className="settings-section">
             <h3>Theme</h3>
@@ -451,7 +469,7 @@ export default function SettingsPage({ onBack, initialSubPage = null }: Props) {
         </>
       )}
 
-      {subPage === 'chat' && (
+      {activeSubPage === 'chat' && (
         <>
           <section className="settings-section" data-testid="caveman-section">
             <h3>Caveman Mode</h3>
@@ -504,7 +522,7 @@ export default function SettingsPage({ onBack, initialSubPage = null }: Props) {
         </>
       )}
 
-      {subPage === 'providers' && (
+      {activeSubPage === 'providers' && (
         <>
           <section className="settings-section">
             <h3>Providers</h3>
@@ -603,7 +621,7 @@ export default function SettingsPage({ onBack, initialSubPage = null }: Props) {
         </>
       )}
 
-      {subPage === 'server' && (
+      {activeSubPage === 'server' && (
         <>
           <section className="settings-section">
             <h3>Server</h3>
@@ -711,15 +729,17 @@ export default function SettingsPage({ onBack, initialSubPage = null }: Props) {
         </>
       )}
 
-      {subPage === 'mcp' && <McpServersSection />}
-      {subPage === 'env' && <EnvVarsSection />}
-      {subPage === 'variables' && <AgentVarsSection />}
-      {subPage === 'plugins' && <PluginsSection onBrowseRegistry={() => setSubPage('registry')} />}
-      {subPage === 'plugin-settings' && <PluginSettingsSection />}
-      {subPage === 'registry' && (
+      {activeSubPage === 'mcp' && <McpServersSection />}
+      {activeSubPage === 'env' && <EnvVarsSection />}
+      {activeSubPage === 'variables' && <AgentVarsSection />}
+      {activeSubPage === 'plugins' && (
+        <PluginsSection onBrowseRegistry={() => setSubPage('registry')} />
+      )}
+      {activeSubPage === 'plugin-settings' && <PluginSettingsSection />}
+      {activeSubPage === 'registry' && (
         <PluginRegistryPanel onManagePlugins={() => setSubPage('plugins')} />
       )}
-      {subPage === 'prompts' && <SystemPromptsSection />}
+      {activeSubPage === 'prompts' && <SystemPromptsSection />}
     </div>
   )
 }
