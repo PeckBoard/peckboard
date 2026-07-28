@@ -355,6 +355,10 @@
   margin: 0 auto;
   /* Room for the margin pin without it hanging over the scroll gutter. */
   padding-left: var(--space-5);
+  /* A path, an id or any other unbroken token has no break point of its
+     own: without this it runs under the right edge of the pane, where at
+     390px it is simply unreadable (the pane scrolls vertically only). */
+  overflow-wrap: anywhere;
 }
 
 /* ─── Anchored blocks ───
@@ -404,6 +408,26 @@
 .review-block--table {
   width: max-content;
   max-width: 100%;
+}
+
+/* A markdown table's columns don't fold, so at a phone's width the last one
+   is cut off with no way to reach it. The TABLE takes the sideways scroll,
+   not the block: the block is the annotation target and carries the margin
+   pin in its left gutter, which a scroll container here would clip. */
+.review-block--table > table {
+  display: block;
+  width: max-content;
+  max-width: 100%;
+  overflow-x: auto;
+  overscroll-behavior-x: contain;
+}
+
+/* Cells wrap at word boundaries again — the body's `anywhere` folded
+   "Rotation" into "Rotat / ion" to squeeze the table into 390px. With the
+   scroll above there is somewhere for the extra width to go. */
+.review-block--table th,
+.review-block--table td {
+  overflow-wrap: normal;
 }
 
 .review-block--active {

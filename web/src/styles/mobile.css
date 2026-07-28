@@ -1439,18 +1439,21 @@
 @media (hover: none) {
   .review-block:hover {
     background: transparent;
+  }
 
-    /* Same for the bar: a tapped tab kept its wash and read as the open
-     panel long after its sheet had been dismissed. */
-    .review-mobile-bar__tab:hover {
-      background: none;
-      color: var(--text2);
-    }
+  /* Same for the bar: a tapped tab kept its wash and read as the open
+     panel long after its sheet had been dismissed. These are siblings of
+     the rule above, not children of it — nested inside `.review-block:hover`
+     they compiled to `.review-block:hover .review-mobile-bar__tab:hover`,
+     which never matches, and the stuck wash was still there. */
+  .review-mobile-bar__tab:hover {
+    background: none;
+    color: var(--text2);
+  }
 
-    .review-mobile-bar__tab--active:hover {
-      background: var(--accent-subtle);
-      color: var(--accent-hover);
-    }
+  .review-mobile-bar__tab--active:hover {
+    background: var(--accent-subtle);
+    color: var(--accent-hover);
   }
 }
 
@@ -1561,6 +1564,16 @@
 
   .review-view .review-ask__actions > button {
     min-height: 40px;
+  }
+  /* Edit/Delete on an annotation and View/Revert on a version are the only
+     way to reach those actions on a phone, and at 22px tall they were under
+     both WCAG 2.5.8's floor and the 44px every other control on this screen
+     uses. The sheets portal to <body>, so they need their own selector. */
+  .review-view .review-annotation__action,
+  .modal.review-sheet .review-annotation__action {
+    min-height: 44px;
+    padding-left: var(--space-3);
+    padding-right: var(--space-3);
   }
 
   /* Four chips per row: let them sit under the title instead of squeezing

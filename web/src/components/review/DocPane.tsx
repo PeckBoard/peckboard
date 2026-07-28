@@ -1,4 +1,12 @@
-import { useEffect, useMemo, useRef, type ElementType, type ReactNode } from 'react'
+import {
+  createContext,
+  useContext,
+  useEffect,
+  useMemo,
+  useRef,
+  type ElementType,
+  type ReactNode,
+} from 'react'
 import type { Components } from 'react-markdown'
 
 import SafeMarkdown from '../SafeMarkdown'
@@ -81,8 +89,36 @@ function toneFor(hits: DocReviewComment[]): string | null {
   return 'review-block--answered'
 }
 
+/** The block's prose, without the margin pin that lives inside it.
+ *  `textContent` on an already-annotated block starts with the pin's count,
+ *  so a second annotation on the same passage was quoted as "2Revised: …". */
+function blockText(block: HTMLElement): string {
+  let out = ''
+  for (const node of Array.from(block.childNodes)) {
+    if (node instanceof HTMLElement && node.classList.contains('review-block__pin')) continue
+    out += node.textContent ?? ''
+  }
+  return out
+}
+
 function prefersReducedMotion(): boolean {
   return window.matchMedia?.('(prefers-reduced-motion: reduce)').matches ?? false
+}
+
+/** True inside another anchored block. A blockquote holds a paragraph, and a
+ *  loose list item holds one too, so mdast gives BOTH their own position:
+ *  without this the inner one wore its own tint, its own outline and its own
+ *  margin pin — one annotation drawn twice, and two tab stops over the same
+ *  words. The inner block keeps its line attributes (a click there still
+ *  resolves to the right range) and drops every decoration. */
+const InsideBlock = createContext(false)
+
+/** Reads the nesting flag for one block and re-provides it for that block's
+ *  children. A component rather than a bare `useContext` call so the hook
+ *  has somewhere legal to live. */
+function AnchoredBlock({ render }: { render: (nested: boolean) => ReactNode }) {
+  const nested = useContext(InsideBlock)
+  return <InsideBlock.Provider value={true}>{render(nested)}</InsideBlock.Provider>
 }
 
 /**
@@ -108,7 +144,11 @@ export default function DocPane({
   const lastTouchAt = useRef(0)
 
   const components = useMemo<Components>(() => {
-    const renderBlock = (tag: string, { node, children, className }: BlockProps) => {
+    const renderBlock = (
+      tag: string,
+      { node, children, className }: BlockProps,
+      nested: boolean,
+    ) => {
       const range = positionOf(node)
       const hits = range
         ? comments.filter((c) => c.start_line <= range.end && c.end_line >= range.start)
@@ -121,9 +161,12 @@ export default function DocPane({
         className: [
           className,
           'review-block',
-          toneFor(hits),
-          active && 'review-block--active',
-          focused && 'review-block--focus',
+          // A block inside another anchored block is the same passage said
+          // twice: it stays clickable, but the tint, the outline and the tab
+          // stop belong to the outermost one only.
+          !nested && toneFor(hits),
+          !nested && active && 'review-block--active',
+          !nested && focused && 'review-block--focus',
         ]
           .filter(Boolean)
           .join(' '),
@@ -131,10 +174,10 @@ export default function DocPane({
         'data-line-start': range?.start,
         'data-line-end': range?.end,
         // container turns Enter/Space into the same open as a click.
-        tabIndex: range ? 0 : undefined,
+        tabIndex: range && !nested ? 0 : undefined,
       }
       const pin =
-        hits.length > 0 ? (
+        hits.length > 0 && !nested ? (
           <button
             type="button"
             className="review-block__pin"
@@ -172,8 +215,11 @@ export default function DocPane({
     }
 
     const map: Record<string, (props: BlockProps) => ReactNode> = {}
-    for (const tag of BLOCK_TAGS) map[tag] = (props) => renderBlock(tag, props)
-    map.table = (props) => renderBlock('table', props)
+    for (const tag of BLOCK_TAGS)
+      map[tag] = (props) => <AnchoredBlock render={(nested) => renderBlock(tag, props, nested)} />
+    map.table = (props) => (
+      <AnchoredBlock render={(nested) => renderBlock('table', props, nested)} />
+    )
     return map as Components
   }, [comments, activeCommentId, focusLines, onSelectComment])
 
@@ -249,11 +295,7 @@ export default function DocPane({
             ? selection.toString()
             : ''
           : ''
-      openFor(
-        block,
-        picked.trim() ? picked : (block.textContent ?? ''),
-        block.getBoundingClientRect(),
-      )
+      openFor(block, picked.trim() ? picked : blockText(block), block.getBoundingClientRect())
     }, LONG_PRESS_MS)
   }
 
@@ -284,7 +326,7 @@ export default function DocPane({
     }
     const block = (e.target as HTMLElement | null)?.closest<HTMLElement>('[data-line-start]')
     if (!block || !root.contains(block)) return
-    openFor(block, block.textContent ?? '', block.getBoundingClientRect())
+    openFor(block, blockText(block), block.getBoundingClientRect())
   }
 
   const onKeyDown = (e: React.KeyboardEvent<HTMLDivElement>) => {
@@ -295,7 +337,7 @@ export default function DocPane({
     const block = target?.closest<HTMLElement>('[data-line-start]')
     if (!block) return
     e.preventDefault()
-    openFor(block, block.textContent ?? '', block.getBoundingClientRect())
+    openFor(block, blockText(block), block.getBoundingClientRect())
   }
 
   return (
