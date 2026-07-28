@@ -76,11 +76,11 @@ fn auth_user(req: &Request<Body>) -> &AuthUser {
 
 fn validate_item_type(s: &str) -> Result<(), (StatusCode, Json<serde_json::Value>)> {
     match s {
-        "session" | "project" | "report" | "repeating_task" => Ok(()),
+        "session" | "project" | "report" | "repeating_task" | "doc_review" => Ok(()),
         _ => Err((
             StatusCode::BAD_REQUEST,
             Json(serde_json::json!({
-                "error": "item_type must be 'session', 'project', 'report', or 'repeating_task'"
+                "error": "item_type must be 'session', 'project', 'report', 'repeating_task', or 'doc_review'"
             })),
         )),
     }
@@ -171,6 +171,18 @@ async fn list_tabs(State(state): State<Arc<AppState>>, req: Request<Body>) -> im
                     .ok()
                     .flatten()
                     .map(|task| task.name),
+                false,
+                false,
+                false,
+            ),
+            "doc_review" => (
+                state
+                    .db
+                    .get_doc_review(&t.item_id)
+                    .await
+                    .ok()
+                    .flatten()
+                    .map(|r| r.title),
                 false,
                 false,
                 false,
@@ -289,6 +301,19 @@ async fn upsert_tab(State(state): State<Arc<AppState>>, req: Request<Body>) -> i
                         .ok()
                         .flatten()
                         .map(|task| task.name)
+                        .unwrap_or_default(),
+                    false,
+                    false,
+                    false,
+                ),
+                "doc_review" => (
+                    state
+                        .db
+                        .get_doc_review(&tab.item_id)
+                        .await
+                        .ok()
+                        .flatten()
+                        .map(|r| r.title)
                         .unwrap_or_default(),
                     false,
                     false,

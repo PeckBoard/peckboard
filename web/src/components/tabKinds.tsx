@@ -102,6 +102,28 @@ const repeatingTaskIcon: ReactNode = (
     </svg>
   </span>
 )
+// Document Review: a page with a pen over it. Deliberately distinct from
+// the plain-page report glyph above — the two kinds sit next to each other
+// in the strip and the rail.
+const docReviewIcon: ReactNode = (
+  <span className="tab-icon tab-icon-doc-review" aria-hidden="true">
+    <svg
+      width="14"
+      height="14"
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="2"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+    >
+      <path d="M14 3H6a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h5" />
+      <polyline points="14 3 14 9 20 9" />
+      <line x1="8" y1="13" x2="12" y2="13" />
+      <path d="M18.5 13.5 21 16l-4.5 4.5H14v-2.5z" />
+    </svg>
+  </span>
+)
 
 // Temp-session marker: an hourglass on the chip warns that closing this
 // tab deletes the session (server-side, on last-tab-close).
@@ -129,6 +151,7 @@ export const tabIcons = {
   project: projectIcon,
   report: reportIcon,
   repeating_task: repeatingTaskIcon,
+  doc_review: docReviewIcon,
   tempSession: tempSessionIcon,
 }
 
@@ -140,6 +163,7 @@ export const tabDefaultLabel: Record<TabType, string> = {
   project: 'Project',
   report: 'Report',
   repeating_task: 'Task',
+  doc_review: 'Review',
 }
 
 /** Compose the encoded item_id for a report tab. The server splits this

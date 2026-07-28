@@ -19,6 +19,21 @@ impl Db {
         .await
     }
 
+    /// Every plan, most recently updated first. Feeds the pickers that let
+    /// a user choose an existing plan (e.g. the Document Review wizard's
+    /// `plan` source kind) — the other accessors all need a card/session
+    /// context the picker doesn't have.
+    pub async fn list_plans(&self) -> anyhow::Result<Vec<Plan>> {
+        self.with_conn(move |conn| {
+            plans::table
+                .order(plans::updated_at.desc())
+                .select(Plan::as_select())
+                .load(conn)
+                .map_err(Into::into)
+        })
+        .await
+    }
+
     /// Latest plan authored by a session (newest first).
     pub async fn get_plan_for_session(&self, session_id: &str) -> anyhow::Result<Option<Plan>> {
         let session_id = session_id.to_string();

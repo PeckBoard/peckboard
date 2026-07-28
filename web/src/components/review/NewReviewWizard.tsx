@@ -1,0 +1,464 @@
+import { useEffect, useMemo, useState, type ReactNode } from 'react'
+
+import Modal from '../Modal'
+import SafeMarkdown from '../SafeMarkdown'
+import FieldError from '../FieldError'
+import { MenuButton, type MenuItem } from '../Dropdown'
+import { authedFetch } from '../../store/auth'
+import { useFoldersStore } from '../../store/folders'
+import { describeActionError } from '../../utils/actionError'
+import {
+  createReview,
+  fileSourceRef,
+  listMarkdownFiles,
+  readMarkdownFile,
+  type DocReview,
+  type ReviewSourceKind,
+} from '../../lib/review'
+import './Review.css'
+
+interface Props {
+  onClose: () => void
+  onCreated: (review: DocReview) => void
+}
+
+/** One pickable document, normalised across the three source kinds. */
+interface Candidate {
+  /** `source_ref` sent to POST /api/doc-reviews. */
+  ref: string
+  /** Primary line in the picker and the default review title. */
+  label: string
+  /** Muted second line — the path / date / status that disambiguates. */
+  detail: string
+  /** Plans already carry their markdown, so their preview needs no fetch. */
+  markdown?: string
+}
+
+const SOURCE_KINDS: {
+  kind: ReviewSourceKind
+  label: string
+  blurb: string
+  icon: ReactNode
+}[] = [
+  {
+    kind: 'file',
+    label: 'File',
+    blurb: 'A markdown file inside one of your folders.',
+    icon: <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z" />,
+  },
+  {
+    kind: 'report',
+    label: 'Report',
+    blurb: 'A report an agent wrote for you.',
+    icon: (
+      <>
+        <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" />
+        <polyline points="14 2 14 8 20 8" />
+        <line x1="16" y1="13" x2="8" y2="13" />
+        <line x1="16" y1="17" x2="8" y2="17" />
+      </>
+    ),
+  },
+  {
+    kind: 'plan',
+    label: 'Plan',
+    blurb: 'A plan a session proposed.',
+    icon: (
+      <>
+        <polyline points="9 11 12 14 20 6" />
+        <path d="M20 12v7a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h9" />
+      </>
+    ),
+  },
+]
+
+const PICKER_LABEL: Record<ReviewSourceKind, string> = {
+  file: 'Document',
+  report: 'Report',
+  plan: 'Plan',
+}
+
+interface ReportRow {
+  folder: string
+  file: string
+  title: string
+  date: string
+}
+
+interface PlanRow {
+  id: string
+  title: string
+  status: string
+  version: number
+  markdown: string
+}
+
+/** Fetch the pickable set for one (kind, folder) pair. Module-level so the
+ *  effect that calls it stays a plain promise chain. */
+async function loadCandidates(kind: ReviewSourceKind, folderId: string): Promise<Candidate[]> {
+  if (kind === 'file') {
+    if (!folderId) return []
+    const files = await listMarkdownFiles(folderId)
+    return files.map((f) => ({
+      ref: fileSourceRef(folderId, f.path),
+      label: f.path.split('/').pop() ?? f.path,
+      detail: f.path,
+    }))
+  }
+  if (kind === 'report') {
+    const res = await authedFetch('/api/reports')
+    if (!res.ok) throw new Error(`HTTP ${res.status}`)
+    const data = (await res.json()) as { reports: ReportRow[] }
+    return data.reports.map((r) => ({
+      ref: `${r.folder}/${r.file}`,
+      label: r.title || r.file,
+      detail: `${r.folder} · ${r.file}`,
+    }))
+  }
+  const res = await authedFetch('/api/plans')
+  if (!res.ok) throw new Error(`HTTP ${res.status}`)
+  const data = (await res.json()) as { plans: PlanRow[] }
+  return data.plans.map((p) => ({
+    ref: p.id,
+    label: p.title,
+    detail: `${p.status} · v${p.version}`,
+    markdown: p.markdown,
+  }))
+}
+
+/** Read the document behind a pick, for the preview pane. Only called for
+ *  kinds whose candidates don't already carry their markdown. */
+async function loadPreview(kind: ReviewSourceKind, ref: string): Promise<string> {
+  if (kind === 'file') {
+    // `<folder_id>:<relative/path.md>` — the path may itself contain ':'.
+    const [folderId, ...rest] = ref.split(':')
+    return readMarkdownFile(folderId, rest.join(':'))
+  }
+  const [folder, file] = ref.split('/')
+  const res = await authedFetch(
+    `/api/reports/${encodeURIComponent(folder)}/${encodeURIComponent(file)}`,
+  )
+  if (!res.ok) throw new Error(`HTTP ${res.status}`)
+  return ((await res.json()) as { body: string }).body
+}
+
+/**
+ * Two-step creation flow for a document review: pick where the document
+ * comes from, then pick the document itself and confirm its title.
+ *
+ * Every pickable set is a searchable combobox rather than a text field — a
+ * markdown tree, the report archive, and the plan list are all known option
+ * sets, and typing a path by hand is how you end up with a review pointed at
+ * a document that doesn't exist. The only free-form input is the title,
+ * which is genuinely the user's own words.
+ */
+export default function NewReviewWizard({ onClose, onCreated }: Props) {
+  const folders = useFoldersStore((s) => s.folders)
+  const fetchFolders = useFoldersStore((s) => s.fetchFolders)
+
+  const [step, setStep] = useState<1 | 2>(1)
+  const [kind, setKind] = useState<ReviewSourceKind>('file')
+  const [chosenFolderId, setChosenFolderId] = useState('')
+  // `null` while the option set is in flight — the picker shows "Loading…".
+  const [candidates, setCandidates] = useState<Candidate[] | null>(null)
+  const [candidatesError, setCandidatesError] = useState<string | null>(null)
+  const [picked, setPicked] = useState<Candidate | null>(null)
+  const [title, setTitle] = useState('')
+  const [preview, setPreview] = useState<string | null>(null)
+  const [previewError, setPreviewError] = useState<string | null>(null)
+  const [submitting, setSubmitting] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+
+  useEffect(() => {
+    void fetchFolders()
+  }, [fetchFolders])
+
+  // Derived rather than stored: the `file` kind needs *a* folder the moment
+  // step 2 opens, and the first one is as good a default as any.
+  const folderId = chosenFolderId || folders[0]?.id || ''
+  const pickerLabel = PICKER_LABEL[kind]
+
+  /** Clear everything downstream of the option set — called whenever the
+   *  set itself changes, so a stale pick can't survive into a new list. */
+  const resetPick = () => {
+    setCandidates(null)
+    setCandidatesError(null)
+    setPicked(null)
+    setPreview(null)
+    setPreviewError(null)
+  }
+
+  // Load the option set for the current (kind, folder) pair.
+  useEffect(() => {
+    if (step !== 2) return
+    let cancelled = false
+    void loadCandidates(kind, folderId)
+      .then((cs) => {
+        if (cancelled) return
+        setCandidates(cs)
+        setCandidatesError(null)
+      })
+      .catch((e: unknown) => {
+        if (cancelled) return
+        setCandidates([])
+        setCandidatesError(describeActionError(e, "Couldn't load the documents to choose from."))
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [step, kind, folderId])
+
+  // Read the picked document for the preview pane. Plans arrive with their
+  // markdown already attached, so they never reach this.
+  useEffect(() => {
+    if (!picked || picked.markdown !== undefined) return
+    let cancelled = false
+    void loadPreview(kind, picked.ref)
+      .then((markdown) => {
+        if (cancelled) return
+        setPreview(markdown)
+        setPreviewError(null)
+      })
+      .catch((e: unknown) => {
+        if (cancelled) return
+        setPreview(null)
+        setPreviewError(describeActionError(e, "Couldn't read that document."))
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [picked, kind])
+
+  const pickerItems: MenuItem[] = useMemo(
+    () =>
+      (candidates ?? []).map((c) => ({
+        label: c.label,
+        description: c.detail,
+        searchText: `${c.detail} ${c.ref}`,
+        active: picked?.ref === c.ref,
+        onSelect: () => {
+          setPicked(c)
+          setTitle(c.label.replace(/\.md$/i, ''))
+          // Plans carry their body; everything else waits on the effect.
+          setPreview(c.markdown ?? null)
+          setPreviewError(null)
+        },
+      })),
+    [candidates, picked],
+  )
+
+  // Why Create is disabled, stated next to the button — a disabled control
+  // with no reason reads as broken.
+  const disabledReason =
+    kind === 'file' && !folderId
+      ? 'Add a folder first'
+      : !picked
+        ? `Pick a ${pickerLabel.toLowerCase()}`
+        : !title.trim()
+          ? 'Give the review a title'
+          : null
+
+  const submit = async () => {
+    if (!picked || disabledReason) return
+    setSubmitting(true)
+    setError(null)
+    try {
+      const detail = await createReview({
+        source_kind: kind,
+        source_ref: picked.ref,
+        title: title.trim(),
+        ...(kind === 'file' ? { folder_id: folderId } : {}),
+      })
+      onCreated(detail.review)
+    } catch (e) {
+      setError(describeActionError(e, "Couldn't create the review. Please try again."))
+    } finally {
+      setSubmitting(false)
+    }
+  }
+
+  return (
+    <Modal onClose={onClose} maxWidth={760} data-testid="review-wizard" className="review-wizard">
+      <h2>New Review</h2>
+
+      {step === 1 ? (
+        <>
+          <p className="form-hint review-wizard__lead">
+            What are we reviewing? You can annotate it, run as many AI passes as you like, and
+            nothing is written back to the document until you apply.
+          </p>
+          <div
+            className="review-wizard__kinds"
+            data-testid="review-wizard-source-kind"
+            role="radiogroup"
+            aria-label="Source kind"
+          >
+            {SOURCE_KINDS.map((s) => (
+              <button
+                key={s.kind}
+                type="button"
+                role="radio"
+                aria-checked={kind === s.kind}
+                data-testid={`review-wizard-kind-${s.kind}`}
+                className={`review-wizard__kind${
+                  kind === s.kind ? ' review-wizard__kind--active' : ''
+                }`}
+                onClick={() => {
+                  setKind(s.kind)
+                  resetPick()
+                }}
+              >
+                <svg
+                  width="22"
+                  height="22"
+                  viewBox="0 0 24 24"
+                  fill="none"
+                  stroke="currentColor"
+                  strokeWidth="2"
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                  aria-hidden="true"
+                >
+                  {s.icon}
+                </svg>
+                <span className="review-wizard__kind-label">{s.label}</span>
+                <span className="review-wizard__kind-blurb">{s.blurb}</span>
+              </button>
+            ))}
+          </div>
+          <div className="form-actions">
+            <button type="button" className="btn-secondary" onClick={onClose}>
+              Cancel
+            </button>
+            <button
+              type="button"
+              className="btn-primary"
+              data-testid="review-wizard-next"
+              onClick={() => setStep(2)}
+            >
+              Next
+            </button>
+          </div>
+        </>
+      ) : (
+        <>
+          <div className="review-wizard__body">
+            <div className="review-wizard__form">
+              {kind === 'file' && (
+                <div className="form-field">
+                  <label className="form-label" htmlFor="review-wizard-folder">
+                    Folder
+                  </label>
+                  {folders.length > 0 ? (
+                    <select
+                      id="review-wizard-folder"
+                      className="form-input"
+                      data-testid="review-wizard-folder"
+                      value={folderId}
+                      onChange={(e) => {
+                        setChosenFolderId(e.target.value)
+                        resetPick()
+                      }}
+                    >
+                      {folders.map((f) => (
+                        <option key={f.id} value={f.id}>
+                          {f.name} — {f.path}
+                        </option>
+                      ))}
+                    </select>
+                  ) : (
+                    <p className="form-hint">
+                      No folders yet. Add one from the Folders page, then come back.
+                    </p>
+                  )}
+                </div>
+              )}
+
+              <div className="form-field">
+                <label className="form-label" htmlFor="review-wizard-file">
+                  {pickerLabel}
+                </label>
+                <MenuButton
+                  id="review-wizard-file"
+                  testId="review-wizard-file"
+                  searchTestId="review-wizard-file-search"
+                  items={pickerItems}
+                  searchable
+                  haspopup="listbox"
+                  matchTriggerWidth
+                  align="left"
+                  ariaLabel={`Choose a ${pickerLabel.toLowerCase()}`}
+                  listLabel={`${pickerLabel} options`}
+                  searchPlaceholder={`Search ${pickerLabel.toLowerCase()}s…`}
+                  emptyLabel={
+                    candidates === null ? 'Loading…' : `No ${pickerLabel.toLowerCase()}s found`
+                  }
+                  triggerClassName="form-input review-wizard__picker"
+                >
+                  <span className="review-wizard__picker-value">
+                    {picked ? picked.label : `Select a ${pickerLabel.toLowerCase()}…`}
+                  </span>
+                  {picked && <span className="review-wizard__picker-detail">{picked.detail}</span>}
+                </MenuButton>
+                <FieldError
+                  message={candidatesError ?? undefined}
+                  testId="review-wizard-list-error"
+                />
+              </div>
+
+              <div className="form-field">
+                <label className="form-label" htmlFor="review-wizard-title">
+                  Title
+                </label>
+                <input
+                  id="review-wizard-title"
+                  className="form-input"
+                  data-testid="review-wizard-title"
+                  value={title}
+                  onChange={(e) => setTitle(e.target.value)}
+                  placeholder="Name this review"
+                />
+                <p className="form-hint">Defaults to the document&apos;s own name.</p>
+              </div>
+            </div>
+
+            <div className="review-wizard__preview" data-testid="review-wizard-preview">
+              {previewError ? (
+                <p className="form-error">{previewError}</p>
+              ) : preview !== null ? (
+                <SafeMarkdown>{preview}</SafeMarkdown>
+              ) : picked ? (
+                <p className="review-wizard__preview-empty">Loading preview…</p>
+              ) : (
+                <p className="review-wizard__preview-empty">
+                  Pick a {pickerLabel.toLowerCase()} to preview it here.
+                </p>
+              )}
+            </div>
+          </div>
+
+          {error && <p className="form-error">{error}</p>}
+          <div className="form-actions">
+            <button type="button" className="btn-secondary" onClick={() => setStep(1)}>
+              Back
+            </button>
+            {!submitting && disabledReason && (
+              <span className="form-actions-reason" data-testid="review-wizard-disabled-reason">
+                {disabledReason}
+              </span>
+            )}
+            <button
+              type="button"
+              className="btn-primary"
+              data-testid="review-wizard-create"
+              disabled={submitting || !!disabledReason}
+              onClick={() => void submit()}
+            >
+              {submitting ? 'Creating…' : 'Create review'}
+            </button>
+          </div>
+        </>
+      )}
+    </Modal>
+  )
+}

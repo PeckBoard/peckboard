@@ -55,6 +55,10 @@ struct PlanQuery {
 
 /// GET /api/plans?card_id=X | ?session_id=Y → the latest plan for that
 /// context, or 204 No Content when none exists (so the menu item disables).
+///
+/// With neither parameter it lists every plan as `{ "plans": [...] }` — the
+/// shape a picker needs (the Document Review wizard's `plan` source kind
+/// chooses from all plans, with no card or session to key off).
 async fn get_plan_by_context(
     State(state): State<Arc<AppState>>,
     Query(q): Query<PlanQuery>,
@@ -64,10 +68,10 @@ async fn get_plan_by_context(
     } else if let Some(session_id) = q.session_id.as_deref() {
         state.db.get_plan_for_session(session_id).await
     } else {
-        return Err(err(
-            StatusCode::BAD_REQUEST,
-            "provide card_id or session_id",
-        ));
+        return match state.db.list_plans().await {
+            Ok(plans) => Ok(Json(serde_json::json!({ "plans": plans })).into_response()),
+            Err(e) => Err(err(StatusCode::INTERNAL_SERVER_ERROR, e)),
+        };
     };
     match plan {
         Ok(Some(p)) => Ok(Json(serde_json::json!({ "plan": p })).into_response()),

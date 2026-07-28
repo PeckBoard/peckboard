@@ -6,6 +6,8 @@ interface ListViewHeaderProps {
   actionLabel?: ReactNode
   /** Handler for the primary action; required to render the button. */
   onAction?: () => void
+  /** Stable hook for Playwright on the primary action button. */
+  actionTestId?: string
   /** Extra control nodes rendered to the right of the title — e.g. a
    *  filter toggle or a secondary button. Render to the LEFT of the
    *  primary action button. */
@@ -26,6 +28,7 @@ export default function ListViewHeader({
   title,
   actionLabel,
   onAction,
+  actionTestId,
   extras,
 }: ListViewHeaderProps) {
   return (
@@ -35,7 +38,7 @@ export default function ListViewHeader({
       <h1 className="list-view-title">{title}</h1>
       {extras}
       {actionLabel && onAction && (
-        <button className="list-view-action" onClick={onAction}>
+        <button className="list-view-action" onClick={onAction} data-testid={actionTestId}>
           {actionLabel}
         </button>
       )}

@@ -1,7 +1,7 @@
 import { create } from 'zustand'
 import { authedFetch } from './auth'
 
-export type TabType = 'session' | 'project' | 'report' | 'repeating_task'
+export type TabType = 'session' | 'project' | 'report' | 'repeating_task' | 'doc_review'
 
 export interface Tab {
   itemType: TabType

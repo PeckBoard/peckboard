@@ -28,6 +28,8 @@ import RenameModal from './components/RenameModal'
 import ReportBrowser from './components/ReportBrowser'
 import ReportView from './components/ReportView'
 import PlanView from './components/PlanView'
+import ReviewListView from './components/review/ReviewListView'
+import ReviewView from './components/review/ReviewView'
 import RepeatingTasksView from './components/RepeatingTasksView'
 import UsageDashboard from './components/UsageDashboard'
 import UserManagement from './components/UserManagement'
@@ -60,6 +62,7 @@ type View =
   | 'settings'
   | 'pluginPage'
   | 'plan'
+  | 'docReview'
 
 /** A UI page a loaded plugin contributes, surfaced as a user-menu link.
  * Generic: the host renders whatever panels a plugin declares (from the
@@ -164,6 +167,9 @@ function parseRoute(): {
     }
     case 'plan':
       return { view: 'plan', activeId: id, sub: 'chat' }
+    case 'review':
+      // `/review` — the index; `/review/<id>` — one document review.
+      return { view: 'docReview', activeId: id, sub: 'chat' }
     case 'users':
       return { view: 'users', activeId: null, sub: 'chat' }
     case 'plugin-page':
@@ -189,6 +195,11 @@ function buildPath(view: View, activeId?: string | null, sub?: SessionSub): stri
     sub.startsWith('plugin:')
   ) {
     return `/${view}/${activeId}/plugin/${sub.slice('plugin:'.length)}`
+  }
+  if (view === 'docReview') {
+    // The route segment is `review`; the View value is camelCase, so this
+    // can't fall through to the generic `/${view}/...` branch below.
+    return activeId ? `/review/${activeId}` : '/review'
   }
   if (view === 'repeatingTasks') {
     return activeId ? `/repeating-tasks/${activeId}` : '/repeating-tasks'
@@ -344,6 +355,11 @@ function App() {
   const [activePlanId, setActivePlanId] = useState<string | null>(
     initialRoute.view === 'plan' ? initialRoute.activeId : null,
   )
+  // Id of the document review open in the full-page screen — null on the
+  // `/review` index. Same reason as `activePlanId` for holding it in state.
+  const [activeReviewId, setActiveReviewId] = useState<string | null>(
+    initialRoute.view === 'docReview' ? initialRoute.activeId : null,
+  )
   // Plugin-contributed full-page entries for the project / session pages.
   const [projectItems, setProjectItems] = useState<SidebarItem[]>([])
   const [sessionItems, setSessionItems] = useState<SidebarItem[]>([])
@@ -462,6 +478,8 @@ function App() {
         setActivePluginPageId(route.activeId)
       } else if (route.view === 'plan') {
         setActivePlanId(route.activeId)
+      } else if (route.view === 'docReview') {
+        setActiveReviewId(route.activeId)
       }
     }
     window.addEventListener('popstate', onPopState)
@@ -507,6 +525,16 @@ function App() {
       }
     }
   }, [view, activeReportId])
+
+  // When the active document review changes, update URL.
+  useEffect(() => {
+    if (view === 'docReview') {
+      const path = buildPath('docReview', activeReviewId)
+      if (window.location.pathname !== path) {
+        history.pushState(null, '', path)
+      }
+    }
+  }, [view, activeReviewId])
 
   // Track the on-screen keyboard via `visualViewport` and shrink the app
   // to the visible region so the top of the UI doesn't scroll off when
@@ -1011,11 +1039,32 @@ function App() {
     // at the top, which is enough for the strip.
     getMenuItems: () => [],
   }
+  const docReviewKind: TabKindHandler = {
+    isActive: (tab) => view === 'docReview' && activeReviewId === tab.itemId,
+    // Reviews are renamed only at creation time, so the server-
+    // denormalized `tab.name` (the review title) is authoritative.
+    getLiveName: () => null,
+    getBadges: () => ({ running: false, unread: false }),
+    getIcon: () => tabIcons.doc_review,
+    onActivate: (tab) => {
+      setActiveReviewId(tab.itemId)
+      navigate('docReview', tab.itemId)
+    },
+    onClose: (tab) => {
+      if (activeReviewId !== tab.itemId) return
+      setActiveReviewId(null)
+      if (view === 'docReview') navigate('docReview', null)
+    },
+    // Deleting a review is a list-page action (it throws away every
+    // version and annotation), so the strip menu stays at "Close tab".
+    getMenuItems: () => [],
+  }
   const tabKindRegistry: TabKindRegistry = {
     session: sessionKind,
     project: projectKind,
     repeating_task: repeatingTaskKind,
     report: reportKind,
+    doc_review: docReviewKind,
   }
 
   const confirmDeleteRepeatingTask = async () => {
@@ -1151,6 +1200,32 @@ function App() {
               <line x1="16" y1="13" x2="8" y2="13" />
               <line x1="16" y1="17" x2="8" y2="17" />
               <polyline points="10 9 9 9 8 9" />
+            </svg>
+          </button>
+          <button
+            className={`rail-btn ${view === 'docReview' ? 'active' : ''}`}
+            onClick={() => {
+              setActiveReviewId(null)
+              navigate('docReview', null)
+            }}
+            title="Review"
+            aria-label="Review"
+            data-testid="review-nav"
+          >
+            <svg
+              width="18"
+              height="18"
+              viewBox="0 0 24 24"
+              fill="none"
+              stroke="currentColor"
+              strokeWidth="2"
+              strokeLinecap="round"
+              strokeLinejoin="round"
+            >
+              <path d="M14 3H6a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h5" />
+              <polyline points="14 3 14 9 20 9" />
+              <line x1="8" y1="13" x2="12" y2="13" />
+              <path d="M18.5 13.5 21 16l-4.5 4.5H14v-2.5z" />
             </svg>
           </button>
           <button
@@ -1573,6 +1648,19 @@ function App() {
                 }}
               />
             )}
+            {view === 'docReview' &&
+              (activeReviewId ? (
+                <ReviewView
+                  key={activeReviewId}
+                  reviewId={activeReviewId}
+                  onBack={() => {
+                    setActiveReviewId(null)
+                    navigate('docReview', null)
+                  }}
+                />
+              ) : (
+                <ReviewListView />
+              ))}
             {view === 'users' && <UserManagement />}
             {view === 'settings' && (
               <SettingsPage

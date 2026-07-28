@@ -68,4 +68,10 @@
     transform: none;
     opacity: 1;
   }
+
+  /* A review is running a pass. The chip's word says so too, but the
+     stalled arc reads as a rendering glitch — close it into a solid ring. */
+  .review-status__spinner {
+    border-top-color: currentColor;
+  }
 }

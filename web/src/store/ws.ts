@@ -211,6 +211,15 @@ export const useWsStore = create<WsState>((set, get) => ({
         return
       }
 
+      // Document Review status / head-version changes. `session_id` carries
+      // the REVIEW id (the review screen subscribes to it exactly the way a
+      // session subscribes to its own stream), so the payload's `review_id`
+      // is what listeners key off.
+      if (msg.type === 'doc-review-update') {
+        window.dispatchEvent(new CustomEvent('peckboard:doc-review-update', { detail: msg }))
+        return
+      }
+
       if (
         msg.type === 'askpass-request' ||
         msg.type === 'askpass-resolved' ||
