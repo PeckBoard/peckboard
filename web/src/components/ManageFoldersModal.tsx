@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react'
 import { useFoldersStore } from '../store/folders'
-import { authedFetch } from '../store/auth'
+import { authedFetch, useAuthStore } from '../store/auth'
 import type { Folder } from '../types/api'
 import Modal from './Modal'
 import ConfirmDialog from './ConfirmDialog'
@@ -9,6 +9,11 @@ export default function FoldersPage() {
   const folders = useFoldersStore((s) => s.folders)
   const fetchFolders = useFoldersStore((s) => s.fetchFolders)
   const createFolder = useFoldersStore((s) => s.createFolder)
+  // Registering a folder hands out host file access (it becomes the cwd and
+  // file scope of every agent spawned inside it) and deleting one destroys
+  // another user's work, so both are admin-only on the API. Mirror that here
+  // so the UI never offers what the server will refuse.
+  const isAdmin = useAuthStore((s) => s.user?.role === 'admin')
 
   const [name, setName] = useState('')
   const [path, setPath] = useState('')
@@ -119,6 +124,7 @@ export default function FoldersPage() {
         <h3>Registered Folders</h3>
         <p style={{ fontSize: 'var(--text-sm)', color: 'var(--text2)', marginBottom: 16 }}>
           Folders map to directories on disk. Sessions and projects live inside folders.
+          {!isAdmin && ' Only an admin can add or remove them.'}
         </p>
 
         <div className="folder-list">
@@ -128,67 +134,73 @@ export default function FoldersPage() {
                 <strong>{f.name}</strong>
                 <span className="folder-path">{f.path}</span>
               </div>
-              <button
-                className="folder-delete"
-                onClick={() => {
-                  setConfirmError(null)
-                  setConfirmFolder(f)
-                }}
-                title="Delete folder"
-                aria-label={`Delete folder ${f.name}`}
-                data-testid={`folder-delete-${f.name}`}
-              >
-                &times;
-              </button>
+              {isAdmin && (
+                <button
+                  className="folder-delete"
+                  onClick={() => {
+                    setConfirmError(null)
+                    setConfirmFolder(f)
+                  }}
+                  title="Delete folder"
+                  aria-label={`Delete folder ${f.name}`}
+                  data-testid={`folder-delete-${f.name}`}
+                >
+                  &times;
+                </button>
+              )}
             </div>
           ))}
           {folders.length === 0 && (
             <p style={{ color: 'var(--text3)', fontSize: 'var(--text-sm)', padding: '12px 0' }}>
-              No folders yet. Add one below to get started.
+              {isAdmin
+                ? 'No folders yet. Add one below to get started.'
+                : 'No folders yet. Ask an admin to add one.'}
             </p>
           )}
         </div>
       </section>
 
-      <section className="settings-section">
-        <h3>Add Folder</h3>
-        <div className="folder-create-fields">
-          <input
-            className="form-input"
-            placeholder="Name (e.g. My Workspace)"
-            value={name}
-            onChange={(e) => setName(e.target.value)}
-          />
-          <input
-            className="form-input"
-            placeholder="Path (e.g. /Users/me/projects)"
-            value={path}
-            onChange={(e) => setPath(e.target.value)}
-            onKeyDown={(e) => e.key === 'Enter' && handleCreate()}
-          />
-          <label className="form-checkbox-label" style={{ fontSize: 'var(--text-sm)' }}>
+      {isAdmin && (
+        <section className="settings-section">
+          <h3>Add Folder</h3>
+          <div className="folder-create-fields">
             <input
-              type="checkbox"
-              checked={createDir}
-              onChange={(e) => setCreateDir(e.target.checked)}
+              className="form-input"
+              placeholder="Name (e.g. My Workspace)"
+              value={name}
+              onChange={(e) => setName(e.target.value)}
             />
-            <span>Create directory if it doesn't exist</span>
-          </label>
-          <button
-            className="btn-primary"
-            onClick={handleCreate}
-            disabled={creating || !name.trim() || !path.trim()}
-            style={{ alignSelf: 'flex-start' }}
-          >
-            {creating ? 'Adding...' : 'Add Folder'}
-          </button>
-        </div>
-        {error && (
-          <p className="form-error" style={{ marginTop: 8 }}>
-            {error}
-          </p>
-        )}
-      </section>
+            <input
+              className="form-input"
+              placeholder="Path (e.g. /Users/me/projects)"
+              value={path}
+              onChange={(e) => setPath(e.target.value)}
+              onKeyDown={(e) => e.key === 'Enter' && handleCreate()}
+            />
+            <label className="form-checkbox-label" style={{ fontSize: 'var(--text-sm)' }}>
+              <input
+                type="checkbox"
+                checked={createDir}
+                onChange={(e) => setCreateDir(e.target.checked)}
+              />
+              <span>Create directory if it doesn't exist</span>
+            </label>
+            <button
+              className="btn-primary"
+              onClick={handleCreate}
+              disabled={creating || !name.trim() || !path.trim()}
+              style={{ alignSelf: 'flex-start' }}
+            >
+              {creating ? 'Adding...' : 'Add Folder'}
+            </button>
+          </div>
+          {error && (
+            <p className="form-error" style={{ marginTop: 8 }}>
+              {error}
+            </p>
+          )}
+        </section>
+      )}
 
       {/* Delete folder dialog — shown when folder has sessions */}
       {confirmFolder && (

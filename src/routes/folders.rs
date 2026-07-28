@@ -4,12 +4,12 @@ use axum::{
     http::StatusCode,
     middleware,
     response::IntoResponse,
-    routing::{delete, post},
+    routing::{delete, get, post},
 };
 use serde::Deserialize;
 use std::sync::Arc;
 
-use crate::auth::middleware::require_auth;
+use crate::auth::middleware::{require_admin, require_auth};
 use crate::db::crud::MoveFolderOutcome;
 use crate::db::models::NewFolder;
 use crate::state::AppState;
@@ -35,7 +35,23 @@ struct ChangeFolderRequest {
 
 pub fn router(state: Arc<AppState>) -> Router<Arc<AppState>> {
     Router::new()
-        .route("/api/folders", post(create_folder).get(list_folders))
+        .merge(admin_router())
+        .merge(user_router())
+        .route_layer(middleware::from_fn_with_state(state, require_auth))
+}
+
+/// Routes that register or unregister a workspace root. A folder is the cwd
+/// and the file-access scope of every agent spawned inside it, so creating one
+/// hands out host file access and deleting one destroys another user's work.
+/// Neither is partitioned per user, so both are admin-only — same reasoning as
+/// `routes/settings.rs`.
+///
+/// Layers run outer-to-inner on the request, so `require_admin` is appended
+/// here and `require_auth` in [`router`] afterwards, which puts `AuthUser`
+/// into the extensions before this middleware reads it.
+fn admin_router() -> Router<Arc<AppState>> {
+    Router::new()
+        .route("/api/folders", post(create_folder))
         .route("/api/folders/{id}", delete(delete_folder))
         .route(
             "/api/folders/{id}/delete-sessions",
@@ -45,6 +61,16 @@ pub fn router(state: Arc<AppState>) -> Router<Arc<AppState>> {
             "/api/folders/{id}/move-sessions",
             post(move_sessions_then_delete),
         )
+        .route_layer(middleware::from_fn(require_admin))
+}
+
+/// Routes any authenticated user may call. Listing folders is how a non-admin
+/// finds the workspaces they're allowed to work in, and the per-entity move
+/// routes only shuffle work between folders that already exist — neither
+/// widens the file-access scope the admin chose.
+fn user_router() -> Router<Arc<AppState>> {
+    Router::new()
+        .route("/api/folders", get(list_folders))
         // Per-entity folder change: each route cancels any agent the
         // move affects BEFORE the DB write, so the move is durable
         // within the running process. Process restart kills child
@@ -56,7 +82,69 @@ pub fn router(state: Arc<AppState>) -> Router<Arc<AppState>> {
             "/api/repeating-tasks/{id}/folder",
             post(change_repeating_task_folder),
         )
-        .route_layer(middleware::from_fn_with_state(state, require_auth))
+}
+
+/// Directory trees that must never become an agent workspace, even for an
+/// admin. Registering one points every agent spawned in that folder at the
+/// host's system files. Both the raw and the canonicalized path are checked
+/// against this list, because macOS canonicalizes `/var` to `/private/var`.
+const SYSTEM_PATH_PREFIXES: &[&str] = &[
+    "/bin",
+    "/boot",
+    "/dev",
+    "/etc",
+    "/lib",
+    "/lib32",
+    "/lib64",
+    "/proc",
+    "/private/etc",
+    "/private/var",
+    "/run",
+    "/sbin",
+    "/sys",
+    "/usr",
+    "/var",
+];
+
+/// Refuse workspace roots that are obviously dangerous: the filesystem root,
+/// the system tree, and PeckBoard's own data directory (an agent editing the
+/// live DB out from under the server corrupts it).
+///
+/// This is a hard refusal rather than a warning: the create API has no way to
+/// carry an "I understand" acknowledgement, and nothing legitimate lives in
+/// these trees. Arbitrary project directories under the user's home — the
+/// point of a local tool — are unaffected, including the home directory
+/// itself, which is an ancestor of the data dir but not inside it.
+fn reject_unsafe_path(path: &std::path::Path, data_dir: &std::path::Path) -> Result<(), String> {
+    // Resolve symlinks and `..` so `/tmp/../etc` and a symlink to /etc are
+    // caught too. An unresolvable path (not created yet) falls back to the
+    // literal one, which still catches the plain `/etc` spelling.
+    let resolved = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+
+    if resolved.parent().is_none() {
+        return Err("refusing to register the filesystem root as a folder".into());
+    }
+
+    for prefix in SYSTEM_PATH_PREFIXES {
+        if resolved.starts_with(prefix) || path.starts_with(prefix) {
+            return Err(format!(
+                "refusing to register a system path as a folder: {}",
+                resolved.display()
+            ));
+        }
+    }
+
+    let data_dir = data_dir
+        .canonicalize()
+        .unwrap_or_else(|_| data_dir.to_path_buf());
+    if resolved.starts_with(&data_dir) {
+        return Err(format!(
+            "refusing to register PeckBoard's own data directory as a folder: {}",
+            data_dir.display()
+        ));
+    }
+
+    Ok(())
 }
 
 /// POST /api/folders
@@ -66,6 +154,17 @@ async fn create_folder(
 ) -> impl IntoResponse {
     tracing::info!(name = %body.name, path = %body.path, create = body.create.unwrap_or(false), "Creating folder");
     let path = std::path::Path::new(&body.path);
+
+    // Checked before the create branch below, so a refused path is never
+    // created on disk as a side effect of the refusal.
+    if let Err(msg) = reject_unsafe_path(path, &state.config.data_dir) {
+        tracing::warn!(path = %body.path, "Refused unsafe folder path");
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({ "error": msg })),
+        ));
+    }
+
     if !path.exists() {
         if body.create.unwrap_or(false) {
             // Create the directory
@@ -463,5 +562,163 @@ async fn change_repeating_task_folder(
             Json(serde_json::json!({ "error": "target folder not found" })),
         )),
         MoveFolderOutcome::RefusedOwnedSession => unreachable!(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::auth::middleware::tests::{seed_authenticated_user, test_state};
+    use axum::body::Body;
+    use axum::http::{Request, header};
+    use tower::ServiceExt;
+
+    fn app(state: Arc<AppState>) -> Router {
+        Router::new().merge(router(state.clone())).with_state(state)
+    }
+
+    fn create_request(token: &str, name: &str, path: &str) -> Request<Body> {
+        Request::builder()
+            .method("POST")
+            .uri("/api/folders")
+            .header(header::AUTHORIZATION, format!("Bearer {token}"))
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(Body::from(
+                serde_json::json!({ "name": name, "path": path }).to_string(),
+            ))
+            .unwrap()
+    }
+
+    async fn error_message(response: axum::response::Response) -> String {
+        let bytes = axum::body::to_bytes(response.into_body(), 64 * 1024)
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        json["error"].as_str().unwrap_or_default().to_string()
+    }
+
+    #[tokio::test]
+    async fn non_admin_cannot_create_or_delete_folders() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = test_state(dir.path());
+        let token = seed_authenticated_user(&state, "user").await;
+        let workspace = dir.path().join("work");
+        std::fs::create_dir_all(&workspace).unwrap();
+
+        let response = app(state.clone())
+            .oneshot(create_request(&token, "probe", workspace.to_str().unwrap()))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+        assert!(state.db.list_folders().await.unwrap().is_empty());
+
+        let delete = Request::builder()
+            .method("DELETE")
+            .uri("/api/folders/whatever")
+            .header(header::AUTHORIZATION, format!("Bearer {token}"))
+            .body(Body::empty())
+            .unwrap();
+        let response = app(state.clone()).oneshot(delete).await.unwrap();
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+
+        // Listing stays open — a non-admin still has to find their workspace.
+        let list = Request::builder()
+            .uri("/api/folders")
+            .header(header::AUTHORIZATION, format!("Bearer {token}"))
+            .body(Body::empty())
+            .unwrap();
+        let response = app(state).oneshot(list).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn admin_can_create_and_delete_a_project_folder() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = test_state(dir.path());
+        let token = seed_authenticated_user(&state, "admin").await;
+        // The data dir is off limits, so the workspace lives beside it.
+        let workspace = tempfile::tempdir().unwrap();
+
+        let response = app(state.clone())
+            .oneshot(create_request(
+                &token,
+                "projects",
+                workspace.path().to_str().unwrap(),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::CREATED);
+
+        let folders = state.db.list_folders().await.unwrap();
+        assert_eq!(folders.len(), 1);
+
+        let delete = Request::builder()
+            .method("DELETE")
+            .uri(format!("/api/folders/{}", folders[0].id))
+            .header(header::AUTHORIZATION, format!("Bearer {token}"))
+            .body(Body::empty())
+            .unwrap();
+        let response = app(state.clone()).oneshot(delete).await.unwrap();
+        assert_eq!(response.status(), StatusCode::NO_CONTENT);
+        assert!(state.db.list_folders().await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn admin_cannot_register_system_paths_or_the_data_dir() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = test_state(dir.path());
+        let token = seed_authenticated_user(&state, "admin").await;
+
+        for path in ["/etc", "/", "/usr/share"] {
+            let response = app(state.clone())
+                .oneshot(create_request(&token, "probe", path))
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::BAD_REQUEST, "path {path}");
+            assert!(
+                error_message(response).await.contains("refusing"),
+                "path {path} should be refused by the unsafe-path guard"
+            );
+        }
+
+        let data_dir = dir.path().to_str().unwrap().to_string();
+        let response = app(state.clone())
+            .oneshot(create_request(&token, "data", &data_dir))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        assert!(error_message(response).await.contains("data directory"));
+
+        assert!(state.db.list_folders().await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn unsafe_path_is_refused_before_the_directory_is_created() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = test_state(dir.path());
+        let token = seed_authenticated_user(&state, "admin").await;
+        let inside_data_dir = dir.path().join("agent-workspace");
+
+        let request = Request::builder()
+            .method("POST")
+            .uri("/api/folders")
+            .header(header::AUTHORIZATION, format!("Bearer {token}"))
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(Body::from(
+                serde_json::json!({
+                    "name": "probe",
+                    "path": inside_data_dir.to_str().unwrap(),
+                    "create": true,
+                })
+                .to_string(),
+            ))
+            .unwrap();
+
+        let response = app(state).oneshot(request).await.unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        assert!(
+            !inside_data_dir.exists(),
+            "a refused path must not be created on disk"
+        );
     }
 }

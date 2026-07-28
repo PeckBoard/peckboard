@@ -122,7 +122,7 @@ pub async fn require_admin(request: Request<axum::body::Body>, next: Next) -> Re
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use crate::auth::token::{create_token, generate_jwt_secret};
     use crate::config::Config;
@@ -131,7 +131,7 @@ mod tests {
     use axum::{Router, body::Body, middleware, routing::get};
     use tower::ServiceExt;
 
-    fn test_state(dir: &std::path::Path) -> Arc<AppState> {
+    pub(crate) fn test_state(dir: &std::path::Path) -> Arc<AppState> {
         let provider_registry = Arc::new(crate::provider::registry::ProviderRegistry::new());
         Arc::new(AppState {
             config: Config {
@@ -161,7 +161,7 @@ mod tests {
     }
 
     /// Seed a user + auth session and return a valid bearer token for it.
-    async fn seed_authenticated_user(state: &Arc<AppState>, role: &str) -> String {
+    pub(crate) async fn seed_authenticated_user(state: &Arc<AppState>, role: &str) -> String {
         let now_str = chrono::Utc::now().to_rfc3339();
         let user_id = "u1".to_string();
         state
