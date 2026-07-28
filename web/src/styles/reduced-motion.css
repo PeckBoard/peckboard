@@ -74,4 +74,25 @@
   .review-status__spinner {
     border-top-color: currentColor;
   }
+
+  /* Run pass, same treatment as the chip's spinner. */
+  .review-view__pass-spinner {
+    border-top-color: currentColor;
+  }
+
+  /* A revision landed. The colour is the signal and the scale-up is the
+     motion — keep the first, drop the second. The class comes off after
+     `FLASH_MS` either way, so the badge still settles back to rest. */
+  .review-view__version--flash {
+    animation: none;
+    color: var(--accent-hover);
+    transform: none;
+  }
+
+  /* Bottom sheets: without the slide they simply appear at the edge they
+     belong to. */
+  .modal.review-sheet,
+  .modal.review-popover--sheet {
+    animation: none;
+  }
 }

@@ -1184,3 +1184,399 @@
     opacity: 1;
   }
 }
+
+/* ── Document review ───────────────────────────────────────────────── */
+/* Below the breakpoint `ReviewView` does not render the right rail at all:
+   the document takes the width, a bottom action bar replaces the tab
+   strip, and each panel opens as a sheet over the document.
+
+   The sheet and bar rules below sit OUTSIDE the media query on purpose —
+   both surfaces are rendered by JS only when
+   `useMediaQuery('(max-width: 768px)')` matches, so a plain selector keeps
+   them out of the desktop cascade entirely and out of a print/zoom edge
+   case where the query and the JS could disagree. */
+
+.review-mobile-bar {
+  display: flex;
+  align-items: stretch;
+  gap: var(--space-2);
+  flex-shrink: 0;
+  padding: 6px max(var(--space-3), env(safe-area-inset-right, 0px)) calc(6px + var(--safe-bottom))
+    max(var(--space-3), env(safe-area-inset-left, 0px));
+  border-top: 1px solid var(--border);
+  background: var(--surface);
+}
+
+/* 44px minimum on every one of these — they are the only way to reach the
+   panels at this width. */
+.review-mobile-bar__tab {
+  flex: 1 1 0;
+  min-width: 0;
+  min-height: 44px;
+  display: inline-flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 2px;
+  padding: 4px 2px;
+  border: none;
+  border-radius: var(--radius-md);
+  background: none;
+  color: var(--text2);
+  font-family: inherit;
+  cursor: pointer;
+  transition: var(--transition);
+}
+
+.review-mobile-bar__tab:hover {
+  color: var(--text);
+  background: var(--surface-hover);
+}
+
+.review-mobile-bar__tab:focus-visible {
+  outline: 2px solid var(--ring);
+  outline-offset: -2px;
+}
+
+.review-mobile-bar__tab--active {
+  color: var(--accent-hover);
+  background: var(--accent-subtle);
+}
+
+.review-mobile-bar__icon {
+  position: relative;
+  display: inline-flex;
+}
+
+.review-mobile-bar__count {
+  position: absolute;
+  top: -5px;
+  right: -9px;
+  min-width: 15px;
+  padding: 0 4px;
+  border-radius: var(--radius-full);
+  background: var(--accent);
+  color: var(--text-inverse);
+  font-size: 10px;
+  font-weight: 700;
+  line-height: 15px;
+  text-align: center;
+}
+
+.review-mobile-bar__label {
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.01em;
+}
+
+.review-mobile-bar__pass {
+  flex: 0 0 auto;
+  min-height: 44px;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding-left: var(--space-4);
+  padding-right: var(--space-4);
+  border-radius: var(--radius-full);
+}
+
+/* ── Bottom sheets ──
+   `Modal` re-shaped, not a second overlay primitive: the portal to body
+   (WebKit clips fixed elements inside a scroller, and this screen is
+   nothing but scrollers), the focus trap, Escape and the backdrop tap all
+   still come from there. The backdrop keeps its `--app-height` sizing, so
+   a sheet rides above the on-screen keyboard; all it loses is centring. */
+.modal-backdrop.review-sheet__backdrop {
+  justify-content: flex-end;
+  align-items: stretch;
+  padding: 0;
+  overflow: hidden;
+}
+
+.modal.review-sheet {
+  display: flex;
+  flex-direction: column;
+  width: 100%;
+  max-width: none;
+  max-height: min(70vh, calc(var(--app-height) - var(--space-8)));
+  margin: 0;
+  padding: 0 0 var(--safe-bottom);
+  border-radius: var(--radius-xl) var(--radius-xl) 0 0;
+  animation: review-sheet-in 200ms ease-out;
+}
+
+@keyframes review-sheet-in {
+  from {
+    transform: translateY(16px);
+    opacity: 0.4;
+  }
+}
+
+.review-sheet__grip {
+  flex-shrink: 0;
+  width: 36px;
+  height: 4px;
+  margin: 8px auto 0;
+  border-radius: var(--radius-full);
+  background: var(--border-strong);
+}
+
+.review-sheet__head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-2);
+  flex-shrink: 0;
+  padding: var(--space-2) var(--space-2) var(--space-2) var(--space-4);
+  border-bottom: 1px solid var(--border);
+}
+
+.review-sheet__title {
+  margin: 0;
+  font-size: var(--text-base);
+  font-weight: 650;
+}
+
+.review-sheet__close {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 36px;
+  height: 36px;
+  border: none;
+  border-radius: var(--radius-full);
+  background: none;
+  color: var(--text2);
+  cursor: pointer;
+  transition: var(--transition);
+}
+
+.review-sheet__close:hover {
+  background: var(--surface-hover);
+  color: var(--text);
+}
+
+.review-sheet__close:focus-visible {
+  outline: 2px solid var(--ring);
+  outline-offset: -2px;
+}
+
+/* Every panel comes in as `.review-rail__panel`; inside a sheet that is
+   the scrolling region, and the sheet itself never scrolls. */
+.modal.review-sheet .review-rail__panel {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+}
+
+/* The chat lane is the one panel that scrolls internally (feed above a
+   pinned composer) — the rule above would hand its scroll to the panel and
+   push the composer out of reach. */
+.modal.review-sheet .review-rail__panel.review-chat {
+  overflow: hidden;
+}
+
+/* A diff has no wrap point that survives a phone's width, so here it
+   scrolls sideways instead of wrapping (the rail's 340px does the
+   opposite). `overscroll-behavior` stops that turning into a page swipe
+   at either end. */
+.modal.review-sheet .review-history__diff {
+  max-height: 46vh;
+  overflow: auto;
+  overscroll-behavior: contain;
+}
+
+.modal.review-sheet .review-history__diff.diff-body > div {
+  white-space: pre;
+}
+
+/* ── Annotation popover as a sheet ──
+   A 300px popover hung off a block is unusable at 390px: it covers the
+   passage it is about and its verbs are 28px tall. Same content, same
+   testids, bottom-sheet shape. */
+.modal.review-popover--sheet {
+  width: 100%;
+  max-width: none;
+  margin: 0;
+  padding: 0 var(--space-4) calc(var(--space-4) + var(--safe-bottom));
+  border: none;
+  border-radius: var(--radius-xl) var(--radius-xl) 0 0;
+  box-shadow: var(--shadow-overlay);
+  animation: review-sheet-in 200ms ease-out;
+}
+
+/* Room to read the passage here — this sheet has the width the desktop
+   popover doesn't. */
+.modal.review-popover--sheet .review-popover__quote {
+  margin-top: var(--space-2);
+  display: -webkit-box;
+  -webkit-line-clamp: 3;
+  -webkit-box-orient: vertical;
+  white-space: normal;
+}
+
+.modal.review-popover--sheet .review-popover__actions {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: var(--space-2);
+}
+
+.modal.review-popover--sheet .review-popover__action {
+  min-height: 44px;
+  font-size: var(--text-sm);
+}
+
+.modal.review-popover--sheet .review-popover__textarea {
+  min-height: 88px;
+}
+
+.modal.review-popover--sheet .review-popover__editor-actions > button {
+  flex: 1;
+  min-height: 44px;
+}
+
+/* Touch devices have no hover: without this the wash a tapped block picks
+   up sticks until something else is tapped. */
+@media (hover: none) {
+  .review-block:hover {
+    background: transparent;
+
+    /* Same for the bar: a tapped tab kept its wash and read as the open
+     panel long after its sheet had been dismissed. */
+    .review-mobile-bar__tab:hover {
+      background: none;
+      color: var(--text2);
+    }
+
+    .review-mobile-bar__tab--active:hover {
+      background: var(--accent-subtle);
+      color: var(--accent-hover);
+    }
+  }
+}
+
+@media (max-width: 768px) {
+  /* Header condenses to back + title + status; the version stays as a
+     3-character mono chip and every verb is behind the overflow menu. */
+  .review-view .review-view__header {
+    flex-wrap: nowrap;
+    gap: var(--space-2);
+    padding: var(--space-2) var(--space-3);
+  }
+
+  .review-view .review-view__back {
+    flex-shrink: 0;
+    padding: 6px 10px;
+  }
+
+  .review-view .review-view__titlebar {
+    flex: 1 1 auto;
+    gap: var(--space-2);
+  }
+
+  .review-view .review-view__title {
+    font-size: var(--text-lg);
+  }
+
+  /* The source kind is on the list row and in the apply dialog; at this
+     width the title needs the room more. */
+  .review-view .review-view__titlebar .review-source {
+    display: none;
+  }
+
+  /* A pass notice is a sentence — it gets its own line under the header
+     rather than competing with the title for the header's one row. */
+  .review-view .review-view__notice--bar {
+    display: block;
+    max-width: none;
+    margin: var(--space-2) var(--space-3) 0;
+    white-space: normal;
+    text-align: center;
+  }
+
+  /* No rail to leave room for. */
+  .review-view .review-view__body {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .review-view .review-doc {
+    padding: var(--space-4) var(--space-3);
+  }
+
+  .review-view .review-doc__body {
+    /* Just the gutter the collapsed pins need. */
+    padding-left: var(--space-3);
+  }
+
+  /* Margin pins collapse to gutter dots: a numbered chip reads as clutter
+     beside 340px of prose. The count moves to the bar's badge; the dot
+     keeps a 32px hit area (WCAG 2.5.8) via the transparent overlay. */
+  .review-view .review-block__pin {
+    top: 7px;
+    left: calc(var(--space-3) * -1);
+    width: 8px;
+    height: 8px;
+    border-color: transparent;
+    background: var(--accent);
+    font-size: 0;
+    color: transparent;
+  }
+
+  .review-view .review-block__pin::after {
+    content: '';
+    position: absolute;
+    inset: -12px;
+  }
+
+  /* The hold gesture opens the annotation sheet; iOS's own callout would
+     race it for the same press. Selection itself is untouched — a
+     highlighted phrase still becomes the annotation's quote. */
+  .review-view .review-block {
+    -webkit-touch-callout: none;
+  }
+
+  /* The clarifying question stays pinned over the document, tightened so
+     it leaves the passage it asks about visible. */
+  .review-view .review-ask--pinned {
+    padding: var(--space-3);
+    gap: var(--space-2);
+  }
+
+  /* The passage chip drops onto its own row. Beside the question its
+     `nowrap` quote is `flex-shrink: 0`, which at 390px starved the question
+     down to one word per line. */
+  .review-ask .review-ask__head {
+    flex-wrap: wrap;
+  }
+
+  .review-ask .review-ask__anchor {
+    order: 3;
+    flex: 1 1 100%;
+    max-width: 100%;
+    min-height: 32px;
+  }
+
+  .review-view .review-ask__option {
+    min-height: 44px;
+  }
+
+  .review-view .review-ask__actions > button {
+    min-height: 40px;
+  }
+
+  /* Four chips per row: let them sit under the title instead of squeezing
+     it to an ellipsis. */
+  [data-testid='review-list'] .list-view-meta {
+    gap: 6px;
+  }
+
+  /* Wizard at 390px: the kind picker, the field and the preview stack, and
+     the preview keeps its own scroll so it can't push the create button
+     off the sheet (same disclosure shape as the report TOC above). */
+  .review-wizard__picker {
+    min-height: 44px;
+  }
+
+  .review-wizard__kind {
+    min-height: 44px;
+  }
+}

@@ -38,6 +38,15 @@ const BLOCK_TAGS = ['p', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'li', 'pre', 'block
  *  selection doesn't need to travel over the wire intact. */
 const MAX_QUOTE = 2_000
 
+/** Touch equivalent of the desktop click. The same 450ms `useContextMenu`
+ *  holds for, so every press-and-hold in the app resolves at one beat. */
+const LONG_PRESS_MS = 450
+
+/** How long after a touch a mouse event is still the browser's emulated
+ *  one. Long enough to cover the ~300ms ghost click, short enough that a
+ *  real click on a hybrid device is never swallowed. */
+const TOUCH_GHOST_MS = 700
+
 interface BlockProps {
   node?: unknown
   children?: ReactNode
@@ -94,6 +103,9 @@ export default function DocPane({
   onSelectComment,
 }: Props) {
   const rootRef = useRef<HTMLDivElement | null>(null)
+  const longPressTimer = useRef<number | undefined>(undefined)
+  /** When the last touch happened — see `TOUCH_GHOST_MS`. */
+  const lastTouchAt = useRef(0)
 
   const components = useMemo<Components>(() => {
     const renderBlock = (tag: string, { node, children, className }: BlockProps) => {
@@ -200,10 +212,62 @@ export default function DocPane({
     )
   }
 
-  // One handler for both gestures. A live selection inside a single block
-  // quotes exactly what the user highlighted; anything else (a plain click,
-  // a selection spanning blocks) falls back to the whole block.
+  const cancelLongPress = () => {
+    if (longPressTimer.current !== undefined) {
+      window.clearTimeout(longPressTimer.current)
+      longPressTimer.current = undefined
+    }
+  }
+
+  useEffect(
+    () => () => {
+      if (longPressTimer.current !== undefined) window.clearTimeout(longPressTimer.current)
+    },
+    [],
+  )
+
+  // Touch: hold a block to annotate it. The tap has to stay free — it
+  // scrolls the document and drives the browser's own text selection — so
+  // the popover hangs off the hold, and the emulated mouse events that
+  // follow are swallowed instead of opening it a second time.
+  const onTouchStart = (e: React.TouchEvent<HTMLDivElement>) => {
+    lastTouchAt.current = Date.now()
+    cancelLongPress()
+    if (!e.touches[0]) return
+    const target = e.target as HTMLElement | null
+    // The pin is a real button — a hold on it is not an annotation.
+    if (target?.closest('button')) return
+    const block = target?.closest<HTMLElement>('[data-line-start]')
+    if (!block || !rootRef.current?.contains(block)) return
+    longPressTimer.current = window.setTimeout(() => {
+      longPressTimer.current = undefined
+      lastTouchAt.current = Date.now()
+      const selection = window.getSelection()
+      const picked =
+        selection && !selection.isCollapsed && selection.anchorNode
+          ? block.contains(selection.anchorNode)
+            ? selection.toString()
+            : ''
+          : ''
+      openFor(
+        block,
+        picked.trim() ? picked : (block.textContent ?? ''),
+        block.getBoundingClientRect(),
+      )
+    }, LONG_PRESS_MS)
+  }
+
+  const onTouchEnd = () => {
+    lastTouchAt.current = Date.now()
+    cancelLongPress()
+  }
+
+  // One handler for both pointer gestures. A live selection inside a single
+  // block quotes exactly what the user highlighted; anything else (a plain
+  // click, a selection spanning blocks) falls back to the whole block.
   const onMouseUp = (e: React.MouseEvent<HTMLDivElement>) => {
+    // Emulated mouse events after a touch: the hold already decided.
+    if (Date.now() - lastTouchAt.current < TOUCH_GHOST_MS) return
     const root = rootRef.current
     if (!root) return
     const selection = window.getSelection()
@@ -240,6 +304,10 @@ export default function DocPane({
       className="review-doc"
       data-testid="review-doc"
       onMouseUp={onMouseUp}
+      onTouchStart={onTouchStart}
+      onTouchEnd={onTouchEnd}
+      onTouchCancel={onTouchEnd}
+      onTouchMove={cancelLongPress}
       onKeyDown={onKeyDown}
     >
       <SafeMarkdown className="chat-markdown review-doc__body" components={components}>

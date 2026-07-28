@@ -18,6 +18,62 @@ import { useTabsStore } from '../../store/tabs'
 import { describeActionError } from '../../utils/actionError'
 import './Review.css'
 
+/** The feature's one flourish: a page with a bird stood beside it, waiting
+ *  to be read. Tokens only, so it sits right in both themes. */
+function ReviewEmptyArt() {
+  return (
+    <svg
+      className="review-empty__art"
+      width="76"
+      height="64"
+      viewBox="0 0 76 64"
+      fill="none"
+      aria-hidden="true"
+    >
+      <path
+        d="M12 10h22l10 10v32a2 2 0 0 1-2 2H12a2 2 0 0 1-2-2V12a2 2 0 0 1 2-2z"
+        stroke="currentColor"
+        strokeWidth="1.6"
+        strokeLinejoin="round"
+      />
+      <path d="M34 10v8a2 2 0 0 0 2 2h8" stroke="currentColor" strokeWidth="1.6" />
+      <path
+        d="M17 30h20M17 37h20M17 44h12"
+        stroke="currentColor"
+        strokeWidth="1.6"
+        strokeLinecap="round"
+      />
+      <ellipse
+        cx="58"
+        cy="44"
+        rx="8"
+        ry="9"
+        fill="var(--accent-subtle)"
+        stroke="var(--accent)"
+        strokeWidth="1.4"
+      />
+      <circle
+        cx="62"
+        cy="31"
+        r="5"
+        fill="var(--accent-subtle)"
+        stroke="var(--accent)"
+        strokeWidth="1.4"
+      />
+      <path d="M67 30.5l5 1.5-5 1.5z" fill="var(--warning)" />
+      <circle cx="63.5" cy="29.5" r="1" fill="var(--accent)" />
+      {/* A wing, not legs: at 64px two hairlines under the body read as
+          whiskers rather than a bird stood on the floor. */}
+      <path
+        d="M54 42c2.5 2 5 3 7.5 3.2"
+        stroke="var(--accent)"
+        strokeWidth="1.4"
+        strokeLinecap="round"
+      />
+    </svg>
+  )
+}
+
 /**
  * Index of every document review. Rows carry the title, the source kind it
  * was created from, the lifecycle status, the head version, and when it was
@@ -122,6 +178,7 @@ export default function ReviewListView() {
           )}
           emptyState={
             <div className="list-view-empty">
+              <ReviewEmptyArt />
               <p>No documents under review yet</p>
               <button className="list-view-empty-action" onClick={() => setShowWizard(true)}>
                 Review a document

@@ -69,6 +69,13 @@
 }
 
 /* ─── List ─── */
+/* The feature's one flourish, and the only one: the empty state's page with
+   a bird stood beside it. Everything else stays plain. */
+.review-empty__art {
+  display: block;
+  margin: 0 auto var(--space-3);
+  color: var(--border-strong);
+}
 .review-list__error {
   margin: 0 var(--space-5) var(--space-3);
 }
@@ -1371,6 +1378,10 @@
   font-size: var(--text-sm);
 }
 
+/* Mobile — the layout swap itself (bottom action bar, panels as sheets,
+   collapsed pins, the popover as a sheet) lives in
+   web/src/styles/mobile.css beside the rest of the app's mobile rules.
+   What stays here is the chrome both layouts share. */
 @media (max-width: 768px) {
   .review-wizard__kinds {
     grid-template-columns: 1fr;
@@ -1384,38 +1395,12 @@
     max-height: 200px;
   }
 
-  /* One column, rail under the document. The dedicated mobile layout (a
-     bottom bar over a full-bleed document) is its own card; this keeps the
-     screen usable at narrow widths until then. */
-  .review-view__body {
-    grid-template-columns: minmax(0, 1fr);
-    grid-template-rows: minmax(0, 1fr) auto;
-  }
-
-  .review-doc {
-    padding: var(--space-4);
-  }
-
-  .review-rail {
-    border-left: none;
-    border-top: 1px solid var(--border);
-    max-height: 45%;
-  }
-
   .review-ask--pinned {
     width: min(76ch, 100% - 2 * var(--space-4));
     max-height: 40vh;
   }
 
-  /* No room for a quote chip beside the question at this width. */
-  .review-ask__anchor {
-    max-width: none;
-    align-self: flex-start;
-  }
-
-  /* The rail is half the screen at this width; a full-height diff would
-     leave no room for the version list under it. */
-  .review-history__diff {
-    max-height: 40vh;
-  }
+  /* The quote chip moves under the question at this width — see
+     styles/mobile.css. Beside it, its `nowrap` quote was starving the
+     question of every column it had. */
 }

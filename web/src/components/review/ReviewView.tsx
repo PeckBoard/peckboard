@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 
 import ConfirmDialog from '../ConfirmDialog'
 import { MenuButton, type MenuItem } from '../Dropdown'
@@ -9,8 +9,10 @@ import ChatLane from './ChatLane'
 import DocPane, { type BlockAnchor } from './DocPane'
 import HistoryTab from './HistoryTab'
 import QuestionCard from './QuestionCard'
+import ReviewSheet from './ReviewSheet'
 import ReviewStatusChip from './ReviewStatusChip'
 import SelectionPopover, { type PopoverAction } from './SelectionPopover'
+import { useMediaQuery } from '../../hooks/useMediaQuery'
 import {
   REVIEW_SOURCE_LABEL,
   ReviewRequestError,
@@ -56,6 +58,44 @@ const DEFAULT_BODY: Partial<Record<ReviewCommentKind, string>> = {
   expand: 'Expand this passage.',
   shorten: 'Shorten this passage.',
 }
+/** The bottom bar's glyphs: a pen for the annotation queue, a bubble for
+ *  the free-form lane, a clock for the version history. 16×16 inline
+ *  strokes, the same idiom as the app rail's icons. */
+const BAR_ICONS: Record<RailTab, ReactNode> = {
+  annotations: (
+    <svg width="16" height="16" viewBox="0 0 16 16" fill="none" aria-hidden="true">
+      <path
+        d="M11.2 2.3l2.5 2.5-7.4 7.4-3.2.7.7-3.2z"
+        stroke="currentColor"
+        strokeWidth="1.4"
+        strokeLinejoin="round"
+      />
+    </svg>
+  ),
+  chat: (
+    <svg width="16" height="16" viewBox="0 0 16 16" fill="none" aria-hidden="true">
+      <path
+        d="M13.5 9.5a1.5 1.5 0 0 1-1.5 1.5H6l-3 2.5V4a1.5 1.5 0 0 1 1.5-1.5h7.5A1.5 1.5 0 0 1 13.5 4z"
+        stroke="currentColor"
+        strokeWidth="1.4"
+        strokeLinejoin="round"
+      />
+    </svg>
+  ),
+  history: (
+    <svg width="16" height="16" viewBox="0 0 16 16" fill="none" aria-hidden="true">
+      <circle cx="8" cy="8" r="5.6" stroke="currentColor" strokeWidth="1.4" />
+      <path d="M8 4.8V8l2.2 1.6" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" />
+    </svg>
+  ),
+}
+
+/** What each panel is called once it is a sheet of its own. */
+const SHEET_TITLE: Record<RailTab, string> = {
+  annotations: 'Annotations',
+  chat: 'Chat',
+  history: 'History',
+}
 
 /**
  * The document review screen.
@@ -74,6 +114,15 @@ export default function ReviewView({ reviewId, onBack }: Props) {
   const [actionError, setActionError] = useState<string | null>(null)
   const [notice, setNotice] = useState<string | null>(null)
   const [tab, setTab] = useState<RailTab>('annotations')
+  /* One breakpoint, the app's own. Below it the rail is not rendered at
+     all: the document takes the full width and the three panels open as
+     bottom sheets off the action bar. */
+  const isMobile = useMediaQuery('(max-width: 768px)')
+  const [openSheet, setSheet] = useState<RailTab | null>(null)
+  // Derived, not an effect: widening the window hands the panels straight
+  // back to the rail, and a sheet left open in state can't strand itself
+  // over the desktop layout.
+  const sheet = isMobile ? openSheet : null
   const [activeCommentId, setActiveCommentId] = useState<string | null>(null)
   const [popover, setPopover] = useState<{
     anchor: BlockAnchor
@@ -259,6 +308,7 @@ export default function ReviewView({ reviewId, onBack }: Props) {
 
   const startPass = () => {
     if (!review || passBusy || running) return
+    setSheet(null)
     setPassBusy(true)
     setActionError(null)
     runPass(review.id, { include_annotations: true })
@@ -340,6 +390,50 @@ export default function ReviewView({ reviewId, onBack }: Props) {
     )
   }
 
+  /** Open a panel: the rail switches tab on desktop, a sheet opens on
+   *  mobile. One entry point so the two surfaces never disagree. */
+  const openPanel = (which: RailTab) => {
+    setTab(which)
+    setSheet(isMobile ? which : null)
+  }
+
+  /** The three panels, shared by the desktop rail and the mobile sheets so
+   *  neither surface drifts from the other. */
+  const renderPanel = (which: RailTab) => {
+    if (which === 'annotations')
+      return (
+        <AnnotationRail
+          comments={comments}
+          activeId={activeCommentId}
+          running={passBusy || running}
+          // On mobile the sheet covers the passage the annotation is
+          // about, so focusing one hands the screen back to the document.
+          onFocus={(c) => {
+            setActiveCommentId(c.id)
+            setSheet(null)
+          }}
+          onEdit={editAnnotation}
+          onDelete={removeAnnotation}
+          onRunPass={startPass}
+        />
+      )
+    if (which === 'chat')
+      return (
+        <ChatLane reviewId={review.id} sessionId={sessionId} status={review.status} onSent={load} />
+      )
+    return (
+      <HistoryTab
+        reviewId={review.id}
+        currentVersion={review.current_version}
+        viewingVersion={viewing?.version ?? null}
+        onView={(v) => {
+          setViewing(v)
+          setSheet(null)
+        }}
+        onReverted={load}
+      />
+    )
+  }
   const menuItems: MenuItem[] = [
     {
       label: 'Apply to source',
@@ -401,28 +495,43 @@ export default function ReviewView({ reviewId, onBack }: Props) {
         </div>
 
         <div className="review-view__actions">
-          {notice && (
+          {/* A sentence-long notice has nowhere to go on a phone header;
+              below the breakpoint it gets its own strip under it. */}
+          {notice && !isMobile && (
             <span className="review-view__notice" role="status" data-testid="review-notice">
               {notice}
             </span>
           )}
-          <button
-            type="button"
-            className="btn-primary review-view__pass"
-            data-testid="review-run-pass"
-            disabled={passBusy || running || pendingCount === 0}
-            aria-busy={passBusy || running || undefined}
-            title={pendingCount === 0 ? 'Annotate the document first' : undefined}
-            onClick={startPass}
-          >
-            {(passBusy || running) && (
-              <span className="review-view__pass-spinner" aria-hidden="true" />
-            )}
-            {running ? 'Pass running…' : 'Run pass'}
-          </button>
+          {/* On mobile Run pass lives in the bottom bar instead — one
+              instance of the control, and the header keeps its title. */}
+          {!isMobile && (
+            <button
+              type="button"
+              className="btn-primary review-view__pass"
+              data-testid="review-run-pass"
+              disabled={passBusy || running || pendingCount === 0}
+              aria-busy={passBusy || running || undefined}
+              title={pendingCount === 0 ? 'Annotate the document first' : undefined}
+              onClick={startPass}
+            >
+              {(passBusy || running) && (
+                <span className="review-view__pass-spinner" aria-hidden="true" />
+              )}
+              {running ? 'Pass running…' : 'Run pass'}
+            </button>
+          )}
           <MenuButton items={menuItems} ariaLabel="Review actions" testId="review-menu" />
         </div>
       </header>
+      {notice && isMobile && (
+        <span
+          className="review-view__notice review-view__notice--bar"
+          role="status"
+          data-testid="review-notice"
+        >
+          {notice}
+        </span>
+      )}
 
       {actionError && (
         <p className="form-error review-view__error" role="alert">
@@ -481,78 +590,107 @@ export default function ReviewView({ reviewId, onBack }: Props) {
                 setPopover({ anchor, at })
               }}
               onSelectComment={(id) => {
-                setTab('annotations')
+                openPanel('annotations')
                 setActiveCommentId(id)
               }}
             />
           )}
         </div>
-        <aside className="review-rail">
-          <div className="review-rail__tabs" role="tablist" aria-label="Review panels">
-            <button
-              type="button"
-              role="tab"
-              aria-selected={tab === 'annotations'}
-              className={`review-rail__tab${tab === 'annotations' ? ' review-rail__tab--active' : ''}`}
-              data-testid="review-tab-annotations"
-              onClick={() => setTab('annotations')}
-            >
-              Annotations
-              {openCount > 0 && <span className="review-rail__count">{openCount}</span>}
-            </button>
-            <button
-              type="button"
-              role="tab"
-              aria-selected={tab === 'chat'}
-              className={`review-rail__tab${tab === 'chat' ? ' review-rail__tab--active' : ''}`}
-              data-testid="review-tab-chat"
-              onClick={() => setTab('chat')}
-            >
-              Chat
-            </button>
-            <button
-              type="button"
-              role="tab"
-              aria-selected={tab === 'history'}
-              className={`review-rail__tab${tab === 'history' ? ' review-rail__tab--active' : ''}`}
-              data-testid="review-tab-history"
-              onClick={() => setTab('history')}
-            >
-              History
-            </button>
-          </div>
+        {!isMobile && (
+          <aside className="review-rail">
+            <div className="review-rail__tabs" role="tablist" aria-label="Review panels">
+              <button
+                type="button"
+                role="tab"
+                aria-selected={tab === 'annotations'}
+                className={`review-rail__tab${tab === 'annotations' ? ' review-rail__tab--active' : ''}`}
+                data-testid="review-tab-annotations"
+                onClick={() => openPanel('annotations')}
+              >
+                Annotations
+                {openCount > 0 && <span className="review-rail__count">{openCount}</span>}
+              </button>
+              <button
+                type="button"
+                role="tab"
+                aria-selected={tab === 'chat'}
+                className={`review-rail__tab${tab === 'chat' ? ' review-rail__tab--active' : ''}`}
+                data-testid="review-tab-chat"
+                onClick={() => openPanel('chat')}
+              >
+                Chat
+              </button>
+              <button
+                type="button"
+                role="tab"
+                aria-selected={tab === 'history'}
+                className={`review-rail__tab${tab === 'history' ? ' review-rail__tab--active' : ''}`}
+                data-testid="review-tab-history"
+                onClick={() => openPanel('history')}
+              >
+                History
+              </button>
+            </div>
 
-          {tab === 'annotations' && (
-            <AnnotationRail
-              comments={comments}
-              activeId={activeCommentId}
-              running={passBusy || running}
-              onFocus={(c) => setActiveCommentId(c.id)}
-              onEdit={editAnnotation}
-              onDelete={removeAnnotation}
-              onRunPass={startPass}
-            />
-          )}
-          {tab === 'chat' && (
-            <ChatLane
-              reviewId={review.id}
-              sessionId={sessionId}
-              status={review.status}
-              onSent={load}
-            />
-          )}
-          {tab === 'history' && (
-            <HistoryTab
-              reviewId={review.id}
-              currentVersion={review.current_version}
-              viewingVersion={viewing?.version ?? null}
-              onView={setViewing}
-              onReverted={load}
-            />
-          )}
-        </aside>
+            {renderPanel(tab)}
+          </aside>
+        )}
       </div>
 
+      {/* The rail's replacement below 768px: the panels behind one row of
+          tap targets, with Run pass kept at hand as the primary verb. */}
+      {isMobile && (
+        <nav
+          className="review-mobile-bar"
+          data-testid="review-mobile-bar"
+          aria-label="Review panels"
+        >
+          {(['annotations', 'chat', 'history'] as const).map((which) => (
+            <button
+              key={which}
+              type="button"
+              className={`review-mobile-bar__tab${
+                sheet === which ? ' review-mobile-bar__tab--active' : ''
+              }`}
+              data-testid={`review-tab-${which}`}
+              aria-expanded={sheet === which}
+              onClick={() => openPanel(which)}
+            >
+              <span className="review-mobile-bar__icon">
+                {BAR_ICONS[which]}
+                {which === 'annotations' && openCount > 0 && (
+                  <span className="review-mobile-bar__count">{openCount}</span>
+                )}
+              </span>
+              <span className="review-mobile-bar__label">{SHEET_TITLE[which]}</span>
+            </button>
+          ))}
+          <button
+            type="button"
+            className="btn-primary review-mobile-bar__pass"
+            data-testid="review-run-pass"
+            disabled={passBusy || running || pendingCount === 0}
+            aria-busy={passBusy || running || undefined}
+            title={pendingCount === 0 ? 'Annotate the document first' : undefined}
+            onClick={startPass}
+          >
+            {(passBusy || running) && (
+              <span className="review-view__pass-spinner" aria-hidden="true" />
+            )}
+            {running ? 'Running…' : 'Run pass'}
+          </button>
+        </nav>
+      )}
+
+      {isMobile && sheet && (
+        <ReviewSheet
+          title={SHEET_TITLE[sheet]}
+          testId={`review-sheet-${sheet}`}
+          onClose={() => setSheet(null)}
+        >
+          {renderPanel(sheet)}
+        </ReviewSheet>
+      )}
       {popover && (
         <SelectionPopover
           anchor={popover.at}

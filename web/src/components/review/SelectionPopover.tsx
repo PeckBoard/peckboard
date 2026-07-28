@@ -1,7 +1,10 @@
 import { useEffect, useLayoutEffect, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
 
+import Modal from '../Modal'
+import { useMediaQuery } from '../../hooks/useMediaQuery'
 import { describeActionError } from '../../utils/actionError'
+import './Review.css'
 import './Review.css'
 
 /** The six things a passage can be asked for. Five become annotations; the
@@ -75,6 +78,7 @@ const MARGIN = 8
  * have the least room for it.
  */
 export default function SelectionPopover({ anchor, quote, onClose, onSubmit }: Props) {
+  const isMobile = useMediaQuery('(max-width: 768px)')
   const ref = useRef<HTMLDivElement | null>(null)
   const firstActionRef = useRef<HTMLButtonElement | null>(null)
   const textareaRef = useRef<HTMLTextAreaElement | null>(null)
@@ -147,15 +151,8 @@ export default function SelectionPopover({ anchor, quote, onClose, onSubmit }: P
       })
   }
 
-  return createPortal(
-    <div
-      ref={ref}
-      className="review-popover"
-      data-testid="review-popover"
-      role="dialog"
-      aria-label="Annotate this passage"
-      style={{ position: 'fixed', left: pos.left, top: pos.top }}
-    >
+  const body = (
+    <>
       {quote && <p className="review-popover__quote">{quote}</p>}
 
       {!action ? (
@@ -226,6 +223,38 @@ export default function SelectionPopover({ anchor, quote, onClose, onSubmit }: P
           </div>
         </div>
       )}
+    </>
+  )
+
+  // Mobile: a bottom sheet through the shared Modal. A 300px popover hung
+  // off a block is unusable at 390px, the verbs need 44px tap targets, and
+  // the editor's textarea wants the keyboard-aware height Modal's backdrop
+  // already carries.
+  if (isMobile) {
+    return (
+      <Modal
+        onClose={onClose}
+        className="review-popover review-popover--sheet"
+        backdropClassName="review-sheet__backdrop"
+        ariaLabel="Annotate this passage"
+        data-testid="review-popover"
+      >
+        <span className="review-sheet__grip" aria-hidden="true" />
+        {body}
+      </Modal>
+    )
+  }
+
+  return createPortal(
+    <div
+      ref={ref}
+      className="review-popover"
+      data-testid="review-popover"
+      role="dialog"
+      aria-label="Annotate this passage"
+      style={{ position: 'fixed', left: pos.left, top: pos.top }}
+    >
+      {body}
     </div>,
     document.body,
   )
