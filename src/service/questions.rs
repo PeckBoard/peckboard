@@ -68,6 +68,12 @@ pub async fn resolve_question(
             }),
         });
 
+    // A document-review session's question just got an answer: the pass
+    // resumes below, so the review goes back to 'running'. No-op for every
+    // other kind of session.
+    crate::service::doc_reviews::resume_after_question(&state.db, &state.broadcaster, &session_id)
+        .await;
+
     let event_data = data;
     let rejected = event_data
         .get("rejected")

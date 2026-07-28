@@ -19,6 +19,12 @@ pub fn tool_names() -> Vec<String> {
 /// worker API call stops paying for. This trims ADVERTISEMENT only; the
 /// per-handler scope checks (e.g. `ScopedFolderId`) remain the enforcement
 /// point if a worker calls a hidden tool by name anyway.
+///
+/// The document-review tools (`get_review_doc`, `submit_review_revision`)
+/// sit in BOTH this list and the chat one: they mean nothing without a
+/// review bound to the session, so only sessions with
+/// `expert_kind == "doc-review"` see them — `routes/mcp.rs` re-admits them
+/// there, and their handlers reject any other session.
 pub fn worker_hidden_tool_names() -> &'static [&'static str] {
     &[
         "list_projects",
@@ -39,6 +45,8 @@ pub fn worker_hidden_tool_names() -> &'static [&'static str] {
         "set_session_system_prompt",
         "list_models",
         "list_sessions",
+        "get_review_doc",
+        "submit_review_revision",
     ]
 }
 
@@ -58,6 +66,8 @@ pub fn chat_hidden_tool_names() -> &'static [&'static str] {
         "send_worker_message",
         "notify_workers",
         "get_finding_details",
+        "get_review_doc",
+        "submit_review_revision",
     ]
 }
 
@@ -198,6 +208,58 @@ pub(super) fn tool_definitions() -> Vec<McpToolDef> {
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {},
+                "additionalProperties": false
+            }),
+        },
+        McpToolDef {
+            name: "get_review_doc".into(),
+            description: "Re-read the document under review: its current version, the FULL markdown, and every annotation still open. Only review sessions have this tool. The same content is injected ahead of each pass, so call this when you need it again — after your own revision, or when the injected copy may be stale.".into(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {},
+                "additionalProperties": false
+            }),
+        },
+        McpToolDef {
+            name: "submit_review_revision".into(),
+            description: "Revise the document under review. `markdown` is the COMPLETE replacement document — never a patch or a fragment; anything omitted is deleted. Keep every line the annotations did not ask you to change byte-identical. This is the ONLY way to change the document: never edit the source file directly. Saves a new version (the user sees a diff) and resolves the annotations you report.".into(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "markdown": {
+                        "type": "string",
+                        "description": "The COMPLETE revised document in Markdown. Full replacement text, not a diff or excerpt."
+                    },
+                    "note": {
+                        "type": "string",
+                        "description": "One short line naming what changed, shown in the version history (e.g. 'tightened the intro, fixed the port number')."
+                    },
+                    "resolutions": {
+                        "type": "array",
+                        "description": "How you handled each open annotation. Report every one you addressed; anything left out stays open for the next pass.",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "comment_id": {
+                                    "type": "string",
+                                    "description": "Id of the annotation, as given in the injected list or by get_review_doc."
+                                },
+                                "action": {
+                                    "type": "string",
+                                    "enum": ["fixed", "declined", "answered"],
+                                    "description": "fixed = the document now satisfies it; declined = you deliberately did not change it; answered = it was a question, answered in the note."
+                                },
+                                "note": {
+                                    "type": "string",
+                                    "description": "Why you declined, or the answer to the question. Optional for 'fixed'."
+                                }
+                            },
+                            "required": ["comment_id", "action"],
+                            "additionalProperties": false
+                        }
+                    }
+                },
+                "required": ["markdown", "note"],
                 "additionalProperties": false
             }),
         },

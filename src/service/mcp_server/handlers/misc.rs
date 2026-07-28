@@ -168,6 +168,12 @@ impl McpToolRegistry {
             )
             .await?;
 
+        // A document-review session asking a question parks its review in
+        // 'needs_input', so the review screen swaps the running spinner for
+        // the question card. No-op for every other kind of session.
+        crate::service::doc_reviews::mark_needs_input(&ctx.db, &ctx.broadcaster, &ctx.session_id)
+            .await;
+
         Ok(serde_json::json!({
             "status": "ok",
             "message": "Question sent to user. They will see interactive controls to answer."

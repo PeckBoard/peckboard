@@ -6,6 +6,7 @@
 mod browser;
 mod cards;
 mod common_tools;
+mod doc_reviews;
 mod folders;
 mod misc;
 mod model_control;

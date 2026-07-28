@@ -191,6 +191,11 @@ async fn mcp_handler(
             let is_worker = session_row.as_ref().map(|s| s.is_worker).unwrap_or(false);
             let pre_hatcher = session_row.as_ref().and_then(|s| s.expert_kind.as_deref())
                 == Some(crate::service::mcp_server::PRE_HATCHER_EXPERT_KIND);
+            // The document-review tools are hidden from workers AND chats
+            // (they are in both lists), then re-admitted here for the one
+            // session kind they mean anything on: the review's own session.
+            let doc_review = session_row.as_ref().and_then(|s| s.expert_kind.as_deref())
+                == Some(crate::service::doc_reviews::EXPERT_KIND);
             let hidden: &[&str] = if is_worker {
                 crate::service::mcp_server::worker_hidden_tool_names()
             } else {
@@ -210,6 +215,8 @@ async fn mcp_handler(
                     crate::service::mcp_server::pre_hatcher_allowed_tool_names().contains(&name)
                 } else if matches!(name, "get_model_guidance" | "switch_session_model") {
                     autoswitch_on
+                } else if matches!(name, "get_review_doc" | "submit_review_revision") {
+                    doc_review
                 } else {
                     !hidden.contains(&name)
                 }

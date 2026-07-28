@@ -711,6 +711,28 @@ pub async fn take_pending_injection(db: &crate::db::Db, session_id: &str, text: 
         }
     }
 
+    // 3. Document review: a review pass armed `sessions.pending_doc_review`
+    //    with the review id. Prepend the document the user is looking at —
+    //    line-numbered, so the annotations' line ranges address something —
+    //    plus every annotation still open. One-shot: `take_pending_doc_review`
+    //    clears the flag as it reads it, whether or not the review survives.
+    if let Ok(Some(review_id)) = db.take_pending_doc_review(session_id).await
+        && let Ok(Some(review)) = db.get_doc_review(&review_id).await
+    {
+        let markdown = db
+            .get_doc_review_version(&review_id, review.current_version)
+            .await
+            .ok()
+            .flatten()
+            .map(|v| v.markdown)
+            .unwrap_or_default();
+        let comments = db
+            .list_doc_review_comments(&review_id, true)
+            .await
+            .unwrap_or_default();
+        out = build_doc_review_injection(&review, &markdown, &comments, &out);
+    }
+
     out
 }
 
@@ -724,6 +746,71 @@ fn build_plan_review_injection(plan_markdown: &str, following: &str) -> String {
          wrong, and only then finish. Once the work aligns with the plan, ask the user via \
          `ask_user` whether to commit and push, and run git commit/push (through `run_command`) \
          only after they explicitly confirm.]\n\n<plan>\n{plan_markdown}\n</plan>\n\n---\n\n{following}"
+    )
+}
+
+/// Prefix every line with its 1-based number, right-aligned in a fixed
+/// gutter. The assistant never sees the document any other way, so the
+/// annotations' `[lines A-B]` ranges always have something to point at.
+fn number_lines(markdown: &str) -> String {
+    let mut out = String::with_capacity(markdown.len() + markdown.lines().count() * 8);
+    for (i, line) in markdown.lines().enumerate() {
+        out.push_str(&format!("{:>4} | {line}\n", i + 1));
+    }
+    out
+}
+
+/// Wrap the turn text with the document under review: what it is, the
+/// numbered markdown of its current version, and the annotations still
+/// open. Mirrors [`build_plan_review_injection`] — one self-contained block
+/// ahead of the user's message, so a review session never has to guess
+/// which document (or which version) the turn is about.
+fn build_doc_review_injection(
+    review: &crate::db::models::DocReview,
+    markdown: &str,
+    comments: &[crate::db::models::DocReviewComment],
+    following: &str,
+) -> String {
+    let numbered = number_lines(markdown);
+    let annotations = if comments.is_empty() {
+        "(none open — go by the user's message below.)".to_string()
+    } else {
+        comments
+            .iter()
+            .map(|c| {
+                let quote = c
+                    .quote
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|q| !q.is_empty())
+                    .map(|q| format!(" «{q}»"))
+                    .unwrap_or_default();
+                format!(
+                    "[lines {}-{}] ({}){quote} — {} (id: {})",
+                    c.start_line,
+                    c.end_line,
+                    c.kind,
+                    c.body.trim(),
+                    c.id
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
+    format!(
+        "[Document review — below is the document you are reviewing, exactly as the user sees it. \
+         Revise it ONLY through `submit_review_revision`, passing the FULL replacement markdown; \
+         never edit the source file directly, and leave every line the annotations did not ask \
+         about byte-identical. The line numbers are an addressing aid for the annotations — never \
+         copy them into the document. Address every open annotation and report each one in \
+         `resolutions`; if an intent is unclear, ask with `ask_user` instead of guessing.]\n\n\
+         Title: {title}\nSource: {kind} — {source_ref}\nVersion: {version}\n\n\
+         <document>\n{numbered}</document>\n\n\
+         <open-annotations>\n{annotations}\n</open-annotations>\n\n---\n\n{following}",
+        title = review.title,
+        kind = review.source_kind,
+        source_ref = review.source_ref,
+        version = review.current_version,
     )
 }
 
@@ -835,5 +922,153 @@ mod tests {
         let out = build_compaction_injection("the doc body", "do the thing");
         assert!(out.contains("<compaction>\nthe doc body\n</compaction>"));
         assert!(out.contains("do the thing"));
+    }
+
+    #[test]
+    fn doc_review_injection_numbers_lines_and_lists_open_annotations() {
+        let review = crate::db::models::DocReview {
+            id: "r1".into(),
+            title: "Launch plan".into(),
+            source_kind: "file".into(),
+            source_ref: "f1:docs/launch.md".into(),
+            folder_id: Some("f1".into()),
+            project_id: None,
+            session_id: Some("s1".into()),
+            status: "running".into(),
+            current_version: 3,
+            created_at: "t".into(),
+            updated_at: "t".into(),
+        };
+        let comment = |id: &str, lines: (i32, i32), quote: Option<&str>, kind: &str, body: &str| {
+            crate::db::models::DocReviewComment {
+                id: id.into(),
+                review_id: "r1".into(),
+                version: 3,
+                start_line: lines.0,
+                end_line: lines.1,
+                quote: quote.map(str::to_string),
+                kind: kind.into(),
+                body: body.into(),
+                status: "sent".into(),
+                resolution_note: None,
+                created_at: "t".into(),
+            }
+        };
+        let out = build_doc_review_injection(
+            &review,
+            "# Launch\n\nShip on Tuesday.\n",
+            &[
+                comment(
+                    "c1",
+                    (3, 3),
+                    Some("Ship on Tuesday."),
+                    "wrong",
+                    "it is Thursday",
+                ),
+                comment("c2", (1, 2), None, "shorten", "cut the preamble"),
+            ],
+            "Run the pass.",
+        );
+
+        assert!(out.contains("Title: Launch plan"), "got: {out}");
+        assert!(
+            out.contains("Source: file — f1:docs/launch.md"),
+            "got: {out}"
+        );
+        assert!(out.contains("Version: 3"), "got: {out}");
+        assert!(
+            out.contains(
+                "<document>\n   1 | # Launch\n   2 | \n   3 | Ship on Tuesday.\n</document>"
+            ),
+            "lines are 1-based and numbered: {out}"
+        );
+        assert!(
+            out.contains("[lines 3-3] (wrong) «Ship on Tuesday.» — it is Thursday (id: c1)"),
+            "got: {out}"
+        );
+        assert!(
+            out.contains("[lines 1-2] (shorten) — cut the preamble (id: c2)"),
+            "a quote-less annotation drops the guillemets: {out}"
+        );
+        assert!(out.ends_with("---\n\nRun the pass."), "got: {out}");
+        assert!(out.contains("submit_review_revision"), "got: {out}");
+    }
+
+    #[test]
+    fn doc_review_injection_says_so_when_nothing_is_open() {
+        let review = crate::db::models::DocReview {
+            id: "r1".into(),
+            title: "Doc".into(),
+            source_kind: "report".into(),
+            source_ref: "2026-07-28/audit.md".into(),
+            folder_id: None,
+            project_id: None,
+            session_id: None,
+            status: "running".into(),
+            current_version: 1,
+            created_at: "t".into(),
+            updated_at: "t".into(),
+        };
+        let out = build_doc_review_injection(&review, "# Doc\n", &[], "Tighten section 2.");
+        assert!(out.contains("<open-annotations>\n(none open"), "got: {out}");
+        assert!(out.ends_with("Tighten section 2."), "got: {out}");
+    }
+
+    /// The whole point of `pending_doc_review` being one-shot: the document
+    /// rides along with the pass that armed it, and the next ordinary turn
+    /// is a plain message again.
+    #[tokio::test]
+    async fn take_pending_injection_injects_the_review_once() {
+        let db = crate::db::Db::in_memory().unwrap();
+        let ts = chrono::Utc::now().to_rfc3339();
+        db.create_folder(crate::db::models::NewFolder {
+            id: "f1".into(),
+            name: "F".into(),
+            path: "/tmp/f".into(),
+            created_at: ts.clone(),
+        })
+        .await
+        .unwrap();
+        db.create_session(crate::db::models::NewSession {
+            id: "s1".into(),
+            name: "Review".into(),
+            folder_id: "f1".into(),
+            is_expert: true,
+            expert_kind: Some(crate::service::doc_reviews::EXPERT_KIND.into()),
+            created_at: ts.clone(),
+            last_activity: ts,
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+        let review = db
+            .create_doc_review(
+                "Doc",
+                "file",
+                "f1:docs/doc.md",
+                Some("f1"),
+                None,
+                "# Doc\n\nbody\n",
+            )
+            .await
+            .unwrap();
+        db.set_doc_review_session(&review.id, Some("s1"))
+            .await
+            .unwrap();
+        db.add_doc_review_comment(&review.id, 1, (3, 3), Some("body"), "expand", "say more")
+            .await
+            .unwrap();
+        db.set_pending_doc_review("s1", &review.id).await.unwrap();
+
+        let first = take_pending_injection(&db, "s1", "Run the pass.").await;
+        assert!(first.contains("<document>\n   1 | # Doc"), "got: {first}");
+        assert!(first.contains("(expand)"), "got: {first}");
+        assert!(first.ends_with("Run the pass."), "got: {first}");
+
+        let second = take_pending_injection(&db, "s1", "And again.").await;
+        assert_eq!(
+            second, "And again.",
+            "the flag is consumed by the first turn"
+        );
     }
 }

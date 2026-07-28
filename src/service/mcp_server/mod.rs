@@ -70,6 +70,8 @@ impl McpToolRegistry {
             "finish_card" => self.handle_finish_card(args, ctx).await,
             "wont_do_card" => self.handle_wont_do_card(args, ctx).await,
             "ask_user" => self.handle_ask_user(args, ctx).await,
+            "get_review_doc" => self.handle_get_review_doc(args, ctx).await,
+            "submit_review_revision" => self.handle_submit_review_revision(args, ctx).await,
             "create_card" => self.handle_create_card(args, ctx).await,
             "propose_plan" => self.handle_propose_plan(args, ctx).await,
             "delete_plan" => self.handle_delete_plan(args, ctx).await,
@@ -481,9 +483,11 @@ mod tests {
         assert!(names.contains(&"spawn_subagent"));
         // Agent variables (shared, folder- or global-scoped state).
         assert!(names.contains(&"list_variables"));
-        assert!(names.contains(&"set_variable"));
         assert!(names.contains(&"delete_variable"));
-        assert_eq!(names.len(), 73);
+        // Document review (only advertised on a review session).
+        assert!(names.contains(&"get_review_doc"));
+        assert!(names.contains(&"submit_review_revision"));
+        assert_eq!(names.len(), 75);
     }
 
     #[test]
