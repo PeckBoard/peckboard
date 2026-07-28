@@ -7,6 +7,9 @@
 mod dispatch;
 mod events;
 
+use crate::auth::middleware::{AuthUser, require_auth, require_session_access};
+use crate::db::models::{NewSession, UpdateSession};
+use crate::state::AppState;
 use axum::{
     Extension, Json, Router,
     extract::{Path, Query, State},
@@ -17,10 +20,6 @@ use axum::{
 };
 use serde::Deserialize;
 use std::sync::Arc;
-
-use crate::auth::middleware::{AuthUser, require_auth};
-use crate::db::models::{NewSession, UpdateSession};
-use crate::state::AppState;
 
 #[derive(Deserialize)]
 struct CreateSessionRequest {
@@ -87,8 +86,10 @@ struct UpdateSessionRequest {
 }
 
 pub fn router(state: Arc<AppState>) -> Router<Arc<AppState>> {
-    Router::new()
-        .route("/api/sessions", post(create_session).get(list_sessions))
+    // Routes scoped to a single session id get an extra ownership check:
+    // admin, the session's owner, or (for a board-attached worker/expert
+    // session) any logged-in user. See `require_session_access`.
+    let id_scoped = Router::new()
         .route(
             "/api/sessions/{id}",
             get(get_session)
@@ -121,6 +122,14 @@ pub fn router(state: Arc<AppState>) -> Router<Arc<AppState>> {
             "/api/sessions/{id}/status",
             get(dispatch::get_session_status),
         )
+        .route_layer(middleware::from_fn_with_state(
+            state.clone(),
+            require_session_access,
+        ));
+
+    Router::new()
+        .route("/api/sessions", post(create_session).get(list_sessions))
+        .merge(id_scoped)
         .route_layer(middleware::from_fn_with_state(state, require_auth))
 }
 
@@ -202,10 +211,9 @@ async fn create_session(
 ///
 /// `next_cursor` is `null` when the current page returned fewer rows
 /// than the requested limit (i.e. end of list); pass the returned
-/// `next_cursor` fields back as `?cursor_la=...&cursor_id=...` to get
-/// the next page.
 async fn list_sessions(
     State(state): State<Arc<AppState>>,
+    Extension(user): Extension<AuthUser>,
     Query(params): Query<ListSessionsQuery>,
 ) -> impl IntoResponse {
     tracing::info!(
@@ -228,13 +236,24 @@ async fn list_sessions(
         _ => None,
     };
 
+    // Plain (chat) sessions are per-user; a non-admin only ever sees
+    // their own. Admins keep blanket access (`owner = None`).
+    let owner = if user.is_admin() {
+        None
+    } else {
+        Some(user.user_id.as_str())
+    };
+
     let sessions = if let Some(folder_id) = params.folder_id {
         state
             .db
-            .list_plain_sessions_by_folder_page(&folder_id, cursor, limit)
+            .list_plain_sessions_by_folder_page(&folder_id, owner, cursor, limit)
             .await
     } else {
-        state.db.list_plain_sessions_page(cursor, limit).await
+        state
+            .db
+            .list_plain_sessions_page(owner, cursor, limit)
+            .await
     };
 
     let sessions = sessions.map_err(|e| {
@@ -890,7 +909,17 @@ pub(crate) async fn clear_session_core(state: &AppState, id: &str) -> anyhow::Re
 }
 
 /// Resolve `[session:id]` and `[report:folder/file]` references in text.
-pub(crate) async fn resolve_references(text: &str, state: &Arc<AppState>) -> String {
+///
+/// `accessor`, when `Some((is_admin, user_id))`, gates each `[session:id]`
+/// lookup through [`crate::auth::access::may_access_session`] so a user
+/// can't use a chat message to probe another user's session name/card by
+/// UUID once they can no longer open it directly. `None` skips the check
+/// (internal/plugin-originated text where the caller is already trusted).
+pub(crate) async fn resolve_references(
+    text: &str,
+    state: &Arc<AppState>,
+    accessor: Option<(bool, &str)>,
+) -> String {
     let mut result = text.to_string();
 
     // Resolve session references
@@ -918,7 +947,23 @@ pub(crate) async fn resolve_references(text: &str, state: &Arc<AppState>) -> Str
             }
         }
 
-        if let Ok(Some(ref_session)) = state.db.get_session(&ref_session_id).await {
+        let ref_session = match state.db.get_session(&ref_session_id).await {
+            Ok(Some(s)) => {
+                let allowed = accessor
+                    .map(|(is_admin, uid)| {
+                        crate::auth::access::may_access_session(
+                            is_admin,
+                            uid,
+                            s.user_id.as_deref(),
+                            s.project_id.as_deref(),
+                        )
+                    })
+                    .unwrap_or(true);
+                allowed.then_some(s)
+            }
+            _ => None,
+        };
+        if let Some(ref_session) = ref_session {
             let session_name = &ref_session.name;
             let card_info = if let Some(ref card_id) = ref_session.card_id {
                 state

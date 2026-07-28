@@ -259,14 +259,19 @@ impl Db {
     /// import) are still totally ordered.
     pub async fn list_plain_sessions_page(
         &self,
+        owner: Option<&str>,
         before: Option<(String, String)>,
         limit: i64,
     ) -> anyhow::Result<Vec<Session>> {
+        let owner = owner.map(|s| s.to_string());
         self.with_conn(move |conn| {
             let mut query = sessions::table
                 .filter(sessions::is_worker.eq(false))
                 .filter(sessions::is_expert.eq(false))
                 .into_boxed();
+            if let Some(owner) = &owner {
+                query = query.filter(sessions::user_id.eq(owner));
+            }
             if let Some((cursor_la, cursor_id)) = before {
                 let la_for_eq = cursor_la.clone();
                 query = query.filter(
@@ -291,16 +296,21 @@ impl Db {
     pub async fn list_plain_sessions_by_folder_page(
         &self,
         folder_id: &str,
+        owner: Option<&str>,
         before: Option<(String, String)>,
         limit: i64,
     ) -> anyhow::Result<Vec<Session>> {
         let folder_id = folder_id.to_string();
+        let owner = owner.map(|s| s.to_string());
         self.with_conn(move |conn| {
             let mut query = sessions::table
                 .filter(sessions::folder_id.eq(&folder_id))
                 .filter(sessions::is_worker.eq(false))
                 .filter(sessions::is_expert.eq(false))
                 .into_boxed();
+            if let Some(owner) = &owner {
+                query = query.filter(sessions::user_id.eq(owner));
+            }
             if let Some((cursor_la, cursor_id)) = before {
                 let la_for_eq = cursor_la.clone();
                 query = query.filter(

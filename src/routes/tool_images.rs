@@ -3,9 +3,12 @@
 //! `emit_event` writes each tool-returned image (e.g. a Playwright MCP
 //! screenshot) to `<data_dir>/tool-images/<session_id>/<image_id>` and the
 //! event carries only `{mimeType, id}`; this route hands the bytes back to
-//! the chat. Same auth posture as the attachments routes: JWT +
-//! admin-gated, since sessions carry no per-user ownership column.
+//! the chat. Same auth posture as the sessions routes: JWT + per-session
+//! ownership check (`require_session_access`).
 
+use crate::auth::middleware::{require_auth, require_session_access};
+use crate::service::tool_images;
+use crate::state::AppState;
 use axum::{
     Json, Router,
     extract::{Path, State},
@@ -16,17 +19,16 @@ use axum::{
 };
 use std::sync::Arc;
 
-use crate::auth::middleware::{require_admin, require_auth};
-use crate::service::tool_images;
-use crate::state::AppState;
-
 pub fn router(state: Arc<AppState>) -> Router<Arc<AppState>> {
     Router::new()
         .route(
             "/api/sessions/{id}/tool-images/{image_id}",
             get(download_tool_image),
         )
-        .route_layer(middleware::from_fn(require_admin))
+        .route_layer(middleware::from_fn_with_state(
+            state.clone(),
+            require_session_access,
+        ))
         .route_layer(middleware::from_fn_with_state(state, require_auth))
 }
 

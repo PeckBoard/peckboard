@@ -119,7 +119,8 @@ pub(super) async fn send_message(
 
     // Resolve [session:id] and [report:folder/file] references early; both
     // the queued and started paths use the resolved text.
-    let mut resolved_text = resolve_references(&body.text, &state).await;
+    let mut resolved_text =
+        resolve_references(&body.text, &state, Some((user.is_admin(), &user.user_id))).await;
 
     // Build spawn config — resolve model/effort with precedence:
     //   request body > session > card > project > "default"

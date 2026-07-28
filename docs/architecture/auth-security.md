@@ -9,6 +9,38 @@
 - Passwords hashed with Argon2
 - Verification uses timing-safe comparison
 
+## Resource Ownership
+
+- Sessions are per-user: `sessions.user_id` records the creator (backfilled
+  for legacy rows when the install has exactly one user; ambiguous rows
+  stay `NULL`)
+- REST and WebSocket both enforce the same rule
+  (`auth::access::may_access_session`): an admin may access any session; a
+  non-admin may access a session they own, or a worker/expert session
+  attached to a project (`project_id` set) since project boards are shared;
+  anything else — including a guessed/unknown session id — returns the same
+  404 a missing session would, so the response can't be used as an
+  existence oracle
+- REST enforcement is `require_session_access`, layered on every
+  session-id route wherever it is declared — the session router itself plus
+  the session-scoped routes that live in other modules (attachments, tool
+  images, queued messages, folder moves, askpass answers, and the
+  per-session usage routes `/api/usage/sessions/{id}` and
+  `.../{id}/turns`, whose turn breakdown includes user-prompt snippets);
+  WS enforcement is `may_stream_session`, gating `Subscribe`/`Resume`
+- A sudo askpass answer additionally has to name the session the prompt was
+  raised for, so knowing a pending `request_id` is not on its own enough to
+  answer another session's password dialog
+- Projects, cards, and folders are **not** per-user scoped — any logged-in
+  user can read/write any project, card, or folder (shared-board design).
+  Some settings/admin routes are gated with `require_admin` instead (see
+  below); board data itself has no ownership column
+- The aggregate usage routes (`/api/usage/sessions`, `/projects`, `/cards`,
+  `/experts`, `/operations`, `/costs`) are **not** per-user scoped — any
+  logged-in user sees the whole install's cost dashboard, including other
+  users' session names and totals. Scoping those needs owner-aware rollup
+  queries, not a route gate
+
 ## JWT Token Lifecycle
 
 - Authentication issues a JWT token containing user ID, role, and expiry

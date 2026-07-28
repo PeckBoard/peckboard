@@ -9,7 +9,7 @@ use axum::{
 use serde::Deserialize;
 use std::sync::Arc;
 
-use crate::auth::middleware::{AuthUser, require_auth};
+use crate::auth::middleware::{AuthUser, require_auth, require_session_access};
 use crate::db::models::{NewAnnouncement, NewPushSubscription, NewQueuedMessage};
 use crate::state::AppState;
 
@@ -59,15 +59,28 @@ pub fn router(state: Arc<AppState>) -> Router<Arc<AppState>> {
             "/api/announcements/{id}",
             axum::routing::delete(delete_announcement),
         )
+        .merge(session_scoped(state.clone()))
+        .route_layer(middleware::from_fn_with_state(state, require_auth));
+
+    public.merge(protected)
+}
+
+/// The queued-message routes read and write the message that will be sent
+/// into a specific session, so they carry the same owner-or-shared-board
+/// gate as the session routes themselves (`require_session_access`) rather
+/// than being reachable by any logged-in user.
+fn session_scoped(state: Arc<AppState>) -> Router<Arc<AppState>> {
+    Router::new()
         .route(
             "/api/sessions/{id}/queue",
             post(upsert_queued_message)
                 .get(get_queued_message)
                 .delete(delete_queued_message),
         )
-        .route_layer(middleware::from_fn_with_state(state, require_auth));
-
-    public.merge(protected)
+        .route_layer(middleware::from_fn_with_state(
+            state,
+            require_session_access,
+        ))
 }
 
 // ── VAPID public key ──────────────────────────────────────────────
@@ -349,4 +362,113 @@ async fn delete_queued_message(
         });
 
     Ok(StatusCode::NO_CONTENT)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::auth::middleware::tests::{seed_authenticated_user, seed_session, test_state};
+    use axum::body::Body;
+    use axum::http::{Request, header};
+    use tower::ServiceExt;
+
+    fn app(state: Arc<AppState>) -> Router {
+        Router::new().merge(router(state.clone())).with_state(state)
+    }
+
+    fn queue_request(token: &str, session_id: &str) -> Request<Body> {
+        Request::builder()
+            .uri(format!("/api/sessions/{session_id}/queue"))
+            .header(header::AUTHORIZATION, format!("Bearer {token}"))
+            .body(Body::empty())
+            .unwrap()
+    }
+
+    async fn seed_queued_message(state: &Arc<AppState>, session_id: &str) {
+        state
+            .db
+            .upsert_queued_message(NewQueuedMessage {
+                session_id: session_id.into(),
+                text: "queued-secret".into(),
+                queued_at: chrono::Utc::now().to_rfc3339(),
+                model: None,
+                effort: None,
+            })
+            .await
+            .unwrap();
+    }
+
+    async fn body_text(response: axum::response::Response) -> String {
+        let bytes = axum::body::to_bytes(response.into_body(), 64 * 1024)
+            .await
+            .unwrap();
+        String::from_utf8_lossy(&bytes).to_string()
+    }
+
+    /// The queued message is text that will be sent into the session, so
+    /// reading it is reading the session. A non-owner gets the same 404 the
+    /// other session routes return — note the message really does exist, so
+    /// this is the gate answering, not the "no queued message" 404.
+    #[tokio::test]
+    async fn non_owner_cannot_read_another_users_queued_message() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = test_state(dir.path());
+        let token = seed_authenticated_user(&state, "user").await;
+        seed_session(&state, "s-theirs", Some("u2"), None).await;
+        seed_queued_message(&state, "s-theirs").await;
+
+        let response = app(state.clone())
+            .oneshot(queue_request(&token, "s-theirs"))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        let body = body_text(response).await;
+        assert!(body.contains("session not found"), "got {body}");
+        assert!(!body.contains("queued-secret"));
+    }
+
+    #[tokio::test]
+    async fn non_owner_cannot_queue_a_message_into_another_users_session() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = test_state(dir.path());
+        let token = seed_authenticated_user(&state, "user").await;
+        seed_session(&state, "s-theirs", Some("u2"), None).await;
+
+        let request = Request::builder()
+            .method("POST")
+            .uri("/api/sessions/s-theirs/queue")
+            .header(header::AUTHORIZATION, format!("Bearer {token}"))
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(Body::from(
+                serde_json::json!({ "text": "do something" }).to_string(),
+            ))
+            .unwrap();
+        let response = app(state.clone()).oneshot(request).await.unwrap();
+
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        assert!(
+            state
+                .db
+                .get_queued_message("s-theirs")
+                .await
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[tokio::test]
+    async fn owner_can_read_their_own_queued_message() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = test_state(dir.path());
+        let token = seed_authenticated_user(&state, "user").await;
+        seed_session(&state, "s-mine", Some("u1"), None).await;
+        seed_queued_message(&state, "s-mine").await;
+
+        let response = app(state.clone())
+            .oneshot(queue_request(&token, "s-mine"))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert!(body_text(response).await.contains("queued-secret"));
+    }
 }

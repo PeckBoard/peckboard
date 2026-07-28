@@ -78,14 +78,15 @@ enum ServerFrame {
 /// May this client stream `session_id`'s events?
 ///
 /// Admins keep blanket access. Everyone else may stream only sessions they
-/// own, using the same ownership rule as the session-control send_message
-/// gate: a match needs both `user_id`s to be `Some` and equal, so a legacy or
-/// internally-spawned session with a NULL owner never matches.
+/// own, or a worker/expert session attached to a project (shared board) —
+/// same rule as the REST layer's `require_session_access`
+/// ([`crate::auth::access::may_access_session`]).
 ///
-/// This is deliberately narrower than the REST layer, which is not yet
-/// per-user partitioned (see the "any logged-in user can read every other
-/// user's sessions" card): a non-admin cannot open another user's stream by
-/// guessing session UUIDs.
+/// One id here is not a session at all: `doc-review-update` frames are keyed
+/// by the *review* id, so the review screen subscribes to that. Reviews carry
+/// no owner column and their REST surface is `require_auth` only, so any
+/// authenticated client may stream one — matching what it could already read
+/// over HTTP.
 async fn may_stream_session(
     state: &AppState,
     is_admin: bool,
@@ -96,8 +97,13 @@ async fn may_stream_session(
         return true;
     }
     match state.db.get_session(session_id).await {
-        Ok(Some(session)) => session.user_id.as_deref() == Some(user_id),
-        Ok(None) => false,
+        Ok(Some(session)) => crate::auth::access::may_access_session(
+            is_admin,
+            user_id,
+            session.user_id.as_deref(),
+            session.project_id.as_deref(),
+        ),
+        Ok(None) => matches!(state.db.get_doc_review(session_id).await, Ok(Some(_))),
         Err(e) => {
             tracing::warn!("WS ownership check failed for session {session_id}: {e}");
             false
@@ -223,13 +229,11 @@ async fn handle_connection(socket: WebSocket, state: Arc<AppState>) {
                             }
                             match frame {
                                 ClientFrame::Subscribe { session_id } => {
-                                    // Sessions are still not per-user partitioned
-                                    // at the REST layer, so keep the stream gate
-                                    // narrower than REST: admins get blanket
-                                    // access, everyone else only the sessions they
-                                    // own. A non-admin can't tap another user's
-                                    // stream by guessing session UUIDs, and their
-                                    // own sessions stream normally.
+                                    // Same owner-or-shared-board rule as the
+                                    // REST layer's `require_session_access`:
+                                    // admins get blanket access, everyone else
+                                    // only their own sessions (or a board-
+                                    // attached worker/expert session).
                                     if !may_stream_session(&state, is_admin, &user_id, &session_id)
                                         .await
                                     {
@@ -481,7 +485,7 @@ async fn handle_connection(socket: WebSocket, state: Arc<AppState>) {
 mod tests {
     use super::*;
     use crate::auth::middleware::tests::test_state;
-    use crate::db::models::{NewFolder, NewSession, NewUser};
+    use crate::db::models::{NewFolder, NewProject, NewSession, NewUser};
 
     async fn seed_user(state: &Arc<AppState>, id: &str, username: &str, role: &str) {
         let now = chrono::Utc::now().to_rfc3339();
@@ -580,5 +584,67 @@ mod tests {
         seed_session(&state, "s-theirs", Some("u1")).await;
 
         assert!(may_stream_session(&state, true, "admin", "s-theirs").await);
+    }
+
+    #[tokio::test]
+    async fn a_non_admin_may_stream_a_board_attached_session_they_dont_own() {
+        // A worker/expert session tied to a project (shared board) is
+        // reachable by any logged-in user, same as the board itself —
+        // even though its `user_id` belongs to someone else.
+        let dir = tempfile::tempdir().unwrap();
+        let state = test_state(dir.path());
+        seed_user(&state, "u1", "alice", "user").await;
+        seed_user(&state, "u2", "bob", "user").await;
+        let now = chrono::Utc::now().to_rfc3339();
+        state
+            .db
+            .create_folder(NewFolder {
+                id: "f1".into(),
+                name: "f1".into(),
+                path: "/tmp/f1".into(),
+                created_at: now.clone(),
+            })
+            .await
+            .ok();
+        state
+            .db
+            .create_project(NewProject {
+                id: "proj-1".into(),
+                name: "proj-1".into(),
+                context: "".into(),
+                folder_id: "f1".into(),
+                worker_count: 1,
+                status: "active".into(),
+                workflow: "default".into(),
+                model: None,
+                effort: None,
+                parallel_instructions: false,
+                auto_notify_changes: false,
+                worker_communication: false,
+                worktree_isolation: false,
+                created_at: now.clone(),
+                last_accessed_at: now.clone(),
+                budget_usd_cents: None,
+                budget_period: None,
+            })
+            .await
+            .ok();
+        state
+            .db
+            .create_session(NewSession {
+                id: "s-worker".into(),
+                name: "s-worker".into(),
+                folder_id: "f1".into(),
+                is_worker: true,
+                project_id: Some("proj-1".into()),
+                created_at: now.clone(),
+                last_activity: now,
+                user_id: Some("u2".into()),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+
+        assert!(may_stream_session(&state, false, "u1", "s-worker").await);
     }
 }

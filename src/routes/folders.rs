@@ -9,7 +9,7 @@ use axum::{
 use serde::Deserialize;
 use std::sync::Arc;
 
-use crate::auth::middleware::{require_admin, require_auth};
+use crate::auth::middleware::{require_admin, require_auth, require_session_access};
 use crate::db::crud::MoveFolderOutcome;
 use crate::db::models::NewFolder;
 use crate::service::doc_review_sources as sources;
@@ -38,7 +38,7 @@ struct ChangeFolderRequest {
 pub fn router(state: Arc<AppState>) -> Router<Arc<AppState>> {
     Router::new()
         .merge(admin_router())
-        .merge(user_router())
+        .merge(user_router(state.clone()))
         .route_layer(middleware::from_fn_with_state(state, require_auth))
 }
 
@@ -70,15 +70,15 @@ fn admin_router() -> Router<Arc<AppState>> {
 /// finds the workspaces they're allowed to work in, and the per-entity move
 /// routes only shuffle work between folders that already exist — neither
 /// widens the file-access scope the admin chose.
-fn user_router() -> Router<Arc<AppState>> {
+fn user_router(state: Arc<AppState>) -> Router<Arc<AppState>> {
     Router::new()
         .route("/api/folders", get(list_folders))
+        .merge(session_folder_router(state))
         // Per-entity folder change: each route cancels any agent the
         // move affects BEFORE the DB write, so the move is durable
         // within the running process. Process restart kills child
         // agents independently, so there's no need for a separate
         // DB-marker / replay step.
-        .route("/api/sessions/{id}/folder", post(change_session_folder))
         .route("/api/projects/{id}/folder", post(change_project_folder))
         .route(
             "/api/repeating-tasks/{id}/folder",
@@ -90,6 +90,21 @@ fn user_router() -> Router<Arc<AppState>> {
         // reading its markdown widens nothing.
         .route("/api/folders/{id}/markdown-files", get(list_markdown_files))
         .route("/api/folders/{id}/markdown-file", get(get_markdown_file))
+}
+
+/// Moving a session cancels its running agent and repoints the workspace
+/// it runs in, so it is a write on that session and carries the same
+/// owner-or-shared-board gate as the session routes
+/// (`require_session_access`). Kept in its own router because the sibling
+/// `{id}` routes above name projects, repeating tasks, and folders — not
+/// sessions — and must not be looked up as one.
+fn session_folder_router(state: Arc<AppState>) -> Router<Arc<AppState>> {
+    Router::new()
+        .route("/api/sessions/{id}/folder", post(change_session_folder))
+        .route_layer(middleware::from_fn_with_state(
+            state,
+            require_session_access,
+        ))
 }
 
 /// Directory trees that must never become an agent workspace, even for an
@@ -653,7 +668,7 @@ async fn get_markdown_file(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::auth::middleware::tests::{seed_authenticated_user, test_state};
+    use crate::auth::middleware::tests::{seed_authenticated_user, seed_session, test_state};
     use axum::body::Body;
     use axum::http::{Request, header};
     use tower::ServiceExt;
@@ -956,5 +971,73 @@ mod tests {
         }
 
         let _ = std::fs::remove_file(root.parent().unwrap().join("folder_secret.md"));
+    }
+
+    fn move_session_request(token: &str, session_id: &str) -> Request<Body> {
+        Request::builder()
+            .method("POST")
+            .uri(format!("/api/sessions/{session_id}/folder"))
+            .header(header::AUTHORIZATION, format!("Bearer {token}"))
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(Body::from(
+                serde_json::json!({ "target_folder_id": "f2" }).to_string(),
+            ))
+            .unwrap()
+    }
+
+    /// `seed_session` puts the session in folder `f1`; this adds the folder
+    /// the move targets.
+    async fn seed_target_folder(state: &Arc<AppState>) {
+        state
+            .db
+            .create_folder(NewFolder {
+                id: "f2".into(),
+                name: "f2".into(),
+                path: "/tmp/f2".into(),
+                created_at: chrono::Utc::now().to_rfc3339(),
+            })
+            .await
+            .unwrap();
+    }
+
+    /// Moving a session cancels whatever agent is running in it and
+    /// repoints the workspace it runs in, so it is a write on that session
+    /// and carries the same gate as the other session routes: a non-owner
+    /// gets the indistinguishable 404 and the row does not move.
+    #[tokio::test]
+    async fn non_owner_cannot_move_another_users_session() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = test_state(dir.path());
+        let token = seed_authenticated_user(&state, "user").await;
+        seed_session(&state, "s-theirs", Some("u2"), None).await;
+        seed_target_folder(&state).await;
+
+        let response = app(state.clone())
+            .oneshot(move_session_request(&token, "s-theirs"))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        assert_eq!(error_message(response).await, "session not found");
+
+        let session = state.db.get_session("s-theirs").await.unwrap().unwrap();
+        assert_eq!(session.folder_id, "f1", "session must not have moved");
+    }
+
+    #[tokio::test]
+    async fn owner_can_move_their_own_session() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = test_state(dir.path());
+        let token = seed_authenticated_user(&state, "user").await;
+        seed_session(&state, "s-mine", Some("u1"), None).await;
+        seed_target_folder(&state).await;
+
+        let response = app(state.clone())
+            .oneshot(move_session_request(&token, "s-mine"))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let session = state.db.get_session("s-mine").await.unwrap().unwrap();
+        assert_eq!(session.folder_id, "f2");
     }
 }

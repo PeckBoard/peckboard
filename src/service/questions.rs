@@ -214,7 +214,7 @@ pub async fn resolve_question(
     };
 
     // Resolve references in the answer text (e.g. [session:id] from autocomplete)
-    let answer_text = resolve_references(&answer_text, &state).await;
+    let answer_text = resolve_references(&answer_text, &state, None).await;
 
     // Notify question-expert plugins of the Q&A, under the answering user's
     // authority. Fire-and-forget: it must not delay the conversation resume,

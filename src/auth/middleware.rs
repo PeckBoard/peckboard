@@ -98,11 +98,13 @@ impl AuthUser {
 }
 
 /// Admin-only middleware. MUST be layered AFTER `require_auth` so the
-/// `AuthUser` extension is already present. Sessions, cards, and other
-/// per-tenant data are not partitioned by user id in the DB (single
-/// admin is the design), so the route layer enforces "admin only" to
-/// keep an admin-created non-admin user from reading or modifying
-/// admin-owned state by guessing UUIDs.
+/// `AuthUser` extension is already present. Cards, projects, and folders
+/// are not partitioned by user id in the DB (shared-board design), so
+/// routes touching them enforce "admin only" or leave that scoping for a
+/// follow-up (see the "any logged-in user can read every other user's
+/// sessions/projects/cards" card). Sessions carry a `user_id` owner column
+/// and use [`require_session_access`] instead, which is per-row rather
+/// than blanket admin-only.
 pub async fn require_admin(request: Request<axum::body::Body>, next: Next) -> Response {
     let is_admin = request
         .extensions()
@@ -117,8 +119,54 @@ pub async fn require_admin(request: Request<axum::body::Body>, next: Next) -> Re
         )
             .into_response();
     }
+    next.run(request).await
+}
+
+/// Per-session ownership middleware. MUST be layered AFTER `require_auth`,
+/// and only on routes with a single `{id}` path param naming a session.
+/// Applies [`crate::auth::access::may_access_session`]: admins pass, the
+/// session's owner passes, and a worker/expert session tied to a project
+/// (shared board) passes for any logged-in user. Anyone else — including a
+/// guessed/unknown session id — gets a 404 identical to a truly missing
+/// session, so the response can't be used as an existence oracle.
+pub async fn require_session_access(
+    State(state): State<Arc<AppState>>,
+    params: axum::extract::RawPathParams,
+    request: Request<axum::body::Body>,
+    next: Next,
+) -> Response {
+    let user = match request.extensions().get::<AuthUser>() {
+        Some(u) => u.clone(),
+        None => return unauthorized(),
+    };
+    let Some(session_id) = params.iter().find(|(k, _)| *k == "id").map(|(_, v)| v) else {
+        return session_not_found();
+    };
+
+    let session = state.db.get_session(session_id).await.ok().flatten();
+    let allowed = match &session {
+        Some(s) => crate::auth::access::may_access_session(
+            user.is_admin(),
+            &user.user_id,
+            s.user_id.as_deref(),
+            s.project_id.as_deref(),
+        ),
+        None => false,
+    };
+
+    if !allowed {
+        return session_not_found();
+    }
 
     next.run(request).await
+}
+
+fn session_not_found() -> Response {
+    (
+        StatusCode::NOT_FOUND,
+        axum::Json(serde_json::json!({ "error": "session not found" })),
+    )
+        .into_response()
 }
 
 #[cfg(test)]
@@ -127,7 +175,7 @@ pub(crate) mod tests {
     use crate::auth::token::{create_token, generate_jwt_secret};
     use crate::config::Config;
     use crate::db::Db;
-    use crate::db::models::{NewAuthSession, NewUser};
+    use crate::db::models::{NewAuthSession, NewFolder, NewProject, NewSession, NewUser};
     use axum::{Router, body::Body, middleware, routing::get};
     use tower::ServiceExt;
 
@@ -369,5 +417,192 @@ pub(crate) mod tests {
                 .unwrap();
             assert_eq!(response.status(), StatusCode::FORBIDDEN);
         }
+    }
+
+    /// Seed a plain session owned by `owner` (`None` = legacy/unowned),
+    /// optionally attached to a project (`project_id`, i.e. a board-shared
+    /// worker/expert session).
+    pub(crate) async fn seed_session(
+        state: &Arc<AppState>,
+        id: &str,
+        owner: Option<&str>,
+        project_id: Option<&str>,
+    ) {
+        let now = chrono::Utc::now().to_rfc3339();
+        state
+            .db
+            .create_folder(NewFolder {
+                id: "f1".into(),
+                name: "f1".into(),
+                path: "/tmp/f1".into(),
+                created_at: now.clone(),
+            })
+            .await
+            .ok();
+        if let Some(pid) = project_id {
+            state
+                .db
+                .create_project(NewProject {
+                    id: pid.into(),
+                    name: pid.into(),
+                    context: "".into(),
+                    folder_id: "f1".into(),
+                    worker_count: 1,
+                    status: "active".into(),
+                    workflow: "default".into(),
+                    model: None,
+                    effort: None,
+                    parallel_instructions: false,
+                    auto_notify_changes: false,
+                    worker_communication: false,
+                    worktree_isolation: false,
+                    created_at: now.clone(),
+                    last_accessed_at: now.clone(),
+                    budget_usd_cents: None,
+                    budget_period: None,
+                })
+                .await
+                .ok();
+        }
+        state
+            .db
+            .create_session(NewSession {
+                id: id.into(),
+                name: id.into(),
+                folder_id: "f1".into(),
+                project_id: project_id.map(str::to_string),
+                created_at: now.clone(),
+                last_activity: now,
+                user_id: owner.map(str::to_string),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+    }
+
+    fn session_request(id: &str) -> Request<Body> {
+        Request::builder()
+            .uri(format!("/api/sessions/{id}"))
+            .body(Body::empty())
+            .unwrap()
+    }
+
+    fn session_app(state: Arc<AppState>, user: Option<AuthUser>) -> Router {
+        // Outer layer injects (or omits) the AuthUser the way
+        // `require_auth` would; inner layer is the one under test.
+        Router::new()
+            .route("/api/sessions/{id}", get(|| async { "ok" }))
+            .route_layer(middleware::from_fn_with_state(
+                state,
+                require_session_access,
+            ))
+            .layer(middleware::from_fn(
+                move |mut req: Request<axum::body::Body>, next: Next| {
+                    let user = user.clone();
+                    async move {
+                        if let Some(u) = user {
+                            req.extensions_mut().insert(u);
+                        }
+                        next.run(req).await
+                    }
+                },
+            ))
+    }
+
+    #[tokio::test]
+    async fn require_session_access_allows_owner() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = test_state(dir.path());
+        seed_session(&state, "s-mine", Some("u1"), None).await;
+
+        let app = session_app(
+            state.clone(),
+            Some(AuthUser {
+                user_id: "u1".into(),
+                role: "user".into(),
+                session_id: "s1".into(),
+            }),
+        );
+        let response = app.oneshot(session_request("s-mine")).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn require_session_access_denies_non_owner_with_404() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = test_state(dir.path());
+        seed_session(&state, "s-theirs", Some("u2"), None).await;
+
+        let app = session_app(
+            state.clone(),
+            Some(AuthUser {
+                user_id: "u1".into(),
+                role: "user".into(),
+                session_id: "s1".into(),
+            }),
+        );
+        let response = app.oneshot(session_request("s-theirs")).await.unwrap();
+        assert_eq!(
+            response.status(),
+            StatusCode::NOT_FOUND,
+            "a non-owner must get the same 404 as a missing session, not a 403 \
+             that would leak existence"
+        );
+    }
+
+    #[tokio::test]
+    async fn require_session_access_allows_admin_for_anyones_session() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = test_state(dir.path());
+        seed_session(&state, "s-theirs", Some("u2"), None).await;
+
+        let app = session_app(
+            state.clone(),
+            Some(AuthUser {
+                user_id: "admin".into(),
+                role: "admin".into(),
+                session_id: "s1".into(),
+            }),
+        );
+        let response = app.oneshot(session_request("s-theirs")).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn require_session_access_allows_board_attached_session_for_any_user() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = test_state(dir.path());
+        seed_session(&state, "s-worker", Some("u2"), Some("proj-1")).await;
+
+        let app = session_app(
+            state.clone(),
+            Some(AuthUser {
+                user_id: "u1".into(),
+                role: "user".into(),
+                session_id: "s1".into(),
+            }),
+        );
+        let response = app.oneshot(session_request("s-worker")).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn require_session_access_denies_unknown_session_id() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = test_state(dir.path());
+
+        let app = session_app(
+            state.clone(),
+            Some(AuthUser {
+                user_id: "u1".into(),
+                role: "user".into(),
+                session_id: "s1".into(),
+            }),
+        );
+        let response = app
+            .oneshot(session_request("no-such-session"))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
     }
 }

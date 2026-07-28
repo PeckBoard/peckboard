@@ -26,7 +26,7 @@ use axum::{
 };
 use serde::{Deserialize, Serialize};
 
-use crate::auth::middleware::require_auth;
+use crate::auth::middleware::{require_auth, require_session_access};
 use crate::db::crud::{UsageRollupRow, UsageWindow};
 use crate::state::AppState;
 
@@ -177,18 +177,33 @@ pub struct UsageDashboard {
 }
 
 pub fn router(state: Arc<AppState>) -> Router<Arc<AppState>> {
-    Router::new()
-        .route("/api/usage/costs", get(get_costs))
-        .route("/api/usage/sessions", get(list_session_usage))
+    // Per-session usage is session content: the turns breakdown carries a
+    // snippet of each user prompt plus the files the turn read and edited,
+    // and the single-session route carries the session's name. Both take
+    // the same owner-or-shared-board gate as the session routes.
+    //
+    // The aggregate routes below stay `require_auth`-only: they are the
+    // cost dashboard, and scoping them per user needs owner-aware rollup
+    // queries rather than a route gate.
+    let id_scoped = Router::new()
         .route("/api/usage/sessions/{id}", get(get_session_usage))
         .route(
             "/api/usage/sessions/{id}/turns",
             get(turns::get_session_turns),
         )
+        .route_layer(middleware::from_fn_with_state(
+            state.clone(),
+            require_session_access,
+        ));
+
+    Router::new()
+        .route("/api/usage/costs", get(get_costs))
+        .route("/api/usage/sessions", get(list_session_usage))
         .route("/api/usage/projects", get(list_project_usage))
         .route("/api/usage/cards", get(list_card_usage))
         .route("/api/usage/experts", get(list_expert_usage))
         .route("/api/usage/operations", get(operations::get_operations))
+        .merge(id_scoped)
         .route_layer(middleware::from_fn_with_state(state, require_auth))
 }
 

@@ -4,7 +4,9 @@
 //! inside a session's `sudo -A` — it is NOT behind the JWT middleware and is
 //! instead gated by the per-session secret token dispatch placed in the
 //! child's environment. `POST /api/sessions/{id}/askpass-answer` is the
-//! JWT-authenticated route the UI's password dialog submits to.
+//! JWT-authenticated route the UI's password dialog submits to; it is gated
+//! by the same per-session ownership rule as the other session routes, and
+//! the answer only resolves a prompt raised by that same session.
 
 use axum::{
     Form, Json, Router,
@@ -17,7 +19,7 @@ use axum::{
 use serde::Deserialize;
 use std::sync::Arc;
 
-use crate::auth::middleware::require_auth;
+use crate::auth::middleware::{require_auth, require_session_access};
 use crate::service::askpass::ANSWER_TIMEOUT_SECS;
 use crate::state::AppState;
 use crate::ws::broadcaster::WsEvent;
@@ -35,6 +37,10 @@ const MAX_PASSWORD_LEN: usize = 1024;
 pub fn router(state: Arc<AppState>) -> Router<Arc<AppState>> {
     let protected = Router::new()
         .route("/api/sessions/{id}/askpass-answer", post(answer))
+        .route_layer(middleware::from_fn_with_state(
+            state.clone(),
+            require_session_access,
+        ))
         .route_layer(middleware::from_fn_with_state(state, require_auth));
 
     // Helper-facing endpoint: token-gated, no JWT (the CLI child has no
@@ -84,7 +90,7 @@ async fn request_password(
         prompt = prompt.chars().take(MAX_PROMPT_LEN).collect();
     }
 
-    let (request_id, rx) = registry.begin_request().await;
+    let (request_id, rx) = registry.begin_request(&session_id).await;
     // Global WS event (see ws::handler) — the dialog must surface even on a
     // client that never subscribed to this session's stream.
     state.broadcaster.broadcast(WsEvent {
@@ -152,7 +158,7 @@ struct AnswerBody {
 /// rejects (sudo sees a failed askpass and gives up immediately).
 async fn answer(
     State(state): State<Arc<AppState>>,
-    Path(_session_id): Path<String>,
+    Path(session_id): Path<String>,
     Json(body): Json<AnswerBody>,
 ) -> impl IntoResponse {
     let Some(registry) = state.session_manager.askpass_registry() else {
@@ -173,7 +179,10 @@ async fn answer(
         }
         Some(pw)
     };
-    if registry.resolve(&body.request_id, answer).await {
+    if registry
+        .resolve(&body.request_id, &session_id, answer)
+        .await
+    {
         (StatusCode::OK, Json(serde_json::json!({ "ok": true })))
     } else {
         // Already answered elsewhere, timed out, or bogus id.

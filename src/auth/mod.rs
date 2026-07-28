@@ -1,3 +1,4 @@
+pub mod access;
 pub mod bootstrap;
 pub mod middleware;
 pub mod password;

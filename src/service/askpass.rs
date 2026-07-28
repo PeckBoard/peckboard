@@ -44,9 +44,11 @@ struct Inner {
     /// session_id → sha256(token), so re-issuing on a fresh spawn replaces
     /// (invalidates) the session's previous token instead of accumulating.
     by_session: HashMap<String, String>,
-    /// request_id → answer channel for in-flight password requests.
-    /// `Some(password)` = user submitted; `None` = user cancelled.
-    pending: HashMap<String, oneshot::Sender<Option<String>>>,
+    /// request_id → (session_id, answer channel) for in-flight password
+    /// requests. `Some(password)` = user submitted; `None` = user cancelled.
+    /// The session id is kept so an answer can only resolve a request that
+    /// belongs to the session it was submitted for.
+    pending: HashMap<String, (String, oneshot::Sender<Option<String>>)>,
 }
 
 /// In-memory registry of per-session askpass tokens and pending password
@@ -90,28 +92,44 @@ impl AskpassRegistry {
         self.inner.lock().await.tokens.get(&hash).cloned()
     }
 
-    /// Register a pending password request; the receiver resolves when the
-    /// user answers (or is dropped when the request times out).
-    pub async fn begin_request(&self) -> (String, oneshot::Receiver<Option<String>>) {
+    /// Register a pending password request for `session_id`; the receiver
+    /// resolves when the user answers (or is dropped when the request
+    /// times out).
+    pub async fn begin_request(
+        &self,
+        session_id: &str,
+    ) -> (String, oneshot::Receiver<Option<String>>) {
         let request_id = uuid::Uuid::new_v4().to_string();
         let (tx, rx) = oneshot::channel();
         self.inner
             .lock()
             .await
             .pending
-            .insert(request_id.clone(), tx);
+            .insert(request_id.clone(), (session_id.to_string(), tx));
         (request_id, rx)
     }
 
     /// Deliver the user's answer (`Some(password)` or `None` for cancel).
     /// Returns false when the request is unknown — already answered, timed
-    /// out, or never existed.
-    pub async fn resolve(&self, request_id: &str, answer: Option<String>) -> bool {
-        let tx = self.inner.lock().await.pending.remove(request_id);
-        match tx {
-            Some(tx) => tx.send(answer).is_ok(),
-            None => false,
+    /// out, or never existed — or when it belongs to a different session
+    /// than the one the answer was submitted for, so knowing a request id
+    /// is not on its own enough to answer another session's sudo prompt.
+    pub async fn resolve(
+        &self,
+        request_id: &str,
+        session_id: &str,
+        answer: Option<String>,
+    ) -> bool {
+        let mut guard = self.inner.lock().await;
+        match guard.pending.get(request_id) {
+            Some((owner, _)) if owner == session_id => {}
+            _ => return false,
         }
+        let Some((_, tx)) = guard.pending.remove(request_id) else {
+            return false;
+        };
+        drop(guard);
+        tx.send(answer).is_ok()
     }
 
     /// Drop a pending request without answering (timeout path). The waiting
@@ -177,24 +195,36 @@ mod tests {
     #[tokio::test]
     async fn resolve_delivers_password_once() {
         let reg = AskpassRegistry::new();
-        let (id, rx) = reg.begin_request().await;
-        assert!(reg.resolve(&id, Some("hunter2".into())).await);
+        let (id, rx) = reg.begin_request("sess-1").await;
+        assert!(reg.resolve(&id, "sess-1", Some("hunter2".into())).await);
         assert_eq!(rx.await.unwrap().as_deref(), Some("hunter2"));
         // Second resolve for the same id: request is gone.
-        assert!(!reg.resolve(&id, Some("again".into())).await);
+        assert!(!reg.resolve(&id, "sess-1", Some("again".into())).await);
     }
 
     #[tokio::test]
     async fn cancel_and_timeout_paths() {
         let reg = AskpassRegistry::new();
-        let (id, rx) = reg.begin_request().await;
-        assert!(reg.resolve(&id, None).await);
+        let (id, rx) = reg.begin_request("sess-1").await;
+        assert!(reg.resolve(&id, "sess-1", None).await);
         assert_eq!(rx.await.unwrap(), None);
 
-        let (id2, rx2) = reg.begin_request().await;
+        let (id2, rx2) = reg.begin_request("sess-1").await;
         reg.drop_request(&id2).await;
         assert!(rx2.await.is_err()); // sender dropped → RecvError
-        assert!(!reg.resolve(&id2, Some("late".into())).await);
+        assert!(!reg.resolve(&id2, "sess-1", Some("late".into())).await);
+    }
+
+    #[tokio::test]
+    async fn an_answer_for_another_session_never_resolves_the_request() {
+        let reg = AskpassRegistry::new();
+        let (id, rx) = reg.begin_request("sess-1").await;
+        // Knowing the request id is not enough: the answer must be
+        // submitted for the session the prompt belongs to.
+        assert!(!reg.resolve(&id, "sess-2", Some("stolen".into())).await);
+        // ...and the request is still pending for its real session.
+        assert!(reg.resolve(&id, "sess-1", Some("hunter2".into())).await);
+        assert_eq!(rx.await.unwrap().as_deref(), Some("hunter2"));
     }
 
     #[test]
