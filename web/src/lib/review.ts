@@ -348,3 +348,75 @@ export function describeReviewSource(review: DocReview): string {
   if (review.source_kind === 'report') return `report ${review.source_ref}`
   return 'the plan it was created from'
 }
+/** A span of the document a clarifying question is about. */
+export interface DocAnchor {
+  /** 1-based, inclusive. */
+  start: number
+  end: number
+  quote: string
+}
+
+/** Quoted spans a question can carry, longest first — the reviewer is asked
+ *  (in its system prompt) to quote the passage in «guillemets», but a plain
+ *  "double quote" or a `code span` is worth matching too. */
+const QUOTE_PATTERNS = [
+  /«([^»]{4,200})»/g,
+  /“([^”]{4,200})”/g,
+  /"([^"]{4,200})"/g,
+  /`([^`]{4,200})`/g,
+]
+
+/**
+ * Locate the passage a clarifying question refers to.
+ *
+ * A question about a document is nearly useless without the sentence it is
+ * about in view, and `ask_user` carries no coordinates — so the quote in the
+ * question text is the anchor. Falls back to the annotation the pass is
+ * currently working through when the reviewer quoted nothing.
+ *
+ * Pure: takes the question text, the document, and the open annotations.
+ */
+export function findQuestionAnchor(
+  questionText: string,
+  markdown: string,
+  openComments: DocReviewComment[] = [],
+): DocAnchor | null {
+  const lines = markdown.split('\n')
+  const haystack = lines.map((l) => l.toLowerCase())
+
+  const candidates: string[] = []
+  for (const pattern of QUOTE_PATTERNS) {
+    for (const match of questionText.matchAll(pattern)) {
+      const quote = match[1].trim()
+      if (quote) candidates.push(quote)
+    }
+  }
+  // Longest first: the most specific quote is the most useful anchor.
+  candidates.sort((a, b) => b.length - a.length)
+
+  for (const quote of candidates) {
+    const needle = quote.toLowerCase()
+    const start = haystack.findIndex((l) => l.includes(needle))
+    if (start >= 0) return { start: start + 1, end: start + 1, quote }
+    // A quote that spans a wrapped line won't match one line — try its
+    // first few words, which is enough to put the reader in the right place.
+    const head = needle.split(/\s+/).slice(0, 6).join(' ')
+    if (head.length >= 12) {
+      const at = haystack.findIndex((l) => l.includes(head))
+      if (at >= 0) return { start: at + 1, end: at + 1, quote }
+    }
+  }
+
+  // No quote matched: the annotation riding the current pass is the next
+  // best guess at what the reviewer is stuck on.
+  const sent = openComments.filter((c) => c.status === 'sent')
+  const fallback = sent.length > 0 ? sent[sent.length - 1] : null
+  if (fallback) {
+    return {
+      start: fallback.start_line,
+      end: fallback.end_line,
+      quote: fallback.quote ?? fallback.body,
+    }
+  }
+  return null
+}

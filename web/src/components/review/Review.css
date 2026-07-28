@@ -404,6 +404,12 @@
   outline-offset: 2px;
 }
 
+/* The passage a clarifying question points at. Dashed, not solid: this is
+   "the reviewer means this bit", not a selection the user made. */
+.review-block--focus {
+  outline: 2px dashed var(--accent);
+  outline-offset: 3px;
+}
 /* The margin pin: sits in the gutter the body reserves, so it never reflows
    the prose it belongs to. */
 .review-block__pin {
@@ -804,20 +810,280 @@
   box-shadow: inset 0 -2px 0 var(--success);
 }
 
-/* ─── Clarifying question ─── */
-.review-question--pinned {
+/* ─── Clarifying question ───
+   The question shares the document's column so answering it never moves the
+   rail: it takes the top of that column and the document scrolls below. */
+.review-doc-col {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
+}
+
+/* One strip, not a panel: an eyebrow + the question, the passage it points
+   at, then one line per option. The chat's boxed question card is sized for
+   a wide feed and reads as a modal at the head of a document column. */
+.review-ask {
   flex-shrink: 0;
-  max-width: 640px;
-  margin: var(--space-3) var(--space-5) 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  border: 1px solid var(--accent-muted);
+  border-left-width: 3px;
+  border-radius: var(--radius-md);
+  background: var(--surface);
+  padding: var(--space-3);
 }
 
-/* In the rail the card is already inside a 340px column — let it use it. */
-.review-question--inline {
-  max-width: none;
+.review-ask--pinned {
+  /* The document body's measure, so the strip reads as part of the page. */
+  width: min(76ch, 100% - 2 * var(--space-6));
+  margin: var(--space-4) auto 0;
+  /* Past this the strip scrolls and the document keeps its share of the pane. */
+  max-height: 60vh;
+  overflow: auto;
 }
 
-.review-question__error {
-  margin: 0 var(--space-4) var(--space-2);
+.review-ask--inline {
+  margin-bottom: var(--space-2);
+}
+
+.review-ask__item + .review-ask__item {
+  margin-top: var(--space-3);
+  padding-top: var(--space-3);
+  border-top: 1px solid var(--border);
+}
+
+.review-ask__head {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--space-2);
+}
+
+.review-ask__mark {
+  flex-shrink: 0;
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  background: var(--accent-subtle);
+  color: var(--accent-hover);
+  font-size: 11px;
+  font-weight: 700;
+  line-height: 18px;
+  text-align: center;
+}
+
+.review-ask__mark--done {
+  background: var(--success-bg);
+  color: var(--success);
+}
+
+.review-ask__text {
+  flex: 1;
+  min-width: 0;
+}
+
+.review-ask__eyebrow {
+  display: block;
+  color: var(--text3);
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
+.review-ask__question {
+  margin: 0;
+  color: var(--text);
+  font-size: var(--text-sm);
+  font-weight: 600;
+  line-height: var(--leading);
+}
+
+/* The passage the question is about — click it and the document scrolls
+   there. Quiet by default: it is a reference, not the answer. */
+.review-ask__anchor {
+  flex-shrink: 0;
+  display: inline-flex;
+  align-items: baseline;
+  gap: 6px;
+  max-width: 40%;
+  padding: 2px 8px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-full);
+  background: var(--surface2);
+  color: var(--text3);
+  font-size: var(--text-xs);
+  cursor: pointer;
+  transition: var(--transition);
+}
+
+.review-ask__anchor:hover {
+  border-color: var(--accent);
+  color: var(--accent-hover);
+}
+
+.review-ask__anchor:focus-visible {
+  outline: 2px solid var(--ring);
+  outline-offset: 1px;
+}
+
+.review-ask__anchor-lines {
+  flex-shrink: 0;
+  font-family: var(--font-mono);
+  font-size: 10px;
+}
+
+.review-ask__anchor-quote {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.review-ask__options {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+/* One line per option: label, then its description in the same row. The
+   full description is on hover, and wraps once the option is chosen. */
+.review-ask__option {
+  display: flex;
+  align-items: baseline;
+  gap: var(--space-2);
+  width: 100%;
+  padding: 5px 8px;
+  border: 1px solid transparent;
+  border-radius: var(--radius);
+  background: none;
+  color: var(--text2);
+  font: inherit;
+  font-size: var(--text-sm);
+  text-align: left;
+  cursor: pointer;
+  transition: var(--transition);
+}
+
+.review-ask__option:hover {
+  background: var(--surface2);
+  color: var(--text);
+}
+
+.review-ask__option:focus-visible {
+  outline: 2px solid var(--ring);
+  outline-offset: -2px;
+}
+
+.review-ask__option--picked {
+  border-color: var(--accent);
+  background: var(--accent-subtle);
+  color: var(--text);
+}
+
+.review-ask__tick {
+  flex-shrink: 0;
+  width: 11px;
+  height: 11px;
+  align-self: center;
+  border: 1.5px solid var(--border-strong);
+  border-radius: 50%;
+  transition: var(--transition);
+}
+
+.review-ask__option--picked .review-ask__tick {
+  border-color: var(--accent);
+  background: radial-gradient(circle at center, var(--accent) 0 3px, transparent 3px);
+}
+
+.review-ask__option-label {
+  flex-shrink: 0;
+  font-weight: 550;
+}
+
+.review-ask__option-desc {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--text3);
+  font-size: var(--text-xs);
+}
+
+.review-ask__option--picked .review-ask__option-desc {
+  white-space: normal;
+}
+
+.review-ask__input {
+  width: 100%;
+  padding: 6px 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--bg);
+  color: var(--text);
+  font: inherit;
+  font-size: var(--text-sm);
+}
+
+.review-ask__input:focus {
+  outline: 2px solid var(--ring);
+  outline-offset: -1px;
+  border-color: var(--accent);
+}
+
+.review-ask__error {
+  margin: 0;
+}
+
+.review-ask__actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: var(--space-2);
+}
+
+.review-ask__dismiss {
+  padding: 3px 8px;
+  border: 1px solid transparent;
+  border-radius: var(--radius-full);
+  background: none;
+  color: var(--text3);
+  font-size: var(--text-xs);
+  cursor: pointer;
+  transition: var(--transition);
+}
+
+.review-ask__dismiss:hover {
+  border-color: var(--border);
+  color: var(--text);
+}
+
+.review-ask__dismiss:focus-visible {
+  outline: 2px solid var(--ring);
+  outline-offset: 1px;
+}
+
+.review-ask__send {
+  padding: 4px 14px;
+  font-size: var(--text-sm);
+}
+
+/* Answered: the strip collapses to the one line that still matters. */
+.review-ask--answered {
+  flex-direction: row;
+  align-items: center;
+  gap: var(--space-2);
+  border-color: var(--border);
+  border-left-color: var(--success);
+}
+
+.review-ask__answer {
+  margin: 0;
+  color: var(--text2);
+  font-size: var(--text-sm);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 /* ─── Chat lane ─── */
@@ -1134,15 +1400,22 @@
     border-left: none;
     border-top: 1px solid var(--border);
     max-height: 45%;
+  }
 
-    .review-question--pinned {
-      margin: var(--space-3) var(--space-4) 0;
-    }
+  .review-ask--pinned {
+    width: min(76ch, 100% - 2 * var(--space-4));
+    max-height: 40vh;
+  }
 
-    /* The rail is half the screen at this width; a full-height diff would
+  /* No room for a quote chip beside the question at this width. */
+  .review-ask__anchor {
+    max-width: none;
+    align-self: flex-start;
+  }
+
+  /* The rail is half the screen at this width; a full-height diff would
      leave no room for the version list under it. */
-    .review-history__diff {
-      max-height: 40vh;
-    }
+  .review-history__diff {
+    max-height: 40vh;
   }
 }

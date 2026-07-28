@@ -21,6 +21,9 @@ interface Props {
   /** The annotation the rail (or a pin) has focused — its block is
    *  highlighted and scrolled into view. */
   activeCommentId: string | null
+  /** A line range to spotlight and scroll to — the passage a clarifying
+   *  question is about. Cleared by the caller once it has been read. */
+  focusLines?: { start: number; end: number } | null
   onAnchor: (anchor: BlockAnchor, at: { x: number; y: number }) => void
   onSelectComment: (commentId: string) => void
 }
@@ -86,6 +89,7 @@ export default function DocPane({
   markdown,
   comments,
   activeCommentId,
+  focusLines = null,
   onAnchor,
   onSelectComment,
 }: Props) {
@@ -98,14 +102,22 @@ export default function DocPane({
         ? comments.filter((c) => c.start_line <= range.end && c.end_line >= range.start)
         : []
       const active = hits.some((c) => c.id === activeCommentId)
+      const focused = Boolean(
+        range && focusLines && focusLines.start <= range.end && focusLines.end >= range.start,
+      )
       const attrs = {
-        className: [className, 'review-block', toneFor(hits), active && 'review-block--active']
+        className: [
+          className,
+          'review-block',
+          toneFor(hits),
+          active && 'review-block--active',
+          focused && 'review-block--focus',
+        ]
           .filter(Boolean)
           .join(' '),
         'data-testid': 'review-block',
         'data-line-start': range?.start,
         'data-line-end': range?.end,
-        // Focusable so the popover is reachable without a pointer; the
         // container turns Enter/Space into the same open as a click.
         tabIndex: range ? 0 : undefined,
       }
@@ -151,7 +163,7 @@ export default function DocPane({
     for (const tag of BLOCK_TAGS) map[tag] = (props) => renderBlock(tag, props)
     map.table = (props) => renderBlock('table', props)
     return map as Components
-  }, [comments, activeCommentId, onSelectComment])
+  }, [comments, activeCommentId, focusLines, onSelectComment])
 
   // Follow the rail: focusing an annotation there scrolls its block into the
   // middle of the pane so the two panes always talk about the same passage.
@@ -163,6 +175,16 @@ export default function DocPane({
       behavior: prefersReducedMotion() ? 'auto' : 'smooth',
     })
   }, [activeCommentId, markdown])
+
+  // Same follow for the passage a clarifying question points at.
+  useEffect(() => {
+    if (!focusLines) return
+    const el = rootRef.current?.querySelector('.review-block--focus')
+    el?.scrollIntoView({
+      block: 'center',
+      behavior: prefersReducedMotion() ? 'auto' : 'smooth',
+    })
+  }, [focusLines, markdown])
 
   /** Open the popover against `el`, quoting `quote`. */
   const openFor = (el: HTMLElement, quote: string, rect: DOMRect) => {

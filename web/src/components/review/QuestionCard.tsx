@@ -2,6 +2,7 @@ import { useState } from 'react'
 
 import type { QuestionItem } from '../chat/events'
 import { authedFetch } from '../../store/auth'
+import { type DocAnchor } from '../../lib/review'
 import { describeActionError } from '../../utils/actionError'
 import './Review.css'
 
@@ -13,8 +14,12 @@ interface Props {
   /** ControlRequest correlation id, when the provider supplied one. */
   requestId?: string
   questions: QuestionItem[]
-  /** `pinned` sits above the document; `inline` is the chat lane's echo. */
+  /** `pinned` heads the document column; `inline` is the chat lane's echo. */
   variant?: 'pinned' | 'inline'
+  /** The passage the question is about, when one could be resolved. */
+  anchor?: DocAnchor | null
+  /** Scroll the document to `anchor` and light the block up. */
+  onJump?: (anchor: DocAnchor) => void
 }
 
 /** An option that means "none of the above" gets a free-text box, so the
@@ -27,12 +32,17 @@ function isOtherOption(label: string): boolean {
  * The reviewer's clarifying question, rendered where the user can still see
  * the document it is about.
  *
- * The same card is pinned above the document and echoed in the chat lane —
- * one component, so an answer given in either place submits the identical
- * `question-resolved` event the main chat posts (`{question_id, request_id?,
- * answers}` keyed by question index). The backend's resolution hook is what
- * walks the review from `needs input` back to `running`; this only has to
- * get the payload right.
+ * Deliberately not the chat's question card: that one is a boxed panel with
+ * a title bar, sized for a wide feed, and at the head of a document column
+ * it reads as a modal that swallowed the page. This is one strip — the
+ * question, the passage it refers to (click it and the document scrolls
+ * there), and the options as single-line rows. Everything below the fold of
+ * a question stays one click away rather than one scroll.
+ *
+ * The submission is identical to the main chat's: a `question-resolved`
+ * event carrying `{question_id, request_id?, answers}` keyed by question
+ * index. The backend's resolution hook walks the review from `needs input`
+ * back to `running`.
  */
 export default function QuestionCard({
   sessionId,
@@ -40,6 +50,8 @@ export default function QuestionCard({
   requestId,
   questions,
   variant = 'pinned',
+  anchor = null,
+  onJump,
 }: Props) {
   const [answers, setAnswers] = useState<Record<number, string>>({})
   /** Free text typed against an "Other" option, per question. */
@@ -124,89 +136,87 @@ export default function QuestionCard({
 
   if (submitted) {
     return (
-      <div
-        className={`question-card question-resolved review-question review-question--${variant}`}
+      <section
+        className={`review-ask review-ask--answered review-ask--${variant}`}
         data-testid="review-question-answered"
       >
-        <div className="question-card-title-bar">
-          <span className="question-card-icon">&#x2611;&#xFE0F;</span>
-          <span className="question-card-title-text">Answer sent</span>
-        </div>
-        {questions.map((q, idx) => (
-          <div key={idx} className="question-item">
-            <div className="question-card-text">{q.question}</div>
-            <div className="question-answer-display">{submitted[String(idx)] ?? 'dismissed'}</div>
-          </div>
-        ))}
-      </div>
+        <span className="review-ask__mark review-ask__mark--done" aria-hidden="true">
+          ✓
+        </span>
+        <p className="review-ask__answer">
+          {Object.values(submitted).join(' · ') || 'Dismissed without answering.'}
+        </p>
+      </section>
     )
   }
 
-  return (
-    <div
-      className={`question-card question-active review-question review-question--${variant}`}
-      data-testid="review-question-card"
-    >
-      <div className="question-card-title-bar">
-        <span className="question-card-icon">&#x2753;</span>
-        <span className="question-card-title-text">The reviewer needs an answer</span>
-      </div>
+  const lineLabel = anchor
+    ? `L${anchor.start}${anchor.end !== anchor.start ? `–${anchor.end}` : ''}`
+    : ''
 
+  return (
+    <section
+      className={`review-ask review-ask--${variant}`}
+      data-testid="review-question-card"
+      aria-label="The reviewer needs an answer"
+    >
       {questions.map((q, idx) => {
         const selected = (answers[idx] ?? '').split(',')
         const otherSelected = selected.some(isOtherOption)
         return (
-          <div key={idx} className="question-item">
-            {q.header && <div className="question-header">{q.header}</div>}
-            <div className="question-card-text">{q.question}</div>
+          <div key={idx} className="review-ask__item">
+            <div className="review-ask__head">
+              <span className="review-ask__mark" aria-hidden="true">
+                ?
+              </span>
+              <div className="review-ask__text">
+                {q.header && <span className="review-ask__eyebrow">{q.header}</span>}
+                <p className="review-ask__question">{q.question}</p>
+              </div>
+              {/* The passage is the whole point: a question about a document
+                  you can't see is a question you answer by guessing. */}
+              {idx === 0 && anchor && onJump && (
+                <button
+                  type="button"
+                  className="review-ask__anchor"
+                  data-testid="review-question-anchor"
+                  title={anchor.quote}
+                  onClick={() => onJump(anchor)}
+                >
+                  <span className="review-ask__anchor-lines">{lineLabel}</span>
+                  <span className="review-ask__anchor-quote">{anchor.quote}</span>
+                </button>
+              )}
+            </div>
+
             {q.options && q.options.length > 0 ? (
-              <div className="question-options">
+              <div className="review-ask__options" role={q.multiSelect ? 'group' : 'radiogroup'}>
                 {q.options.map((opt, optIdx) => {
                   const desc = q.optionObjects?.[optIdx]?.description
+                  const picked = q.multiSelect ? selected.includes(opt) : answers[idx] === opt
                   return (
-                    <label key={opt} className="question-option-label">
-                      {q.multiSelect ? (
-                        <input
-                          type="checkbox"
-                          checked={selected.includes(opt)}
-                          onChange={() => toggleMulti(idx, opt)}
-                          disabled={submitting}
-                        />
-                      ) : (
-                        <input
-                          type="radio"
-                          name={`review-question-${questionId}-${idx}`}
-                          checked={answers[idx] === opt}
-                          onChange={() => setAnswer(idx, opt)}
-                          disabled={submitting}
-                        />
-                      )}
-                      <span className="question-option-text">
-                        <span className="question-option-label-text">{opt}</span>
-                        {desc && <span className="question-option-desc">{desc}</span>}
-                      </span>
-                    </label>
+                    <button
+                      key={opt}
+                      type="button"
+                      role={q.multiSelect ? 'checkbox' : 'radio'}
+                      aria-checked={picked}
+                      className={`review-ask__option${picked ? ' review-ask__option--picked' : ''}`}
+                      disabled={submitting}
+                      // Descriptions stay one line: the full text is on hover
+                      // and expands under the option once it's the choice.
+                      title={desc}
+                      onClick={() => (q.multiSelect ? toggleMulti(idx, opt) : setAnswer(idx, opt))}
+                    >
+                      <span className="review-ask__tick" aria-hidden="true" />
+                      <span className="review-ask__option-label">{opt}</span>
+                      {desc && <span className="review-ask__option-desc">{desc}</span>}
+                    </button>
                   )
                 })}
-                {otherSelected && (
-                  <input
-                    className="question-input"
-                    type="text"
-                    placeholder="Say what you'd rather…"
-                    aria-label="Other answer"
-                    data-testid="review-question-other"
-                    value={otherText[idx] ?? ''}
-                    disabled={submitting}
-                    onChange={(e) => setOtherText((p) => ({ ...p, [idx]: e.target.value }))}
-                    onKeyDown={(e) => {
-                      if (e.key === 'Enter' && questions.length === 1) submit()
-                    }}
-                  />
-                )}
               </div>
             ) : (
               <input
-                className="question-input"
+                className="review-ask__input"
                 type="text"
                 placeholder="Type your answer…"
                 aria-label={q.question}
@@ -219,30 +229,52 @@ export default function QuestionCard({
                 }}
               />
             )}
+
+            {otherSelected && (
+              <input
+                className="review-ask__input"
+                type="text"
+                placeholder="Say what you'd rather…"
+                aria-label="Other answer"
+                data-testid="review-question-other"
+                autoFocus
+                value={otherText[idx] ?? ''}
+                disabled={submitting}
+                onChange={(e) => setOtherText((p) => ({ ...p, [idx]: e.target.value }))}
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter' && questions.length === 1) submit()
+                }}
+              />
+            )}
           </div>
         )
       })}
 
       {error && (
-        <p className="form-error review-question__error" role="alert">
+        <p className="form-error review-ask__error" role="alert">
           {error}
         </p>
       )}
 
-      <div className="question-actions">
+      <div className="review-ask__actions">
         <button
           type="button"
-          className="btn-primary"
+          className="review-ask__dismiss"
+          disabled={submitting}
+          onClick={dismiss}
+        >
+          Dismiss
+        </button>
+        <button
+          type="button"
+          className="btn-primary review-ask__send"
           data-testid="review-question-submit"
           disabled={!answered || submitting}
           onClick={submit}
         >
           {submitting ? 'Sending…' : 'Answer'}
         </button>
-        <button type="button" className="btn-secondary" disabled={submitting} onClick={dismiss}>
-          Dismiss
-        </button>
       </div>
-    </div>
+    </section>
   )
 }

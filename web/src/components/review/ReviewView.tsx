@@ -19,6 +19,7 @@ import {
   deleteComment,
   deleteReview,
   describeReviewSource,
+  findQuestionAnchor,
   getReview,
   runPass,
   updateComment,
@@ -83,6 +84,9 @@ export default function ReviewView({ reviewId, onBack }: Props) {
   const [confirmBusy, setConfirmBusy] = useState(false)
   /** A history version opened read-only over the document pane. */
   const [viewing, setViewing] = useState<{ version: number; markdown: string } | null>(null)
+  /** The passage a clarifying question points at, once the user asks to see
+   *  it: the doc pane scrolls there and lights the block up. */
+  const [focusLines, setFocusLines] = useState<{ start: number; end: number } | null>(null)
   const [confirmError, setConfirmError] = useState<string | null>(null)
   const [flash, setFlash] = useState(false)
 
@@ -184,6 +188,15 @@ export default function ReviewView({ reviewId, onBack }: Props) {
   /** The reviewer's open clarifying question — pinned above the document so
    *  the passage it is about stays readable while it's answered. */
   const openQuestion = useMemo(() => findOpenQuestion(sessionEvents), [sessionEvents])
+
+  /** Which passage that question is about. `ask_user` carries no document
+   *  coordinates, so the anchor comes from the quote the reviewer is asked
+   *  to include — falling back to the annotation the pass is working on. */
+  const questionAnchor = useMemo(() => {
+    if (!openQuestion || !detail) return null
+    const text = openQuestion.questions.map((q) => q.question).join('\n')
+    return findQuestionAnchor(text, detail.markdown, detail.comments)
+  }, [openQuestion, detail])
 
   useEffect(() => {
     if (!flash) return
@@ -417,53 +430,63 @@ export default function ReviewView({ reviewId, onBack }: Props) {
         </p>
       )}
 
-      {/* Pinned above the document, never over it: the question is about a
-          passage, so the passage has to stay readable while it's answered. */}
-      {openQuestion && sessionId && (
-        <QuestionCard
-          sessionId={sessionId}
-          questionId={openQuestion.questionId}
-          requestId={openQuestion.requestId}
-          questions={openQuestion.questions}
-        />
-      )}
-
       <div className="review-view__body">
-        {viewing ? (
-          <div className="review-doc review-version-view" data-testid="review-version-view">
-            <div className="review-version-view__banner" data-testid="review-version-banner">
-              <span>
-                Viewing v{viewing.version} — current is v{review.current_version}
-              </span>
-              <button
-                type="button"
-                className="btn-secondary"
-                data-testid="review-version-close"
-                onClick={() => setViewing(null)}
-              >
-                Back to current
-              </button>
+        {/* The question sits at the top of the DOCUMENT column, not above the
+            whole body: pushed above both panes it shoved the rail off the
+            bottom of the screen. Here the passage it is about stays
+            readable and scrollable underneath, and nothing else moves. */}
+        <div className="review-doc-col">
+          {openQuestion && sessionId && (
+            <QuestionCard
+              sessionId={sessionId}
+              questionId={openQuestion.questionId}
+              requestId={openQuestion.requestId}
+              questions={openQuestion.questions}
+              anchor={questionAnchor}
+              onJump={(a) => {
+                setViewing(null)
+                setFocusLines({ start: a.start, end: a.end })
+              }}
+            />
+          )}
+          {viewing ? (
+            <div className="review-doc review-version-view" data-testid="review-version-view">
+              <div className="review-version-view__banner" data-testid="review-version-banner">
+                <span>
+                  Viewing v{viewing.version} — current is v{review.current_version}
+                </span>
+                <button
+                  type="button"
+                  className="btn-secondary"
+                  data-testid="review-version-close"
+                  onClick={() => setViewing(null)}
+                >
+                  Back to current
+                </button>
+              </div>
+              <SafeMarkdown className="chat-markdown review-doc__body">
+                {viewing.markdown}
+              </SafeMarkdown>
             </div>
-            <SafeMarkdown className="chat-markdown review-doc__body">
-              {viewing.markdown}
-            </SafeMarkdown>
-          </div>
-        ) : (
-          <DocPane
-            markdown={detail.markdown}
-            comments={comments}
-            activeCommentId={activeCommentId}
-            onAnchor={(anchor, at) => {
-              setActiveCommentId(null)
-              setPopover({ anchor, at })
-            }}
-            onSelectComment={(id) => {
-              setTab('annotations')
-              setActiveCommentId(id)
-            }}
-          />
-        )}
-
+          ) : (
+            <DocPane
+              markdown={detail.markdown}
+              comments={comments}
+              activeCommentId={activeCommentId}
+              // The spotlight belongs to the open question; once it is
+              // answered the passage goes back to reading normally.
+              focusLines={openQuestion ? focusLines : null}
+              onAnchor={(anchor, at) => {
+                setActiveCommentId(null)
+                setPopover({ anchor, at })
+              }}
+              onSelectComment={(id) => {
+                setTab('annotations')
+                setActiveCommentId(id)
+              }}
+            />
+          )}
+        </div>
         <aside className="review-rail">
           <div className="review-rail__tabs" role="tablist" aria-label="Review panels">
             <button

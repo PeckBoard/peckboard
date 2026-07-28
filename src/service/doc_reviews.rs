@@ -64,6 +64,10 @@ WHEN YOU ARE UNSURE
 it would mean inventing facts, ask with `ask_user` instead of guessing. Ask \
 the specific question, offer the options you can see, and wait — one round \
 of questions beats three passes of wrong rewrites.
+- Quote the passage you are asking about inside « guillemets » in the \
+question text, copied verbatim from the document. The review screen matches \
+that quote back to the document and shows the user exactly which lines the \
+question is about, so a question without one is harder to answer well.
 - Call `get_review_doc` any time you need the current document and open \
 annotations again (after your own revision, or if the injected copy looks \
 stale).
