@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from 'react'
-import { authedFetch } from '../store/auth'
+import { authedFetch, useAuthStore } from '../store/auth'
 import Modal from './Modal'
 import PluginPanelModal from './PluginPanelModal'
 import ConfirmDialog from './ConfirmDialog'
@@ -161,6 +161,7 @@ function WasmPluginList({
   panels: UiPanel[]
   onDecided: () => void
 }) {
+  const isAdmin = useAuthStore((s) => s.user?.role === 'admin')
   const [busy, setBusy] = useState<string | null>(null)
   const [confirmRemove, setConfirmRemove] = useState<string | null>(null)
   const [detailsFor, setDetailsFor] = useState<WasmPlugin | null>(null)
@@ -228,15 +229,17 @@ function WasmPluginList({
               {badgeFor(p.status)}
               <span className="plugin-row-summary">{firstSentence(p.description)}</span>
             </button>
-            <button
-              type="button"
-              className="plugin-approval-remove"
-              data-testid={`wasm-plugin-remove-${p.name}`}
-              disabled={busy === p.name}
-              onClick={() => setConfirmRemove(p.name)}
-            >
-              Remove
-            </button>
+            {isAdmin && (
+              <button
+                type="button"
+                className="plugin-approval-remove"
+                data-testid={`wasm-plugin-remove-${p.name}`}
+                disabled={busy === p.name}
+                onClick={() => setConfirmRemove(p.name)}
+              >
+                Remove
+              </button>
+            )}
           </li>
         ))}
       </ul>
@@ -269,7 +272,7 @@ function WasmPluginList({
             </p>
           )}
           <div className="form-actions">
-            {detailsFor.status !== 'approved' && (
+            {isAdmin && detailsFor.status !== 'approved' && (
               <button
                 type="button"
                 className="plugin-approval-approve"
@@ -280,7 +283,7 @@ function WasmPluginList({
                 Approve
               </button>
             )}
-            {detailsFor.status !== 'denied' && (
+            {isAdmin && detailsFor.status !== 'denied' && (
               <button
                 type="button"
                 className="plugin-approval-deny"

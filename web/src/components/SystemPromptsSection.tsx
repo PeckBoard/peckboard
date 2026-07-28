@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react'
-import { authedFetch } from '../store/auth'
+import { authedFetch, useAuthStore } from '../store/auth'
 import ConfirmDialog from './ConfirmDialog'
 
 interface SystemPrompt {
@@ -21,6 +21,10 @@ type Draft = { id: string | null; name: string; body: string }
  * preview before saving.
  */
 export default function SystemPromptsSection() {
+  // Writing the shared prompt library is host-wide, so it's admin-only on
+  // the API; mirror that here. Listing stays open (feeds the session-
+  // creation dropdown).
+  const isAdmin = useAuthStore((s) => s.user?.role === 'admin')
   const [prompts, setPrompts] = useState<SystemPrompt[]>([])
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState('')
@@ -165,105 +169,111 @@ export default function SystemPromptsSection() {
                   {p.body.length > 90 ? '…' : ''}
                 </span>
               </div>
-              <div className="system-prompt-actions">
-                <button
-                  type="button"
-                  className="btn-secondary"
-                  onClick={() => setDraft({ id: p.id, name: p.name, body: p.body })}
-                >
-                  Edit
-                </button>
-                <button
-                  type="button"
-                  className="btn-secondary"
-                  onClick={() => {
-                    setDeleteError(null)
-                    setConfirmDelete(p)
-                  }}
-                  data-testid={`system-prompt-delete-${p.name}`}
-                >
-                  Delete
-                </button>
-              </div>
+              {isAdmin && (
+                <div className="system-prompt-actions">
+                  <button
+                    type="button"
+                    className="btn-secondary"
+                    onClick={() => setDraft({ id: p.id, name: p.name, body: p.body })}
+                  >
+                    Edit
+                  </button>
+                  <button
+                    type="button"
+                    className="btn-secondary"
+                    onClick={() => {
+                      setDeleteError(null)
+                      setConfirmDelete(p)
+                    }}
+                    data-testid={`system-prompt-delete-${p.name}`}
+                  >
+                    Delete
+                  </button>
+                </div>
+              )}
             </li>
           ))}
         </ul>
       )}
 
-      {draft ? (
-        <div className="form-inline-card" data-testid="system-prompt-editor">
-          <input
-            className="form-input"
-            placeholder="Prompt name (e.g. implement)"
-            value={draft.name}
-            onChange={(e) => setDraft({ ...draft, name: e.target.value })}
-            data-testid="system-prompt-name-input"
-          />
-          <textarea
-            className="form-input"
-            placeholder="Prompt body..."
-            rows={8}
-            value={draft.body}
-            onChange={(e) => setDraft({ ...draft, body: e.target.value })}
-            data-testid="system-prompt-body-input"
-          />
-          <div className="form-actions">
-            <button type="button" className="btn-secondary" onClick={() => setDraft(null)}>
-              Cancel
-            </button>
+      {isAdmin && (
+        <>
+          {draft ? (
+            <div className="form-inline-card" data-testid="system-prompt-editor">
+              <input
+                className="form-input"
+                placeholder="Prompt name (e.g. implement)"
+                value={draft.name}
+                onChange={(e) => setDraft({ ...draft, name: e.target.value })}
+                data-testid="system-prompt-name-input"
+              />
+              <textarea
+                className="form-input"
+                placeholder="Prompt body..."
+                rows={8}
+                value={draft.body}
+                onChange={(e) => setDraft({ ...draft, body: e.target.value })}
+                data-testid="system-prompt-body-input"
+              />
+              <div className="form-actions">
+                <button type="button" className="btn-secondary" onClick={() => setDraft(null)}>
+                  Cancel
+                </button>
+                <button
+                  type="button"
+                  className="btn-primary"
+                  onClick={saveDraft}
+                  data-testid="system-prompt-save"
+                >
+                  Save
+                </button>
+              </div>
+            </div>
+          ) : (
             <button
               type="button"
-              className="btn-primary"
-              onClick={saveDraft}
-              data-testid="system-prompt-save"
+              className="btn-secondary"
+              onClick={() => setDraft({ id: null, name: '', body: '' })}
+              data-testid="system-prompt-new"
             >
-              Save
+              + New prompt
             </button>
-          </div>
-        </div>
-      ) : (
-        <button
-          type="button"
-          className="btn-secondary"
-          onClick={() => setDraft({ id: null, name: '', body: '' })}
-          data-testid="system-prompt-new"
-        >
-          + New prompt
-        </button>
-      )}
+          )}
 
-      <div className="settings-subsection">
-        <h4>Import From URL</h4>
-        <p className="form-hint" style={{ marginTop: 0 }}>
-          Downloads the prompt body server-side over https. Re-importing a name refreshes it in
-          place.
-        </p>
-        <div className="form-inline-card">
-          <input
-            className="form-input"
-            placeholder="Name"
-            value={importName}
-            onChange={(e) => setImportName(e.target.value)}
-            data-testid="system-prompt-import-name"
-          />
-          <input
-            className="form-input"
-            placeholder="https://..."
-            value={importUrl}
-            onChange={(e) => setImportUrl(e.target.value)}
-            data-testid="system-prompt-import-url"
-          />
-          <button
-            type="button"
-            className="btn-secondary"
-            onClick={doImport}
-            disabled={importing || !importName.trim() || !importUrl.trim()}
-            data-testid="system-prompt-import-submit"
-          >
-            {importing ? 'Importing...' : 'Import'}
-          </button>
-        </div>
-      </div>
+          <div className="settings-subsection">
+            <h4>Import From URL</h4>
+            <p className="form-hint" style={{ marginTop: 0 }}>
+              Downloads the prompt body server-side over https. Re-importing a name refreshes it in
+              place.
+            </p>
+            <div className="form-inline-card">
+              <input
+                className="form-input"
+                placeholder="Name"
+                value={importName}
+                onChange={(e) => setImportName(e.target.value)}
+                data-testid="system-prompt-import-name"
+              />
+              <input
+                className="form-input"
+                placeholder="https://..."
+                value={importUrl}
+                onChange={(e) => setImportUrl(e.target.value)}
+                data-testid="system-prompt-import-url"
+              />
+              <button
+                type="button"
+                className="btn-secondary"
+                onClick={doImport}
+                disabled={importing || !importName.trim() || !importUrl.trim()}
+                data-testid="system-prompt-import-submit"
+              >
+                {importing ? 'Importing...' : 'Import'}
+              </button>
+            </div>
+          </div>
+        </>
+      )}
       {confirmDelete && (
         <ConfirmDialog
           testId="system-prompt-delete-confirm"

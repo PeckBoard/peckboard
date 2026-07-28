@@ -15,41 +15,61 @@
 //!   are always enabled today; there is intentionally no enable/disable
 //!   route — the user can only adjust the settings they're allowed to
 //!   change.
-
 use std::sync::Arc;
 
 use axum::{
     Json, Router,
-    extract::{Path, State},
+    extract::{Extension, Path, State},
     http::StatusCode,
     middleware,
     response::IntoResponse,
     routing::{delete, get, post},
 };
 
-use crate::auth::middleware::require_auth;
+use crate::auth::middleware::{AuthUser, require_admin, require_auth};
 use crate::plugin::registry;
 use crate::plugin::settings::{apply_updates, redact_for_wire};
 use crate::state::AppState;
 
 pub fn router(state: Arc<AppState>) -> Router<Arc<AppState>> {
+    admin_router()
+        .merge(user_router())
+        .route_layer(middleware::from_fn_with_state(state, require_auth))
+}
+
+/// Routes that load, remove, or reconfigure a plugin: none of this is
+/// partitioned per user, so installing or uninstalling one is host-wide
+/// (every session on this instance) — same reasoning as `routes/settings.rs`.
+///
+/// Layers run outer-to-inner on the request, so `require_admin` is appended
+/// here and `require_auth` in [`router`] afterwards, which puts `AuthUser`
+/// into the extensions before this middleware reads it.
+fn admin_router() -> Router<Arc<AppState>> {
+    Router::new()
+        .route("/api/plugins/{plugin_id}", delete(uninstall_plugin))
+        .route("/api/plugins/{plugin_id}/approval", post(decide_approval))
+        .route(
+            "/api/plugins/repositories",
+            post(add_repository).delete(remove_repository),
+        )
+        .route("/api/plugins/registry/install", post(install_registry))
+        .route_layer(middleware::from_fn(require_admin))
+}
+
+/// Routes any authenticated user may reach. `/settings` mixes a read (any
+/// user) with a write (admin only) on the same path, which the
+/// admin_router/user_router split can't express as a route-layer — so
+/// `update_settings` checks `AuthUser::is_admin()` itself, same idiom as
+/// `routes/auth.rs::create_user`.
+fn user_router() -> Router<Arc<AppState>> {
     Router::new()
         .route("/api/plugins", get(list_plugins))
         .route(
             "/api/plugins/{plugin_id}/settings",
             get(get_settings).put(update_settings),
         )
-        .route("/api/plugins/{plugin_id}", delete(uninstall_plugin))
-        .route("/api/plugins/{plugin_id}/approval", post(decide_approval))
-        .route(
-            "/api/plugins/repositories",
-            get(list_repositories)
-                .post(add_repository)
-                .delete(remove_repository),
-        )
+        .route("/api/plugins/repositories", get(list_repositories))
         .route("/api/plugins/registry", get(list_registry))
-        .route("/api/plugins/registry/install", post(install_registry))
-        .route_layer(middleware::from_fn_with_state(state, require_auth))
 }
 
 /// The full set of registry repositories to aggregate: the operator's
@@ -241,9 +261,17 @@ async fn get_settings(
 /// row so the schema default takes over.
 async fn update_settings(
     State(state): State<Arc<AppState>>,
+    Extension(auth_user): Extension<AuthUser>,
     Path(plugin_id): Path<String>,
     Json(body): Json<serde_json::Value>,
 ) -> impl IntoResponse {
+    if !auth_user.is_admin() {
+        return Err((
+            StatusCode::FORBIDDEN,
+            Json(serde_json::json!({ "error": "admin only" })),
+        ));
+    }
+
     let Some(schema) = settings_schema_for(&state, &plugin_id).await else {
         return Err((
             StatusCode::NOT_FOUND,

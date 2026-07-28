@@ -1,4 +1,5 @@
 import { useEffect, useState } from 'react'
+import { useAuthStore } from '../store/auth'
 import { useClaudeAccountsStore } from '../store/claudeAccounts'
 import type { ClaudeAccount, PlanUsageEntry, WarnLevel } from '../types/api'
 import ClaudeAccountModal from './ClaudeAccountModal'
@@ -154,24 +155,26 @@ function AccountRow({
           </div>
         ) : null}
       </div>
-      <div className="acct-row-actions">
-        <button
-          type="button"
-          className="btn-secondary btn-sm"
-          onClick={onEdit}
-          data-testid={`acct-edit-${account.id}`}
-        >
-          Edit
-        </button>
-        <button
-          type="button"
-          className="btn-secondary btn-sm"
-          onClick={onDelete}
-          data-testid={`acct-delete-${account.id}`}
-        >
-          Delete
-        </button>
-      </div>
+      {useAuthStore((s) => s.user?.role === 'admin') && (
+        <div className="acct-row-actions">
+          <button
+            type="button"
+            className="btn-secondary btn-sm"
+            onClick={onEdit}
+            data-testid={`acct-edit-${account.id}`}
+          >
+            Edit
+          </button>
+          <button
+            type="button"
+            className="btn-secondary btn-sm"
+            onClick={onDelete}
+            data-testid={`acct-delete-${account.id}`}
+          >
+            Delete
+          </button>
+        </div>
+      )}
     </div>
   )
 }
@@ -187,6 +190,7 @@ function AccountRow({
  * read it.
  */
 export default function ClaudeAccountsSection() {
+  const isAdmin = useAuthStore((s) => s.user?.role === 'admin')
   const accounts = useClaudeAccountsStore((s) => s.accounts)
   const loaded = useClaudeAccountsStore((s) => s.loaded)
   const error = useClaudeAccountsStore((s) => s.error)
@@ -210,14 +214,16 @@ export default function ClaudeAccountsSection() {
     <section className="settings-section" data-testid="claude-accounts-section">
       <div className="settings-section-head">
         <h3>Claude Accounts</h3>
-        <button
-          type="button"
-          className="btn-primary btn-sm"
-          onClick={() => setModal({ account: null })}
-          data-testid="acct-add"
-        >
-          + Add account
-        </button>
+        {isAdmin && (
+          <button
+            type="button"
+            className="btn-primary btn-sm"
+            onClick={() => setModal({ account: null })}
+            data-testid="acct-add"
+          >
+            + Add account
+          </button>
+        )}
       </div>
       <p className="form-hint">
         Each account appears in the model picker as <code>[Name] Model</code>. Pick that model on a

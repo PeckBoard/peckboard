@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from 'react'
-import { authedFetch } from '../store/auth'
+import { authedFetch, useAuthStore } from '../store/auth'
 
 /**
  * Renders the inputs for a single built-in plugin's settings, driven by
@@ -152,6 +152,7 @@ function encodeField(field: SchemaField, raw: FormValue): unknown {
 }
 
 export default function PluginSettingsForm({ pluginId }: { pluginId: string }) {
+  const isAdmin = useAuthStore((s) => s.user?.role === 'admin')
   const [payload, setPayload] = useState<SettingsPayload | null>(null)
   const [form, setForm] = useState<FormState>({ values: {}, dirty: {} })
   const [savingKey, setSavingKey] = useState<string | null>(null)
@@ -261,20 +262,23 @@ export default function PluginSettingsForm({ pluginId }: { pluginId: string }) {
 
   return (
     <div className="plugin-settings" data-testid={`plugin-settings-${pluginId}`}>
-      {settings.schema.fields.map((field) => (
-        <FieldRow
-          key={field.key}
-          field={field}
-          value={form.values[field.key]}
-          stored={storedByKey.get(field.key)}
-          dirty={Boolean(form.dirty[field.key])}
-          onChange={(v) => update(field.key, v)}
-          onCommit={(v) => void commit(field, v)}
-          onCommitIfDirty={(v) => {
-            if (form.dirty[field.key]) void commit(field, v)
-          }}
-        />
-      ))}
+      <fieldset disabled={!isAdmin} className="plugin-settings-fields">
+        {settings.schema.fields.map((field) => (
+          <FieldRow
+            key={field.key}
+            field={field}
+            value={form.values[field.key]}
+            stored={storedByKey.get(field.key)}
+            dirty={Boolean(form.dirty[field.key])}
+            onChange={(v) => update(field.key, v)}
+            onCommit={(v) => void commit(field, v)}
+            onCommitIfDirty={(v) => {
+              if (form.dirty[field.key]) void commit(field, v)
+            }}
+          />
+        ))}
+      </fieldset>
+      {!isAdmin && <p className="form-hint">Only an admin can change plugin settings.</p>}
       <div className="plugin-settings-actions" aria-live="polite">
         <span className="plugin-settings-autosave">Changes save automatically.</span>
         {savingKey && <span className="plugin-settings-saving">Saving…</span>}

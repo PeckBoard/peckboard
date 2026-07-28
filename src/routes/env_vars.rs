@@ -23,7 +23,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use crate::auth::middleware::{AuthUser, require_auth};
+use crate::auth::middleware::{AuthUser, require_admin, require_auth};
 use crate::auth::password::verify_password;
 use crate::db::models::NewEnvVar;
 use crate::service::env_vars::{decrypt_value, encrypt_value};
@@ -37,12 +37,30 @@ const VALUE_MAX_LEN: usize = 32768;
 const MAX_PASSWORD_LEN: usize = 1024;
 
 pub fn router(state: Arc<AppState>) -> Router<Arc<AppState>> {
+    admin_router()
+        .merge(user_router())
+        .route_layer(middleware::from_fn_with_state(state, require_auth))
+}
+
+/// Deleting a var is host-wide (no `user_id` on the row), so it's
+/// admin-only — same reasoning as `routes/settings.rs`. `/api/env-vars`
+/// mixes a read (list) with a write (upsert) on the same path, so `upsert`
+/// checks `AuthUser::is_admin()` itself instead of moving here.
+///
+/// Layers run outer-to-inner on the request, so `require_admin` is appended
+/// here and `require_auth` in [`router`] afterwards, which puts `AuthUser`
+/// into the extensions before this middleware reads it.
+fn admin_router() -> Router<Arc<AppState>> {
+    Router::new()
+        .route("/api/env-vars/{id}", delete(delete_var))
+        .route_layer(middleware::from_fn(require_admin))
+}
+
+fn user_router() -> Router<Arc<AppState>> {
     Router::new()
         .route("/api/env-vars", get(list).post(upsert))
-        .route("/api/env-vars/{id}", delete(delete_var))
         .route("/api/env-vars/unlock-answer", post(unlock_answer))
         .route("/api/env-vars/lock", post(lock))
-        .route_layer(middleware::from_fn_with_state(state, require_auth))
 }
 
 fn auth_user(req: &Request<Body>) -> &AuthUser {
@@ -178,6 +196,9 @@ struct UpsertBody {
 
 /// POST /api/env-vars — upsert (by name + scope) a plaintext or encrypted var.
 async fn upsert(State(state): State<Arc<AppState>>, request: Request<Body>) -> Response {
+    if !auth_user(&request).is_admin() {
+        return err(StatusCode::FORBIDDEN, "admin only");
+    }
     let user_id = auth_user(&request).user_id.clone();
     let body: UpsertBody = match parse_body(request).await {
         Ok(b) => b,

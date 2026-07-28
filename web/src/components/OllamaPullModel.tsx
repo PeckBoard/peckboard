@@ -1,5 +1,5 @@
 import { useRef, useState } from 'react'
-import { authedFetch } from '../store/auth'
+import { authedFetch, useAuthStore } from '../store/auth'
 import { useResourcesStore } from '../store/resources'
 
 /**
@@ -24,6 +24,9 @@ interface PullLine {
 }
 
 export default function OllamaPullModel() {
+  // Pulling downloads onto a host-wide Ollama server every session shares,
+  // so it's admin-only on the API; mirror that here.
+  const isAdmin = useAuthStore((s) => s.user?.role === 'admin')
   const fetchModels = useResourcesStore((s) => s.fetchModels)
   const [model, setModel] = useState('')
   const [pulling, setPulling] = useState(false)
@@ -126,6 +129,15 @@ export default function OllamaPullModel() {
       setPercent(null)
       abortRef.current = null
     }
+  }
+
+  if (!isAdmin) {
+    return (
+      <div className="ollama-pull" data-testid="ollama-pull">
+        <h4>Pull a Model</h4>
+        <p className="form-hint">Only an admin can pull models onto the shared server.</p>
+      </div>
+    )
   }
 
   return (

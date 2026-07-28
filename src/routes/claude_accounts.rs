@@ -16,7 +16,7 @@ use std::sync::Arc;
 
 use axum::{
     Json, Router,
-    extract::{Path, State},
+    extract::{Extension, Path, State},
     http::StatusCode,
     middleware,
     response::IntoResponse,
@@ -24,7 +24,7 @@ use axum::{
 };
 use serde::{Deserialize, Serialize};
 
-use crate::auth::middleware::require_auth;
+use crate::auth::middleware::{AuthUser, require_admin, require_auth};
 use crate::db::models::{ClaudeAccount, ClaudeAccountChanges, NewClaudeAccount};
 use crate::provider::claude::oauth;
 use crate::provider::claude::plan_usage;
@@ -32,24 +32,46 @@ use crate::routes::usage::cost::usage_cost;
 use crate::state::AppState;
 
 pub fn router(state: Arc<AppState>) -> Router<Arc<AppState>> {
+    admin_router()
+        .merge(user_router())
+        .route_layer(middleware::from_fn_with_state(state, require_auth))
+}
+
+/// Routes that mint, rotate, or delete a shared credential. Accounts carry
+/// no `user_id` — one pool any authenticated user could otherwise rotate or
+/// delete — so these are admin-only, same reasoning as `routes/settings.rs`.
+///
+/// Layers run outer-to-inner on the request, so `require_admin` is appended
+/// here and `require_auth` in [`router`] afterwards, which puts `AuthUser`
+/// into the extensions before this middleware reads it.
+fn admin_router() -> Router<Arc<AppState>> {
+    Router::new()
+        .route(
+            "/api/claude-accounts/login/start",
+            axum::routing::post(start_login),
+        )
+        .route(
+            "/api/claude-accounts/{id}",
+            axum::routing::put(update_account).delete(delete_account),
+        )
+        .route_layer(middleware::from_fn(require_admin))
+}
+
+/// `/api/claude-accounts` mixes a read (list, any user) with a write
+/// (create, admin only) on the same path, so `create_account` checks
+/// `AuthUser::is_admin()` itself — same idiom as `routes/auth.rs::create_user`.
+/// Plan-usage only reads/refreshes spend telemetry, not credentials, so it
+/// stays open to any authenticated user.
+fn user_router() -> Router<Arc<AppState>> {
     Router::new()
         .route(
             "/api/claude-accounts",
             get(list_accounts).post(create_account),
         )
         .route(
-            "/api/claude-accounts/login/start",
-            axum::routing::post(start_login),
-        )
-        .route(
             "/api/claude-accounts/plan-usage",
             get(get_plan_usage).post(refresh_plan_usage),
         )
-        .route(
-            "/api/claude-accounts/{id}",
-            axum::routing::put(update_account).delete(delete_account),
-        )
-        .route_layer(middleware::from_fn_with_state(state, require_auth))
 }
 
 /// A short-lived client for the Claude OAuth token endpoint.
@@ -348,8 +370,15 @@ async fn list_accounts(State(state): State<Arc<AppState>>) -> impl IntoResponse 
 
 async fn create_account(
     State(state): State<Arc<AppState>>,
+    Extension(auth_user): Extension<AuthUser>,
     Json(body): Json<CreateAccountBody>,
 ) -> impl IntoResponse {
+    if !auth_user.is_admin() {
+        return Err((
+            StatusCode::FORBIDDEN,
+            Json(serde_json::json!({ "error": "admin only" })),
+        ));
+    }
     let name = body.name.trim().to_string();
     if name.is_empty() {
         return Err(bad_request("name is required"));

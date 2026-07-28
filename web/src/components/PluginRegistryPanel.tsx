@@ -13,7 +13,7 @@ import {
   type RegistryPlugin,
   type RegistryRepo,
 } from '../utils/pluginApproval'
-import { authedFetch } from '../store/auth'
+import { authedFetch, useAuthStore } from '../store/auth'
 import { useResourcesStore } from '../store/resources'
 import { ServerModal } from './McpServersSection'
 import { tidy, type McpServer } from '../utils/mcpServers'
@@ -251,6 +251,7 @@ function renderAction(
   isBusy: boolean,
   install: (p: RegistryPlugin) => void,
   testidPrefix = 'registry-install-',
+  isAdmin = true,
 ) {
   const compatible = p.compatible !== false
   const testid = `${testidPrefix}${p.id}`
@@ -264,7 +265,8 @@ function renderAction(
         className="plugin-approval-approve"
         data-testid={testid}
         data-action="upgrade"
-        disabled={isBusy}
+        disabled={isBusy || !isAdmin}
+        title={isAdmin ? undefined : 'Only an admin can install or upgrade plugins'}
         onClick={() => install(p)}
       >
         {isBusy ? 'Upgrading…' : `Upgrade to v${p.version}`}
@@ -325,7 +327,8 @@ function renderAction(
       className="plugin-approval-approve"
       data-testid={testid}
       data-action="install"
-      disabled={isBusy}
+      disabled={isBusy || !isAdmin}
+      title={isAdmin ? undefined : 'Only an admin can install or upgrade plugins'}
       onClick={() => install(p)}
     >
       {isBusy ? 'Installing…' : 'Install'}
@@ -420,6 +423,7 @@ function RegistryDetailModal({
   /** Failure text from the last install attempt, shown where the click was. */
   installError?: string | null
 }) {
+  const isAdmin = useAuthStore((s) => s.user?.role === 'admin')
   if (detail.kind === 'plugin') {
     const p = detail.plugin
     const perms = detailPermissions(p)
@@ -510,7 +514,7 @@ function RegistryDetailModal({
           </p>
         )}
         <div className="form-actions">
-          {renderAction(p, busy === p.id, onInstall, 'registry-modal-install-')}
+          {renderAction(p, busy === p.id, onInstall, 'registry-modal-install-', isAdmin)}
           {p.installed && p.installed_status === 'pending' && onManagePlugins && (
             <button
               type="button"
@@ -611,6 +615,7 @@ function BrowseTab({
   onChanged: () => void
   onManagePlugins?: () => void
 }) {
+  const isAdmin = useAuthStore((s) => s.user?.role === 'admin')
   const [busy, setBusy] = useState<string | null>(null)
   const [installError, setInstallError] = useState<string | null>(null)
   const [kind, setKind] = useState<Kind>('all')
@@ -897,7 +902,9 @@ function BrowseTab({
                   )}
                   <span className="plugin-row-summary">{p.description}</span>
                 </button>
-                <div className="registry-row-action">{renderAction(p, busy === p.id, install)}</div>
+                <div className="registry-row-action">
+                  {renderAction(p, busy === p.id, install, 'registry-install-', isAdmin)}
+                </div>
               </li>
             ))}
           </ul>
@@ -980,6 +987,7 @@ function BrowseTab({
 }
 
 function RepositoriesTab({ data, onChanged }: { data: RegistryData; onChanged: () => void }) {
+  const isAdmin = useAuthStore((s) => s.user?.role === 'admin')
   const [input, setInput] = useState('')
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
@@ -1027,28 +1035,30 @@ function RepositoriesTab({ data, onChanged }: { data: RegistryData; onChanged: (
 
   return (
     <div className="registry-panel" data-testid="registry-repositories-tab">
-      <div className="registry-repo-add">
-        <input
-          type="text"
-          className="registry-search"
-          data-testid="registry-repo-input"
-          placeholder="owner/repo or https://…/registry.json"
-          value={input}
-          onChange={(e) => setInput(e.target.value)}
-          onKeyDown={(e) => {
-            if (e.key === 'Enter') add()
-          }}
-        />
-        <button
-          type="button"
-          className="plugin-approval-approve"
-          data-testid="registry-repo-add"
-          disabled={busy || !input.trim()}
-          onClick={add}
-        >
-          Add
-        </button>
-      </div>
+      {isAdmin && (
+        <div className="registry-repo-add">
+          <input
+            type="text"
+            className="registry-search"
+            data-testid="registry-repo-input"
+            placeholder="owner/repo or https://…/registry.json"
+            value={input}
+            onChange={(e) => setInput(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === 'Enter') add()
+            }}
+          />
+          <button
+            type="button"
+            className="plugin-approval-approve"
+            data-testid="registry-repo-add"
+            disabled={busy || !input.trim()}
+            onClick={add}
+          >
+            Add
+          </button>
+        </div>
+      )}
       {error && <p className="plugin-card-error">{error}</p>}
       <ul className="wasm-plugins-list registry-list">
         {data.repositories.map((r: RegistryRepo, i: number) => (
@@ -1075,18 +1085,20 @@ function RepositoriesTab({ data, onChanged }: { data: RegistryData; onChanged: (
               </span>
             </div>
             <div className="registry-row-action">
-              <button
-                type="button"
-                className="plugin-approval-deny"
-                data-testid={`registry-repo-remove-${i}`}
-                disabled={!r.removable}
-                title={
-                  r.removable ? '' : "This source is set by the environment and can't be removed"
-                }
-                onClick={() => remove(r.url)}
-              >
-                Remove
-              </button>
+              {isAdmin && (
+                <button
+                  type="button"
+                  className="plugin-approval-deny"
+                  data-testid={`registry-repo-remove-${i}`}
+                  disabled={!r.removable}
+                  title={
+                    r.removable ? '' : "This source is set by the environment and can't be removed"
+                  }
+                  onClick={() => remove(r.url)}
+                >
+                  Remove
+                </button>
+              )}
             </div>
           </li>
         ))}

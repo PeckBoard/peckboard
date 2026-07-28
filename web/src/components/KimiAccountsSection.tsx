@@ -1,4 +1,5 @@
 import { useEffect, useState } from 'react'
+import { useAuthStore } from '../store/auth'
 import { useKimiAccountsStore } from '../store/kimiAccounts'
 import type { KimiAccount, WarnLevel } from '../types/api'
 import ConfirmDialog from './ConfirmDialog'
@@ -71,38 +72,39 @@ function AccountRow({
           </span>
         </div>
       </div>
-      <div className="acct-row-actions">
-        {account.kind === 'device' && (
+      {useAuthStore((s) => s.user?.role === 'admin') && (
+        <div className="acct-row-actions">
+          {account.kind === 'device' && (
+            <button
+              type="button"
+              className="btn-secondary btn-sm"
+              onClick={onSignIn}
+              data-testid={`kimi-acct-signin-${account.id}`}
+            >
+              {account.authenticated ? 'Re-sign in' : 'Sign in'}
+            </button>
+          )}
           <button
             type="button"
             className="btn-secondary btn-sm"
-            onClick={onSignIn}
-            data-testid={`kimi-acct-signin-${account.id}`}
+            onClick={onEdit}
+            data-testid={`kimi-acct-edit-${account.id}`}
           >
-            {account.authenticated ? 'Re-sign in' : 'Sign in'}
+            Edit
           </button>
-        )}
-        <button
-          type="button"
-          className="btn-secondary btn-sm"
-          onClick={onEdit}
-          data-testid={`kimi-acct-edit-${account.id}`}
-        >
-          Edit
-        </button>
-        <button
-          type="button"
-          className="btn-secondary btn-sm"
-          onClick={onDelete}
-          data-testid={`kimi-acct-delete-${account.id}`}
-        >
-          Delete
-        </button>
-      </div>
+          <button
+            type="button"
+            className="btn-secondary btn-sm"
+            onClick={onDelete}
+            data-testid={`kimi-acct-delete-${account.id}`}
+          >
+            Delete
+          </button>
+        </div>
+      )}
     </div>
   )
 }
-
 /**
  * Settings section that manages the logged-in Kimi accounts. Adding a device
  * account creates it, then opens the browser sign-in (`kimi login`); each
@@ -111,6 +113,7 @@ function AccountRow({
  * accounts section.
  */
 export default function KimiAccountsSection() {
+  const isAdmin = useAuthStore((s) => s.user?.role === 'admin')
   const accounts = useKimiAccountsStore((s) => s.accounts)
   const loaded = useKimiAccountsStore((s) => s.loaded)
   const error = useKimiAccountsStore((s) => s.error)
@@ -130,14 +133,16 @@ export default function KimiAccountsSection() {
     <section className="settings-section" data-testid="kimi-accounts-section">
       <div className="settings-section-head">
         <h3>Kimi Accounts</h3>
-        <button
-          type="button"
-          className="btn-primary btn-sm"
-          onClick={() => setModal({ account: null })}
-          data-testid="kimi-acct-add"
-        >
-          + Add account
-        </button>
+        {isAdmin && (
+          <button
+            type="button"
+            className="btn-primary btn-sm"
+            onClick={() => setModal({ account: null })}
+            data-testid="kimi-acct-add"
+          >
+            + Add account
+          </button>
+        )}
       </div>
       <p className="form-hint">
         Each account appears in the model picker as <code>[Name] Model</code>. Pick that model on a

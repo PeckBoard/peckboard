@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from 'react'
-import { authedFetch } from '../store/auth'
+import { authedFetch, useAuthStore } from '../store/auth'
 import { useFoldersStore } from '../store/folders'
 import type { AgentVar } from '../types/api'
 import ConfirmDialog from './ConfirmDialog'
@@ -12,6 +12,9 @@ import ConfirmDialog from './ConfirmDialog'
  * Variables, not here.
  */
 export default function AgentVarsSection() {
+  // Writing a var is host-wide (no per-user ownership), so it's admin-only
+  // on the API; mirror that here.
+  const isAdmin = useAuthStore((s) => s.user?.role === 'admin')
   const [vars, setVars] = useState<AgentVar[] | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [deleting, setDeleting] = useState<string | null>(null)
@@ -163,103 +166,109 @@ export default function AgentVarsSection() {
                 <span className="env-var-value">{v.value}</span>
               </div>
               <div className="env-var-actions">
-                <button
-                  type="button"
-                  className="btn-secondary btn-sm"
-                  onClick={() => startEdit(v)}
-                  data-testid={`agent-var-edit-${v.name}`}
-                >
-                  Edit
-                </button>
-                <button
-                  type="button"
-                  className="btn-secondary btn-sm"
-                  onClick={() => {
-                    setDeleteError(null)
-                    setConfirmDelete(v)
-                  }}
-                  disabled={deleting === v.id}
-                  data-testid={`agent-var-delete-${v.name}`}
-                >
-                  {deleting === v.id ? 'Deleting…' : 'Delete'}
-                </button>
+                {isAdmin && (
+                  <button
+                    type="button"
+                    className="btn-secondary btn-sm"
+                    onClick={() => startEdit(v)}
+                    data-testid={`agent-var-edit-${v.name}`}
+                  >
+                    Edit
+                  </button>
+                )}
+                {isAdmin && (
+                  <button
+                    type="button"
+                    className="btn-secondary btn-sm"
+                    onClick={() => {
+                      setDeleteError(null)
+                      setConfirmDelete(v)
+                    }}
+                    disabled={deleting === v.id}
+                    data-testid={`agent-var-delete-${v.name}`}
+                  >
+                    {deleting === v.id ? 'Deleting…' : 'Delete'}
+                  </button>
+                )}
               </div>
             </li>
           ))}
         </ul>
       )}
 
-      <form
-        className="env-var-form"
-        onSubmit={(e) => {
-          e.preventDefault()
-          void submit()
-        }}
-      >
-        <h4>{editing ? `Edit ${editing}` : 'Add variable'}</h4>
-        <div className="form-field">
-          <label className="form-label" htmlFor="agent-var-name">
-            Name
-          </label>
-          <input
-            id="agent-var-name"
-            className="form-input"
-            value={name}
-            autoComplete="off"
-            placeholder="my_var"
-            onChange={(e) => setName(e.target.value)}
-            data-testid="agent-var-name-input"
-          />
-        </div>
-        <div className="form-field">
-          <label className="form-label" htmlFor="agent-var-value">
-            Value
-          </label>
-          <input
-            id="agent-var-value"
-            className="form-input"
-            value={value}
-            autoComplete="off"
-            onChange={(e) => setValue(e.target.value)}
-            data-testid="agent-var-value-input"
-          />
-        </div>
-        <div className="form-field">
-          <label className="form-label" htmlFor="agent-var-scope">
-            Scope
-          </label>
-          <select
-            id="agent-var-scope"
-            className="form-input"
-            value={folderId}
-            onChange={(e) => setFolderId(e.target.value)}
-            data-testid="agent-var-scope-select"
-          >
-            <option value="">Global</option>
-            {folders.map((f) => (
-              <option key={f.id} value={f.id}>
-                {f.name}
-              </option>
-            ))}
-          </select>
-        </div>
-        {formError && <p className="form-error">{formError}</p>}
-        <div className="form-actions">
-          {editing && (
-            <button type="button" className="btn-secondary" onClick={clearForm}>
-              Cancel
+      {isAdmin && (
+        <form
+          className="env-var-form"
+          onSubmit={(e) => {
+            e.preventDefault()
+            void submit()
+          }}
+        >
+          <h4>{editing ? `Edit ${editing}` : 'Add variable'}</h4>
+          <div className="form-field">
+            <label className="form-label" htmlFor="agent-var-name">
+              Name
+            </label>
+            <input
+              id="agent-var-name"
+              className="form-input"
+              value={name}
+              autoComplete="off"
+              placeholder="my_var"
+              onChange={(e) => setName(e.target.value)}
+              data-testid="agent-var-name-input"
+            />
+          </div>
+          <div className="form-field">
+            <label className="form-label" htmlFor="agent-var-value">
+              Value
+            </label>
+            <input
+              id="agent-var-value"
+              className="form-input"
+              value={value}
+              autoComplete="off"
+              onChange={(e) => setValue(e.target.value)}
+              data-testid="agent-var-value-input"
+            />
+          </div>
+          <div className="form-field">
+            <label className="form-label" htmlFor="agent-var-scope">
+              Scope
+            </label>
+            <select
+              id="agent-var-scope"
+              className="form-input"
+              value={folderId}
+              onChange={(e) => setFolderId(e.target.value)}
+              data-testid="agent-var-scope-select"
+            >
+              <option value="">Global</option>
+              {folders.map((f) => (
+                <option key={f.id} value={f.id}>
+                  {f.name}
+                </option>
+              ))}
+            </select>
+          </div>
+          {formError && <p className="form-error">{formError}</p>}
+          <div className="form-actions">
+            {editing && (
+              <button type="button" className="btn-secondary" onClick={clearForm}>
+                Cancel
+              </button>
+            )}
+            <button
+              type="submit"
+              className="btn-primary"
+              disabled={saving || name.trim().length === 0}
+              data-testid="agent-var-save-btn"
+            >
+              {saving ? 'Saving…' : editing ? 'Save' : 'Add'}
             </button>
-          )}
-          <button
-            type="submit"
-            className="btn-primary"
-            disabled={saving || name.trim().length === 0}
-            data-testid="agent-var-save-btn"
-          >
-            {saving ? 'Saving…' : editing ? 'Save' : 'Add'}
-          </button>
-        </div>
-      </form>
+          </div>
+        </form>
+      )}
       {confirmDelete && (
         <ConfirmDialog
           testId="agent-var-delete-confirm"

@@ -9,10 +9,9 @@
 //! fetch the plugin host uses (`plugin::host::http_fetch_impl`: HTTPS,
 //! IP-pinned, no redirects, size-capped) — the browser never fetches, so a
 //! malicious URL can't reach the loopback control plane.
-
 use axum::{
     Json, Router,
-    extract::{Path, State},
+    extract::{Extension, Path, State},
     http::StatusCode,
     middleware,
     response::IntoResponse,
@@ -20,7 +19,7 @@ use axum::{
 };
 use std::sync::Arc;
 
-use crate::auth::middleware::require_auth;
+use crate::auth::middleware::{AuthUser, require_admin, require_auth};
 use crate::state::AppState;
 
 /// Max characters accepted for a prompt name / body from the API, guarding
@@ -30,14 +29,33 @@ const MAX_NAME_LEN: usize = 200;
 const MAX_BODY_LEN: usize = 100_000;
 
 pub fn router(state: Arc<AppState>) -> Router<Arc<AppState>> {
+    admin_router()
+        .merge(user_router())
+        .route_layer(middleware::from_fn_with_state(state, require_auth))
+}
+
+/// Creating, editing, deleting, or importing a prompt changes the shared
+/// library every session's model picker reads from, so these are
+/// admin-only — same reasoning as `routes/settings.rs`. `/api/system-prompts`
+/// mixes a read (list, any user — it feeds the session-creation dropdown)
+/// with a write (create) on the same path, so `create_prompt` checks
+/// `AuthUser::is_admin()` itself instead of moving here.
+///
+/// Layers run outer-to-inner on the request, so `require_admin` is appended
+/// here and `require_auth` in [`router`] afterwards, which puts `AuthUser`
+/// into the extensions before this middleware reads it.
+fn admin_router() -> Router<Arc<AppState>> {
     Router::new()
-        .route("/api/system-prompts", get(list_prompts).post(create_prompt))
         .route(
             "/api/system-prompts/{id}",
             axum::routing::put(update_prompt).delete(delete_prompt),
         )
         .route("/api/system-prompts/import", post(import_prompt))
-        .route_layer(middleware::from_fn_with_state(state, require_auth))
+        .route_layer(middleware::from_fn(require_admin))
+}
+
+fn user_router() -> Router<Arc<AppState>> {
+    Router::new().route("/api/system-prompts", get(list_prompts).post(create_prompt))
 }
 
 fn err(status: StatusCode, msg: impl std::fmt::Display) -> (StatusCode, Json<serde_json::Value>) {
@@ -64,8 +82,12 @@ struct CreatePromptBody {
 /// POST /api/system-prompts `{name, body}` → 201 with the created prompt.
 async fn create_prompt(
     State(state): State<Arc<AppState>>,
+    Extension(auth_user): Extension<AuthUser>,
     Json(body): Json<CreatePromptBody>,
 ) -> impl IntoResponse {
+    if !auth_user.is_admin() {
+        return Err(err(StatusCode::FORBIDDEN, "admin only"));
+    }
     let name = body.name.trim().to_string();
     if let Err(e) = validate(&name, &body.body) {
         return Err(err(StatusCode::BAD_REQUEST, e));

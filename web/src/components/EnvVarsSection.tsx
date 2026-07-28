@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from 'react'
-import { authedFetch } from '../store/auth'
+import { authedFetch, useAuthStore } from '../store/auth'
 import { useFoldersStore } from '../store/folders'
 import type { EnvVar } from '../types/api'
 import ConfirmDialog from './ConfirmDialog'
@@ -15,6 +15,9 @@ import SecretInput from './SecretInput'
  * password. "Lock now" drops the server's cache of decrypted values.
  */
 export default function EnvVarsSection() {
+  // Writing a var is host-wide (no per-user ownership), so it's admin-only
+  // on the API; mirror that here.
+  const isAdmin = useAuthStore((s) => s.user?.role === 'admin')
   const [vars, setVars] = useState<EnvVar[] | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [revealed, setRevealed] = useState<Record<string, boolean>>({})
@@ -212,139 +215,145 @@ export default function EnvVarsSection() {
                     {revealed[v.id] ? 'Hide' : 'Reveal'}
                   </button>
                 )}
-                <button
-                  type="button"
-                  className="btn-secondary btn-sm"
-                  onClick={() => startEdit(v)}
-                  data-testid={`env-var-edit-${v.name}`}
-                >
-                  Edit
-                </button>
-                <button
-                  type="button"
-                  className="btn-secondary btn-sm"
-                  onClick={() => {
-                    setDeleteError(null)
-                    setConfirmDelete(v)
-                  }}
-                  disabled={deleting === v.id}
-                  data-testid={`env-var-delete-${v.name}`}
-                >
-                  {deleting === v.id ? 'Deleting…' : 'Delete'}
-                </button>
+                {isAdmin && (
+                  <button
+                    type="button"
+                    className="btn-secondary btn-sm"
+                    onClick={() => startEdit(v)}
+                    data-testid={`env-var-edit-${v.name}`}
+                  >
+                    Edit
+                  </button>
+                )}
+                {isAdmin && (
+                  <button
+                    type="button"
+                    className="btn-secondary btn-sm"
+                    onClick={() => {
+                      setDeleteError(null)
+                      setConfirmDelete(v)
+                    }}
+                    disabled={deleting === v.id}
+                    data-testid={`env-var-delete-${v.name}`}
+                  >
+                    {deleting === v.id ? 'Deleting…' : 'Delete'}
+                  </button>
+                )}
               </div>
             </li>
           ))}
         </ul>
       )}
 
-      <form
-        className="env-var-form"
-        onSubmit={(e) => {
-          e.preventDefault()
-          void submit()
-        }}
-      >
-        <h4>{editing ? `Edit ${editing}` : 'Add variable'}</h4>
-        {editing && encrypt && (
-          <p className="form-hint">
-            Encrypted values can&rsquo;t be shown — enter a new value and your password to replace
-            it.
-          </p>
-        )}
-        <div className="form-field">
-          <label className="form-label" htmlFor="env-var-name">
-            Name
-          </label>
-          <input
-            id="env-var-name"
-            className="form-input"
-            value={name}
-            autoComplete="off"
-            placeholder="MY_VAR"
-            onChange={(e) => setName(e.target.value)}
-            data-testid="env-var-name-input"
-          />
-        </div>
-        <div className="form-field">
-          <label className="form-label" htmlFor="env-var-value">
-            Value
-          </label>
-          <SecretInput
-            id="env-var-value"
-            // Remount when the form switches target so a revealed value from
-            // the previous row can't carry over into the next one.
-            key={editing ?? 'new'}
-            className="form-input"
-            value={value}
-            onChange={setValue}
-            testId="env-var-value-input"
-            revealTestId="env-var-value-reveal"
-          />
-        </div>
-        <div className="form-field">
-          <label className="form-label" htmlFor="env-var-scope">
-            Scope
-          </label>
-          <select
-            id="env-var-scope"
-            className="form-input"
-            value={folderId}
-            onChange={(e) => setFolderId(e.target.value)}
-            data-testid="env-var-scope-select"
-          >
-            <option value="">Global</option>
-            {folders.map((f) => (
-              <option key={f.id} value={f.id}>
-                {f.name}
-              </option>
-            ))}
-          </select>
-        </div>
-        <div className="form-field">
-          <label className="form-label env-var-encrypt-label">
-            <input
-              type="checkbox"
-              checked={encrypt}
-              onChange={(e) => setEncrypt(e.target.checked)}
-              data-testid="env-var-encrypt-checkbox"
-            />
-            Encrypt with my password
-          </label>
-        </div>
-        {encrypt && (
+      {isAdmin && (
+        <form
+          className="env-var-form"
+          onSubmit={(e) => {
+            e.preventDefault()
+            void submit()
+          }}
+        >
+          <h4>{editing ? `Edit ${editing}` : 'Add variable'}</h4>
+          {editing && encrypt && (
+            <p className="form-hint">
+              Encrypted values can&rsquo;t be shown — enter a new value and your password to replace
+              it.
+            </p>
+          )}
           <div className="form-field">
-            <label className="form-label" htmlFor="env-var-password">
-              Your password
+            <label className="form-label" htmlFor="env-var-name">
+              Name
             </label>
             <input
-              id="env-var-password"
+              id="env-var-name"
               className="form-input"
-              type="password"
-              value={password}
+              value={name}
               autoComplete="off"
-              onChange={(e) => setPassword(e.target.value)}
-              data-testid="env-var-password-input"
+              placeholder="MY_VAR"
+              onChange={(e) => setName(e.target.value)}
+              data-testid="env-var-name-input"
             />
           </div>
-        )}
-        {formError && <p className="form-error">{formError}</p>}
-        <div className="form-actions">
-          {editing && (
-            <button type="button" className="btn-secondary" onClick={clearForm}>
-              Cancel
-            </button>
+          <div className="form-field">
+            <label className="form-label" htmlFor="env-var-value">
+              Value
+            </label>
+            <SecretInput
+              id="env-var-value"
+              // Remount when the form switches target so a revealed value from
+              // the previous row can't carry over into the next one.
+              key={editing ?? 'new'}
+              className="form-input"
+              value={value}
+              onChange={setValue}
+              testId="env-var-value-input"
+              revealTestId="env-var-value-reveal"
+            />
+          </div>
+          <div className="form-field">
+            <label className="form-label" htmlFor="env-var-scope">
+              Scope
+            </label>
+            <select
+              id="env-var-scope"
+              className="form-input"
+              value={folderId}
+              onChange={(e) => setFolderId(e.target.value)}
+              data-testid="env-var-scope-select"
+            >
+              <option value="">Global</option>
+              {folders.map((f) => (
+                <option key={f.id} value={f.id}>
+                  {f.name}
+                </option>
+              ))}
+            </select>
+          </div>
+          <div className="form-field">
+            <label className="form-label env-var-encrypt-label">
+              <input
+                type="checkbox"
+                checked={encrypt}
+                onChange={(e) => setEncrypt(e.target.checked)}
+                data-testid="env-var-encrypt-checkbox"
+              />
+              Encrypt with my password
+            </label>
+          </div>
+          {encrypt && (
+            <div className="form-field">
+              <label className="form-label" htmlFor="env-var-password">
+                Your password
+              </label>
+              <input
+                id="env-var-password"
+                className="form-input"
+                type="password"
+                value={password}
+                autoComplete="off"
+                onChange={(e) => setPassword(e.target.value)}
+                data-testid="env-var-password-input"
+              />
+            </div>
           )}
-          <button
-            type="submit"
-            className="btn-primary"
-            disabled={saving || name.trim().length === 0 || (encrypt && password.length === 0)}
-            data-testid="env-var-save-btn"
-          >
-            {saving ? 'Saving…' : editing ? 'Save' : 'Add'}
-          </button>
-        </div>
-      </form>
+          {formError && <p className="form-error">{formError}</p>}
+          <div className="form-actions">
+            {editing && (
+              <button type="button" className="btn-secondary" onClick={clearForm}>
+                Cancel
+              </button>
+            )}
+            <button
+              type="submit"
+              className="btn-primary"
+              disabled={saving || name.trim().length === 0 || (encrypt && password.length === 0)}
+              data-testid="env-var-save-btn"
+            >
+              {saving ? 'Saving…' : editing ? 'Save' : 'Add'}
+            </button>
+          </div>
+        </form>
+      )}
 
       <div className="env-var-lock">
         <button

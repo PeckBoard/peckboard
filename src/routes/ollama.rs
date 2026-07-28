@@ -26,13 +26,17 @@ use axum::{
 };
 use serde::Deserialize;
 
-use crate::auth::middleware::require_auth;
+use crate::auth::middleware::{require_admin, require_auth};
 use crate::plugin::settings::PluginSettingsStore;
 use crate::state::AppState;
 
+/// Pulling a model downloads onto a host-wide Ollama server (or writes to
+/// its Additional Servers config) that every session shares, so it's
+/// admin-only — same reasoning as `routes/settings.rs`.
 pub fn router(state: Arc<AppState>) -> Router<Arc<AppState>> {
     Router::new()
         .route("/api/ollama/pull", post(pull_model))
+        .route_layer(middleware::from_fn(require_admin))
         .route_layer(middleware::from_fn_with_state(state, require_auth))
 }
 

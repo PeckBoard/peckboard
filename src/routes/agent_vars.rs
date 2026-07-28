@@ -6,7 +6,9 @@
 //! by design — no encryption, no masking — so they must not hold secrets
 //! (that's what env vars are for). All routes are JWT-authenticated
 //! (`require_auth`).
-
+use crate::auth::middleware::{AuthUser, require_admin, require_auth};
+use crate::db::models::NewAgentVar;
+use crate::state::AppState;
 use axum::body::Body;
 use axum::{
     Json, Router,
@@ -20,10 +22,6 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use crate::auth::middleware::require_auth;
-use crate::db::models::NewAgentVar;
-use crate::state::AppState;
-
 /// Var names follow the POSIX identifier shape `^[A-Za-z_][A-Za-z0-9_]*$`
 /// (same rule as env vars — one grammar to remember).
 const NAME_MAX_LEN: usize = 128;
@@ -31,10 +29,32 @@ const NAME_MAX_LEN: usize = 128;
 const VALUE_MAX_LEN: usize = 32768;
 
 pub fn router(state: Arc<AppState>) -> Router<Arc<AppState>> {
-    Router::new()
-        .route("/api/agent-vars", get(list).post(upsert))
-        .route("/api/agent-vars/{id}", delete(delete_var))
+    admin_router()
+        .merge(user_router())
         .route_layer(middleware::from_fn_with_state(state, require_auth))
+}
+
+/// Deleting a var is host-wide (no `user_id` on the row), so it's
+/// admin-only — same reasoning as `routes/env_vars.rs`. `/api/agent-vars`
+/// mixes a read (list) with a write (upsert) on the same path, so `upsert`
+/// checks `AuthUser::is_admin()` itself instead of moving here.
+///
+/// Layers run outer-to-inner on the request, so `require_admin` is appended
+/// here and `require_auth` in [`router`] afterwards, which puts `AuthUser`
+/// into the extensions before this middleware reads it.
+fn admin_router() -> Router<Arc<AppState>> {
+    Router::new()
+        .route("/api/agent-vars/{id}", delete(delete_var))
+        .route_layer(middleware::from_fn(require_admin))
+}
+
+fn user_router() -> Router<Arc<AppState>> {
+    Router::new().route("/api/agent-vars", get(list).post(upsert))
+}
+fn auth_user(req: &Request<Body>) -> &AuthUser {
+    req.extensions()
+        .get::<AuthUser>()
+        .expect("auth middleware should inject AuthUser")
 }
 
 fn err(status: StatusCode, msg: &str) -> Response {
@@ -132,6 +152,9 @@ struct UpsertBody {
 
 /// POST /api/agent-vars — upsert by (name, scope).
 async fn upsert(State(state): State<Arc<AppState>>, request: Request<Body>) -> Response {
+    if !auth_user(&request).is_admin() {
+        return err(StatusCode::FORBIDDEN, "admin only");
+    }
     let body: UpsertBody = match parse_body(request).await {
         Ok(b) => b,
         Err(resp) => return resp,

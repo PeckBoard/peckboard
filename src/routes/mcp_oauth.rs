@@ -22,7 +22,7 @@ use axum::{
 };
 use std::sync::Arc;
 
-use crate::auth::middleware::require_auth;
+use crate::auth::middleware::{require_admin, require_auth};
 use crate::service::mcp_server::{oauth, user_servers};
 use crate::state::AppState;
 
@@ -30,13 +30,26 @@ pub fn router(state: Arc<AppState>) -> Router<Arc<AppState>> {
     let protected = Router::new()
         .route("/api/mcp-oauth/start", post(start_login))
         .route("/api/mcp-oauth/tokens", get(list_tokens))
-        .route("/api/mcp-oauth/tokens/{server_id}", delete(disconnect))
+        .merge(admin_router())
         .route_layer(middleware::from_fn_with_state(state, require_auth));
     // Public on purpose: the provider's redirect arrives without our JWT.
     // The one-time `state` value minted by `start` is the capability that
     // claims the pending login; an unknown state gets a static error page.
     let public = Router::new().route("/oauth/callback", get(callback));
     public.merge(protected)
+}
+
+/// Disconnecting revokes a shared MCP server's stored OAuth tokens (no
+/// `user_id` on the row), so it's admin-only — same reasoning as
+/// `routes/settings.rs`.
+///
+/// Layers run outer-to-inner on the request, so `require_admin` is appended
+/// here and `require_auth` in [`router`] afterwards, which puts `AuthUser`
+/// into the extensions before this middleware reads it.
+fn admin_router() -> Router<Arc<AppState>> {
+    Router::new()
+        .route("/api/mcp-oauth/tokens/{server_id}", delete(disconnect))
+        .route_layer(middleware::from_fn(require_admin))
 }
 
 fn now_ms() -> i64 {

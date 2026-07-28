@@ -10,12 +10,11 @@
 //! `POST /api/grok-accounts/{id}/login/start`, which returns a URL to open.
 //! The account reads as authenticated once `grok login` writes its
 //! `auth.json` (see [`crate::provider::grok::login`]).
-
 use std::sync::Arc;
 
 use axum::{
     Json, Router,
-    extract::{Path, State},
+    extract::{Extension, Path, State},
     http::StatusCode,
     middleware,
     response::IntoResponse,
@@ -23,18 +22,27 @@ use axum::{
 };
 use serde::{Deserialize, Serialize};
 
-use crate::auth::middleware::require_auth;
+use crate::auth::middleware::{AuthUser, require_admin, require_auth};
 use crate::db::models::{GrokAccount, GrokAccountChanges, NewGrokAccount};
 use crate::provider::grok::login::{self, GROK_LOGIN};
 use crate::routes::usage::cost::usage_cost;
 use crate::state::AppState;
 
 pub fn router(state: Arc<AppState>) -> Router<Arc<AppState>> {
+    admin_router()
+        .merge(user_router())
+        .route_layer(middleware::from_fn_with_state(state, require_auth))
+}
+
+/// Routes that mint, rotate, or delete a shared credential. Accounts carry
+/// no `user_id`, so these are admin-only — same reasoning as
+/// `routes/claude_accounts.rs`.
+///
+/// Layers run outer-to-inner on the request, so `require_admin` is appended
+/// here and `require_auth` in [`router`] afterwards, which puts `AuthUser`
+/// into the extensions before this middleware reads it.
+fn admin_router() -> Router<Arc<AppState>> {
     Router::new()
-        .route(
-            "/api/grok-accounts",
-            get(list_accounts).post(create_account),
-        )
         .route(
             "/api/grok-accounts/{id}",
             axum::routing::put(update_account).delete(delete_account),
@@ -43,7 +51,17 @@ pub fn router(state: Arc<AppState>) -> Router<Arc<AppState>> {
             "/api/grok-accounts/{id}/login/start",
             axum::routing::post(start_login),
         )
-        .route_layer(middleware::from_fn_with_state(state, require_auth))
+        .route_layer(middleware::from_fn(require_admin))
+}
+
+/// `/api/grok-accounts` mixes a read (list, any user) with a write (create,
+/// admin only) on the same path, so `create_account` checks
+/// `AuthUser::is_admin()` itself — same idiom as `routes/auth.rs::create_user`.
+fn user_router() -> Router<Arc<AppState>> {
+    Router::new().route(
+        "/api/grok-accounts",
+        get(list_accounts).post(create_account),
+    )
 }
 
 type ApiError = (StatusCode, Json<serde_json::Value>);
@@ -288,8 +306,15 @@ async fn list_accounts(State(state): State<Arc<AppState>>) -> impl IntoResponse 
 
 async fn create_account(
     State(state): State<Arc<AppState>>,
+    Extension(auth_user): Extension<AuthUser>,
     Json(body): Json<CreateAccountBody>,
 ) -> impl IntoResponse {
+    if !auth_user.is_admin() {
+        return Err((
+            StatusCode::FORBIDDEN,
+            Json(serde_json::json!({ "error": "admin only" })),
+        ));
+    }
     let name = body.name.trim().to_string();
     if name.is_empty() {
         return Err(bad_request("name is required"));

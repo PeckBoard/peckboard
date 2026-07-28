@@ -20,7 +20,16 @@ use peckboard::plugin::builtin::BuiltinPluginRegistry;
 use peckboard::plugin::manager::PluginManager;
 use peckboard::provider::manager::SessionManager;
 use peckboard::provider::registry::ProviderRegistry;
+use peckboard::routes::agent_vars::router as agent_vars_router;
+use peckboard::routes::claude_accounts::router as claude_accounts_router;
+use peckboard::routes::env_vars::router as env_vars_router;
+use peckboard::routes::grok_accounts::router as grok_accounts_router;
+use peckboard::routes::kimi_accounts::router as kimi_accounts_router;
+use peckboard::routes::mcp_oauth::router as mcp_oauth_router;
+use peckboard::routes::ollama::router as ollama_router;
+use peckboard::routes::plugins::router as plugins_router;
 use peckboard::routes::settings::router as settings_router;
+use peckboard::routes::system_prompts::router as system_prompts_router;
 use peckboard::routes::update::router as update_router;
 use peckboard::service::mcp_server::McpTokenRegistry;
 use peckboard::service::push::PushService;
@@ -123,6 +132,15 @@ async fn build_fixture() -> Fixture {
 fn make_router(state: Arc<AppState>) -> axum::Router {
     settings_router(state.clone())
         .merge(update_router(state.clone()))
+        .merge(plugins_router(state.clone()))
+        .merge(claude_accounts_router(state.clone()))
+        .merge(grok_accounts_router(state.clone()))
+        .merge(kimi_accounts_router(state.clone()))
+        .merge(env_vars_router(state.clone()))
+        .merge(agent_vars_router(state.clone()))
+        .merge(system_prompts_router(state.clone()))
+        .merge(ollama_router(state.clone()))
+        .merge(mcp_oauth_router(state.clone()))
         .with_state(state)
 }
 
@@ -328,4 +346,230 @@ async fn unauthenticated_requests_are_rejected_before_the_admin_check() {
     )
     .await;
     assert_eq!(status, StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn non_admin_cannot_reach_the_plugin_management_routes() {
+    let f = build_fixture().await;
+
+    let cases: Vec<(Method, &str, Option<Value>)> = vec![
+        (Method::DELETE, "/api/plugins/ollama", None),
+        (
+            Method::PUT,
+            "/api/plugins/ollama/settings",
+            Some(serde_json::json!({ "updates": {} })),
+        ),
+        (
+            Method::POST,
+            "/api/plugins/ollama/approval",
+            Some(serde_json::json!({ "decision": "approve" })),
+        ),
+        (
+            Method::POST,
+            "/api/plugins/repositories",
+            Some(serde_json::json!({ "label": "x", "url": "https://example.com" })),
+        ),
+        (
+            Method::POST,
+            "/api/plugins/registry/install",
+            Some(serde_json::json!({ "id": "x" })),
+        ),
+    ];
+    for (method, uri, body) in cases {
+        let (status, _) = call(
+            f.state.clone(),
+            Some(&f.user_token),
+            method.clone(),
+            uri,
+            body,
+        )
+        .await;
+        assert_eq!(
+            status,
+            StatusCode::FORBIDDEN,
+            "{method} {uri} must be admin only"
+        );
+    }
+
+    // Reads stay open to any authenticated user.
+    let (list_status, _) = call(
+        f.state.clone(),
+        Some(&f.user_token),
+        Method::GET,
+        "/api/plugins",
+        None,
+    )
+    .await;
+    assert_eq!(list_status, StatusCode::OK);
+}
+
+#[tokio::test]
+async fn non_admin_cannot_manage_provider_accounts() {
+    let f = build_fixture().await;
+
+    for (create_uri, id_uri) in [
+        ("/api/claude-accounts", "/api/claude-accounts/acc_x"),
+        ("/api/grok-accounts", "/api/grok-accounts/acc_x"),
+        ("/api/kimi-accounts", "/api/kimi-accounts/acc_x"),
+    ] {
+        let (create_status, body) = call(
+            f.state.clone(),
+            Some(&f.user_token),
+            Method::POST,
+            create_uri,
+            Some(serde_json::json!({ "name": "probe" })),
+        )
+        .await;
+        assert_eq!(
+            create_status,
+            StatusCode::FORBIDDEN,
+            "POST {create_uri} must be admin only"
+        );
+        assert_eq!(body["error"], "admin only");
+
+        let (delete_status, _) = call(
+            f.state.clone(),
+            Some(&f.user_token),
+            Method::DELETE,
+            id_uri,
+            None,
+        )
+        .await;
+        assert_eq!(
+            delete_status,
+            StatusCode::FORBIDDEN,
+            "DELETE {id_uri} must be admin only"
+        );
+    }
+
+    // Listing accounts stays open (the model picker needs it).
+    let (list_status, _) = call(
+        f.state.clone(),
+        Some(&f.user_token),
+        Method::GET,
+        "/api/claude-accounts",
+        None,
+    )
+    .await;
+    assert_eq!(list_status, StatusCode::OK);
+}
+
+#[tokio::test]
+async fn non_admin_cannot_write_env_or_agent_vars() {
+    let f = build_fixture().await;
+
+    for (upsert_uri, delete_uri) in [
+        ("/api/env-vars", "/api/env-vars/v1"),
+        ("/api/agent-vars", "/api/agent-vars/v1"),
+    ] {
+        let (upsert_status, _) = call(
+            f.state.clone(),
+            Some(&f.user_token),
+            Method::POST,
+            upsert_uri,
+            Some(serde_json::json!({ "name": "FOO", "value": "bar" })),
+        )
+        .await;
+        assert_eq!(
+            upsert_status,
+            StatusCode::FORBIDDEN,
+            "POST {upsert_uri} must be admin only"
+        );
+
+        let (delete_status, _) = call(
+            f.state.clone(),
+            Some(&f.user_token),
+            Method::DELETE,
+            delete_uri,
+            None,
+        )
+        .await;
+        assert_eq!(
+            delete_status,
+            StatusCode::FORBIDDEN,
+            "DELETE {delete_uri} must be admin only"
+        );
+    }
+
+    // Listing stays open.
+    let (list_status, _) = call(
+        f.state.clone(),
+        Some(&f.user_token),
+        Method::GET,
+        "/api/env-vars",
+        None,
+    )
+    .await;
+    assert_eq!(list_status, StatusCode::OK);
+}
+
+#[tokio::test]
+async fn non_admin_cannot_manage_system_prompts() {
+    let f = build_fixture().await;
+
+    let (create_status, _) = call(
+        f.state.clone(),
+        Some(&f.user_token),
+        Method::POST,
+        "/api/system-prompts",
+        Some(serde_json::json!({ "name": "probe", "body": "be terse" })),
+    )
+    .await;
+    assert_eq!(create_status, StatusCode::FORBIDDEN);
+
+    let (update_status, _) = call(
+        f.state.clone(),
+        Some(&f.user_token),
+        Method::PUT,
+        "/api/system-prompts/p1",
+        Some(serde_json::json!({ "name": "probe", "body": "be terse" })),
+    )
+    .await;
+    assert_eq!(update_status, StatusCode::FORBIDDEN);
+
+    let (delete_status, _) = call(
+        f.state.clone(),
+        Some(&f.user_token),
+        Method::DELETE,
+        "/api/system-prompts/p1",
+        None,
+    )
+    .await;
+    assert_eq!(delete_status, StatusCode::FORBIDDEN);
+
+    // Listing stays open (feeds the session-creation dropdown).
+    let (list_status, _) = call(
+        f.state.clone(),
+        Some(&f.user_token),
+        Method::GET,
+        "/api/system-prompts",
+        None,
+    )
+    .await;
+    assert_eq!(list_status, StatusCode::OK);
+}
+
+#[tokio::test]
+async fn non_admin_cannot_pull_ollama_models_or_disconnect_mcp_oauth() {
+    let f = build_fixture().await;
+
+    let (pull_status, _) = call(
+        f.state.clone(),
+        Some(&f.user_token),
+        Method::POST,
+        "/api/ollama/pull",
+        Some(serde_json::json!({ "model": "llama3.2" })),
+    )
+    .await;
+    assert_eq!(pull_status, StatusCode::FORBIDDEN);
+
+    let (disconnect_status, _) = call(
+        f.state.clone(),
+        Some(&f.user_token),
+        Method::DELETE,
+        "/api/mcp-oauth/tokens/srv1",
+        None,
+    )
+    .await;
+    assert_eq!(disconnect_status, StatusCode::FORBIDDEN);
 }
