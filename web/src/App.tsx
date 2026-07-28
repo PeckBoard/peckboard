@@ -1585,7 +1585,22 @@ function App() {
         </div>
       </main>
 
-      {showNewSession && <NewSessionModal onClose={() => setShowNewSession(false)} />}
+      {showNewSession && (
+        <NewSessionModal
+          onClose={() => setShowNewSession(false)}
+          onCreated={(id) => {
+            // Creating a session must land the user in it from anywhere in
+            // the app. `view` is the single full-page selector, and the
+            // activeSessionId→URL effect only runs while view === 'sessions',
+            // so selecting alone leaves a full-page view (Settings, Reports,
+            // Usage, …) up with the new tab unselected. Same activation
+            // triple every other create path uses.
+            setActiveSession(id)
+            navigate('sessions', id, 'chat')
+            useTabsStore.getState().openTab('session', id)
+          }}
+        />
+      )}
       {showNewProject && <NewProjectModal onClose={() => setShowNewProject(false)} />}
       {showChangePassword && (
         <ChangePasswordModal mode={{ kind: 'self' }} onClose={() => setShowChangePassword(false)} />

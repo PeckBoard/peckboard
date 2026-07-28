@@ -11,11 +11,15 @@ import type { WasmPlugin } from '../utils/pluginApproval'
 
 interface Props {
   onClose: () => void
+  /** Called with the new session's id once it exists. The host owns
+   *  activation (select + navigate + open tab) so creating a session from a
+   *  full-page view — Settings, Reports, Usage, … — lands the user in the
+   *  new session instead of leaving the overlay up with an unselected tab. */
+  onCreated: (sessionId: string) => void
 }
 
-export default function NewSessionModal({ onClose }: Props) {
+export default function NewSessionModal({ onClose, onCreated }: Props) {
   const createSession = useSessionsStore((s) => s.createSession)
-  const setActiveSession = useSessionsStore((s) => s.setActiveSession)
   const setDraft = useSessionsStore((s) => s.setDraft)
   const folders = useFoldersStore((s) => s.folders)
   const fetchFolders = useFoldersStore((s) => s.fetchFolders)
@@ -144,7 +148,7 @@ export default function NewSessionModal({ onClose }: Props) {
           setDraft(session.id, text)
         }
       }
-      setActiveSession(session.id)
+      onCreated(session.id)
       onClose()
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to create session')
