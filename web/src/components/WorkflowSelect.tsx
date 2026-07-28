@@ -113,6 +113,11 @@ export default function WorkflowSelect({
           items={items}
           onClose={close}
           align="left"
+          // Pin the popup to the trigger's box so it reads as part of the
+          // field and stays inside the modal that owns it — the option
+          // descriptions would otherwise stretch it to the viewport edge.
+          minWidth={anchor.width}
+          maxWidth={anchor.width}
           className="workflow-select-dropdown"
         />
       )}

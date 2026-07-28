@@ -321,6 +321,11 @@
   width: 100%;
 }
 .workflow-select-trigger {
+  /* A `<button>` shrink-to-fits even with `display: flex`, so without this it
+     sat narrower than every other field in the form — and dragged the popup,
+     which is pinned to the trigger, down to the same odd width. */
+  width: 100%;
+  box-sizing: border-box;
   display: flex;
   flex-direction: column;
   align-items: flex-start;

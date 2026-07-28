@@ -73,6 +73,11 @@ interface DropdownProps {
   /** Minimum popup width in px. The model picker uses it to keep the popup
    *  at least as wide as the trigger it hangs off. */
   minWidth?: number
+  /** Maximum popup width in px, clamped to the viewport. Callers anchored to
+   *  a form field (WorkflowSelect) pass the trigger width so the popup reads
+   *  as part of that field. Left unset, a menu whose rows carry
+   *  `description` text falls back to DESC_MAX_WIDTH — see below. */
+  maxWidth?: number
   /** Testid for the searchable variant's filter input. */
   searchTestId?: string
   /** Row shown when the list is empty BEFORE filtering (e.g. "Loading
@@ -84,6 +89,12 @@ interface DropdownProps {
 }
 
 const MENU_MARGIN = 8
+
+/** Fallback width cap for menus with two-line (`description`) rows. Such a
+ *  popup is shrink-to-fit and its descriptions are single long lines, so
+ *  without a cap it stretches to the viewport edge instead of wrapping —
+ *  which is how the workflow picker used to escape its 480px modal. */
+const DESC_MAX_WIDTH = 420
 
 /**
  * Portal-rendered popup menu. The single dropdown primitive used by every
@@ -100,6 +111,7 @@ export default function Dropdown({
   searchable,
   searchPlaceholder,
   minWidth,
+  maxWidth,
   searchTestId,
   emptyLabel,
   listLabel,
@@ -110,6 +122,10 @@ export default function Dropdown({
     top: anchor.y,
   }))
   const visible = items.filter((i) => !i.hidden)
+  // Two-line rows wrap their description only once the popup has a width to
+  // wrap against; without a cap the shrink-to-fit popup grows to the viewport
+  // edge. An explicit `maxWidth` (a field-anchored picker) always wins.
+  const widthCap = maxWidth ?? (visible.some((i) => i.description) ? DESC_MAX_WIDTH : undefined)
   // Searchable variant: filter rows by the query and track a keyboard cursor
   // over the selectable rows so ArrowUp/Down + Enter work from the input
   // (mirrors ModelPicker's interaction).
@@ -263,7 +279,9 @@ export default function Dropdown({
         left: pos.left,
         top: pos.top,
         minWidth,
-        maxWidth: `calc(100vw - ${MENU_MARGIN * 2}px)`,
+        maxWidth: widthCap
+          ? `min(${widthCap}px, calc(100vw - ${MENU_MARGIN * 2}px))`
+          : `calc(100vw - ${MENU_MARGIN * 2}px)`,
       }}
     >
       {searchable ? (

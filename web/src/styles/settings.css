@@ -1406,6 +1406,10 @@ a.wasm-plugin-repo:hover {
   margin-top: 12px;
 }
 .mcp-import-textarea {
+  /* `.form-hint` above has no bottom margin (it normally sits tight under
+     an input), so the explanatory paragraph would otherwise butt straight
+     into this textarea's top border. */
+  margin-top: 10px;
   width: 100%;
   box-sizing: border-box;
   font-family: var(--font-mono);
