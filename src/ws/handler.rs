@@ -22,6 +22,10 @@ static NEXT_CLIENT_ID: AtomicU64 = AtomicU64::new(1);
 /// session is caught up, so a long gap is no longer a permanent hole.
 const RESUME_PAGE_SIZE: i64 = 500;
 
+/// Reason returned to a client whose `Subscribe` / `Resume` the stream gate
+/// refused. Kept in one place so the WS test and the UI copy stay in sync.
+const STREAM_DENIED_REASON: &str = "You don't have access to this session's live updates.";
+
 /// Incoming frame types from the client.
 #[derive(Debug, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
@@ -50,6 +54,12 @@ enum ServerFrame {
     ResumeComplete {
         session_id: String,
     },
+    /// A `Subscribe` / `Resume` the server refused. Sent so the client can
+    /// surface an error instead of waiting on a stream that never opens.
+    SubscribeDenied {
+        session_id: String,
+        reason: String,
+    },
     /// The client's broadcast slot overflowed and `dropped` events were
     /// discarded before we could forward them. Nothing can recover them from
     /// the channel, so the client must re-run its Resume flow. `session_id` /
@@ -63,6 +73,36 @@ enum ServerFrame {
         last_seq: Option<i32>,
         dropped: u64,
     },
+}
+
+/// May this client stream `session_id`'s events?
+///
+/// Admins keep blanket access. Everyone else may stream only sessions they
+/// own, using the same ownership rule as the session-control send_message
+/// gate: a match needs both `user_id`s to be `Some` and equal, so a legacy or
+/// internally-spawned session with a NULL owner never matches.
+///
+/// This is deliberately narrower than the REST layer, which is not yet
+/// per-user partitioned (see the "any logged-in user can read every other
+/// user's sessions" card): a non-admin cannot open another user's stream by
+/// guessing session UUIDs.
+async fn may_stream_session(
+    state: &AppState,
+    is_admin: bool,
+    user_id: &str,
+    session_id: &str,
+) -> bool {
+    if is_admin {
+        return true;
+    }
+    match state.db.get_session(session_id).await {
+        Ok(Some(session)) => session.user_id.as_deref() == Some(user_id),
+        Ok(None) => false,
+        Err(e) => {
+            tracing::warn!("WS ownership check failed for session {session_id}: {e}");
+            false
+        }
+    }
 }
 
 /// WebSocket upgrade handler.
@@ -183,14 +223,34 @@ async fn handle_connection(socket: WebSocket, state: Arc<AppState>) {
                             }
                             match frame {
                                 ClientFrame::Subscribe { session_id } => {
-                                    // Sessions are not per-user partitioned; gate
-                                    // subscription on admin role so a non-admin
-                                    // user can't tap into another's stream by
-                                    // guessing session UUIDs.
-                                    if !is_admin {
+                                    // Sessions are still not per-user partitioned
+                                    // at the REST layer, so keep the stream gate
+                                    // narrower than REST: admins get blanket
+                                    // access, everyone else only the sessions they
+                                    // own. A non-admin can't tap another user's
+                                    // stream by guessing session UUIDs, and their
+                                    // own sessions stream normally.
+                                    if !may_stream_session(&state, is_admin, &user_id, &session_id)
+                                        .await
+                                    {
                                         tracing::info!(
-                                            "WS client {client_id} non-admin subscribe denied"
+                                            "WS client {client_id} subscribe denied for {session_id}"
                                         );
+                                        // Tell the client it was refused. A silent
+                                        // drop left the UI waiting forever on a
+                                        // stream that would never open.
+                                        let _ = sender
+                                            .send(Message::Text(
+                                                serde_json::to_string(
+                                                    &ServerFrame::SubscribeDenied {
+                                                        session_id,
+                                                        reason: STREAM_DENIED_REASON.to_string(),
+                                                    },
+                                                )
+                                                .unwrap()
+                                                .into(),
+                                            ))
+                                            .await;
                                         continue;
                                     }
                                     state.broadcaster.subscribe(client_id, &session_id).await;
@@ -199,12 +259,28 @@ async fn handle_connection(socket: WebSocket, state: Arc<AppState>) {
                                     state.broadcaster.unsubscribe(client_id, &session_id).await;
                                 }
                                 ClientFrame::Resume { session_id, last_seq } => {
-                                    if !is_admin {
+                                    if !may_stream_session(&state, is_admin, &user_id, &session_id)
+                                        .await
+                                    {
                                         tracing::info!(
-                                            "WS client {client_id} non-admin resume denied"
+                                            "WS client {client_id} resume denied for {session_id}"
                                         );
-                                        // Send ResumeComplete so the client unblocks
+                                        // Same refusal frame as Subscribe so the UI
+                                        // has one error state for both, then
+                                        // ResumeComplete so the client unblocks
                                         // instead of hanging on a forbidden replay.
+                                        let _ = sender
+                                            .send(Message::Text(
+                                                serde_json::to_string(
+                                                    &ServerFrame::SubscribeDenied {
+                                                        session_id: session_id.clone(),
+                                                        reason: STREAM_DENIED_REASON.to_string(),
+                                                    },
+                                                )
+                                                .unwrap()
+                                                .into(),
+                                            ))
+                                            .await;
                                         let _ = sender.send(Message::Text(
                                             serde_json::to_string(&ServerFrame::ResumeComplete {
                                                 session_id,
@@ -399,4 +475,110 @@ async fn handle_connection(socket: WebSocket, state: Arc<AppState>) {
     // Cleanup
     state.broadcaster.remove_client(client_id).await;
     tracing::info!("WS client {client_id} disconnected");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::auth::middleware::tests::test_state;
+    use crate::db::models::{NewFolder, NewSession, NewUser};
+
+    async fn seed_user(state: &Arc<AppState>, id: &str, username: &str, role: &str) {
+        let now = chrono::Utc::now().to_rfc3339();
+        state
+            .db
+            .create_user(NewUser {
+                id: id.into(),
+                username: username.into(),
+                email: None,
+                password_hash: "x".into(),
+                role: role.into(),
+                created_at: now.clone(),
+                updated_at: now,
+            })
+            .await
+            .unwrap();
+    }
+
+    /// Seed a chat session owned by `owner` (`None` = legacy/internal row).
+    async fn seed_session(state: &Arc<AppState>, id: &str, owner: Option<&str>) {
+        let now = chrono::Utc::now().to_rfc3339();
+        state
+            .db
+            .create_folder(NewFolder {
+                id: "f1".into(),
+                name: "f1".into(),
+                path: "/tmp/f1".into(),
+                created_at: now.clone(),
+            })
+            .await
+            .ok();
+        state
+            .db
+            .create_session(NewSession {
+                id: id.into(),
+                name: id.into(),
+                folder_id: "f1".into(),
+                created_at: now.clone(),
+                last_activity: now,
+                user_id: owner.map(str::to_string),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_non_admin_may_stream_a_session_they_own() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = test_state(dir.path());
+        seed_user(&state, "u1", "alice", "user").await;
+        seed_session(&state, "s-own", Some("u1")).await;
+
+        assert!(may_stream_session(&state, false, "u1", "s-own").await);
+    }
+
+    #[tokio::test]
+    async fn a_non_admin_may_not_stream_someone_elses_session() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = test_state(dir.path());
+        seed_user(&state, "u1", "alice", "user").await;
+        seed_user(&state, "u2", "bob", "user").await;
+        seed_session(&state, "s-theirs", Some("u2")).await;
+
+        assert!(!may_stream_session(&state, false, "u1", "s-theirs").await);
+    }
+
+    #[tokio::test]
+    async fn an_unowned_session_never_matches_a_non_admin() {
+        // NULL owner = non-matching, the same rule the session-control
+        // send_message gate applies to legacy / internally-spawned rows.
+        let dir = tempfile::tempdir().unwrap();
+        let state = test_state(dir.path());
+        seed_user(&state, "u1", "alice", "user").await;
+        seed_session(&state, "s-orphan", None).await;
+
+        assert!(!may_stream_session(&state, false, "u1", "s-orphan").await);
+    }
+
+    #[tokio::test]
+    async fn a_non_admin_may_not_stream_an_unknown_session_id() {
+        // Guessing UUIDs must not open a stream, and must not error open.
+        let dir = tempfile::tempdir().unwrap();
+        let state = test_state(dir.path());
+        seed_user(&state, "u1", "alice", "user").await;
+
+        assert!(!may_stream_session(&state, false, "u1", "no-such-session").await);
+    }
+
+    #[tokio::test]
+    async fn an_admin_may_stream_any_session() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = test_state(dir.path());
+        seed_user(&state, "u1", "alice", "user").await;
+        seed_user(&state, "admin", "root", "admin").await;
+        seed_session(&state, "s-theirs", Some("u1")).await;
+
+        assert!(may_stream_session(&state, true, "admin", "s-theirs").await);
+    }
 }

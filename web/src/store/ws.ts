@@ -30,6 +30,11 @@ interface WsState {
   eventsBySession: Record<string, Event[]>
   lastSeqBySession: Record<string, number>
   subscribedSessions: Set<string>
+  /** Sessions whose `subscribe`/`resume` the server refused, mapped to the
+   *  reason it gave. The server used to drop a refused frame silently, which
+   *  left the chat pane waiting forever on a stream that never opened — the
+   *  UI reads this to show an error state instead. */
+  deniedSessions: Record<string, string>
   connect: () => void
   disconnect: () => void
   subscribe: (sessionId: string) => void
@@ -67,6 +72,7 @@ function sendJson(data: unknown) {
 export const useWsStore = create<WsState>((set, get) => ({
   eventsBySession: {},
   lastSeqBySession: loadLastSeqs(),
+  deniedSessions: {},
   subscribedSessions: new Set<string>(),
 
   connect: () => {
@@ -110,6 +116,27 @@ export const useWsStore = create<WsState>((set, get) => ({
           if (lastSeq !== undefined) {
             sendJson({ type: 'resume', session_id: sid, last_seq: lastSeq })
           }
+        }
+        return
+      }
+
+      if (msg.type === 'subscribe_denied') {
+        // The server refused this session's stream (today: it isn't ours and
+        // we're not an admin). Record it so ChatView can say so instead of
+        // leaving an optimistic bubble spinning on a stream that will never
+        // deliver. Dropping the subscription too stops the reconnect path
+        // from re-requesting a stream we know is refused.
+        const sessionId = msg.session_id as string
+        if (sessionId) {
+          const { subscribedSessions, deniedSessions } = get()
+          subscribedSessions.delete(sessionId)
+          set({
+            subscribedSessions: new Set(subscribedSessions),
+            deniedSessions: {
+              ...deniedSessions,
+              [sessionId]: (msg.reason as string) || 'Live updates are unavailable.',
+            },
+          })
         }
         return
       }
@@ -322,9 +349,15 @@ export const useWsStore = create<WsState>((set, get) => ({
   },
 
   subscribe: (sessionId: string) => {
-    const { subscribedSessions, lastSeqBySession } = get()
+    const { subscribedSessions, lastSeqBySession, deniedSessions } = get()
     subscribedSessions.add(sessionId)
-    set({ subscribedSessions: new Set(subscribedSessions) })
+    // Drop any earlier refusal: an explicit re-subscribe is a fresh attempt
+    // (the session may now be ours, or our role may have changed), and the
+    // stale error state would otherwise outlive the reason for it.
+    const { [sessionId]: _wasDenied, ...remainingDenied } = deniedSessions
+    void _wasDenied
+    set({ subscribedSessions: new Set(subscribedSessions), deniedSessions: remainingDenied })
+    sendJson({ type: 'subscribe', session_id: sessionId })
     sendJson({ type: 'subscribe', session_id: sessionId })
     // Auto-resume from last known seq
     const lastSeq = lastSeqBySession[sessionId]

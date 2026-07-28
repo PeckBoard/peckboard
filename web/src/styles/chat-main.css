@@ -443,6 +443,54 @@
   opacity: 0.65;
 }
 
+/* The server refused this session's live stream (`subscribe_denied`, see
+   store/ws.ts). Warning-toned, not danger: nothing was lost and the turn
+   still runs — only the live view is unavailable. Same rule as the stalled
+   chip above: amber carries the chrome, the label stays --text. */
+.chat-stream-denied {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 4px 8px;
+  margin: 8px 0;
+  padding: 8px 12px;
+  border: 1px solid var(--warning);
+  border-radius: var(--radius-md);
+  background: var(--warning-bg);
+  color: var(--text);
+  font-size: var(--text-sm);
+}
+.chat-stream-denied-title {
+  font-weight: 600;
+}
+.chat-stream-denied-reason,
+.chat-stream-denied-hint {
+  color: var(--text2);
+}
+.chat-stream-denied-reload {
+  margin-left: auto;
+  padding: 2px 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-full);
+  background: var(--surface2);
+  color: var(--text2);
+  font-family: inherit;
+  font-size: var(--text-xs);
+  font-weight: 600;
+  cursor: pointer;
+  transition: all var(--transition);
+}
+.chat-stream-denied-reload:hover {
+  background: var(--surface3);
+  color: var(--text);
+}
+
+/* Optimistic bubble whose reply can never arrive live. Not "in flight", so
+   it keeps full legibility; the dashed amber edge says it won't update. */
+.chat-bubble-undelivered {
+  border: 1px dashed var(--warning);
+}
+
 .chat-bubble-assistant {
   /* Surface3 fill — one step darker than surface2 — so the bubble sits
      clearly above the lighter chat column. The border is the same fill

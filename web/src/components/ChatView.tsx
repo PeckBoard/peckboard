@@ -949,6 +949,11 @@ export default function ChatView({
   const pendingOlderScrollRestore = useRef<number | null>(null)
 
   const subscribe = useWsStore((s) => s.subscribe)
+  /** Set when the server refused this session's live stream. Streaming is
+   *  the only thing refused — the turn still runs and the events land in the
+   *  log — so the pane says so and offers a reload instead of leaving an
+   *  optimistic bubble on "Sending..." forever. */
+  const streamDeniedReason = useWsStore((s) => s.deniedSessions[sessionId])
   const unsubscribe = useWsStore((s) => s.unsubscribe)
   const addEventListener = useWsStore((s) => s.addEventListener)
   const removeEventListener = useWsStore((s) => s.removeEventListener)
@@ -1852,6 +1857,22 @@ export default function ChatView({
             )}
           </div>
         )}
+        {streamDeniedReason && (
+          <div className="chat-stream-denied" data-testid="chat-stream-denied" role="alert">
+            <span className="chat-stream-denied-title">Live updates unavailable</span>
+            <span className="chat-stream-denied-reason">{streamDeniedReason}</span>
+            <span className="chat-stream-denied-hint">
+              Messages you send still run — reload to see the replies.
+            </span>
+            <button
+              type="button"
+              className="chat-stream-denied-reload"
+              onClick={() => window.location.reload()}
+            >
+              Reload
+            </button>
+          </div>
+        )}
         {displayItems.length === 0 && (
           <div className="chat-empty">No messages yet. Send one below.</div>
         )}
@@ -1882,14 +1903,24 @@ export default function ChatView({
             chat doesn't appear to swallow the message during the WS
             round-trip (especially noticeable for queued turns). The
             matching real `user` event clears the pending entry on
-            arrival; see `clearMatchingPending` in store/sessions.ts. */}
+            arrival; see `clearMatchingPending` in store/sessions.ts.
+            With the stream refused no such event will ever arrive, so the
+            bubble says that instead of animating "Sending..." forever. */}
         {pendingUserMessages.map((p) => (
           <div key={p.tempId} className="chat-row chat-row-user">
-            <div className="chat-bubble chat-bubble-user chat-bubble-pending">
+            <div
+              className={`chat-bubble chat-bubble-user ${
+                streamDeniedReason ? 'chat-bubble-undelivered' : 'chat-bubble-pending'
+              }`}
+            >
               {p.text}
               <MessageAttachments sessionId={sessionId} attachments={p.attachments} />
-              <div className="chat-time chat-time-user">
-                {queuedText === p.text ? 'Queued' : 'Sending...'}
+              <div className="chat-time chat-time-user" data-testid="chat-pending-status">
+                {streamDeniedReason
+                  ? 'Sent — reply not shown live'
+                  : queuedText === p.text
+                    ? 'Queued'
+                    : 'Sending...'}
               </div>
             </div>
           </div>
