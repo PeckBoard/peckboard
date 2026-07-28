@@ -19,7 +19,7 @@
 
 use axum::{
     Extension, Json, Router,
-    extract::{Path, State},
+    extract::{Path, Query, State},
     http::StatusCode,
     middleware,
     response::IntoResponse,
@@ -161,12 +161,21 @@ async fn create_review(
     }
 }
 
+/// Query for [`get_review`]. `comments=all` additionally returns the resolved
+/// annotations, which the review screen's rail groups under "Resolved" with
+/// the note the assistant left; the default stays open-only.
+#[derive(serde::Deserialize)]
+struct GetReviewQuery {
+    comments: Option<String>,
+}
+
 /// GET /api/doc-reviews/{id} → the review, its current markdown, and the
 /// annotations still awaiting the assistant. One request is everything the
 /// review screen needs to render.
 async fn get_review(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
+    Query(q): Query<GetReviewQuery>,
 ) -> impl IntoResponse {
     let review = match state.db.get_doc_review(&id).await {
         Ok(Some(r)) => r,
@@ -181,9 +190,10 @@ async fn get_review(
         .flatten()
         .map(|v| v.markdown)
         .unwrap_or_default();
+    let open_only = q.comments.as_deref() != Some("all");
     let comments = state
         .db
-        .list_doc_review_comments(&id, true)
+        .list_doc_review_comments(&id, open_only)
         .await
         .unwrap_or_default();
     Ok(Json(serde_json::json!({
@@ -1417,5 +1427,62 @@ mod tests {
             !text.contains("Review pass:"),
             "no annotation digest on a chat turn: {text}"
         );
+    }
+
+    /// The review screen's rail groups resolved annotations under the note the
+    /// assistant left, so it asks for them explicitly. The default response
+    /// stays open-only — the injection and the list view both rely on that.
+    #[tokio::test]
+    async fn get_review_returns_resolved_comments_only_on_request() {
+        let dir = tempfile::tempdir().unwrap();
+        let workspace = tempfile::tempdir().unwrap();
+        let (state, token) = fixture(dir.path(), workspace.path()).await;
+        let id = seed_review(&state, &token).await;
+        add_annotation(&state, &token, &id, "this paragraph is wrong").await;
+
+        let detail = json_body(
+            app(state.clone())
+                .oneshot(req("GET", &format!("/api/doc-reviews/{id}"), &token, None))
+                .await
+                .unwrap(),
+        )
+        .await;
+        let comment_id = detail["comments"][0]["id"].as_str().unwrap().to_string();
+
+        let response = app(state.clone())
+            .oneshot(req(
+                "PATCH",
+                &format!("/api/doc-reviews/{id}/comments/{comment_id}"),
+                &token,
+                Some(serde_json::json!({ "status": "fixed", "resolution_note": "rewrote it" })),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let open_only = json_body(
+            app(state.clone())
+                .oneshot(req("GET", &format!("/api/doc-reviews/{id}"), &token, None))
+                .await
+                .unwrap(),
+        )
+        .await;
+        assert!(open_only["comments"].as_array().unwrap().is_empty());
+
+        let all = json_body(
+            app(state.clone())
+                .oneshot(req(
+                    "GET",
+                    &format!("/api/doc-reviews/{id}?comments=all"),
+                    &token,
+                    None,
+                ))
+                .await
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(all["comments"].as_array().unwrap().len(), 1);
+        assert_eq!(all["comments"][0]["status"], "fixed");
+        assert_eq!(all["comments"][0]["resolution_note"], "rewrote it");
     }
 }

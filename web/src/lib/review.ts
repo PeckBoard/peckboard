@@ -67,16 +67,31 @@ export interface ReviewDetail {
 }
 
 /** One `.md` file under a folder, as listed by the jailed walker. */
+/** One `.md` file under a folder, as listed by the jailed walker. */
 export interface MarkdownFileEntry {
   path: string
   size: number
+}
+
+/** A non-2xx response, carrying the server's `{"error"}` message and the
+ *  status. The status matters to the review screen: a 404 means the review
+ *  was deleted (from another tab, or by the list view), and the screen bails
+ *  back to the list rather than parking on an error nobody can clear. */
+export class ReviewRequestError extends Error {
+  readonly status: number
+
+  constructor(message: string, status: number) {
+    super(message)
+    this.name = 'ReviewRequestError'
+    this.status = status
+  }
 }
 
 /** Turn a non-2xx response into an Error carrying the server's `{"error"}`
  *  message, so callers can hand it straight to `describeActionError`. */
 async function fail(res: Response, fallback: string): Promise<never> {
   const body = (await res.json().catch(() => null)) as { error?: string } | null
-  throw new Error(body?.error || `${fallback} (HTTP ${res.status})`)
+  throw new ReviewRequestError(body?.error || `${fallback} (HTTP ${res.status})`, res.status)
 }
 
 async function json<T>(res: Response, fallback: string): Promise<T> {
@@ -110,8 +125,15 @@ export async function createReview(input: CreateReviewInput): Promise<ReviewDeta
   return json<ReviewDetail>(res, "Couldn't create the review")
 }
 
-export async function getReview(id: string): Promise<ReviewDetail> {
-  const res = await authedFetch(`/api/doc-reviews/${encodeURIComponent(id)}`)
+/** `comments: 'all'` also returns the resolved annotations, which the review
+ *  screen's rail groups under "Resolved" with the note the assistant left.
+ *  The default stays open-only. */
+export async function getReview(
+  id: string,
+  opts: { comments?: 'open' | 'all' } = {},
+): Promise<ReviewDetail> {
+  const query = opts.comments === 'all' ? '?comments=all' : ''
+  const res = await authedFetch(`/api/doc-reviews/${encodeURIComponent(id)}${query}`)
   return json<ReviewDetail>(res, "Couldn't load this review")
 }
 
@@ -270,4 +292,40 @@ export const REVIEW_SOURCE_LABEL: Record<ReviewSourceKind, string> = {
   file: 'file',
   report: 'report',
   plan: 'plan',
+}
+
+/** Human-facing label for an annotation kind, as the rail and the selection
+ *  popover both name it. Same word in both places or the rail reads as a
+ *  different feature from the popover that filled it. */
+export const REVIEW_COMMENT_KIND_LABEL: Record<ReviewCommentKind, string> = {
+  comment: 'Comment',
+  suggest: 'Suggested edit',
+  wrong: 'Marked wrong',
+  expand: 'Expand',
+  shorten: 'Shorten',
+}
+
+/** How the assistant closed an annotation out. */
+export const REVIEW_RESOLUTION_LABEL: Record<'fixed' | 'declined' | 'answered', string> = {
+  fixed: 'fixed',
+  declined: 'declined',
+  answered: 'answered',
+}
+
+/** `pending` and `sent` are both still awaiting the assistant: a `sent`
+ *  annotation is riding along on the pass that's running right now. */
+export function isOpenComment(c: DocReviewComment): boolean {
+  return c.status === 'pending' || c.status === 'sent'
+}
+
+/** Where `apply` would write. Shown in the confirmation so nobody overwrites
+ *  a file they only meant to read. */
+export function describeReviewSource(review: DocReview): string {
+  if (review.source_kind === 'file') {
+    // `<folder_id>:<relative/path.md>` — the folder id is noise to a human.
+    const sep = review.source_ref.indexOf(':')
+    return sep >= 0 ? review.source_ref.slice(sep + 1) : review.source_ref
+  }
+  if (review.source_kind === 'report') return `report ${review.source_ref}`
+  return 'the plan it was created from'
 }
