@@ -356,6 +356,11 @@ export default function NewReviewWizard({ onClose, onCreated }: Props) {
                       data-testid="review-wizard-folder"
                       value={folderId}
                       onChange={(e) => {
+                        // Re-picking the folder that is already selected must
+                        // not reset the option set: the loader effect keys on
+                        // `folderId`, so with nothing to re-run the picker
+                        // would sit on "Loading…" forever.
+                        if (e.target.value === folderId) return
                         setChosenFolderId(e.target.value)
                         resetPick()
                       }}

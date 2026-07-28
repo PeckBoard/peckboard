@@ -3,6 +3,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
+use serde_json::json;
 use tokio::sync::mpsc;
 use tokio::sync::{Mutex, Notify};
 use tokio::task::JoinHandle;
@@ -29,6 +30,12 @@ use crate::provider::stream::{CrashKind, ModelInfo, ProviderEvent, ToolImage};
 /// * `system-blob` — Started → raw `system` event with no `text`/`message` →
 ///   Completed
 /// * `crash` — Started → Text → Crashed
+/// * `doc-review` — the document-review loop, driven through the REAL MCP
+///   tools (`get_review_doc` / `submit_review_revision` / `ask_user`) via
+///   [`call_mcp_tool`]. Branch chosen by a marker in the turn text:
+///   `[mock:ask]` asks a clarifying question, `[mock:chat]` answers without
+///   revising, anything else revises the document and resolves every open
+///   annotation.
 /// * `ask` — Started → ControlRequest, waits for stdin → Text(reply) → Completed
 /// * `todo` — Started → ToolStart/ToolEnd(TodoWrite) → Todo(snapshot) → Completed
 /// * `tasks` — Started → scripted TaskCreate/TaskUpdate ToolStart/ToolEnd
@@ -248,7 +255,7 @@ async fn run_scenario(
     message: &str,
     model_label: &str,
     db: &crate::db::Db,
-    broadcaster: &crate::ws::broadcaster::Broadcaster,
+    broadcaster: &Arc<crate::ws::broadcaster::Broadcaster>,
     plugins: &crate::plugin::manager::PluginManager,
     mut stdin_rx: mpsc::Receiver<String>,
     cancel: Arc<Notify>,
@@ -984,6 +991,127 @@ async fn run_scenario(
             )
             .await;
         }
+        "doc-review" => {
+            // The document-review loop. Unlike the older scenarios this one
+            // calls the REAL MCP tools a live reviewer would call (see
+            // `call_mcp_tool`) instead of scripting a fixture of their side
+            // effects, so a run exercises the handlers, the review-status
+            // hooks they fire, and the events the review screen renders.
+            //
+            // Which branch runs is picked by a marker in the turn text — the
+            // same respond-by-prompt convention the other scenarios use, so
+            // one model id covers the whole loop:
+            //   `[mock:ask]`  → ask a clarifying question and stop. The
+            //                   answer arrives as the next turn, which has no
+            //                   marker and therefore revises.
+            //   `[mock:chat]` → answer in the chat lane, revise nothing (the
+            //                   Clarify action and the chat composer).
+            //   anything else → revise the document and resolve every open
+            //                   annotation.
+            if message.contains("[mock:ask]") {
+                let quote = call_mcp_tool(db, broadcaster, session_id, "get_review_doc", json!({}))
+                    .await
+                    .and_then(|d| {
+                        d["open_comments"]
+                            .as_array()
+                            .and_then(|cs| cs.first())
+                            .and_then(|c| c["quote"].as_str())
+                            .map(str::to_string)
+                    })
+                    .unwrap_or_default();
+                tick().await;
+                emit_event(
+                    db,
+                    broadcaster,
+                    session_id,
+                    ProviderEvent::Text {
+                        text: "That passage reads two ways — asking before I guess.".into(),
+                    },
+                )
+                .await;
+                tick().await;
+                let question = if quote.is_empty() {
+                    "Which reading of that passage did you mean?".to_string()
+                } else {
+                    format!("Which reading of «{quote}» did you mean?")
+                };
+                call_mcp_tool(
+                    db,
+                    broadcaster,
+                    session_id,
+                    "ask_user",
+                    json!({
+                        "questions": [{
+                            "question": question,
+                            "header": "Intent",
+                            "options": [
+                                { "label": "Keep it as written", "description": "Leave the passage alone." },
+                                { "label": "Rewrite it", "description": "Replace it with clearer wording." }
+                            ]
+                        }]
+                    }),
+                )
+                .await;
+            } else if message.contains("[mock:chat]") {
+                emit_event(
+                    db,
+                    broadcaster,
+                    session_id,
+                    ProviderEvent::Text {
+                        text: "Answering in the lane — the document is unchanged.".into(),
+                    },
+                )
+                .await;
+            } else if let Some(doc) =
+                call_mcp_tool(db, broadcaster, session_id, "get_review_doc", json!({})).await
+            {
+                let markdown = doc["markdown"].as_str().unwrap_or_default();
+                let version = doc["version"].as_i64().unwrap_or(1);
+                let next = version + 1;
+                let resolutions: Vec<serde_json::Value> = doc["open_comments"]
+                    .as_array()
+                    .map(|cs| {
+                        cs.iter()
+                            .filter_map(|c| {
+                                let id = c["id"].as_str()?;
+                                let kind = c["kind"].as_str().unwrap_or("comment");
+                                // A plain comment is a remark to answer; every
+                                // other kind asks for a change to the text.
+                                let action = if kind == "comment" { "answered" } else { "fixed" };
+                                Some(json!({
+                                    "comment_id": id,
+                                    "action": action,
+                                    "note": format!("mock reviewer: {kind} {action} in pass {next}"),
+                                }))
+                            })
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                tick().await;
+                call_mcp_tool(
+                    db,
+                    broadcaster,
+                    session_id,
+                    "submit_review_revision",
+                    json!({
+                        "markdown": mock_revised_markdown(markdown, next),
+                        "note": format!("mock pass {next}"),
+                        "resolutions": resolutions,
+                    }),
+                )
+                .await;
+                tick().await;
+                emit_event(
+                    db,
+                    broadcaster,
+                    session_id,
+                    ProviderEvent::Text {
+                        text: format!("Revised the document to v{next}."),
+                    },
+                )
+                .await;
+            }
+        }
         "todo" => {
             // Emit a TodoWrite tool call exactly as Claude would, then run it
             // through the same `snapshot_from_tool_call` seam the real provider
@@ -1206,12 +1334,101 @@ async fn run_scenario(
     true
 }
 
+/// Call a real PeckBoard MCP tool the way an agent would: emit the
+/// `ToolStart` the chat renders, run the actual handler behind
+/// `mcp__peckboard__<name>`, then emit `ToolEnd` carrying the handler's own
+/// result (or its error text). A scenario built on this exercises the live
+/// MCP surface — handlers, status hooks, broadcast events — instead of a
+/// hand-written fixture of what those tools happen to write today.
+///
+/// Returns the handler's JSON result, or `None` when the session is gone or
+/// the tool refused (the refusal is still visible as the `ToolEnd` error).
+async fn call_mcp_tool(
+    db: &crate::db::Db,
+    broadcaster: &Arc<crate::ws::broadcaster::Broadcaster>,
+    session_id: &str,
+    name: &str,
+    args: serde_json::Value,
+) -> Option<serde_json::Value> {
+    let session = db.get_session(session_id).await.ok().flatten()?;
+    let ctx = crate::service::mcp_server::ToolCallContext {
+        session_id: session_id.to_string(),
+        project_id: session.project_id.clone(),
+        card_id: session.card_id.clone(),
+        folder_id: session.folder_id.clone(),
+        db: Arc::new(db.clone()),
+        broadcaster: broadcaster.clone(),
+        provider_registry: None,
+        data_dir: None,
+    };
+
+    let tool_id = format!("tool-{}", uuid::Uuid::new_v4());
+    emit_event(
+        db,
+        broadcaster,
+        session_id,
+        ProviderEvent::ToolStart {
+            tool_use_id: tool_id.clone(),
+            name: format!("mcp__peckboard__{name}"),
+            input: args.clone(),
+        },
+    )
+    .await;
+
+    let result = crate::service::mcp_server::McpToolRegistry::new()
+        .handle_tool_call(name, args, &ctx)
+        .await;
+    let (output, error) = match &result {
+        Ok(value) => (Some(value.to_string()), None),
+        Err(e) => (None, Some(e.to_string())),
+    };
+    emit_event(
+        db,
+        broadcaster,
+        session_id,
+        ProviderEvent::ToolEnd {
+            tool_use_id: tool_id,
+            output,
+            error,
+            images: Vec::new(),
+        },
+    )
+    .await;
+
+    result.ok()
+}
+
+/// The revision the `doc-review` scenario submits: the first body line is
+/// rewritten and a pass-stamped line is appended, so a diff always has both
+/// a deletion and additions to assert on without depending on a real model's
+/// prose. Headings are left alone — the document keeps its shape.
+fn mock_revised_markdown(markdown: &str, version: i64) -> String {
+    let mut lines: Vec<String> = markdown.lines().map(str::to_string).collect();
+    if let Some(line) = lines
+        .iter_mut()
+        .find(|l| !l.trim().is_empty() && !l.trim_start().starts_with('#'))
+    {
+        *line = format!("Revised: {}", line.trim());
+    }
+    lines.push(String::new());
+    lines.push(format!("_Mock reviewer pass {version}._"));
+    let mut out = lines.join("\n");
+    out.push('\n');
+    out
+}
+
 /// Scripted models the mock provider exposes. Pulled out of
 /// `register_mock_provider` so the built-in `MockPlugin`
 /// (`src/plugin/builtins/mock.rs`) can call it without duplicating the
 /// list.
 pub fn mock_model_infos() -> Vec<ModelInfo> {
     vec![
+        ModelInfo {
+            id: "doc-review".into(),
+            display_name: "Mock: document review".into(),
+            capabilities: vec!["mock".into(), "tools".into(), "interactive".into()],
+            tier: 3,
+        },
         ModelInfo {
             id: "echo".into(),
             display_name: "Mock: echo".into(),

@@ -400,6 +400,13 @@ struct PassBody {
     /// inline Clarify action send `false` — they are conversation about the
     /// document, not a revision pass over the annotations.
     include_annotations: bool,
+    /// Model id for the review session, honoured only when this pass is the
+    /// one that CREATES it — a review is one continuous conversation, so the
+    /// model is never swapped underneath a session that already exists. The
+    /// review screen omits it and leaves the session on auto; callers that
+    /// need a specific reviewer supply it (the e2e suite pins
+    /// `mock:doc-review` so the whole loop is deterministic).
+    model: Option<String>,
 }
 
 impl Default for PassBody {
@@ -407,6 +414,7 @@ impl Default for PassBody {
         Self {
             message: None,
             include_annotations: true,
+            model: None,
         }
     }
 }
@@ -443,6 +451,12 @@ async fn run_pass(
         }
     };
     let (message, include_annotations) = (body.message, body.include_annotations);
+    let model = body
+        .model
+        .as_deref()
+        .map(str::trim)
+        .filter(|m| !m.is_empty())
+        .map(str::to_string);
     let message: Option<String> = message
         .as_deref()
         .map(str::trim)
@@ -466,10 +480,12 @@ async fn run_pass(
         ));
     }
 
-    let session_id = match ensure_review_session(&state, &review, user.user_id.as_str()).await {
-        Ok(s) => s,
-        Err(e) => return Err(e),
-    };
+    let session_id =
+        match ensure_review_session(&state, &review, user.user_id.as_str(), model.as_deref()).await
+        {
+            Ok(s) => s,
+            Err(e) => return Err(e),
+        };
 
     if include_annotations && let Err(e) = state.db.mark_pending_comments_sent(&id).await {
         return Err(err(StatusCode::INTERNAL_SERVER_ERROR, e));
@@ -541,6 +557,7 @@ async fn ensure_review_session(
     state: &Arc<AppState>,
     review: &DocReview,
     user_id: &str,
+    model: Option<&str>,
 ) -> Result<String, (StatusCode, Json<serde_json::Value>)> {
     // A session id that no longer resolves (the session was deleted) is
     // treated as absent rather than fatal: the next pass gets a fresh one.
@@ -585,6 +602,7 @@ async fn ensure_review_session(
                 .take(MAX_TITLE_LEN)
                 .collect(),
             folder_id,
+            model: model.map(str::to_string),
             is_expert: true,
             expert_kind: Some(review_service::EXPERT_KIND.to_string()),
             project_id: review.project_id.clone(),
@@ -1381,6 +1399,46 @@ mod tests {
                 .as_deref(),
             Some(id.as_str()),
             "the injection is re-armed for every pass"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_pass_pins_the_model_only_on_the_session_it_creates() {
+        let dir = tempfile::tempdir().unwrap();
+        let workspace = tempfile::tempdir().unwrap();
+        let (state, token) = fixture(dir.path(), workspace.path()).await;
+        let id = seed_review(&state, &token).await;
+        add_annotation(&state, &token, &id, "this is wrong").await;
+
+        let response = run_pass(
+            &state,
+            &token,
+            &id,
+            Some(serde_json::json!({ "model": "mock:doc-review" })),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let session_id = json_body(response).await["session_id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        let session = state.db.get_session(&session_id).await.unwrap().unwrap();
+        assert_eq!(session.model.as_deref(), Some("mock:doc-review"));
+
+        // A later pass never swaps the model underneath a live conversation.
+        let response = run_pass(
+            &state,
+            &token,
+            &id,
+            Some(serde_json::json!({ "message": "carry on", "model": "mock:echo" })),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let session = state.db.get_session(&session_id).await.unwrap().unwrap();
+        assert_eq!(
+            session.model.as_deref(),
+            Some("mock:doc-review"),
+            "the reviewing model is fixed for the life of the review session"
         );
     }
 
