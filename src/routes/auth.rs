@@ -666,13 +666,31 @@ async fn create_user(
         })?
     };
 
-    if body.username.is_empty() || body.password.len() < MIN_PASSWORD_LEN {
-        return Err((
-            StatusCode::BAD_REQUEST,
-            Json(serde_json::json!({
-                "error": format!("username required, password min {MIN_PASSWORD_LEN} chars")
-            })),
-        ));
+    // Report only the constraints that actually failed, and name the
+    // offending field, so the UI can anchor the message to it instead of
+    // accusing a field the user filled in correctly.
+    {
+        let mut problems: Vec<String> = Vec::new();
+        let mut field: Option<&str> = None;
+        if body.username.trim().is_empty() {
+            problems.push("username is required".to_string());
+            field = Some("username");
+        }
+        if body.password.len() < MIN_PASSWORD_LEN {
+            problems.push(format!(
+                "password must be at least {MIN_PASSWORD_LEN} characters"
+            ));
+            field = field.or(Some("password"));
+        }
+        if !problems.is_empty() {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({
+                    "error": problems.join("; "),
+                    "field": field,
+                })),
+            ));
+        }
     }
 
     let password_hash = hash_password(&body.password).map_err(|e| {

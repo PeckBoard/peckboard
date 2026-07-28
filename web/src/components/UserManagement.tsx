@@ -3,6 +3,9 @@ import { useAuthStore } from '../store/auth'
 import { useUsersStore } from '../store/users'
 import ChangePasswordModal from './ChangePasswordModal'
 import ConfirmDialog from './ConfirmDialog'
+import FieldError from './FieldError'
+import { FieldValidationError } from '../utils/actionError'
+import { MIN_PASSWORD_LEN, passwordProblem } from '../utils/password'
 
 export default function UserManagement() {
   const currentUser = useAuthStore((s) => s.user)
@@ -23,6 +26,16 @@ export default function UserManagement() {
   const [newEmail, setNewEmail] = useState('')
   const [newRole, setNewRole] = useState('user')
   const [creating, setCreating] = useState(false)
+  // Per-field validation messages, keyed by field name. A field the user
+  // filled in correctly must never appear here.
+  const [fieldErrors, setFieldErrors] = useState<Record<string, string>>({})
+  const clearFieldError = (field: string) =>
+    setFieldErrors((prev) => {
+      if (!(field in prev)) return prev
+      const next = { ...prev }
+      delete next[field]
+      return next
+    })
 
   // Delete confirm. Carries the username so the dialog can name who is
   // about to be deleted without re-looking it up.
@@ -51,9 +64,20 @@ export default function UserManagement() {
 
   const handleCreate = async (e: React.FormEvent) => {
     e.preventDefault()
-    if (!newUsername.trim() || !newPassword.trim()) return
+    // Check each constraint separately and report only the ones that
+    // failed, against the field that failed them.
+    const usernameIssue = newUsername.trim() ? '' : 'Username is required'
+    const passwordIssue = passwordProblem(newPassword)
+    if (usernameIssue || passwordIssue) {
+      const next: Record<string, string> = {}
+      if (usernameIssue) next.username = usernameIssue
+      if (passwordIssue) next.password = passwordIssue
+      setFieldErrors(next)
+      return
+    }
     setCreating(true)
     setLocalError('')
+    setFieldErrors({})
     try {
       await createUserAction({
         username: newUsername.trim(),
@@ -67,7 +91,14 @@ export default function UserManagement() {
       setNewRole('user')
       setShowCreate(false)
     } catch (err) {
-      setLocalError(err instanceof Error ? err.message : 'Failed to create user')
+      const message = err instanceof Error ? err.message : 'Failed to create user'
+      // A server-side validation failure names its field; anchor it there
+      // rather than in the page-wide banner.
+      if (err instanceof FieldValidationError && err.field) {
+        setFieldErrors({ [err.field]: message })
+      } else {
+        setLocalError(message)
+      }
     } finally {
       setCreating(false)
     }
@@ -110,6 +141,10 @@ export default function UserManagement() {
     }
   }
 
+  // Live once the user has typed a password, so a too-short one is called
+  // out before they submit; a server-reported problem takes precedence.
+  const passwordError = fieldErrors.password || (newPassword ? passwordProblem(newPassword) : '')
+
   return (
     <div className="settings-page">
       <h2>User Management</h2>
@@ -145,10 +180,15 @@ export default function UserManagement() {
                 id="new-user-username"
                 className="form-input"
                 value={newUsername}
-                onChange={(e) => setNewUsername(e.target.value)}
+                onChange={(e) => {
+                  setNewUsername(e.target.value)
+                  clearFieldError('username')
+                }}
                 placeholder="username"
+                aria-invalid={fieldErrors.username ? true : undefined}
                 required
               />
+              <FieldError message={fieldErrors.username} testId="new-user-username-error" />
             </div>
             <div className="form-field">
               <label className="form-label" htmlFor="new-user-password">
@@ -159,10 +199,20 @@ export default function UserManagement() {
                 className="form-input"
                 type="password"
                 value={newPassword}
-                onChange={(e) => setNewPassword(e.target.value)}
+                onChange={(e) => {
+                  setNewPassword(e.target.value)
+                  clearFieldError('password')
+                }}
                 placeholder="password"
+                aria-invalid={passwordError ? true : undefined}
                 required
               />
+              <FieldError message={passwordError} testId="new-user-password-error" />
+              {/* The hint restates the rule the error already spells out —
+                  show one or the other, never both. */}
+              {!passwordError && (
+                <p className="form-hint">At least {MIN_PASSWORD_LEN} characters</p>
+              )}
             </div>
             <div className="form-field">
               <label className="form-label" htmlFor="new-user-email">

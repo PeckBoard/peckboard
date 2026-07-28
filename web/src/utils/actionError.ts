@@ -22,3 +22,18 @@ export function describeActionError(err: unknown, fallback: string): string {
   if (text.length > 200 || text.includes('\n')) return fallback
   return text
 }
+
+/**
+ * A validation failure the server anchored to a single field (`field` in the
+ * error body), so the UI can render it under that input instead of in a
+ * form-wide banner that might name a field the user filled in correctly.
+ */
+export class FieldValidationError extends Error {
+  readonly field?: string
+
+  constructor(message: string, field?: string) {
+    super(message)
+    this.name = 'FieldValidationError'
+    this.field = field
+  }
+}

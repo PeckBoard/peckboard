@@ -1,5 +1,6 @@
 import { create } from 'zustand'
 import { authedFetch } from './auth'
+import { FieldValidationError } from '../utils/actionError'
 
 export interface UserRecord {
   id: string
@@ -62,7 +63,10 @@ export const useUsersStore = create<UsersState>((set, get) => ({
     })
     if (!res.ok) {
       const err = await res.json().catch(() => ({ error: 'Failed to create user' }))
-      throw new Error(err.error || 'Failed to create user')
+      throw new FieldValidationError(
+        err.error || 'Failed to create user',
+        typeof err.field === 'string' ? err.field : undefined,
+      )
     }
     await get().fetchUsers()
   },

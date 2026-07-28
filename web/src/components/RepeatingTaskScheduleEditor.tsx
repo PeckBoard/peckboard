@@ -1,4 +1,10 @@
 import type { RepeatingScheduleKind } from '../types/api'
+import {
+  MAX_INTERVAL_MINUTES,
+  MIN_INTERVAL_MINUTES,
+  scheduleProblem,
+} from '../utils/repeatingSchedule'
+import FieldError from './FieldError'
 
 interface ScheduleEditorProps {
   kind: RepeatingScheduleKind
@@ -29,7 +35,10 @@ export default function RepeatingTaskScheduleEditor({
   value,
   onChange,
 }: ScheduleEditorProps) {
-  const minutes = clampInt(value.minutes ?? 60, 1, 525600)
+  // NOT clamped to the minimum: an out-of-range interval stays visible and
+  // is reported by `scheduleProblem` instead of being silently rewritten.
+  const minutes = value.minutes ?? 60
+  const intervalProblem = scheduleProblem(kind, value)
   const hour = clampInt(value.hour ?? 9, 0, 23)
   const minute = clampInt(value.minute ?? 0, 0, 59)
   const weekday = clampInt(value.weekday ?? 0, 0, 6)
@@ -64,13 +73,20 @@ export default function RepeatingTaskScheduleEditor({
             id="schedule-minutes"
             type="number"
             className="form-input"
-            value={minutes}
-            min={1}
-            max={525600}
-            onChange={(e) =>
-              onChange('interval', { minutes: clampInt(parseInt(e.target.value, 10), 1, 525600) })
-            }
+            value={Number.isFinite(minutes) ? minutes : ''}
+            min={MIN_INTERVAL_MINUTES}
+            max={MAX_INTERVAL_MINUTES}
+            aria-invalid={intervalProblem ? true : undefined}
+            onChange={(e) => {
+              const parsed = parseInt(e.target.value, 10)
+              onChange('interval', {
+                minutes: Number.isFinite(parsed)
+                  ? Math.min(Math.trunc(parsed), MAX_INTERVAL_MINUTES)
+                  : Number.NaN,
+              })
+            }}
           />
+          <FieldError message={intervalProblem} testId="schedule-minutes-error" />
           <p className="form-help">
             Minimum 1 minute. The first run fires roughly this far from now; subsequent runs advance
             from the moment each run started.

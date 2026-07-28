@@ -364,6 +364,11 @@ export default function CardFormModal(props: CardFormProps) {
           )}
           {error && <p className="form-error">{error}</p>}
           <div className="form-actions">
+            {!loading && !title.trim() && (
+              <span className="form-actions-reason" data-testid="card-form-disabled-reason">
+                Enter a title
+              </span>
+            )}
             <button type="button" className="btn-secondary" onClick={onClose}>
               Cancel
             </button>

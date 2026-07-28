@@ -6,6 +6,7 @@ import { effortOptionsForModel, useResourcesStore, type ModelInfo } from '../sto
 import Modal from './Modal'
 import ModelPicker from './ModelPicker'
 import RepeatingTaskScheduleEditor from './RepeatingTaskScheduleEditor'
+import { scheduleProblem } from '../utils/repeatingSchedule'
 
 interface Props {
   initial?: RepeatingTask
@@ -62,6 +63,17 @@ export default function NewRepeatingTaskModal({ initial, onClose, onSaved }: Pro
     fetchModels()
   }, [fetchFolders, fetchModels])
 
+  // The requirement the form doesn't meet yet. Shown next to the disabled
+  // primary action so a blocked Create never leaves the user guessing.
+  const scheduleIssue = scheduleProblem(scheduleKind, scheduleValue)
+  const disabledReason = !name.trim()
+    ? 'Enter a name'
+    : !folderId
+      ? 'Add a folder first'
+      : !prompt.trim()
+        ? 'Enter a prompt'
+        : scheduleIssue
+
   const handleSubmit = async (e: FormEvent) => {
     e.preventDefault()
     if (!name.trim()) {
@@ -74,6 +86,10 @@ export default function NewRepeatingTaskModal({ initial, onClose, onSaved }: Pro
     }
     if (!prompt.trim()) {
       setError('Prompt is required')
+      return
+    }
+    if (scheduleIssue) {
+      setError(scheduleIssue)
       return
     }
     setLoading(true)
@@ -249,14 +265,15 @@ export default function NewRepeatingTaskModal({ initial, onClose, onSaved }: Pro
 
         {error && <p className="form-error">{error}</p>}
         <div className="form-actions">
+          {!loading && disabledReason && (
+            <span className="form-actions-reason" data-testid="repeating-task-disabled-reason">
+              {disabledReason}
+            </span>
+          )}
           <button type="button" className="btn-secondary" onClick={onClose}>
             Cancel
           </button>
-          <button
-            type="submit"
-            className="btn-primary"
-            disabled={loading || !name.trim() || !folderId || !prompt.trim()}
-          >
+          <button type="submit" className="btn-primary" disabled={loading || !!disabledReason}>
             {loading ? 'Saving...' : editing ? 'Save' : 'Create Task'}
           </button>
         </div>

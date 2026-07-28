@@ -7,6 +7,7 @@ import Modal from './Modal'
 import ModelPicker from './ModelPicker'
 import WorkflowSelect from './WorkflowSelect'
 import WorkflowInstructionsModal from './WorkflowInstructionsModal'
+import FieldError from './FieldError'
 
 interface Props {
   project: Project
@@ -62,6 +63,18 @@ export default function EditProjectModal({ project, onClose }: Props) {
     if (providers.length > 0 && effort && !opts.some((o) => o.value === effort)) setEffort('')
   }
 
+  // Why Save is disabled, shown next to the button — a disabled control
+  // with no stated reason leaves the user hunting for the bad field.
+  const workerCountProblem =
+    Number.isInteger(workerCount) && workerCount >= 1 && workerCount <= 10
+      ? ''
+      : 'Worker count must be between 1 and 10'
+  const disabledReason = !name.trim()
+    ? 'Enter a name'
+    : !workflow
+      ? 'Pick a workflow'
+      : workerCountProblem
+
   const handleSubmit = async (e: FormEvent) => {
     e.preventDefault()
     if (!name.trim()) {
@@ -70,6 +83,10 @@ export default function EditProjectModal({ project, onClose }: Props) {
     }
     if (!workflow) {
       setError('Workflow is required')
+      return
+    }
+    if (workerCountProblem) {
+      setError(workerCountProblem)
       return
     }
     setLoading(true)
@@ -139,9 +156,11 @@ export default function EditProjectModal({ project, onClose }: Props) {
               type="number"
               min={1}
               max={10}
-              value={workerCount}
-              onChange={(e) => setWorkerCount(Number(e.target.value))}
+              value={Number.isFinite(workerCount) ? workerCount : ''}
+              aria-invalid={workerCountProblem ? true : undefined}
+              onChange={(e) => setWorkerCount(parseInt(e.target.value, 10))}
             />
+            <FieldError message={workerCountProblem} testId="edit-project-worker-count-error" />
           </div>
           <div className="form-field">
             <label className="form-label" htmlFor="edit-project-workflow">
@@ -281,14 +300,15 @@ export default function EditProjectModal({ project, onClose }: Props) {
             </p>
           </div>
           <div className="form-actions">
+            {!loading && disabledReason && (
+              <span className="form-actions-reason" data-testid="edit-project-disabled-reason">
+                {disabledReason}
+              </span>
+            )}
             <button type="button" className="btn-secondary" onClick={onClose}>
               Cancel
             </button>
-            <button
-              type="submit"
-              className="btn-primary"
-              disabled={loading || !name.trim() || !workflow}
-            >
+            <button type="submit" className="btn-primary" disabled={loading || !!disabledReason}>
               {loading ? 'Saving...' : 'Save'}
             </button>
           </div>

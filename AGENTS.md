@@ -208,6 +208,12 @@ expected to use:
   be built from the same list (`List` does this for you).
 - **`ConfirmDialog`** (`web/src/components/ConfirmDialog.tsx`) — every
   destructive confirmation. Don't reach for `window.confirm`.
+- **`FieldError`** (`web/src/components/FieldError.tsx`) — the inline
+  validation message under a single input. Use it instead of appending to
+  a form-wide banner: a banner that lists every constraint ends up naming
+  fields the user filled in correctly. Pair it with a
+  `.form-actions-reason` span stating why the primary action is disabled —
+  a disabled button with no stated reason reads as broken.
 
 **Naming and ordering of menu items must match across surfaces.** If a
 session's chat-toolbar 3-dot menu says "Clear session", the tab

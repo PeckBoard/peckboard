@@ -555,6 +555,16 @@ select.form-input {
   margin: 2px 0 0;
   line-height: 1.4;
 }
+/* Inline per-field validation message. Deliberately NOT `.form-error` —
+   that one is the banner box at the foot of a form; this sits quietly
+   under the offending input. */
+.form-field-error {
+  font-size: var(--text-xs);
+  color: var(--danger);
+  font-weight: 500;
+  margin: 2px 0 0;
+  line-height: 1.4;
+}
 
 .form-link {
   display: inline-block;

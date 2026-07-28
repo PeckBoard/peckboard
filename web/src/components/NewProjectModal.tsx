@@ -10,6 +10,7 @@ import WorkflowInstructionsModal, {
   type WorkflowInstructionsDraft,
 } from './WorkflowInstructionsModal'
 import FolderManager from './ManageFoldersModal'
+import FieldError from './FieldError'
 
 interface Props {
   onClose: () => void
@@ -74,6 +75,11 @@ export default function NewProjectModal({ onClose }: Props) {
     if (providers.length > 0 && effort && !opts.some((o) => o.value === effort)) setEffort('')
   }
 
+  const workerCountProblem =
+    Number.isInteger(workerCount) && workerCount >= 1 && workerCount <= 10
+      ? ''
+      : 'Worker count must be between 1 and 10'
+
   const handleSubmit = async (e: FormEvent) => {
     e.preventDefault()
     if (!name.trim() || !folderId) {
@@ -82,6 +88,10 @@ export default function NewProjectModal({ onClose }: Props) {
     }
     if (!workflow) {
       setError('Workflow is required')
+      return
+    }
+    if (workerCountProblem) {
+      setError(workerCountProblem)
       return
     }
     setLoading(true)
@@ -153,7 +163,7 @@ export default function NewProjectModal({ onClose }: Props) {
       ? 'Add a folder first'
       : !workflow
         ? 'Pick a workflow'
-        : ''
+        : workerCountProblem
 
   return (
     <>
@@ -267,9 +277,11 @@ export default function NewProjectModal({ onClose }: Props) {
                   type="number"
                   min={1}
                   max={10}
-                  value={workerCount}
-                  onChange={(e) => setWorkerCount(Number(e.target.value))}
+                  value={Number.isFinite(workerCount) ? workerCount : ''}
+                  aria-invalid={workerCountProblem ? true : undefined}
+                  onChange={(e) => setWorkerCount(parseInt(e.target.value, 10))}
                 />
+                <FieldError message={workerCountProblem} testId="new-project-worker-count-error" />
                 <p className="form-hint">
                   Number of parallel workers. Keep at 1 unless the repo is set up for parallel work
                   (git worktrees).
@@ -413,11 +425,7 @@ export default function NewProjectModal({ onClose }: Props) {
             <button type="button" className="btn-secondary" onClick={onClose}>
               Cancel
             </button>
-            <button
-              type="submit"
-              className="btn-primary"
-              disabled={loading || !name.trim() || !folderId || !workflow}
-            >
+            <button type="submit" className="btn-primary" disabled={loading || !!disabledReason}>
               {loading ? 'Creating...' : 'Create Project'}
             </button>
           </div>

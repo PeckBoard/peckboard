@@ -2,8 +2,7 @@ import { useState, type FormEvent } from 'react'
 import { useAuthStore } from '../store/auth'
 import { useUsersStore } from '../store/users'
 import Modal from './Modal'
-
-const MIN_PASSWORD_LEN = 12
+import { MIN_PASSWORD_LEN } from '../utils/password'
 
 type Mode = { kind: 'self' } | { kind: 'admin'; targetUserId: string; targetUsername: string }
 
