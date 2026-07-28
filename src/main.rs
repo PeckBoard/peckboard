@@ -515,6 +515,21 @@ async fn main() -> anyhow::Result<()> {
                         );
                     }
 
+                    // 1.6 Doc Review: a review session's turn just ended.
+                    // Chat-lane / clarify-only replies never call
+                    // submit_review_revision, so nothing else reacts to the
+                    // turn ending — without this the status chip says
+                    // "running" forever. No-op unless the review is still
+                    // `running` (a revision or a question already moved it).
+                    if completion.completed {
+                        peckboard::service::doc_reviews::resume_after_turn(
+                            &orchestrator_state.db,
+                            &orchestrator_state.broadcaster,
+                            &sid,
+                        )
+                        .await;
+                    }
+
                     // 2. Drain any queued message — runs for every session
                     // (worker or interactive) and every completion outcome.
                     // drain_queue_for_session takes the per-session lock

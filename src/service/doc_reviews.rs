@@ -150,6 +150,20 @@ pub async fn resume_after_question(db: &Db, broadcaster: &Broadcaster, session_i
     }
 }
 
+/// The review session's turn ended. Chat-lane and clarify-only messages
+/// answer in plain text with no revision (per the system prompt above), so
+/// nothing else ever moves the review off `running` for that turn — the
+/// status would otherwise say "running" forever. Only from `running`: a
+/// revision already moved it to `annotating` (no-op here) and a question
+/// already moved it to `needs_input` (left alone; that pass is still open).
+pub async fn resume_after_turn(db: &Db, broadcaster: &Broadcaster, session_id: &str) {
+    if let Some(review) = review_for_review_session(db, session_id).await
+        && review.status == "running"
+    {
+        set_status(db, broadcaster, &review.id, "annotating").await;
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -233,6 +247,39 @@ mod tests {
             db.get_doc_review(&id).await.unwrap().unwrap().status,
             "running",
             "the expert_kind guard holds even when the session owns the review"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_chat_only_turn_drops_running_back_to_annotating() {
+        let (db, id) = seed(Some(EXPERT_KIND)).await;
+        let bc = Broadcaster::new();
+        db.set_doc_review_status(&id, "running").await.unwrap();
+
+        resume_after_turn(&db, &bc, "s1").await;
+        assert_eq!(
+            db.get_doc_review(&id).await.unwrap().unwrap().status,
+            "annotating"
+        );
+    }
+
+    #[tokio::test]
+    async fn resume_after_turn_leaves_needs_input_and_approved_alone() {
+        let (db, id) = seed(Some(EXPERT_KIND)).await;
+        let bc = Broadcaster::new();
+
+        db.set_doc_review_status(&id, "needs_input").await.unwrap();
+        resume_after_turn(&db, &bc, "s1").await;
+        assert_eq!(
+            db.get_doc_review(&id).await.unwrap().unwrap().status,
+            "needs_input"
+        );
+
+        db.set_doc_review_status(&id, "approved").await.unwrap();
+        resume_after_turn(&db, &bc, "s1").await;
+        assert_eq!(
+            db.get_doc_review(&id).await.unwrap().unwrap().status,
+            "approved"
         );
     }
 }
