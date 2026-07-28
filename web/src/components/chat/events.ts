@@ -935,6 +935,37 @@ export function createDisplayItemsFolder(): (events: Event[]) => DisplayItem[] {
 export function buildDisplayItems(events: Event[]): DisplayItem[] {
   return createDisplayItemsFolder()(events)
 }
+/**
+ * The newest question still awaiting an answer, as the display item a
+ * question card renders — or null when the last question was answered (or
+ * dismissed, or there never was one).
+ *
+ * Folds that single event rather than re-parsing the payload, so an
+ * AskUserQuestion, a generic control request and a bare `{text}` all read
+ * the same here as they do in the chat feed. Used by surfaces that pin the
+ * question outside the feed (the review screen shows it above the document).
+ */
+export function findOpenQuestion(
+  events: Event[],
+): Extract<DisplayItem, { type: 'question' }> | null {
+  for (let i = events.length - 1; i >= 0; i--) {
+    const ev = events[i]
+    if (ev.kind !== 'question') continue
+    const answered = events
+      .slice(i + 1)
+      .some(
+        (e) =>
+          e.kind === 'question-resolved' &&
+          (e.data.question_id === ev.id || e.data.questionId === ev.id),
+      )
+    if (answered) return null
+    const st = newFoldState()
+    foldEvent(st, ev)
+    const item = st.items[0]
+    return item?.type === 'question' ? item : null
+  }
+  return null
+}
 
 export function formatTime(ts: number): string {
   if (!ts) return ''

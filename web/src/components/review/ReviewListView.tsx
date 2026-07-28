@@ -9,6 +9,7 @@ import ReviewStatusChip from './ReviewStatusChip'
 import {
   REVIEW_SOURCE_LABEL,
   deleteReview,
+  formatRelativeTime,
   listReviews,
   openReview,
   type DocReview,
@@ -16,22 +17,6 @@ import {
 import { useTabsStore } from '../../store/tabs'
 import { describeActionError } from '../../utils/actionError'
 import './Review.css'
-
-/** Relative "updated" stamp; falls back to the raw value when unparseable. */
-function formatUpdated(dateStr: string): string {
-  const then = new Date(dateStr).getTime()
-  if (Number.isNaN(then)) return dateStr
-  const diffMs = Date.now() - then
-  if (diffMs < 60_000) return 'just now'
-  const minutes = Math.floor(diffMs / 60_000)
-  if (minutes < 60) return `${minutes}m ago`
-  const hours = Math.floor(minutes / 60)
-  if (hours < 24) return `${hours}h ago`
-  const days = Math.floor(hours / 24)
-  if (days === 1) return 'yesterday'
-  if (days < 30) return `${days}d ago`
-  return new Date(dateStr).toLocaleDateString()
-}
 
 /**
  * Index of every document review. Rows carry the title, the source kind it
@@ -131,7 +116,7 @@ export default function ReviewListView() {
                 </span>
                 <ReviewStatusChip status={r.status} />
                 <span className="list-view-tag">v{r.current_version}</span>
-                <span className="list-view-time">{formatUpdated(r.updated_at)}</span>
+                <span className="list-view-time">{formatRelativeTime(r.updated_at)}</span>
               </span>
             </>
           )}

@@ -1,7 +1,6 @@
 import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import { useVirtualizer } from '@tanstack/react-virtual'
 import rehypeHighlight from 'rehype-highlight'
-import type { Components } from 'react-markdown'
 import SafeMarkdown from './SafeMarkdown'
 import type { CostTable, Event, Session } from '../types/api'
 import { authedFetch } from '../store/auth'
@@ -21,7 +20,6 @@ import { usageCost } from '../util/cost'
 import { downloadTranscript } from '../util/transcript'
 import InputBar from './InputBar'
 import ToolUseBlock from './ToolUseBlock'
-import MermaidBlock from './MermaidBlock'
 import DiffBlock from './DiffBlock'
 import ConfirmDialog from './ConfirmDialog'
 import Modal from './Modal'
@@ -30,6 +28,7 @@ import { MenuButton, type MenuItem } from './Dropdown'
 import ModelPicker from './ModelPicker'
 import TodoPanel from './TodoPanel'
 import PreHatchActivity from './chat/PreHatchActivity'
+import { chatMarkdownComponents } from './chat/markdown'
 import { fetchPlanId, openPlan } from '../lib/plan'
 import { openReport } from '../lib/reports'
 import { describeActionError } from '../utils/actionError'
@@ -82,18 +81,6 @@ function announcementFor(key: AnnounceKey, hasReply: boolean): string {
 // fresh-array warning from React fast refresh).
 const EMPTY_TODOS: TodoItem[] = []
 const EMPTY_PENDING_MESSAGES: PendingUserMessage[] = []
-
-// Render fenced ```mermaid blocks in chat markdown as diagrams — same
-// wiring PlanView uses for plan bodies.
-const chatMarkdownComponents: Components = {
-  code({ className, children }) {
-    const text = String(children ?? '')
-    if (className && /\blanguage-mermaid\b/.test(className)) {
-      return <MermaidBlock code={text.replace(/\n$/, '')} />
-    }
-    return <code className={className}>{children}</code>
-  },
-}
 
 /** Live stopwatch; isolated so the 1s tick re-renders only this span. */
 function ElapsedSince({ since }: { since: number }) {

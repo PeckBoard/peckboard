@@ -1,9 +1,14 @@
-import { useCallback, useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 
 import ConfirmDialog from '../ConfirmDialog'
 import { MenuButton, type MenuItem } from '../Dropdown'
+import SafeMarkdown from '../SafeMarkdown'
+import { EMPTY_EVENTS, findOpenQuestion } from '../chat/events'
 import AnnotationRail from './AnnotationRail'
+import ChatLane from './ChatLane'
 import DocPane, { type BlockAnchor } from './DocPane'
+import HistoryTab from './HistoryTab'
+import QuestionCard from './QuestionCard'
 import ReviewStatusChip from './ReviewStatusChip'
 import SelectionPopover, { type PopoverAction } from './SelectionPopover'
 import {
@@ -21,6 +26,7 @@ import {
   type ReviewCommentKind,
   type ReviewDetail,
 } from '../../lib/review'
+import { useSessionsStore } from '../../store/sessions'
 import { useTabsStore } from '../../store/tabs'
 import { useWsStore } from '../../store/ws'
 // Aliased: the DOM `Event` is the one the window listener below takes.
@@ -75,6 +81,8 @@ export default function ReviewView({ reviewId, onBack }: Props) {
   const [passBusy, setPassBusy] = useState(false)
   const [confirming, setConfirming] = useState<PendingConfirm | null>(null)
   const [confirmBusy, setConfirmBusy] = useState(false)
+  /** A history version opened read-only over the document pane. */
+  const [viewing, setViewing] = useState<{ version: number; markdown: string } | null>(null)
   const [confirmError, setConfirmError] = useState<string | null>(null)
   const [flash, setFlash] = useState(false)
 
@@ -145,18 +153,37 @@ export default function ReviewView({ reviewId, onBack }: Props) {
   // frame and the session event race; whichever arrives first refetches, and
   // the second is a no-op against the same version.
   const sessionId = detail?.review.session_id ?? null
+  // The screen owns the review session's event log: the chat lane reads it
+  // out of the store, and the pinned question has to appear whichever rail
+  // tab is open — so neither of them can be the one subscribing.
+  const sessionEvents = useSessionsStore((s) =>
+    sessionId ? (s.eventsBySession[sessionId] ?? EMPTY_EVENTS) : EMPTY_EVENTS,
+  )
+  const fetchSessionEvents = useSessionsStore((s) => s.fetchEvents)
+  const appendSessionEvent = useSessionsStore((s) => s.appendEvent)
+
+  useEffect(() => {
+    if (sessionId) fetchSessionEvents(sessionId)
+  }, [sessionId, fetchSessionEvents])
+
   useEffect(() => {
     if (!sessionId) return
     subscribe(sessionId)
     const listener = (event: SessionEvent) => {
-      if (event.session_id === sessionId && event.kind === 'doc-review-revision') load()
+      if (event.session_id !== sessionId) return
+      appendSessionEvent(event)
+      if (event.kind === 'doc-review-revision') load()
     }
     addWsListener(listener)
     return () => {
       removeWsListener(listener)
       unsubscribe(sessionId)
     }
-  }, [sessionId, subscribe, unsubscribe, addWsListener, removeWsListener, load])
+  }, [sessionId, subscribe, unsubscribe, addWsListener, removeWsListener, load, appendSessionEvent])
+
+  /** The reviewer's open clarifying question — pinned above the document so
+   *  the passage it is about stays readable while it's answered. */
+  const openQuestion = useMemo(() => findOpenQuestion(sessionEvents), [sessionEvents])
 
   useEffect(() => {
     if (!flash) return
@@ -237,6 +264,7 @@ export default function ReviewView({ reviewId, onBack }: Props) {
     if (!review || !confirming) return
     setConfirmBusy(true)
     setConfirmError(null)
+    setActionError(null)
     if (confirming === 'delete') {
       deleteReview(review.id)
         .then(() => {
@@ -264,7 +292,13 @@ export default function ReviewView({ reviewId, onBack }: Props) {
         load()
       })
       .catch((e: unknown) => {
-        setConfirmError(describeActionError(e, "Couldn't write the document back to its source."))
+        // Both surfaces, deliberately: the dialog keeps the server's words
+        // next to the retry button, and the banner keeps them after the
+        // dialog is dismissed — an adapter refusal (file gone, path no
+        // longer writable) is not something to lose on a stray Escape.
+        const message = describeActionError(e, "Couldn't write the document back to its source.")
+        setConfirmError(message)
+        setActionError(message)
         setConfirmBusy(false)
       })
   }
@@ -329,7 +363,11 @@ export default function ReviewView({ reviewId, onBack }: Props) {
 
   return (
     <div className="review-view" data-testid="review-view" data-review-id={review.id}>
-      <header className="review-view__header">
+      <header
+        className={`review-view__header${
+          review.status === 'approved' ? ' review-view__header--approved' : ''
+        }`}
+      >
         <button className="review-view__back" onClick={onBack} data-testid="review-back">
           ← Back
         </button>
@@ -379,20 +417,52 @@ export default function ReviewView({ reviewId, onBack }: Props) {
         </p>
       )}
 
-      <div className="review-view__body">
-        <DocPane
-          markdown={detail.markdown}
-          comments={comments}
-          activeCommentId={activeCommentId}
-          onAnchor={(anchor, at) => {
-            setActiveCommentId(null)
-            setPopover({ anchor, at })
-          }}
-          onSelectComment={(id) => {
-            setTab('annotations')
-            setActiveCommentId(id)
-          }}
+      {/* Pinned above the document, never over it: the question is about a
+          passage, so the passage has to stay readable while it's answered. */}
+      {openQuestion && sessionId && (
+        <QuestionCard
+          sessionId={sessionId}
+          questionId={openQuestion.questionId}
+          requestId={openQuestion.requestId}
+          questions={openQuestion.questions}
         />
+      )}
+
+      <div className="review-view__body">
+        {viewing ? (
+          <div className="review-doc review-version-view" data-testid="review-version-view">
+            <div className="review-version-view__banner" data-testid="review-version-banner">
+              <span>
+                Viewing v{viewing.version} — current is v{review.current_version}
+              </span>
+              <button
+                type="button"
+                className="btn-secondary"
+                data-testid="review-version-close"
+                onClick={() => setViewing(null)}
+              >
+                Back to current
+              </button>
+            </div>
+            <SafeMarkdown className="chat-markdown review-doc__body">
+              {viewing.markdown}
+            </SafeMarkdown>
+          </div>
+        ) : (
+          <DocPane
+            markdown={detail.markdown}
+            comments={comments}
+            activeCommentId={activeCommentId}
+            onAnchor={(anchor, at) => {
+              setActiveCommentId(null)
+              setPopover({ anchor, at })
+            }}
+            onSelectComment={(id) => {
+              setTab('annotations')
+              setActiveCommentId(id)
+            }}
+          />
+        )}
 
         <aside className="review-rail">
           <div className="review-rail__tabs" role="tablist" aria-label="Review panels">
@@ -441,14 +511,21 @@ export default function ReviewView({ reviewId, onBack }: Props) {
             />
           )}
           {tab === 'chat' && (
-            <div className="review-rail__panel">
-              <p className="review-rail__empty">Nothing here yet.</p>
-            </div>
+            <ChatLane
+              reviewId={review.id}
+              sessionId={sessionId}
+              status={review.status}
+              onSent={load}
+            />
           )}
           {tab === 'history' && (
-            <div className="review-rail__panel">
-              <p className="review-rail__empty">Nothing here yet.</p>
-            </div>
+            <HistoryTab
+              reviewId={review.id}
+              currentVersion={review.current_version}
+              viewingVersion={viewing?.version ?? null}
+              onView={setViewing}
+              onReverted={load}
+            />
           )}
         </aside>
       </div>
