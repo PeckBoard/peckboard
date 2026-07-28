@@ -156,3 +156,70 @@ test('an admin still sees Server and MCP Servers in the Settings hub', async ({
   await settings.getByTestId('settings-nav-server').click()
   await expect(settings.getByTestId('claude-permissions-section')).toBeVisible()
 })
+
+test('a non-admin is refused by plugin, account, var, and prompt write APIs', async ({
+  request,
+}) => {
+  const { auth: adminAuth } = await authenticateAdmin(request)
+  const { auth } = await createNonAdmin(request, adminAuth, 'api2')
+
+  const uninstall = await request.delete('/api/plugins/ollama', { headers: auth })
+  expect(uninstall.status(), 'non-admin DELETE plugins/{id}').toBe(403)
+  const settingsPut = await request.put('/api/plugins/ollama/settings', {
+    headers: auth,
+    data: { updates: {} },
+  })
+  expect(settingsPut.status(), 'non-admin PUT plugins/{id}/settings').toBe(403)
+
+  const createAcct = await request.post('/api/claude-accounts', {
+    headers: auth,
+    data: { name: 'probe' },
+  })
+  expect(createAcct.status(), 'non-admin POST claude-accounts').toBe(403)
+  const listAcct = await request.get('/api/claude-accounts', { headers: auth })
+  expect(listAcct.status(), 'non-admin GET claude-accounts stays open').toBe(200)
+
+  const upsertEnv = await request.post('/api/env-vars', {
+    headers: auth,
+    data: { name: 'FOO', value: 'bar' },
+  })
+  expect(upsertEnv.status(), 'non-admin POST env-vars').toBe(403)
+
+  const upsertAgent = await request.post('/api/agent-vars', {
+    headers: auth,
+    data: { name: 'foo', value: 'bar' },
+  })
+  expect(upsertAgent.status(), 'non-admin POST agent-vars').toBe(403)
+
+  const createPrompt = await request.post('/api/system-prompts', {
+    headers: auth,
+    data: { name: 'probe', body: 'be terse' },
+  })
+  expect(createPrompt.status(), 'non-admin POST system-prompts').toBe(403)
+  const listPrompts = await request.get('/api/system-prompts', { headers: auth })
+  expect(listPrompts.status(), 'non-admin GET system-prompts stays open').toBe(200)
+
+  const pull = await request.post('/api/ollama/pull', {
+    headers: auth,
+    data: { model: 'llama3.2' },
+  })
+  expect(pull.status(), 'non-admin POST ollama/pull').toBe(403)
+
+  const disconnect = await request.delete('/api/mcp-oauth/tokens/srv1', { headers: auth })
+  expect(disconnect.status(), 'non-admin DELETE mcp-oauth/tokens').toBe(403)
+})
+
+test('the Plugins settings page hides install/remove controls from a non-admin', async ({
+  request,
+  page,
+}) => {
+  const { auth: adminAuth } = await authenticateAdmin(request)
+  const { token } = await createNonAdmin(request, adminAuth, 'plugins-ui')
+
+  await openSettings(page, token)
+  const settings = page.getByTestId('settings-page')
+  await settings.getByTestId('settings-nav-plugins').click()
+
+  await expect(page.getByTestId('wasm-plugins')).toBeVisible()
+  await expect(page.locator('[data-testid^="wasm-plugin-remove-"]')).toHaveCount(0)
+})
