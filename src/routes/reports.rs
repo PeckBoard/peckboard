@@ -306,7 +306,7 @@ pub(crate) fn report_title(content: &str, file: &str) -> String {
     file.trim_end_matches(".md").to_string()
 }
 
-fn extract_frontmatter(content: &str) -> Option<String> {
+pub(crate) fn extract_frontmatter(content: &str) -> Option<String> {
     let content = content.trim_start();
     if !content.starts_with("---") {
         return None;
@@ -316,7 +316,7 @@ fn extract_frontmatter(content: &str) -> Option<String> {
     Some(rest[..end].trim().to_string())
 }
 
-fn strip_frontmatter(content: &str) -> String {
+pub(crate) fn strip_frontmatter(content: &str) -> String {
     let content = content.trim_start();
     if !content.starts_with("---") {
         return content.to_string();

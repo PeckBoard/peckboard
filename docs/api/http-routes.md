@@ -78,6 +78,35 @@ All `/api/*` routes require bearer token auth unless noted. Global middleware: H
 | GET    | /api/reports/:folder/zip               | -          | Download folder as .zip                                                     |
 | POST   | /api/reports/:folder/:file/discuss     | -          | Create session with report as attachment. Returns `{ session, attachment }` |
 
+## Document Reviews
+
+An AI-assisted review pass over one markdown document. History is append-only: every revision is a new version and `revert` copies an old version to a new head. The source document is written **only** by `apply`. Every mutation broadcasts a `doc-review-update` WebSocket event keyed by the review id.
+
+| Method | Path                               | Rate Limit | Description                                                                                                                       |
+| ------ | ---------------------------------- | ---------- | --------------------------------------------------------------------------------------------------------------------------------- |
+| GET    | /api/doc-reviews                   | -          | List reviews, most recently updated first                                                                                         |
+| POST   | /api/doc-reviews                   | -          | Create a review from a source, snapshotting it as version 1. Body: `{ source_kind, source_ref, title?, folder_id?, project_id? }` |
+| GET    | /api/doc-reviews/:id               | -          | Review + current version markdown + open comments                                                                                 |
+| DELETE | /api/doc-reviews/:id               | -          | Delete review, versions, comments, and pinned tabs. Source document untouched                                                     |
+| GET    | /api/doc-reviews/:id/versions      | -          | Version history metadata, newest first (no markdown bodies)                                                                       |
+| GET    | /api/doc-reviews/:id/versions/:n   | -          | One version with its markdown, for the diff view                                                                                  |
+| POST   | /api/doc-reviews/:id/comments      | -          | Anchor an annotation to the current version. Body: `{ start_line, end_line?, quote?, kind, body }`                                |
+| PATCH  | /api/doc-reviews/:id/comments/:cid | -          | Update an annotation. Body: `{ body?, kind?, status?, resolution_note? }`                                                         |
+| DELETE | /api/doc-reviews/:id/comments/:cid | -          | Delete an annotation                                                                                                              |
+| POST   | /api/doc-reviews/:id/apply         | -          | Write the current version back to the source. Body: `{ finish? }`; `finish` also marks the review approved                        |
+| POST   | /api/doc-reviews/:id/revert/:n     | -          | Copy version `n` to a new head version (`created_by: user`, note `revert to vN`)                                                  |
+
+`source_kind` selects the adapter and fixes the shape of `source_ref`: `file` -> `<folder_id>:<relative/path.md>`, `report` -> `<YYYY-MM-DD>/<file.md>` (frontmatter preserved on apply, body-only replacement), `plan` -> `<plan_id>`.
+
+## Folder Files
+
+Jailed, read-only markdown access inside a registered workspace folder — the source picker for a `file` review. Paths must be relative and `.md`; `..`, absolute paths, and symlinks that escape the folder root are refused.
+
+| Method | Path                            | Rate Limit | Description                                                                               |
+| ------ | ------------------------------- | ---------- | ----------------------------------------------------------------------------------------- |
+| GET    | /api/folders/:id/markdown-files | -          | Recursive `.md` listing (relative path + size). Skips hidden/build dirs; depth 8, 20k cap |
+| GET    | /api/folders/:id/markdown-file  | -          | Read one file. Query: `path` (relative `.md`). 1 MiB cap (413 over it)                    |
+
 ## Config and Misc
 
 | Method | Path                      | Description                                                     |

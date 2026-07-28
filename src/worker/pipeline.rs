@@ -56,7 +56,7 @@ fn scan_dir(dir: &Path, root: &Path, depth: usize, out: &mut Vec<ProjectFileEntr
         let path = entry.path();
         if ft.is_dir() {
             let name = entry.file_name().to_string_lossy().to_string();
-            if crate::plugin::host::is_ignored_fs_dir(&name) {
+            if crate::service::fs_jail::is_ignored_dir(&name) {
                 continue;
             }
             scan_dir(&path, root, depth + 1, out);

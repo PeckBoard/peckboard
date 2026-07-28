@@ -40,7 +40,7 @@
 
 use std::collections::BTreeMap;
 use std::net::{IpAddr, SocketAddr, ToSocketAddrs};
-use std::path::{Component, Path, PathBuf};
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -49,6 +49,7 @@ use serde::Deserialize;
 
 use crate::db::Db;
 use crate::db::models::NewCard;
+use crate::service::fs_jail;
 
 /// Per-plugin user data shared by all of a single plugin's host functions.
 ///
@@ -1212,47 +1213,14 @@ fn fetch_visible_session(
 //
 // A plugin may read only the caller's *folder* directory — the same boundary
 // core uses as a session's working dir — resolved from the trusted context,
-// never a plugin-supplied id. Listed/accepted paths are relative to that root;
-// every read re-resolves against the canonicalized root and refuses anything
-// that escapes it (absolute paths, `..`, or a symlink pointing outside). The
-// walk uses `file_type()` (lstat), so symlinks are neither followed nor listed
-// — no cycle risk and no escape via a linked subtree. Output is bounded so a
-// huge tree can't blow the WASM result marshaling.
-
-const PLUGIN_FS_MAX_DEPTH: usize = 8;
-const PLUGIN_FS_MAX_FILES: usize = 20_000;
-const PLUGIN_FS_MAX_READ_BYTES: usize = 1024 * 1024; // 1 MiB
+// never a plugin-supplied id. Containment (relative-only paths, canonicalized
+// re-check, lstat walks, depth/size caps) lives in
+// [`crate::service::fs_jail`], shared with core's own folder-scoped routes so
+// a plugin's view and the app's view of a folder can't drift apart.
 
 #[derive(Deserialize)]
 struct ReadFileRequest {
     path: String,
-}
-
-/// Directories the file walk never descends into — hidden dirs (`.git`, …)
-/// plus common build/vendor output. Mirrors the experts handler's
-/// `is_ignored_dir` so a plugin's view matches core's codebase scan.
-///
-/// `pub(crate)` so the worker pipeline's codebase-map scan
-/// ([`crate::worker::pipeline::scan_project_files`]) skips the exact same
-/// dirs a plugin sees — a worker's map and an expert's view stay in sync.
-pub(crate) fn is_ignored_fs_dir(name: &str) -> bool {
-    if name.starts_with('.') {
-        return true;
-    }
-    matches!(
-        name,
-        "node_modules"
-            | "target"
-            | "dist"
-            | "build"
-            | "vendor"
-            | "out"
-            | "bin"
-            | "obj"
-            | "coverage"
-            | "__pycache__"
-            | "venv"
-    )
 }
 
 /// Resolve the caller's folder root to a real (canonicalized) directory from
@@ -1270,51 +1238,6 @@ fn caller_folder_root(db: &Db, inv: &InvocationContext) -> Result<PathBuf, Strin
     std::fs::canonicalize(&folder.path).map_err(|e| format!("folder path unavailable: {e}"))
 }
 
-/// Recursively collect files under `dir` (relative to `root`) with sizes,
-/// honoring the depth, ignore, and count caps. Sets `truncated` when the file
-/// cap is hit so the caller knows the listing is partial.
-fn walk_project_files(
-    dir: &Path,
-    root: &Path,
-    depth: usize,
-    out: &mut Vec<serde_json::Value>,
-    truncated: &mut bool,
-) {
-    if depth > PLUGIN_FS_MAX_DEPTH || *truncated {
-        return;
-    }
-    let rd = match std::fs::read_dir(dir) {
-        Ok(rd) => rd,
-        Err(_) => return,
-    };
-    for entry in rd.flatten() {
-        if out.len() >= PLUGIN_FS_MAX_FILES {
-            *truncated = true;
-            return;
-        }
-        let file_type = match entry.file_type() {
-            Ok(ft) => ft,
-            Err(_) => continue,
-        };
-        let path = entry.path();
-        if file_type.is_dir() {
-            let name = entry.file_name().to_string_lossy().to_string();
-            if is_ignored_fs_dir(&name) {
-                continue;
-            }
-            walk_project_files(&path, root, depth + 1, out, truncated);
-        } else if file_type.is_file()
-            && let Ok(rel) = path.strip_prefix(root)
-        {
-            let size = entry.metadata().map(|m| m.len()).unwrap_or(0);
-            out.push(serde_json::json!({
-                "path": rel.to_string_lossy(),
-                "size": size,
-            }));
-        }
-    }
-}
-
 /// `peckboard_list_project_files` — list files (relative path + byte size)
 /// under the caller's folder, for size-balanced scope partitioning. Paths are
 /// relative to the folder root; `truncated` is `true` if the file cap was hit.
@@ -1323,15 +1246,17 @@ pub(crate) fn list_project_files_impl(db: &Db, inv: &InvocationContext) -> Strin
         Ok(r) => r,
         Err(e) => return error_json(e),
     };
-    let mut files = Vec::new();
-    let mut truncated = false;
-    walk_project_files(&root, &root, 0, &mut files, &mut truncated);
+    let (walked, truncated) = fs_jail::walk_files(&root, &|_| true);
+    let files: Vec<serde_json::Value> = walked
+        .into_iter()
+        .map(|f| serde_json::json!({ "path": f.path, "size": f.size }))
+        .collect();
     serde_json::json!({ "files": files, "truncated": truncated }).to_string()
 }
 
 /// `peckboard_read_file` — read one UTF-8 text file under the caller's folder.
 /// The path must be relative and stay within the folder; content is capped at
-/// `PLUGIN_FS_MAX_READ_BYTES` (`truncated` flags a clipped read).
+/// [`fs_jail::MAX_READ_BYTES`] (`truncated` flags a clipped read).
 pub(crate) fn read_file_impl(db: &Db, input: &str, inv: &InvocationContext) -> String {
     let req: ReadFileRequest = match serde_json::from_str(input) {
         Ok(r) => r,
@@ -1341,47 +1266,24 @@ pub(crate) fn read_file_impl(db: &Db, input: &str, inv: &InvocationContext) -> S
         Ok(r) => r,
         Err(e) => return error_json(e),
     };
-    let rel = Path::new(&req.path);
-    // Reject anything but plain, descending relative segments *before* touching
-    // the filesystem: no absolute/root/prefix, no `..`.
-    if rel.components().any(|c| {
-        matches!(
-            c,
-            Component::ParentDir | Component::RootDir | Component::Prefix(_)
-        )
-    }) {
-        return error_json("path must be relative and within the project folder");
-    }
-    let target = root.join(rel);
-    // Canonicalize and re-check containment — defeats a symlink that points
-    // outside the folder even though every textual segment looked safe.
-    let canon = match std::fs::canonicalize(&target) {
+    let canon = match fs_jail::resolve_read(&root, Path::new(&req.path)) {
         Ok(p) => p,
-        Err(e) => return error_json(format!("file not found: {e}")),
-    };
-    if !canon.starts_with(&root) {
-        return error_json("path escapes the project folder");
-    }
-    let meta = match std::fs::metadata(&canon) {
-        Ok(m) => m,
         Err(e) => return error_json(e),
     };
-    if !meta.is_file() {
-        return error_json("not a file");
-    }
+    let size = std::fs::metadata(&canon).map(|m| m.len()).unwrap_or(0);
     let bytes = match std::fs::read(&canon) {
         Ok(b) => b,
         Err(e) => return error_json(e),
     };
-    let truncated = bytes.len() > PLUGIN_FS_MAX_READ_BYTES;
-    let slice = &bytes[..bytes.len().min(PLUGIN_FS_MAX_READ_BYTES)];
+    let truncated = bytes.len() > fs_jail::MAX_READ_BYTES;
+    let slice = &bytes[..bytes.len().min(fs_jail::MAX_READ_BYTES)];
     // Lossy so a clip at a multi-byte boundary (or a stray non-UTF-8 byte in an
     // otherwise-text file) still returns usable content rather than erroring.
     let content = String::from_utf8_lossy(slice).into_owned();
     serde_json::json!({
         "content": content,
         "truncated": truncated,
-        "size": meta.len(),
+        "size": size,
     })
     .to_string()
 }
@@ -1389,7 +1291,7 @@ pub(crate) fn read_file_impl(db: &Db, input: &str, inv: &InvocationContext) -> S
 /// `peckboard_read_file_base64` — read one file under the caller's folder and
 /// return its **raw bytes** base64-encoded, so binary content (images, etc.)
 /// survives intact rather than being mangled by the lossy UTF-8 decode
-/// `peckboard_read_file` applies. Same containment rules as `read_file`
+/// [`fs_jail::MAX_READ_BYTES`] cap (`truncated` flags a clipped read).
 /// (relative, in-folder, symlink-escape-checked) and the same
 /// `PLUGIN_FS_MAX_READ_BYTES` cap (`truncated` flags a clipped read).
 pub(crate) fn read_file_base64_impl(db: &Db, input: &str, inv: &InvocationContext) -> String {
@@ -1402,45 +1304,22 @@ pub(crate) fn read_file_base64_impl(db: &Db, input: &str, inv: &InvocationContex
         Ok(r) => r,
         Err(e) => return error_json(e),
     };
-    let rel = Path::new(&req.path);
-    // Reject anything but plain, descending relative segments *before* touching
-    // the filesystem: no absolute/root/prefix, no `..`.
-    if rel.components().any(|c| {
-        matches!(
-            c,
-            Component::ParentDir | Component::RootDir | Component::Prefix(_)
-        )
-    }) {
-        return error_json("path must be relative and within the project folder");
-    }
-    let target = root.join(rel);
-    // Canonicalize and re-check containment — defeats a symlink that points
-    // outside the folder even though every textual segment looked safe.
-    let canon = match std::fs::canonicalize(&target) {
+    let canon = match fs_jail::resolve_read(&root, Path::new(&req.path)) {
         Ok(p) => p,
-        Err(e) => return error_json(format!("file not found: {e}")),
-    };
-    if !canon.starts_with(&root) {
-        return error_json("path escapes the project folder");
-    }
-    let meta = match std::fs::metadata(&canon) {
-        Ok(m) => m,
         Err(e) => return error_json(e),
     };
-    if !meta.is_file() {
-        return error_json("not a file");
-    }
+    let size = std::fs::metadata(&canon).map(|m| m.len()).unwrap_or(0);
     let bytes = match std::fs::read(&canon) {
         Ok(b) => b,
         Err(e) => return error_json(e),
     };
-    let truncated = bytes.len() > PLUGIN_FS_MAX_READ_BYTES;
-    let slice = &bytes[..bytes.len().min(PLUGIN_FS_MAX_READ_BYTES)];
+    let truncated = bytes.len() > fs_jail::MAX_READ_BYTES;
+    let slice = &bytes[..bytes.len().min(fs_jail::MAX_READ_BYTES)];
     let base64 = base64::engine::general_purpose::STANDARD.encode(slice);
     serde_json::json!({
         "base64": base64,
         "truncated": truncated,
-        "size": meta.len(),
+        "size": size,
     })
     .to_string()
 }
@@ -1477,51 +1356,10 @@ pub(crate) fn write_file_impl(db: &Db, input: &str, inv: &InvocationContext) -> 
         Ok(r) => r,
         Err(e) => return error_json(e),
     };
-    let rel = Path::new(&req.path);
-    // Reject anything but plain, descending relative segments before touching
-    // the filesystem: no absolute/root/prefix, no `..`.
-    if rel.components().any(|c| {
-        matches!(
-            c,
-            Component::ParentDir | Component::RootDir | Component::Prefix(_)
-        )
-    }) {
-        return error_json("path must be relative and within the project folder");
-    }
-    if rel.file_name().is_none() {
-        return error_json("path must name a file");
-    }
-    let target = root.join(rel);
-    let parent = match target.parent() {
-        Some(p) => p.to_path_buf(),
-        None => return error_json("path has no parent directory"),
-    };
-    // Materialize the parent dir (only when asked) so we can canonicalize it.
-    if !parent.exists() {
-        if req.create_dirs {
-            if let Err(e) = std::fs::create_dir_all(&parent) {
-                return error_json(format!("could not create parent directories: {e}"));
-            }
-        } else {
-            return error_json("parent directory does not exist (pass create_dirs to make it)");
-        }
-    }
-    // Canonicalize the parent and re-check containment — defeats a symlinked
-    // intermediate directory that points outside the folder.
-    let canon_parent = match std::fs::canonicalize(&parent) {
+    let final_path = match fs_jail::resolve_write(&root, Path::new(&req.path), req.create_dirs) {
         Ok(p) => p,
-        Err(e) => return error_json(format!("parent path unavailable: {e}")),
+        Err(e) => return error_json(e),
     };
-    if !canon_parent.starts_with(&root) {
-        return error_json("path escapes the project folder");
-    }
-    let final_path = canon_parent.join(rel.file_name().unwrap());
-    // Refuse to clobber a non-file (e.g. a directory) at the target.
-    if let Ok(meta) = std::fs::symlink_metadata(&final_path)
-        && !meta.is_file()
-    {
-        return error_json("target exists and is not a regular file");
-    }
 
     use std::io::Write as _;
     let open = std::fs::OpenOptions::new()

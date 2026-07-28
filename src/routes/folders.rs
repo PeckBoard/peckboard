@@ -1,6 +1,6 @@
 use axum::{
     Json, Router,
-    extract::{Path, State},
+    extract::{Path, Query, State},
     http::StatusCode,
     middleware,
     response::IntoResponse,
@@ -12,6 +12,8 @@ use std::sync::Arc;
 use crate::auth::middleware::{require_admin, require_auth};
 use crate::db::crud::MoveFolderOutcome;
 use crate::db::models::NewFolder;
+use crate::service::doc_review_sources as sources;
+use crate::service::fs_jail;
 use crate::state::AppState;
 
 #[derive(Deserialize)]
@@ -82,6 +84,12 @@ fn user_router() -> Router<Arc<AppState>> {
             "/api/repeating-tasks/{id}/folder",
             post(change_repeating_task_folder),
         )
+        // Jailed, read-only markdown access inside a folder: the source
+        // picker for Document Review. Any authenticated user may already
+        // start a session in a folder (and read files from there), so
+        // reading its markdown widens nothing.
+        .route("/api/folders/{id}/markdown-files", get(list_markdown_files))
+        .route("/api/folders/{id}/markdown-file", get(get_markdown_file))
 }
 
 /// Directory trees that must never become an agent workspace, even for an
@@ -564,6 +572,83 @@ async fn change_repeating_task_folder(
         MoveFolderOutcome::RefusedOwnedSession => unreachable!(),
     }
 }
+/// Resolve a folder's canonical on-disk root, or the response to send back.
+async fn markdown_root(
+    state: &AppState,
+    folder_id: &str,
+) -> Result<std::path::PathBuf, (StatusCode, Json<serde_json::Value>)> {
+    sources::folder_root(&state.db, folder_id)
+        .await
+        .map_err(|e| {
+            (
+                StatusCode::NOT_FOUND,
+                Json(serde_json::json!({ "error": e })),
+            )
+        })
+}
+
+/// GET /api/folders/{id}/markdown-files — every `.md` file under the folder,
+/// as paths relative to its root. Bounded by the shared jail's depth and file
+/// caps; `truncated` says the listing was cut short. Symlinks are not
+/// followed, so the list can never name a file outside the folder.
+async fn list_markdown_files(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> impl IntoResponse {
+    let root = markdown_root(&state, &id).await?;
+    let (walked, truncated) = fs_jail::walk_files(&root, &|p| sources::is_markdown(p));
+    let files: Vec<serde_json::Value> = walked
+        .into_iter()
+        .map(|f| {
+            serde_json::json!({
+                "path": f.path.replace('\\', "/"),
+                "size": f.size,
+            })
+        })
+        .collect();
+    Ok::<_, (StatusCode, Json<serde_json::Value>)>(Json(serde_json::json!({
+        "files": files,
+        "truncated": truncated,
+    })))
+}
+
+#[derive(Deserialize)]
+struct MarkdownFileQuery {
+    path: String,
+}
+
+/// GET /api/folders/{id}/markdown-file?path=rel.md — read one markdown file
+/// inside the folder, capped at 1 MiB. The path must be relative, `.md`, and
+/// resolve (after canonicalization) inside the folder root.
+async fn get_markdown_file(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+    Query(q): Query<MarkdownFileQuery>,
+) -> impl IntoResponse {
+    let root = markdown_root(&state, &id).await?;
+    if !sources::is_markdown(std::path::Path::new(&q.path)) {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({ "error": "only .md files can be read" })),
+        ));
+    }
+    match sources::read_markdown(&root, &q.path) {
+        Ok(markdown) => Ok(Json(serde_json::json!({
+            "path": q.path,
+            "markdown": markdown,
+        }))),
+        Err(e) => {
+            let status = if e.contains("read limit") {
+                StatusCode::PAYLOAD_TOO_LARGE
+            } else if e.contains("file not found") {
+                StatusCode::NOT_FOUND
+            } else {
+                StatusCode::BAD_REQUEST
+            };
+            Err((status, Json(serde_json::json!({ "error": e }))))
+        }
+    }
+}
 
 #[cfg(test)]
 mod tests {
@@ -720,5 +805,156 @@ mod tests {
             !inside_data_dir.exists(),
             "a refused path must not be created on disk"
         );
+    }
+
+    /// Seed a folder `f1` rooted at `workspace` and return a user token.
+    async fn markdown_fixture(state: &Arc<AppState>, workspace: &std::path::Path) -> String {
+        let token = seed_authenticated_user(state, "user").await;
+        state
+            .db
+            .create_folder(crate::db::models::NewFolder {
+                id: "f1".into(),
+                name: "Repo".into(),
+                path: workspace.to_string_lossy().to_string(),
+                created_at: chrono::Utc::now().to_rfc3339(),
+            })
+            .await
+            .unwrap();
+        token
+    }
+
+    fn get(uri: &str, token: &str) -> Request<Body> {
+        Request::builder()
+            .uri(uri)
+            .header(header::AUTHORIZATION, format!("Bearer {token}"))
+            .body(Body::empty())
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn markdown_listing_covers_the_tree_and_skips_ignored_dirs() {
+        let dir = tempfile::tempdir().unwrap();
+        let workspace = tempfile::tempdir().unwrap();
+        let state = test_state(dir.path());
+        let token = markdown_fixture(&state, workspace.path()).await;
+        let root = workspace.path();
+        for sub in ["docs", "docs/deep", "node_modules", ".git"] {
+            std::fs::create_dir_all(root.join(sub)).unwrap();
+        }
+        std::fs::write(root.join("README.md"), "# readme").unwrap();
+        std::fs::write(root.join("docs/deep/plan.md"), "# plan").unwrap();
+        std::fs::write(root.join("docs/notes.txt"), "plain").unwrap();
+        std::fs::write(root.join("node_modules/dep.md"), "# vendored").unwrap();
+        std::fs::write(root.join(".git/HEAD"), "ref").unwrap();
+
+        let response = app(state.clone())
+            .oneshot(get("/api/folders/f1/markdown-files", &token))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let bytes = axum::body::to_bytes(response.into_body(), 64 * 1024)
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        let paths: Vec<String> = json["files"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|f| f["path"].as_str().unwrap().to_string())
+            .collect();
+        assert!(paths.contains(&"README.md".to_string()), "{paths:?}");
+        assert!(
+            paths.contains(&"docs/deep/plan.md".to_string()),
+            "{paths:?}"
+        );
+        assert!(
+            !paths.iter().any(|p| p.ends_with(".txt")),
+            "markdown only: {paths:?}"
+        );
+        assert!(
+            !paths
+                .iter()
+                .any(|p| p.contains("node_modules") || p.contains(".git")),
+            "ignored dirs stay hidden: {paths:?}"
+        );
+
+        // An unregistered folder is a 404, not a path probe.
+        let response = app(state)
+            .oneshot(get("/api/folders/nope/markdown-files", &token))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn markdown_read_is_jailed_capped_and_markdown_only() {
+        let dir = tempfile::tempdir().unwrap();
+        let workspace = tempfile::tempdir().unwrap();
+        let state = test_state(dir.path());
+        let token = markdown_fixture(&state, workspace.path()).await;
+        let root = workspace.path();
+        std::fs::write(root.join("doc.md"), "# doc\n\nbody\n").unwrap();
+        std::fs::write(root.join("notes.txt"), "plain").unwrap();
+        std::fs::write(root.join("huge.md"), "x".repeat(1024 * 1024 + 1)).unwrap();
+        std::fs::write(
+            root.parent().unwrap().join("folder_secret.md"),
+            "# TOP SECRET\n",
+        )
+        .unwrap();
+
+        let response = app(state.clone())
+            .oneshot(get("/api/folders/f1/markdown-file?path=doc.md", &token))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let bytes = axum::body::to_bytes(response.into_body(), 64 * 1024)
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert!(json["markdown"].as_str().unwrap().contains("body"));
+
+        for (query, expected, why) in [
+            (
+                "path=../folder_secret.md",
+                StatusCode::BAD_REQUEST,
+                "traversal",
+            ),
+            ("path=/etc/hosts", StatusCode::BAD_REQUEST, "absolute path"),
+            ("path=notes.txt", StatusCode::BAD_REQUEST, "non-markdown"),
+            ("path=missing.md", StatusCode::NOT_FOUND, "missing file"),
+            (
+                "path=huge.md",
+                StatusCode::PAYLOAD_TOO_LARGE,
+                "over the 1 MiB cap",
+            ),
+        ] {
+            let response = app(state.clone())
+                .oneshot(get(
+                    &format!("/api/folders/f1/markdown-file?{query}"),
+                    &token,
+                ))
+                .await
+                .unwrap();
+            assert_eq!(response.status(), expected, "{why} must be refused");
+        }
+
+        // A symlink whose textual path looks in-bounds is refused by the
+        // canonicalized containment check.
+        #[cfg(unix)]
+        {
+            std::os::unix::fs::symlink(
+                root.parent().unwrap().join("folder_secret.md"),
+                root.join("link.md"),
+            )
+            .unwrap();
+            let response = app(state.clone())
+                .oneshot(get("/api/folders/f1/markdown-file?path=link.md", &token))
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+            assert!(error_message(response).await.contains("escapes"));
+        }
+
+        let _ = std::fs::remove_file(root.parent().unwrap().join("folder_secret.md"));
     }
 }
