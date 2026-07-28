@@ -41,6 +41,7 @@ diesel::table! {
         pending_plan_review -> Bool,
         is_temp -> Bool,
         parent_session_id -> Nullable<Text>,
+        pending_doc_review -> Nullable<Text>,
         subagent_completed_at -> Nullable<Text>,
     }
 }
@@ -408,6 +409,49 @@ diesel::table! {
     }
 }
 
+diesel::table! {
+    doc_reviews (id) {
+        id -> Text,
+        title -> Text,
+        source_kind -> Text,
+        source_ref -> Text,
+        folder_id -> Nullable<Text>,
+        project_id -> Nullable<Text>,
+        session_id -> Nullable<Text>,
+        status -> Text,
+        current_version -> Integer,
+        created_at -> Text,
+        updated_at -> Text,
+    }
+}
+
+diesel::table! {
+    doc_review_versions (review_id, version) {
+        review_id -> Text,
+        version -> Integer,
+        markdown -> Text,
+        note -> Text,
+        created_by -> Text,
+        created_at -> Text,
+    }
+}
+
+diesel::table! {
+    doc_review_comments (id) {
+        id -> Text,
+        review_id -> Text,
+        version -> Integer,
+        start_line -> Integer,
+        end_line -> Integer,
+        quote -> Nullable<Text>,
+        kind -> Text,
+        body -> Text,
+        status -> Text,
+        resolution_note -> Nullable<Text>,
+        created_at -> Text,
+    }
+}
+
 diesel::joinable!(sessions -> folders (folder_id));
 diesel::joinable!(sessions -> projects (project_id));
 diesel::joinable!(sessions -> repeating_tasks (repeating_task_id));
@@ -422,6 +466,9 @@ diesel::joinable!(project_workflow_instructions -> projects (project_id));
 diesel::joinable!(pm_decisions -> projects (project_id));
 diesel::joinable!(usage_events -> sessions (session_id));
 diesel::joinable!(env_vars -> folders (folder_id));
+diesel::joinable!(doc_reviews -> folders (folder_id));
+diesel::joinable!(doc_review_versions -> doc_reviews (review_id));
+diesel::joinable!(doc_review_comments -> doc_reviews (review_id));
 diesel::joinable!(agent_vars -> folders (folder_id));
 
 diesel::joinable!(user_tabs -> users (user_id));
@@ -455,4 +502,7 @@ diesel::allow_tables_to_appear_in_same_query!(
     env_vars,
     agent_vars,
     plan_comments,
+    doc_reviews,
+    doc_review_versions,
+    doc_review_comments,
 );

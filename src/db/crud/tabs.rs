@@ -29,8 +29,8 @@ impl Db {
     /// no FK to lean on; without this check a stale URL like
     /// `/sessions/<deleted-id>` (or a cross-device delete race) would
     /// write an orphan row that then renders as a phantom chip.
-    ///
-    /// For DB-backed kinds (session/project/repeating_task) the
+    /// For DB-backed kinds (session/project/repeating_task/doc_review)
+    /// the existence check is a `SELECT id` against the owning table. The
     /// existence check is a `SELECT id` against the owning table. The
     /// file-backed `report` kind has no DB row to check; callers must
     /// pre-validate the report file exists before calling.
@@ -64,6 +64,12 @@ impl Db {
                 "repeating_task" => repeating_tasks::table
                     .find(&tab.item_id)
                     .select(repeating_tasks::id)
+                    .first::<String>(conn)
+                    .optional()?
+                    .is_some(),
+                "doc_review" => doc_reviews::table
+                    .find(&tab.item_id)
+                    .select(doc_reviews::id)
                     .first::<String>(conn)
                     .optional()?
                     .is_some(),

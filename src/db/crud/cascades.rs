@@ -59,6 +59,14 @@ impl Db {
             diesel::delete(env_vars::table.filter(env_vars::folder_id.eq(&id))).execute(conn)?;
             diesel::delete(agent_vars::table.filter(agent_vars::folder_id.eq(&id)))
                 .execute(conn)?;
+            // Doc reviews FK onto the folder; purge them (and their tabs)
+            // before the folder goes, mirroring the plan purge in the
+            // cascading deletes below.
+            let review_ids: Vec<String> = doc_reviews::table
+                .filter(doc_reviews::folder_id.eq(&id))
+                .select(doc_reviews::id)
+                .load(conn)?;
+            purge_doc_reviews(conn, review_ids)?;
             diesel::delete(folders::table.find(&id)).execute(conn)?;
             Ok(FolderEmptyDelete::Deleted)
         })
@@ -80,6 +88,14 @@ impl Db {
                 .filter(plans::session_id.eq_any(session_ids.clone()))
                 .select(plans::id)
                 .load(conn)?;
+            let review_ids: Vec<String> = doc_reviews::table
+                .filter(doc_reviews::folder_id.eq(&id))
+                .select(doc_reviews::id)
+                .load(conn)?;
+            purge_doc_reviews(conn, review_ids)?;
+            // Reviews owned elsewhere but driven by a session that's about
+            // to go keep their history — only the session link is severed.
+            detach_doc_review_sessions(conn, &session_ids)?;
             purge_plans(conn, plan_ids)?;
             let mut events_deleted = 0usize;
             for sid in &session_ids {
@@ -158,6 +174,12 @@ impl Db {
                 )
                 .select(plans::id)
                 .load(conn)?;
+            let review_ids: Vec<String> = doc_reviews::table
+                .filter(doc_reviews::project_id.eq(&id))
+                .select(doc_reviews::id)
+                .load(conn)?;
+            purge_doc_reviews(conn, review_ids)?;
+            detach_doc_review_sessions(conn, &session_ids)?;
             purge_plans(conn, plan_ids)?;
             let mut events_deleted = 0usize;
             for sid in &session_ids {
@@ -224,6 +246,9 @@ impl Db {
                 )
                 .select(plans::id)
                 .load(conn)?;
+            // A card owns no reviews, but its worker sessions may drive
+            // one — sever the link rather than deleting the document.
+            detach_doc_review_sessions(conn, &session_ids)?;
             purge_plans(conn, plan_ids)?;
             let mut events_deleted = 0usize;
             for sid in &session_ids {
@@ -260,5 +285,38 @@ fn purge_plans(conn: &mut SqliteConnection, plan_ids: Vec<String>) -> anyhow::Re
     if !plan_ids.is_empty() {
         diesel::delete(plans::table.filter(plans::id.eq_any(plan_ids))).execute(conn)?;
     }
+    Ok(())
+}
+
+/// Delete the given doc reviews. Their versions and comments go via the
+/// SQLite `ON DELETE CASCADE` on `review_id`; `user_tabs` is polymorphic
+/// with no FK, so its rows are cleaned explicitly.
+fn purge_doc_reviews(conn: &mut SqliteConnection, review_ids: Vec<String>) -> anyhow::Result<()> {
+    if review_ids.is_empty() {
+        return Ok(());
+    }
+    diesel::delete(
+        user_tabs::table
+            .filter(user_tabs::item_type.eq("doc_review"))
+            .filter(user_tabs::item_id.eq_any(review_ids.clone())),
+    )
+    .execute(conn)?;
+    diesel::delete(doc_reviews::table.filter(doc_reviews::id.eq_any(review_ids))).execute(conn)?;
+    Ok(())
+}
+
+/// Null the review session link for sessions about to be deleted. The
+/// review itself survives — its document and history are the user's work,
+/// not the agent's — and the next pass creates a fresh session.
+fn detach_doc_review_sessions(
+    conn: &mut SqliteConnection,
+    session_ids: &[String],
+) -> anyhow::Result<()> {
+    if session_ids.is_empty() {
+        return Ok(());
+    }
+    diesel::update(doc_reviews::table.filter(doc_reviews::session_id.eq_any(session_ids.to_vec())))
+        .set(doc_reviews::session_id.eq::<Option<String>>(None))
+        .execute(conn)?;
     Ok(())
 }

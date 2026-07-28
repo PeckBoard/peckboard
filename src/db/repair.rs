@@ -55,6 +55,8 @@ pub fn ensure_schema(conn: &mut SqliteConnection) -> anyhow::Result<()> {
     ensure_projects_worktree_isolation_column(conn)?;
     ensure_projects_budget_columns(conn)?;
     ensure_sessions_pending_plan_review_column(conn)?;
+    ensure_doc_review_tables(conn)?;
+    ensure_sessions_pending_doc_review_column(conn)?;
     ensure_sessions_is_temp_column(conn)?;
     backfill_session_owners(conn)?;
     Ok(())
@@ -684,6 +686,91 @@ fn ensure_sessions_pending_plan_review_column(conn: &mut SqliteConnection) -> an
     }
     Ok(())
 }
+
+/// Heal DBs that predate `1785100000_doc_reviews`. Mirrors the migration's
+/// tables verbatim, including the FKs the cascade paths rely on.
+fn ensure_doc_review_tables(conn: &mut SqliteConnection) -> anyhow::Result<()> {
+    log_if_healing_table(conn, "doc_reviews")?;
+    sql_query(
+        "CREATE TABLE IF NOT EXISTS doc_reviews (
+            id              TEXT    PRIMARY KEY NOT NULL,
+            title           TEXT    NOT NULL,
+            source_kind     TEXT    NOT NULL CHECK (source_kind IN ('file', 'report', 'plan')),
+            source_ref      TEXT    NOT NULL,
+            folder_id       TEXT    REFERENCES folders(id),
+            project_id      TEXT,
+            session_id      TEXT,
+            status          TEXT    NOT NULL DEFAULT 'annotating',
+            current_version INTEGER NOT NULL DEFAULT 1,
+            created_at      TEXT    NOT NULL,
+            updated_at      TEXT    NOT NULL
+        )",
+    )
+    .execute(conn)?;
+    sql_query("CREATE INDEX IF NOT EXISTS idx_doc_reviews_status ON doc_reviews (status)")
+        .execute(conn)?;
+    sql_query("CREATE INDEX IF NOT EXISTS idx_doc_reviews_session ON doc_reviews (session_id)")
+        .execute(conn)?;
+    sql_query("CREATE INDEX IF NOT EXISTS idx_doc_reviews_folder ON doc_reviews (folder_id)")
+        .execute(conn)?;
+    sql_query(
+        "CREATE TABLE IF NOT EXISTS doc_review_versions (
+            review_id  TEXT    NOT NULL REFERENCES doc_reviews(id) ON DELETE CASCADE,
+            version    INTEGER NOT NULL,
+            markdown   TEXT    NOT NULL,
+            note       TEXT    NOT NULL,
+            created_by TEXT    NOT NULL CHECK (created_by IN ('user', 'assistant')),
+            created_at TEXT    NOT NULL,
+            PRIMARY KEY (review_id, version)
+        )",
+    )
+    .execute(conn)?;
+    sql_query(
+        "CREATE INDEX IF NOT EXISTS idx_doc_review_versions_review ON doc_review_versions (review_id)",
+    )
+    .execute(conn)?;
+    sql_query(
+        "CREATE TABLE IF NOT EXISTS doc_review_comments (
+            id              TEXT    PRIMARY KEY NOT NULL,
+            review_id       TEXT    NOT NULL REFERENCES doc_reviews(id) ON DELETE CASCADE,
+            version         INTEGER NOT NULL,
+            start_line      INTEGER NOT NULL,
+            end_line        INTEGER NOT NULL,
+            quote           TEXT,
+            kind            TEXT    NOT NULL CHECK (kind IN ('comment', 'suggest', 'wrong', 'expand', 'shorten')),
+            body            TEXT    NOT NULL,
+            status          TEXT    NOT NULL DEFAULT 'pending',
+            resolution_note TEXT,
+            created_at      TEXT    NOT NULL
+        )",
+    )
+    .execute(conn)?;
+    sql_query(
+        "CREATE INDEX IF NOT EXISTS idx_doc_review_comments_review ON doc_review_comments (review_id)",
+    )
+    .execute(conn)?;
+    sql_query(
+        "CREATE INDEX IF NOT EXISTS idx_doc_review_comments_status ON doc_review_comments (review_id, status)",
+    )
+    .execute(conn)?;
+    Ok(())
+}
+
+/// Heal DBs that predate `1785100000_doc_reviews`: the one-shot review
+/// injection flag on sessions. Nullable TEXT (a review id) mirrors the
+/// migration.
+fn ensure_sessions_pending_doc_review_column(conn: &mut SqliteConnection) -> anyhow::Result<()> {
+    let rows: Vec<PragmaColumn> = sql_query("PRAGMA table_info(sessions)").load(conn)?;
+    let existing: Vec<String> = rows.into_iter().map(|r| r.name).collect();
+    if existing.is_empty() {
+        return Ok(());
+    }
+    if !existing.iter().any(|c| c == "pending_doc_review") {
+        tracing::info!("Repairing schema: adding sessions.pending_doc_review");
+        sql_query("ALTER TABLE sessions ADD COLUMN pending_doc_review TEXT").execute(conn)?;
+    }
+    Ok(())
+}
 /// Heal DBs that predate `1784100000_temp_sessions`: the auto-delete-on-
 /// last-tab-close flag on sessions. NOT NULL DEFAULT 0 mirrors the migration.
 fn ensure_sessions_is_temp_column(conn: &mut SqliteConnection) -> anyhow::Result<()> {
@@ -1174,14 +1261,15 @@ fn log_if_healing_table(conn: &mut SqliteConnection, table: &str) -> anyhow::Res
     Ok(())
 }
 
-/// Heal DBs that predate `1781202566_user_tabs_more_kinds`. That
-/// migration relaxes the `user_tabs.item_type` CHECK constraint to
-/// allow `'report'` and `'repeating_task'` in addition to `'session'`
+/// Heal DBs that predate `1781202566_user_tabs_more_kinds` or
+/// `1785100001_user_tabs_doc_review`. Those migrations widen the
+/// `user_tabs.item_type` CHECK constraint to allow `'report'`,
+/// `'repeating_task'` and `'doc_review'` in addition to `'session'`
 /// and `'project'`. CHECK constraints can only be changed by recreating
 /// the table, and SQLite has no IF-CHECK-IS-RELAXED guard, so this
-/// detect-then-recreate path heals data dirs that somehow skipped the
+/// detect-then-recreate path heals data dirs that somehow skipped a
 /// migration — or where the table-recreate half failed midway and left
-/// the old CHECK in place.
+/// an older CHECK in place.
 fn ensure_user_tabs_check_constraint(conn: &mut SqliteConnection) -> anyhow::Result<()> {
     #[derive(QueryableByName)]
     struct MasterRow {
@@ -1198,17 +1286,17 @@ fn ensure_user_tabs_check_constraint(conn: &mut SqliteConnection) -> anyhow::Res
         // caller surface that rather than try to create one here.
         None => return Ok(()),
     };
-    // Already relaxed (or never had the CHECK) — nothing to do.
-    if sql.contains("'report'") || sql.contains("'repeating_task'") {
+    // Already at the widest CHECK (or never had one) — nothing to do.
+    if sql.contains("'doc_review'") || !sql.contains("CHECK") {
         return Ok(());
     }
-    // CHECK still names only session/project. Recreate the table with
-    // the wider CHECK, preserving every existing row.
+    // CHECK predates one of the widening migrations. Recreate the table
+    // with the current CHECK, preserving every existing row.
     tracing::info!("Repairing schema: relaxing user_tabs.item_type CHECK constraint");
     sql_query(
         "CREATE TABLE IF NOT EXISTS user_tabs_new (
             user_id     TEXT    NOT NULL REFERENCES users(id),
-            item_type   TEXT    NOT NULL CHECK (item_type IN ('session', 'project', 'report', 'repeating_task')),
+            item_type   TEXT    NOT NULL CHECK (item_type IN ('session', 'project', 'report', 'repeating_task', 'doc_review')),
             item_id     TEXT    NOT NULL,
             last_active TEXT    NOT NULL,
             PRIMARY KEY (user_id, item_type, item_id)

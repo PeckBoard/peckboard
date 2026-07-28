@@ -94,6 +94,11 @@ pub struct Session {
     /// completed work against it. Set by the review model-switch, cleared
     /// after a single injection. See [`crate::handover`].
     pub pending_plan_review: bool,
+    /// One-shot flag: when set to a `doc_reviews.id`, the session's next
+    /// turn injects that review's document + open comments ahead of the
+    /// user message. Cleared after a single injection — see
+    /// [`crate::handover`] and `Db::take_pending_doc_review`.
+    pub pending_doc_review: Option<String>,
     /// Temporary session: deleted automatically (full delete-session
     /// cleanup) when the last `user_tabs` row pointing at it is closed —
     /// see `routes::me::delete_tab` and the startup sweep in
@@ -1029,5 +1034,129 @@ pub struct NewPlanComment {
     pub anchor: i32,
     pub body: String,
     pub resolved: bool,
+    pub created_at: String,
+}
+
+// ── Document Reviews ─────────────────────────────
+
+/// A review pass over one markdown document. The document's text lives in
+/// [`DocReviewVersion`] rows (one per revision), never on this row, so no
+/// revision can silently overwrite an earlier one.
+#[derive(Queryable, Selectable, Serialize, Debug, Clone)]
+#[diesel(table_name = doc_reviews)]
+pub struct DocReview {
+    pub id: String,
+    pub title: String,
+    /// file | report | plan — selects the source adapter.
+    pub source_kind: String,
+    /// Addresses the document within its `source_kind`:
+    /// file -> "<folder_id>:<relative/path.md>", report ->
+    /// "<YYYY-MM-DD>/<file.md>", plan -> "<plan_id>".
+    pub source_ref: String,
+    pub folder_id: Option<String>,
+    pub project_id: Option<String>,
+    /// The review AI session, created lazily on the first pass. Nulled if
+    /// that session is later deleted.
+    pub session_id: Option<String>,
+    /// annotating | running | needs_input | approved
+    pub status: String,
+    /// Highest version number in `doc_review_versions` for this review.
+    pub current_version: i32,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+#[derive(Insertable, Debug, Default)]
+#[diesel(table_name = doc_reviews)]
+pub struct NewDocReview {
+    pub id: String,
+    pub title: String,
+    pub source_kind: String,
+    pub source_ref: String,
+    pub folder_id: Option<String>,
+    pub project_id: Option<String>,
+    pub session_id: Option<String>,
+    pub status: String,
+    pub current_version: i32,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+/// One immutable snapshot of the document under review.
+#[derive(Queryable, Selectable, Serialize, Debug, Clone)]
+#[diesel(table_name = doc_review_versions)]
+pub struct DocReviewVersion {
+    pub review_id: String,
+    pub version: i32,
+    pub markdown: String,
+    /// What changed in this version ("initial", the assistant's revision
+    /// note, or "revert to vN").
+    pub note: String,
+    /// user | assistant
+    pub created_by: String,
+    pub created_at: String,
+}
+
+/// Version metadata without the markdown body — what the history list
+/// needs. Selecting the body for every version would ship the whole
+/// document N times just to render a list of revisions.
+#[derive(Queryable, Selectable, Serialize, Debug, Clone)]
+#[diesel(table_name = doc_review_versions)]
+pub struct DocReviewVersionMeta {
+    pub review_id: String,
+    pub version: i32,
+    pub note: String,
+    pub created_by: String,
+    pub created_at: String,
+}
+
+#[derive(Insertable, Debug, Default)]
+#[diesel(table_name = doc_review_versions)]
+pub struct NewDocReviewVersion {
+    pub review_id: String,
+    pub version: i32,
+    pub markdown: String,
+    pub note: String,
+    pub created_by: String,
+    pub created_at: String,
+}
+
+/// A user annotation anchored to a line range of a given version.
+#[derive(Queryable, Selectable, Serialize, Debug, Clone)]
+#[diesel(table_name = doc_review_comments)]
+pub struct DocReviewComment {
+    pub id: String,
+    pub review_id: String,
+    /// Document version the line range refers to.
+    pub version: i32,
+    /// 1-based inclusive line range in that version's markdown.
+    pub start_line: i32,
+    pub end_line: i32,
+    /// Snapshot of the annotated text, for display after a revision moves
+    /// the lines.
+    pub quote: Option<String>,
+    /// comment | suggest | wrong | expand | shorten
+    pub kind: String,
+    pub body: String,
+    /// pending | sent | fixed | declined | answered
+    pub status: String,
+    /// How the assistant resolved it, set alongside a terminal status.
+    pub resolution_note: Option<String>,
+    pub created_at: String,
+}
+
+#[derive(Insertable, Debug, Default)]
+#[diesel(table_name = doc_review_comments)]
+pub struct NewDocReviewComment {
+    pub id: String,
+    pub review_id: String,
+    pub version: i32,
+    pub start_line: i32,
+    pub end_line: i32,
+    pub quote: Option<String>,
+    pub kind: String,
+    pub body: String,
+    pub status: String,
+    pub resolution_note: Option<String>,
     pub created_at: String,
 }

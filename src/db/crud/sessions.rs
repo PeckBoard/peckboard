@@ -381,6 +381,12 @@ impl Db {
             )
             .execute(conn)?;
             diesel::delete(todos::table.filter(todos::session_id.eq(&id))).execute(conn)?;
+            // A doc review outlives the review session driving it — its
+            // document and history are the user's work, so only the link is
+            // severed; the next pass creates a fresh session.
+            diesel::update(doc_reviews::table.filter(doc_reviews::session_id.eq(&id)))
+                .set(doc_reviews::session_id.eq::<Option<String>>(None))
+                .execute(conn)?;
             let count = diesel::delete(sessions::table.find(&id)).execute(conn)?;
             Ok(count > 0)
         })
