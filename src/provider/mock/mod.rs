@@ -1003,12 +1003,16 @@ async fn run_scenario(
             // one model id covers the whole loop:
             //   `[mock:ask]`  → ask a clarifying question and stop. The
             //                   answer arrives as the next turn, which has no
-            //                   marker and therefore revises.
+            //                   marker and therefore revises. Two variants
+            //                   drive the other shapes the question card has
+            //                   to render: `[mock:ask:multi]` asks a
+            //                   multi-select, `[mock:ask:free]` asks with no
+            //                   options at all (free text).
             //   `[mock:chat]` → answer in the chat lane, revise nothing (the
             //                   Clarify action and the chat composer).
             //   anything else → revise the document and resolve every open
             //                   annotation.
-            if message.contains("[mock:ask]") {
+            if message.contains("[mock:ask") {
                 let quote = call_mcp_tool(db, broadcaster, session_id, "get_review_doc", json!({}))
                     .await
                     .and_then(|d| {
@@ -1035,33 +1039,55 @@ async fn run_scenario(
                 } else {
                     format!("Which reading of «{quote}» did you mean?")
                 };
-                call_mcp_tool(
-                    db,
-                    broadcaster,
-                    session_id,
-                    "ask_user",
+                let payload = if message.contains("[mock:ask:free]") {
+                    json!({ "questions": [{ "question": question, "header": "Intent" }] })
+                } else if message.contains("[mock:ask:multi]") {
+                    json!({
+                        "questions": [{
+                            "question": question,
+                            "header": "Intent",
+                            "multiSelect": true,
+                            "options": [
+                                { "label": "Tighten the wording", "description": "Same meaning, fewer words." },
+                                { "label": "Add an example", "description": "Show what it looks like in practice." },
+                                { "label": "Split it in two", "description": "One idea per sentence." },
+                                { "label": "Other", "description": "" }
+                            ]
+                        }]
+                    })
+                } else {
                     json!({
                         "questions": [{
                             "question": question,
                             "header": "Intent",
                             "options": [
                                 { "label": "Keep it as written", "description": "Leave the passage alone." },
-                                { "label": "Rewrite it", "description": "Replace it with clearer wording." }
+                                { "label": "Rewrite it", "description": "Replace it with clearer wording." },
+                                { "label": "Other", "description": "" }
                             ]
                         }]
-                    }),
-                )
-                .await;
+                    })
+                };
+                call_mcp_tool(db, broadcaster, session_id, "ask_user", payload).await;
             } else if message.contains("[mock:chat]") {
-                emit_event(
-                    db,
-                    broadcaster,
-                    session_id,
-                    ProviderEvent::Text {
-                        text: "Answering in the lane — the document is unchanged.".into(),
-                    },
-                )
-                .await;
+                // Three chunks, not one: the lane folds consecutive assistant
+                // text the way a streamed reply arrives, and the answer is
+                // markdown (list, table, fenced code) because that is what
+                // the lane has to render.
+                for chunk in [
+                    "Answering in the lane \u{2014} the document is unchanged.\n\n",
+                    "Three things worth knowing:\n\n1. The rotation lives in `oncall.yaml`.\n2. Escalation is a separate policy.\n3. Nothing here touches the document.\n\n",
+                    "| Field | Value |\n| --- | --- |\n| Owner | platform |\n| Cadence | quarterly |\n\n```bash\nmake verify\n```\n",
+                ] {
+                    emit_event(
+                        db,
+                        broadcaster,
+                        session_id,
+                        ProviderEvent::Text { text: chunk.into() },
+                    )
+                    .await;
+                    tick().await;
+                }
             } else if let Some(doc) =
                 call_mcp_tool(db, broadcaster, session_id, "get_review_doc", json!({})).await
             {

@@ -225,13 +225,18 @@
   display: flex;
   align-items: center;
   gap: var(--space-3);
-  flex-wrap: wrap;
+  /* One row, always. With `wrap` a long title claimed its full intrinsic
+     width and the header broke into three stacked rows — Back stranded on
+     the first, Run pass exiled to the third. The title bar absorbs the
+     squeeze instead (see `.review-view__titlebar`). */
+  flex-wrap: nowrap;
   padding: var(--space-3) var(--space-5);
   background: var(--surface);
   border-bottom: 1px solid var(--border);
 }
 
 .review-view__back {
+  flex-shrink: 0;
   display: inline-flex;
   align-items: center;
   gap: 4px;
@@ -256,10 +261,14 @@
   display: flex;
   align-items: center;
   gap: var(--space-3);
+  /* Takes whatever the row has left and shrinks into it, so the ellipsis in
+     `.review-view__title` is what gives, not the header's layout. */
+  flex: 1 1 auto;
   min-width: 0;
 }
 
 .review-view__title {
+  min-width: 0;
   margin: 0;
   font-size: var(--text-2xl);
   font-weight: 650;
@@ -299,6 +308,7 @@
   gap: var(--space-2);
   margin-left: auto;
   min-width: 0;
+  flex-shrink: 0;
 }
 
 /* Clarify and apply confirm themselves here rather than in a toast: the
@@ -477,7 +487,10 @@
 /* ─── Selection popover ─── */
 .review-popover {
   z-index: 1000;
-  width: 300px;
+  /* Wide enough that "Suggest edit" and "Mark wrong" stay on one line: at
+     300px they wrapped and the first row of verbs stood a line taller than
+     the second. */
+  width: 336px;
   max-width: calc(100vw - 16px);
   display: flex;
   flex-direction: column;
@@ -1025,6 +1038,18 @@
 .review-ask__option--picked .review-ask__tick {
   border-color: var(--accent);
   background: radial-gradient(circle at center, var(--accent) 0 3px, transparent 3px);
+}
+
+/* A multi-select has to look like one. The option is already `role="checkbox"`
+   and already toggles; a round tick told the eye "pick exactly one". */
+.review-ask__option[role='checkbox'] .review-ask__tick {
+  border-radius: 3px;
+}
+
+.review-ask__option[role='checkbox'].review-ask__option--picked .review-ask__tick {
+  border-color: var(--accent);
+  background: var(--accent);
+  box-shadow: inset 0 0 0 1.5px var(--surface);
 }
 
 .review-ask__option-label {

@@ -99,11 +99,16 @@ async function loadCandidates(kind: ReviewSourceKind, folderId: string): Promise
   if (kind === 'file') {
     if (!folderId) return []
     const files = await listMarkdownFiles(folderId)
-    return files.map((f) => ({
-      ref: fileSourceRef(folderId, f.path),
-      label: f.path.split('/').pop() ?? f.path,
-      detail: f.path,
-    }))
+    // The walk returns whatever order the filesystem hands back, which reads
+    // as random in the picker. Sort by path so the list looks like the tree.
+    return files
+      .slice()
+      .sort((a, b) => a.path.localeCompare(b.path, undefined, { sensitivity: 'base' }))
+      .map((f) => ({
+        ref: fileSourceRef(folderId, f.path),
+        label: f.path.split('/').pop() ?? f.path,
+        detail: f.path,
+      }))
   }
   if (kind === 'report') {
     const res = await authedFetch('/api/reports')

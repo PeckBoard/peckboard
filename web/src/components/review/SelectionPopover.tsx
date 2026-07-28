@@ -5,7 +5,6 @@ import Modal from '../Modal'
 import { useMediaQuery } from '../../hooks/useMediaQuery'
 import { describeActionError } from '../../utils/actionError'
 import './Review.css'
-import './Review.css'
 
 /** The six things a passage can be asked for. Five become annotations; the
  *  sixth (`clarify`) asks a question without touching the document. */
@@ -127,6 +126,25 @@ export default function SelectionPopover({ anchor, quote, onClose, onSubmit }: P
       document.removeEventListener('mousedown', onDown)
     }
   }, [onClose])
+
+  // Hand focus back where it came from. The desktop popover is a portalled
+  // `role="dialog"`, so without this Escape (or a click outside) drops focus
+  // on `<body>` and a keyboard user restarts their tab order at the top of
+  // the page instead of on the passage they were annotating. `Modal` already
+  // does this for the mobile sheet.
+  useEffect(() => {
+    const opener = document.activeElement as HTMLElement | null
+    return () => {
+      // React runs this cleanup while the popover's DOM is still attached and
+      // still holds focus; detaching it a moment later sends focus to
+      // `<body>` anyway. Restore on the next frame instead, and only if
+      // nothing else has claimed focus in the meantime.
+      requestAnimationFrame(() => {
+        if (document.activeElement && document.activeElement !== document.body) return
+        if (opener && opener !== document.body && document.contains(opener)) opener.focus()
+      })
+    }
+  }, [])
 
   // Focus follows the step: the verbs first, then the box you type in.
   useEffect(() => {

@@ -142,6 +142,15 @@ export default function DocPane({
   const longPressTimer = useRef<number | undefined>(undefined)
   /** When the last touch happened — see `TOUCH_GHOST_MS`. */
   const lastTouchAt = useRef(0)
+  /** Held in a ref, not read straight from props, so the `components` map
+   *  below does not have to list it as a dependency. Callers pass an inline
+   *  arrow; depending on it rebuilt the map — and therefore remounted every
+   *  block in the document — on EVERY parent render, which dropped focus and
+   *  the text selection each time the popover opened or a WS frame landed. */
+  const selectRef = useRef(onSelectComment)
+  useEffect(() => {
+    selectRef.current = onSelectComment
+  }, [onSelectComment])
 
   const components = useMemo<Components>(() => {
     const renderBlock = (
@@ -186,7 +195,7 @@ export default function DocPane({
             onMouseUp={(e) => e.stopPropagation()}
             onClick={(e) => {
               e.stopPropagation()
-              onSelectComment(hits[0].id)
+              selectRef.current(hits[0].id)
             }}
           >
             {hits.length}
@@ -221,7 +230,7 @@ export default function DocPane({
       <AnchoredBlock render={(nested) => renderBlock('table', props, nested)} />
     )
     return map as Components
-  }, [comments, activeCommentId, focusLines, onSelectComment])
+  }, [comments, activeCommentId, focusLines])
 
   // Follow the rail: focusing an annotation there scrolls its block into the
   // middle of the pane so the two panes always talk about the same passage.
