@@ -102,10 +102,11 @@ An AI-assisted review pass over one markdown document. History is append-only: e
 
 Jailed, read-only markdown access inside a registered workspace folder — the source picker for a `file` review. Paths must be relative and `.md`; `..`, absolute paths, and symlinks that escape the folder root are refused.
 
-| Method | Path                            | Rate Limit | Description                                                                               |
-| ------ | ------------------------------- | ---------- | ----------------------------------------------------------------------------------------- |
-| GET    | /api/folders/:id/markdown-files | -          | Recursive `.md` listing (relative path + size). Skips hidden/build dirs; depth 8, 20k cap |
-| GET    | /api/folders/:id/markdown-file  | -          | Read one file. Query: `path` (relative `.md`). 1 MiB cap (413 over it)                    |
+| Method | Path                            | Rate Limit | Description                                                                                                                                                                                                                                                |
+| ------ | ------------------------------- | ---------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| GET    | /api/folders/:id/markdown-files | -          | Recursive `.md` listing (relative path + size). Skips hidden/build dirs; depth 8, 20k cap. `?scope=<rel/dir>` walks only that subdir (paths come back `<scope>/`-prefixed); `?worktree=<id8>` is the legacy spelling of `scope=.peckboard/worktrees/<id8>` |
+
+| GET | /api/repos | - | Git repos across all folders (subfolder scan, no `git` binary), each with its worktrees: main checkout, git-registered linked trees, `.peckboard/worktrees/<id8>` card trees. Worktrees outside the folder are dropped |
 
 ## Config and Misc
 

@@ -12,6 +12,7 @@ pub mod mdns;
 pub mod push;
 pub mod questions;
 pub mod redact;
+pub mod repo_scan;
 pub mod secret_mask;
 pub mod tls;
 pub mod tool_images;

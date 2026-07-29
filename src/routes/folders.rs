@@ -14,6 +14,7 @@ use crate::db::crud::MoveFolderOutcome;
 use crate::db::models::NewFolder;
 use crate::service::doc_review_sources as sources;
 use crate::service::fs_jail;
+use crate::service::repo_scan;
 use crate::state::AppState;
 
 #[derive(Deserialize)]
@@ -90,11 +91,10 @@ fn user_router(state: Arc<AppState>) -> Router<Arc<AppState>> {
         // reading its markdown widens nothing.
         .route("/api/folders/{id}/markdown-files", get(list_markdown_files))
         .route("/api/folders/{id}/markdown-file", get(get_markdown_file))
-        // Card worktrees across every folder (the fixed
-        // `.peckboard/worktrees/<id8>` layout) — the review wizard's
-        // "review off a worktree" picker. Read-only, same audience as the
-        // markdown routes above.
-        .route("/api/worktrees", get(list_worktrees))
+        // Git repos across every folder, each with its worktrees — the
+        // review wizard's repo → worktree → file cascade. Read-only, same
+        // audience as the markdown routes above.
+        .route("/api/repos", get(list_repos))
 }
 
 /// Moving a session cancels its running agent and repoints the workspace
@@ -612,41 +612,49 @@ async fn markdown_root(
 /// caps; `truncated` says the listing was cut short. Symlinks are not
 /// followed, so the list can never name a file outside the folder.
 ///
-/// `?worktree=<id8>` scopes the walk to one card worktree — a tree the
-/// normal walk never enters (`.peckboard` is a hidden dir). Paths come back
-/// prefixed with `.peckboard/worktrees/<id8>/`, so they slot into
-/// `source_ref`, the preview read and apply unchanged.
+/// `?scope=<rel/dir>` walks only that subdirectory — the review wizard
+/// passes a repo worktree's folder-relative path here, including trees the
+/// normal walk never enters (`.peckboard/worktrees/<id8>` sits inside a
+/// hidden dir). Paths come back prefixed with `<scope>/`, so they slot into
+/// `source_ref`, the preview read and apply unchanged. `?worktree=<id8>` is
+/// the legacy spelling of `scope=.peckboard/worktrees/<id8>`.
 async fn list_markdown_files(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
     Query(q): Query<MarkdownListQuery>,
 ) -> impl IntoResponse {
     let folder_root = markdown_root(&state, &id).await?;
-    let (root, prefix) = match q.worktree.as_deref() {
-        None => (folder_root, String::new()),
-        Some(id8) => {
-            if !is_worktree_id8(id8) {
+    let (root, prefix) = match (q.scope.as_deref(), q.worktree.as_deref()) {
+        (Some(_), Some(_)) => {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({ "error": "pass either scope or worktree, not both" })),
+            ));
+        }
+        (None, None) => (folder_root, String::new()),
+        (None, Some(id8)) => {
+            if !repo_scan::is_worktree_id8(id8) {
                 return Err((
                     StatusCode::BAD_REQUEST,
                     Json(serde_json::json!({ "error": "invalid worktree id" })),
                 ));
             }
-            let wt = folder_root.join(".peckboard").join("worktrees").join(id8);
-            // Canonicalize and re-check containment, same reasoning as the
-            // jailed read: a symlinked worktree dir must not walk elsewhere.
-            let canon = std::fs::canonicalize(&wt).map_err(|_| {
-                (
-                    StatusCode::NOT_FOUND,
-                    Json(serde_json::json!({ "error": "worktree not found" })),
-                )
-            })?;
-            if !canon.starts_with(&folder_root) {
-                return Err((
-                    StatusCode::BAD_REQUEST,
-                    Json(serde_json::json!({ "error": "worktree escapes the folder" })),
-                ));
+            scoped_walk_root(
+                &folder_root,
+                &format!(".peckboard/worktrees/{id8}"),
+                "worktree",
+            )?
+        }
+        (Some(scope), None) => {
+            // Trailing-slash tolerance only — a LEADING slash must reach
+            // check_relative and be refused as absolute.
+            let scope = scope.trim_end_matches('/');
+            if scope.is_empty() {
+                // An empty scope is the folder itself — same as no scope.
+                (folder_root, String::new())
+            } else {
+                scoped_walk_root(&folder_root, scope, "scope")?
             }
-            (canon, format!(".peckboard/worktrees/{id8}/"))
         }
     };
     let (walked, truncated) = fs_jail::walk_files(&root, &|p| sources::is_markdown(p));
@@ -665,10 +673,44 @@ async fn list_markdown_files(
     })))
 }
 
+/// Resolve a folder-relative directory as a walk root: the path must be
+/// relative and descending, and its canonicalization must stay inside the
+/// folder — a symlinked dir must not walk elsewhere, same reasoning as the
+/// jailed read. Returns the canonical root and the `"<rel>/"` path prefix.
+fn scoped_walk_root(
+    folder_root: &std::path::Path,
+    rel: &str,
+    what: &str,
+) -> Result<(std::path::PathBuf, String), (StatusCode, Json<serde_json::Value>)> {
+    if fs_jail::check_relative(std::path::Path::new(rel)).is_err() {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({ "error": format!("invalid {what} path") })),
+        ));
+    }
+    let canon = std::fs::canonicalize(folder_root.join(rel)).map_err(|_| {
+        (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({ "error": format!("{what} not found") })),
+        )
+    })?;
+    if !canon.starts_with(folder_root) || !canon.is_dir() {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({ "error": format!("{what} escapes the folder") })),
+        ));
+    }
+    Ok((canon, format!("{rel}/")))
+}
+
 #[derive(Deserialize)]
 struct MarkdownListQuery {
-    /// Scope the listing to one card worktree by its dir name (8-hex id8).
+    /// Legacy: scope the listing to one root-level card worktree by its dir
+    /// name (8-hex id8).
     worktree: Option<String>,
+    /// Folder-relative directory to walk instead of the whole folder — how
+    /// the wizard scopes the listing to one repo worktree.
+    scope: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -709,24 +751,14 @@ async fn get_markdown_file(
     }
 }
 
-/// 8 lowercase hex chars — the only dir-name shape
-/// [`crate::worker::worktree::card_id8`] mints.
-fn is_worktree_id8(s: &str) -> bool {
-    s.len() == 8
-        && s.bytes()
-            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
-}
-
-/// GET /api/worktrees — every card worktree across every workspace folder.
-///
-/// A directory scan of the fixed `<folder>/.peckboard/worktrees/<id8>`
-/// layout rather than a `git worktree list`: it stays cheap, needs no git
-/// on PATH, and also surfaces trees whose repo state is broken — which is
-/// exactly when someone most wants to read what's in them. The card lookup
-/// (worktree dirs are named by the card's first 8 UUID chars) turns the id
-/// into a human label; a pruned card leaves it null and the branch name
-/// still identifies the tree.
-async fn list_worktrees(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+/// GET /api/repos — every git repo across every workspace folder, each with
+/// its worktrees: the main checkout, git-registered linked trees, and fixed
+/// `.peckboard/worktrees/<id8>` card trees whose git registration is gone.
+/// The scan and its jail rules live in [`repo_scan`]. Card worktree dirs are
+/// named by the card's first 8 UUID chars, so the dir name resolves to a
+/// human label; a pruned card leaves it null and the branch still identifies
+/// the tree.
+async fn list_repos(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     let folders = match state.db.list_folders().await {
         Ok(f) => f,
         Err(e) => {
@@ -736,33 +768,48 @@ async fn list_worktrees(State(state): State<Arc<AppState>>) -> impl IntoResponse
             ));
         }
     };
-    let mut worktrees = Vec::new();
+    let mut repos = Vec::new();
     for folder in folders {
-        let dir = std::path::Path::new(&folder.path)
-            .join(".peckboard")
-            .join("worktrees");
-        let Ok(entries) = std::fs::read_dir(&dir) else {
-            continue; // no worktrees for this folder — the common case
+        // The scan wants the same canonical root the markdown jail uses.
+        let Ok(root) = std::fs::canonicalize(&folder.path) else {
+            continue; // unreadable folder — nothing to serve from it
         };
-        for entry in entries.flatten() {
-            let name = entry.file_name().to_string_lossy().to_string();
-            if !is_worktree_id8(&name) || !entry.path().is_dir() {
-                continue;
+        for repo in repo_scan::scan_repos(&root) {
+            let mut worktrees = Vec::with_capacity(repo.worktrees.len());
+            for wt in &repo.worktrees {
+                // A card tree is named by its card's id8 — resolve a label.
+                let id8 = std::path::Path::new(&wt.path)
+                    .file_name()
+                    .map(|n| n.to_string_lossy().to_string())
+                    .filter(|n| !wt.main && repo_scan::is_worktree_id8(n));
+                let card = match &id8 {
+                    Some(id8) => state.db.find_card_by_id_prefix(id8).await.ok().flatten(),
+                    None => None,
+                };
+                worktrees.push(serde_json::json!({
+                    "path": wt.path,
+                    "branch": wt.branch,
+                    "main": wt.main,
+                    "card_id": card.as_ref().map(|c| c.id.clone()),
+                    "card_title": card.as_ref().map(|c| c.title.clone()),
+                }));
             }
-            let card = state.db.find_card_by_id_prefix(&name).await.ok().flatten();
-            worktrees.push(serde_json::json!({
+            repos.push(serde_json::json!({
                 "folder_id": folder.id,
                 "folder_name": folder.name,
-                "id8": name,
-                "branch": format!("card/{name}"),
-                "card_id": card.as_ref().map(|c| c.id.clone()),
-                "card_title": card.as_ref().map(|c| c.title.clone()),
+                "path": repo.path,
+                // The folder-root repo has no dir name worth showing — the
+                // folder's own name is the repo's name there.
+                "name": if repo.path.is_empty() {
+                    folder.name.clone()
+                } else {
+                    repo.name.clone()
+                },
+                "worktrees": worktrees,
             }));
         }
     }
-    Ok::<_, (StatusCode, Json<serde_json::Value>)>(Json(
-        serde_json::json!({ "worktrees": worktrees }),
-    ))
+    Ok::<_, (StatusCode, Json<serde_json::Value>)>(Json(serde_json::json!({ "repos": repos })))
 }
 
 #[cfg(test)]
@@ -1142,31 +1189,41 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn worktrees_list_and_scope_the_markdown_walk() {
+    async fn repos_list_and_scoped_walks_stay_jailed() {
         let dir = tempfile::tempdir().unwrap();
         let workspace = tempfile::tempdir().unwrap();
         let state = test_state(dir.path());
         let token = markdown_fixture(&state, workspace.path()).await;
-        let root = workspace.path();
-        // Two trees under the fixed layout; the odd name must not list.
-        for sub in [
-            ".peckboard/worktrees/deadbeef/docs",
-            ".peckboard/worktrees/0a1b2c3d",
-            ".peckboard/worktrees/not-hex!",
-        ] {
-            std::fs::create_dir_all(root.join(sub)).unwrap();
-        }
+        let root = std::fs::canonicalize(workspace.path()).unwrap();
+
+        // A repo in a subfolder with one registered card worktree — fake git
+        // metadata, no git binary: `.git/HEAD` names the branch,
+        // `.git/worktrees/<name>/gitdir` registers the linked tree.
+        let repo = root.join("repos/app");
+        std::fs::create_dir_all(repo.join(".git/worktrees/deadbeef")).unwrap();
+        std::fs::write(repo.join(".git/HEAD"), "ref: refs/heads/main\n").unwrap();
+        let tree = repo.join(".peckboard/worktrees/deadbeef");
+        std::fs::create_dir_all(tree.join("docs")).unwrap();
         std::fs::write(
-            root.join(".peckboard/worktrees/deadbeef/docs/wt.md"),
-            "# wt",
+            repo.join(".git/worktrees/deadbeef/gitdir"),
+            format!("{}/.git\n", tree.display()),
         )
         .unwrap();
-        std::fs::write(root.join(".peckboard/worktrees/deadbeef/skip.txt"), "x").unwrap();
+        std::fs::write(
+            repo.join(".git/worktrees/deadbeef/HEAD"),
+            "ref: refs/heads/card/deadbeef\n",
+        )
+        .unwrap();
+        std::fs::write(tree.join("docs/wt.md"), "# wt").unwrap();
+        std::fs::write(tree.join("skip.txt"), "x").unwrap();
         std::fs::write(root.join("README.md"), "# readme").unwrap();
+        // A legacy root-level card tree, addressed by `?worktree=<id8>`.
+        std::fs::create_dir_all(root.join(".peckboard/worktrees/0a1b2c3d")).unwrap();
+        std::fs::write(root.join(".peckboard/worktrees/0a1b2c3d/n.md"), "# n").unwrap();
 
-        // The aggregate listing names both trees, keyed to the folder.
+        // The repo listing finds the subfolder repo and both of its trees.
         let response = app(state.clone())
-            .oneshot(get("/api/worktrees", &token))
+            .oneshot(get("/api/repos", &token))
             .await
             .unwrap();
         assert_eq!(response.status(), StatusCode::OK);
@@ -1174,20 +1231,31 @@ mod tests {
             .await
             .unwrap();
         let json: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
-        let ids: Vec<(&str, &str)> = json["worktrees"]
-            .as_array()
-            .unwrap()
+        let repos = json["repos"].as_array().unwrap();
+        assert_eq!(repos.len(), 1, "{json}");
+        assert_eq!(repos[0]["folder_id"], "f1");
+        assert_eq!(repos[0]["path"], "repos/app");
+        assert_eq!(repos[0]["name"], "app");
+        let wts = repos[0]["worktrees"].as_array().unwrap();
+        let wt_rows: Vec<(&str, &str)> = wts
             .iter()
-            .map(|w| (w["folder_id"].as_str().unwrap(), w["id8"].as_str().unwrap()))
+            .map(|w| (w["path"].as_str().unwrap(), w["branch"].as_str().unwrap()))
             .collect();
-        assert!(ids.contains(&("f1", "deadbeef")), "{ids:?}");
-        assert!(ids.contains(&("f1", "0a1b2c3d")), "{ids:?}");
-        assert_eq!(ids.len(), 2, "non-hex dirs stay hidden: {ids:?}");
+        assert_eq!(
+            wt_rows,
+            vec![
+                ("repos/app", "main"),
+                ("repos/app/.peckboard/worktrees/deadbeef", "card/deadbeef"),
+            ],
+            "{json}"
+        );
+        assert_eq!(wts[0]["main"], true);
+        assert_eq!(wts[1]["main"], false);
 
         // The scoped walk sees ONLY the worktree, with prefixed paths…
         let response = app(state.clone())
             .oneshot(get(
-                "/api/folders/f1/markdown-files?worktree=deadbeef",
+                "/api/folders/f1/markdown-files?scope=repos/app/.peckboard/worktrees/deadbeef",
                 &token,
             ))
             .await
@@ -1205,7 +1273,7 @@ mod tests {
             .collect();
         assert_eq!(
             paths,
-            vec![".peckboard/worktrees/deadbeef/docs/wt.md".to_string()],
+            vec!["repos/app/.peckboard/worktrees/deadbeef/docs/wt.md".to_string()],
             "{paths:?}"
         );
 
@@ -1213,15 +1281,14 @@ mod tests {
         // route (the same resolver `source_ref` uses)…
         let response = app(state.clone())
             .oneshot(get(
-                "/api/folders/f1/markdown-file?path=.peckboard/worktrees/deadbeef/docs/wt.md",
+                "/api/folders/f1/markdown-file?path=repos/app/.peckboard/worktrees/deadbeef/docs/wt.md",
                 &token,
             ))
             .await
             .unwrap();
         assert_eq!(response.status(), StatusCode::OK);
 
-        // …the unscoped walk still hides the hidden tree, and bad ids fail
-        // closed.
+        // …the unscoped walk still hides the hidden trees…
         let response = app(state.clone())
             .oneshot(get("/api/folders/f1/markdown-files", &token))
             .await
@@ -1232,23 +1299,68 @@ mod tests {
         let json: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
         assert!(
             !json["files"].to_string().contains(".peckboard"),
-            "hidden without the param"
+            "hidden without a scope"
         );
+
+        // …the legacy worktree param still scopes to the root-level layout…
         let response = app(state.clone())
             .oneshot(get(
+                "/api/folders/f1/markdown-files?worktree=0a1b2c3d",
+                &token,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let bytes = axum::body::to_bytes(response.into_body(), 64 * 1024)
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(
+            json["files"][0]["path"].as_str().unwrap(),
+            ".peckboard/worktrees/0a1b2c3d/n.md"
+        );
+
+        // …and bad scopes fail closed.
+        for (uri, status) in [
+            (
+                "/api/folders/f1/markdown-files?scope=../escape",
+                StatusCode::BAD_REQUEST,
+            ),
+            (
+                "/api/folders/f1/markdown-files?scope=/etc",
+                StatusCode::BAD_REQUEST,
+            ),
+            (
+                "/api/folders/f1/markdown-files?scope=repos/missing",
+                StatusCode::NOT_FOUND,
+            ),
+            (
+                "/api/folders/f1/markdown-files?scope=repos/app&worktree=0a1b2c3d",
+                StatusCode::BAD_REQUEST,
+            ),
+            (
                 "/api/folders/f1/markdown-files?worktree=DEADBEEF",
-                &token,
-            ))
-            .await
-            .unwrap();
-        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
-        let response = app(state)
-            .oneshot(get(
+                StatusCode::BAD_REQUEST,
+            ),
+            (
                 "/api/folders/f1/markdown-files?worktree=ffffffff",
-                &token,
-            ))
-            .await
-            .unwrap();
-        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+                StatusCode::NOT_FOUND,
+            ),
+        ] {
+            let response = app(state.clone()).oneshot(get(uri, &token)).await.unwrap();
+            assert_eq!(response.status(), status, "{uri}");
+        }
+
+        // A symlinked scope that resolves outside the folder is refused.
+        #[cfg(unix)]
+        {
+            let outside = tempfile::tempdir().unwrap();
+            std::os::unix::fs::symlink(outside.path(), root.join("link")).unwrap();
+            let response = app(state)
+                .oneshot(get("/api/folders/f1/markdown-files?scope=link", &token))
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        }
     }
 }

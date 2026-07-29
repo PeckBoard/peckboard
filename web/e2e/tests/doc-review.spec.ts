@@ -137,17 +137,18 @@ async function seedFolder(
   request: APIRequestContext,
   auth: Record<string, string>,
   suffix: string,
-): Promise<{ id: string; dir: string }> {
+): Promise<{ id: string; dir: string; name: string }> {
   const dir = mkdtempSync(path.join(tmpdir(), `peckboard-e2e-review-${suffix}-`))
   mkdirSync(path.join(dir, 'docs'), { recursive: true })
   writeFileSync(path.join(dir, 'docs', 'onboarding.md'), DOC)
+  const name = `e2e-review-${suffix}-${Date.now()}`
   const res = await request.post('/api/folders', {
     headers: auth,
-    data: { name: `e2e-review-${suffix}-${Date.now()}`, path: dir },
+    data: { name, path: dir },
   })
   expect(res.ok(), `create folder failed: ${await res.text()}`).toBeTruthy()
   const folder = (await res.json()) as { id: string }
-  return { id: folder.id, dir }
+  return { id: folder.id, dir, name }
 }
 
 /** Write a report straight into the server's reports tree — the only HTTP
@@ -674,13 +675,18 @@ test.describe('document review — desktop', () => {
     await expect(page.getByTestId('review-model')).not.toContainText('Auto')
   })
 
-  test('the wizard reviews a markdown file from a card worktree', async ({ request, page }) => {
+  test('the wizard reviews a markdown file from a repo worktree', async ({ request, page }) => {
     const { token, auth } = await authenticate(request)
     const folder = await seedFolder(request, auth, 'worktree')
 
-    // A real git repo with a real linked worktree under the app's fixed
-    // layout — exactly what worker worktree isolation produces.
-    const git = (cmd: string) => execSync(`git ${cmd}`, { cwd: folder.dir, stdio: 'pipe' })
+    // A real git repo in a SUBFOLDER of the workspace, with a real linked
+    // worktree under the app's fixed layout — exactly what worker worktree
+    // isolation produces. The wizard must find the repo by scanning the
+    // folder's subfolders, then offer that repo's worktrees.
+    const repoDir = path.join(folder.dir, 'repos', 'app')
+    mkdirSync(path.join(repoDir, 'docs'), { recursive: true })
+    writeFileSync(path.join(repoDir, 'docs', 'in-repo.md'), '# In repo\n')
+    const git = (cmd: string) => execSync(`git ${cmd}`, { cwd: repoDir, stdio: 'pipe' })
     git('init -q')
     git('config user.email e2e@example.com')
     git('config user.name e2e')
@@ -688,7 +694,7 @@ test.describe('document review — desktop', () => {
     git('commit -qm seed')
     git('worktree add .peckboard/worktrees/abcd1234 -b card/abcd1234')
     writeFileSync(
-      path.join(folder.dir, '.peckboard/worktrees/abcd1234/docs/wt-note.md'),
+      path.join(repoDir, '.peckboard/worktrees/abcd1234/docs/wt-note.md'),
       '# Worktree note\n\nOnly in the worktree.\n',
     )
 
@@ -698,14 +704,23 @@ test.describe('document review — desktop', () => {
     await page.getByTestId('review-wizard-kind-file').click()
     await page.getByTestId('review-wizard-next').click()
 
-    // The radio swaps the folder select for the worktree picker.
+    // The radio swaps the folder select for the repo → worktree cascade.
+    // Search by the folder's unique name — a retried run leaves an older
+    // registered folder with the same repos/app layout behind.
     await page.getByTestId('review-wizard-source-worktree').click()
     await expect(page.getByTestId('review-wizard-folder')).toHaveCount(0)
+    await page.getByTestId('review-wizard-repo').click()
+    await page.getByTestId('review-wizard-repo-search').fill(folder.name)
+    await page.getByRole('option', { name: /repos\/app/ }).click()
+
+    // The worktree picker offers the main checkout AND the card worktree.
     await page.getByTestId('review-wizard-worktree').click()
+    await expect(page.getByRole('option', { name: /Main checkout/ })).toBeVisible()
     await page.getByTestId('review-wizard-worktree-search').fill('abcd1234')
     await page.getByRole('option', { name: /card\/abcd1234/ }).click()
 
-    // The file picker now lists ONLY the worktree's markdown.
+    // The file picker lists the worktree's markdown, paths shown relative
+    // to the worktree.
     await page.getByTestId('review-wizard-file').click()
     await expect(page.getByRole('option', { name: /wt-note\.md/ })).toBeVisible()
     await page.getByRole('option', { name: /wt-note\.md/ }).click()
@@ -722,6 +737,8 @@ test.describe('document review — desktop', () => {
       (await list.json()) as { reviews: Array<{ title: string; source_ref: string }> }
     ).reviews
     const created = reviews.find((r) => r.title === 'wt-note')
-    expect(created?.source_ref).toBe(`${folder.id}:.peckboard/worktrees/abcd1234/docs/wt-note.md`)
+    expect(created?.source_ref).toBe(
+      `${folder.id}:repos/app/.peckboard/worktrees/abcd1234/docs/wt-note.md`,
+    )
   })
 })

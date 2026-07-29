@@ -255,13 +255,13 @@ export async function revertToVersion(id: string, n: number): Promise<void> {
 
 export async function listMarkdownFiles(
   folderId: string,
-  /** Card worktree id8 — scopes the walk to `.peckboard/worktrees/<id8>`,
-   *  with the returned paths prefixed accordingly. */
-  worktree?: string,
+  /** Folder-relative directory to walk instead of the whole folder — a repo
+   *  worktree's path. Returned paths come back prefixed with `<scope>/`. */
+  scope?: string,
 ): Promise<MarkdownFileEntry[]> {
-  const scope = worktree ? `?worktree=${encodeURIComponent(worktree)}` : ''
+  const query = scope ? `?scope=${encodeURIComponent(scope)}` : ''
   const res = await authedFetch(
-    `/api/folders/${encodeURIComponent(folderId)}/markdown-files${scope}`,
+    `/api/folders/${encodeURIComponent(folderId)}/markdown-files${query}`,
   )
   const data = await json<{ files: MarkdownFileEntry[]; truncated: boolean }>(
     res,
@@ -270,23 +270,34 @@ export async function listMarkdownFiles(
   return data.files
 }
 
-/** One card worktree (`<folder>/.peckboard/worktrees/<id8>`), as served by
- *  GET /api/worktrees. `card_title` is null when the card is gone; the
- *  branch still names the tree. */
-export interface WorktreeEntry {
-  folder_id: string
-  folder_name: string
-  /** The worktree's dir name — the card's first 8 UUID chars. */
-  id8: string
+/** One checkout of a repo: the main working tree or a linked worktree
+ *  (including `.peckboard/worktrees/<id8>` card trees). `card_title` is null
+ *  when the tree is no card's or the card is gone; the branch still names
+ *  the tree. */
+export interface RepoWorktree {
+  /** Folder-relative path of the working tree; `''` is the folder root. */
+  path: string
   branch: string
+  main: boolean
   card_id: string | null
   card_title: string | null
 }
 
-export async function listWorktrees(): Promise<WorktreeEntry[]> {
-  const res = await authedFetch('/api/worktrees')
-  const data = await json<{ worktrees: WorktreeEntry[] }>(res, "Couldn't list the worktrees")
-  return data.worktrees
+/** One git repo found by scanning a workspace folder's subfolders, as served
+ *  by GET /api/repos. `path` is folder-relative (`''` = the folder root is
+ *  the repo). */
+export interface RepoEntry {
+  folder_id: string
+  folder_name: string
+  path: string
+  name: string
+  worktrees: RepoWorktree[]
+}
+
+export async function listRepos(): Promise<RepoEntry[]> {
+  const res = await authedFetch('/api/repos')
+  const data = await json<{ repos: RepoEntry[] }>(res, "Couldn't list the repos")
+  return data.repos
 }
 
 export async function readMarkdownFile(folderId: string, path: string): Promise<string> {
