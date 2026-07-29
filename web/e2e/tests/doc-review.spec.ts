@@ -1,4 +1,5 @@
 import { test, expect, type APIRequestContext, type Page } from '@playwright/test'
+import { execSync } from 'node:child_process'
 import { mkdirSync, mkdtempSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
@@ -671,5 +672,56 @@ test.describe('document review — desktop', () => {
       )
       .toBe('mock:happy-path')
     await expect(page.getByTestId('review-model')).not.toContainText('Auto')
+  })
+
+  test('the wizard reviews a markdown file from a card worktree', async ({ request, page }) => {
+    const { token, auth } = await authenticate(request)
+    const folder = await seedFolder(request, auth, 'worktree')
+
+    // A real git repo with a real linked worktree under the app's fixed
+    // layout — exactly what worker worktree isolation produces.
+    const git = (cmd: string) => execSync(`git ${cmd}`, { cwd: folder.dir, stdio: 'pipe' })
+    git('init -q')
+    git('config user.email e2e@example.com')
+    git('config user.name e2e')
+    git('add .')
+    git('commit -qm seed')
+    git('worktree add .peckboard/worktrees/abcd1234 -b card/abcd1234')
+    writeFileSync(
+      path.join(folder.dir, '.peckboard/worktrees/abcd1234/docs/wt-note.md'),
+      '# Worktree note\n\nOnly in the worktree.\n',
+    )
+
+    await loadAt(page, token, '/review')
+    await expect(page.getByTestId('review-list')).toBeVisible({ timeout: 15_000 })
+    await page.getByTestId('review-new').click()
+    await page.getByTestId('review-wizard-kind-file').click()
+    await page.getByTestId('review-wizard-next').click()
+
+    // The radio swaps the folder select for the worktree picker.
+    await page.getByTestId('review-wizard-source-worktree').click()
+    await expect(page.getByTestId('review-wizard-folder')).toHaveCount(0)
+    await page.getByTestId('review-wizard-worktree').click()
+    await page.getByTestId('review-wizard-worktree-search').fill('abcd1234')
+    await page.getByRole('option', { name: /card\/abcd1234/ }).click()
+
+    // The file picker now lists ONLY the worktree's markdown.
+    await page.getByTestId('review-wizard-file').click()
+    await expect(page.getByRole('option', { name: /wt-note\.md/ })).toBeVisible()
+    await page.getByRole('option', { name: /wt-note\.md/ }).click()
+    await expect(page.getByTestId('review-wizard-preview')).toContainText('Only in the worktree.')
+    await page.getByTestId('review-wizard-create').click()
+
+    await expect(page.getByTestId('review-view')).toBeVisible({ timeout: 15_000 })
+    await expect(page.getByTestId('review-doc')).toContainText('Only in the worktree.')
+
+    // The ref points into the worktree, still inside the folder's jail —
+    // the existing folder flow is what every other test in this file runs.
+    const list = await request.get('/api/doc-reviews', { headers: auth })
+    const reviews = (
+      (await list.json()) as { reviews: Array<{ title: string; source_ref: string }> }
+    ).reviews
+    const created = reviews.find((r) => r.title === 'wt-note')
+    expect(created?.source_ref).toBe(`${folder.id}:.peckboard/worktrees/abcd1234/docs/wt-note.md`)
   })
 })

@@ -253,13 +253,40 @@ export async function revertToVersion(id: string, n: number): Promise<void> {
 
 // ─── Folder markdown (the `file` source kind) ───
 
-export async function listMarkdownFiles(folderId: string): Promise<MarkdownFileEntry[]> {
-  const res = await authedFetch(`/api/folders/${encodeURIComponent(folderId)}/markdown-files`)
+export async function listMarkdownFiles(
+  folderId: string,
+  /** Card worktree id8 — scopes the walk to `.peckboard/worktrees/<id8>`,
+   *  with the returned paths prefixed accordingly. */
+  worktree?: string,
+): Promise<MarkdownFileEntry[]> {
+  const scope = worktree ? `?worktree=${encodeURIComponent(worktree)}` : ''
+  const res = await authedFetch(
+    `/api/folders/${encodeURIComponent(folderId)}/markdown-files${scope}`,
+  )
   const data = await json<{ files: MarkdownFileEntry[]; truncated: boolean }>(
     res,
     "Couldn't list the markdown files in this folder",
   )
   return data.files
+}
+
+/** One card worktree (`<folder>/.peckboard/worktrees/<id8>`), as served by
+ *  GET /api/worktrees. `card_title` is null when the card is gone; the
+ *  branch still names the tree. */
+export interface WorktreeEntry {
+  folder_id: string
+  folder_name: string
+  /** The worktree's dir name — the card's first 8 UUID chars. */
+  id8: string
+  branch: string
+  card_id: string | null
+  card_title: string | null
+}
+
+export async function listWorktrees(): Promise<WorktreeEntry[]> {
+  const res = await authedFetch('/api/worktrees')
+  const data = await json<{ worktrees: WorktreeEntry[] }>(res, "Couldn't list the worktrees")
+  return data.worktrees
 }
 
 export async function readMarkdownFile(folderId: string, path: string): Promise<string> {

@@ -119,6 +119,23 @@ impl Db {
         .await
     }
 
+    /// The card whose UUID starts with `prefix` — worktree dirs are named by
+    /// the card's first 8 UUID chars (see [`crate::worker::worktree`]), and
+    /// this turns a dir name back into a card for labelling.
+    pub async fn find_card_by_id_prefix(&self, prefix: &str) -> anyhow::Result<Option<Card>> {
+        // Validated hex upstream; strip LIKE wildcards anyway so this can
+        // never widen into a pattern match.
+        let pattern = format!("{}%", prefix.replace(['%', '_'], ""));
+        self.with_conn(move |conn| {
+            cards::table
+                .filter(cards::id.like(pattern.as_str()))
+                .select(Card::as_select())
+                .first(conn)
+                .optional()
+                .map_err(Into::into)
+        })
+        .await
+    }
     pub async fn list_cards_by_project(&self, project_id: &str) -> anyhow::Result<Vec<Card>> {
         let project_id = project_id.to_string();
         self.with_conn(move |conn| list_cards_by_project_query(conn, &project_id))

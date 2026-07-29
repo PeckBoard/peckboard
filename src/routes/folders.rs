@@ -90,6 +90,11 @@ fn user_router(state: Arc<AppState>) -> Router<Arc<AppState>> {
         // reading its markdown widens nothing.
         .route("/api/folders/{id}/markdown-files", get(list_markdown_files))
         .route("/api/folders/{id}/markdown-file", get(get_markdown_file))
+        // Card worktrees across every folder (the fixed
+        // `.peckboard/worktrees/<id8>` layout) — the review wizard's
+        // "review off a worktree" picker. Read-only, same audience as the
+        // markdown routes above.
+        .route("/api/worktrees", get(list_worktrees))
 }
 
 /// Moving a session cancels its running agent and repoints the workspace
@@ -606,17 +611,50 @@ async fn markdown_root(
 /// as paths relative to its root. Bounded by the shared jail's depth and file
 /// caps; `truncated` says the listing was cut short. Symlinks are not
 /// followed, so the list can never name a file outside the folder.
+///
+/// `?worktree=<id8>` scopes the walk to one card worktree — a tree the
+/// normal walk never enters (`.peckboard` is a hidden dir). Paths come back
+/// prefixed with `.peckboard/worktrees/<id8>/`, so they slot into
+/// `source_ref`, the preview read and apply unchanged.
 async fn list_markdown_files(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
+    Query(q): Query<MarkdownListQuery>,
 ) -> impl IntoResponse {
-    let root = markdown_root(&state, &id).await?;
+    let folder_root = markdown_root(&state, &id).await?;
+    let (root, prefix) = match q.worktree.as_deref() {
+        None => (folder_root, String::new()),
+        Some(id8) => {
+            if !is_worktree_id8(id8) {
+                return Err((
+                    StatusCode::BAD_REQUEST,
+                    Json(serde_json::json!({ "error": "invalid worktree id" })),
+                ));
+            }
+            let wt = folder_root.join(".peckboard").join("worktrees").join(id8);
+            // Canonicalize and re-check containment, same reasoning as the
+            // jailed read: a symlinked worktree dir must not walk elsewhere.
+            let canon = std::fs::canonicalize(&wt).map_err(|_| {
+                (
+                    StatusCode::NOT_FOUND,
+                    Json(serde_json::json!({ "error": "worktree not found" })),
+                )
+            })?;
+            if !canon.starts_with(&folder_root) {
+                return Err((
+                    StatusCode::BAD_REQUEST,
+                    Json(serde_json::json!({ "error": "worktree escapes the folder" })),
+                ));
+            }
+            (canon, format!(".peckboard/worktrees/{id8}/"))
+        }
+    };
     let (walked, truncated) = fs_jail::walk_files(&root, &|p| sources::is_markdown(p));
     let files: Vec<serde_json::Value> = walked
         .into_iter()
         .map(|f| {
             serde_json::json!({
-                "path": f.path.replace('\\', "/"),
+                "path": format!("{prefix}{}", f.path.replace('\\', "/")),
                 "size": f.size,
             })
         })
@@ -625,6 +663,12 @@ async fn list_markdown_files(
         "files": files,
         "truncated": truncated,
     })))
+}
+
+#[derive(Deserialize)]
+struct MarkdownListQuery {
+    /// Scope the listing to one card worktree by its dir name (8-hex id8).
+    worktree: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -663,6 +707,62 @@ async fn get_markdown_file(
             Err((status, Json(serde_json::json!({ "error": e }))))
         }
     }
+}
+
+/// 8 lowercase hex chars — the only dir-name shape
+/// [`crate::worker::worktree::card_id8`] mints.
+fn is_worktree_id8(s: &str) -> bool {
+    s.len() == 8
+        && s.bytes()
+            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+}
+
+/// GET /api/worktrees — every card worktree across every workspace folder.
+///
+/// A directory scan of the fixed `<folder>/.peckboard/worktrees/<id8>`
+/// layout rather than a `git worktree list`: it stays cheap, needs no git
+/// on PATH, and also surfaces trees whose repo state is broken — which is
+/// exactly when someone most wants to read what's in them. The card lookup
+/// (worktree dirs are named by the card's first 8 UUID chars) turns the id
+/// into a human label; a pruned card leaves it null and the branch name
+/// still identifies the tree.
+async fn list_worktrees(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+    let folders = match state.db.list_folders().await {
+        Ok(f) => f,
+        Err(e) => {
+            return Err((
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({ "error": e.to_string() })),
+            ));
+        }
+    };
+    let mut worktrees = Vec::new();
+    for folder in folders {
+        let dir = std::path::Path::new(&folder.path)
+            .join(".peckboard")
+            .join("worktrees");
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            continue; // no worktrees for this folder — the common case
+        };
+        for entry in entries.flatten() {
+            let name = entry.file_name().to_string_lossy().to_string();
+            if !is_worktree_id8(&name) || !entry.path().is_dir() {
+                continue;
+            }
+            let card = state.db.find_card_by_id_prefix(&name).await.ok().flatten();
+            worktrees.push(serde_json::json!({
+                "folder_id": folder.id,
+                "folder_name": folder.name,
+                "id8": name,
+                "branch": format!("card/{name}"),
+                "card_id": card.as_ref().map(|c| c.id.clone()),
+                "card_title": card.as_ref().map(|c| c.title.clone()),
+            }));
+        }
+    }
+    Ok::<_, (StatusCode, Json<serde_json::Value>)>(Json(
+        serde_json::json!({ "worktrees": worktrees }),
+    ))
 }
 
 #[cfg(test)]
@@ -1039,5 +1139,116 @@ mod tests {
 
         let session = state.db.get_session("s-mine").await.unwrap().unwrap();
         assert_eq!(session.folder_id, "f2");
+    }
+
+    #[tokio::test]
+    async fn worktrees_list_and_scope_the_markdown_walk() {
+        let dir = tempfile::tempdir().unwrap();
+        let workspace = tempfile::tempdir().unwrap();
+        let state = test_state(dir.path());
+        let token = markdown_fixture(&state, workspace.path()).await;
+        let root = workspace.path();
+        // Two trees under the fixed layout; the odd name must not list.
+        for sub in [
+            ".peckboard/worktrees/deadbeef/docs",
+            ".peckboard/worktrees/0a1b2c3d",
+            ".peckboard/worktrees/not-hex!",
+        ] {
+            std::fs::create_dir_all(root.join(sub)).unwrap();
+        }
+        std::fs::write(
+            root.join(".peckboard/worktrees/deadbeef/docs/wt.md"),
+            "# wt",
+        )
+        .unwrap();
+        std::fs::write(root.join(".peckboard/worktrees/deadbeef/skip.txt"), "x").unwrap();
+        std::fs::write(root.join("README.md"), "# readme").unwrap();
+
+        // The aggregate listing names both trees, keyed to the folder.
+        let response = app(state.clone())
+            .oneshot(get("/api/worktrees", &token))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let bytes = axum::body::to_bytes(response.into_body(), 64 * 1024)
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        let ids: Vec<(&str, &str)> = json["worktrees"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|w| (w["folder_id"].as_str().unwrap(), w["id8"].as_str().unwrap()))
+            .collect();
+        assert!(ids.contains(&("f1", "deadbeef")), "{ids:?}");
+        assert!(ids.contains(&("f1", "0a1b2c3d")), "{ids:?}");
+        assert_eq!(ids.len(), 2, "non-hex dirs stay hidden: {ids:?}");
+
+        // The scoped walk sees ONLY the worktree, with prefixed paths…
+        let response = app(state.clone())
+            .oneshot(get(
+                "/api/folders/f1/markdown-files?worktree=deadbeef",
+                &token,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let bytes = axum::body::to_bytes(response.into_body(), 64 * 1024)
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        let paths: Vec<String> = json["files"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|f| f["path"].as_str().unwrap().to_string())
+            .collect();
+        assert_eq!(
+            paths,
+            vec![".peckboard/worktrees/deadbeef/docs/wt.md".to_string()],
+            "{paths:?}"
+        );
+
+        // …the prefixed path reads back through the jailed single-file
+        // route (the same resolver `source_ref` uses)…
+        let response = app(state.clone())
+            .oneshot(get(
+                "/api/folders/f1/markdown-file?path=.peckboard/worktrees/deadbeef/docs/wt.md",
+                &token,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+
+        // …the unscoped walk still hides the hidden tree, and bad ids fail
+        // closed.
+        let response = app(state.clone())
+            .oneshot(get("/api/folders/f1/markdown-files", &token))
+            .await
+            .unwrap();
+        let bytes = axum::body::to_bytes(response.into_body(), 64 * 1024)
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert!(
+            !json["files"].to_string().contains(".peckboard"),
+            "hidden without the param"
+        );
+        let response = app(state.clone())
+            .oneshot(get(
+                "/api/folders/f1/markdown-files?worktree=DEADBEEF",
+                &token,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let response = app(state)
+            .oneshot(get(
+                "/api/folders/f1/markdown-files?worktree=ffffffff",
+                &token,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
     }
 }

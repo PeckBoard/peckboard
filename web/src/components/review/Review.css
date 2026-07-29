@@ -180,6 +180,37 @@
   max-width: 100%;
 }
 
+/* Folder-vs-worktree source radio for the `file` kind. A fieldset so the
+   pair is one labelled group to a screen reader; visually just a quiet
+   inline row above whichever picker it selects. */
+.review-wizard__file-source {
+  display: flex;
+  align-items: center;
+  gap: var(--space-4);
+  margin: 0;
+  padding: 0;
+  border: 0;
+}
+
+.review-wizard__file-source legend {
+  padding: 0;
+  margin-bottom: var(--space-1);
+}
+
+.review-wizard__file-source-option {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: var(--text-sm);
+  color: var(--text2);
+  cursor: pointer;
+}
+
+.review-wizard__file-source-option input {
+  accent-color: var(--accent);
+  cursor: pointer;
+}
+
 .review-wizard__preview {
   min-width: 0;
   max-height: 340px;

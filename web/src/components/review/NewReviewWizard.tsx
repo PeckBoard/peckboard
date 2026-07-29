@@ -11,9 +11,11 @@ import {
   createReview,
   fileSourceRef,
   listMarkdownFiles,
+  listWorktrees,
   readMarkdownFile,
   type DocReview,
   type ReviewSourceKind,
+  type WorktreeEntry,
 } from '../../lib/review'
 import './Review.css'
 
@@ -93,10 +95,29 @@ interface PlanRow {
   markdown: string
 }
 
-/** Fetch the pickable set for one (kind, folder) pair. Module-level so the
- *  effect that calls it stays a plain promise chain. */
-async function loadCandidates(kind: ReviewSourceKind, folderId: string): Promise<Candidate[]> {
+/** Fetch the pickable set for one (kind, scope) pair. Module-level so the
+ *  effect that calls it stays a plain promise chain. A `worktree` narrows
+ *  the `file` kind to one card worktree; its folder wins over `folderId`. */
+async function loadCandidates(
+  kind: ReviewSourceKind,
+  folderId: string,
+  worktree: WorktreeEntry | null,
+): Promise<Candidate[]> {
   if (kind === 'file') {
+    if (worktree) {
+      const prefix = `.peckboard/worktrees/${worktree.id8}/`
+      const files = await listMarkdownFiles(worktree.folder_id, worktree.id8)
+      return files
+        .slice()
+        .sort((a, b) => a.path.localeCompare(b.path, undefined, { sensitivity: 'base' }))
+        .map((f) => ({
+          ref: fileSourceRef(worktree.folder_id, f.path),
+          label: f.path.split('/').pop() ?? f.path,
+          // The prefix is the same on every row — show the path inside the
+          // worktree, keep the full one in the ref.
+          detail: f.path.startsWith(prefix) ? f.path.slice(prefix.length) : f.path,
+        }))
+    }
     if (!folderId) return []
     const files = await listMarkdownFiles(folderId)
     // The walk returns whatever order the filesystem hands back, which reads
@@ -173,6 +194,13 @@ export default function NewReviewWizard({ onClose, onCreated }: Props) {
   const [previewError, setPreviewError] = useState<string | null>(null)
   const [submitting, setSubmitting] = useState(false)
   const [error, setError] = useState<string | null>(null)
+  /** Where a `file` review reads from: the folder tree, or one card
+      worktree (`.peckboard/worktrees/<id8>`) the folder walk never shows. */
+  const [fileSource, setFileSource] = useState<'folder' | 'worktree'>('folder')
+  // `null` while the worktree list is in flight.
+  const [worktrees, setWorktrees] = useState<WorktreeEntry[] | null>(null)
+  const [worktreesError, setWorktreesError] = useState<string | null>(null)
+  const [pickedWorktree, setPickedWorktree] = useState<WorktreeEntry | null>(null)
 
   useEffect(() => {
     void fetchFolders()
@@ -193,11 +221,32 @@ export default function NewReviewWizard({ onClose, onCreated }: Props) {
     setPreviewError(null)
   }
 
-  // Load the option set for the current (kind, folder) pair.
+  // The worktree list is global (all folders), fetched when the worktree
+  // mode first opens.
+  useEffect(() => {
+    if (step !== 2 || kind !== 'file' || fileSource !== 'worktree' || worktrees !== null) return
+    let cancelled = false
+    void listWorktrees()
+      .then((ws) => {
+        if (cancelled) return
+        setWorktrees(ws)
+        setWorktreesError(null)
+      })
+      .catch((e: unknown) => {
+        if (cancelled) return
+        setWorktrees([])
+        setWorktreesError(describeActionError(e, "Couldn't list the worktrees."))
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [step, kind, fileSource, worktrees])
+
+  // Load the option set for the current (kind, folder, worktree) scope.
   useEffect(() => {
     if (step !== 2) return
     let cancelled = false
-    void loadCandidates(kind, folderId)
+    void loadCandidates(kind, folderId, fileSource === 'worktree' ? pickedWorktree : null)
       .then((cs) => {
         if (cancelled) return
         setCandidates(cs)
@@ -211,7 +260,7 @@ export default function NewReviewWizard({ onClose, onCreated }: Props) {
     return () => {
       cancelled = true
     }
-  }, [step, kind, folderId])
+  }, [step, kind, folderId, fileSource, pickedWorktree])
 
   // Read the picked document for the preview pane. Plans arrive with their
   // markdown already attached, so they never reach this.
@@ -252,16 +301,39 @@ export default function NewReviewWizard({ onClose, onCreated }: Props) {
     [candidates, picked],
   )
 
+  const worktreeItems: MenuItem[] = useMemo(
+    () =>
+      (worktrees ?? []).map((w) => ({
+        label: w.card_title ?? w.branch,
+        description: `${w.folder_name} · ${w.id8}`,
+        searchText: `${w.folder_name} ${w.branch} ${w.id8} ${w.card_title ?? ''}`,
+        active: pickedWorktree?.id8 === w.id8 && pickedWorktree?.folder_id === w.folder_id,
+        onSelect: () => {
+          if (pickedWorktree?.id8 === w.id8 && pickedWorktree?.folder_id === w.folder_id) return
+          setPickedWorktree(w)
+          // Same reset as a folder change — the option set is new.
+          setCandidates(null)
+          setCandidatesError(null)
+          setPicked(null)
+          setPreview(null)
+          setPreviewError(null)
+        },
+      })),
+    [worktrees, pickedWorktree],
+  )
+
   // Why Create is disabled, stated next to the button — a disabled control
   // with no reason reads as broken.
   const disabledReason =
-    kind === 'file' && !folderId
+    kind === 'file' && fileSource === 'folder' && !folderId
       ? 'Add a folder first'
-      : !picked
-        ? `Pick a ${pickerLabel.toLowerCase()}`
-        : !title.trim()
-          ? 'Give the review a title'
-          : null
+      : kind === 'file' && fileSource === 'worktree' && !pickedWorktree
+        ? 'Pick a worktree first'
+        : !picked
+          ? `Pick a ${pickerLabel.toLowerCase()}`
+          : !title.trim()
+            ? 'Give the review a title'
+            : null
 
   const submit = async () => {
     if (!picked || disabledReason) return
@@ -272,7 +344,12 @@ export default function NewReviewWizard({ onClose, onCreated }: Props) {
         source_kind: kind,
         source_ref: picked.ref,
         title: title.trim(),
-        ...(kind === 'file' ? { folder_id: folderId } : {}),
+        ...(kind === 'file'
+          ? {
+              folder_id:
+                fileSource === 'worktree' && pickedWorktree ? pickedWorktree.folder_id : folderId,
+            }
+          : {}),
       })
       onCreated(detail.review)
     } catch (e) {
@@ -350,38 +427,118 @@ export default function NewReviewWizard({ onClose, onCreated }: Props) {
           <div className="review-wizard__body">
             <div className="review-wizard__form">
               {kind === 'file' && (
-                <div className="form-field">
-                  <label className="form-label" htmlFor="review-wizard-folder">
-                    Folder
-                  </label>
-                  {folders.length > 0 ? (
-                    <select
-                      id="review-wizard-folder"
-                      className="form-input"
-                      data-testid="review-wizard-folder"
-                      value={folderId}
-                      onChange={(e) => {
-                        // Re-picking the folder that is already selected must
-                        // not reset the option set: the loader effect keys on
-                        // `folderId`, so with nothing to re-run the picker
-                        // would sit on "Loading…" forever.
-                        if (e.target.value === folderId) return
-                        setChosenFolderId(e.target.value)
-                        resetPick()
-                      }}
-                    >
-                      {folders.map((f) => (
-                        <option key={f.id} value={f.id}>
-                          {f.name} — {f.path}
-                        </option>
-                      ))}
-                    </select>
+                <>
+                  {/* Where the file comes from. A radio rather than a third
+                      source kind: a worktree file IS a file review — same
+                      ref shape, preview and apply — it just lists from a
+                      tree the folder walk hides. */}
+                  <fieldset
+                    className="review-wizard__file-source"
+                    data-testid="review-wizard-file-source"
+                  >
+                    <legend className="form-label">Review from</legend>
+                    <label className="review-wizard__file-source-option">
+                      <input
+                        type="radio"
+                        name="review-wizard-file-source"
+                        data-testid="review-wizard-source-folder"
+                        checked={fileSource === 'folder'}
+                        onChange={() => {
+                          if (fileSource === 'folder') return
+                          setFileSource('folder')
+                          setPickedWorktree(null)
+                          resetPick()
+                        }}
+                      />
+                      <span>Folder</span>
+                    </label>
+                    <label className="review-wizard__file-source-option">
+                      <input
+                        type="radio"
+                        name="review-wizard-file-source"
+                        data-testid="review-wizard-source-worktree"
+                        checked={fileSource === 'worktree'}
+                        onChange={() => {
+                          if (fileSource === 'worktree') return
+                          setFileSource('worktree')
+                          resetPick()
+                        }}
+                      />
+                      <span>Worktree</span>
+                    </label>
+                  </fieldset>
+                  {fileSource === 'folder' ? (
+                    <div className="form-field">
+                      <label className="form-label" htmlFor="review-wizard-folder">
+                        Folder
+                      </label>
+                      {folders.length > 0 ? (
+                        <select
+                          id="review-wizard-folder"
+                          className="form-input"
+                          data-testid="review-wizard-folder"
+                          value={folderId}
+                          onChange={(e) => {
+                            // Re-picking the folder that is already selected
+                            // must not reset the option set: the loader
+                            // effect keys on `folderId`, so with nothing to
+                            // re-run the picker would sit on "Loading…"
+                            // forever.
+                            if (e.target.value === folderId) return
+                            setChosenFolderId(e.target.value)
+                            resetPick()
+                          }}
+                        >
+                          {folders.map((f) => (
+                            <option key={f.id} value={f.id}>
+                              {f.name} — {f.path}
+                            </option>
+                          ))}
+                        </select>
+                      ) : (
+                        <p className="form-hint">
+                          No folders yet. Add one from the Folders page, then come back.
+                        </p>
+                      )}
+                    </div>
                   ) : (
-                    <p className="form-hint">
-                      No folders yet. Add one from the Folders page, then come back.
-                    </p>
+                    <div className="form-field">
+                      <label className="form-label" htmlFor="review-wizard-worktree">
+                        Worktree
+                      </label>
+                      <MenuButton
+                        id="review-wizard-worktree"
+                        testId="review-wizard-worktree"
+                        searchTestId="review-wizard-worktree-search"
+                        items={worktreeItems}
+                        searchable
+                        haspopup="listbox"
+                        matchTriggerWidth
+                        align="left"
+                        ariaLabel="Choose a worktree"
+                        listLabel="Worktree options"
+                        searchPlaceholder="Search worktrees…"
+                        emptyLabel={worktrees === null ? 'Loading…' : 'No worktrees found'}
+                        triggerClassName="form-input review-wizard__picker"
+                      >
+                        <span className="review-wizard__picker-value">
+                          {pickedWorktree
+                            ? (pickedWorktree.card_title ?? pickedWorktree.branch)
+                            : 'Select a worktree…'}
+                        </span>
+                        {pickedWorktree && (
+                          <span className="review-wizard__picker-detail">
+                            {pickedWorktree.folder_name} · {pickedWorktree.id8}
+                          </span>
+                        )}
+                      </MenuButton>
+                      <FieldError
+                        message={worktreesError ?? undefined}
+                        testId="review-wizard-worktree-error"
+                      />
+                    </div>
                   )}
-                </div>
+                </>
               )}
 
               <div className="form-field">
@@ -401,7 +558,11 @@ export default function NewReviewWizard({ onClose, onCreated }: Props) {
                   listLabel={`${pickerLabel} options`}
                   searchPlaceholder={`Search ${pickerLabel.toLowerCase()}s…`}
                   emptyLabel={
-                    candidates === null ? 'Loading…' : `No ${pickerLabel.toLowerCase()}s found`
+                    kind === 'file' && fileSource === 'worktree' && !pickedWorktree
+                      ? 'Pick a worktree first'
+                      : candidates === null
+                        ? 'Loading…'
+                        : `No ${pickerLabel.toLowerCase()}s found`
                   }
                   triggerClassName="form-input review-wizard__picker"
                 >
