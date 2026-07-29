@@ -867,6 +867,10 @@ pub async fn resume_running_reviews(state: &Arc<AppState>) {
             }
         }
 
+        // Logged before the dispatch, not after: a CLI provider can sit in
+        // its spawn path for minutes, and a line that only appears on the
+        // far side of that makes the wait look like a hang.
+        tracing::info!(review_id = %review.id, session_id = %session_id, "Resuming interrupted review pass");
         if let Err(e) = crate::service::mcp_server::AppExpertDispatcher::new(state.clone())
             .resume_session(&session_id, &instruction)
             .await
@@ -879,7 +883,6 @@ pub async fn resume_running_reviews(state: &Arc<AppState>) {
             continue;
         }
         resumed += 1;
-        tracing::info!(review_id = %review.id, session_id = %session_id, "Resumed interrupted review pass");
     }
 
     if resumed > 0 || freed > 0 {
@@ -2430,6 +2433,8 @@ mod tests {
         // still points at, so the row is always there or the column is
         // NULL (the case above).
     }
+
+    /// A dispatch that cannot start (no provider for the session's model,
     /// missing credentials) must not leave the review spinning either.
     #[tokio::test]
     async fn a_restart_frees_the_review_when_the_resume_cannot_dispatch() {

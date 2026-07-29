@@ -207,7 +207,18 @@ async fn main() -> anyhow::Result<()> {
     // that replaced this binary). Resume the interrupted turn where one was
     // in flight, and free the rest — nothing else ever moves a review off
     // `running`, so a stuck one disables Run pass forever.
-    peckboard::routes::doc_reviews::resume_running_reviews(&state).await;
+    //
+    // Detached deliberately: resuming dispatches a real turn, and a CLI
+    // provider can sit in its spawn path for minutes (cursor's `--resume`
+    // took 120s in the wild). Awaited here that delay lands BEFORE the
+    // listener binds and the whole server looks hung, so recovery runs
+    // alongside startup instead of in front of it.
+    {
+        let review_state = state.clone();
+        tokio::spawn(async move {
+            peckboard::routes::doc_reviews::resume_running_reviews(&review_state).await;
+        });
+    }
 
     // Run orchestrator on a 5-second interval to pick up new cards quickly
     {
