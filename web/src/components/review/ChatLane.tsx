@@ -20,6 +20,9 @@ interface Props {
   /** The review's AI session — null until the first pass creates it. */
   sessionId: string | null
   status: ReviewStatus
+  /** Sent with the pass while the review has no session yet — a chat
+   *  message can be the session-creating action, so it carries the choice. */
+  model?: string
   /** Refetch the review: a sent message moves it to `running`. */
   onSent: () => void
 }
@@ -83,7 +86,7 @@ function PassTurn({ text, ts }: { text: string; ts: number }) {
  * the pass endpoint with `include_annotations: false`, so talking here never
  * consumes the annotation queue.
  */
-export default function ChatLane({ reviewId, sessionId, status, onSent }: Props) {
+export default function ChatLane({ reviewId, sessionId, status, model, onSent }: Props) {
   const events = useSessionsStore((s) =>
     sessionId ? (s.eventsBySession[sessionId] ?? EMPTY_EVENTS) : EMPTY_EVENTS,
   )
@@ -146,7 +149,7 @@ export default function ChatLane({ reviewId, sessionId, status, onSent }: Props)
     if (!message || sending || needsInput) return
     setSending(true)
     setError(null)
-    runPass(reviewId, { message, include_annotations: false })
+    runPass(reviewId, { message, include_annotations: false, model })
       .then(() => {
         setText('')
         setSending(false)

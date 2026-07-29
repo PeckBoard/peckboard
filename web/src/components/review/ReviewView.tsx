@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } fro
 
 import ConfirmDialog from '../ConfirmDialog'
 import { MenuButton, type MenuItem } from '../Dropdown'
+import ModelPicker from '../ModelPicker'
 import SafeMarkdown from '../SafeMarkdown'
 import { EMPTY_EVENTS, findOpenQuestion } from '../chat/events'
 import AnnotationRail from './AnnotationRail'
@@ -29,6 +30,8 @@ import {
   type ReviewCommentKind,
   type ReviewDetail,
 } from '../../lib/review'
+import { authedFetch } from '../../store/auth'
+import { useResourcesStore } from '../../store/resources'
 import { useSessionsStore } from '../../store/sessions'
 import { useTabsStore } from '../../store/tabs'
 import { useWsStore } from '../../store/ws'
@@ -138,6 +141,11 @@ export default function ReviewView({ reviewId, onBack }: Props) {
   const [focusLines, setFocusLines] = useState<{ start: number; end: number } | null>(null)
   const [confirmError, setConfirmError] = useState<string | null>(null)
   const [flash, setFlash] = useState(false)
+  /** Model for the FIRST pass ('' = Auto): the session is created on it.
+      Once the session exists the picker reads and writes the session. */
+  const [pendingModel, setPendingModel] = useState('')
+  /** The live session's model, fetched when the session appears. */
+  const [sessionModel, setSessionModel] = useState<string | null>(null)
 
   const versionRef = useRef<number | null>(null)
   // App hands `onBack` as an inline arrow, so it changes identity on every
@@ -206,6 +214,62 @@ export default function ReviewView({ reviewId, onBack }: Props) {
   // frame and the session event race; whichever arrives first refetches, and
   // the second is a no-op against the same version.
   const sessionId = detail?.review.session_id ?? null
+
+  // Model catalogue for the header picker — the same store the chat
+  // toolbar and PlanView read.
+  const models = useResourcesStore((s) => s.models)
+  const fetchModels = useResourcesStore((s) => s.fetchModels)
+  useEffect(() => {
+    void fetchModels()
+  }, [fetchModels])
+
+  // The pass endpoint only honours `model` on the session-creating pass,
+  // so once a session exists the picker reads the session row instead of
+  // local state.
+  useEffect(() => {
+    // No reset on session loss: the value is only ever read while a
+    // session exists, and the next session's fetch overwrites it.
+    if (!sessionId) return
+    let stale = false
+    authedFetch(`/api/sessions/${sessionId}`)
+      .then((res) => (res.ok ? (res.json() as Promise<{ model?: string | null }>) : null))
+      .then((s) => {
+        if (!stale && s) setSessionModel(s.model ?? '')
+      })
+      .catch(() => {
+        /* the picker keeps saying Auto; the next open refetches nothing —
+           harmless, the pass itself is unaffected */
+      })
+    return () => {
+      stale = true
+    }
+  }, [sessionId])
+
+  const changeModel = (id: string) => {
+    if (!sessionId) {
+      setPendingModel(id)
+      return
+    }
+    // Same PATCH the chat toolbar uses, handover and child-recycling
+    // included. Refusals (409 while the reviewer is mid-turn) surface in
+    // the header's error strip.
+    authedFetch(`/api/sessions/${sessionId}`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ model: id }),
+    })
+      .then(async (res) => {
+        if (res.ok) {
+          const s = (await res.json()) as { model?: string | null }
+          setSessionModel(s.model ?? '')
+          setActionError(null)
+        } else {
+          const e = (await res.json().catch(() => null)) as { error?: string } | null
+          setActionError(e?.error ?? `Couldn't switch the model (${res.status}).`)
+        }
+      })
+      .catch(() => setActionError("Couldn't switch the model."))
+  }
   // The screen owns the review session's event log: the chat lane reads it
   // out of the store, and the pinned question has to appear whichever rail
   // tab is open — so neither of them can be the one subscribing.
@@ -274,6 +338,7 @@ export default function ReviewView({ reviewId, onBack }: Props) {
       await runPass(review.id, {
         message: `Clarify (do not change the document): «${quote}»${body ? ` — ${body}` : ''}`,
         include_annotations: false,
+        model: sessionId ? undefined : pendingModel || undefined,
       })
       setNotice('Asked for a clarification — the answer lands in the chat lane.')
       load()
@@ -311,7 +376,10 @@ export default function ReviewView({ reviewId, onBack }: Props) {
     setSheet(null)
     setPassBusy(true)
     setActionError(null)
-    runPass(review.id, { include_annotations: true })
+    runPass(review.id, {
+      include_annotations: true,
+      model: sessionId ? undefined : pendingModel || undefined,
+    })
       .then(() => {
         setNotice('Pass started — the reviewer is working through the queue.')
         setPassBusy(false)
@@ -419,7 +487,13 @@ export default function ReviewView({ reviewId, onBack }: Props) {
       )
     if (which === 'chat')
       return (
-        <ChatLane reviewId={review.id} sessionId={sessionId} status={review.status} onSent={load} />
+        <ChatLane
+          reviewId={review.id}
+          sessionId={sessionId}
+          status={review.status}
+          model={sessionId ? undefined : pendingModel || undefined}
+          onSent={load}
+        />
       )
     return (
       <HistoryTab
@@ -504,6 +578,18 @@ export default function ReviewView({ reviewId, onBack }: Props) {
           )}
           {/* On mobile Run pass lives in the bottom bar instead — one
               instance of the control, and the header keeps its title. */}
+          <ModelPicker
+            value={sessionId ? (sessionModel ?? '') : pendingModel}
+            onChange={changeModel}
+            models={models}
+            defaultLabel="Auto"
+            triggerClassName="review-view__model"
+            showChevron={false}
+            align="right"
+            ariaLabel="Review model"
+            testId="review-model"
+            emptyHint="Loading models…"
+          />
           {!isMobile && (
             <button
               type="button"

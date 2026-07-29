@@ -216,6 +216,10 @@ export interface RunPassInput {
   /** Defaults to true server-side. The chat lane and Clarify pass false so
    *  queued annotations stay pending for a deliberate pass. */
   include_annotations?: boolean
+  /** Model id for the review session. Honoured only by the pass that
+   *  CREATES the session — a live session's model is never swapped via a
+   *  pass (that goes through PATCH /api/sessions/{id} instead). */
+  model?: string
 }
 
 export async function runPass(id: string, input: RunPassInput = {}): Promise<void> {

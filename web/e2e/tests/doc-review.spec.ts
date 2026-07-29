@@ -611,4 +611,65 @@ test.describe('document review — desktop', () => {
     })
     await expect(page.locator('.tab-opened', { hasText: 'Nav review' })).toHaveCount(0)
   })
+
+  test('the header model picker pins the first pass and switches the live session', async ({
+    request,
+    page,
+  }) => {
+    const { token, auth } = await authenticate(request)
+    const folder = await seedFolder(request, auth, 'model')
+    const reviewId = await createReview(request, auth, {
+      source_kind: 'file',
+      source_ref: `${folder.id}:docs/onboarding.md`,
+      title: 'Model review',
+    })
+
+    await loadAt(page, token, `/review/${reviewId}`)
+    await expect(page.getByTestId('review-view')).toBeVisible({ timeout: 15_000 })
+
+    // No session yet: the picker holds the choice the session will be
+    // created on. Deliberately NOT armReviewer — picking `mock:doc-review`
+    // here is the UI's own version of that pin.
+    await expect(page.getByTestId('review-model')).toContainText('Auto')
+    await page.getByTestId('review-model').click()
+    await page.locator('.model-picker-search').fill('doc-review')
+    await page.getByTestId('review-model-option-mock:doc-review').click()
+
+    await annotate(page, 3, 'wrong', 'we ship on Tuesdays')
+    await page.getByTestId('review-run-pass').click()
+
+    // The pass creates the session on the picked model.
+    let sessionId: string | null = null
+    await expect
+      .poll(
+        async () => {
+          const d = await getReview(request, auth, reviewId)
+          sessionId = d.review.session_id
+          return sessionId
+        },
+        { timeout: 20_000, message: 'the pass never created a session' },
+      )
+      .not.toBeNull()
+    const session = await request.get(`/api/sessions/${sessionId!}`, { headers: auth })
+    expect(((await session.json()) as { model: string | null }).model).toBe('mock:doc-review')
+
+    // Let the pass finish before switching — a mid-turn PATCH is refused.
+    await expect(page.getByTestId('review-version')).toHaveText('v2', { timeout: 30_000 })
+
+    // With a live session the picker PATCHes it — the next pass runs on the
+    // new model. Same provider, so no handover: the write is immediate.
+    await page.getByTestId('review-model').click()
+    await page.locator('.model-picker-search').fill('happy-path')
+    await page.getByTestId('review-model-option-mock:happy-path').click()
+    await expect
+      .poll(
+        async () => {
+          const res = await request.get(`/api/sessions/${sessionId!}`, { headers: auth })
+          return ((await res.json()) as { model: string | null }).model
+        },
+        { timeout: 10_000, message: 'the model switch never landed on the session' },
+      )
+      .toBe('mock:happy-path')
+    await expect(page.getByTestId('review-model')).not.toContainText('Auto')
+  })
 })

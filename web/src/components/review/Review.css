@@ -311,6 +311,30 @@
   flex-shrink: 0;
 }
 
+/* The reviewer model, worn as a quiet pill (the chat toolbar's idiom).
+   Before the first pass it holds the choice the session will be created
+   on; after that it mirrors — and switches — the session itself. */
+.review-view__model {
+  display: flex;
+  align-items: center;
+  max-width: 16ch;
+  min-width: 0;
+  font-size: 10px;
+  font-weight: 600;
+  padding: 2px 8px;
+  border-radius: var(--radius-full);
+  background: var(--surface2);
+  color: var(--text3);
+  border: 1px solid transparent;
+  cursor: pointer;
+  transition: all var(--transition);
+}
+
+.review-view__model:hover {
+  border-color: var(--border);
+  color: var(--text2);
+}
+
 /* Clarify and apply confirm themselves here rather than in a toast: the
    answer they refer to arrives on this screen, not over it. */
 .review-view__notice {
