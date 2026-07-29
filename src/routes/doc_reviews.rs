@@ -31,6 +31,7 @@ use crate::auth::middleware::{AuthUser, require_auth};
 use crate::db::models::{DocReview, DocReviewComment, NewSession};
 use crate::service::doc_review_sources as sources;
 use crate::service::doc_reviews as review_service;
+use crate::service::github_pr;
 use crate::service::mcp_server::ExpertDispatcher;
 use crate::state::AppState;
 use crate::ws::broadcaster::WsEvent;
@@ -61,6 +62,11 @@ pub fn router(state: Arc<AppState>) -> Router<Arc<AppState>> {
         .route("/api/doc-reviews/{id}/stop", post(stop_pass))
         .route("/api/doc-reviews/{id}/apply", post(apply))
         .route("/api/doc-reviews/{id}/revert/{n}", post(revert))
+        .route(
+            "/api/doc-reviews/{id}/pr",
+            get(get_pr).put(link_pr).delete(unlink_pr),
+        )
+        .route("/api/doc-reviews/{id}/pr/sync", post(sync_pr))
         .route_layer(middleware::from_fn_with_state(state, require_auth))
 }
 
@@ -368,6 +374,16 @@ async fn update_comment(
         .await
     {
         Ok(Some(c)) => {
+            // Resolving an annotation that came from a pull request answers
+            // it there too. The reviewer asked on GitHub; a resolution they
+            // never see is half a conversation.
+            if crate::db::crud::RESOLUTION_ACTIONS.contains(&c.status.as_str()) {
+                github_pr::answer_resolutions(
+                    state.db.clone(),
+                    id.clone(),
+                    vec![(c.id.clone(), c.status.clone(), c.resolution_note.clone())],
+                );
+            }
             broadcast_by_id(&state, &id).await;
             Ok(Json(serde_json::json!({ "comment": c })))
         }
@@ -1019,8 +1035,21 @@ async fn apply(
     {
         return Err(err(StatusCode::BAD_REQUEST, e));
     }
-    if finish && let Err(e) = state.db.set_doc_review_status(&id, "approved").await {
-        return Err(err(StatusCode::INTERNAL_SERVER_ERROR, e));
+    if finish {
+        if let Err(e) = state.db.set_doc_review_status(&id, "approved").await {
+            return Err(err(StatusCode::INTERNAL_SERVER_ERROR, e));
+        }
+        // A finished plan review is what "approved" means for the plan
+        // itself — the flag the old plan-review flow set, and what the plan
+        // viewer's badge still reads. Set after the write: `write_plan`
+        // upserts the plan, which is what bumps it back to proposed.
+        if review.source_kind == "plan" {
+            state
+                .db
+                .set_plan_status(&review.source_ref, "approved")
+                .await
+                .ok();
+        }
     }
     let updated = state
         .db
@@ -1064,6 +1093,215 @@ async fn revert(
         "review": review,
         "version": version,
         "markdown": target.markdown,
+    })))
+}
+
+// ── pull request link ─────────────────────────────────────────────
+//
+// A review of a markdown file can be tied to the pull request that changes
+// it. GitHub's line comments on that file then arrive as annotations, and
+// resolving one answers its thread. Nothing here reaches the network unless
+// a review is actually linked — an unlinked review never sees GitHub.
+
+/// GET /api/doc-reviews/{id}/pr → the link, whether GitHub is configured at
+/// all, and the PR we would suggest for an unlinked file review.
+async fn get_pr(State(state): State<Arc<AppState>>, Path(id): Path<String>) -> impl IntoResponse {
+    let review = match state.db.get_doc_review(&id).await {
+        Ok(Some(r)) => r,
+        Ok(None) => return Err(err(StatusCode::NOT_FOUND, "review not found")),
+        Err(e) => return Err(err(StatusCode::INTERNAL_SERVER_ERROR, e)),
+    };
+    let link = state.db.get_doc_review_pr_link(&id).await.ok().flatten();
+    let configured = github_pr::config(&state.db).await.is_some();
+    // Only look for a suggestion when it could be acted on: an already
+    // linked review has its answer, and an unconfigured one can't ask.
+    let suggestion = if link.is_none() && configured {
+        suggest_pr(&state, &review).await
+    } else {
+        None
+    };
+    Ok(Json(serde_json::json!({
+        "link": link,
+        "configured": configured,
+        "suggestion": suggestion,
+    })))
+}
+
+/// The owner/repo the reviewed file's checkout points at, its path inside
+/// that checkout, and the open PR for the checkout's branch if there is one.
+async fn suggest_pr(state: &Arc<AppState>, review: &DocReview) -> Option<serde_json::Value> {
+    let (owner, repo, file_path, branch) = pr_context(state, review).await?;
+    let cfg = github_pr::config(&state.db).await?;
+    let number = match branch {
+        Some(branch) => github_pr::find_open_pr_for_branch(&cfg, &owner, &repo, &branch)
+            .await
+            .ok()
+            .flatten(),
+        None => None,
+    };
+    Some(serde_json::json!({
+        "owner": owner,
+        "repo": repo,
+        "number": number,
+        "file_path": file_path,
+    }))
+}
+
+/// Everything the git checkout under a file review can tell us: the GitHub
+/// remote, the file's repo-relative path, and the branch. `None` when the
+/// review isn't a file, isn't in a checkout, or the checkout isn't GitHub's.
+async fn pr_context(
+    state: &Arc<AppState>,
+    review: &DocReview,
+) -> Option<(String, String, String, Option<String>)> {
+    if review.source_kind != "file" {
+        return None;
+    }
+    let (folder_id, rel) = sources::split_file_ref(&review.source_ref).ok()?;
+    let root = sources::folder_root(&state.db, folder_id).await.ok()?;
+    let (checkout, file_path) = github_pr::checkout_of(&root, rel)?;
+    let remote = github_pr::origin_remote(&checkout)?;
+    let (owner, repo) = github_pr::parse_remote(&remote)?;
+    Some((owner, repo, file_path, github_pr::head_branch(&checkout)))
+}
+
+#[derive(serde::Deserialize)]
+struct LinkPrBody {
+    owner: String,
+    repo: String,
+    number: i32,
+    /// Repo-relative path of the reviewed file. Derived from the checkout
+    /// when omitted, which is the normal case — nobody should have to type
+    /// a path the review already knows.
+    file_path: Option<String>,
+}
+
+/// PUT /api/doc-reviews/{id}/pr → tie this review to a pull request.
+async fn link_pr(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+    Json(body): Json<LinkPrBody>,
+) -> impl IntoResponse {
+    let review = match state.db.get_doc_review(&id).await {
+        Ok(Some(r)) => r,
+        Ok(None) => return Err(err(StatusCode::NOT_FOUND, "review not found")),
+        Err(e) => return Err(err(StatusCode::INTERNAL_SERVER_ERROR, e)),
+    };
+    if review.source_kind != "file" {
+        return Err(err(
+            StatusCode::BAD_REQUEST,
+            "only a file review can be linked to a pull request",
+        ));
+    }
+    let (owner, repo) = (body.owner.trim(), body.repo.trim());
+    if owner.is_empty() || repo.is_empty() || body.number < 1 {
+        return Err(err(
+            StatusCode::BAD_REQUEST,
+            "owner, repo and a positive number are required",
+        ));
+    }
+    let file_path = match body.file_path.map(|p| p.trim().to_string()) {
+        Some(p) if !p.is_empty() => p,
+        _ => match pr_context(&state, &review).await {
+            Some((_, _, path, _)) => path,
+            None => {
+                return Err(err(
+                    StatusCode::BAD_REQUEST,
+                    "this file isn't in a git checkout — pass file_path explicitly",
+                ));
+            }
+        },
+    };
+    match state
+        .db
+        .set_doc_review_pr_link(&id, owner, repo, body.number, &file_path)
+        .await
+    {
+        Ok(link) => Ok(Json(serde_json::json!({ "link": link }))),
+        Err(e) => Err(err(StatusCode::INTERNAL_SERVER_ERROR, e)),
+    }
+}
+
+/// DELETE /api/doc-reviews/{id}/pr → forget the pull request. Annotations it
+/// imported stay: they were read and answered like any other.
+async fn unlink_pr(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> impl IntoResponse {
+    match state.db.clear_doc_review_pr_link(&id).await {
+        Ok(_) => Ok(StatusCode::NO_CONTENT),
+        Err(e) => Err(err(StatusCode::INTERNAL_SERVER_ERROR, e)),
+    }
+}
+
+/// POST /api/doc-reviews/{id}/pr/sync → pull the PR's line comments on this
+/// file in as annotations. Idempotent: a comment already imported is
+/// recognised by its GitHub id, so syncing twice imports nothing twice.
+async fn sync_pr(State(state): State<Arc<AppState>>, Path(id): Path<String>) -> impl IntoResponse {
+    let review = match state.db.get_doc_review(&id).await {
+        Ok(Some(r)) => r,
+        Ok(None) => return Err(err(StatusCode::NOT_FOUND, "review not found")),
+        Err(e) => return Err(err(StatusCode::INTERNAL_SERVER_ERROR, e)),
+    };
+    let Ok(Some(link)) = state.db.get_doc_review_pr_link(&id).await else {
+        return Err(err(
+            StatusCode::BAD_REQUEST,
+            "this review isn't linked to a pull request",
+        ));
+    };
+    let Some(cfg) = github_pr::config(&state.db).await else {
+        return Err(err(
+            StatusCode::BAD_REQUEST,
+            "no GitHub token configured — set one on the github-bridge plugin or in GITHUB_TOKEN",
+        ));
+    };
+    let comments =
+        match github_pr::list_review_comments(&cfg, &link.owner, &link.repo, link.number).await {
+            Ok(cs) => cs,
+            Err(e) => return Err(err(StatusCode::BAD_GATEWAY, e)),
+        };
+
+    let mut imported = 0usize;
+    let mut skipped = 0usize;
+    for c in comments {
+        // Comments on other files in the same PR are not about this
+        // document; a comment with no line is on the file as a whole and has
+        // nothing to anchor to.
+        if c.path != link.file_path {
+            continue;
+        }
+        let Some(line) = c.anchor_line() else {
+            skipped += 1;
+            continue;
+        };
+        // The PR's line numbers are the repo file's. They match the review's
+        // current version until a pass revises it; after that the anchor
+        // remap moves them with the text like any other annotation.
+        let body = format!("@{} on GitHub: {}", c.author, c.body.trim());
+        match state
+            .db
+            .import_doc_review_comment(
+                &id,
+                review.current_version,
+                (line, line),
+                None,
+                "comment",
+                &body,
+                "github_pr",
+                &c.id.to_string(),
+            )
+            .await
+        {
+            Ok((_, true)) => imported += 1,
+            Ok((_, false)) => {}
+            Err(e) => return Err(err(StatusCode::INTERNAL_SERVER_ERROR, e)),
+        }
+    }
+    state.db.touch_doc_review_pr_sync(&id).await.ok();
+    broadcast_by_id(&state, &id).await;
+    Ok(Json(serde_json::json!({
+        "imported": imported,
+        "skipped_without_line": skipped,
     })))
 }
 
@@ -1497,6 +1735,67 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn a_revert_puts_every_anchor_back_on_the_text_it_marked() {
+        let dir = tempfile::tempdir().unwrap();
+        let workspace = tempfile::tempdir().unwrap();
+        let (state, token) = fixture(dir.path(), workspace.path()).await;
+        let created = json_body(
+            app(state.clone())
+                .oneshot(req(
+                    "POST",
+                    "/api/doc-reviews",
+                    &token,
+                    Some(serde_json::json!({
+                        "source_kind": "file",
+                        "source_ref": "f1:docs/doc.md",
+                    })),
+                ))
+                .await
+                .unwrap(),
+        )
+        .await;
+        let id = created["review"]["id"].as_str().unwrap().to_string();
+        let comment = state
+            .db
+            .add_doc_review_comment(&id, 1, (4, 4), Some("line three"), "comment", "keep this")
+            .await
+            .unwrap();
+
+        // A pass pushes the annotated line down...
+        state
+            .db
+            .insert_doc_review_version(
+                &id,
+                "# Doc Title\n\nA new opener.\n\nline two\nline three\n",
+                "pass 1",
+                "assistant",
+            )
+            .await
+            .unwrap();
+        let moved = state.db.list_doc_review_comments(&id, false).await.unwrap();
+        assert_eq!((moved[0].start_line, moved[0].end_line), (6, 6));
+
+        // ...and reverting brings it back with the text, on the version it
+        // now addresses.
+        let response = app(state.clone())
+            .oneshot(req(
+                "POST",
+                &format!("/api/doc-reviews/{id}/revert/1"),
+                &token,
+                None,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let back = state.db.list_doc_review_comments(&id, false).await.unwrap();
+        assert_eq!(back[0].id, comment.id);
+        assert_eq!(
+            (back[0].version, back[0].start_line, back[0].end_line),
+            (3, 4, 4)
+        );
     }
 
     #[tokio::test]
@@ -2453,5 +2752,117 @@ mod tests {
             state.db.get_doc_review(&id).await.unwrap().unwrap().status,
             "annotating"
         );
+    }
+
+    #[tokio::test]
+    async fn a_pull_request_links_to_a_file_review_and_never_to_a_plan() {
+        let dir = tempfile::tempdir().unwrap();
+        let workspace = tempfile::tempdir().unwrap();
+        let (state, token) = fixture(dir.path(), workspace.path()).await;
+        let id = seed_review(&state, &token).await;
+        let pr_url = format!("/api/doc-reviews/{id}/pr");
+        let get_pr = |state: Arc<AppState>, token: String, url: String| async move {
+            json_body(
+                app(state)
+                    .oneshot(req("GET", &url, &token, None))
+                    .await
+                    .unwrap(),
+            )
+            .await
+        };
+
+        let pr = get_pr(state.clone(), token.clone(), pr_url.clone()).await;
+        assert!(pr["link"].is_null(), "nothing linked yet: {pr}");
+
+        // Syncing before linking is refused without reaching the network.
+        let response = app(state.clone())
+            .oneshot(req("POST", &format!("{pr_url}/sync"), &token, None))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+
+        // The fixture's file is not in a git checkout, so there is no path
+        // to derive and the caller has to say which one it means.
+        let response = app(state.clone())
+            .oneshot(req(
+                "PUT",
+                &pr_url,
+                &token,
+                Some(serde_json::json!({ "owner": "acme", "repo": "app", "number": 7 })),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+
+        let linked = json_body(
+            app(state.clone())
+                .oneshot(req(
+                    "PUT",
+                    &pr_url,
+                    &token,
+                    Some(serde_json::json!({
+                        "owner": "acme",
+                        "repo": "app",
+                        "number": 7,
+                        "file_path": "docs/doc.md",
+                    })),
+                ))
+                .await
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(linked["link"]["number"], 7, "{linked}");
+        assert_eq!(linked["link"]["file_path"], "docs/doc.md");
+
+        let pr = get_pr(state.clone(), token.clone(), pr_url.clone()).await;
+        assert_eq!(pr["link"]["owner"], "acme");
+        assert!(
+            pr["suggestion"].is_null(),
+            "a linked review has its answer already: {pr}"
+        );
+
+        // A plan is a document too, but not one a pull request changes.
+        let plan = state
+            .db
+            .upsert_plan("s-plan", None, None, "Plan", "# Plan\n")
+            .await
+            .unwrap();
+        let created = json_body(
+            app(state.clone())
+                .oneshot(req(
+                    "POST",
+                    "/api/doc-reviews",
+                    &token,
+                    Some(serde_json::json!({
+                        "source_kind": "plan",
+                        "source_ref": plan.id,
+                    })),
+                ))
+                .await
+                .unwrap(),
+        )
+        .await;
+        let plan_review = created["review"]["id"].as_str().unwrap().to_string();
+        let response = app(state.clone())
+            .oneshot(req(
+                "PUT",
+                &format!("/api/doc-reviews/{plan_review}/pr"),
+                &token,
+                Some(serde_json::json!({
+                    "owner": "acme", "repo": "app", "number": 7, "file_path": "x.md",
+                })),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+
+        // Unlinking leaves the review, and says so.
+        let response = app(state.clone())
+            .oneshot(req("DELETE", &pr_url, &token, None))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::NO_CONTENT);
+        let pr = get_pr(state.clone(), token.clone(), pr_url).await;
+        assert!(pr["link"].is_null(), "{pr}");
     }
 }

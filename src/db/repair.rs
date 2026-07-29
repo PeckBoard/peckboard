@@ -655,19 +655,6 @@ fn ensure_plans_tables(conn: &mut SqliteConnection) -> anyhow::Result<()> {
     sql_query("CREATE INDEX IF NOT EXISTS idx_plans_session ON plans (session_id)")
         .execute(conn)?;
     sql_query("CREATE INDEX IF NOT EXISTS idx_plans_card ON plans (card_id)").execute(conn)?;
-    sql_query(
-        "CREATE TABLE IF NOT EXISTS plan_comments (
-            id          TEXT PRIMARY KEY NOT NULL,
-            plan_id     TEXT NOT NULL,
-            anchor      INTEGER NOT NULL,
-            body        TEXT NOT NULL,
-            resolved    BOOLEAN NOT NULL DEFAULT 0,
-            created_at  TEXT NOT NULL
-        )",
-    )
-    .execute(conn)?;
-    sql_query("CREATE INDEX IF NOT EXISTS idx_plan_comments_plan ON plan_comments (plan_id)")
-        .execute(conn)?;
     Ok(())
 }
 

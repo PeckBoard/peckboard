@@ -399,17 +399,6 @@ diesel::table! {
 }
 
 diesel::table! {
-    plan_comments (id) {
-        id -> Text,
-        plan_id -> Text,
-        anchor -> Integer,
-        body -> Text,
-        resolved -> Bool,
-        created_at -> Text,
-    }
-}
-
-diesel::table! {
     doc_reviews (id) {
         id -> Text,
         title -> Text,
@@ -448,6 +437,20 @@ diesel::table! {
         body -> Text,
         status -> Text,
         resolution_note -> Nullable<Text>,
+        created_at -> Text,
+        external_kind -> Nullable<Text>,
+        external_id -> Nullable<Text>,
+    }
+}
+
+diesel::table! {
+    doc_review_pr_links (review_id) {
+        review_id -> Text,
+        owner -> Text,
+        repo -> Text,
+        number -> Integer,
+        file_path -> Text,
+        last_synced_at -> Nullable<Text>,
         created_at -> Text,
     }
 }
@@ -501,8 +504,8 @@ diesel::allow_tables_to_appear_in_same_query!(
     plans,
     env_vars,
     agent_vars,
-    plan_comments,
     doc_reviews,
     doc_review_versions,
     doc_review_comments,
+    doc_review_pr_links,
 );

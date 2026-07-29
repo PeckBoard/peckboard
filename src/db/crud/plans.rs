@@ -143,87 +143,10 @@ impl Db {
         .await
     }
 
-    /// Comments on a plan. When `include_resolved` is false only open
-    /// (unresolved) comments are returned.
-    pub async fn list_plan_comments(
-        &self,
-        plan_id: &str,
-        include_resolved: bool,
-    ) -> anyhow::Result<Vec<PlanComment>> {
-        let plan_id = plan_id.to_string();
-        self.with_conn(move |conn| {
-            let mut q = plan_comments::table
-                .filter(plan_comments::plan_id.eq(&plan_id))
-                .into_boxed();
-            if !include_resolved {
-                q = q.filter(plan_comments::resolved.eq(false));
-            }
-            q.order(plan_comments::anchor.asc())
-                .select(PlanComment::as_select())
-                .load(conn)
-                .map_err(Into::into)
-        })
-        .await
-    }
-
-    /// Add a per-line comment to a plan.
-    pub async fn add_plan_comment(
-        &self,
-        plan_id: &str,
-        anchor: i32,
-        body: &str,
-    ) -> anyhow::Result<PlanComment> {
-        let new = NewPlanComment {
-            id: uuid::Uuid::new_v4().to_string(),
-            plan_id: plan_id.to_string(),
-            anchor,
-            body: body.to_string(),
-            resolved: false,
-            created_at: chrono::Utc::now().to_rfc3339(),
-        };
-        self.with_conn(move |conn| {
-            diesel::insert_into(plan_comments::table)
-                .values(&new)
-                .returning(PlanComment::as_returning())
-                .get_result(conn)
-                .map_err(Into::into)
-        })
-        .await
-    }
-
-    /// Delete a single comment.
-    pub async fn delete_plan_comment(&self, id: &str) -> anyhow::Result<()> {
-        let id = id.to_string();
-        self.with_conn(move |conn| {
-            diesel::delete(plan_comments::table.find(&id)).execute(conn)?;
-            Ok(())
-        })
-        .await
-    }
-
-    /// Mark every open comment on a plan resolved (called once the comments
-    /// have been folded into a revision request).
-    pub async fn resolve_plan_comments(&self, plan_id: &str) -> anyhow::Result<usize> {
-        let plan_id = plan_id.to_string();
-        self.with_conn(move |conn| {
-            diesel::update(
-                plan_comments::table
-                    .filter(plan_comments::plan_id.eq(&plan_id))
-                    .filter(plan_comments::resolved.eq(false)),
-            )
-            .set(plan_comments::resolved.eq(true))
-            .execute(conn)
-            .map_err(Into::into)
-        })
-        .await
-    }
-
-    /// Delete a plan and all its comments.
+    /// Delete a plan.
     pub async fn delete_plan(&self, id: &str) -> anyhow::Result<usize> {
         let id = id.to_string();
         self.with_conn(move |conn| {
-            diesel::delete(plan_comments::table.filter(plan_comments::plan_id.eq(&id)))
-                .execute(conn)?;
             diesel::delete(plans::table.find(&id))
                 .execute(conn)
                 .map_err(Into::into)
@@ -285,35 +208,5 @@ mod tests {
             p1.id
         );
         assert!(db.get_plan_for_card("nope").await.unwrap().is_none());
-    }
-
-    #[tokio::test]
-    async fn comments_add_list_and_resolve() {
-        let db = Db::in_memory().unwrap();
-        let plan = db
-            .upsert_plan("sess-2", None, None, "T", "a\nb\nc")
-            .await
-            .unwrap();
-        db.add_plan_comment(&plan.id, 2, "fix line 2")
-            .await
-            .unwrap();
-        db.add_plan_comment(&plan.id, 3, "and line 3")
-            .await
-            .unwrap();
-        assert_eq!(
-            db.list_plan_comments(&plan.id, false).await.unwrap().len(),
-            2
-        );
-
-        let resolved = db.resolve_plan_comments(&plan.id).await.unwrap();
-        assert_eq!(resolved, 2);
-        assert_eq!(
-            db.list_plan_comments(&plan.id, false).await.unwrap().len(),
-            0
-        );
-        assert_eq!(
-            db.list_plan_comments(&plan.id, true).await.unwrap().len(),
-            2
-        );
     }
 }

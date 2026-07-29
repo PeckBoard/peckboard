@@ -146,6 +146,13 @@ export default function AnnotationRail({
               L{c.start_line}
               {c.end_line !== c.start_line ? `–${c.end_line}` : ''}
             </span>
+            {/* Where it came from, when that isn't here. The reviewer wrote
+                it on the pull request, and the resolution goes back there. */}
+            {c.external_kind === 'github_pr' && (
+              <span className="review-annotation__origin" data-testid="review-annotation-origin">
+                PR
+              </span>
+            )}
           </span>
           {c.quote && <span className="review-annotation__quote">{c.quote}</span>}
           {c.body && <span className="review-annotation__body">{c.body}</span>}

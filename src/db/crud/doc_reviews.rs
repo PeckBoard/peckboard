@@ -10,6 +10,7 @@
 use diesel::prelude::*;
 
 use crate::db::Db;
+use crate::db::crud::doc_review_anchors::line_map;
 use crate::db::models::*;
 use crate::db::schema::*;
 
@@ -200,17 +201,29 @@ impl Db {
             let Some(current) = current else {
                 anyhow::bail!("doc review not found: {review_id}");
             };
+            let previous: Option<String> = doc_review_versions::table
+                .filter(doc_review_versions::review_id.eq(&review_id))
+                .filter(doc_review_versions::version.eq(current))
+                .select(doc_review_versions::markdown)
+                .first(conn)
+                .optional()?;
             let next = current + 1;
             diesel::insert_into(doc_review_versions::table)
                 .values(&NewDocReviewVersion {
                     review_id: review_id.clone(),
                     version: next,
-                    markdown,
+                    markdown: markdown.clone(),
                     note,
                     created_by,
                     created_at: now.clone(),
                 })
                 .execute(conn)?;
+            // The revision just moved the lines every annotation hangs off.
+            // Remap them inside the same lock, so no reader can catch the
+            // new document sitting beside the old document's anchors.
+            if let Some(previous) = previous.filter(|p| *p != markdown) {
+                remap_comments(conn, &review_id, next, &previous, &markdown)?;
+            }
             diesel::update(doc_reviews::table.find(&review_id))
                 .set((
                     doc_reviews::current_version.eq(next),
@@ -311,6 +324,8 @@ impl Db {
             status: "pending".into(),
             resolution_note: None,
             created_at: chrono::Utc::now().to_rfc3339(),
+            external_kind: None,
+            external_id: None,
         };
         self.with_conn(move |conn| {
             diesel::insert_into(doc_review_comments::table)
@@ -318,6 +333,141 @@ impl Db {
                 .returning(DocReviewComment::as_returning())
                 .get_result(conn)
                 .map_err(Into::into)
+        })
+        .await
+    }
+
+    /// Insert an annotation that came from somewhere else — today, a GitHub
+    /// pull-request review comment. Idempotent on `(review_id,
+    /// external_id)`: a re-sync of a PR that has said nothing new is a
+    /// no-op, not a second copy of every thread.
+    ///
+    /// Returns the annotation, and whether this call is what created it.
+    pub async fn import_doc_review_comment(
+        &self,
+        review_id: &str,
+        version: i32,
+        lines: (i32, i32),
+        quote: Option<&str>,
+        kind: &str,
+        body: &str,
+        external_kind: &str,
+        external_id: &str,
+    ) -> anyhow::Result<(DocReviewComment, bool)> {
+        let (start_line, end_line) = lines;
+        let new = NewDocReviewComment {
+            id: uuid::Uuid::new_v4().to_string(),
+            review_id: review_id.to_string(),
+            version,
+            start_line,
+            end_line,
+            quote: quote.map(str::to_string),
+            kind: kind.to_string(),
+            body: body.to_string(),
+            status: "pending".into(),
+            resolution_note: None,
+            created_at: chrono::Utc::now().to_rfc3339(),
+            external_kind: Some(external_kind.to_string()),
+            external_id: Some(external_id.to_string()),
+        };
+        let review_id = review_id.to_string();
+        let external_id = external_id.to_string();
+        self.with_conn(move |conn| {
+            // Look under the same lock that inserts, so two syncs racing on
+            // one review can't both decide the comment is new.
+            let existing: Option<DocReviewComment> = doc_review_comments::table
+                .filter(doc_review_comments::review_id.eq(&review_id))
+                .filter(doc_review_comments::external_id.eq(&external_id))
+                .select(DocReviewComment::as_select())
+                .first(conn)
+                .optional()?;
+            if let Some(existing) = existing {
+                return Ok((existing, false));
+            }
+            let inserted = diesel::insert_into(doc_review_comments::table)
+                .values(&new)
+                .returning(DocReviewComment::as_returning())
+                .get_result(conn)?;
+            Ok((inserted, true))
+        })
+        .await
+    }
+
+    /// The pull request this review is tied to, if any.
+    pub async fn get_doc_review_pr_link(
+        &self,
+        review_id: &str,
+    ) -> anyhow::Result<Option<DocReviewPrLink>> {
+        let review_id = review_id.to_string();
+        self.with_conn(move |conn| {
+            doc_review_pr_links::table
+                .find(&review_id)
+                .select(DocReviewPrLink::as_select())
+                .first(conn)
+                .optional()
+                .map_err(Into::into)
+        })
+        .await
+    }
+
+    /// Tie a review to a pull request, replacing any existing link. One link
+    /// per review — re-linking is how you point it somewhere else.
+    pub async fn set_doc_review_pr_link(
+        &self,
+        review_id: &str,
+        owner: &str,
+        repo: &str,
+        number: i32,
+        file_path: &str,
+    ) -> anyhow::Result<DocReviewPrLink> {
+        let new = NewDocReviewPrLink {
+            review_id: review_id.to_string(),
+            owner: owner.to_string(),
+            repo: repo.to_string(),
+            number,
+            file_path: file_path.to_string(),
+            last_synced_at: None,
+            created_at: chrono::Utc::now().to_rfc3339(),
+        };
+        self.with_conn(move |conn| {
+            diesel::insert_into(doc_review_pr_links::table)
+                .values(&new)
+                .on_conflict(doc_review_pr_links::review_id)
+                .do_update()
+                .set((
+                    doc_review_pr_links::owner.eq(&new.owner),
+                    doc_review_pr_links::repo.eq(&new.repo),
+                    doc_review_pr_links::number.eq(new.number),
+                    doc_review_pr_links::file_path.eq(&new.file_path),
+                ))
+                .returning(DocReviewPrLink::as_returning())
+                .get_result(conn)
+                .map_err(Into::into)
+        })
+        .await
+    }
+
+    /// Drop the link. The annotations it imported stay — they were read and
+    /// answered like any other, and deleting them would rewrite history.
+    pub async fn clear_doc_review_pr_link(&self, review_id: &str) -> anyhow::Result<usize> {
+        let review_id = review_id.to_string();
+        self.with_conn(move |conn| {
+            diesel::delete(doc_review_pr_links::table.find(&review_id))
+                .execute(conn)
+                .map_err(Into::into)
+        })
+        .await
+    }
+
+    /// Stamp a successful sync, so the UI can say when it last looked.
+    pub async fn touch_doc_review_pr_sync(&self, review_id: &str) -> anyhow::Result<()> {
+        let review_id = review_id.to_string();
+        let now = chrono::Utc::now().to_rfc3339();
+        self.with_conn(move |conn| {
+            diesel::update(doc_review_pr_links::table.find(&review_id))
+                .set(doc_review_pr_links::last_synced_at.eq(&now))
+                .execute(conn)?;
+            Ok(())
         })
         .await
     }
@@ -499,6 +649,40 @@ impl Db {
     }
 }
 
+/// Move every annotation on `review_id` from the lines it held in `old` to
+/// the lines that hold the same content in `new`, and restamp it with the
+/// version it now addresses.
+///
+/// Resolved annotations are remapped too: their fainter mark in the
+/// document pane is how a reader traces what a pass changed, which is only
+/// true while it still sits on the passage it was about.
+fn remap_comments(
+    conn: &mut SqliteConnection,
+    review_id: &str,
+    version: i32,
+    old: &str,
+    new: &str,
+) -> anyhow::Result<()> {
+    let map = line_map(old, new);
+    let comments: Vec<DocReviewComment> = doc_review_comments::table
+        .filter(doc_review_comments::review_id.eq(review_id))
+        .select(DocReviewComment::as_select())
+        .load(conn)?;
+    for c in comments {
+        let (start, end) = map.remap(c.start_line, c.end_line, c.quote.as_deref());
+        if start == c.start_line && end == c.end_line && c.version == version {
+            continue;
+        }
+        diesel::update(doc_review_comments::table.find(&c.id))
+            .set((
+                doc_review_comments::version.eq(version),
+                doc_review_comments::start_line.eq(start),
+                doc_review_comments::end_line.eq(end),
+            ))
+            .execute(conn)?;
+    }
+    Ok(())
+}
 #[cfg(test)]
 mod tests {
     use diesel::prelude::*;
@@ -777,5 +961,160 @@ mod tests {
             "needs_input"
         );
         assert_eq!(db.list_doc_reviews().await.unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn a_revision_moves_every_anchor_onto_the_content_it_was_about() {
+        let db = Db::in_memory().unwrap();
+        seed_folder(&db);
+        let review = db
+            .create_doc_review(
+                "Spec",
+                "file",
+                "f1:docs/spec.md",
+                Some("f1"),
+                None,
+                "# Spec\n\nAlpha paragraph.\n\nBeta paragraph.\n",
+            )
+            .await
+            .unwrap();
+        let alpha = db
+            .add_doc_review_comment(
+                &review.id,
+                1,
+                (3, 3),
+                Some("Alpha paragraph."),
+                "comment",
+                "tighten this",
+            )
+            .await
+            .unwrap();
+        let beta = db
+            .add_doc_review_comment(
+                &review.id,
+                1,
+                (5, 5),
+                Some("Beta paragraph."),
+                "wrong",
+                "that number is off",
+            )
+            .await
+            .unwrap();
+        // A resolved annotation is remapped too: its fainter mark is how a
+        // reader traces what the pass changed.
+        db.apply_comment_resolutions(&review.id, vec![(beta.id.clone(), "fixed".into(), None)])
+            .await
+            .unwrap();
+
+        // Two lines land above both anchors.
+        db.insert_doc_review_version(
+            &review.id,
+            "# Spec\n\nA new opening line.\n\nAlpha paragraph.\n\nBeta paragraph.\n",
+            "added an opener",
+            "assistant",
+        )
+        .await
+        .unwrap();
+
+        let comments = db
+            .list_doc_review_comments(&review.id, false)
+            .await
+            .unwrap();
+        let at = |id: &str| {
+            let c = comments.iter().find(|c| c.id == id).unwrap();
+            (c.version, c.start_line, c.end_line)
+        };
+        assert_eq!(
+            at(&alpha.id),
+            (2, 5, 5),
+            "open annotation follows its lines"
+        );
+        assert_eq!(at(&beta.id), (2, 7, 7), "resolved annotation follows too");
+    }
+
+    #[tokio::test]
+    async fn an_imported_annotation_is_recognised_on_the_next_sync() {
+        let db = Db::in_memory().unwrap();
+        let review = seed_review(&db).await;
+        let import = |line: i32, body: &'static str, external: &'static str| {
+            let id = review.id.clone();
+            let db = &db;
+            async move {
+                db.import_doc_review_comment(
+                    &id,
+                    1,
+                    (line, line),
+                    None,
+                    "comment",
+                    body,
+                    "github_pr",
+                    external,
+                )
+                .await
+                .unwrap()
+            }
+        };
+
+        let (first, created) = import(2, "@octocat on GitHub: tighten this", "4242").await;
+        assert!(created, "the first sync imports it");
+        assert_eq!(first.external_kind.as_deref(), Some("github_pr"));
+
+        // The same GitHub comment on a later sync is the same annotation,
+        // not a second copy of the thread.
+        let (again, created) = import(2, "@octocat on GitHub: tighten this", "4242").await;
+        assert!(!created);
+        assert_eq!(again.id, first.id);
+
+        // A different comment still imports.
+        let (_, created) = import(3, "@hubot on GitHub: and this", "4243").await;
+        assert!(created);
+        assert_eq!(
+            db.list_doc_review_comments(&review.id, false)
+                .await
+                .unwrap()
+                .len(),
+            2
+        );
+    }
+
+    #[tokio::test]
+    async fn a_pull_request_link_is_one_per_review_and_clearable() {
+        let db = Db::in_memory().unwrap();
+        let review = seed_review(&db).await;
+        assert!(
+            db.get_doc_review_pr_link(&review.id)
+                .await
+                .unwrap()
+                .is_none()
+        );
+
+        db.set_doc_review_pr_link(&review.id, "acme", "app", 7, "docs/spec.md")
+            .await
+            .unwrap();
+        // Re-linking points the review somewhere else rather than stacking a
+        // second link on one document.
+        let link = db
+            .set_doc_review_pr_link(&review.id, "acme", "app", 9, "docs/spec.md")
+            .await
+            .unwrap();
+        assert_eq!(link.number, 9);
+        assert!(link.last_synced_at.is_none());
+
+        db.touch_doc_review_pr_sync(&review.id).await.unwrap();
+        let synced = db
+            .get_doc_review_pr_link(&review.id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(synced.number, 9);
+        assert!(synced.last_synced_at.is_some());
+
+        assert_eq!(db.clear_doc_review_pr_link(&review.id).await.unwrap(), 1);
+        assert!(
+            db.get_doc_review_pr_link(&review.id)
+                .await
+                .unwrap()
+                .is_none()
+        );
     }
 }

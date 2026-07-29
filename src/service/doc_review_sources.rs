@@ -89,7 +89,7 @@ pub fn folder_id_for(source_kind: &str, source_ref: &str) -> Option<String> {
 
 /// Split `"<folder_id>:<relative/path.md>"`. Rejects a non-`.md` path here so
 /// a caller can't use the review surface as a generic file reader.
-fn split_file_ref(source_ref: &str) -> Result<(&str, &str), String> {
+pub(crate) fn split_file_ref(source_ref: &str) -> Result<(&str, &str), String> {
     let (folder_id, rel) = source_ref
         .split_once(':')
         .ok_or_else(|| "file source_ref must be \"<folder_id>:<relative/path.md>\"".to_string())?;

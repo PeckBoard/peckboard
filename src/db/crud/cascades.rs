@@ -275,13 +275,9 @@ impl Db {
     }
 }
 
-/// Delete the given plans and their per-line comments. Plans carry no FK
-/// constraints, so cascade callers purge them explicitly.
+/// Delete the given plans. Plans carry no FK constraints, so cascade callers
+/// purge them explicitly.
 fn purge_plans(conn: &mut SqliteConnection, plan_ids: Vec<String>) -> anyhow::Result<()> {
-    for pid in &plan_ids {
-        diesel::delete(plan_comments::table.filter(plan_comments::plan_id.eq(pid)))
-            .execute(conn)?;
-    }
     if !plan_ids.is_empty() {
         diesel::delete(plans::table.filter(plans::id.eq_any(plan_ids))).execute(conn)?;
     }

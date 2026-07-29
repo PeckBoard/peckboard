@@ -12,6 +12,7 @@ use serde_json::Value;
 use super::super::McpToolRegistry;
 use crate::db::models::DocReview;
 use crate::service::doc_reviews;
+use crate::service::github_pr;
 use crate::service::mcp_server::context::ToolCallContext;
 
 impl McpToolRegistry {
@@ -87,8 +88,9 @@ impl McpToolRegistry {
         let resolutions = parse_resolutions(args.get("resolutions"))?;
         if !resolutions.is_empty() {
             ctx.db
-                .apply_comment_resolutions(&review.id, resolutions)
+                .apply_comment_resolutions(&review.id, resolutions.clone())
                 .await?;
+            github_pr::answer_resolutions((*ctx.db).clone(), review.id.clone(), resolutions);
         }
 
         let version = ctx
@@ -423,6 +425,44 @@ mod tests {
                 .unwrap()
                 .current_version,
             1
+        );
+    }
+
+    #[tokio::test]
+    async fn a_revision_leaves_an_unresolved_annotation_on_its_own_passage() {
+        let (ctx, db, id) = ctx(true).await;
+        let comment = db
+            .add_doc_review_comment(&id, 1, (3, 3), Some("line two"), "suggest", "expand this")
+            .await
+            .unwrap();
+        let registry = McpToolRegistry::new();
+
+        // A revision that answers something else, and in doing so pushes
+        // the annotated passage two lines down.
+        registry
+            .handle_submit_review_revision(
+                serde_json::json!({
+                    "markdown": "# Doc\n\nA new opening.\n\nline two\n",
+                    "note": "added an opener",
+                }),
+                &ctx,
+            )
+            .await
+            .unwrap();
+
+        // The next pass reads the document back, and the annotation still
+        // names the lines the words it was written about now live on.
+        let out = registry
+            .handle_get_review_doc(serde_json::json!({}), &ctx)
+            .await
+            .unwrap();
+        let open = &out["open_comments"][0];
+        assert_eq!(open["id"], comment.id);
+        assert_eq!(open["start_line"], 5, "got: {out}");
+        assert_eq!(open["end_line"], 5);
+        assert_eq!(
+            out["markdown"].as_str().unwrap().lines().nth(4),
+            Some("line two")
         );
     }
 }

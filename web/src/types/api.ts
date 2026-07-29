@@ -103,17 +103,6 @@ export interface Plan {
   created_at: string
   updated_at: string
 }
-
-export interface PlanComment {
-  id: string
-  plan_id: string
-  /** 1-based source-markdown line the comment is attached to. */
-  anchor: number
-  body: string
-  resolved: boolean
-  created_at: string
-}
-
 export interface Card {
   id: string
   project_id: string

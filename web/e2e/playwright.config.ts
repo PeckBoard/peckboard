@@ -19,6 +19,11 @@ import { fileURLToPath } from 'node:url'
  */
 const PORT = process.env.PECKBOARD_E2E_PORT ?? '4444'
 const HTTPS_PORT = process.env.PECKBOARD_E2E_HTTPS_PORT ?? '4445'
+// Where `doc-review-pr.spec.ts` stands up its fake GitHub API. Fixed rather
+// than random because the server reads the base URL from its environment at
+// boot, long before any spec runs.
+const GITHUB_STUB_PORT = process.env.PECKBOARD_E2E_GITHUB_PORT ?? '4446'
+process.env.PECKBOARD_E2E_GITHUB_PORT = GITHUB_STUB_PORT
 
 // Self-service registration was removed; the server now bootstraps a
 // single admin from the bootstrap env vars on first start. We pre-set
@@ -82,8 +87,11 @@ export default defineConfig({
     // PECKBOARD_CLAUDE_MODEL_DISCOVERY=0 pins the Claude catalog to the
     // static seed: specs assert exact model labels, which must not depend
     // on whatever `claude` binary the host machine has installed.
-    command: `PECKBOARD_DATA_DIR=${DATA_DIR} PECKBOARD_BOOTSTRAP_USERNAME=${E2E_USER} PECKBOARD_BOOTSTRAP_PASSWORD=${E2E_PASS} PECKBOARD_CLAUDE_MODEL_DISCOVERY=0 ../../target/release/peckboard --port ${PORT} --https-port ${HTTPS_PORT} --host 127.0.0.1`,
-    url: `http://127.0.0.1:${PORT}/api/health`,
+    // PECKBOARD_GITHUB_TOKEN + PECKBOARD_GITHUB_API_BASE point the PR
+    // features at the stub `doc-review-pr.spec.ts` runs on
+    // GITHUB_STUB_PORT, so "both directions" is exercised for real without
+    // ever leaving the machine.
+    command: `PECKBOARD_DATA_DIR=${DATA_DIR} PECKBOARD_BOOTSTRAP_USERNAME=${E2E_USER} PECKBOARD_BOOTSTRAP_PASSWORD=${E2E_PASS} PECKBOARD_CLAUDE_MODEL_DISCOVERY=0 PECKBOARD_GITHUB_TOKEN=e2e-stub-token PECKBOARD_GITHUB_API_BASE=http://127.0.0.1:${GITHUB_STUB_PORT} ../../target/release/peckboard --port ${PORT} --https-port ${HTTPS_PORT} --host 127.0.0.1`,
     reuseExistingServer: !process.env.CI,
     timeout: 60_000,
     stdout: 'pipe',

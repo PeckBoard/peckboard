@@ -27,28 +27,46 @@ export default async function globalSetup() {
   // re-dispatches provider.register with the stub config.
   const port = process.env.PECKBOARD_E2E_PORT ?? '4444'
   const baseURL = `http://127.0.0.1:${port}`
-  try {
-    const login = await fetch(`${baseURL}/api/auth/login`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        username: process.env.PECKBOARD_E2E_USER ?? 'e2e-user',
-        password: process.env.PECKBOARD_E2E_PASS ?? 'e2e-password-1234',
-      }),
-    })
-    if (login.ok) {
-      const { token } = (await login.json()) as { token: string }
-      for (const plugin of ['openai-compat', 'chicken-coop']) {
-        await fetch(`${baseURL}/api/plugins/${plugin}/approval`, {
+
+  // The health endpoint Playwright waits on can answer a beat before the
+  // bootstrap admin row lands, and a login that loses that race used to
+  // fail silently — leaving the plugin unapproved, its prompt overlaying
+  // every page, and every click in the suite timing out against a
+  // `modal-backdrop`. Retry briefly, and say so if it never works.
+  const tokenFor = async (): Promise<string | null> => {
+    for (let attempt = 0; attempt < 20; attempt++) {
+      try {
+        const login = await fetch(`${baseURL}/api/auth/login`, {
           method: 'POST',
-          headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
-          body: JSON.stringify({ decision: 'approve' }),
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            username: process.env.PECKBOARD_E2E_USER ?? 'e2e-user',
+            password: process.env.PECKBOARD_E2E_PASS ?? 'e2e-password-1234',
+          }),
         })
+        if (login.ok) return ((await login.json()) as { token: string }).token
+      } catch {
+        // Server not up yet — fall through to the wait below.
       }
-      console.log('[e2e] Approved staged wasm plugins (if present)')
+      await new Promise((resolve) => setTimeout(resolve, 250))
     }
-  } catch {
-    // Server not reachable yet — plugin tests will self-skip.
+    return null
+  }
+
+  const token = await tokenFor()
+  if (token) {
+    for (const plugin of ['openai-compat', 'chicken-coop']) {
+      await fetch(`${baseURL}/api/plugins/${plugin}/approval`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+        body: JSON.stringify({ decision: 'approve' }),
+      })
+    }
+    console.log('[e2e] Approved staged wasm plugins (if present)')
+  } else {
+    console.warn(
+      '[e2e] Could not log in to approve staged plugins — their approval prompt will block clicks',
+    )
   }
 
   // Escape hatch for machines where the release re-link is slow: set

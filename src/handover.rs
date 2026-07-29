@@ -952,6 +952,8 @@ mod tests {
                 status: "sent".into(),
                 resolution_note: None,
                 created_at: "t".into(),
+                external_kind: None,
+                external_id: None,
             }
         };
         let out = build_doc_review_injection(

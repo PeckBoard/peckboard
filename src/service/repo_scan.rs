@@ -21,9 +21,11 @@ use std::path::{Path, PathBuf};
 use crate::service::fs_jail;
 
 /// How deep the repo scan descends below the folder root. Deliberately
-/// shallower than [`fs_jail::MAX_DEPTH`]: repos sit near the top of a
-/// workspace, and every level multiplies directory reads.
-pub const MAX_SCAN_DEPTH: usize = 5;
+/// shallower than [`fs_jail::MAX_DEPTH`] — every level multiplies directory
+/// reads — but deep enough for the layouts people actually keep: a folder
+/// holding `clients/acme/repo` needs more than the three levels a
+/// repo-sits-near-the-top rule assumes.
+pub const MAX_SCAN_DEPTH: usize = 8;
 /// Cap on directories visited by one scan, so a pathological tree cannot
 /// blow up the request.
 const MAX_SCAN_DIRS: usize = 10_000;

@@ -9,6 +9,7 @@ import AnnotationRail from './AnnotationRail'
 import ChatLane from './ChatLane'
 import DocPane, { type BlockAnchor } from './DocPane'
 import HistoryTab from './HistoryTab'
+import PrLinkDialog from './PrLinkDialog'
 import QuestionCard from './QuestionCard'
 import ReviewSheet from './ReviewSheet'
 import ReviewStatusChip from './ReviewStatusChip'
@@ -23,13 +24,17 @@ import {
   deleteReview,
   describeReviewSource,
   findQuestionAnchor,
+  getPrState,
   getReview,
+  syncPr,
+  unlinkPr,
   runPass,
   stopPass,
   updateComment,
   type DocReviewComment,
   type ReviewCommentKind,
   type ReviewDetail,
+  type PrState,
 } from '../../lib/review'
 import { authedFetch } from '../../store/auth'
 import { useResourcesStore } from '../../store/resources'
@@ -148,6 +153,10 @@ export default function ReviewView({ reviewId, onBack }: Props) {
   const [pendingModel, setPendingModel] = useState('')
   /** The live session's model, fetched when the session appears. */
   const [sessionModel, setSessionModel] = useState<string | null>(null)
+  /** The pull request this review is tied to, plus what we'd suggest. `null`
+   *  until the first fetch — the PR menu items stay hidden until then. */
+  const [pr, setPr] = useState<PrState | null>(null)
+  const [linkingPr, setLinkingPr] = useState(false)
 
   const versionRef = useRef<number | null>(null)
   // App hands `onBack` as an inline arrow, so it changes identity on every
@@ -408,6 +417,44 @@ export default function ReviewView({ reviewId, onBack }: Props) {
         setStopBusy(false)
       })
   }
+  // The pull request link, refetched whenever the review is (re)loaded.
+  // A review that isn't a file, or a PeckBoard with no GitHub token, gets
+  // `configured: false` and the PR controls never appear.
+  const loadPr = useCallback(() => {
+    getPrState(reviewId)
+      .then(setPr)
+      .catch(() => setPr(null))
+  }, [reviewId])
+  useEffect(loadPr, [loadPr])
+
+  const syncPullRequest = () => {
+    setActionError(null)
+    syncPr(reviewId)
+      .then(({ imported }) => {
+        setNotice(
+          imported === 0
+            ? 'Pull request synced — nothing new to bring in.'
+            : `Pull request synced — ${imported} comment${imported === 1 ? '' : 's'} imported.`,
+        )
+        loadPr()
+        load()
+      })
+      .catch((e: unknown) => {
+        setActionError(describeActionError(e, "Couldn't sync the pull request."))
+      })
+  }
+
+  const unlinkPullRequest = () => {
+    setActionError(null)
+    unlinkPr(reviewId)
+      .then(() => {
+        setNotice('Pull request unlinked — the annotations it brought in stay.')
+        loadPr()
+      })
+      .catch((e: unknown) => {
+        setActionError(describeActionError(e, "Couldn't unlink the pull request."))
+      })
+  }
 
   const confirmAction = () => {
     if (!review || !confirming) return
@@ -538,6 +585,34 @@ export default function ReviewView({ reviewId, onBack }: Props) {
       onSelect: () => setConfirming('finish'),
       testId: 'review-finish',
     },
+    // The pull-request items only appear where they could work: a file
+    // review, on a PeckBoard that has a GitHub token.
+    ...(pr?.configured && review.source_kind === 'file'
+      ? pr.link
+        ? [
+            { divider: true } as MenuItem,
+            {
+              label: 'Sync pull request',
+              hint: `${pr.link.owner}/${pr.link.repo}#${pr.link.number}`,
+              onSelect: () => void syncPullRequest(),
+              testId: 'review-pr-sync',
+            } as MenuItem,
+            {
+              label: 'Unlink pull request',
+              onSelect: () => void unlinkPullRequest(),
+              testId: 'review-pr-unlink',
+            } as MenuItem,
+          ]
+        : [
+            { divider: true } as MenuItem,
+            {
+              label: 'Link a pull request…',
+              hint: pr.suggestion ? `${pr.suggestion.owner}/${pr.suggestion.repo}` : undefined,
+              onSelect: () => setLinkingPr(true),
+              testId: 'review-pr-link-open',
+            } as MenuItem,
+          ]
+      : []),
     { divider: true },
     { label: 'Delete', danger: true, onSelect: () => setConfirming('delete') },
   ]
@@ -584,6 +659,19 @@ export default function ReviewView({ reviewId, onBack }: Props) {
           >
             v{review.current_version}
           </span>
+          {/* The pull request this document is under. Clicking it syncs —
+              the one thing you want from a chip that says a PR exists. */}
+          {pr?.link && (
+            <button
+              type="button"
+              className="review-view__pr"
+              data-testid="review-pr-chip"
+              title="Sync the pull request's comments"
+              onClick={syncPullRequest}
+            >
+              {pr.link.owner}/{pr.link.repo}#{pr.link.number}
+            </button>
+          )}
         </div>
 
         <div className="review-view__actions">
@@ -837,6 +925,19 @@ export default function ReviewView({ reviewId, onBack }: Props) {
           onCancel={() => {
             setConfirming(null)
             setConfirmError(null)
+          }}
+        />
+      )}
+
+      {linkingPr && (
+        <PrLinkDialog
+          reviewId={reviewId}
+          suggestion={pr?.suggestion ?? null}
+          onClose={() => setLinkingPr(false)}
+          onLinked={() => {
+            setLinkingPr(false)
+            setNotice('Pull request linked — sync it to bring its comments in.')
+            loadPr()
           }}
         />
       )}

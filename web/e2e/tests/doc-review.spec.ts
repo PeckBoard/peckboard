@@ -181,7 +181,15 @@ async function getReview(request: APIRequestContext, auth: Record<string, string
   return (await res.json()) as {
     review: { id: string; status: string; current_version: number; session_id: string | null }
     markdown: string
-    comments: Array<{ id: string; status: string; kind: string; resolution_note: string | null }>
+    comments: Array<{
+      id: string
+      status: string
+      kind: string
+      body: string
+      start_line: number
+      end_line: number
+      resolution_note: string | null
+    }>
   }
 }
 
@@ -474,6 +482,58 @@ test.describe('document review — desktop', () => {
     })
     const finished = await getReview(request, auth, reviewId)
     expect(finished.review.status).toBe('approved')
+  })
+
+  test('a revision that adds lines re-anchors every annotation onto its own passage', async ({
+    request,
+    page,
+    baseURL,
+  }) => {
+    const { token, auth } = await authenticate(request)
+    const folder = await seedFolder(request, auth, 'anchor')
+    const reviewId = await createReview(request, auth, {
+      source_kind: 'file',
+      source_ref: `${folder.id}:docs/onboarding.md`,
+      title: 'Anchor review',
+    })
+    const sessionId = await armReviewer(request, auth, reviewId)
+
+    await loadAt(page, token, `/review/${reviewId}`)
+    await expect(page.getByTestId('review-view')).toBeVisible({ timeout: 15_000 })
+
+    // Two passages, one under the other. `[mock:insert]` makes the pass
+    // slide a paragraph in beneath the heading and touch nothing else, so
+    // both annotations end up two lines below where they were written.
+    await annotate(page, 3, 'suggest', '[mock:insert] name the day')
+    await annotate(page, 7, 'comment', 'who covers the weekend?')
+
+    const events = collectEventsUntil(baseURL!, token, sessionId, 'agent-end', 30_000)
+    await page.getByTestId('review-run-pass').click()
+    await events
+    await expect(page.getByTestId('review-version')).toHaveText('v2', { timeout: 15_000 })
+    await expect(page.getByTestId('review-doc')).toContainText('Mock reviewer opener, pass 2.')
+
+    // The stored anchors name the lines those words actually live on now.
+    const after = await getReview(request, auth, reviewId)
+    const lines = after.markdown.split('\n')
+    const anchoredText = (body: string) => {
+      const c = after.comments.find((x) => x.body.includes(body))
+      expect(c, `no annotation matching ${body}`).toBeTruthy()
+      return lines[c!.start_line - 1]
+    }
+    expect(anchoredText('name the day')).toBe('The team ships on Fridays.')
+    expect(anchoredText('weekend')).toBe('On-call rotates weekly.')
+
+    // And the document pane pins them to those blocks, rather than to
+    // whatever moved into their old line numbers.
+    const oncall = page.locator('[data-testid="review-block"]', {
+      hasText: 'On-call rotates weekly.',
+    })
+    await expect(oncall).toHaveAttribute('data-line-start', '9')
+    await expect(oncall.getByTestId('review-block-pin')).toHaveCount(1)
+    await expect(
+      page.locator('[data-testid="review-block"][data-line-start="3"]'),
+    ).not.toContainText('The team ships on Fridays.')
   })
 
   test('a clarifying question pins the card over the document and the answer resumes the pass', async ({
@@ -796,13 +856,12 @@ test.describe('document review — desktop', () => {
     await page.getByTestId('review-wizard-kind-file').click()
     await page.getByTestId('review-wizard-next').click()
 
-    // The radio swaps the folder select for the repo → worktree cascade.
-    // Search by the folder's unique name — a retried run leaves an older
-    // registered folder with the same repos/app layout behind.
-    await page.getByTestId('review-wizard-source-worktree').click()
-    await expect(page.getByTestId('review-wizard-folder')).toHaveCount(0)
+    // Folder → repo → worktree → file. The folder is picked explicitly: a
+    // retried run leaves an older registered folder with the same repos/app
+    // layout behind, and the repo list is scoped to whichever one is chosen.
+    await page.getByTestId('review-wizard-folder').selectOption(folder.id)
     await page.getByTestId('review-wizard-repo').click()
-    await page.getByTestId('review-wizard-repo-search').fill(folder.name)
+    await page.getByTestId('review-wizard-repo-search').fill('repos/app')
     await page.getByRole('option', { name: /repos\/app/ }).click()
 
     // The worktree picker offers the main checkout AND the card worktree.

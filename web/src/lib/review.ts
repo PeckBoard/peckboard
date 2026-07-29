@@ -42,6 +42,10 @@ export interface DocReviewComment {
   status: ReviewCommentStatus
   resolution_note: string | null
   created_at: string
+  /** Set when the annotation was imported from somewhere else: `github_pr`
+   *  plus the GitHub review-comment id. Resolving one replies there. */
+  external_kind: string | null
+  external_id: string | null
 }
 
 /** History-list entry — no markdown body (the whole document per row would
@@ -260,6 +264,74 @@ export async function revertToVersion(id: string, n: number): Promise<void> {
   })
   if (!res.ok) await fail(res, "Couldn't revert to that version")
 }
+// ─── Pull request link ───
+
+/** The pull request a file review is tied to. */
+export interface DocReviewPrLink {
+  review_id: string
+  owner: string
+  repo: string
+  number: number
+  /** Repo-relative path of the reviewed file — what GitHub reports as a
+   *  review comment's `path`, and what they are matched on. */
+  file_path: string
+  last_synced_at: string | null
+  created_at: string
+}
+
+/** The PR we'd link to, detected from the file's checkout. `number` is null
+ *  when the branch has no open pull request. */
+export interface PrSuggestion {
+  owner: string
+  repo: string
+  number: number | null
+  file_path: string
+}
+
+export interface PrState {
+  link: DocReviewPrLink | null
+  /** False when this PeckBoard has no GitHub token — the PR controls stay
+   *  out of the way rather than failing on click. */
+  configured: boolean
+  suggestion: PrSuggestion | null
+}
+
+export async function getPrState(id: string): Promise<PrState> {
+  const res = await authedFetch(`/api/doc-reviews/${encodeURIComponent(id)}/pr`)
+  return json<PrState>(res, "Couldn't load the pull request link")
+}
+
+export async function linkPr(
+  id: string,
+  input: { owner: string; repo: string; number: number; file_path?: string },
+): Promise<DocReviewPrLink> {
+  const res = await authedFetch(`/api/doc-reviews/${encodeURIComponent(id)}/pr`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(input),
+  })
+  const data = await json<{ link: DocReviewPrLink }>(res, "Couldn't link that pull request")
+  return data.link
+}
+
+export async function unlinkPr(id: string): Promise<void> {
+  const res = await authedFetch(`/api/doc-reviews/${encodeURIComponent(id)}/pr`, {
+    method: 'DELETE',
+  })
+  if (!res.ok) await fail(res, "Couldn't unlink the pull request")
+}
+
+/** Pull the PR's line comments on this file in as annotations. Idempotent —
+ *  syncing twice imports nothing twice. */
+export async function syncPr(id: string): Promise<{ imported: number }> {
+  const res = await authedFetch(`/api/doc-reviews/${encodeURIComponent(id)}/pr/sync`, {
+    method: 'POST',
+  })
+  return json<{ imported: number; skipped_without_line: number }>(
+    res,
+    "Couldn't sync the pull request",
+  )
+}
 
 // ─── Folder markdown (the `file` source kind) ───
 
@@ -304,8 +376,12 @@ export interface RepoEntry {
   worktrees: RepoWorktree[]
 }
 
-export async function listRepos(): Promise<RepoEntry[]> {
-  const res = await authedFetch('/api/repos')
+/** Repos under one folder, or across every folder when `folderId` is left
+ *  out. The review wizard always scopes: it picks the folder first. */
+export async function listRepos(folderId?: string): Promise<RepoEntry[]> {
+  const res = await authedFetch(
+    folderId ? `/api/repos?folder_id=${encodeURIComponent(folderId)}` : '/api/repos',
+  )
   const data = await json<{ repos: RepoEntry[] }>(res, "Couldn't list the repos")
   return data.repos
 }

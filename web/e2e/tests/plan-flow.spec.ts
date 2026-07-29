@@ -116,19 +116,26 @@ test('worker persists a plan; it is durable, viewable, and reviewable', async ({
   await expect(page.locator('[data-testid="plan-title"]')).toHaveText('Widget plan')
   await expect(page.locator('[data-testid="plan-rendered"]')).toContainText('Implement the widget')
 
-  // 5. Per-line review: switch to review mode, comment on a line, see it land.
-  await page.locator('[data-testid="plan-tab-review"]').click()
-  const addBtn = page.locator('[data-testid^="plan-comment-add-"]').first()
-  await addBtn.click()
-  await page.locator('[data-testid="plan-comment-input"]').fill('tighten step 1')
-  await page.locator('[data-testid="plan-comment-save"]').click()
-  await expect(page.locator('[data-testid="plan-comment"]')).toContainText('tighten step 1')
+  // 5. Review: the button opens a plan-kind document review in its own tab —
+  //    the plan screen no longer carries a comment mode of its own.
+  await page.locator('[data-testid="plan-review"]').click()
+  await expect(page.locator('[data-testid="review-view"]')).toBeVisible({ timeout: 15_000 })
+  await expect(page.locator('[data-testid="review-doc"]')).toContainText('Implement the widget')
 
-  // The comment is durable via the API too.
-  const comments = await request.get(`/api/plans/${plan.id}/comments`, { headers: auth })
-  expect(((await comments.json()).comments as unknown[]).length).toBeGreaterThan(0)
+  const reviews = await request.get('/api/doc-reviews', { headers: auth })
+  const forPlan = (
+    (await reviews.json()) as {
+      reviews: Array<{ id: string; source_kind: string; source_ref: string }>
+    }
+  ).reviews.filter((r) => r.source_kind === 'plan' && r.source_ref === plan.id)
+  expect(forPlan.length, 'one review per plan — reused, never stacked').toBe(1)
+  // Leave no review behind: an open review keeps a tab chip, and the
+  // tab-strip specs later in the run count the chips in the strip.
+  for (const r of forPlan) await request.delete(`/api/doc-reviews/${r.id}`, { headers: auth })
+
   // 6. Delete the plan from its own button (with confirm) and verify it's gone.
-  await page.locator('[data-testid="plan-tab-read"]').click()
+  await loadAt(page, token, `/plan/${plan.id}`)
+  await expect(page.locator('[data-testid="plan-view"]')).toBeVisible({ timeout: 10_000 })
   await page.locator('[data-testid="plan-delete"]').click()
   await page.locator('.confirm-dialog-danger').click()
   await expect

@@ -8,6 +8,7 @@ mod cards;
 mod cascades;
 mod claude_accounts;
 mod dependencies;
+mod doc_review_anchors;
 mod doc_reviews;
 mod env_vars;
 mod events;

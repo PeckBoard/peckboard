@@ -1013,6 +1013,9 @@ async fn run_scenario(
             //   `[mock:block]` → park mid-tool until interrupted — drives the
             //                   review Stop button and the "deleting every
             //                   annotation kills the pass" e2e.
+            //   `[mock:insert]` → revise by inserting a paragraph and
+            //                   changing nothing else, so every annotation
+            //                   below it has to be re-anchored.
             //   anything else → revise the document and resolve every open
             //                   annotation.
             if message.contains("[mock:ask") {
@@ -1163,7 +1166,11 @@ async fn run_scenario(
                     session_id,
                     "submit_review_revision",
                     json!({
-                        "markdown": mock_revised_markdown(markdown, next),
+                        "markdown": mock_revised_markdown(
+                            markdown,
+                            next,
+                            message.contains("[mock:insert]"),
+                        ),
                         "note": format!("mock pass {next}"),
                         "resolutions": resolutions,
                     }),
@@ -1471,16 +1478,31 @@ async fn call_mcp_tool(
 /// rewritten and a pass-stamped line is appended, so a diff always has both
 /// a deletion and additions to assert on without depending on a real model's
 /// prose. Headings are left alone — the document keeps its shape.
-fn mock_revised_markdown(markdown: &str, version: i64) -> String {
+///
+/// `insert_only` (the `[mock:insert]` marker) leaves every existing line
+/// exactly as it was and slides a new paragraph in under the first heading
+/// instead. That is the shape that moves the lines under an annotation
+/// without changing a word of what it was about — the one a remapped anchor
+/// has to survive.
+fn mock_revised_markdown(markdown: &str, version: i64, insert_only: bool) -> String {
     let mut lines: Vec<String> = markdown.lines().map(str::to_string).collect();
-    if let Some(line) = lines
-        .iter_mut()
-        .find(|l| !l.trim().is_empty() && !l.trim_start().starts_with('#'))
-    {
-        *line = format!("Revised: {}", line.trim());
+    if insert_only {
+        let at = lines
+            .iter()
+            .position(|l| l.trim_start().starts_with('#'))
+            .map_or(0, |i| i + 1);
+        lines.insert(at, String::new());
+        lines.insert(at + 1, format!("_Mock reviewer opener, pass {version}._"));
+    } else {
+        if let Some(line) = lines
+            .iter_mut()
+            .find(|l| !l.trim().is_empty() && !l.trim_start().starts_with('#'))
+        {
+            *line = format!("Revised: {}", line.trim());
+        }
+        lines.push(String::new());
+        lines.push(format!("_Mock reviewer pass {version}._"));
     }
-    lines.push(String::new());
-    lines.push(format!("_Mock reviewer pass {version}._"));
     let mut out = lines.join("\n");
     out.push('\n');
     out

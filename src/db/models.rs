@@ -1012,31 +1012,6 @@ pub struct NewPlan {
     pub created_at: String,
     pub updated_at: String,
 }
-
-/// A per-line human review comment on a proposed plan.
-#[derive(Queryable, Selectable, Serialize, Debug, Clone)]
-#[diesel(table_name = plan_comments)]
-pub struct PlanComment {
-    pub id: String,
-    pub plan_id: String,
-    /// 1-based source-markdown line the comment is attached to.
-    pub anchor: i32,
-    pub body: String,
-    pub resolved: bool,
-    pub created_at: String,
-}
-
-#[derive(Insertable, Debug, Default)]
-#[diesel(table_name = plan_comments)]
-pub struct NewPlanComment {
-    pub id: String,
-    pub plan_id: String,
-    pub anchor: i32,
-    pub body: String,
-    pub resolved: bool,
-    pub created_at: String,
-}
-
 // ── Document Reviews ─────────────────────────────
 
 /// A review pass over one markdown document. The document's text lives in
@@ -1143,6 +1118,11 @@ pub struct DocReviewComment {
     /// How the assistant resolved it, set alongside a terminal status.
     pub resolution_note: Option<String>,
     pub created_at: String,
+    /// Set when the annotation was imported from somewhere else —
+    /// `github_pr` plus the GitHub review-comment id. A resolution on one of
+    /// these is replied back to that thread.
+    pub external_kind: Option<String>,
+    pub external_id: Option<String>,
 }
 
 #[derive(Insertable, Debug, Default)]
@@ -1158,5 +1138,34 @@ pub struct NewDocReviewComment {
     pub body: String,
     pub status: String,
     pub resolution_note: Option<String>,
+    pub created_at: String,
+    pub external_kind: Option<String>,
+    pub external_id: Option<String>,
+}
+
+/// The pull request a file review is tied to.
+#[derive(Queryable, Selectable, Serialize, Debug, Clone)]
+#[diesel(table_name = doc_review_pr_links)]
+pub struct DocReviewPrLink {
+    pub review_id: String,
+    pub owner: String,
+    pub repo: String,
+    pub number: i32,
+    /// Repo-relative path of the reviewed file, matched against the `path`
+    /// GitHub reports on each review comment.
+    pub file_path: String,
+    pub last_synced_at: Option<String>,
+    pub created_at: String,
+}
+
+#[derive(Insertable, Debug, Default)]
+#[diesel(table_name = doc_review_pr_links)]
+pub struct NewDocReviewPrLink {
+    pub review_id: String,
+    pub owner: String,
+    pub repo: String,
+    pub number: i32,
+    pub file_path: String,
+    pub last_synced_at: Option<String>,
     pub created_at: String,
 }

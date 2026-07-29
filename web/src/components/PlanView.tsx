@@ -1,14 +1,18 @@
 import { useCallback, useEffect, useState } from 'react'
 import type { Components } from 'react-markdown'
 
-import type { Plan, PlanComment } from '../types/api'
+import type { Plan } from '../types/api'
 import { authedFetch } from '../store/auth'
 import SafeMarkdown from './SafeMarkdown'
 import MermaidBlock from './MermaidBlock'
 import ConfirmDialog from './ConfirmDialog'
+import FieldError from './FieldError'
 import PlanImplementWizard from './PlanImplementWizard'
 import ModelPicker from './ModelPicker'
 import { useResourcesStore } from '../store/resources'
+import { useTabsStore } from '../store/tabs'
+import { createReview, listReviews, openReview } from '../lib/review'
+import { describeActionError } from '../utils/actionError'
 import './PlanView.css'
 
 interface PlanViewProps {
@@ -29,18 +33,20 @@ const markdownComponents: Components = {
   },
 }
 
-/** Full-page rendered view of a saved plan, plus a per-line review mode
- *  where the human annotates the plan source. "Mark review complete" folds
- *  the open comments into a message posted back to the authoring session so
- *  it revises the plan with full context. */
+/**
+ * Full-page rendered view of a saved plan: read it, review it, implement it.
+ *
+ * Reviewing opens a `plan`-kind Document Review rather than the per-line
+ * comment mode this screen used to carry. That mode was a weaker second
+ * copy of the same idea — one flat line anchor per note, no versions, no
+ * diff, and a "review complete" that flattened every note into a single
+ * chat message. A plan is a document; it gets the document reviewer.
+ */
 export default function PlanView({ planId, onBack, onOpenSession }: PlanViewProps) {
   const [plan, setPlan] = useState<Plan | null>(null)
-  const [comments, setComments] = useState<PlanComment[]>([])
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
-  const [mode, setMode] = useState<'read' | 'review'>('read')
-  const [activeLine, setActiveLine] = useState<number | null>(null)
-  const [draft, setDraft] = useState('')
+  const [reviewError, setReviewError] = useState<string | null>(null)
   const [submitting, setSubmitting] = useState(false)
   const [showWizard, setShowWizard] = useState(false)
   const [confirmDelete, setConfirmDelete] = useState(false)
@@ -51,34 +57,17 @@ export default function PlanView({ planId, onBack, onOpenSession }: PlanViewProp
     void fetchModels()
   }, [fetchModels])
 
-  const load = useCallback(async () => {
-    if (!planId) return
-    try {
-      const res = await authedFetch(`/api/plans/${planId}`)
-      if (!res.ok) throw new Error(`plan not found (${res.status})`)
-      const data = (await res.json()) as { plan: Plan; comments: PlanComment[] }
-      setPlan(data.plan)
-      setComments(data.comments ?? [])
-      setError(null)
-    } catch (e) {
-      setError(String((e as Error).message ?? e))
-    } finally {
-      setLoading(false)
-    }
-  }, [planId])
-
   useEffect(() => {
     if (!planId) return
     let cancelled = false
     void authedFetch(`/api/plans/${planId}`)
       .then((r) => {
         if (!r.ok) throw new Error(`plan not found (${r.status})`)
-        return r.json() as Promise<{ plan: Plan; comments: PlanComment[] }>
+        return r.json() as Promise<{ plan: Plan }>
       })
       .then((data) => {
         if (cancelled) return
         setPlan(data.plan)
-        setComments(data.comments ?? [])
         setError(null)
         setLoading(false)
       })
@@ -92,56 +81,34 @@ export default function PlanView({ planId, onBack, onOpenSession }: PlanViewProp
     }
   }, [planId])
 
-  const addComment = useCallback(
-    async (anchor: number) => {
-      if (!planId || !draft.trim()) return
-      setSubmitting(true)
-      try {
-        const res = await authedFetch(`/api/plans/${planId}/comments`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ anchor, body: draft.trim() }),
-        })
-        if (res.ok) {
-          setDraft('')
-          setActiveLine(null)
-          await load()
-        }
-      } finally {
-        setSubmitting(false)
-      }
-    },
-    [planId, draft, load],
-  )
-
-  const deleteComment = useCallback(
-    async (id: string) => {
-      if (!planId) return
-      await authedFetch(`/api/plans/${planId}/comments/${id}`, { method: 'DELETE' })
-      await load()
-    },
-    [planId, load],
-  )
-
-  const reviewComplete = useCallback(async () => {
-    if (!planId) return
+  /** Review this plan as a document. Reuses the review already pointed at
+   *  it rather than stacking a second one on the same plan — two reviews of
+   *  one document is two answers to the same question. */
+  const reviewPlan = useCallback(async () => {
+    if (!planId || !plan) return
     setSubmitting(true)
+    setReviewError(null)
     try {
-      const res = await authedFetch(`/api/plans/${planId}/review-complete`, { method: 'POST' })
-      if (!res.ok) return
-      const data = (await res.json()) as { session_id: string; message: string }
-      // Post the synthesized revision request back to the authoring session.
-      await authedFetch(`/api/sessions/${data.session_id}/message`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ text: data.message }),
-      })
-      if (onOpenSession) onOpenSession(data.session_id)
-      else await load()
+      const existing = (await listReviews()).find(
+        (r) => r.source_kind === 'plan' && r.source_ref === planId,
+      )
+      const review =
+        existing ??
+        (
+          await createReview({
+            source_kind: 'plan',
+            source_ref: planId,
+            title: plan.title,
+          })
+        ).review
+      openReview(review.id)
+      void useTabsStore.getState().openTab('doc_review', review.id)
+    } catch (e) {
+      setReviewError(describeActionError(e, "Couldn't open a review for this plan."))
     } finally {
       setSubmitting(false)
     }
-  }, [planId, onOpenSession, load])
+  }, [planId, plan])
 
   // `plan` still holds the previous plan until the fetch for a newly
   // requested `planId` resolves — back/forward between two plans must show
@@ -158,14 +125,6 @@ export default function PlanView({ planId, onBack, onOpenSession }: PlanViewProp
         <p>Could not load plan: {error ?? 'unknown error'}</p>
       </div>
     )
-
-  const lines = plan.markdown.split('\n')
-  const commentsByLine = new Map<number, PlanComment[]>()
-  for (const c of comments) {
-    const arr = commentsByLine.get(c.anchor) ?? []
-    arr.push(c)
-    commentsByLine.set(c.anchor, arr)
-  }
 
   const deletePlan = async () => {
     if (!planId) return
@@ -208,24 +167,6 @@ export default function PlanView({ planId, onBack, onOpenSession }: PlanViewProp
           <span className={`plan-view__badge plan-view__badge--${plan.status}`}>{plan.status}</span>
           <span className="plan-view__version">v{plan.version}</span>
         </div>
-        <div className="plan-view__spacer" />
-        <div className="plan-view__tabs" role="tablist">
-          <button
-            className={`plan-view__tab ${mode === 'read' ? 'plan-view__tab--active' : ''}`}
-            onClick={() => setMode('read')}
-            data-testid="plan-tab-read"
-          >
-            Rendered
-          </button>
-          <button
-            className={`plan-view__tab ${mode === 'review' ? 'plan-view__tab--active' : ''}`}
-            onClick={() => setMode('review')}
-            data-testid="plan-tab-review"
-          >
-            Review
-            {comments.length > 0 && <span className="plan-view__tab-count">{comments.length}</span>}
-          </button>
-        </div>
       </header>
       <div className="plan-view__toolbar">
         <div className="plan-view__toolbar-group">
@@ -260,16 +201,14 @@ export default function PlanView({ planId, onBack, onOpenSession }: PlanViewProp
         </div>
         <div className="plan-view__spacer" />
         <div className="plan-view__toolbar-group">
-          {comments.length > 0 && (
-            <button
-              className="btn-primary"
-              onClick={reviewComplete}
-              disabled={submitting}
-              data-testid="plan-review-complete"
-            >
-              Mark review complete
-            </button>
-          )}
+          <button
+            className="btn-secondary"
+            onClick={() => void reviewPlan()}
+            disabled={submitting}
+            data-testid="plan-review"
+          >
+            Review plan
+          </button>
           <button
             className="btn-danger"
             onClick={() => setConfirmDelete(true)}
@@ -279,69 +218,11 @@ export default function PlanView({ planId, onBack, onOpenSession }: PlanViewProp
           </button>
         </div>
       </div>
+      <FieldError message={reviewError ?? undefined} testId="plan-review-error" />
 
-      {mode === 'read' ? (
-        <div className="plan-view__rendered" data-testid="plan-rendered">
-          <SafeMarkdown components={markdownComponents}>{plan.markdown}</SafeMarkdown>
-        </div>
-      ) : (
-        <div className="plan-view__source" data-testid="plan-source">
-          {lines.map((line, i) => {
-            const anchor = i + 1
-            const lineComments = commentsByLine.get(anchor) ?? []
-            return (
-              <div className="plan-line" key={anchor}>
-                <div className="plan-line__row">
-                  <span className="plan-line__num">{anchor}</span>
-                  <code className="plan-line__text">{line || ' '}</code>
-                  <button
-                    className="plan-line__add"
-                    onClick={() => {
-                      setActiveLine(activeLine === anchor ? null : anchor)
-                      setDraft('')
-                    }}
-                    data-testid={`plan-comment-add-${anchor}`}
-                    title="Comment on this line"
-                  >
-                    ＋
-                  </button>
-                </div>
-                {lineComments.map((c) => (
-                  <div className="plan-line__comment" key={c.id} data-testid="plan-comment">
-                    <span>{c.body}</span>
-                    <button
-                      className="plan-line__comment-del"
-                      onClick={() => void deleteComment(c.id)}
-                      title="Delete comment"
-                    >
-                      ✕
-                    </button>
-                  </div>
-                ))}
-                {activeLine === anchor && (
-                  <div className="plan-line__editor">
-                    <textarea
-                      value={draft}
-                      onChange={(e) => setDraft(e.target.value)}
-                      placeholder={`Comment on line ${anchor}…`}
-                      data-testid="plan-comment-input"
-                      rows={2}
-                    />
-                    <button
-                      className="btn-primary"
-                      disabled={submitting || !draft.trim()}
-                      onClick={() => void addComment(anchor)}
-                      data-testid="plan-comment-save"
-                    >
-                      Add comment
-                    </button>
-                  </div>
-                )}
-              </div>
-            )
-          })}
-        </div>
-      )}
+      <div className="plan-view__rendered" data-testid="plan-rendered">
+        <SafeMarkdown components={markdownComponents}>{plan.markdown}</SafeMarkdown>
+      </div>
       {showWizard && plan && (
         <PlanImplementWizard
           sessionId={plan.session_id}
@@ -355,7 +236,7 @@ export default function PlanView({ planId, onBack, onOpenSession }: PlanViewProp
       {confirmDelete && (
         <ConfirmDialog
           title="Delete plan"
-          message="Delete this plan and all its review comments? This cannot be undone."
+          message="Delete this plan? This cannot be undone. Any review of it keeps its own copy."
           confirmLabel="Delete"
           danger
           onConfirm={() => {

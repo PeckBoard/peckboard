@@ -751,14 +751,26 @@ async fn get_markdown_file(
     }
 }
 
-/// GET /api/repos — every git repo across every workspace folder, each with
-/// its worktrees: the main checkout, git-registered linked trees, and fixed
-/// `.peckboard/worktrees/<id8>` card trees whose git registration is gone.
-/// The scan and its jail rules live in [`repo_scan`]. Card worktree dirs are
-/// named by the card's first 8 UUID chars, so the dir name resolves to a
-/// human label; a pruned card leaves it null and the branch still identifies
-/// the tree.
-async fn list_repos(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+/// Query for `GET /api/repos`.
+#[derive(Deserialize)]
+struct ListReposQuery {
+    /// Limit the scan to one workspace folder. The review wizard picks a
+    /// folder before it picks a repo, so scanning the other folders' trees
+    /// would be work nobody asked for.
+    folder_id: Option<String>,
+}
+
+/// GET /api/repos — every git repo in a workspace folder (or across all of
+/// them, unscoped), each with its worktrees: the main checkout,
+/// git-registered linked trees, and fixed `.peckboard/worktrees/<id8>` card
+/// trees whose git registration is gone. The scan and its jail rules live in
+/// [`repo_scan`]. Card worktree dirs are named by the card's first 8 UUID
+/// chars, so the dir name resolves to a human label; a pruned card leaves it
+/// null and the branch still identifies the tree.
+async fn list_repos(
+    State(state): State<Arc<AppState>>,
+    Query(q): Query<ListReposQuery>,
+) -> impl IntoResponse {
     let folders = match state.db.list_folders().await {
         Ok(f) => f,
         Err(e) => {
@@ -770,6 +782,9 @@ async fn list_repos(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     };
     let mut repos = Vec::new();
     for folder in folders {
+        if q.folder_id.as_ref().is_some_and(|id| *id != folder.id) {
+            continue;
+        }
         // The scan wants the same canonical root the markdown jail uses.
         let Ok(root) = std::fs::canonicalize(&folder.path) else {
             continue; // unreadable folder — nothing to serve from it
@@ -1251,6 +1266,28 @@ mod tests {
         );
         assert_eq!(wts[0]["main"], true);
         assert_eq!(wts[1]["main"], false);
+
+        // Scoped to a folder: the same repo back, and nothing at all for a
+        // folder that holds none — the wizard picks the folder first, so it
+        // never pays for the other folders' trees.
+        let response = app(state.clone())
+            .oneshot(get("/api/repos?folder_id=f1", &token))
+            .await
+            .unwrap();
+        let bytes = axum::body::to_bytes(response.into_body(), 64 * 1024)
+            .await
+            .unwrap();
+        let scoped: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(scoped["repos"].as_array().unwrap().len(), 1, "{scoped}");
+        let response = app(state.clone())
+            .oneshot(get("/api/repos?folder_id=nope", &token))
+            .await
+            .unwrap();
+        let bytes = axum::body::to_bytes(response.into_body(), 64 * 1024)
+            .await
+            .unwrap();
+        let empty: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert!(empty["repos"].as_array().unwrap().is_empty(), "{empty}");
 
         // The scoped walk sees ONLY the worktree, with prefixed paths…
         let response = app(state.clone())

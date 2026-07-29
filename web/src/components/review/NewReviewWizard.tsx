@@ -46,7 +46,7 @@ const SOURCE_KINDS: {
   {
     kind: 'file',
     label: 'File',
-    blurb: 'A markdown file inside one of your folders.',
+    blurb: 'A markdown file in a folder, one of its repos, or a worktree.',
     icon: <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z" />,
   },
   {
@@ -96,10 +96,14 @@ interface PlanRow {
   markdown: string
 }
 
+/** The repo level's opt-out: no repo picked means the whole folder tree,
+ *  repos included — which is what a folder with no repos in it needs too. */
+const BROWSE_FOLDER_LABEL = 'Browse the whole folder'
+
 /** Fetch the pickable set for one (kind, scope) pair. Module-level so the
  *  effect that calls it stays a plain promise chain. A `repo` + `worktree`
- *  pair narrows the `file` kind to one repo worktree; the repo's folder wins
- *  over `folderId`. */
+ *  pair narrows the `file` kind to that one checkout; without them the walk
+ *  covers the whole folder. */
 async function loadCandidates(
   kind: ReviewSourceKind,
   folderId: string,
@@ -197,10 +201,9 @@ export default function NewReviewWizard({ onClose, onCreated }: Props) {
   const [previewError, setPreviewError] = useState<string | null>(null)
   const [submitting, setSubmitting] = useState(false)
   const [error, setError] = useState<string | null>(null)
-  /** Where a `file` review reads from: the folder tree, or a repo worktree
-      picked repo-first — repos found by scanning the folders' subfolders. */
-  const [fileSource, setFileSource] = useState<'folder' | 'worktree'>('folder')
-  // `null` while the repo list is in flight.
+  // The repos in the chosen folder — `null` while the list is in flight.
+  // A null `pickedRepo` means "browse the whole folder"; a picked one always
+  // carries a picked worktree, so no level of the cascade dead-ends.
   const [repos, setRepos] = useState<RepoEntry[] | null>(null)
   const [reposError, setReposError] = useState<string | null>(null)
   const [pickedRepo, setPickedRepo] = useState<RepoEntry | null>(null)
@@ -225,12 +228,14 @@ export default function NewReviewWizard({ onClose, onCreated }: Props) {
     setPreviewError(null)
   }
 
-  // The repo list is global — every folder's subfolders scanned for git
-  // repos — fetched when the worktree mode first opens.
+  // The repos under the chosen folder. Scoped to that folder rather than
+  // scanning every folder's tree: the cascade picks the folder first, so
+  // the rest is work nobody asked for. A folder change nulls `repos`, which
+  // is what re-runs this.
   useEffect(() => {
-    if (step !== 2 || kind !== 'file' || fileSource !== 'worktree' || repos !== null) return
+    if (step !== 2 || kind !== 'file' || !folderId || repos !== null) return
     let cancelled = false
-    void listRepos()
+    void listRepos(folderId)
       .then((rs) => {
         if (cancelled) return
         setRepos(rs)
@@ -244,18 +249,13 @@ export default function NewReviewWizard({ onClose, onCreated }: Props) {
     return () => {
       cancelled = true
     }
-  }, [step, kind, fileSource, repos])
+  }, [step, kind, folderId, repos])
 
   // Load the option set for the current (kind, folder, repo worktree) scope.
   useEffect(() => {
     if (step !== 2) return
     let cancelled = false
-    void loadCandidates(
-      kind,
-      folderId,
-      fileSource === 'worktree' ? pickedRepo : null,
-      fileSource === 'worktree' ? pickedWorktree : null,
-    )
+    void loadCandidates(kind, folderId, pickedRepo, pickedWorktree)
       .then((cs) => {
         if (cancelled) return
         setCandidates(cs)
@@ -269,7 +269,7 @@ export default function NewReviewWizard({ onClose, onCreated }: Props) {
     return () => {
       cancelled = true
     }
-  }, [step, kind, folderId, fileSource, pickedRepo, pickedWorktree])
+  }, [step, kind, folderId, pickedRepo, pickedWorktree])
 
   // Read the picked document for the preview pane. Plans arrive with their
   // markdown already attached, so they never reach this.
@@ -310,27 +310,42 @@ export default function NewReviewWizard({ onClose, onCreated }: Props) {
     [candidates, picked],
   )
 
-  const repoItems: MenuItem[] = useMemo(
-    () =>
-      (repos ?? []).map((r) => ({
-        label: r.name,
-        description: `${r.folder_name}${r.path ? ` · ${r.path}` : ''}`,
-        searchText: `${r.folder_name} ${r.name} ${r.path}`,
-        active: pickedRepo?.folder_id === r.folder_id && pickedRepo?.path === r.path,
+  const repoItems: MenuItem[] = useMemo(() => {
+    const pick = (r: RepoEntry | null) => {
+      setPickedRepo(r)
+      // A repo brings its own worktrees, and its main checkout is the one
+      // obvious answer — start there so the level never stalls the cascade.
+      setPickedWorktree(r ? (r.worktrees[0] ?? null) : null)
+      // A new scope means a new option set.
+      setCandidates(null)
+      setCandidatesError(null)
+      setPicked(null)
+      setPreview(null)
+      setPreviewError(null)
+    }
+    return [
+      {
+        label: BROWSE_FOLDER_LABEL,
+        description: 'Every markdown file in the folder, repos included',
+        searchText: 'folder browse whole all',
+        active: pickedRepo === null,
         onSelect: () => {
-          if (pickedRepo?.folder_id === r.folder_id && pickedRepo?.path === r.path) return
-          setPickedRepo(r)
-          // A new repo means a new worktree set — and a new option set.
-          setPickedWorktree(null)
-          setCandidates(null)
-          setCandidatesError(null)
-          setPicked(null)
-          setPreview(null)
-          setPreviewError(null)
+          if (pickedRepo === null) return
+          pick(null)
+        },
+      },
+      ...(repos ?? []).map((r) => ({
+        label: r.name,
+        description: r.path || 'Folder root',
+        searchText: `${r.name} ${r.path}`,
+        active: pickedRepo?.path === r.path,
+        onSelect: () => {
+          if (pickedRepo?.path === r.path) return
+          pick(r)
         },
       })),
-    [repos, pickedRepo],
-  )
+    ]
+  }, [repos, pickedRepo])
 
   const worktreeItems: MenuItem[] = useMemo(
     () =>
@@ -356,17 +371,13 @@ export default function NewReviewWizard({ onClose, onCreated }: Props) {
   // Why Create is disabled, stated next to the button — a disabled control
   // with no reason reads as broken.
   const disabledReason =
-    kind === 'file' && fileSource === 'folder' && !folderId
+    kind === 'file' && !folderId
       ? 'Add a folder first'
-      : kind === 'file' && fileSource === 'worktree' && !pickedRepo
-        ? 'Pick a repo first'
-        : kind === 'file' && fileSource === 'worktree' && !pickedWorktree
-          ? 'Pick a worktree first'
-          : !picked
-            ? `Pick a ${pickerLabel.toLowerCase()}`
-            : !title.trim()
-              ? 'Give the review a title'
-              : null
+      : !picked
+        ? `Pick a ${pickerLabel.toLowerCase()}`
+        : !title.trim()
+          ? 'Give the review a title'
+          : null
 
   const submit = async () => {
     if (!picked || disabledReason) return
@@ -379,7 +390,7 @@ export default function NewReviewWizard({ onClose, onCreated }: Props) {
         title: title.trim(),
         ...(kind === 'file'
           ? {
-              folder_id: fileSource === 'worktree' && pickedRepo ? pickedRepo.folder_id : folderId,
+              folder_id: folderId,
             }
           : {}),
       })
@@ -460,148 +471,113 @@ export default function NewReviewWizard({ onClose, onCreated }: Props) {
             <div className="review-wizard__form">
               {kind === 'file' && (
                 <>
-                  {/* Where the file comes from. A radio rather than a third
-                      source kind: a worktree file IS a file review — same
-                      ref shape, preview and apply — it just lists from a
-                      tree the folder walk hides. */}
-                  <fieldset
-                    className="review-wizard__file-source"
-                    data-testid="review-wizard-file-source"
-                  >
-                    <legend className="form-label">Review from</legend>
-                    <label className="review-wizard__file-source-option">
-                      <input
-                        type="radio"
-                        name="review-wizard-file-source"
-                        data-testid="review-wizard-source-folder"
-                        checked={fileSource === 'folder'}
-                        onChange={() => {
-                          if (fileSource === 'folder') return
-                          setFileSource('folder')
+                  {/* Folder → repo → worktree → file. Each level narrows the
+                      next, and picking one resets everything under it — a
+                      stale pick from the previous scope is a review pointed
+                      at a document that isn't there. */}
+                  <div className="form-field">
+                    <label className="form-label" htmlFor="review-wizard-folder">
+                      Folder
+                    </label>
+                    {folders.length > 0 ? (
+                      <select
+                        id="review-wizard-folder"
+                        className="form-input"
+                        data-testid="review-wizard-folder"
+                        value={folderId}
+                        onChange={(e) => {
+                          // Re-picking the folder that is already selected
+                          // must not reset the option set: the loader effect
+                          // keys on `folderId`, so with nothing to re-run the
+                          // picker would sit on "Loading…" forever.
+                          if (e.target.value === folderId) return
+                          setChosenFolderId(e.target.value)
+                          // Null repos is what re-runs the repo scan.
+                          setRepos(null)
+                          setReposError(null)
                           setPickedRepo(null)
                           setPickedWorktree(null)
                           resetPick()
                         }}
-                      />
-                      <span>Folder</span>
+                      >
+                        {folders.map((f) => (
+                          <option key={f.id} value={f.id}>
+                            {f.name} — {f.path}
+                          </option>
+                        ))}
+                      </select>
+                    ) : (
+                      <p className="form-hint">
+                        No folders yet. Add one from the Folders page, then come back.
+                      </p>
+                    )}
+                  </div>
+                  <div className="form-field">
+                    <label className="form-label" htmlFor="review-wizard-repo">
+                      Repo
                     </label>
-                    <label className="review-wizard__file-source-option">
-                      <input
-                        type="radio"
-                        name="review-wizard-file-source"
-                        data-testid="review-wizard-source-worktree"
-                        checked={fileSource === 'worktree'}
-                        onChange={() => {
-                          if (fileSource === 'worktree') return
-                          setFileSource('worktree')
-                          resetPick()
-                        }}
-                      />
-                      <span>Worktree</span>
-                    </label>
-                  </fieldset>
-                  {fileSource === 'folder' ? (
+                    <MenuButton
+                      id="review-wizard-repo"
+                      testId="review-wizard-repo"
+                      searchTestId="review-wizard-repo-search"
+                      items={repoItems}
+                      searchable
+                      haspopup="listbox"
+                      matchTriggerWidth
+                      align="left"
+                      ariaLabel="Choose a repo"
+                      listLabel="Repo options"
+                      searchPlaceholder="Search repos…"
+                      emptyLabel={repos === null ? 'Loading…' : 'No repos found'}
+                      triggerClassName="form-input review-wizard__picker"
+                    >
+                      <span className="review-wizard__picker-value">
+                        {pickedRepo ? pickedRepo.name : BROWSE_FOLDER_LABEL}
+                      </span>
+                      <span className="review-wizard__picker-detail">
+                        {pickedRepo
+                          ? pickedRepo.path || 'Folder root'
+                          : 'Every markdown file in the folder'}
+                      </span>
+                    </MenuButton>
+                    <FieldError
+                      message={reposError ?? undefined}
+                      testId="review-wizard-repo-error"
+                    />
+                  </div>
+                  {/* Only a repo has worktrees — the level appears with one. */}
+                  {pickedRepo && (
                     <div className="form-field">
-                      <label className="form-label" htmlFor="review-wizard-folder">
-                        Folder
+                      <label className="form-label" htmlFor="review-wizard-worktree">
+                        Worktree
                       </label>
-                      {folders.length > 0 ? (
-                        <select
-                          id="review-wizard-folder"
-                          className="form-input"
-                          data-testid="review-wizard-folder"
-                          value={folderId}
-                          onChange={(e) => {
-                            // Re-picking the folder that is already selected
-                            // must not reset the option set: the loader
-                            // effect keys on `folderId`, so with nothing to
-                            // re-run the picker would sit on "Loading…"
-                            // forever.
-                            if (e.target.value === folderId) return
-                            setChosenFolderId(e.target.value)
-                            resetPick()
-                          }}
-                        >
-                          {folders.map((f) => (
-                            <option key={f.id} value={f.id}>
-                              {f.name} — {f.path}
-                            </option>
-                          ))}
-                        </select>
-                      ) : (
-                        <p className="form-hint">
-                          No folders yet. Add one from the Folders page, then come back.
-                        </p>
-                      )}
+                      <MenuButton
+                        id="review-wizard-worktree"
+                        testId="review-wizard-worktree"
+                        searchTestId="review-wizard-worktree-search"
+                        items={worktreeItems}
+                        searchable
+                        haspopup="listbox"
+                        matchTriggerWidth
+                        align="left"
+                        ariaLabel="Choose a worktree"
+                        listLabel="Worktree options"
+                        searchPlaceholder="Search worktrees…"
+                        emptyLabel="No worktrees found"
+                        triggerClassName="form-input review-wizard__picker"
+                      >
+                        <span className="review-wizard__picker-value">
+                          {pickedWorktree
+                            ? (pickedWorktree.card_title ?? pickedWorktree.branch)
+                            : 'Select a worktree…'}
+                        </span>
+                        {pickedWorktree && (
+                          <span className="review-wizard__picker-detail">
+                            {pickedWorktree.main ? 'Main checkout' : pickedWorktree.path}
+                          </span>
+                        )}
+                      </MenuButton>
                     </div>
-                  ) : (
-                    <>
-                      <div className="form-field">
-                        <label className="form-label" htmlFor="review-wizard-repo">
-                          Repo
-                        </label>
-                        <MenuButton
-                          id="review-wizard-repo"
-                          testId="review-wizard-repo"
-                          searchTestId="review-wizard-repo-search"
-                          items={repoItems}
-                          searchable
-                          haspopup="listbox"
-                          matchTriggerWidth
-                          align="left"
-                          ariaLabel="Choose a repo"
-                          listLabel="Repo options"
-                          searchPlaceholder="Search repos…"
-                          emptyLabel={repos === null ? 'Loading…' : 'No repos found'}
-                          triggerClassName="form-input review-wizard__picker"
-                        >
-                          <span className="review-wizard__picker-value">
-                            {pickedRepo ? pickedRepo.name : 'Select a repo…'}
-                          </span>
-                          {pickedRepo && (
-                            <span className="review-wizard__picker-detail">
-                              {pickedRepo.folder_name}
-                              {pickedRepo.path ? ` · ${pickedRepo.path}` : ''}
-                            </span>
-                          )}
-                        </MenuButton>
-                        <FieldError
-                          message={reposError ?? undefined}
-                          testId="review-wizard-repo-error"
-                        />
-                      </div>
-                      <div className="form-field">
-                        <label className="form-label" htmlFor="review-wizard-worktree">
-                          Worktree
-                        </label>
-                        <MenuButton
-                          id="review-wizard-worktree"
-                          testId="review-wizard-worktree"
-                          searchTestId="review-wizard-worktree-search"
-                          items={worktreeItems}
-                          searchable
-                          haspopup="listbox"
-                          matchTriggerWidth
-                          align="left"
-                          ariaLabel="Choose a worktree"
-                          listLabel="Worktree options"
-                          searchPlaceholder="Search worktrees…"
-                          emptyLabel={pickedRepo ? 'No worktrees found' : 'Pick a repo first'}
-                          triggerClassName="form-input review-wizard__picker"
-                        >
-                          <span className="review-wizard__picker-value">
-                            {pickedWorktree
-                              ? (pickedWorktree.card_title ?? pickedWorktree.branch)
-                              : 'Select a worktree…'}
-                          </span>
-                          {pickedWorktree && (
-                            <span className="review-wizard__picker-detail">
-                              {pickedWorktree.main ? 'Main checkout' : pickedWorktree.path}
-                            </span>
-                          )}
-                        </MenuButton>
-                      </div>
-                    </>
                   )}
                 </>
               )}
@@ -623,13 +599,7 @@ export default function NewReviewWizard({ onClose, onCreated }: Props) {
                   listLabel={`${pickerLabel} options`}
                   searchPlaceholder={`Search ${pickerLabel.toLowerCase()}s…`}
                   emptyLabel={
-                    kind === 'file' && fileSource === 'worktree' && !pickedRepo
-                      ? 'Pick a repo first'
-                      : kind === 'file' && fileSource === 'worktree' && !pickedWorktree
-                        ? 'Pick a worktree first'
-                        : candidates === null
-                          ? 'Loading…'
-                          : `No ${pickerLabel.toLowerCase()}s found`
+                    candidates === null ? 'Loading…' : `No ${pickerLabel.toLowerCase()}s found`
                   }
                   triggerClassName="form-input review-wizard__picker"
                 >
