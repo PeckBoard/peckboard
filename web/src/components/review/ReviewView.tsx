@@ -25,6 +25,7 @@ import {
   findQuestionAnchor,
   getReview,
   runPass,
+  stopPass,
   updateComment,
   type DocReviewComment,
   type ReviewCommentKind,
@@ -134,6 +135,7 @@ export default function ReviewView({ reviewId, onBack }: Props) {
   const [passBusy, setPassBusy] = useState(false)
   const [confirming, setConfirming] = useState<PendingConfirm | null>(null)
   const [confirmBusy, setConfirmBusy] = useState(false)
+  const [stopBusy, setStopBusy] = useState(false)
   /** A history version opened read-only over the document pane. */
   const [viewing, setViewing] = useState<{ version: number; markdown: string } | null>(null)
   /** The passage a clarifying question points at, once the user asks to see
@@ -391,6 +393,22 @@ export default function ReviewView({ reviewId, onBack }: Props) {
       })
   }
 
+  const stopRun = () => {
+    if (!review || stopBusy) return
+    setStopBusy(true)
+    setActionError(null)
+    stopPass(review.id)
+      .then(() => {
+        setStopBusy(false)
+        setNotice('Stopped — the queue is back in your hands.')
+        load()
+      })
+      .catch((e: unknown) => {
+        setActionError(describeActionError(e, "Couldn't stop the pass."))
+        setStopBusy(false)
+      })
+  }
+
   const confirmAction = () => {
     if (!review || !confirming) return
     setConfirmBusy(true)
@@ -590,22 +608,32 @@ export default function ReviewView({ reviewId, onBack }: Props) {
             testId="review-model"
             emptyHint="Loading models…"
           />
-          {!isMobile && (
-            <button
-              type="button"
-              className="btn-primary review-view__pass"
-              data-testid="review-run-pass"
-              disabled={passBusy || running || pendingCount === 0}
-              aria-busy={passBusy || running || undefined}
-              title={pendingCount === 0 ? 'Annotate the document first' : undefined}
-              onClick={startPass}
-            >
-              {(passBusy || running) && (
+          {!isMobile &&
+            (running ? (
+              <button
+                type="button"
+                className="btn-secondary review-view__stop"
+                data-testid="review-stop"
+                disabled={stopBusy}
+                onClick={stopRun}
+              >
                 <span className="review-view__pass-spinner" aria-hidden="true" />
-              )}
-              {running ? 'Pass running…' : 'Run pass'}
-            </button>
-          )}
+                {stopBusy ? 'Stopping…' : 'Stop pass'}
+              </button>
+            ) : (
+              <button
+                type="button"
+                className="btn-primary review-view__pass"
+                data-testid="review-run-pass"
+                disabled={passBusy || pendingCount === 0}
+                aria-busy={passBusy || undefined}
+                title={pendingCount === 0 ? 'Annotate the document first' : undefined}
+                onClick={startPass}
+              >
+                {passBusy && <span className="review-view__pass-spinner" aria-hidden="true" />}
+                {passBusy ? 'Starting…' : 'Run pass'}
+              </button>
+            ))}
           <MenuButton items={menuItems} ariaLabel="Review actions" testId="review-menu" />
         </div>
       </header>
@@ -751,20 +779,31 @@ export default function ReviewView({ reviewId, onBack }: Props) {
               <span className="review-mobile-bar__label">{SHEET_TITLE[which]}</span>
             </button>
           ))}
-          <button
-            type="button"
-            className="btn-primary review-mobile-bar__pass"
-            data-testid="review-run-pass"
-            disabled={passBusy || running || pendingCount === 0}
-            aria-busy={passBusy || running || undefined}
-            title={pendingCount === 0 ? 'Annotate the document first' : undefined}
-            onClick={startPass}
-          >
-            {(passBusy || running) && (
+          {running ? (
+            <button
+              type="button"
+              className="btn-secondary review-mobile-bar__pass"
+              data-testid="review-stop"
+              disabled={stopBusy}
+              onClick={stopRun}
+            >
               <span className="review-view__pass-spinner" aria-hidden="true" />
-            )}
-            {running ? 'Running…' : 'Run pass'}
-          </button>
+              {stopBusy ? 'Stopping…' : 'Stop'}
+            </button>
+          ) : (
+            <button
+              type="button"
+              className="btn-primary review-mobile-bar__pass"
+              data-testid="review-run-pass"
+              disabled={passBusy || pendingCount === 0}
+              aria-busy={passBusy || undefined}
+              title={pendingCount === 0 ? 'Annotate the document first' : undefined}
+              onClick={startPass}
+            >
+              {passBusy && <span className="review-view__pass-spinner" aria-hidden="true" />}
+              {passBusy ? 'Starting…' : 'Run pass'}
+            </button>
+          )}
         </nav>
       )}
 

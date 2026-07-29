@@ -58,6 +58,7 @@ pub fn router(state: Arc<AppState>) -> Router<Arc<AppState>> {
             axum::routing::patch(update_comment).delete(delete_comment),
         )
         .route("/api/doc-reviews/{id}/pass", post(run_pass))
+        .route("/api/doc-reviews/{id}/stop", post(stop_pass))
         .route("/api/doc-reviews/{id}/apply", post(apply))
         .route("/api/doc-reviews/{id}/revert/{n}", post(revert))
         .route_layer(middleware::from_fn_with_state(state, require_auth))
@@ -383,6 +384,7 @@ async fn delete_comment(
     match state.db.delete_doc_review_comment(&comment_id).await {
         Ok(0) => Err(err(StatusCode::NOT_FOUND, "comment not found")),
         Ok(_) => {
+            maybe_kill_emptied_run(&state, &id).await;
             broadcast_by_id(&state, &id).await;
             Ok(StatusCode::NO_CONTENT)
         }
@@ -490,7 +492,12 @@ async fn run_pass(
     if include_annotations && let Err(e) = state.db.mark_pending_comments_sent(&id).await {
         return Err(err(StatusCode::INTERNAL_SERVER_ERROR, e));
     }
-    if let Err(e) = state.db.set_doc_review_status(&id, "running").await {
+    // A finished review stays finished: chatting on an approved document
+    // must not drag it back through `running` → `annotating`. The chat
+    // lane's working indicator follows the session's own events instead.
+    if review.status != "approved"
+        && let Err(e) = state.db.set_doc_review_status(&id, "running").await
+    {
         return Err(err(StatusCode::INTERNAL_SERVER_ERROR, e));
     }
     if let Err(e) = state.db.set_pending_doc_review(&session_id, &id).await {
@@ -622,6 +629,324 @@ async fn ensure_review_session(
     Ok(session.id)
 }
 
+/// POST /api/doc-reviews/{id}/stop — stop the in-flight run.
+///
+/// Interrupts the review session's process (the same seam as
+/// `POST /api/sessions/{id}/interrupt`, `interrupt` event included) and
+/// hands the review back: `running` / `needs_input` drop to `annotating`.
+/// Idempotent — stopping an idle review moves nothing.
+async fn stop_pass(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> impl IntoResponse {
+    let review = match state.db.get_doc_review(&id).await {
+        Ok(Some(r)) => r,
+        Ok(None) => return Err(err(StatusCode::NOT_FOUND, "review not found")),
+        Err(e) => return Err(err(StatusCode::INTERNAL_SERVER_ERROR, e)),
+    };
+    kill_review_run(&state, &review).await;
+    let updated = state
+        .db
+        .get_doc_review(&id)
+        .await
+        .ok()
+        .flatten()
+        .unwrap_or(review);
+    Ok(Json(serde_json::json!({ "review": updated })))
+}
+
+/// Kill whatever the review session is doing right now: interrupt the
+/// process, dismiss any question the run left open (a stale card would
+/// otherwise sit over the document with nobody coming back to answer it),
+/// append the same `interrupt` event the sessions route appends so the
+/// chat lane says what happened, and put a `running` / `needs_input`
+/// review back to `annotating`. An approved review keeps its status —
+/// stopping a chat turn must not un-approve the document. The interrupted
+/// turn's completion still fires `resume_after_turn`, which no-ops after
+/// this.
+async fn kill_review_run(state: &Arc<AppState>, review: &DocReview) {
+    if let Some(session_id) = review.session_id.as_deref() {
+        state.session_manager.interrupt(session_id).await;
+        crate::routes::sessions::dismiss_pending_questions(state, session_id, "pass-stopped").await;
+        match state
+            .db
+            .append_event(
+                session_id,
+                "interrupt",
+                serde_json::json!({ "reason": "user-interrupt" }),
+            )
+            .await
+        {
+            Ok(ev) => state.broadcaster.broadcast(WsEvent {
+                event_type: "event".into(),
+                session_id: session_id.to_string(),
+                data: serde_json::json!({
+                    "id": ev.id,
+                    "seq": ev.seq,
+                    "ts": ev.ts,
+                    "kind": "interrupt",
+                    "data": { "reason": "user-interrupt" },
+                }),
+            }),
+            Err(e) => {
+                tracing::warn!(review_id = %review.id, "review stop: interrupt event failed: {e}")
+            }
+        }
+    }
+    if matches!(review.status.as_str(), "running" | "needs_input") {
+        review_service::set_status(&state.db, &state.broadcaster, &review.id, "annotating").await;
+    }
+}
+
+/// A comment was deleted: if that emptied the open queue out from under a
+/// A comment was deleted: if that emptied the open queue out from under a
+/// live annotation pass, kill the pass — the reviewer would otherwise keep
+/// addressing annotations that no longer exist. Only the annotation pass
+/// dies here: the session's newest `user` event says which kind of turn is
+/// running (see [`is_annotation_pass`]), so clearing the queue never kills
+/// an unrelated chat-lane turn.
+async fn maybe_kill_emptied_run(state: &Arc<AppState>, review_id: &str) {
+    let Ok(Some(review)) = state.db.get_doc_review(review_id).await else {
+        return;
+    };
+    if !matches!(review.status.as_str(), "running" | "needs_input") {
+        return;
+    }
+    match state.db.list_doc_review_comments(review_id, true).await {
+        Ok(open) if open.is_empty() => {}
+        _ => return,
+    }
+    let Some(session_id) = review.session_id.as_deref() else {
+        return;
+    };
+    let is_annotation_pass = state
+        .db
+        .list_events_by_session_before(session_id, None, 200)
+        .await
+        .ok()
+        .and_then(|events| {
+            events
+                .into_iter()
+                .rev()
+                .find(|e| e.kind == "user")
+                .map(|e| {
+                    serde_json::from_str::<serde_json::Value>(&e.data)
+                        .ok()
+                        .and_then(|d| {
+                            d.get("text")
+                                .and_then(|t| t.as_str())
+                                .map(is_annotation_pass)
+                        })
+                        .unwrap_or(false)
+                })
+        })
+        .unwrap_or(false);
+    if is_annotation_pass {
+        kill_review_run(state, &review).await;
+    }
+}
+
+/// Does this turn text hand the annotation queue to the reviewer?
+/// [`pass_instruction`] opens those turns with the digest header, and a
+/// turn a restart re-dispatched carries the same header behind its
+/// preamble — a resumed pass is still a pass, so deleting its last
+/// annotation has to kill it too.
+fn is_annotation_pass(text: &str) -> bool {
+    strip_resume_preamble(text).starts_with(PASS_HEADER)
+}
+
+/// The pass digest's first words, shared by the turn builder, the kill
+/// check and the review screen's chat lane.
+const PASS_HEADER: &str = "Review pass:";
+
+/// A resumed turn is `<preamble>\n\n<the original turn>`; everything that
+/// reads the turn wants the original.
+fn strip_resume_preamble(text: &str) -> &str {
+    text.split_once("\n\n")
+        .filter(|(head, _)| head.starts_with(RESUME_PREFIX))
+        .map_or(text, |(_, rest)| rest)
+}
+
+/// What a resumed turn opens with. The prefix is a contract with the
+/// review screen's chat lane, which renders a turn starting with it as a
+/// "resumed after a restart" system row rather than words the user typed.
+pub const RESUME_PREFIX: &str = "Resumed after a PeckBoard restart.";
+
+/// Boot recovery for document reviews.
+///
+/// At startup (and so after every upgrade, which restarts the binary) no
+/// agent process exists, so a review the database still calls `running` is
+/// a pass whose turn died with the previous process. Nothing else would
+/// ever move it: the completion listener that fires `resume_after_turn`
+/// only sees turns THIS process started, so without this the review is
+/// stuck on a spinner forever with Run pass disabled.
+///
+/// Each `running` review gets one of two outcomes:
+///
+/// - the turn really was in flight (no clean `agent-end` after the last
+///   user turn, and the user didn't stop it) → re-arm the one-shot document
+///   injection and re-dispatch that same turn, so the reviewer picks the
+///   pass back up with the document and every open annotation attached;
+/// - anything else (session gone, turn already finished, user interrupted)
+///   → hand the review back to `annotating`, because there is nothing left
+///   to resume and a spinner nobody can clear is worse than a lost status.
+///
+/// `needs_input` is deliberately left parked: the question card survives
+/// the restart and answering it spawns a fresh process
+/// ([`crate::service::questions::resolve_question`]), so only the injection
+/// needs re-arming for that answer turn.
+pub async fn resume_running_reviews(state: &Arc<AppState>) {
+    let reviews = match state.db.list_doc_reviews().await {
+        Ok(reviews) => reviews,
+        Err(e) => {
+            tracing::warn!("doc review startup resume: listing reviews failed: {e}");
+            return;
+        }
+    };
+
+    let (mut resumed, mut freed) = (0u32, 0u32);
+    for review in reviews {
+        match review.status.as_str() {
+            "needs_input" => {
+                if let Some(session_id) = review.session_id.as_deref() {
+                    rearm_injection(state, session_id, &review.id).await;
+                }
+                continue;
+            }
+            "running" => {}
+            _ => continue,
+        }
+
+        // A session id that no longer resolves is treated the same way the
+        // pass endpoint treats it: absent.
+        let session_id = match review.session_id.as_deref() {
+            Some(sid) if state.db.get_session(sid).await.ok().flatten().is_some() => {
+                sid.to_string()
+            }
+            _ => {
+                hand_review_back(state, &review, "no session to resume").await;
+                freed += 1;
+                continue;
+            }
+        };
+
+        let Some(turn) = unfinished_turn(state, &session_id).await else {
+            hand_review_back(state, &review, "nothing left in flight").await;
+            freed += 1;
+            continue;
+        };
+
+        rearm_injection(state, &session_id, &review.id).await;
+        let instruction = format!(
+            "{RESUME_PREFIX} The turn below never finished, and the document plus every open \
+             annotation are re-attached above. Pick the pass up from the CURRENT version \
+             (call `get_review_doc` if you need it again) instead of starting over.\n\n{turn}"
+        );
+        match state
+            .db
+            .append_event(
+                &session_id,
+                "user",
+                serde_json::json!({ "text": &instruction, "source": "doc-review-resume" }),
+            )
+            .await
+        {
+            Ok(ev) => state.broadcaster.broadcast(WsEvent {
+                event_type: "event".into(),
+                session_id: session_id.clone(),
+                data: serde_json::json!({
+                    "id": ev.id,
+                    "seq": ev.seq,
+                    "ts": ev.ts,
+                    "kind": "user",
+                    "data": { "text": &instruction, "source": "doc-review-resume" },
+                }),
+            }),
+            Err(e) => {
+                tracing::warn!(review_id = %review.id, "review resume: user event failed: {e}")
+            }
+        }
+
+        if let Err(e) = crate::service::mcp_server::AppExpertDispatcher::new(state.clone())
+            .resume_session(&session_id, &instruction)
+            .await
+        {
+            // No provider, no credentials, nothing to spawn: the review
+            // must not keep spinning on a run that never started.
+            tracing::warn!(review_id = %review.id, session_id = %session_id, "review resume dispatch failed: {e}");
+            hand_review_back(state, &review, "resume dispatch failed").await;
+            freed += 1;
+            continue;
+        }
+        resumed += 1;
+        tracing::info!(review_id = %review.id, session_id = %session_id, "Resumed interrupted review pass");
+    }
+
+    if resumed > 0 || freed > 0 {
+        tracing::info!("Doc reviews: resumed {resumed} pass(es), freed {freed} stuck review(s)");
+    }
+}
+
+/// Re-arm the one-shot document injection so the session's next turn opens
+/// with the document and open annotations again — the pre-restart turn
+/// consumed the flag ([`crate::db::Db::take_pending_doc_review`]).
+async fn rearm_injection(state: &Arc<AppState>, session_id: &str, review_id: &str) {
+    if let Err(e) = state.db.set_pending_doc_review(session_id, review_id).await {
+        tracing::warn!(
+            review_id,
+            session_id,
+            "review resume: re-arming the injection failed: {e}"
+        );
+    }
+}
+
+/// Put a review nobody is working on back in the user's hands.
+async fn hand_review_back(state: &Arc<AppState>, review: &DocReview, why: &str) {
+    tracing::info!(review_id = %review.id, "Freeing stuck review ({why})");
+    review_service::set_status(&state.db, &state.broadcaster, &review.id, "annotating").await;
+}
+
+/// The text of the session's last user turn, but ONLY when that turn was
+/// still in flight when the process died.
+///
+/// A clean `agent-end` after it means the turn finished and merely the
+/// status write was lost — re-running it would redo work the user already
+/// has. An `interrupt` means the user stopped it on purpose, which a
+/// restart must not undo. A crashed `agent-end` is what a killed process
+/// leaves behind (including the one
+/// [`crate::security::repair_dangling_sessions`] synthesizes at boot), so
+/// that still counts as unfinished.
+async fn unfinished_turn(state: &Arc<AppState>, session_id: &str) -> Option<String> {
+    let events = state
+        .db
+        .list_events_by_session_before(session_id, None, 500)
+        .await
+        .ok()?;
+    let last_user = events.iter().rposition(|e| e.kind == "user")?;
+    for ev in &events[last_user + 1..] {
+        match ev.kind.as_str() {
+            "interrupt" => return None,
+            "agent-end" => {
+                let crashed = serde_json::from_str::<serde_json::Value>(&ev.data)
+                    .ok()
+                    .and_then(|d| {
+                        d.get("status")
+                            .and_then(|s| s.as_str())
+                            .map(|s| s == "crashed")
+                    })
+                    .unwrap_or(false);
+                if !crashed {
+                    return None;
+                }
+            }
+            _ => {}
+        }
+    }
+    let data = serde_json::from_str::<serde_json::Value>(&events[last_user].data).ok()?;
+    // A resume of a resume would stack the preamble on every restart.
+    let text = strip_resume_preamble(data.get("text")?.as_str()?);
+    (!text.trim().is_empty()).then(|| text.to_string())
+}
 /// The turn text for a pass. The document and the annotations' full text
 /// already arrive via the injection, so this is the *instruction*: what to
 /// do with them, plus a digest so the ask survives a long turn.
@@ -629,7 +954,7 @@ fn pass_instruction(pending: &[DocReviewComment], message: Option<&str>) -> Stri
     let mut out = String::new();
     if !pending.is_empty() {
         out.push_str(&format!(
-            "Review pass: {} new annotation(s) on the document above.\n\n",
+            "{PASS_HEADER} {} new annotation(s) on the document above.\n\n",
             pending.len()
         ));
         for c in pending {
@@ -1542,5 +1867,586 @@ mod tests {
         assert_eq!(all["comments"].as_array().unwrap().len(), 1);
         assert_eq!(all["comments"][0]["status"], "fixed");
         assert_eq!(all["comments"][0]["resolution_note"], "rewrote it");
+    }
+
+    #[tokio::test]
+    async fn stop_frees_a_running_review_and_logs_the_interrupt() {
+        let dir = tempfile::tempdir().unwrap();
+        let workspace = tempfile::tempdir().unwrap();
+        let (state, token) = fixture(dir.path(), workspace.path()).await;
+        let id = seed_review(&state, &token).await;
+        add_annotation(&state, &token, &id, "this is wrong").await;
+        let response = run_pass(&state, &token, &id, None).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let session_id = json_body(response).await["session_id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+
+        let response = app(state.clone())
+            .oneshot(req(
+                "POST",
+                &format!("/api/doc-reviews/{id}/stop"),
+                &token,
+                None,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = json_body(response).await;
+        assert_eq!(body["review"]["status"], "annotating", "got: {body}");
+        let events = state
+            .db
+            .list_events_by_session(&session_id, None)
+            .await
+            .unwrap();
+        assert!(
+            events.iter().any(|e| e.kind == "interrupt"),
+            "the lane is told the run was stopped"
+        );
+
+        // A parked question dies with the run: needs_input also stops, and
+        // the open question is dismissed so no stale card lingers over the
+        // document.
+        state
+            .db
+            .append_event(
+                &session_id,
+                "question",
+                serde_json::json!({ "text": "which reading?" }),
+            )
+            .await
+            .unwrap();
+        state
+            .db
+            .set_doc_review_status(&id, "needs_input")
+            .await
+            .unwrap();
+        let response = app(state.clone())
+            .oneshot(req(
+                "POST",
+                &format!("/api/doc-reviews/{id}/stop"),
+                &token,
+                None,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = json_body(response).await;
+        assert_eq!(body["review"]["status"], "annotating", "got: {body}");
+        let events = state
+            .db
+            .list_events_by_session(&session_id, None)
+            .await
+            .unwrap();
+        assert!(
+            events.iter().any(|e| e.kind == "question-resolved"),
+            "the parked question is dismissed"
+        );
+    }
+
+    #[tokio::test]
+    async fn deleting_the_last_open_annotation_kills_the_running_pass() {
+        let dir = tempfile::tempdir().unwrap();
+        let workspace = tempfile::tempdir().unwrap();
+        let (state, token) = fixture(dir.path(), workspace.path()).await;
+        let id = seed_review(&state, &token).await;
+        add_annotation(&state, &token, &id, "first problem").await;
+        add_annotation(&state, &token, &id, "second problem").await;
+        let response = run_pass(&state, &token, &id, None).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let session_id = json_body(response).await["session_id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+
+        let comments = state.db.list_doc_review_comments(&id, true).await.unwrap();
+        assert_eq!(comments.len(), 2);
+
+        // One open annotation left: the pass keeps running.
+        let response = app(state.clone())
+            .oneshot(req(
+                "DELETE",
+                &format!("/api/doc-reviews/{id}/comments/{}", comments[0].id),
+                &token,
+                None,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::NO_CONTENT);
+        assert_eq!(
+            state.db.get_doc_review(&id).await.unwrap().unwrap().status,
+            "running"
+        );
+
+        // The queue is now empty: the pass dies and the review is handed
+        // back.
+        let response = app(state.clone())
+            .oneshot(req(
+                "DELETE",
+                &format!("/api/doc-reviews/{id}/comments/{}", comments[1].id),
+                &token,
+                None,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::NO_CONTENT);
+        assert_eq!(
+            state.db.get_doc_review(&id).await.unwrap().unwrap().status,
+            "annotating"
+        );
+        let events = state
+            .db
+            .list_events_by_session(&session_id, None)
+            .await
+            .unwrap();
+        assert!(events.iter().any(|e| e.kind == "interrupt"));
+    }
+
+    #[tokio::test]
+    async fn clearing_annotations_never_kills_a_chat_turn() {
+        let dir = tempfile::tempdir().unwrap();
+        let workspace = tempfile::tempdir().unwrap();
+        let (state, token) = fixture(dir.path(), workspace.path()).await;
+        let id = seed_review(&state, &token).await;
+        add_annotation(&state, &token, &id, "queued for the next pass").await;
+        // The chat lane's turn: message only, the annotation stays pending.
+        let response = run_pass(
+            &state,
+            &token,
+            &id,
+            Some(
+                serde_json::json!({ "message": "how does this read?", "include_annotations": false }),
+            ),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let session_id = json_body(response).await["session_id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+
+        let comments = state.db.list_doc_review_comments(&id, true).await.unwrap();
+        let response = app(state.clone())
+            .oneshot(req(
+                "DELETE",
+                &format!("/api/doc-reviews/{id}/comments/{}", comments[0].id),
+                &token,
+                None,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::NO_CONTENT);
+        assert_eq!(
+            state.db.get_doc_review(&id).await.unwrap().unwrap().status,
+            "running",
+            "a chat turn survives the queue being cleared"
+        );
+        let events = state
+            .db
+            .list_events_by_session(&session_id, None)
+            .await
+            .unwrap();
+        assert!(!events.iter().any(|e| e.kind == "interrupt"));
+    }
+
+    #[tokio::test]
+    async fn a_chat_message_on_an_approved_review_stays_approved_on_the_same_session() {
+        let dir = tempfile::tempdir().unwrap();
+        let workspace = tempfile::tempdir().unwrap();
+        let (state, token) = fixture(dir.path(), workspace.path()).await;
+        let id = seed_review(&state, &token).await;
+        // First chat turn creates the session.
+        let response = run_pass(
+            &state,
+            &token,
+            &id,
+            Some(serde_json::json!({ "message": "hello", "include_annotations": false })),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let session_id = json_body(response).await["session_id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+
+        state
+            .db
+            .set_doc_review_status(&id, "approved")
+            .await
+            .unwrap();
+
+        // Chatting after approval reuses the conversation and never drags
+        // the review back through running → annotating.
+        let response = run_pass(
+            &state,
+            &token,
+            &id,
+            Some(
+                serde_json::json!({ "message": "one more question", "include_annotations": false }),
+            ),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = json_body(response).await;
+        assert_eq!(body["session_id"], session_id, "same conversation: {body}");
+        assert_eq!(body["review"]["status"], "approved", "got: {body}");
+    }
+
+    // ─── Boot recovery ───
+    //
+    // These simulate what a restart (and so an upgrade, which replaces the
+    // binary and restarts it) actually leaves behind: rows in the database
+    // saying a pass is running, and no process anywhere. The session is
+    // seeded directly rather than through `run_pass` for exactly that
+    // reason — a pass started in-process would still be live, which is the
+    // one thing a restart guarantees is not.
+
+    /// The review's session as a restart finds it: on disk, with a model,
+    /// and nothing running.
+    async fn seed_dead_session(state: &Arc<AppState>, review_id: &str, model: &str) -> String {
+        let now = chrono::Utc::now().to_rfc3339();
+        let session = state
+            .db
+            .create_session(NewSession {
+                id: uuid::Uuid::new_v4().to_string(),
+                name: "Review: seeded".into(),
+                folder_id: "f1".into(),
+                model: Some(model.to_string()),
+                is_expert: true,
+                expert_kind: Some(review_service::EXPERT_KIND.to_string()),
+                system_prompt: Some(review_service::SYSTEM_PROMPT.to_string()),
+                created_at: now.clone(),
+                last_activity: now,
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        state
+            .db
+            .set_doc_review_session(review_id, Some(&session.id))
+            .await
+            .unwrap();
+        session.id
+    }
+
+    /// Put a review in the state a killed pass leaves: annotations handed
+    /// over, status `running`, the one-shot injection already consumed by
+    /// the turn that died, and the turn's own `user` event on the log.
+    async fn seed_interrupted_pass(state: &Arc<AppState>, review_id: &str, session_id: &str) {
+        state
+            .db
+            .mark_pending_comments_sent(review_id)
+            .await
+            .unwrap();
+        state
+            .db
+            .set_doc_review_status(review_id, "running")
+            .await
+            .unwrap();
+        state
+            .db
+            .set_pending_doc_review(session_id, review_id)
+            .await
+            .unwrap();
+        state.db.take_pending_doc_review(session_id).await.unwrap();
+        state
+            .db
+            .append_event(
+                session_id,
+                "user",
+                serde_json::json!({
+                    "text": "Review pass: 1 new annotation(s) on the document above.\n\n- [lines 3-3] (wrong) this is wrong (id: c1)",
+                    "source": "doc-review-pass",
+                }),
+            )
+            .await
+            .unwrap();
+    }
+
+    async fn resume_events(state: &Arc<AppState>, session_id: &str) -> Vec<String> {
+        state
+            .db
+            .list_events_by_session(session_id, None)
+            .await
+            .unwrap()
+            .into_iter()
+            .filter(|e| e.kind == "user")
+            .filter_map(|e| serde_json::from_str::<serde_json::Value>(&e.data).ok())
+            .filter(|d| d.get("source").and_then(|s| s.as_str()) == Some("doc-review-resume"))
+            .map(|d| d["text"].as_str().unwrap_or_default().to_string())
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn a_restart_resumes_the_pass_that_was_in_flight() {
+        let dir = tempfile::tempdir().unwrap();
+        let workspace = tempfile::tempdir().unwrap();
+        let (state, token) = fixture(dir.path(), workspace.path()).await;
+        // `mock:block` parks the resumed turn, so the assertions are about
+        // the resume itself rather than how fast a reviewer answers.
+        crate::provider::mock::register_mock_provider(&state.provider_registry).await;
+        let id = seed_review(&state, &token).await;
+        add_annotation(&state, &token, &id, "this is wrong").await;
+        let session_id = seed_dead_session(&state, &id, "mock:block").await;
+        seed_interrupted_pass(&state, &id, &session_id).await;
+        // The real boot repair runs first and closes the dangling turn.
+        state
+            .db
+            .append_event(&session_id, "agent-start", serde_json::json!({}))
+            .await
+            .unwrap();
+        crate::security::repair_dangling_sessions(&state.db)
+            .await
+            .unwrap();
+
+        resume_running_reviews(&state).await;
+
+        // The interrupted turn is re-dispatched verbatim, on the same
+        // session, under a preamble that says why it is back.
+        let resumes = resume_events(&state, &session_id).await;
+        assert_eq!(resumes.len(), 1, "got: {resumes:?}");
+        assert!(resumes[0].starts_with(RESUME_PREFIX), "got: {}", resumes[0]);
+        assert!(
+            resumes[0].contains("- [lines 3-3] (wrong) this is wrong"),
+            "the original ask rides along: {}",
+            resumes[0]
+        );
+
+        // A process is actually running again, and the review still reads
+        // `running` rather than stranding the user on a dead spinner.
+        let mut spawned = false;
+        for _ in 0..50 {
+            let events = state
+                .db
+                .list_events_by_session(&session_id, None)
+                .await
+                .unwrap();
+            // The boot repair's synthetic close is the first agent-start's;
+            // a second one means the resumed turn really spawned.
+            if events.iter().filter(|e| e.kind == "agent-start").count() >= 2 {
+                spawned = true;
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        assert!(spawned, "the resumed pass never started an agent");
+        assert_eq!(
+            state.db.get_doc_review(&id).await.unwrap().unwrap().status,
+            "running"
+        );
+        // The annotations are still open, so the resumed pass can resolve
+        // them — a restart must not silently drop the queue.
+        assert_eq!(
+            state
+                .db
+                .list_doc_review_comments(&id, true)
+                .await
+                .unwrap()
+                .len(),
+            1
+        );
+        state.session_manager.interrupt(&session_id).await;
+    }
+
+    #[tokio::test]
+    async fn a_restart_frees_a_review_whose_turn_had_already_finished() {
+        let dir = tempfile::tempdir().unwrap();
+        let workspace = tempfile::tempdir().unwrap();
+        let (state, token) = fixture(dir.path(), workspace.path()).await;
+        let id = seed_review(&state, &token).await;
+        add_annotation(&state, &token, &id, "this is wrong").await;
+        let session_id = seed_dead_session(&state, &id, "mock:doc-review").await;
+        seed_interrupted_pass(&state, &id, &session_id).await;
+        // A clean end: the turn finished and only the status write was lost.
+        state
+            .db
+            .append_event(
+                &session_id,
+                "agent-end",
+                serde_json::json!({ "status": "ok" }),
+            )
+            .await
+            .unwrap();
+
+        resume_running_reviews(&state).await;
+
+        assert_eq!(
+            state.db.get_doc_review(&id).await.unwrap().unwrap().status,
+            "annotating",
+            "the review is handed back instead of spinning forever"
+        );
+        assert!(
+            resume_events(&state, &session_id).await.is_empty(),
+            "finished work is never re-run"
+        );
+    }
+
+    /// A resumed pass is still a pass: the preamble a restart adds must not
+    /// hide the annotation digest from the "queue is empty, kill it" check.
+    #[tokio::test]
+    async fn deleting_the_last_annotation_kills_a_pass_a_restart_resumed() {
+        let dir = tempfile::tempdir().unwrap();
+        let workspace = tempfile::tempdir().unwrap();
+        let (state, token) = fixture(dir.path(), workspace.path()).await;
+        crate::provider::mock::register_mock_provider(&state.provider_registry).await;
+        let id = seed_review(&state, &token).await;
+        add_annotation(&state, &token, &id, "this is wrong").await;
+        let session_id = seed_dead_session(&state, &id, "mock:block").await;
+        seed_interrupted_pass(&state, &id, &session_id).await;
+
+        resume_running_reviews(&state).await;
+        assert_eq!(
+            state.db.get_doc_review(&id).await.unwrap().unwrap().status,
+            "running"
+        );
+
+        let comment = state.db.list_doc_review_comments(&id, true).await.unwrap()[0]
+            .id
+            .clone();
+        let response = app(state.clone())
+            .oneshot(req(
+                "DELETE",
+                &format!("/api/doc-reviews/{id}/comments/{comment}"),
+                &token,
+                None,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::NO_CONTENT);
+
+        assert_eq!(
+            state.db.get_doc_review(&id).await.unwrap().unwrap().status,
+            "annotating",
+            "the resumed pass dies with its queue"
+        );
+        let events = state
+            .db
+            .list_events_by_session(&session_id, None)
+            .await
+            .unwrap();
+        assert!(events.iter().any(|e| e.kind == "interrupt"));
+    }
+
+    #[tokio::test]
+    async fn a_restart_leaves_a_stopped_pass_stopped() {
+        let dir = tempfile::tempdir().unwrap();
+        let workspace = tempfile::tempdir().unwrap();
+        let (state, token) = fixture(dir.path(), workspace.path()).await;
+        let id = seed_review(&state, &token).await;
+        add_annotation(&state, &token, &id, "this is wrong").await;
+        let session_id = seed_dead_session(&state, &id, "mock:doc-review").await;
+        seed_interrupted_pass(&state, &id, &session_id).await;
+        // The user hit Stop right before the shutdown.
+        state
+            .db
+            .append_event(
+                &session_id,
+                "interrupt",
+                serde_json::json!({ "reason": "user-interrupt" }),
+            )
+            .await
+            .unwrap();
+
+        resume_running_reviews(&state).await;
+
+        assert!(
+            resume_events(&state, &session_id).await.is_empty(),
+            "a restart must not undo a deliberate Stop"
+        );
+        assert_eq!(
+            state.db.get_doc_review(&id).await.unwrap().unwrap().status,
+            "annotating"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_restart_re_arms_a_parked_question_without_resuming_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let workspace = tempfile::tempdir().unwrap();
+        let (state, token) = fixture(dir.path(), workspace.path()).await;
+        let id = seed_review(&state, &token).await;
+        add_annotation(&state, &token, &id, "this is wrong").await;
+        let session_id = seed_dead_session(&state, &id, "mock:doc-review").await;
+        seed_interrupted_pass(&state, &id, &session_id).await;
+        state
+            .db
+            .append_event(
+                &session_id,
+                "question",
+                serde_json::json!({ "text": "which reading?" }),
+            )
+            .await
+            .unwrap();
+        state
+            .db
+            .set_doc_review_status(&id, "needs_input")
+            .await
+            .unwrap();
+
+        resume_running_reviews(&state).await;
+
+        // The card survives the restart and answering it spawns the next
+        // turn, so the pass is not re-dispatched underneath it.
+        assert_eq!(
+            state.db.get_doc_review(&id).await.unwrap().unwrap().status,
+            "needs_input"
+        );
+        assert!(resume_events(&state, &session_id).await.is_empty());
+        assert_eq!(
+            state
+                .db
+                .take_pending_doc_review(&session_id)
+                .await
+                .unwrap()
+                .as_deref(),
+            Some(id.as_str()),
+            "the answer turn opens with the document again"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_restart_frees_a_running_review_with_no_live_session() {
+        let dir = tempfile::tempdir().unwrap();
+        let workspace = tempfile::tempdir().unwrap();
+        let (state, token) = fixture(dir.path(), workspace.path()).await;
+        let id = seed_review(&state, &token).await;
+        state
+            .db
+            .set_doc_review_status(&id, "running")
+            .await
+            .unwrap();
+
+        resume_running_reviews(&state).await;
+
+        assert_eq!(
+            state.db.get_doc_review(&id).await.unwrap().unwrap().status,
+            "annotating",
+            "a review pointing at no session has nothing to resume"
+        );
+        // The other half of the guard — a `session_id` that no longer
+        // resolves — is defensive only: the foreign key on
+        // `doc_reviews.session_id` refuses to delete a session a review
+        // still points at, so the row is always there or the column is
+        // NULL (the case above).
+    }
+    /// missing credentials) must not leave the review spinning either.
+    #[tokio::test]
+    async fn a_restart_frees_the_review_when_the_resume_cannot_dispatch() {
+        let dir = tempfile::tempdir().unwrap();
+        let workspace = tempfile::tempdir().unwrap();
+        let (state, token) = fixture(dir.path(), workspace.path()).await;
+        let id = seed_review(&state, &token).await;
+        add_annotation(&state, &token, &id, "this is wrong").await;
+        // No provider is registered on this state, so the spawn fails.
+        let session_id = seed_dead_session(&state, &id, "mock:doc-review").await;
+        seed_interrupted_pass(&state, &id, &session_id).await;
+
+        resume_running_reviews(&state).await;
+
+        assert_eq!(
+            state.db.get_doc_review(&id).await.unwrap().unwrap().status,
+            "annotating"
+        );
     }
 }

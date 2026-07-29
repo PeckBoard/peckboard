@@ -172,7 +172,7 @@ pub(super) async fn send_message(
     // the `/events` route, to avoid the route's `question-resolved`
     // side effect that respawns the agent (this turn is about to do
     // exactly that with the user's actual text).
-    dismiss_pending_questions(&state, &id).await;
+    dismiss_pending_questions(&state, &id, "superseded-by-user-message").await;
 
     // Pre-warm hook: let a plugin intercept an interactive chat message
     // before it reaches the agent (e.g. the pre-hatcher plugin enriches it
@@ -792,7 +792,7 @@ pub(super) async fn cancel_pre_hatch(
 
     // Any question card still up (opt-in, clarifying, approval) belongs to
     // the pre-hatch being cancelled; its redirect target is now dead.
-    dismiss_pending_questions(&state, &id).await;
+    dismiss_pending_questions(&state, &id, "superseded-by-user-message").await;
 
     // A `Cancelled` verdict means the plugin delivered the original (or knew
     // it was already delivered); anything else falls through to core's own
@@ -919,12 +919,15 @@ async fn load_attachments(
 }
 
 /// Resolve every outstanding `question` event for the session by appending a
-/// `question-resolved {rejected: true}` for each id that doesn't already have
-/// one. Persists + broadcasts directly (no `/events` route), so we don't
-/// trigger the route's question-resolved → agent-respawn side effect — the
-/// caller is about to dispatch the actual user message and start a turn on
-/// its own.
-async fn dismiss_pending_questions(state: &Arc<AppState>, session_id: &str) {
+/// `question-resolved {rejected: true, reason}` for each id that doesn't
+/// already have one. Persists + broadcasts directly (no `/events` route), so
+/// we don't trigger the route's question-resolved → agent-respawn side effect
+/// — every caller is about to start (or has just stopped) a turn on its own.
+pub(crate) async fn dismiss_pending_questions(
+    state: &Arc<AppState>,
+    session_id: &str,
+    reason: &str,
+) {
     let events = match state.db.list_events_by_session(session_id, None).await {
         Ok(events) => events,
         Err(e) => {
@@ -964,7 +967,7 @@ async fn dismiss_pending_questions(state: &Arc<AppState>, session_id: &str) {
         let data = serde_json::json!({
             "question_id": qid,
             "rejected": true,
-            "reason": "superseded-by-user-message",
+            "reason": reason,
         });
         match state
             .db

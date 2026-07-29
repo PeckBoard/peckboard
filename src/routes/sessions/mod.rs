@@ -7,6 +7,8 @@
 mod dispatch;
 mod events;
 
+pub(crate) use dispatch::dismiss_pending_questions;
+
 use crate::auth::middleware::{AuthUser, require_auth, require_session_access};
 use crate::db::models::{NewSession, UpdateSession};
 use crate::state::AppState;

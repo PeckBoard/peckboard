@@ -381,7 +381,8 @@
   white-space: nowrap;
 }
 
-.review-view__pass {
+.review-view__pass,
+.review-view__stop {
   display: inline-flex;
   align-items: center;
   gap: 6px;
@@ -1319,7 +1320,38 @@
   align-items: center;
   gap: 6px;
   color: var(--text3);
+  max-width: 100%;
   font-size: var(--text-xs);
+}
+
+/* The activity text updates in place as the reviewer moves between tools —
+   one clipped line, never a growing feed. */
+.review-chat__working-label {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.review-chat__stop {
+  flex-shrink: 0;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--surface);
+  color: var(--text2);
+  font-size: var(--text-xs);
+  padding: 1px 8px;
+  cursor: pointer;
+}
+
+.review-chat__stop:hover:not(:disabled) {
+  color: var(--danger);
+  border-color: currentColor;
+}
+
+.review-chat__stop:disabled {
+  opacity: 0.6;
+  cursor: default;
 }
 
 .review-chat__error {

@@ -34,8 +34,8 @@ use crate::provider::stream::{CrashKind, ModelInfo, ProviderEvent, ToolImage};
 ///   tools (`get_review_doc` / `submit_review_revision` / `ask_user`) via
 ///   [`call_mcp_tool`]. Branch chosen by a marker in the turn text:
 ///   `[mock:ask]` asks a clarifying question, `[mock:chat]` answers without
-///   revising, anything else revises the document and resolves every open
-///   annotation.
+///   revising, `[mock:block]` parks mid-tool until interrupted, anything
+///   else revises the document and resolves every open annotation.
 /// * `ask` — Started → ControlRequest, waits for stdin → Text(reply) → Completed
 /// * `todo` — Started → ToolStart/ToolEnd(TodoWrite) → Todo(snapshot) → Completed
 /// * `tasks` — Started → scripted TaskCreate/TaskUpdate ToolStart/ToolEnd
@@ -1010,6 +1010,9 @@ async fn run_scenario(
             //                   options at all (free text).
             //   `[mock:chat]` → answer in the chat lane, revise nothing (the
             //                   Clarify action and the chat composer).
+            //   `[mock:block]` → park mid-tool until interrupted — drives the
+            //                   review Stop button and the "deleting every
+            //                   annotation kills the pass" e2e.
             //   anything else → revise the document and resolve every open
             //                   annotation.
             if message.contains("[mock:ask") {
@@ -1088,6 +1091,46 @@ async fn run_scenario(
                     .await;
                     tick().await;
                 }
+            } else if message.contains("[mock:block]") {
+                // Park mid-tool until interrupted: the review Stop button
+                // and the delete-every-annotation kill both need a run that
+                // outlives the click. The open ToolStart is what the chat
+                // lane's working line shows while parked.
+                emit_event(
+                    db,
+                    broadcaster,
+                    session_id,
+                    ProviderEvent::Text {
+                        text: "Reading the document closely…".into(),
+                    },
+                )
+                .await;
+                tick().await;
+                emit_event(
+                    db,
+                    broadcaster,
+                    session_id,
+                    ProviderEvent::ToolStart {
+                        tool_use_id: format!("tool-{}", uuid::Uuid::new_v4()),
+                        name: "mcp__peckboard__get_review_doc".into(),
+                        input: json!({}),
+                    },
+                )
+                .await;
+                cancel.notified().await;
+                emit_event(
+                    db,
+                    broadcaster,
+                    session_id,
+                    ProviderEvent::Crashed {
+                        reason: "interrupted".into(),
+                        error_kind: CrashKind::Interrupted,
+                        exit_code: None,
+                        stderr: None,
+                    },
+                )
+                .await;
+                return false;
             } else if let Some(doc) =
                 call_mcp_tool(db, broadcaster, session_id, "get_review_doc", json!({})).await
             {

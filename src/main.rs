@@ -202,6 +202,13 @@ async fn main() -> anyhow::Result<()> {
     peckboard::worker::orchestrator::check_and_spawn_workers(&state).await;
     tracing::info!("Worker orchestrator startup check complete");
 
+    // Same idea for document reviews: a review the DB still calls `running`
+    // is a pass whose process died with the last shutdown (or the upgrade
+    // that replaced this binary). Resume the interrupted turn where one was
+    // in flight, and free the rest — nothing else ever moves a review off
+    // `running`, so a stuck one disables Run pass forever.
+    peckboard::routes::doc_reviews::resume_running_reviews(&state).await;
+
     // Run orchestrator on a 5-second interval to pick up new cards quickly
     {
         let orch_state = state.clone();

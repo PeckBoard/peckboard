@@ -231,6 +231,16 @@ export async function runPass(id: string, input: RunPassInput = {}): Promise<voi
   if (!res.ok) await fail(res, "Couldn't start the pass")
 }
 
+/** Interrupt the in-flight run and hand the review back: `running` /
+ *  `needs_input` drop to `annotating`. An approved review keeps its status.
+ *  Idempotent — stopping an idle review moves nothing. */
+export async function stopPass(id: string): Promise<void> {
+  const res = await authedFetch(`/api/doc-reviews/${encodeURIComponent(id)}/stop`, {
+    method: 'POST',
+  })
+  if (!res.ok) await fail(res, "Couldn't stop the pass")
+}
+
 /** Write the current version back to the source document. `finish` also
  *  marks the review approved. */
 export async function applyReview(id: string, finish = false): Promise<void> {

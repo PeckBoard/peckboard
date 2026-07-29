@@ -528,7 +528,7 @@ test.describe('document review — desktop', () => {
       source_ref: `${folder.id}:docs/onboarding.md`,
       title: 'Chat review',
     })
-    await armReviewer(request, auth, reviewId)
+    const sessionId = await armReviewer(request, auth, reviewId)
 
     await loadAt(page, token, `/review/${reviewId}`)
     await expect(page.getByTestId('review-view')).toBeVisible({ timeout: 15_000 })
@@ -562,8 +562,100 @@ test.describe('document review — desktop', () => {
     const detail = await getReview(request, auth, reviewId)
     expect(detail.review.current_version, 'conversation never bumps the document').toBe(1)
     expect(detail.comments, 'clarify stores no annotation').toHaveLength(0)
+
+    // Finish the review, then keep talking: the conversation survives
+    // approval — the SAME session answers — and chatting never un-approves
+    // the document.
+    const done = await request.post(`/api/doc-reviews/${reviewId}/apply`, {
+      headers: auth,
+      data: { finish: true },
+    })
+    expect(done.ok(), `apply+finish failed: ${await done.text()}`).toBeTruthy()
+    await expect(page.getByTestId('review-status')).toHaveAttribute('data-status', 'approved', {
+      timeout: 10_000,
+    })
+    await page.getByTestId('review-chat-input').fill('[mock:chat] one last question')
+    await page.getByTestId('review-chat-send').click()
+    await expect(page.getByTestId('review-chat-reply')).toHaveCount(4, { timeout: 20_000 })
+    await expect(page.getByTestId('review-status')).toHaveAttribute('data-status', 'approved')
+    const settled = await getReview(request, auth, reviewId)
+    expect(settled.review.session_id, 'the same conversation carries on').toBe(sessionId)
   })
 
+  test('the working line narrates the run, Stop kills it, and the chat survives', async ({
+    request,
+    page,
+  }) => {
+    const { token, auth } = await authenticate(request)
+    const folder = await seedFolder(request, auth, 'stop')
+    const reviewId = await createReview(request, auth, {
+      source_kind: 'file',
+      source_ref: `${folder.id}:docs/onboarding.md`,
+      title: 'Stop review',
+    })
+    const sessionId = await armReviewer(request, auth, reviewId)
+
+    await loadAt(page, token, `/review/${reviewId}`)
+    await expect(page.getByTestId('review-view')).toBeVisible({ timeout: 15_000 })
+
+    await page.getByTestId('review-tab-chat').click()
+    await page.getByTestId('review-chat-input').fill('[mock:block] read everything first')
+    await page.getByTestId('review-chat-send').click()
+
+    // ONE working row narrates the parked tool call in place — the lane
+    // never grows a feed of tool rows.
+    await expect(page.getByTestId('review-chat-activity')).toContainText('get review doc', {
+      timeout: 20_000,
+    })
+    await expect(page.getByTestId('review-chat-working')).toHaveCount(1)
+    await expect(page.getByTestId('review-status')).toHaveAttribute('data-status', 'running')
+
+    // The header's Run pass flips into Stop while the run is live.
+    await page.getByTestId('review-stop').click()
+    await expect(page.getByTestId('review-status')).toHaveAttribute('data-status', 'annotating', {
+      timeout: 15_000,
+    })
+    await expect(page.getByTestId('review-chat-working')).toHaveCount(0, { timeout: 15_000 })
+
+    // The conversation survived the stop: the next message lands in the
+    // same session and the earlier turns are still on screen.
+    await page.getByTestId('review-chat-input').fill('[mock:chat] still with me?')
+    await page.getByTestId('review-chat-send').click()
+    await expect(page.getByTestId('review-chat-reply').last()).toContainText(
+      'Answering in the lane',
+      { timeout: 20_000 },
+    )
+    const after = await getReview(request, auth, reviewId)
+    expect(after.review.session_id, 'stop never swaps the conversation').toBe(sessionId)
+  })
+
+  test('deleting every queued annotation kills the running pass', async ({ request, page }) => {
+    const { token, auth } = await authenticate(request)
+    const folder = await seedFolder(request, auth, 'kill')
+    const reviewId = await createReview(request, auth, {
+      source_kind: 'file',
+      source_ref: `${folder.id}:docs/onboarding.md`,
+      title: 'Kill review',
+    })
+    await armReviewer(request, auth, reviewId)
+
+    await loadAt(page, token, `/review/${reviewId}`)
+    await expect(page.getByTestId('review-view')).toBeVisible({ timeout: 15_000 })
+
+    await annotate(page, 3, 'wrong', '[mock:block] hold this pass open')
+    await page.getByTestId('review-run-pass').click()
+    await expect(page.getByTestId('review-status')).toHaveAttribute('data-status', 'running', {
+      timeout: 15_000,
+    })
+
+    // Deleting the only annotation empties the queue out from under the
+    // pass — the run is killed instead of revising against nothing.
+    await page.getByTestId('review-annotation-item').getByRole('button', { name: 'Delete' }).click()
+    await expect(page.getByTestId('review-status')).toHaveAttribute('data-status', 'annotating', {
+      timeout: 15_000,
+    })
+    await expect(page.getByTestId('review-annotation-item')).toHaveCount(0)
+  })
   test('a review deep-links, keeps its tab chip, and deleting the last one shows the empty state', async ({
     request,
     page,

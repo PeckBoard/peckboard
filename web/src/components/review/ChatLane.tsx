@@ -10,8 +10,10 @@ import {
   type DisplayItem,
 } from '../chat/events'
 import { chatMarkdownComponents } from '../chat/markdown'
-import { runPass, type ReviewStatus } from '../../lib/review'
+import { getCommandLine, getToolLabel } from '../chat/toolDisplay'
+import { runPass, stopPass, type ReviewStatus } from '../../lib/review'
 import { useSessionsStore } from '../../store/sessions'
+import type { Event } from '../../types/api'
 import { describeActionError } from '../../utils/actionError'
 import './Review.css'
 
@@ -31,7 +33,63 @@ interface Props {
  *  Rendered whole, one queued pass would bury the conversation under the
  *  annotation digest, so those turns collapse to a summary. */
 const PASS_PREFIX = 'Review pass:'
+/** A turn the server re-dispatched for itself after a restart (see
+ *  `resume_running_reviews`). It is machinery, not words the user typed, so
+ *  the lane says so instead of putting it in a user bubble. */
+const RESUME_PREFIX = 'Resumed after a PeckBoard restart.'
 const PASS_COUNT_RE = /^Review pass: (\d+) new annotation/
+
+/** The first of these input keys names what a tool call is chewing on —
+ *  the argument a human would want on the working line. */
+const ACTIVITY_DETAIL_KEYS = ['file_path', 'path', 'query', 'pattern', 'url', 'name'] as const
+
+const clip = (s: string, n = 64) => {
+  const t = s.replace(/\s+/g, ' ').trim()
+  return t.length > n ? `${t.slice(0, n - 1)}…` : t
+}
+
+function activityDetail(input?: Record<string, unknown>): string {
+  if (!input) return ''
+  for (const key of ACTIVITY_DETAIL_KEYS) {
+    const v = input[key]
+    if (typeof v === 'string' && v.trim()) return v
+  }
+  return ''
+}
+
+/** What the reviewer is doing RIGHT NOW: its newest still-open tool call,
+ *  as one line ("Read file · onboarding.md"). The working row re-renders
+ *  this in place per event, so tool traffic never grows the feed — null
+ *  between calls falls back to plain "Working…". */
+function deriveActivity(events: Event[]): string | null {
+  const open = new Map<string, string>()
+  for (const ev of events) {
+    switch (ev.kind) {
+      case 'agent-tool-start': {
+        const id = (ev.data.toolUseId as string) ?? (ev.data.tool_use_id as string) ?? ev.id
+        const name = (ev.data.name as string) ?? (ev.data.tool_name as string) ?? 'tool'
+        const input = ev.data.input as Record<string, unknown> | undefined
+        const detail = getCommandLine(name, input) || activityDetail(input)
+        open.set(id, detail ? `${getToolLabel(name)} · ${clip(detail)}` : getToolLabel(name))
+        break
+      }
+      case 'agent-tool-end':
+        open.delete((ev.data.toolUseId as string) ?? (ev.data.tool_use_id as string) ?? '')
+        break
+      // A new turn or a finished one leaves nothing running.
+      case 'user':
+      case 'agent-end':
+      case 'interrupt':
+        open.clear()
+        break
+      default:
+        break
+    }
+  }
+  let last: string | null = null
+  for (const label of open.values()) last = label
+  return last
+}
 
 /** Grow the composer with its content, capped like the chat's InputBar. */
 function useAutoResize(value: string) {
@@ -75,6 +133,21 @@ function PassTurn({ text, ts }: { text: string; ts: number }) {
   )
 }
 
+/** PeckBoard restarted (or was upgraded) mid-pass and picked the turn back
+ *  up: one row saying so, with the ask it re-sent folded away. */
+function ResumedTurn({ text, ts }: { text: string; ts: number }) {
+  const [, ...rest] = text.split('\n\n')
+  return (
+    <details className="review-chat__pass" data-testid="review-chat-resumed">
+      <summary>
+        <span className="review-chat__pass-label">Resumed after a restart</span>
+        <span className="review-chat__time">{formatTime(ts)}</span>
+      </summary>
+      <div className="review-chat__pass-body">{rest.join('\n\n') || text}</div>
+    </details>
+  )
+}
+
 /**
  * The review session's free-form lane: the place for asks too big to pin to
  * a passage ("restructure section 3", "give me three options for the intro").
@@ -96,6 +169,7 @@ export default function ChatLane({ reviewId, sessionId, status, model, onSent }:
 
   const [text, setText] = useState('')
   const [sending, setSending] = useState(false)
+  const [stopping, setStopping] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const textareaRef = useAutoResize(text)
   const scrollRef = useRef<HTMLDivElement>(null)
@@ -114,6 +188,17 @@ export default function ChatLane({ reviewId, sessionId, status, model, onSent }:
     const agent = deriveAgentStatus(events)
     return agent === 'working' || agent === 'tool'
   }, [events])
+
+  /** The single, in-place-updating line under the feed while it works. */
+  const activity = useMemo(() => (working ? deriveActivity(events) : null), [working, events])
+
+  // A finished stop leaves the button ready for the next run — adjusted
+  // during render on the working→idle transition, not in an effect.
+  const [wasWorking, setWasWorking] = useState(working)
+  if (wasWorking !== working) {
+    setWasWorking(working)
+    if (!working) setStopping(false)
+  }
 
   const rows = useMemo(
     () =>
@@ -162,6 +247,18 @@ export default function ChatLane({ reviewId, sessionId, status, model, onSent }:
       })
   }
 
+  const stop = () => {
+    if (!sessionId || stopping) return
+    setStopping(true)
+    setError(null)
+    stopPass(reviewId)
+      .then(() => onSent())
+      .catch((e: unknown) => {
+        setError(describeActionError(e, "Couldn't stop the reviewer."))
+        setStopping(false)
+      })
+  }
+
   const onKeyDown = (e: KeyboardEvent<HTMLTextAreaElement>) => {
     if (e.key === 'Enter' && !e.shiftKey && !e.nativeEvent.isComposing) {
       e.preventDefault()
@@ -172,6 +269,8 @@ export default function ChatLane({ reviewId, sessionId, status, model, onSent }:
   const renderRow = (item: DisplayItem) => {
     switch (item.type) {
       case 'user':
+        if (item.text.startsWith(RESUME_PREFIX))
+          return <ResumedTurn key={item.key} text={item.text} ts={item.ts} />
         return item.text.startsWith(PASS_PREFIX) ? (
           <PassTurn key={item.key} text={item.text} ts={item.ts} />
         ) : (
@@ -245,9 +344,23 @@ export default function ChatLane({ reviewId, sessionId, status, model, onSent }:
         )}
         {rows.map(renderRow)}
         {(working || sending) && (
-          <div className="review-chat__working" role="status">
+          <div className="review-chat__working" role="status" data-testid="review-chat-working">
             <span className="review-view__pass-spinner" aria-hidden="true" />
-            Working…
+            <span className="review-chat__working-label" data-testid="review-chat-activity">
+              {activity ?? 'Working…'}
+            </span>
+            {working && sessionId && (
+              <button
+                type="button"
+                className="review-chat__stop"
+                data-testid="review-chat-stop"
+                disabled={stopping}
+                onClick={stop}
+                title="Stop the reviewer mid-run"
+              >
+                {stopping ? 'Stopping…' : 'Stop'}
+              </button>
+            )}
           </div>
         )}
       </div>
