@@ -4,6 +4,8 @@ import ConfirmDialog from '../ConfirmDialog'
 import { MenuButton, type MenuItem } from '../Dropdown'
 import ModelPicker from '../ModelPicker'
 import SafeMarkdown from '../SafeMarkdown'
+import { chatMarkdownComponents } from '../chat/markdown'
+import { highlightPlugins } from '../markdownHighlight'
 import { EMPTY_EVENTS, findOpenQuestion } from '../chat/events'
 import AnnotationRail from './AnnotationRail'
 import ChatLane from './ChatLane'
@@ -775,7 +777,14 @@ export default function ReviewView({ reviewId, onBack }: Props) {
                   Back to current
                 </button>
               </div>
-              <SafeMarkdown className="chat-markdown review-doc__body">
+              {/* An older version reads like the live document — diagrams and
+                  highlighted code included — minus the annotation anchors,
+                  which only ever hang off the current version. */}
+              <SafeMarkdown
+                className="chat-markdown review-doc__body"
+                rehypePlugins={highlightPlugins}
+                components={chatMarkdownComponents}
+              >
                 {viewing.markdown}
               </SafeMarkdown>
             </div>

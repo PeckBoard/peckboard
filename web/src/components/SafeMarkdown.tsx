@@ -33,6 +33,10 @@ export default function SafeMarkdown({
         {linkChildren}
       </a>
     ),
+    // Lazy so a document carrying a dozen screenshots doesn't fetch every
+    // one of them the moment it opens. The scheme has already been vetted by
+    // react-markdown's own `urlTransform` before it reaches here.
+    img: ({ src, alt, title }) => <img src={src} alt={alt ?? ''} title={title} loading="lazy" />,
     ...(components ?? {}),
   }
   return (

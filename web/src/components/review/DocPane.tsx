@@ -10,6 +10,9 @@ import {
 import type { Components } from 'react-markdown'
 
 import SafeMarkdown from '../SafeMarkdown'
+import MermaidBlock from '../MermaidBlock'
+import { mermaidFence } from '../mermaidFence'
+import { highlightPlugins } from '../markdownHighlight'
 import { isOpenComment, type DocReviewComment } from '../../lib/review'
 import './Review.css'
 
@@ -125,10 +128,13 @@ function AnchoredBlock({ render }: { render: (nested: boolean) => ReactNode }) {
  * The rendered document, with every block anchored back to its source lines.
  *
  * `SafeMarkdown` renders it — no `rehype-raw`, no relaxed URL transform, the
- * security contract is untouched. All this adds is a `components` map that
+ * security contract is untouched. On top of that it gets what every other
+ * markdown surface in the app already has — `rehype-highlight` for fenced
+ * code, ```mermaid fences as real diagrams — plus a `components` map that
  * wraps the block-level tags with `data-line-start` / `data-line-end` read
  * off the parsed node, so a click or a text selection resolves to the exact
- * range the annotation should hang off.
+ * range the annotation should hang off. A diagram anchors like any other
+ * block: the whole thing is one annotatable passage.
  */
 export default function DocPane({
   markdown,
@@ -201,6 +207,23 @@ export default function DocPane({
             {hits.length}
           </button>
         ) : null
+
+      // A ```mermaid fence renders as the diagram, not as its source. The
+      // wrapper carries the anchor attributes, so a diagram is annotatable
+      // like every other block — and it REPLACES the <pre> rather than
+      // sitting inside one: <div> is not valid there, and the monospace,
+      // pre-wrapped box would fight the SVG for width.
+      if (tag === 'pre') {
+        const diagram = mermaidFence(node)
+        if (diagram !== null) {
+          return (
+            <div {...attrs} className={`${attrs.className} review-block--diagram`}>
+              {pin}
+              <MermaidBlock code={diagram} />
+            </div>
+          )
+        }
+      }
 
       // A <button> is not valid inside <table>, so the table anchors on a
       // wrapper instead of the element itself — same attributes either way.
@@ -361,7 +384,11 @@ export default function DocPane({
       onTouchMove={cancelLongPress}
       onKeyDown={onKeyDown}
     >
-      <SafeMarkdown className="chat-markdown review-doc__body" components={components}>
+      <SafeMarkdown
+        className="chat-markdown review-doc__body"
+        rehypePlugins={highlightPlugins}
+        components={components}
+      >
         {markdown}
       </SafeMarkdown>
     </div>

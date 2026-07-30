@@ -12,6 +12,8 @@ import { authedFetch } from '../store/auth'
 import { useMediaQuery } from '../hooks/useMediaQuery'
 import { extractToc, rehypeHeadingIds } from '../lib/markdownToc'
 import SafeMarkdown from './SafeMarkdown'
+import { chatMarkdownComponents } from './chat/markdown'
+import { highlightPlugins } from './markdownHighlight'
 
 interface ReportViewProps {
   folder: string
@@ -62,7 +64,11 @@ function headingWithAnchor(Tag: 'h2' | 'h3' | 'h4') {
   }
 }
 
+/** A report is one of the documents the review screen renders, so it reads the
+ *  same way here: diagrams for ```mermaid fences and highlighted fenced code,
+ *  plus this screen's own anchored headings. */
 const markdownComponents: Components = {
+  ...chatMarkdownComponents,
   h2: headingWithAnchor('h2'),
   h3: headingWithAnchor('h3'),
   h4: headingWithAnchor('h4'),
@@ -70,7 +76,7 @@ const markdownComponents: Components = {
 
 // Module scope so the identity is stable across renders (a fresh array
 // would re-run the whole markdown pipeline on every keystroke elsewhere).
-const rehypePlugins = [rehypeHeadingIds]
+const rehypePlugins = [rehypeHeadingIds, ...highlightPlugins]
 
 /** Copy `text` to the clipboard, reporting whether it worked.
  *  `navigator.clipboard` only exists in a secure context and PeckBoard is

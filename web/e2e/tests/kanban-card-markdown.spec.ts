@@ -32,6 +32,12 @@ This card has **bold text**, _italic_, and \`inline code\`.
 <img src="x" onerror="window.__pwned_img = 'card'" data-testid="should-not-exist" />
 `
 
+/** A second card, kept apart from `DESCRIPTION` so the assertions on it can
+ *  keep counting single elements. */
+const DIAGRAM_DESCRIPTION = ['```mermaid', 'flowchart LR', '  A[Draft] --> B[Review]', '```'].join(
+  '\n',
+)
+
 async function authenticate(
   request: APIRequestContext,
 ): Promise<{ token: string; auth: Record<string, string> }> {
@@ -54,6 +60,7 @@ async function setupProjectWithCard(
   request: APIRequestContext,
   auth: Record<string, string>,
   suffix: string,
+  description: string = DESCRIPTION,
 ): Promise<{ projectId: string }> {
   const folderPath = mkdtempSync(path.join(tmpdir(), `peckboard-e2e-md-${suffix}-`))
   const folderRes = await request.post('/api/folders', {
@@ -81,7 +88,7 @@ async function setupProjectWithCard(
     headers: auth,
     data: {
       title: 'Markdown smoke',
-      description: DESCRIPTION,
+      description,
       step: 'backlog',
       priority: 2,
     },
@@ -173,4 +180,29 @@ test('card detail modal renders markdown and escapes embedded raw HTML', async (
       (window as unknown as { __pwned?: string; __pwned_img?: string }).__pwned_img,
   )
   expect(pwned, 'no script or onerror handler from the description ran').toBeUndefined()
+})
+
+test('a card description renders a mermaid fence as a diagram', async ({ request, page }) => {
+  const { token, auth } = await authenticate(request)
+  const { projectId } = await setupProjectWithCard(request, auth, 'diagram', DIAGRAM_DESCRIPTION)
+
+  await loadAt(page, token, `/projects/${projectId}`)
+
+  const card = page.locator('.kanban-card', { hasText: 'Markdown smoke' })
+  await expect(card.locator('.kanban-card-title', { hasText: 'Markdown smoke' })).toBeVisible({
+    timeout: 10_000,
+  })
+  await card.locator('.kanban-card-title').click()
+
+  const desc = card.locator('.kanban-card-desc-markdown')
+  await expect(
+    desc.locator('[data-testid="mermaid-diagram"], [data-testid="mermaid-error"]'),
+  ).toBeVisible({ timeout: 15_000 })
+  await expect(page.getByTestId('mermaid-error'), 'mermaid fell back to raw source').toHaveCount(0)
+  await expect(desc.getByTestId('mermaid-diagram').locator('svg')).toContainText('Draft')
+
+  // Whatever the diagram's own width, it stays inside the card.
+  const cardBox = await card.boundingBox()
+  const svgBox = await desc.locator('svg').boundingBox()
+  expect(svgBox!.width).toBeLessThanOrEqual(cardBox!.width)
 })

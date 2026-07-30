@@ -10,6 +10,7 @@ import {
   type DisplayItem,
 } from '../chat/events'
 import { chatMarkdownComponents } from '../chat/markdown'
+import { highlightPlugins } from '../markdownHighlight'
 import { getCommandLine, getToolLabel } from '../chat/toolDisplay'
 import { runPass, stopPass, type ReviewStatus } from '../../lib/review'
 import { useSessionsStore } from '../../store/sessions'
@@ -276,7 +277,11 @@ export default function ChatLane({ reviewId, sessionId, status, model, onSent }:
         ) : (
           <div key={item.key} className="review-chat__row review-chat__row--user">
             <div className="review-chat__bubble review-chat__bubble--user">
-              <SafeMarkdown className="chat-markdown" components={chatMarkdownComponents}>
+              <SafeMarkdown
+                className="chat-markdown"
+                rehypePlugins={highlightPlugins}
+                components={chatMarkdownComponents}
+              >
                 {item.text}
               </SafeMarkdown>
               <span className="review-chat__time">{formatTime(item.ts)}</span>
@@ -290,7 +295,11 @@ export default function ChatLane({ reviewId, sessionId, status, model, onSent }:
               className="review-chat__bubble review-chat__bubble--assistant"
               data-testid="review-chat-reply"
             >
-              <SafeMarkdown className="chat-markdown" components={chatMarkdownComponents}>
+              <SafeMarkdown
+                className="chat-markdown"
+                rehypePlugins={highlightPlugins}
+                components={chatMarkdownComponents}
+              >
                 {item.text}
               </SafeMarkdown>
               <span className="review-chat__time">{formatTime(item.ts)}</span>

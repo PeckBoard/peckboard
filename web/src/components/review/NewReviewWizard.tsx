@@ -2,6 +2,8 @@ import { useEffect, useMemo, useState, type ReactNode } from 'react'
 
 import Modal from '../Modal'
 import SafeMarkdown from '../SafeMarkdown'
+import { chatMarkdownComponents } from '../chat/markdown'
+import { highlightPlugins } from '../markdownHighlight'
 import FieldError from '../FieldError'
 import { MenuButton, type MenuItem } from '../Dropdown'
 import { authedFetch } from '../../store/auth'
@@ -634,7 +636,13 @@ export default function NewReviewWizard({ onClose, onCreated }: Props) {
               {previewError ? (
                 <p className="form-error">{previewError}</p>
               ) : preview !== null ? (
-                <SafeMarkdown>{preview}</SafeMarkdown>
+                <SafeMarkdown
+                  className="chat-markdown"
+                  rehypePlugins={highlightPlugins}
+                  components={chatMarkdownComponents}
+                >
+                  {preview}
+                </SafeMarkdown>
               ) : picked ? (
                 <p className="review-wizard__preview-empty">Loading preview…</p>
               ) : (

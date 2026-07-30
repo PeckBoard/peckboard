@@ -1,6 +1,6 @@
 import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import { useVirtualizer } from '@tanstack/react-virtual'
-import rehypeHighlight from 'rehype-highlight'
+import { highlightPlugins } from './markdownHighlight'
 import SafeMarkdown from './SafeMarkdown'
 import type { CostTable, Event, Session } from '../types/api'
 import { authedFetch } from '../store/auth'
@@ -45,7 +45,6 @@ import {
   type MessageAttachment,
   type QuestionItem,
 } from './chat/events'
-import 'highlight.js/styles/github-dark.css'
 
 // Coarse announcement key: `working` and `tool` collapse into one "busy"
 // state so an agentic turn that runs ten tools doesn't announce twenty
@@ -475,7 +474,7 @@ const ChatRow = memo(function ChatRow({
             {USER_MARKDOWN_RE.test(item.text) ? (
               <SafeMarkdown
                 className="chat-markdown chat-user-markdown"
-                rehypePlugins={[rehypeHighlight]}
+                rehypePlugins={highlightPlugins}
                 components={chatMarkdownComponents}
               >
                 {item.text}
@@ -517,7 +516,7 @@ const ChatRow = memo(function ChatRow({
           <div className="chat-bubble chat-bubble-assistant">
             <SafeMarkdown
               className="chat-markdown"
-              rehypePlugins={[rehypeHighlight]}
+              rehypePlugins={highlightPlugins}
               components={chatMarkdownComponents}
             >
               {item.text}
@@ -654,6 +653,7 @@ const ChatRow = memo(function ChatRow({
             <SafeMarkdown
               className="chat-markdown chat-handover-doc"
               components={chatMarkdownComponents}
+              rehypePlugins={highlightPlugins}
             >
               {item.doc}
             </SafeMarkdown>

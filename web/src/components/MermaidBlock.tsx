@@ -1,12 +1,14 @@
 import { useEffect, useRef, useState } from 'react'
 
+import './MermaidBlock.css'
+
 let mermaidPromise: Promise<typeof import('mermaid').default> | null = null
 let idSeq = 0
 
-/** Lazy-load mermaid only when a plan with a ```mermaid block is opened, so
- *  it never weighs down the main bundle. Renders the diagram to SVG; on any
- *  parse/render error it falls back to showing the raw source so the plan is
- *  never blank. */
+/** Lazy-load mermaid only when a document holding a ```mermaid block is
+ *  opened — a plan, a chat reply, a review — so it never weighs down the main
+ *  bundle. Renders the diagram to SVG; on any parse/render error it falls back
+ *  to showing the raw source, so the passage is never blank. */
 export default function MermaidBlock({ code }: { code: string }) {
   const ref = useRef<HTMLDivElement>(null)
   const [error, setError] = useState<string | null>(null)
@@ -40,10 +42,25 @@ export default function MermaidBlock({ code }: { code: string }) {
     mermaidPromise
       .then(async (mermaid) => {
         if (cancelled) return
+        // Mermaid sizes each label's box from a hidden measurement of the
+        // text, in the app's font. Measure that before the webfont lands and
+        // every box comes out a hair too narrow — the first node rendered as
+        // "Draf". The labels live in <foreignObject>, which clips at its own
+        // geometry, so no CSS can rescue a box that came out short.
+        await document.fonts?.ready
+        if (cancelled) return
         const id = `mermaid-${idSeq++}`
         const { svg } = await mermaid.render(id, code)
         if (!cancelled && ref.current) {
           ref.current.innerHTML = svg
+          // Mermaid caps the diagram at its natural width from a <style>
+          // block inside the SVG — the one this bundle strips. Without the
+          // cap its `width: 100%` stretches a three-node flowchart across a
+          // full report column, scaling the text (and the clip on every
+          // label box) with it. Re-apply the cap from the viewBox.
+          const el = ref.current.querySelector('svg')
+          const natural = el?.viewBox?.baseVal?.width
+          if (el && natural) el.style.maxWidth = `${natural}px`
           setError(null)
         }
       })
@@ -57,10 +74,10 @@ export default function MermaidBlock({ code }: { code: string }) {
 
   if (error) {
     return (
-      <pre className="plan-mermaid-error" data-testid="mermaid-error">
+      <pre className="md-mermaid-error" data-testid="mermaid-error">
         <code>{code}</code>
       </pre>
     )
   }
-  return <div className="plan-mermaid" data-testid="mermaid-diagram" ref={ref} />
+  return <div className="md-mermaid" data-testid="mermaid-diagram" ref={ref} />
 }

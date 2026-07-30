@@ -1,0 +1,77 @@
+/* Styles for the rendered ```mermaid diagram, next to the component that
+   emits it rather than in one caller's stylesheet. They used to live in
+   PlanView.css under a `.plan-` prefix, which only loaded because PlanView
+   happens to be statically imported — the review pane renders diagrams too
+   and must not depend on that. */
+
+.md-mermaid {
+  display: flex;
+  justify-content: center;
+  margin: var(--space-5) 0;
+  padding: var(--space-4);
+  border-radius: var(--radius-md);
+  background: var(--surface);
+  border: 1px solid var(--border);
+  /* Mermaid measures every label in a hidden element it appends to <body>,
+     so the box it sizes assumes the BODY typography. Its own SVG <style>
+     would then pin the rendered label to match — and that <style> is exactly
+     what this bundle drops (see below), leaving labels to inherit whatever
+     column they land in. In the report viewer, whose text runs larger, the
+     label outgrew the box mermaid had sized and <foreignObject> clipped the
+     last glyph: "Draft" came out as "Draf". Restating the body values here
+     puts the rendered label back on the measurement's terms. */
+  font-family: var(--font);
+  font-size: var(--text-base);
+  line-height: var(--leading);
+}
+
+/* Fallback palette for mermaid output. The bundled mermaid build (vite 8 /
+   rolldown) currently emits SVGs whose embedded <style> carries no usable
+   theme rules, leaving every shape at SVG-default black — the same version
+   from a CDN styles itself fine, so this is a bundling casualty, not a
+   config one. These class-scoped rules keep diagrams readable either way:
+   when mermaid's own #id-scoped styles ARE present they win on specificity
+   and this block is inert. */
+.md-mermaid svg {
+  max-width: 100%;
+}
+.md-mermaid .node rect,
+.md-mermaid .node circle,
+.md-mermaid .node ellipse,
+.md-mermaid .node polygon,
+.md-mermaid .node path,
+.md-mermaid .actor {
+  fill: #eef2ff;
+  stroke: #8593c9;
+}
+.md-mermaid .cluster rect {
+  fill: #f5f7fa;
+  stroke: #b6c2cf;
+}
+.md-mermaid .edgePaths path,
+.md-mermaid .flowchart-link,
+.md-mermaid .messageLine0,
+.md-mermaid .messageLine1 {
+  stroke: #5b6472;
+  fill: none;
+}
+.md-mermaid .marker {
+  fill: #5b6472;
+  stroke: #5b6472;
+}
+.md-mermaid text,
+.md-mermaid .nodeLabel,
+.md-mermaid .edgeLabel,
+.md-mermaid .label {
+  fill: #1f2430;
+  color: #1f2430;
+}
+.md-mermaid .edgeLabel {
+  background: #ffffff;
+}
+
+.md-mermaid-error {
+  border-left: 3px solid var(--danger);
+  padding-left: var(--space-2);
+  color: var(--danger);
+}

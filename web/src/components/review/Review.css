@@ -511,6 +511,15 @@
   overflow-wrap: normal;
 }
 
+/* A ```mermaid block anchors on a wrapper div, like the table above, so it
+   gets the same shrink-to-fit: a hover wash running the full text column
+   past a narrow flowchart reads as if the blank space were part of the
+   passage. The diagram keeps its own framed card. */
+.review-block--diagram {
+  width: max-content;
+  max-width: 100%;
+}
+
 .review-block--active {
   outline: 2px solid var(--accent);
   outline-offset: 2px;

@@ -1,10 +1,9 @@
 import { useCallback, useEffect, useState } from 'react'
-import type { Components } from 'react-markdown'
 
 import type { Plan } from '../types/api'
 import { authedFetch } from '../store/auth'
 import SafeMarkdown from './SafeMarkdown'
-import MermaidBlock from './MermaidBlock'
+import { chatMarkdownComponents } from './chat/markdown'
 import ConfirmDialog from './ConfirmDialog'
 import FieldError from './FieldError'
 import PlanImplementWizard from './PlanImplementWizard'
@@ -20,17 +19,6 @@ interface PlanViewProps {
   onBack: () => void
   /** Open the session that authored the plan (to watch it revise). */
   onOpenSession?: (sessionId: string) => void
-}
-
-// Render fenced ```mermaid blocks as diagrams; everything else stays plain.
-const markdownComponents: Components = {
-  code({ className, children }) {
-    const text = String(children ?? '')
-    if (className && /\blanguage-mermaid\b/.test(className)) {
-      return <MermaidBlock code={text.replace(/\n$/, '')} />
-    }
-    return <code className={className}>{children}</code>
-  },
 }
 
 /**
@@ -221,7 +209,7 @@ export default function PlanView({ planId, onBack, onOpenSession }: PlanViewProp
       <FieldError message={reviewError ?? undefined} testId="plan-review-error" />
 
       <div className="plan-view__rendered" data-testid="plan-rendered">
-        <SafeMarkdown components={markdownComponents}>{plan.markdown}</SafeMarkdown>
+        <SafeMarkdown components={chatMarkdownComponents}>{plan.markdown}</SafeMarkdown>
       </div>
       {showWizard && plan && (
         <PlanImplementWizard

@@ -14,6 +14,8 @@ import Modal from './Modal'
 import WorkerComms from './WorkerComms'
 import ProjectTodoSummary from './ProjectTodoSummary'
 import SafeMarkdown from './SafeMarkdown'
+import { chatMarkdownComponents } from './chat/markdown'
+import { highlightPlugins } from './markdownHighlight'
 import { fetchPlanId, openPlan } from '../lib/plan'
 import { openReport } from '../lib/reports'
 import { useProjectTodos } from '../hooks/useProjectTodos'
@@ -1290,7 +1292,11 @@ export default function KanbanBoard({
                             <div className="kanban-card-body">
                               {description ? (
                                 <div className="kanban-card-desc" data-testid="card-description">
-                                  <SafeMarkdown className="kanban-card-desc-markdown">
+                                  <SafeMarkdown
+                                    className="kanban-card-desc-markdown"
+                                    rehypePlugins={highlightPlugins}
+                                    components={chatMarkdownComponents}
+                                  >
                                     {description}
                                   </SafeMarkdown>
                                 </div>
@@ -1573,7 +1579,11 @@ export default function KanbanBoard({
             {selectedCard.description && (
               <div className="card-detail-row card-detail-row-description">
                 <span className="card-detail-label">Description</span>
-                <SafeMarkdown className="card-detail-description">
+                <SafeMarkdown
+                  className="card-detail-description"
+                  rehypePlugins={highlightPlugins}
+                  components={chatMarkdownComponents}
+                >
                   {selectedCard.description}
                 </SafeMarkdown>
               </div>

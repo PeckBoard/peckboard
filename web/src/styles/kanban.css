@@ -508,6 +508,12 @@
   max-width: 100%;
   height: auto;
 }
+/* A diagram on a board card is a thumbnail, not a figure: the shared card
+   chrome around it, sized for a full document column, dwarfs a 300px one. */
+.kanban-card-desc-markdown .md-mermaid {
+  margin: 0.3em 0;
+  padding: var(--space-2);
+}
 .kanban-card-worker {
   display: inline-flex;
   align-items: center;

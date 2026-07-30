@@ -587,6 +587,18 @@
   border: 1px solid var(--border);
   padding: 4px 8px;
 }
+/* Markdown images render inside the text column instead of pushing it
+   sideways — a screenshot pasted into a doc is usually far wider than the
+   pane it lands in. `height: auto` keeps the aspect ratio once max-width
+   bites. */
+.chat-markdown img {
+  display: block;
+  max-width: 100%;
+  height: auto;
+  margin: 0.5em 0;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+}
 
 .chat-status {
   font-size: var(--text-xs);

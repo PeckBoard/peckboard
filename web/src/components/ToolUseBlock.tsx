@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from 'react'
-import rehypeHighlight from 'rehype-highlight'
+import { highlightPlugins } from './markdownHighlight'
 import Modal from './Modal'
 import DiffBlock from './DiffBlock'
 import SafeMarkdown from './SafeMarkdown'
@@ -253,7 +253,7 @@ function CodePreview({ path, content }: { path?: string; content: string }) {
         )}
         <CopyButton text={content} />
       </div>
-      <SafeMarkdown className="chat-markdown tool-code-preview" rehypePlugins={[rehypeHighlight]}>
+      <SafeMarkdown className="chat-markdown tool-code-preview" rehypePlugins={highlightPlugins}>
         {`${fence}${ext}\n${visible}${clamped ? `\n… ${lines.length - PRE_CLAMP_LINES} more lines` : ''}\n${fence}`}
       </SafeMarkdown>
     </div>
