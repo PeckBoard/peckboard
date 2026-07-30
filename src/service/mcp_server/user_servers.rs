@@ -73,11 +73,13 @@ pub struct McpOauthConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub scopes: Option<String>,
     /// Query parameter carrying the scopes on the authorize request
-    /// (default `scope`; Slack's user flow wants `user_scope`).
+    /// (default `scope`; Slack's *classic* v2 flow wants `user_scope` — its
+    /// MCP endpoint `/oauth/v2_user/authorize` takes the standard `scope`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub scope_param: Option<String>,
     /// Dot-path of the access token in a non-standard token response
-    /// (Slack: `authed_user.access_token`). Default `access_token`.
+    /// (Slack's classic `oauth.v2.access` nests it under
+    /// `authed_user.access_token`). Default `access_token`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub token_field: Option<String>,
     /// Extra query parameters appended to the authorize request — SSO/team
@@ -85,6 +87,16 @@ pub struct McpOauthConfig {
     /// `domain_hint=…`. Names in [`RESERVED_AUTH_PARAMS`] are rejected.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub auth_params: Vec<KvEntry>,
+    /// Fixed public callback base for installs whose own origin cannot be
+    /// registered with the provider — Slack, for one, allows neither
+    /// wildcards nor arbitrary ports in an app's Redirect URLs, so one app
+    /// cannot serve many PeckBoard origins. When set, the redirect URI
+    /// becomes `{redirect_broker}/callback` and the authorization code is
+    /// pulled from `{redirect_broker}/claim?state=…` instead of arriving at
+    /// this instance's own `/oauth/callback`. The broker only ever holds a
+    /// short-lived code; the token exchange stays here.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub redirect_broker: Option<String>,
 }
 
 /// One choice in a server's URL picker (e.g. a Datadog region). Registry

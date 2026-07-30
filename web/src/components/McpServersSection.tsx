@@ -4,6 +4,7 @@ import { useResourcesStore } from '../store/resources'
 import Modal from './Modal'
 import {
   checkMcpCommand,
+  claimMcpOauth,
   disconnectMcpOauth,
   fetchMcpOauthTokens,
   probeMcpServer,
@@ -558,6 +559,9 @@ function OauthConnect({
   const [error, setError] = useState<string | null>(null)
   const [needsClient, setNeedsClient] = useState(false)
   const [redirectUri, setRedirectUri] = useState(`${window.location.origin}/oauth/callback`)
+  // Set once the sign-in starts: this attempt's code comes back through a
+  // redirect broker, so it has to be claimed rather than waited for.
+  const [brokerFlow, setBrokerFlow] = useState(false)
 
   const refresh = async () => {
     const tokens = await fetchMcpOauthTokens()
@@ -575,19 +579,30 @@ function OauthConnect({
     }
   }, [draft.id])
 
-  // While a sign-in tab is open, poll the token list (up to 5 minutes).
+  // While a sign-in tab is open, watch for the token (up to 5 minutes).
   useEffect(() => {
     if (!waiting) return
     let tries = 0
     const t = setInterval(() => {
       tries += 1
-      void refresh().then((connected) => {
-        if (connected || tries > 150) setWaiting(false)
+      // Broker flow: no redirect reaches us, so ask the host to check the
+      // broker for a code. Otherwise just watch the token list.
+      const tick = brokerFlow
+        ? claimMcpOauth(draft.id).then((r) => {
+            if (r.error) {
+              setError(r.error)
+              return true
+            }
+            return r.connected ? refresh() : false
+          })
+        : refresh()
+      void Promise.resolve(tick).then((done) => {
+        if (done || tries > 150) setWaiting(false)
       })
     }, 2000)
     return () => clearInterval(t)
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [waiting])
+  }, [waiting, brokerFlow, draft.id])
 
   // A registry template with static endpoints but no client id and no
   // registration endpoint (Slack) will need user-supplied credentials —
@@ -595,6 +610,10 @@ function OauthConnect({
   const likelyNeedsClient =
     !!draft.oauth?.authorize_url && !draft.oauth?.registration_url && !draft.oauth?.client_id
   const showClientFields = needsClient || likelyNeedsClient
+  // A configured broker owns the redirect: that fixed URL is what gets
+  // registered with the provider, not this instance's origin.
+  const brokerBase = (draft.oauth?.redirect_broker ?? '').trim().replace(/\/+$/, '')
+  const effectiveRedirectUri = brokerBase ? `${brokerBase}/callback` : redirectUri
 
   const signIn = async () => {
     setStarting(true)
@@ -602,6 +621,7 @@ function OauthConnect({
     const r = await startMcpOauth(tidy(draft))
     setStarting(false)
     if (r.ok) {
+      setBrokerFlow(r.broker)
       window.open(r.url, '_blank', 'noopener')
       setWaiting(true)
     } else {
@@ -641,7 +661,8 @@ function OauthConnect({
           </span>
           <span className="plugin-setting-desc" data-testid="mcp-oauth-callback">
             Callback URL — allow-list it with the provider if it requires registered redirect URLs
-            (Datadog: Organization Settings): <code className="mcp-mono">{redirectUri}</code>
+            (Datadog: Organization Settings):{' '}
+            <code className="mcp-mono">{effectiveRedirectUri}</code>
           </span>
           {showClientFields && (
             <>
@@ -665,6 +686,20 @@ function OauthConnect({
                 data-testid="mcp-oauth-client-secret"
                 onChange={(e) => setOauth({ client_secret: e.target.value })}
               />
+              <input
+                className="plugin-setting-input mcp-mono"
+                type="text"
+                placeholder="Public callback broker (optional) — https://oauth.example.com/slack"
+                value={draft.oauth?.redirect_broker ?? ''}
+                data-testid="mcp-oauth-redirect-broker"
+                onChange={(e) => setOauth({ redirect_broker: e.target.value })}
+              />
+              <span className="plugin-setting-desc">
+                Set a broker when the provider won&rsquo;t register this instance&rsquo;s own
+                callback URL — Slack allows neither wildcards nor ports, so one app can&rsquo;t
+                cover every origin. It holds the one-time code for a couple of minutes; the token is
+                still minted here.
+              </span>
             </>
           )}
           <div className="mcp-test-row">

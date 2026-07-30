@@ -36,6 +36,13 @@ export interface McpOauthConfig {
   token_field?: string | null
   /** Extra authorize-request params (SSO/team hints, e.g. Slack team=T…). */
   auth_params?: KvEntry[] | null
+  /**
+   * Fixed public callback base, for providers that allow neither wildcards
+   * nor arbitrary ports in an app's redirect URLs (Slack) — one registered
+   * app then serves every PeckBoard origin. The code is claimed from it
+   * rather than landing on this instance's own `/oauth/callback`.
+   */
+  redirect_broker?: string | null
 }
 
 export interface McpServer {
@@ -73,6 +80,7 @@ export function tidy(s: McpServer): McpServer {
       ? {
           ...s.oauth,
           auth_params: (s.oauth.auth_params ?? []).filter((kv) => kv.key.trim() !== ''),
+          redirect_broker: s.oauth.redirect_broker?.trim() || null,
         }
       : s.oauth,
     headers: s.headers.filter((kv) => kv.key.trim() !== ''),
@@ -145,7 +153,7 @@ export interface McpOauthTokenInfo {
 }
 
 export type StartOauthResult =
-  | { ok: true; url: string }
+  | { ok: true; url: string; broker: boolean }
   | { ok: false; needsClient: boolean; error: string; redirectUri?: string }
 
 /**
@@ -162,7 +170,8 @@ export async function startMcpOauth(server: McpServer): Promise<StartOauthResult
       body: JSON.stringify({ server }),
     })
     const data = (await res.json().catch(() => null)) as Record<string, unknown> | null
-    if (res.ok && data && typeof data.url === 'string') return { ok: true, url: data.url }
+    if (res.ok && data && typeof data.url === 'string')
+      return { ok: true, url: data.url, broker: data.broker === true }
     const needsClient = res.status === 422 && data?.error === 'needs_client'
     const error = needsClient
       ? typeof data?.message === 'string'
@@ -179,6 +188,35 @@ export async function startMcpOauth(server: McpServer): Promise<StartOauthResult
     }
   } catch {
     return { ok: false, needsClient: false, error: 'Sign-in could not start — server unreachable.' }
+  }
+}
+
+/**
+ * Broker flow only: ask the host to check the configured redirect broker
+ * once for this server's in-flight login. `pending` stays true until the
+ * user finishes consenting; `connected` means the token is stored.
+ */
+export async function claimMcpOauth(
+  serverId: string,
+): Promise<{ pending: boolean; connected: boolean; error?: string }> {
+  try {
+    const res = await authedFetch('/api/mcp-oauth/claim', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ server_id: serverId }),
+    })
+    const data = (await res.json().catch(() => null)) as Record<string, unknown> | null
+    if (!res.ok) {
+      return {
+        pending: false,
+        connected: false,
+        error: typeof data?.error === 'string' ? data.error : `Sign-in failed (${res.status}).`,
+      }
+    }
+    return { pending: data?.pending === true, connected: data?.connected === true }
+  } catch {
+    // A transient network blip shouldn't abort a sign-in mid-consent.
+    return { pending: true, connected: false }
   }
 }
 

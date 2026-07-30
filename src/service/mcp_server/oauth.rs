@@ -10,6 +10,10 @@
 //! `GET /oauth/callback`. Registry entries can pre-fill or override any
 //! piece via [`McpOauthConfig`] — providers without discovery/DCR (Slack)
 //! ship static endpoints and take a user-created client id/secret instead.
+//! Such providers also refuse wildcard redirect URLs, so one registered app
+//! cannot serve many PeckBoard origins; [`McpOauthConfig::redirect_broker`]
+//! points the redirect at a fixed public callback and pulls the code back
+//! from it (see [`claim_code`]).
 //!
 //! Tokens are stored per server **id** in the core-settings plugin store
 //! (key [`MCP_OAUTH_TOKENS_KEY`]) — same trust boundary as the manually
@@ -352,6 +356,9 @@ pub struct PendingLogin {
     pub token_field: Option<String>,
     pub resource: Option<String>,
     pub redirect_uri: String,
+    /// Set when this login went out through a redirect broker: where to
+    /// claim the code from, since it never lands on our own callback.
+    pub redirect_broker: Option<String>,
     pub created_ms: i64,
 }
 
@@ -370,6 +377,68 @@ pub fn take_pending(state: &str) -> Option<PendingLogin> {
     let mut map = PENDING.lock().expect("pending logins lock");
     let login = map.remove(state)?;
     (login.created_ms >= now_ms() - PENDING_TTL_MS).then_some(login)
+}
+
+/// The freshest in-flight *broker* login for `server_id`, as
+/// `(state, broker_base)`. The broker flow needs this because no browser
+/// redirect ever reaches this instance to hand the `state` back — the UI
+/// polls with a server id instead.
+pub fn pending_broker_login(server_id: &str) -> Option<(String, String)> {
+    let map = PENDING.lock().expect("pending logins lock");
+    let cutoff = now_ms() - PENDING_TTL_MS;
+    map.iter()
+        .filter(|(_, l)| l.server_id == server_id && l.created_ms >= cutoff)
+        .filter_map(|(s, l)| {
+            l.redirect_broker
+                .clone()
+                .map(|b| (s.clone(), b, l.created_ms))
+        })
+        .max_by_key(|(_, _, created)| *created)
+        .map(|(s, b, _)| (s, b))
+}
+
+/// Ask a redirect broker for the code it is holding for `state`. `Ok(None)`
+/// is the ordinary answer while the user is still consenting. The broker
+/// hands a code out once and never sees a token — the exchange happens
+/// here, with the PKCE verifier that never left this process.
+pub async fn claim_code(
+    client: &reqwest::Client,
+    broker: &str,
+    state: &str,
+) -> anyhow::Result<Option<String>> {
+    let url = format!(
+        "{}/claim?state={}",
+        broker.trim_end_matches('/'),
+        urlencoding::encode(state)
+    );
+    let resp = client
+        .get(&url)
+        .header(reqwest::header::ACCEPT, "application/json")
+        .send()
+        .await?;
+    let status = resp.status();
+    // "Nothing for that state" is a wait, not a failure.
+    if status == reqwest::StatusCode::NOT_FOUND || status == reqwest::StatusCode::NO_CONTENT {
+        return Ok(None);
+    }
+    let body = resp.text().await.unwrap_or_default();
+    if !status.is_success() {
+        anyhow::bail!("redirect broker refused ({status}): {body}");
+    }
+    let v: serde_json::Value =
+        serde_json::from_str(&body).map_err(|e| anyhow::anyhow!("unexpected broker reply: {e}"))?;
+    // The broker relays a provider-side denial verbatim.
+    if let Some(err) = v
+        .get("error")
+        .and_then(|e| e.as_str())
+        .filter(|e| !e.is_empty())
+    {
+        anyhow::bail!("the provider reported: {err}");
+    }
+    Ok(v.get("code")
+        .and_then(|c| c.as_str())
+        .filter(|c| !c.is_empty())
+        .map(str::to_string))
 }
 
 /// Build the authorize URL for one started login.
@@ -437,6 +506,10 @@ pub fn begin_login(
             token_field: server.oauth.as_ref().and_then(|c| c.token_field.clone()),
             resource: endpoints.resource.clone(),
             redirect_uri,
+            redirect_broker: server
+                .oauth
+                .as_ref()
+                .and_then(|c| c.redirect_broker.clone()),
             created_ms: now_ms(),
         },
     );
@@ -878,6 +951,7 @@ mod tests {
             token_field: None,
             resource: None,
             redirect_uri: "https://pb/oauth/callback".into(),
+            redirect_broker: None,
             created_ms,
         };
         stash_pending("st-live".into(), mk(now_ms()));
@@ -886,6 +960,37 @@ mod tests {
         stash_pending("st-old".into(), mk(now_ms() - PENDING_TTL_MS - 1000));
         assert!(take_pending("st-old").is_none(), "expired");
         assert!(take_pending("st-unknown").is_none());
+    }
+
+    #[test]
+    fn pending_broker_login_picks_the_newest_broker_attempt() {
+        let mk = |broker: Option<&str>, created_ms| PendingLogin {
+            server_id: "sid-broker".into(),
+            server_name: "slack".into(),
+            verifier: "v".into(),
+            token_url: "https://as/token".into(),
+            client_id: "c".into(),
+            client_secret: None,
+            token_field: None,
+            resource: None,
+            redirect_uri: "https://broker.example/callback".into(),
+            redirect_broker: broker.map(str::to_string),
+            created_ms,
+        };
+        let now = now_ms();
+        // A plain (non-broker) login for the same server must be ignored:
+        // its code arrives at our own callback, not at a broker.
+        stash_pending("st-plain".into(), mk(None, now));
+        stash_pending(
+            "st-b1".into(),
+            mk(Some("https://b.example/oauth"), now - 5_000),
+        );
+        stash_pending("st-b2".into(), mk(Some("https://b.example/oauth"), now));
+        assert_eq!(
+            pending_broker_login("sid-broker"),
+            Some(("st-b2".into(), "https://b.example/oauth".into()))
+        );
+        assert_eq!(pending_broker_login("sid-nothing"), None);
     }
 
     #[test]

@@ -30,6 +30,7 @@ pub fn router(state: Arc<AppState>) -> Router<Arc<AppState>> {
     let protected = Router::new()
         .route("/api/mcp-oauth/start", post(start_login))
         .route("/api/mcp-oauth/tokens", get(list_tokens))
+        .route("/api/mcp-oauth/claim", post(claim_login))
         .merge(admin_router())
         .route_layer(middleware::from_fn_with_state(state, require_auth));
     // Public on purpose: the provider's redirect arrives without our JWT.
@@ -109,12 +110,31 @@ async fn start_login(
     if server.id.trim().is_empty() || server.name.trim().is_empty() {
         return bad_request("server needs an id and a name before signing in");
     }
-    let Some(origin) = request_origin(&headers) else {
-        return bad_request("cannot determine this PeckBoard instance's public origin");
-    };
-    let redirect_uri = format!("{origin}/oauth/callback");
-
     let cfg = server.oauth.clone().unwrap_or_default();
+    // A redirect broker replaces this instance's own callback: providers
+    // that allow neither wildcards nor arbitrary ports in an app's redirect
+    // URLs (Slack) can then serve every install from one registration.
+    let broker = cfg
+        .redirect_broker
+        .as_deref()
+        .map(str::trim)
+        .filter(|b| !b.is_empty())
+        .map(|b| b.trim_end_matches('/').to_string());
+    if let Some(b) = &broker {
+        // The broker holds a live authorization code, briefly — no cleartext.
+        if !(b.starts_with("https://") || b.starts_with("http://localhost")) {
+            return bad_request("the callback broker must be an https:// URL");
+        }
+    }
+    let redirect_uri = match &broker {
+        Some(b) => format!("{b}/callback"),
+        None => {
+            let Some(origin) = request_origin(&headers) else {
+                return bad_request("cannot determine this PeckBoard instance's public origin");
+            };
+            format!("{origin}/oauth/callback")
+        }
+    };
     let client = oauth::http_client();
     let endpoints = match oauth::discover(&client, &server.url, &cfg).await {
         Ok(e) => e,
@@ -172,7 +192,83 @@ async fn start_login(
     };
 
     let url = oauth::begin_login(&endpoints, &server, client_id, client_secret, redirect_uri);
-    Json(serde_json::json!({ "url": url })).into_response()
+    // `broker` tells the UI to poll /claim instead of waiting for a redirect
+    // that will never reach us.
+    Json(serde_json::json!({ "url": url, "broker": broker.is_some() })).into_response()
+}
+
+#[derive(serde::Deserialize)]
+struct ClaimBody {
+    server_id: String,
+}
+
+/// POST /api/mcp-oauth/claim — the broker flow's stand-in for the browser
+/// callback. The UI polls this while the consent tab is open; each call
+/// asks the broker once whether it holds a code for this server's in-flight
+/// login, and finishes the sign-in the moment it does.
+async fn claim_login(State(state): State<Arc<AppState>>, Json(body): Json<ClaimBody>) -> Response {
+    let Some((st, broker)) = oauth::pending_broker_login(&body.server_id) else {
+        // Nothing in flight — never started, already finished, or expired.
+        return Json(serde_json::json!({ "pending": false })).into_response();
+    };
+    let code = match oauth::claim_code(&oauth::http_client(), &broker, &st).await {
+        Ok(Some(c)) => c,
+        Ok(None) => return Json(serde_json::json!({ "pending": true })).into_response(),
+        Err(e) => {
+            // A broker-reported denial ends the attempt; don't poll it forever.
+            oauth::take_pending(&st);
+            return (
+                StatusCode::BAD_GATEWAY,
+                Json(serde_json::json!({ "error": e.to_string() })),
+            )
+                .into_response();
+        }
+    };
+    let Some(login) = oauth::take_pending(&st) else {
+        return Json(serde_json::json!({ "pending": false })).into_response();
+    };
+    match finish_login(&state, &login, &code).await {
+        Ok(()) => {
+            tracing::info!(
+                "mcp oauth: connected server '{}' via redirect broker",
+                login.server_name
+            );
+            Json(serde_json::json!({ "pending": false, "connected": true })).into_response()
+        }
+        Err(e) => (
+            StatusCode::BAD_GATEWAY,
+            Json(serde_json::json!({ "error": e.to_string() })),
+        )
+            .into_response(),
+    }
+}
+
+/// Swap a claimed code for tokens and store them. Shared by the browser
+/// callback and the broker claim — they differ only in how the code got
+/// here.
+async fn finish_login(
+    state: &AppState,
+    login: &oauth::PendingLogin,
+    code: &str,
+) -> anyhow::Result<()> {
+    let minted = oauth::exchange_code(&oauth::http_client(), login, code).await?;
+    oauth::put_token(
+        &state.db,
+        oauth::StoredToken {
+            server_id: login.server_id.clone(),
+            server_name: login.server_name.clone(),
+            access_token: minted.access_token,
+            refresh_token: minted.refresh_token,
+            expires_at_ms: minted.expires_at_ms,
+            token_url: login.token_url.clone(),
+            client_id: login.client_id.clone(),
+            client_secret: login.client_secret.clone(),
+            token_field: login.token_field.clone(),
+            resource: login.resource.clone(),
+            obtained_at_ms: now_ms(),
+        },
+    )
+    .await
 }
 
 /// GET /api/mcp-oauth/tokens → `{"tokens": {server_id: {…}}}` — connection
@@ -295,28 +391,8 @@ async fn callback(
         );
     };
 
-    match oauth::exchange_code(&oauth::http_client(), &login, code).await {
-        Ok(minted) => {
-            let token = oauth::StoredToken {
-                server_id: login.server_id.clone(),
-                server_name: login.server_name.clone(),
-                access_token: minted.access_token,
-                refresh_token: minted.refresh_token,
-                expires_at_ms: minted.expires_at_ms,
-                token_url: login.token_url.clone(),
-                client_id: login.client_id.clone(),
-                client_secret: login.client_secret.clone(),
-                token_field: login.token_field.clone(),
-                resource: login.resource.clone(),
-                obtained_at_ms: now_ms(),
-            };
-            if let Err(e) = oauth::put_token(&state.db, token).await {
-                return page(
-                    "Sign-in failed",
-                    &format!("The token could not be stored: {}", esc(&e.to_string())),
-                    false,
-                );
-            }
+    match finish_login(&state, &login, code).await {
+        Ok(()) => {
             tracing::info!("mcp oauth: connected server '{}'", login.server_name);
             page(
                 "Connected",
@@ -326,7 +402,7 @@ async fn callback(
         }
         Err(e) => page(
             "Sign-in failed",
-            &format!("Token exchange failed: {}", esc(&e.to_string())),
+            &format!("Sign-in could not be completed: {}", esc(&e.to_string())),
             false,
         ),
     }
