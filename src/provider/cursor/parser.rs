@@ -16,7 +16,10 @@
 //!   `ToolCall` (`readToolCall`, `globToolCall`, `shellToolCall`, …) with
 //!   `args` and, on completion, `result.success` / `result.error`. Mapped
 //!   to `ToolStart` / `ToolEnd` so the UI shows Cursor's actions live,
-//!   matching the Claude provider's verbosity.
+//!   matching the Claude provider's verbosity. `mcpToolCall` frames are
+//!   unwrapped to the MCP tool they actually ran, and an edit's result
+//!   carries a unified diff that becomes a `FileDiff` (verified live
+//!   against cursor-agent 2026.07.28).
 //! - `thinking` (subtype `delta` / `completed`) — reasoning deltas, each
 //!   carrying a `text` chunk (the `completed` frame carries none). Verified
 //!   against cursor-agent 2026.07.20; mapped to `Thinking` so reasoning
@@ -262,11 +265,24 @@ fn push_tool_start(
     });
 }
 
-/// Translate a `tool_call` frame into `ToolStart` / `ToolEnd`.
+/// Translate a `tool_call` frame into `ToolStart` / `ToolEnd`, plus a
+/// `FileDiff` when the tool edited a file.
 ///
 /// The tool payload sits under the single key of `tool_call` ending in
 /// `ToolCall`; the prefix is the tool name (`readToolCall` → `read`). The
 /// frame-level `call_id` pairs `started` with `completed`.
+///
+/// Two things are unwrapped rather than passed through verbatim, because
+/// the chat builds a tool row out of the name and input:
+///
+/// * `mcpToolCall` names EVERY MCP call `mcp` — the row read `mcp` over
+///   and over with no hint of what ran. The real identity is in its args
+///   (`serverIdentifier` + `toolName`, the model's own arguments nested
+///   under `args`), so it is re-emitted as `mcp__<server>__<tool>` with
+///   those inner arguments: the shape the Claude provider already emits,
+///   which the shared tool-display layer labels and summarises.
+/// * The model's one-sentence `description` is lifted to `reason`, the key
+///   the chat shows as a tool row's why-sentence.
 fn push_tool_call(json: &serde_json::Value, events: &mut Vec<ProviderEvent>) {
     let Some(tc) = json.get("tool_call").and_then(|v| v.as_object()) else {
         return;
@@ -274,29 +290,51 @@ fn push_tool_call(json: &serde_json::Value, events: &mut Vec<ProviderEvent>) {
     let payload = tc
         .iter()
         .find(|(k, v)| k.ends_with("ToolCall") && v.is_object());
-    let name = payload
+    let raw_name = payload
         .map(|(k, _)| k.strip_suffix("ToolCall").unwrap_or(k))
         .filter(|n| !n.is_empty())
-        .unwrap_or("tool")
-        .to_string();
+        .unwrap_or("tool");
     let tool_use_id = json
         .get("call_id")
         .and_then(|v| v.as_str())
         .or_else(|| tc.get("toolCallId").and_then(|v| v.as_str()))
         .map(str::to_string)
-        .unwrap_or_else(|| name.clone());
+        .unwrap_or_else(|| raw_name.to_string());
     let payload = payload.map(|(_, v)| v);
+    let args = payload.and_then(|p| p.get("args"));
 
     match json.get("subtype").and_then(|v| v.as_str()).unwrap_or("") {
         "started" => {
-            let input = payload
-                .and_then(|p| p.get("args"))
-                .cloned()
-                .unwrap_or(serde_json::Value::Null);
+            let (name, mut input) = if raw_name == "mcp" {
+                unwrap_mcp_call(args)
+            } else {
+                (
+                    raw_name.to_string(),
+                    args.cloned().unwrap_or(serde_json::Value::Null),
+                )
+            };
+            let reason = payload
+                .and_then(|p| p.get("description"))
+                .or_else(|| args.and_then(|a| a.get("description")))
+                .and_then(|v| v.as_str())
+                .filter(|s| !s.trim().is_empty())
+                .map(str::to_string);
+            if let (Some(reason), Some(obj)) = (reason, input.as_object_mut())
+                && !obj.contains_key("reason")
+            {
+                obj.insert("reason".into(), serde_json::Value::String(reason));
+            }
+            strip_plumbing(&mut input);
             push_tool_start(tool_use_id, name, input, events);
         }
         "completed" => {
-            let (output, error) = tool_call_outcome(payload.and_then(|p| p.get("result")));
+            let result = payload.and_then(|p| p.get("result"));
+            // Before the `ToolEnd`, so the chat attaches the diff card to a
+            // still-open tool row rather than leaving it standalone.
+            if let Some(diff) = file_diff_event(result) {
+                events.push(diff);
+            }
+            let (output, error) = tool_call_outcome(result);
             events.push(ProviderEvent::ToolEnd {
                 tool_use_id,
                 output,
@@ -308,9 +346,93 @@ fn push_tool_call(json: &serde_json::Value, events: &mut Vec<ProviderEvent>) {
     }
 }
 
+/// Real name + arguments of an `mcpToolCall`. The server is
+/// `serverIdentifier` (or `providerIdentifier`) and the tool `toolName`,
+/// with the model's arguments nested one level down under `args`; the
+/// combined `"<server>-<tool>"` in `name` is the fallback when the split
+/// fields are absent. An unrecognised shape stays `mcp` with whatever args
+/// it carried — a vague row beats a lost one.
+fn unwrap_mcp_call(args: Option<&serde_json::Value>) -> (String, serde_json::Value) {
+    let field = |key: &str| {
+        args.and_then(|a| a.get(key))
+            .and_then(|v| v.as_str())
+            .filter(|s| !s.is_empty())
+    };
+    let server = field("serverIdentifier").or_else(|| field("providerIdentifier"));
+    let tool = field("toolName").or_else(|| {
+        let combined = field("name")?;
+        match server {
+            Some(server) => combined.strip_prefix(server)?.strip_prefix('-'),
+            None => Some(combined),
+        }
+    });
+    let name = match (server, tool) {
+        (Some(server), Some(tool)) => format!("mcp__{server}__{tool}"),
+        (None, Some(tool)) => tool.to_string(),
+        _ => "mcp".to_string(),
+    };
+    let input = args
+        .and_then(|a| a.get("args"))
+        .cloned()
+        .unwrap_or_else(|| args.cloned().unwrap_or(serde_json::Value::Null));
+    (name, input)
+}
+
+/// Keys cursor attaches to a tool's args that are pure plumbing — ids,
+/// approval flags, shell parse trees, byte thresholds. They would bury the
+/// real arguments in the chat's input pane, so they are dropped; every
+/// other key is kept verbatim.
+const PLUMBING_ARG_KEYS: &[&str] = &[
+    "toolCallId",
+    "conversationId",
+    "skipApproval",
+    "smartModeApprovalOnly",
+    "providerIdentifier",
+    "serverIdentifier",
+    "parsingResult",
+    "simpleCommands",
+    "hasInputRedirect",
+    "hasOutputRedirect",
+    "fileOutputThresholdBytes",
+    "timeoutBehavior",
+    "hardTimeout",
+    "closeStdin",
+    "isBackground",
+];
+
+fn strip_plumbing(input: &mut serde_json::Value) {
+    if let Some(obj) = input.as_object_mut() {
+        obj.retain(|k, _| !PLUMBING_ARG_KEYS.contains(&k.as_str()));
+    }
+}
+
+/// A `FileDiff` event from an edit tool's result: cursor edits files with
+/// its own tool and hands back a unified `diffString` plus line counts, so
+/// the chat can show the same diff card PeckBoard's `edit_file` produces.
+/// `None` for every other tool, and for an edit that reported no diff.
+fn file_diff_event(result: Option<&serde_json::Value>) -> Option<ProviderEvent> {
+    let success = result?.get("success")?;
+    let diff = success.get("diffString")?.as_str()?;
+    let path = success.get("path")?.as_str()?;
+    if diff.is_empty() || path.is_empty() {
+        return None;
+    }
+    let count = |key: &str| success.get(key).and_then(|v| v.as_i64()).unwrap_or(0);
+    Some(ProviderEvent::FileDiff {
+        path: path.to_string(),
+        diff: diff.to_string(),
+        added: count("linesAdded"),
+        removed: count("linesRemoved"),
+        // Only an edit to an existing file reports the prior content.
+        created: success.get("beforeFullFileContent").is_none(),
+    })
+}
+
 /// Split a `tool_call.result` into `(output, error)` for `ToolEnd`.
-/// `error.errorMessage` wins; `success` prefers its `content` string (file
-/// reads) over a pretty-JSON dump of the whole payload. Output is not
+/// `error.errorMessage` wins; `success` prefers its `content` — a string
+/// (file reads) or MCP's array of content blocks — over a pretty-JSON dump
+/// of the whole payload. An MCP result flagged `isError` lands on the error
+/// side, so a failed MCP call stops rendering as a success. Output is not
 /// capped here — the central budget in `emit_event` truncates.
 fn tool_call_outcome(result: Option<&serde_json::Value>) -> (Option<String>, Option<String>) {
     let Some(result) = result else {
@@ -328,17 +450,44 @@ fn tool_call_outcome(result: Option<&serde_json::Value>) -> (Option<String>, Opt
     if let Some(success) = result.get("success") {
         let text = success
             .get("content")
-            .and_then(|v| v.as_str())
-            .map(str::to_string)
+            .and_then(content_text)
             .or_else(|| success.as_str().map(str::to_string))
             .unwrap_or_else(|| serde_json::to_string_pretty(success).unwrap_or_default());
         let output = if text.is_empty() { None } else { Some(text) };
+        if success.get("isError").and_then(|v| v.as_bool()) == Some(true) {
+            return (None, output);
+        }
         return (output, None);
     }
     // Unknown result shape — carry it verbatim so nothing is silently lost.
     match result {
         serde_json::Value::Null => (None, None),
         other => (Some(other.to_string()), None),
+    }
+}
+
+/// Text of a tool result's `content`: a plain string, or MCP's array of
+/// content blocks whose text sits at `text` (a string) or `text.text`
+/// (cursor's nested envelope). `None` when neither shape fits, so the
+/// caller can fall back to dumping the payload.
+fn content_text(content: &serde_json::Value) -> Option<String> {
+    if let Some(s) = content.as_str() {
+        return Some(s.to_string());
+    }
+    let texts: Vec<String> = content
+        .as_array()?
+        .iter()
+        .filter_map(|block| {
+            let text = block.get("text")?;
+            text.as_str()
+                .or_else(|| text.get("text").and_then(|v| v.as_str()))
+                .map(str::to_string)
+        })
+        .collect();
+    if texts.is_empty() {
+        None
+    } else {
+        Some(texts.join("\n"))
     }
 }
 
@@ -830,6 +979,233 @@ mod tests {
         };
         assert!(error.is_none());
         assert!(output.as_deref().unwrap_or_default().contains("a.rs"));
+    }
+
+    // Frame shapes below are verbatim from a live cursor-agent 2026.07.28
+    // capture, minus the plumbing keys that don't matter to the assertion.
+
+    #[test]
+    fn mcp_tool_call_unwraps_to_the_tool_that_actually_ran() {
+        let mut state = started_state();
+        let events = parse(
+            serde_json::json!({
+                "type": "tool_call", "subtype": "started", "call_id": "m1",
+                "tool_call": { "mcpToolCall": {
+                    "args": {
+                        "name": "peckboard-search_files",
+                        "args": { "query": "needle" },
+                        "toolCallId": "m1",
+                        "providerIdentifier": "peckboard",
+                        "toolName": "search_files",
+                        "serverIdentifier": "peckboard"
+                    },
+                    "description": "Find the needle"
+                }}
+            }),
+            &mut state,
+        );
+        let ProviderEvent::ToolStart { name, input, .. } = &events[0] else {
+            panic!("expected ToolStart, got {:?}", events[0]);
+        };
+        // Every MCP call used to arrive under the single name `mcp`.
+        assert_eq!(name, "mcp__peckboard__search_files");
+        assert_eq!(input["query"], "needle");
+        // The model's own sentence becomes the row's why-line.
+        assert_eq!(input["reason"], "Find the needle");
+        // MCP envelope plumbing is not part of the call's arguments.
+        assert!(input.get("toolCallId").is_none());
+        assert!(input.get("serverIdentifier").is_none());
+    }
+
+    #[test]
+    fn mcp_tool_call_without_split_fields_falls_back_to_the_combined_name() {
+        let mut state = started_state();
+        let events = parse(
+            serde_json::json!({
+                "type": "tool_call", "subtype": "started", "call_id": "m2",
+                "tool_call": { "mcpToolCall": { "args": {
+                    "name": "capture-echo_text",
+                    "args": { "text": "hello" },
+                    "serverIdentifier": "capture"
+                }}}
+            }),
+            &mut state,
+        );
+        assert!(matches!(
+            &events[0],
+            ProviderEvent::ToolStart { name, input, .. }
+            if name == "mcp__capture__echo_text" && input["text"] == "hello"
+        ));
+    }
+
+    #[test]
+    fn mcp_tool_call_of_unknown_shape_keeps_its_row() {
+        let mut state = started_state();
+        let events = parse(
+            serde_json::json!({
+                "type": "tool_call", "subtype": "started", "call_id": "m3",
+                "tool_call": { "mcpToolCall": { "args": { "mystery": 1 } } }
+            }),
+            &mut state,
+        );
+        assert!(matches!(
+            &events[0],
+            ProviderEvent::ToolStart { name, input, .. }
+            if name == "mcp" && input["mystery"] == 1
+        ));
+    }
+
+    #[test]
+    fn mcp_result_content_blocks_become_plain_output() {
+        let mut state = started_state();
+        let events = parse(
+            serde_json::json!({
+                "type": "tool_call", "subtype": "completed", "call_id": "m1",
+                "tool_call": { "mcpToolCall": { "result": { "success": {
+                    "content": [{ "text": { "text": "echo: hello" } }],
+                    "isError": false
+                }}}}
+            }),
+            &mut state,
+        );
+        let ProviderEvent::ToolEnd { output, error, .. } = &events[0] else {
+            panic!("expected ToolEnd, got {:?}", events[0]);
+        };
+        assert!(error.is_none());
+        // Not the `{"content":[{"text":{"text":…}}]}` envelope.
+        assert_eq!(output.as_deref(), Some("echo: hello"));
+    }
+
+    #[test]
+    fn mcp_result_flagged_is_error_lands_on_the_error_side() {
+        let mut state = started_state();
+        let events = parse(
+            serde_json::json!({
+                "type": "tool_call", "subtype": "completed", "call_id": "m4",
+                "tool_call": { "mcpToolCall": { "result": { "success": {
+                    "content": [{ "text": "tool blew up" }],
+                    "isError": true
+                }}}}
+            }),
+            &mut state,
+        );
+        let ProviderEvent::ToolEnd { output, error, .. } = &events[0] else {
+            panic!("expected ToolEnd, got {:?}", events[0]);
+        };
+        assert!(output.is_none());
+        assert_eq!(error.as_deref(), Some("tool blew up"));
+    }
+
+    #[test]
+    fn get_mcp_tools_call_keeps_its_name_and_server() {
+        let mut state = started_state();
+        let events = parse(
+            serde_json::json!({
+                "type": "tool_call", "subtype": "started", "call_id": "g2",
+                "tool_call": { "getMcpToolsToolCall": { "args": {
+                    "server": "peckboard", "toolCallId": "g2"
+                }}}
+            }),
+            &mut state,
+        );
+        assert!(matches!(
+            &events[0],
+            ProviderEvent::ToolStart { name, input, .. }
+            if name == "getMcpTools" && input["server"] == "peckboard"
+        ));
+    }
+
+    #[test]
+    fn shell_call_lifts_its_description_and_drops_plumbing() {
+        let mut state = started_state();
+        let events = parse(
+            serde_json::json!({
+                "type": "tool_call", "subtype": "started", "call_id": "s2",
+                "tool_call": { "shellToolCall": { "args": {
+                    "command": "echo hi",
+                    "description": "Echo hi to stdout",
+                    "toolCallId": "s2",
+                    "simpleCommands": ["echo"],
+                    "parsingResult": { "parsingFailed": false },
+                    "timeoutBehavior": "TIMEOUT_BEHAVIOR_BACKGROUND",
+                    "conversationId": "conv"
+                }}}
+            }),
+            &mut state,
+        );
+        let ProviderEvent::ToolStart { input, .. } = &events[0] else {
+            panic!("expected ToolStart, got {:?}", events[0]);
+        };
+        assert_eq!(input["command"], "echo hi");
+        assert_eq!(input["reason"], "Echo hi to stdout");
+        for noise in [
+            "toolCallId",
+            "simpleCommands",
+            "parsingResult",
+            "conversationId",
+        ] {
+            assert!(input.get(noise).is_none(), "{noise} should be stripped");
+        }
+    }
+
+    #[test]
+    fn edit_tool_call_emits_a_file_diff_before_its_tool_end() {
+        let mut state = started_state();
+        let events = parse(
+            serde_json::json!({
+                "type": "tool_call", "subtype": "completed", "call_id": "e1",
+                "tool_call": { "editToolCall": {
+                    "args": { "path": "/tmp/scratch.txt", "streamContent": "two" },
+                    "result": { "success": {
+                        "path": "/tmp/scratch.txt",
+                        "linesAdded": 1,
+                        "linesRemoved": 1,
+                        "diffString": "--- a//tmp/scratch.txt\n+++ b//tmp/scratch.txt\n@@ -1 +1 @@\n-one\n+two",
+                        "beforeFullFileContent": "one\n",
+                        "afterFullFileContent": "two\n"
+                    }}
+                }}
+            }),
+            &mut state,
+        );
+        assert_eq!(events.len(), 2);
+        let ProviderEvent::FileDiff {
+            path,
+            diff,
+            added,
+            removed,
+            created,
+        } = &events[0]
+        else {
+            panic!("expected FileDiff first, got {:?}", events[0]);
+        };
+        assert_eq!(path, "/tmp/scratch.txt");
+        assert!(diff.contains("+two"));
+        assert_eq!((*added, *removed), (1, 1));
+        assert!(!created);
+        assert!(matches!(&events[1], ProviderEvent::ToolEnd { .. }));
+    }
+
+    #[test]
+    fn edit_tool_call_on_a_new_file_marks_it_created() {
+        let mut state = started_state();
+        let events = parse(
+            serde_json::json!({
+                "type": "tool_call", "subtype": "completed", "call_id": "e2",
+                "tool_call": { "editToolCall": { "result": { "success": {
+                    "path": "/tmp/new.txt",
+                    "linesAdded": 1,
+                    "linesRemoved": 0,
+                    "diffString": "--- /dev/null\n+++ b//tmp/new.txt\n@@ -1,0 +1 @@\n+one",
+                    "afterFullFileContent": "one\n"
+                }}}}
+            }),
+            &mut state,
+        );
+        assert!(matches!(
+            &events[0],
+            ProviderEvent::FileDiff { created, added, .. } if *created && *added == 1
+        ));
     }
 
     #[test]

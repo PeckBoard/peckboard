@@ -1,50 +1,100 @@
 /** Shared formatting for tool calls, used by the chat's tool rows, the
  *  kanban thought bubbles and the pre-hatch activity feed: friendly labels,
  *  the real command line for exec-like tools, and the model-supplied
- *  one-sentence reason. */
+ *  one-sentence reason.
+ *
+ *  Every provider drives these rows, and each CLI names the same handful of
+ *  actions differently — Claude's `Read`, cursor's `read`, grok/kimi's
+ *  `read_file`. Matching is therefore on the BARE name (no `mcp__server__`
+ *  prefix), case-folded, against one synonym table, so a row reads the same
+ *  whichever agent produced it. Anything unmapped is humanized rather than
+ *  dumped raw. */
 
 /** Strip an `mcp__<server>__` prefix, leaving the bare tool name. */
 export function bareToolName(toolName: string): string {
   return toolName.replace(/^mcp__.+?__/, '')
 }
 
-/** Map tool names to friendly labels. Per-tool emoji icons were removed
- *  in favour of a single shared chevron — the chevron doubles as the
- *  expand/collapse affordance, so every tool row stays visually flat. */
+/** Friendly labels keyed on the case-folded bare name. Per-tool emoji icons
+ *  were removed in favour of a single shared chevron — the chevron doubles
+ *  as the expand/collapse affordance, so every tool row stays visually
+ *  flat. */
+const TOOL_LABELS: Record<string, string> = {
+  // Shells: Claude/kimi `Bash`, cursor `shell`, Peckboard's `run_command`.
+  bash: 'Terminal',
+  shell: 'Terminal',
+  terminal: 'Terminal',
+  run_command: 'Terminal',
+  run_terminal_cmd: 'Terminal',
+  execute_command: 'Terminal',
+  // Files.
+  read: 'Read file',
+  read_file: 'Read file',
+  view_file: 'Read file',
+  write: 'Write file',
+  write_file: 'Write file',
+  create_file: 'Write file',
+  edit: 'Edit file',
+  edit_file: 'Edit file',
+  multiedit: 'Edit file',
+  str_replace: 'Edit file',
+  apply_patch: 'Edit file',
+  delete: 'Delete file',
+  delete_file: 'Delete file',
+  // Listing / search.
+  ls: 'List files',
+  list_dir: 'List files',
+  list_files: 'List files',
+  glob: 'Find files',
+  grep: 'Search content',
+  search_files: 'Search content',
+  codebase_search: 'Semantic search',
+  semsearch: 'Semantic search',
+  // Web.
+  webfetch: 'Fetch URL',
+  fetch_url: 'Fetch URL',
+  websearch: 'Web search',
+  web_search: 'Web search',
+  search_web: 'Web search',
+  // Agent plumbing.
+  toolsearch: 'Tool search',
+  agent: 'Sub-agent',
+  spawn_subagent: 'Sub-agent',
+  notebookedit: 'Edit notebook',
+  todowrite: 'Tasks',
+  todo: 'Tasks',
+  // Cursor's MCP plumbing: one generic `mcp` name for every server call
+  // (unwrapped to the real tool by the cursor parser, so this is only the
+  // fallback) and a separate tool-listing call.
+  mcp: 'MCP tool',
+  getmcptools: 'List MCP tools',
+}
+
+/** Turn an unmapped tool name into words: `getMcpTools` → "Get Mcp Tools",
+ *  `read_symbol` → "Read symbol". Keeps a provider's unknown tools
+ *  readable instead of showing a raw identifier. */
+function humanize(name: string): string {
+  const words = name
+    .replace(/([a-z0-9])([A-Z])/g, '$1 $2')
+    .replace(/[_-]+/g, ' ')
+    .trim()
+  if (!words) return name
+  return words.charAt(0).toUpperCase() + words.slice(1)
+}
+
+/** Map tool names to friendly labels. */
 export function getToolLabel(toolName: string): string {
-  switch (toolName) {
-    case 'Bash':
-      return 'Terminal'
-    case 'Read':
-      return 'Read file'
-    case 'Write':
-      return 'Write file'
-    case 'Edit':
-      return 'Edit file'
-    case 'Grep':
-      return 'Search content'
-    case 'Glob':
-      return 'Find files'
-    case 'ToolSearch':
-      return 'Tool search'
-    case 'Agent':
-      return 'Sub-agent'
-    case 'WebFetch':
-      return 'Fetch URL'
-    case 'WebSearch':
-      return 'Web search'
-    case 'NotebookEdit':
-      return 'Edit notebook'
+  const bare = bareToolName(toolName)
+  const mapped = TOOL_LABELS[bare.toLowerCase()]
+  if (mapped) return mapped
+  switch (bare) {
     case 'TaskCreate':
     case 'TaskUpdate':
     case 'TaskGet':
     case 'TaskList':
-      return toolName.replace('Task', 'Task ')
+      return bare.replace('Task', 'Task ')
     default:
-      if (toolName.startsWith('mcp__')) {
-        return bareToolName(toolName).replace(/_/g, ' ')
-      }
-      return toolName
+      return humanize(bare)
   }
 }
 
@@ -75,9 +125,12 @@ export function getCommandLine(toolName: string, input?: Record<string, unknown>
       const args = joinStringArgs(input.args)
       return ['run tests', runner ? `(${runner})` : '', args].filter(Boolean).join(' ')
     }
-    // Native shells: Claude/Kimi's Bash, Cursor's shell.
+    // Native shells: Claude/Kimi's Bash, Cursor's shell, grok's terminal.
     case 'Bash':
-    case 'shell': {
+    case 'shell':
+    case 'terminal':
+    case 'run_terminal_cmd':
+    case 'execute_command': {
       const cmd = input.command
       return typeof cmd === 'string' ? cmd : ''
     }
@@ -86,13 +139,16 @@ export function getCommandLine(toolName: string, input?: Record<string, unknown>
   }
 }
 
-/** The model's one-sentence why for a tool call: our exec tools' `reason`,
- *  or the native shell tools' `description`. Other tools' `description`
- *  fields carry payloads (e.g. a card body), so they are not reasons. */
+/** The model's one-sentence why for a tool call: our exec tools' `reason`
+ *  (the cursor parser lifts its `description` into the same key), an
+ *  `explanation` arg, or the native shell tools' `description`. Other
+ *  tools' `description` fields carry payloads (e.g. a card body), so they
+ *  are not reasons. */
 export function getToolReason(toolName: string, input?: Record<string, unknown>): string {
   if (!input) return ''
   const bare = bareToolName(toolName)
-  const raw = input.reason ?? (bare === 'Bash' || bare === 'shell' ? input.description : undefined)
+  const isShell = bare === 'Bash' || bare === 'shell' || bare === 'terminal'
+  const raw = input.reason ?? input.explanation ?? (isShell ? input.description : undefined)
   return typeof raw === 'string' ? raw.trim() : ''
 }
 
@@ -101,6 +157,33 @@ export function shortenPath(p: string): string {
   const parts = p.split('/')
   if (parts.length <= 3) return p
   return '.../' + parts.slice(-3).join('/')
+}
+
+/** Input keys worth showing when a tool has no purpose-built summary —
+ *  what the call is chewing on, most specific first. Path-ish keys are
+ *  shortened; the rest are shown verbatim. */
+const SUMMARY_KEYS = [
+  'path',
+  'file_path',
+  'filePath',
+  'target_file',
+  'pattern',
+  'query',
+  'url',
+  'server',
+  'name',
+] as const
+const PATH_KEYS = new Set(['path', 'file_path', 'filePath', 'target_file'])
+
+/** Last-resort summary for a tool nothing else knows about — any provider,
+ *  any MCP server. Without it those rows show a label and nothing else. */
+function genericSummary(input: Record<string, unknown>): string {
+  for (const key of SUMMARY_KEYS) {
+    const v = input[key]
+    if (typeof v !== 'string' || v === '') continue
+    return PATH_KEYS.has(key) ? shortenPath(v) : v
+  }
+  return ''
 }
 
 /** Extract a concise one-line summary from tool input */
@@ -156,18 +239,33 @@ export function getSummary(toolName: string, input?: Record<string, unknown>): s
       break
   }
 
-  // Peckboard MCP tools — matched on the bare name so the `mcp__peckboard__`
-  // (or any other server's) prefix doesn't matter.
+  // Peckboard MCP tools and the other CLIs' native tools — matched on the
+  // bare name so the `mcp__peckboard__` (or any other server's) prefix
+  // doesn't matter.
   switch (bareToolName(toolName)) {
+    // Cursor's MCP tool-listing call: it looks a server up by tool name or
+    // by regex — whichever it used is the interesting half.
+    case 'getMcpTools': {
+      const tool = (input.toolName ?? input.pattern) as string | undefined
+      const server = input.server as string | undefined
+      if (tool && server) return `${tool} on ${server}`
+      return tool ?? server ?? ''
+    }
     case 'read_file': {
       const p = input.path as string | undefined
       if (!p) return ''
       const start = input.start_line as number | undefined
       return start ? `${shortenPath(p)}:${start}` : shortenPath(p)
     }
+    // Peckboard's file tools and cursor's own, which all take a `path`.
     case 'write_file':
     case 'edit_file':
-    case 'file_outline': {
+    case 'file_outline':
+    case 'read':
+    case 'write':
+    case 'edit':
+    case 'delete':
+    case 'ls': {
       const p = input.path as string | undefined
       return p ? shortenPath(p) : ''
     }
@@ -176,13 +274,19 @@ export function getSummary(toolName: string, input?: Record<string, unknown>): s
       const p = input.path as string | undefined
       return [name, p ? `in ${shortenPath(p)}` : ''].filter(Boolean).join(' ')
     }
-    case 'search_files': {
-      const q = input.query as string | undefined
-      const scope = input.path_contains as string | undefined
+    case 'search_files':
+    case 'grep': {
+      const q = (input.query ?? input.pattern) as string | undefined
+      const scope = (input.path_contains ?? input.path) as string | undefined
       const parts: string[] = []
       if (q) parts.push(`"${q}"`)
-      if (scope) parts.push(`in ${scope}`)
+      if (scope) parts.push(`in ${shortenPath(scope)}`)
       return parts.join(' ')
+    }
+    case 'glob': {
+      const pattern = input.pattern as string | undefined
+      const p = input.path as string | undefined
+      return [pattern, p ? `in ${shortenPath(p)}` : ''].filter(Boolean).join(' ')
     }
     case 'list_files': {
       const scope = input.path_contains as string | undefined
@@ -202,6 +306,6 @@ export function getSummary(toolName: string, input?: Record<string, unknown>): s
       return n ?? ''
     }
     default:
-      return ''
+      return genericSummary(input)
   }
 }

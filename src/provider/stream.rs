@@ -160,6 +160,20 @@ pub enum ProviderEvent {
         #[serde(default)]
         images: Vec<ToolImage>,
     },
+    /// A file the agent edited, as a unified diff — the chat's diff card.
+    /// PeckBoard's own `edit_file`/`write_file` MCP tools emit this from the
+    /// tool handler; providers whose CLI edits files with its OWN tools (and
+    /// hands back a diff, as `cursor-agent` does) emit it from their parser,
+    /// so a diff card appears whichever tool did the editing.
+    FileDiff {
+        path: String,
+        diff: String,
+        added: i64,
+        removed: i64,
+        /// The file did not exist before this edit.
+        #[serde(default)]
+        created: bool,
+    },
     /// The agent reported its current todo list (a full replace-all snapshot
     /// of its trackable work items). Provider-agnostic — any provider that can
     /// surface work items emits this; the latest one wins.
@@ -238,6 +252,7 @@ impl ProviderEvent {
             ProviderEvent::Thinking { .. } => "agent-thinking",
             ProviderEvent::ToolStart { .. } => "agent-tool-start",
             ProviderEvent::ToolEnd { .. } => "agent-tool-end",
+            ProviderEvent::FileDiff { .. } => "file-diff",
             ProviderEvent::Todo { .. } => "todo",
             ProviderEvent::Usage { .. } => "agent-usage",
             ProviderEvent::System { .. } => "system",
@@ -286,6 +301,21 @@ impl ProviderEvent {
                         "dataBase64": img.data_base64,
                     }))
                     .collect::<Vec<_>>(),
+            }),
+            // Same payload the `edit_file`/`write_file` tool handler emits,
+            // so the chat's existing `file-diff` card renders it unchanged.
+            ProviderEvent::FileDiff {
+                path,
+                diff,
+                added,
+                removed,
+                created,
+            } => serde_json::json!({
+                "path": path,
+                "diff": diff,
+                "added": added,
+                "removed": removed,
+                "created": created,
             }),
             ProviderEvent::Todo { todos } => serde_json::json!({ "todos": todos }),
             ProviderEvent::Usage {

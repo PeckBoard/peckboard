@@ -471,8 +471,17 @@ const HIDDEN_KINDS = new Set([
 ])
 
 /** Tool cards a `file-diff` event may attach to, by bare name (Peckboard
- *  MCP file tools + the native Claude file tools). */
-const EDIT_TOOL_BARE_NAMES = new Set(['edit_file', 'write_file', 'Edit', 'Write', 'MultiEdit'])
+ *  MCP file tools, the native Claude file tools, and cursor's `edit` —
+ *  which writes new files too, so it covers both). */
+const EDIT_TOOL_BARE_NAMES = new Set([
+  'edit_file',
+  'write_file',
+  'Edit',
+  'Write',
+  'MultiEdit',
+  'edit',
+  'write',
+])
 
 function foldEvent(st: FoldState, ev: Event): void {
   const items = st.items

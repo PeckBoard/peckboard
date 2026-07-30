@@ -157,6 +157,13 @@ function strField(o: Record<string, unknown>, key: string): string | undefined {
   return typeof v === 'string' && v !== '' ? v : undefined
 }
 
+/** A command's exit status: Peckboard's `exit_code`, or the camelCase
+ *  `exitCode` cursor's shell tool reports. */
+function exitCodeOf(o: Record<string, unknown>): number | undefined {
+  const v = o.exit_code ?? o.exitCode
+  return typeof v === 'number' ? v : undefined
+}
+
 /** Best-effort pass/fail counts from runner stdout (cargo, vitest, pytest…). */
 function parseTestCounts(text: string): string {
   const passed = /(\d+)\s+passed/.exec(text)?.[1]
@@ -369,9 +376,15 @@ function InputSections({ toolName, input }: { toolName: string; input: Record<st
     )
   }
 
+  // Content of a whole-file write: Claude's `file_text`, Peckboard's
+  // `content`, cursor's `streamContent` (its `edit` tool streams the new
+  // file body).
   const content =
-    strInput(input, 'content') ?? (bare === 'Write' ? strInput(input, 'file_text') : undefined)
-  if ((bare === 'write_file' || bare === 'Write') && content !== undefined) {
+    strInput(input, 'content') ?? strInput(input, 'file_text') ?? strInput(input, 'streamContent')
+  if (
+    (bare === 'write_file' || bare === 'Write' || bare === 'write' || bare === 'edit') &&
+    content !== undefined
+  ) {
     return (
       <div className="tool-section">
         <div className="tool-section-label">Content{pathSuffix}</div>
@@ -402,7 +415,7 @@ function OutputSections({ out }: { out: Record<string, unknown> | string }) {
   }
   const stdout = strField(out, 'stdout')
   const stderr = strField(out, 'stderr')
-  if (stdout !== undefined || stderr !== undefined || typeof out.exit_code === 'number') {
+  if (stdout !== undefined || stderr !== undefined || exitCodeOf(out) !== undefined) {
     return (
       <>
         {stdout && (
@@ -501,8 +514,7 @@ export default function ToolUseBlock({
 
   const out = normalizeOutput(output)
   const outObj = out !== undefined && typeof out !== 'string' ? out : undefined
-  const exitCode =
-    outObj && typeof outObj.exit_code === 'number' ? (outObj.exit_code as number) : undefined
+  const exitCode = outObj ? exitCodeOf(outObj) : undefined
   const timedOut = outObj?.timed_out === true
   const passedFlag =
     outObj && typeof outObj.passed === 'boolean' ? (outObj.passed as boolean) : undefined

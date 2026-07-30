@@ -27,6 +27,10 @@ use crate::provider::stream::{CrashKind, ModelInfo, ProviderEvent, ToolImage};
 ///   dashboard (entity rollups, file_update + ask_expert cost breakdowns,
 ///   token/cost trends) deterministically.
 /// * `tool-error` — Started → ToolStart/ToolEnd(error) → Completed
+/// * `cli-tools` — Started → cursor-shaped tool traffic (`shell`, `read`,
+///   `edit` + its `FileDiff`, an unwrapped `mcp__peckboard__search_files`
+///   and `getMcpTools`) → Completed. Drives the chat's tool rows for the
+///   providers that don't use Claude's tool names.
 /// * `system-blob` — Started → raw `system` event with no `text`/`message` →
 ///   Completed
 /// * `crash` — Started → Text → Crashed
@@ -556,6 +560,93 @@ async fn run_scenario(
                 },
             )
             .await;
+        }
+        // A turn shaped like a NON-Claude CLI's tool traffic: cursor's own
+        // `shell` / `read` / `edit` names, an MCP call the cursor parser
+        // unwrapped to `mcp__<server>__<tool>`, its `getMcpTools` listing
+        // call, and the diff an edit hands back. Drives the chat's
+        // tool-row rendering for every provider that isn't Claude.
+        "cli-tools" => {
+            let shell_id = format!("tool-{}", uuid::Uuid::new_v4());
+            let mcp_id = format!("tool-{}", uuid::Uuid::new_v4());
+            let list_id = format!("tool-{}", uuid::Uuid::new_v4());
+            let read_id = format!("tool-{}", uuid::Uuid::new_v4());
+            let edit_id = format!("tool-{}", uuid::Uuid::new_v4());
+            let path = "/workspace/src/lib.rs";
+            let script = vec![
+                ProviderEvent::ToolStart {
+                    tool_use_id: shell_id.clone(),
+                    name: "shell".into(),
+                    input: serde_json::json!({
+                        "command": "cargo build --release",
+                        "reason": "Build the release binary",
+                    }),
+                },
+                ProviderEvent::ToolEnd {
+                    tool_use_id: shell_id,
+                    output: Some(
+                        serde_json::json!({ "stdout": "Finished release\n", "exitCode": 0 })
+                            .to_string(),
+                    ),
+                    error: None,
+                    images: Vec::new(),
+                },
+                ProviderEvent::ToolStart {
+                    tool_use_id: mcp_id.clone(),
+                    name: "mcp__peckboard__search_files".into(),
+                    input: serde_json::json!({ "query": "needle", "path_contains": "src" }),
+                },
+                ProviderEvent::ToolEnd {
+                    tool_use_id: mcp_id,
+                    output: Some("one match".into()),
+                    error: None,
+                    images: Vec::new(),
+                },
+                ProviderEvent::ToolStart {
+                    tool_use_id: list_id.clone(),
+                    name: "getMcpTools".into(),
+                    input: serde_json::json!({ "server": "peckboard" }),
+                },
+                ProviderEvent::ToolEnd {
+                    tool_use_id: list_id,
+                    output: Some("2 tools".into()),
+                    error: None,
+                    images: Vec::new(),
+                },
+                ProviderEvent::ToolStart {
+                    tool_use_id: read_id.clone(),
+                    name: "read".into(),
+                    input: serde_json::json!({ "path": path }),
+                },
+                ProviderEvent::ToolEnd {
+                    tool_use_id: read_id,
+                    output: Some("fn main() {}".into()),
+                    error: None,
+                    images: Vec::new(),
+                },
+                ProviderEvent::ToolStart {
+                    tool_use_id: edit_id.clone(),
+                    name: "edit".into(),
+                    input: serde_json::json!({ "path": path, "streamContent": "fn main() {}\n" }),
+                },
+                ProviderEvent::FileDiff {
+                    path: path.into(),
+                    diff: format!("--- a/{path}\n+++ b/{path}\n@@ -1 +1 @@\n-old\n+new"),
+                    added: 1,
+                    removed: 1,
+                    created: false,
+                },
+                ProviderEvent::ToolEnd {
+                    tool_use_id: edit_id,
+                    output: Some("updated".into()),
+                    error: None,
+                    images: Vec::new(),
+                },
+            ];
+            for event in script {
+                emit_event(db, broadcaster, session_id, event).await;
+                tick().await;
+            }
         }
         "tool-error" => {
             // A tool that fails. Drives the chat's errored-tool rendering: the
@@ -1571,6 +1662,12 @@ pub fn mock_model_infos() -> Vec<ModelInfo> {
         ModelInfo {
             id: "tool-error".into(),
             display_name: "Mock: tool error".into(),
+            capabilities: vec!["mock".into(), "tools".into()],
+            tier: 2,
+        },
+        ModelInfo {
+            id: "cli-tools".into(),
+            display_name: "Mock: non-Claude CLI tool names".into(),
             capabilities: vec!["mock".into(), "tools".into()],
             tier: 2,
         },
