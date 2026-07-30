@@ -118,11 +118,12 @@ layout: null
           <div class="marquee-track">
             <span>Claude</span><span>Grok</span><span>Kimi Code</span
             ><span>Cursor</span><span>Ollama</span><span>WASM plugins</span
-            ><span>MCP servers</span><span>Experts</span><span>Test replay</span
-            ><span>Diff viewer</span><span>SQLite inside</span
-            ><span>Claude</span><span>Grok</span><span>Kimi Code</span
-            ><span>Cursor</span><span>Ollama</span><span>WASM plugins</span
-            ><span>MCP servers</span><span>Experts</span><span>Test replay</span
+            ><span>MCP servers</span><span>Experts</span><span>Doc review</span
+            ><span>Test replay</span><span>Diff viewer</span
+            ><span>SQLite inside</span><span>Claude</span><span>Grok</span
+            ><span>Kimi Code</span><span>Cursor</span><span>Ollama</span
+            ><span>WASM plugins</span><span>MCP servers</span
+            ><span>Experts</span><span>Doc review</span><span>Test replay</span
             ><span>Diff viewer</span><span>SQLite inside</span>
           </div>
         </div>
@@ -186,6 +187,31 @@ layout: null
               <img
                 src="{{ '/assets/screenshots/chat.png' | relative_url }}"
                 alt="Chat view of a session showing user messages, agent replies, and a collapsed tool call"
+              />
+            </div>
+          </div>
+
+          <div class="feature">
+            <div class="feature-copy">
+              <span class="kicker">Review</span>
+              <h3>Review documents with an AI pass</h3>
+              <p>
+                Annotate any markdown document — suggest, mark wrong, ask to
+                expand — and run a pass: a reviewer session revises the
+                document, resolves each annotation with a note, and asks an
+                inline question when it needs your call. Every revision is a
+                version with a diff, and nothing touches the source until you
+                apply. Link a GitHub pull request and its review comments come
+                along.
+              </p>
+              <a class="more" href="{{ '/review.html' | relative_url }}"
+                >The review flow →</a
+              >
+            </div>
+            <div class="feature-shot f-review">
+              <img
+                src="{{ '/assets/screenshots/document-review.png' | relative_url }}"
+                alt="The review screen with a markdown document on the left and annotations with resolution notes in a rail on the right"
               />
             </div>
           </div>
@@ -282,6 +308,63 @@ layout: null
         </div>
       </section>
 
+      <section class="extras">
+        <div class="wrap">
+          <span class="kicker">Also in the box</span>
+          <h2>The rest of the flock's kit</h2>
+          <div class="extra-grid">
+            <div class="extra">
+              <h3>Usage dashboard</h3>
+              <p>
+                Token and cost rollups per model, project, and session — with
+                trends over time — so you know where the spend goes before the
+                bill says so.
+              </p>
+            </div>
+            <div class="extra">
+              <h3>Repeating tasks</h3>
+              <p>
+                A saved prompt on a schedule: every N minutes, daily, or weekly.
+                Each firing starts a fresh session in the task's folder —
+                nightly dependency checks, morning summaries.
+              </p>
+            </div>
+            <div class="extra">
+              <h3>Multi-user access</h3>
+              <p>
+                Accounts with per-user sessions: each person sees and streams
+                their own conversations, and admin-only surfaces stay locked to
+                admins.
+              </p>
+            </div>
+            <div class="extra">
+              <h3>Plans before code</h3>
+              <p>
+                An agent proposes a plan you can read, comment on, and revise; a
+                wizard then turns the approved plan into cards the flock works
+                through.
+              </p>
+            </div>
+            <div class="extra">
+              <h3>Reports that outlive sessions</h3>
+              <p>
+                Agents write markdown reports — research, audits, findings —
+                that collect in a browsable library long after the session that
+                wrote them is gone.
+              </p>
+            </div>
+            <div class="extra">
+              <h3>Every tool call, readable</h3>
+              <p>
+                Whichever provider runs the agent, the transcript reads the
+                same: the real command line, the model's one-sentence reason,
+                and a diff card for every file edit.
+              </p>
+            </div>
+          </div>
+        </div>
+      </section>
+
       <section class="binary">
         <div class="wrap">
           <div>
@@ -322,6 +405,7 @@ layout: null
             >Getting Started</a
           >
           <a href="{{ '/core-concepts.html' | relative_url }}">Core Concepts</a>
+          <a href="{{ '/review.html' | relative_url }}">Document Review</a>
           <a href="{{ '/experts.html' | relative_url }}">Experts</a>
           <a href="{{ '/plugins.html' | relative_url }}">Plugins</a>
           <a href="{{ '/architecture.html' | relative_url }}">Architecture</a>

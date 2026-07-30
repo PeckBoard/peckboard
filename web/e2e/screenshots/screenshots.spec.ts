@@ -908,3 +908,100 @@ test('capture providers screenshot @screenshot', async ({ request, page }) => {
   await expect(page.getByTestId('acct-row-acct-team')).toBeVisible()
   await capture(page, 'providers.png')
 })
+
+// document-review.png — the review screen in its annotating state: a real
+// markdown document in the doc pane, open annotations of several kinds in
+// the rail. All seeded through the live API (no route stubs); the pass is
+// never run, so no mock-reviewer text appears in the shot.
+test('capture document review screenshot @screenshot', async ({ request, page }) => {
+  mkdirSync(OUT_DIR, { recursive: true })
+  const { token, authHeader } = await authenticate(request)
+
+  const dir = mkdtempSync(path.join(tmpdir(), 'peckboard-shots-review-'))
+  mkdirSync(path.join(dir, 'docs'), { recursive: true })
+  const doc = [
+    '# Deploy Runbook',
+    '',
+    'This runbook covers a routine production deploy of the payments',
+    'service, from merge to the post-deploy checks.',
+    '',
+    '## Before You Deploy',
+    '',
+    'Confirm CI is green on `main` and that the staging environment has',
+    'run the release candidate for at least one hour without alerts.',
+    '',
+    'Announce the deploy in the on-call channel with the release tag.',
+    '',
+    '## Rolling Out',
+    '',
+    'Deploys go region by region. Start with `eu-west-1`, watch the error',
+    'budget for ten minutes, then continue to the remaining regions.',
+    '',
+    'If error rates rise above the alert threshold, roll back first and',
+    'investigate second.',
+    '',
+    '## After the Deploy',
+    '',
+    'Verify the payment success rate on the dashboard and close the',
+    'deploy announcement with a link to the release notes.',
+    '',
+  ].join('\n')
+  writeFileSync(path.join(dir, 'docs', 'deploy-runbook.md'), doc)
+  const folderId = await createFolder(request, authHeader, 'payments-runbooks', dir)
+
+  const create = await request.post('/api/doc-reviews', {
+    headers: authHeader,
+    data: { source_kind: 'file', source_ref: `${folderId}:docs/deploy-runbook.md` },
+  })
+  expect(create.ok(), `create review failed: ${await create.text()}`).toBeTruthy()
+  const reviewId = ((await create.json()) as { review: { id: string } }).review.id
+
+  const annotations: Array<{
+    start_line: number
+    end_line?: number
+    quote?: string
+    kind: string
+    body: string
+  }> = [
+    {
+      start_line: 9,
+      quote: 'run the release candidate for at least one hour without alerts',
+      kind: 'suggest',
+      body: 'Name the alert dashboards to watch — "without alerts" is doing a lot of work here.',
+    },
+    {
+      start_line: 16,
+      end_line: 17,
+      quote: 'Start with `eu-west-1`',
+      kind: 'wrong',
+      body: 'We start with us-east-2 since the traffic split changed in Q2.',
+    },
+    {
+      start_line: 23,
+      end_line: 25,
+      kind: 'expand',
+      body: 'Add the rollback command and where to find the previous release tag.',
+    },
+  ]
+  for (const a of annotations) {
+    const res = await request.post(`/api/doc-reviews/${reviewId}/comments`, {
+      headers: authHeader,
+      data: a,
+    })
+    expect(res.ok(), `annotate failed: ${await res.text()}`).toBeTruthy()
+  }
+
+  // The screenshots config stages the experts wasm into the data dir; an
+  // unapproved plugin overlays every page with its approval prompt. Approve
+  // it so the shot shows the review screen, not the modal (404 when the
+  // wasm wasn't built — fine, then there is no modal either).
+  await request.post('/api/plugins/experts/approval', {
+    headers: authHeader,
+    data: { decision: 'approve' },
+  })
+  await loadAppAt(page, token, `/review/${reviewId}`)
+  await expect(page.getByTestId('review-view')).toBeVisible({ timeout: 15_000 })
+  await expect(page.getByTestId('review-annotation-item')).toHaveCount(3, { timeout: 10_000 })
+  await expect(page.getByTestId('review-run-pass')).toBeVisible()
+  await capture(page, 'document-review.png')
+})

@@ -15,6 +15,7 @@ const PAGES: Array<{ path: string; title: string }> = [
   { path: 'getting-started.html', title: 'Getting Started' },
   { path: 'core-concepts.html', title: 'Core Concepts' },
   { path: 'experts.html', title: 'Experts' },
+  { path: 'review.html', title: 'Document Review' },
   { path: 'plugins.html', title: 'Plugins' },
   { path: 'architecture.html', title: 'Architecture' },
   { path: 'configuration.html', title: 'Configuration' },
@@ -26,8 +27,10 @@ const PAGES: Array<{ path: string; title: string }> = [
 const NAV_TITLES = ['Home', ...PAGES.map((p) => p.title)]
 
 // Pages whose source contains ```mermaid blocks.
+// Pages whose source contains ```mermaid blocks.
 const MERMAID_PAGES = [
   'core-concepts.html',
+  'review.html',
   'plugins.html',
   'session-hooks.html',
   'architecture.html',
@@ -99,9 +102,11 @@ test.describe('Landing', () => {
       'https://github.com/PeckBoard/peckboard',
     )
     // The three how-it-works steps and all five feature rows.
+    // The three how-it-works steps, all six feature rows, and the
+    // also-in-the-box grid.
     await expect(page.locator('.step')).toHaveCount(3)
-    await expect(page.locator('.feature')).toHaveCount(5)
-    // No doc-theme chrome on the landing.
+    await expect(page.locator('.feature')).toHaveCount(6)
+    await expect(page.locator('.extra')).toHaveCount(6)
     await expect(page.locator('.site-nav')).toHaveCount(0)
   })
 

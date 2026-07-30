@@ -569,13 +569,75 @@ img {
   box-shadow: var(--shadow-lg);
 }
 
+/* ── also-in-the-box grid ── */
+
+.extras {
+  background: var(--cream);
+  border-top: 1px solid var(--line);
+  padding: 76px 0;
+  text-align: center;
+  margin-top: 48px;
+}
+
+.extras h2 {
+  margin-top: 14px;
+  font-size: clamp(27px, 3.2vw, 36px);
+  font-weight: 700;
+  letter-spacing: -0.015em;
+  line-height: 1.18;
+}
+
+.extra-grid {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 24px;
+  margin-top: 44px;
+  text-align: left;
+}
+
+.extra {
+  background: #fff;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  padding: 24px 24px 22px;
+  box-shadow: var(--shadow-sm);
+  transition:
+    box-shadow 0.15s ease,
+    transform 0.15s ease;
+}
+
+.extra:hover {
+  transform: translateY(-3px);
+  box-shadow: var(--shadow-lg);
+}
+
+.extra h3 {
+  font-size: 16.5px;
+  font-weight: 700;
+}
+
+.extra h3::after {
+  content: "";
+  display: block;
+  width: 26px;
+  height: 2px;
+  margin-top: 8px;
+  background: var(--gold);
+  border-radius: 2px;
+}
+
+.extra p {
+  margin-top: 10px;
+  font-size: 14px;
+  color: var(--muted);
+}
 /* ── one binary strip ── */
 
 .binary {
   background: var(--navy);
   color: #edf1f6;
   padding: 80px 0;
-  margin-top: 48px;
+  margin-top: 0;
 }
 
 .binary .wrap {
@@ -770,6 +832,7 @@ footer nav a:hover {
 
 @media (max-width: 860px) {
   .step-grid,
+  .extra-grid,
   .feature,
   .binary .wrap {
     grid-template-columns: 1fr;
