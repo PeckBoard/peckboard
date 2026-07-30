@@ -239,3 +239,45 @@ test.describe('Session Hooks (child page)', () => {
     expect(leak, `raw Liquid leaked: ${leak}`).toBeNull()
   })
 })
+
+// mcp-servers.html is the second Plugins child page: the generated MCP
+// server catalog. Same out-of-loop treatment as session-hooks, plus a
+// row-count floor so a silently truncated generation can't ship as "the
+// full catalog".
+test.describe('MCP Server Catalog (child page)', () => {
+  test('renders with nav link under its parent and a full catalog', async ({ page }) => {
+    await page.goto('mcp-servers.html')
+    await expect(page.locator('h1').first()).toContainText('MCP Server Catalog')
+    const nav = page.locator('.site-nav').first()
+    await expect(nav.getByText('MCP Server Catalog', { exact: true }).first()).toBeVisible()
+    // Every registry server is one table row; the registry holds 100+.
+    const rows = page.locator('main table tbody tr')
+    expect(await rows.count()).toBeGreaterThanOrEqual(100)
+    // Parent page links the child both in the sidebar and in its body.
+    await page.goto('plugins.html')
+    await expect(
+      page.locator('.site-nav').getByRole('link', { name: 'MCP Server Catalog' }),
+    ).toBeVisible()
+  })
+
+  test('internal links resolve and no Liquid leaks', async ({ page, request, baseURL }) => {
+    await page.goto('mcp-servers.html')
+    const hrefs = await page.$$eval('a[href]', (as) => as.map((a) => (a as HTMLAnchorElement).href))
+    const origin = new URL(baseURL!).origin
+    const internal = [...new Set(hrefs)]
+      .filter((h) => h.startsWith(origin))
+      .map((h) => h.split('#')[0])
+    for (const url of internal) {
+      const res = await request.get(url)
+      expect(res.status(), `broken link on mcp-servers: ${url}`).toBeLessThan(400)
+    }
+    const leak = await page.evaluate(() => {
+      const clone = document.body.cloneNode(true) as HTMLElement
+      clone.querySelectorAll('pre, code, script, style').forEach((el) => el.remove())
+      const text = clone.textContent ?? ''
+      const i = text.indexOf('{{')
+      return i >= 0 ? text.slice(Math.max(0, i - 40), i + 40) : null
+    })
+    expect(leak, `raw Liquid leaked: ${leak}`).toBeNull()
+  })
+})

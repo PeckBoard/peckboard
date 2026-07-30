@@ -6,7 +6,7 @@ has_children: true
 
 # Plugins
 
-A _plugin_ is a WebAssembly module PeckBoard loads to add tools, pages, and behaviors without changing the core binary — for example a diff viewer tab on every project, or SSH tools for a fleet of servers. Plugins install in a couple of clicks from a built-in registry, and none of a plugin's code runs until you approve exactly the capabilities it asked for. This page covers installing plugins and what each distributed plugin does; [Session Hooks]({{ "/session-hooks.html" | relative_url }}) maps the points where a plugin can hook into a running session.
+A _plugin_ is a WebAssembly module PeckBoard loads to add tools, pages, and behaviors without changing the core binary — for example a diff viewer tab on every project, or SSH tools for a fleet of servers. Plugins install in a couple of clicks from a built-in registry, and none of a plugin's code runs until you approve exactly the capabilities it asked for. This page covers installing plugins, what each distributed plugin does, and the MCP tools each one gives sessions. [Session Hooks]({{ "/session-hooks.html" | relative_url }}) maps the points where a plugin can hook into a running session, and the [MCP Server Catalog]({{ "/mcp-servers.html" | relative_url }}) lists the external tool servers the registry can configure alongside plugins.
 
 ## Installing and Updating
 
@@ -33,25 +33,40 @@ One historical note: the standard worker tools (file reading and editing, search
 
 ## What Each Plugin Adds
 
-| Plugin           | What it adds                                                                               |
-| ---------------- | ------------------------------------------------------------------------------------------ |
-| Experts          | Knowledge, question, and PM expert sessions plus the Experts view                          |
-| Pre-hatcher      | Opt-in enrichment of chat messages with repository context before the main model sees them |
-| Session Control  | Tools for controlling other sessions: interrupt, terminate, clear, message                 |
-| Diff Viewer      | A side-by-side diff and editor tab on projects and sessions                                |
-| API              | A public REST API with scoped API keys                                                     |
-| Playwright Tests | Replay of recorded browser test runs, LogRocket-style                                      |
-| SSH Fleet        | A registry of SSH hosts, remote command and file tools, and a live dashboard               |
-| Nginx Manager    | Nginx Proxy Manager control from any session                                               |
-| Kaiad Manager    | Kaiad control-plane access from any session                                                |
+Every plugin in the official registry, with the MCP tools it contributes to sessions. Tool-by-tool detail follows in each plugin's section.
+
+| Plugin           | What it adds                                                                               | MCP tools |
+| ---------------- | ------------------------------------------------------------------------------------------ | --------- |
+| Experts          | Knowledge, question, and PM expert sessions plus the Experts view                          | 8         |
+| Pre-hatcher      | Opt-in enrichment of chat messages with repository context before the main model sees them | —         |
+| Session Control  | Tools for controlling other sessions: interrupt, terminate, clear, message                 | 6         |
+| Diff Viewer      | A side-by-side diff and editor tab on projects and sessions                                | —         |
+| API              | A public REST API with scoped API keys                                                     | —         |
+| Playwright Tests | Replay of recorded browser test runs, LogRocket-style                                      | —         |
+| Chicken Coop     | A 3D chicken run visualizing every live session as a bird                                  | —         |
+| SSH Fleet        | A registry of SSH hosts, remote command and file tools, and a live dashboard               | 10        |
+| Nginx Manager    | Nginx Proxy Manager control from any session                                               | 4         |
+| Kaiad Manager    | Kaiad control-plane access from any session                                                | 4         |
+| OpenSearch       | Query and manage an OpenSearch or Elasticsearch-compatible cluster                         | 8         |
 
 ## Experts
 
-The experts feature — knowledge experts that each read one area of a codebase, the question expert that remembers your answers, and the PM expert that records project decisions — ships as the `experts` plugin. Installing it adds the Experts view and the expert tools (`spin_up_experts`, `ask_expert`, and the `pm_*` decision tools) to sessions. [Experts]({{ "/experts.html" | relative_url }}) describes the feature in full.
+The experts feature — knowledge experts that each read one area of a codebase, the question expert that remembers your answers, and the PM expert that records project decisions — ships as the `experts` plugin. Installing it adds the Experts view and the expert tools to sessions. [Experts]({{ "/experts.html" | relative_url }}) describes the feature in full.
+
+| Tool                  | What it does                                                                     |
+| --------------------- | -------------------------------------------------------------------------------- |
+| `spin_up_experts`     | Partitions a project's codebase across knowledge experts, each reading its slice |
+| `list_experts`        | Lists consultable experts with kind, area, scope, and last activity              |
+| `ask_expert`          | Asks an expert a question; the answer arrives asynchronously as a later event    |
+| `read_expert_brief`   | Reads an expert's distilled brief synchronously — cheap orientation              |
+| `record_expert_brief` | Knowledge experts persist their distilled understanding for others to read       |
+| `pm_record_decision`  | Records a project-direction decision in the durable PM log                       |
+| `pm_check_decisions`  | Checks a planned change against active PM decisions                              |
+| `pm_escalate_to_user` | PM expert escalates an unanswerable direction question to the user               |
 
 ## Pre-hatcher
 
-Pre-hatcher offers to enrich a chat message with repository context before your main model sees it. Each message you send gets a small opt-in card; declining sends the message unchanged, accepting spawns a temporary session on the provider's cheapest model (or one you pick in the plugin's settings) that reads the repository, then proposes an expanded version of your message for approval. You always see and approve the final text — the plugin's own code, not a model, delivers it.
+Pre-hatcher offers to enrich a chat message with repository context before your main model sees it. Each message you send gets a small opt-in card; declining sends the message unchanged, accepting spawns a temporary session on the provider's cheapest model (or one you pick in the plugin's settings) that reads the repository, then proposes an expanded version of your message for approval. You always see and approve the final text — the plugin's own code, not a model, delivers it. Its one MCP tool (`pre_hatch_result`) is internal plumbing for the research session, not something other sessions call.
 
 <details markdown="1">
 <summary>What pre-hatcher does and does not intercept</summary>
@@ -62,7 +77,16 @@ Only plain text messages in chat sessions are intercepted. Worker and expert ses
 
 ## Session Control
 
-Session Control adds tools a session can use on _other_ sessions: `interrupt_session` cancels an in-flight turn, `terminate_agent` kills a session's agent process, `clear_session` wipes a session's history, `send_message` and `send_image` deliver content into another session as if you had typed it, and `find_session` searches sessions across folders. It is what lets one agent coordinate others — for example a chat session redirecting a subagent it spawned. `clear_session` is irreversible: it deletes the session's event history, todos, and attachments.
+Session Control adds tools a session can use on _other_ sessions — it is what lets one agent coordinate others, for example a chat session redirecting a subagent it spawned.
+
+| Tool                | What it does                                                                      |
+| ------------------- | --------------------------------------------------------------------------------- |
+| `find_session`      | Lists sessions across every folder and project, with an optional substring query  |
+| `interrupt_session` | Stops another session's in-flight turn without touching its history               |
+| `terminate_agent`   | Kills a session's agent process; the next message starts a fresh one              |
+| `clear_session`     | Wipes a session's history, todos, and attachments — irreversible                  |
+| `send_message`      | Delivers text into another session as if the user had typed it, and resumes it    |
+| `send_image`        | Delivers an image into another session as an attachment, with an optional caption |
 
 ## Diff Viewer
 
@@ -78,18 +102,64 @@ Playwright Tests adds a view that replays recorded browser test runs the way ses
 
 ![A recorded browser test replayed in the Playwright Tests view: the replayed frame with the cursor, an event timeline with a rage click, and a network waterfall with two failed requests]({{ "/assets/screenshots/playwright-player.png" | relative_url }})
 
+## Chicken Coop
+
+Chicken Coop draws every live session as a bird in a 3D chicken run: a hen per active card — out of the coop while working, pecking on tool activity, nesting during testing, walking home when the card lands — a rooster for chats, a barred hen for repeating tasks, and chicks that follow their parent bird for subagents. Each project gets a fenced pen, done cards lay eggs onto a daily stats board, and the run keeps a real-clock day and night cycle. Click a bird for its session details; scatter feed to gather the flock. Pure visualization: it adds a sidebar page and touches nothing.
+
 ## SSH Fleet
 
-SSH Fleet keeps a registry of SSH hosts — each with a username and either a password or a private key, plus a label and tags — and gives sessions tools to act on them: `ssh_run` on one host, `ssh_run_many` across a tag or the whole fleet, `ssh_read_file` / `ssh_write_file` / `ssh_edit_file` over SFTP, and `ssh_probe` to check a connection and pin a server key. An SSH Fleet page shows every command live, filterable by host. The SSH client itself is built into PeckBoard core, so credentials stay in memory and are never written to disk.
+SSH Fleet keeps a registry of SSH hosts — each with a username and either a password or a private key, plus a label and tags — and gives sessions tools to act on them. An SSH Fleet page shows every command live, filterable by host. The SSH client itself is built into PeckBoard core, so credentials stay in memory and are never written to disk.
+
+| Tool              | What it does                                                                |
+| ----------------- | --------------------------------------------------------------------------- |
+| `ssh_host_add`    | Registers a host with hostname, username, and a password or private key     |
+| `ssh_host_update` | Updates a host by id; omitted credentials are kept                          |
+| `ssh_host_remove` | Removes a host from the fleet                                               |
+| `ssh_host_list`   | Lists hosts with credentials redacted and last-seen status                  |
+| `ssh_probe`       | Connects and authenticates only — returns the server-key fingerprint to pin |
+| `ssh_run`         | Runs a command on one host: stdout, stderr, exit code                       |
+| `ssh_run_many`    | Runs one command across a tag or the whole fleet, with per-host results     |
+| `ssh_read_file`   | Reads a remote file over SFTP (base64 for binary)                           |
+| `ssh_write_file`  | Creates or overwrites a remote file over SFTP                               |
+| `ssh_edit_file`   | Edits a remote file: full replacement or literal find/replace               |
 
 ## Nginx Manager
 
-Nginx Manager connects sessions to a self-hosted [Nginx Proxy Manager](https://nginxproxymanager.com/) instance through the MCP server it ships: `npm_configure` stores the instance's URL and API key, `npm_status` checks the connection, `npm_list_tools` shows what your key's scopes allow, and `npm_call` invokes any of it — proxy hosts, certificates, access lists, and the rest. The catalog is discovered live from your instance, so it always matches your NPM version. Configure it in the plugin's settings form (recommended — the API key never enters a chat transcript) or with `npm_configure` from a session.
+Nginx Manager connects sessions to a self-hosted [Nginx Proxy Manager](https://nginxproxymanager.com/) instance through the MCP server it ships. The catalog is discovered live from your instance, so it always matches your NPM version. Configure it in the plugin's settings form (recommended — the API key never enters a chat transcript) or with `npm_configure` from a session.
+
+| Tool             | What it does                                                            |
+| ---------------- | ----------------------------------------------------------------------- |
+| `npm_configure`  | Stores the instance URL and API key, verifying the connection           |
+| `npm_status`     | Checks the connection and reports the server info                       |
+| `npm_list_tools` | Lists what your key's scopes allow, with full schemas on request        |
+| `npm_call`       | Invokes any NPM tool — proxy hosts, certificates, access lists, streams |
 
 ## Kaiad Manager
 
-Kaiad Manager is the same bridge for a [Kaiad](https://kaiad.dev) control plane: `kaiad_configure`, `kaiad_status`, `kaiad_list_tools`, and `kaiad_call` proxy to the panel's hosted MCP server for services, deployments, builds, agents, and incidents. It needs an API credential minted in the Kaiad panel with the `mcp.read` scope, plus `mcp.write` if agents should be able to deploy or mutate.
+Kaiad Manager is the same bridge for a [Kaiad](https://kaiad.dev) control plane: services, deployments, builds, agents, and incidents through the panel's hosted MCP server. It needs an API credential minted in the Kaiad panel with the `mcp.read` scope, plus `mcp.write` if agents should be able to deploy or mutate.
 
-## MCP Server Templates
+| Tool               | What it does                                                  |
+| ------------------ | ------------------------------------------------------------- |
+| `kaiad_configure`  | Stores the panel URL and credential, verifying the connection |
+| `kaiad_status`     | Checks the connection and reports the server info             |
+| `kaiad_list_tools` | Lists what your credential's scopes allow                     |
+| `kaiad_call`       | Invokes any control-plane tool by name                        |
 
-Besides WASM plugins, the registry lists ready-made MCP server templates — external tool servers such as Playwright, Context7, GitHub, and Notion that sessions can talk to directly. Adding one from the registry configures it for your sessions without hand-writing the server command or URL.
+## OpenSearch
+
+The OpenSearch plugin talks to a cluster's REST API directly — no separate MCP server process — and also works with Elasticsearch-compatible clusters. Configure the cluster URL and credentials in the plugin's settings or with `opensearch_configure` from a session; reaching a self-hosted cluster needs the `http_request` permission the plugin requests at approval.
+
+| Tool                    | What it does                                                         |
+| ----------------------- | -------------------------------------------------------------------- |
+| `opensearch_configure`  | Stores the cluster URL and credentials, verifying the connection     |
+| `opensearch_status`     | Pings the cluster and reports name, version, and health              |
+| `opensearch_indices`    | Lists indices with health, doc counts, shards, and disk size         |
+| `opensearch_search`     | Searches an index with query DSL or a Lucene `q` string              |
+| `opensearch_get_doc`    | Fetches one document by id                                           |
+| `opensearch_index_doc`  | Stores a JSON document, creating the index if needed                 |
+| `opensearch_delete_doc` | Deletes one document by id                                           |
+| `opensearch_request`    | Escape hatch: any REST endpoint — mappings, `_bulk`, `_cat`, reindex |
+
+## MCP Server Catalog
+
+Besides WASM plugins, the registry lists ready-made MCP server entries — 106 external tool servers such as Playwright, GitHub, Postgres, and Figma that sessions can talk to directly. Adding one from the registry configures it without hand-writing the server command or URL. The full list, grouped by category, is on the [MCP Server Catalog]({{ "/mcp-servers.html" | relative_url }}) page.
