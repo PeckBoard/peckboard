@@ -465,6 +465,8 @@ impl RepeatingTaskManager {
                 db,
                 broadcaster,
                 config,
+                crate::provider::manager::MidTurnPolicy::Queue,
+                true,
             )
             .await;
         if let Err(e) = dispatch_result {

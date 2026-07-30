@@ -462,12 +462,11 @@ async fn auto_compact_skips_when_message_queued() {
     seed_context(&state.db, "u1", "w1", 210_000).await;
     state
         .db
-        .upsert_queued_message(NewQueuedMessage {
+        .enqueue_message(NewQueuedMessage {
             session_id: "w1".into(),
             text: "queued while busy".into(),
             queued_at: chrono::Utc::now().to_rfc3339(),
-            model: None,
-            effort: None,
+            ..Default::default()
         })
         .await
         .unwrap();

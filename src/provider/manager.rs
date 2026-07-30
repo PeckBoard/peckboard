@@ -6,7 +6,7 @@ use tokio::sync::OwnedMutexGuard;
 use tokio::sync::mpsc;
 
 use crate::db::Db;
-use crate::db::models::NewQueuedMessage;
+use crate::db::models::{NewQueuedMessage, QueuedMessage};
 use crate::plugin::manager::PluginManager;
 use crate::provider::agent::{ProcessCompletion, SendMessageContext};
 use crate::provider::message::UserMessage;
@@ -26,6 +26,23 @@ pub enum SendOutcome {
     /// the persistent `queued_messages` queue and will be delivered when
     /// the current run completes.
     Queued,
+}
+
+/// What `send_or_queue` does with a message that arrives while the
+/// session is already mid-turn.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MidTurnPolicy {
+    /// Persist in `queued_messages` and deliver when the current run
+    /// completes. The default everywhere a human or another agent sends
+    /// into a busy session: the working agent is never interrupted.
+    Queue,
+    /// Hand the message to the live turn when the provider supports
+    /// mid-stream injection (the Claude CLI consumes stdin envelopes
+    /// mid-run, which steers/interrupts the turn). Falls back to the
+    /// queue when the provider can't inject. Reserved for flows that
+    /// must reach the running agent now: ask_user answers and the
+    /// explicit per-message "send now" force path.
+    Inject,
 }
 
 /// Proof token: the bearer holds the per-session lock for `session_id`.
@@ -251,6 +268,7 @@ impl SessionManager {
             UserMessage {
                 text,
                 attachments: message.attachments,
+                attachment_ids: message.attachment_ids,
             }
         } else {
             message
@@ -571,24 +589,26 @@ impl SessionManager {
 
     /// Atomic check-and-act for the message dispatch path.
     ///
-    /// Behaviour forks on the underlying provider's
-    /// `supports_mid_stream_injection` capability:
+    /// Idle session: dispatches through `send_message_locked` (spawn or
+    /// resume). Busy session: behaviour is decided by `policy` —
     ///
-    /// - **Mid-stream-capable (Claude in stream-json mode).** Always
-    ///   dispatches through `send_message_locked`. The provider
-    ///   either spawns a fresh child (first turn / after idle reap)
-    ///   or writes the new user envelope to the existing child's
-    ///   stdin. There is no DB-level queue — the CLI itself is the
-    ///   queue. `SendOutcome::Queued` is reported when a turn was
-    ///   already in flight at dispatch time so the UI can render
-    ///   the "will pick up after this turn" badge.
+    /// - [`MidTurnPolicy::Queue`] (the default for user sends, agent-to-
+    ///   agent messages, repeating tasks): persist the message in the
+    ///   `queued_messages` FIFO and broadcast a queue event. The
+    ///   completion listener calls `drain_queued` on agent-end, so the
+    ///   running agent finishes its work untouched and queued messages
+    ///   are delivered afterwards, oldest first, one turn each.
     ///
-    /// - **Per-turn provider (mock + any future provider that can
-    ///   only handle one turn at a time).** Falls back to the
-    ///   original behaviour: if `is_running`, persist the message in
-    ///   `queued_messages` and broadcast a queue event; the
-    ///   completion listener calls `drain_queued` to deliver it
-    ///   when the current run ends. Otherwise dispatch directly.
+    /// - [`MidTurnPolicy::Inject`]: when the provider supports mid-stream
+    ///   injection (Claude in stream-json mode) the user envelope is
+    ///   written to the live child's stdin — the CLI folds it into the
+    ///   running turn, which steers/interrupts the agent's current work.
+    ///   Providers without that capability fall back to the queue.
+    ///
+    /// `user_event_appended`: true when the caller already appended the
+    /// `user` event for this message (the /message route does, before
+    /// calling here). Recorded on the queue row so the drain doesn't
+    /// append a duplicate; when false the drain appends one at delivery.
     ///
     /// Callers MUST use this from any external trigger (HTTP route,
     /// orchestrator respawn). The per-session lock is held across
@@ -601,6 +621,8 @@ impl SessionManager {
         db: &Db,
         broadcaster: &Arc<Broadcaster>,
         config: SpawnConfig,
+        policy: MidTurnPolicy,
+        user_event_appended: bool,
     ) -> anyhow::Result<SendOutcome> {
         let lock = self.lock_session(session_id).await;
         let was_running = self.is_running(session_id).await;
@@ -608,31 +630,41 @@ impl SessionManager {
             .provider_for_model_supports_mid_stream(&config.model)
             .await;
 
-        if was_running && !supports_mid_stream {
-            // Per-turn provider — fall back to the durable queue so
-            // the completion listener can deliver this message when
-            // the current run finishes. The persistent queue is
-            // text-only; per-turn providers (mock, ollama) can't
-            // make use of multimodal attachments, so dropping them
-            // here is lossless for the providers that actually take
-            // this branch.
+        if was_running && (policy == MidTurnPolicy::Queue || !supports_mid_stream) {
+            // Durable FIFO: the completion listener delivers this when
+            // the current run finishes. Attachment ids ride along so a
+            // queued send keeps its images — bytes are re-resolved from
+            // the attachments dir at delivery time.
             let now = chrono::Utc::now().to_rfc3339();
-            db.upsert_queued_message(NewQueuedMessage {
-                session_id: session_id.to_string(),
-                text: message.text.clone(),
-                queued_at: now,
-                model: Some(config.model.clone()),
-                effort: config.effort.clone(),
-            })
-            .await?;
+            let attachment_ids = if message.attachment_ids.is_empty() {
+                None
+            } else {
+                serde_json::to_string(&message.attachment_ids).ok()
+            };
+            let queued = db
+                .enqueue_message(NewQueuedMessage {
+                    session_id: session_id.to_string(),
+                    text: message.text.clone(),
+                    queued_at: now,
+                    model: Some(config.model.clone()),
+                    effort: config.effort.clone(),
+                    attachment_ids,
+                    user_event_appended,
+                })
+                .await?;
             broadcaster.broadcast(WsEvent {
                 event_type: "queue".into(),
                 session_id: session_id.to_string(),
-                data: serde_json::json!({ "action": "set", "text": message.text }),
+                data: serde_json::json!({
+                    "action": "set",
+                    "id": queued.id,
+                    "text": message.text,
+                }),
             });
             tracing::info!(
                 session_id = %session_id,
-                "Per-turn provider already running; message persisted in queue"
+                queued_id = queued.id,
+                "Agent mid-turn; message persisted in queue until it finishes"
             );
             return Ok(SendOutcome::Queued);
         }
@@ -673,10 +705,12 @@ impl SessionManager {
         }
     }
 
-    /// Drain the persistent queued message (if any) for `session_id` and
-    /// dispatch it as a fresh agent run. Idempotent: if there is no
-    /// queued message or an agent is already running, it returns
-    /// `Ok(false)` without side effects.
+    /// Drain the next queued message (oldest first) for `session_id` and
+    /// dispatch it as a fresh agent run. Idempotent: if the queue is
+    /// empty or an agent is already running, it returns `Ok(false)`
+    /// without side effects. One message per call — the next agent-end
+    /// triggers the next drain, so a backlog delivers as separate turns
+    /// in FIFO order.
     ///
     /// Holds the per-session lock so it can't race with `send_or_queue`,
     /// the orchestrator, or another completion handler.
@@ -686,6 +720,7 @@ impl SessionManager {
         db: &Db,
         broadcaster: &Arc<Broadcaster>,
         config: SpawnConfig,
+        data_dir: &std::path::Path,
     ) -> anyhow::Result<bool> {
         let lock = self.lock_session(session_id).await;
 
@@ -693,58 +728,155 @@ impl SessionManager {
             return Ok(false);
         }
 
-        let queued = match db.get_queued_message(session_id).await? {
+        let queued = match db.next_queued_message(session_id).await? {
             Some(q) => q,
             None => return Ok(false),
         };
 
-        let _ = db.delete_queued_message(session_id).await;
+        let _ = db.delete_queued_message_by_id(session_id, queued.id).await;
 
-        // Persist the queued text as a user event so the conversation log
-        // reflects the actual delivery order (queue write → drain on
-        // completion → user event → agent run).
-        let user_data = serde_json::json!({ "text": queued.text });
-        match db.append_event(session_id, "user", user_data.clone()).await {
-            Ok(ev) => {
-                broadcaster.broadcast(WsEvent {
-                    event_type: "event".into(),
-                    session_id: session_id.to_string(),
-                    data: serde_json::json!({
-                        "id": ev.id,
-                        "seq": ev.seq,
-                        "ts": ev.ts,
-                        "kind": ev.kind,
-                        "data": user_data,
-                    }),
-                });
-            }
-            Err(e) => {
-                tracing::error!(
-                    session_id = %session_id,
-                    "drain_queued: failed to append user event: {e}"
-                );
+        tracing::info!(
+            session_id = %session_id,
+            queued_id = queued.id,
+            "Draining queued message and spawning agent run"
+        );
+        self.deliver_queued_row(&lock, queued, db, broadcaster, config, data_dir)
+            .await?;
+        Ok(true)
+    }
+
+    /// Force one queued message through immediately — the per-message
+    /// "send now" button. The row must already be removed from the queue
+    /// by the caller (so a racing drain can't deliver it twice).
+    ///
+    /// Under the per-session lock:
+    /// - agent running, provider supports mid-stream injection (Claude):
+    ///   the message is written into the live turn, which steers/
+    ///   interrupts the agent's current work;
+    /// - agent running, per-turn provider: the run is cancelled and the
+    ///   message dispatched as a fresh run once termination completes;
+    /// - agent idle: plain dispatch.
+    ///
+    /// The lock is held across cancel + wait + dispatch, so the
+    /// completion listener's drain (triggered by the cancel's synthetic
+    /// agent-end) blocks until the forced run is registered and then
+    /// no-ops — the forced message can't be overtaken by the queue head.
+    pub async fn force_queued(
+        &self,
+        session_id: &str,
+        queued: QueuedMessage,
+        db: &Db,
+        broadcaster: &Arc<Broadcaster>,
+        config: SpawnConfig,
+        data_dir: &std::path::Path,
+    ) -> anyhow::Result<()> {
+        let lock = self.lock_session(session_id).await;
+
+        if self.is_running(session_id).await
+            && !self
+                .provider_for_model_supports_mid_stream(&config.model)
+                .await
+        {
+            tracing::info!(
+                session_id = %session_id,
+                queued_id = queued.id,
+                "Force-send: cancelling current run to deliver queued message"
+            );
+            self.cancel_and_wait(session_id).await;
+        }
+
+        self.deliver_queued_row(&lock, queued, db, broadcaster, config, data_dir)
+            .await
+    }
+
+    /// Shared delivery tail for `drain_queued` / `force_queued`: append
+    /// the `user` event when the enqueuer didn't, announce the drain,
+    /// rebuild attachments from their ids, and dispatch.
+    async fn deliver_queued_row(
+        &self,
+        lock: &SessionLock,
+        queued: QueuedMessage,
+        db: &Db,
+        broadcaster: &Arc<Broadcaster>,
+        config: SpawnConfig,
+        data_dir: &std::path::Path,
+    ) -> anyhow::Result<()> {
+        let session_id = lock.session_id().to_string();
+
+        // The /message route appends the `user` event at enqueue time so
+        // the transcript shows the message where the user typed it; rows
+        // queued by machine paths (POST /queue, agent-to-agent sends)
+        // haven't been recorded yet, so the drain writes the event at
+        // delivery. Exactly one of the two happens per message.
+        if !queued.user_event_appended {
+            let user_data = serde_json::json!({ "text": queued.text });
+            match db
+                .append_event(&session_id, "user", user_data.clone())
+                .await
+            {
+                Ok(ev) => {
+                    broadcaster.broadcast(WsEvent {
+                        event_type: "event".into(),
+                        session_id: session_id.clone(),
+                        data: serde_json::json!({
+                            "id": ev.id,
+                            "seq": ev.seq,
+                            "ts": ev.ts,
+                            "kind": ev.kind,
+                            "data": user_data,
+                        }),
+                    });
+                }
+                Err(e) => {
+                    tracing::error!(
+                        session_id = %session_id,
+                        "deliver_queued_row: failed to append user event: {e}"
+                    );
+                }
             }
         }
 
         broadcaster.broadcast(WsEvent {
             event_type: "queue".into(),
-            session_id: session_id.to_string(),
-            data: serde_json::json!({ "action": "drained" }),
+            session_id: session_id.clone(),
+            data: serde_json::json!({ "action": "drained", "id": queued.id }),
         });
 
-        tracing::info!(
-            session_id = %session_id,
-            "Draining queued message and spawning agent run"
-        );
+        let attachment_ids: Vec<String> = queued
+            .attachment_ids
+            .as_deref()
+            .and_then(|raw| serde_json::from_str(raw).ok())
+            .unwrap_or_default();
+        let mut attachments = Vec::with_capacity(attachment_ids.len());
+        for aid in &attachment_ids {
+            match crate::routes::attachments::load_attachment_payload(data_dir, &session_id, aid)
+                .await
+            {
+                Some(p) => attachments.push(crate::provider::message::UserAttachment {
+                    filename: p.filename,
+                    mime_type: p.mime_type,
+                    data: p.data,
+                }),
+                None => tracing::warn!(
+                    session_id = %session_id,
+                    attachment_id = %aid,
+                    "Skipping attachment that vanished while queued"
+                ),
+            }
+        }
+
         self.send_message_locked(
-            &lock,
-            UserMessage::from_text(queued.text),
+            lock,
+            UserMessage {
+                text: queued.text,
+                attachments,
+                attachment_ids,
+            },
             db,
             broadcaster,
             config,
         )
-        .await?;
-        Ok(true)
+        .await
     }
 
     /// Cancel the run for `session_id` across every registered provider.
@@ -887,19 +1019,19 @@ pub async fn cancel_via_registry(registry: &ProviderRegistry, session_id: &str) 
 /// drain so the user's queued message isn't stranded — only an explicit
 /// hard stop discards it.
 pub async fn clear_queued_message(db: &Db, broadcaster: &Arc<Broadcaster>, session_id: &str) {
-    match db.delete_queued_message(session_id).await {
-        Ok(true) => {
+    match db.clear_queued_messages(session_id).await {
+        Ok(0) => {}
+        Ok(_) => {
             broadcaster.broadcast(WsEvent {
                 event_type: "queue".into(),
                 session_id: session_id.to_string(),
                 data: serde_json::json!({ "action": "deleted" }),
             });
         }
-        Ok(false) => {}
         Err(e) => {
             tracing::warn!(
                 session_id = %session_id,
-                "clear_queued_message: failed to drop queued message on stop: {e}"
+                "clear_queued_message: failed to drop queued messages on stop: {e}"
             );
         }
     }

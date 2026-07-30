@@ -1080,25 +1080,74 @@
   padding-bottom: 6px;
 }
 
-/* Queued-turn chip: a send parked while the agent is mid-turn. */
+/* Queued-turn chips: one per send parked while the agent is mid-turn.
+   Each carries its message text plus "Send now" (force through —
+   interrupts the agent) and remove buttons. */
 .chat-queued-chip {
   display: flex;
   align-items: center;
   gap: 8px;
+  max-width: min(560px, 90%);
   font-size: var(--text-xs);
   font-weight: 500;
   color: var(--text2);
   background: var(--surface2);
   border: 1px solid var(--border);
   border-radius: var(--radius-full);
-  padding: 4px 12px;
+  padding: 4px 6px 4px 12px;
 }
 .chat-queued-dot {
+  flex-shrink: 0;
   width: 6px;
   height: 6px;
   border-radius: var(--radius-full);
   background: var(--warning);
   animation: thinkBounce 1.4s ease-in-out infinite;
+}
+.chat-queued-text {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  min-width: 0;
+}
+.chat-queued-hint {
+  flex-shrink: 0;
+  color: var(--text3);
+  font-weight: 400;
+}
+.chat-queued-send {
+  flex-shrink: 0;
+  font: inherit;
+  font-weight: 600;
+  color: var(--accent);
+  background: none;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-full);
+  padding: 1px 10px;
+  cursor: pointer;
+}
+.chat-queued-send:hover {
+  background: var(--surface3);
+  border-color: var(--accent);
+}
+.chat-queued-remove {
+  flex-shrink: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 20px;
+  height: 20px;
+  font-size: var(--text-sm);
+  line-height: 1;
+  color: var(--text3);
+  background: none;
+  border: none;
+  border-radius: var(--radius-full);
+  cursor: pointer;
+}
+.chat-queued-remove:hover {
+  color: var(--danger);
+  background: var(--surface3);
 }
 
 /* Unknown-event fallback row: kind label + collapsed JSON payload. */

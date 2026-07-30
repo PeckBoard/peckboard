@@ -105,7 +105,10 @@ impl Db {
                 .get_result(conn)?;
             // Drop any queued message for this session — the queue can
             // only meaningfully fire in the OLD folder's worker context.
-            diesel::delete(queued_messages::table.find(&session_id)).execute(conn)?;
+            diesel::delete(
+                queued_messages::table.filter(queued_messages::session_id.eq(&session_id)),
+            )
+            .execute(conn)?;
             Ok(MoveFolderOutcome::Moved(updated))
         })
         .await
@@ -154,9 +157,11 @@ impl Db {
                     .set(sessions::folder_id.eq(&target))
                     .execute(conn)?;
             // Wipe queued messages for every moved session in one shot.
-            for sid in &owned_session_ids {
-                diesel::delete(queued_messages::table.find(sid)).execute(conn)?;
-            }
+            diesel::delete(
+                queued_messages::table
+                    .filter(queued_messages::session_id.eq_any(&owned_session_ids)),
+            )
+            .execute(conn)?;
             let updated_project: Project = diesel::update(projects::table.find(&project_id))
                 .set(projects::folder_id.eq(&target))
                 .returning(Project::as_returning())
@@ -210,9 +215,11 @@ impl Db {
                 diesel::update(sessions::table.filter(sessions::repeating_task_id.eq(&task_id)))
                     .set(sessions::folder_id.eq(&target))
                     .execute(conn)?;
-            for sid in &owned_session_ids {
-                diesel::delete(queued_messages::table.find(sid)).execute(conn)?;
-            }
+            diesel::delete(
+                queued_messages::table
+                    .filter(queued_messages::session_id.eq_any(&owned_session_ids)),
+            )
+            .execute(conn)?;
             let updated_task: RepeatingTask = diesel::update(repeating_tasks::table.find(&task_id))
                 .set(repeating_tasks::folder_id.eq(&target))
                 .returning(RepeatingTask::as_returning())

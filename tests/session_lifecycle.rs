@@ -19,7 +19,7 @@ use peckboard::db::Db;
 use peckboard::db::models::{NewFolder, NewQueuedMessage, NewSession};
 use peckboard::provider::agent::ProcessCompletion;
 use peckboard::provider::claude::register_claude_provider;
-use peckboard::provider::manager::{SendOutcome, SessionManager};
+use peckboard::provider::manager::{MidTurnPolicy, SendOutcome, SessionManager};
 use peckboard::provider::message::UserMessage;
 use peckboard::provider::mock::register_mock_provider;
 use peckboard::provider::registry::ProviderRegistry;
@@ -112,6 +112,8 @@ async fn interrupt_aborts_blocking_run_and_delivers_completion() {
             &db,
             &broadcaster,
             cfg("mock:ask"),
+            MidTurnPolicy::Queue,
+            false,
         )
         .await
         .unwrap();
@@ -163,6 +165,8 @@ async fn send_or_queue_queues_when_agent_already_running() {
             &db,
             &broadcaster,
             cfg("mock:ask"),
+            MidTurnPolicy::Queue,
+            false,
         )
         .await
         .unwrap();
@@ -177,13 +181,15 @@ async fn send_or_queue_queues_when_agent_already_running() {
             &db,
             &broadcaster,
             cfg("mock:ask"),
+            MidTurnPolicy::Queue,
+            false,
         )
         .await
         .unwrap();
     assert_eq!(second, SendOutcome::Queued);
 
     // The queued message is persisted.
-    let queued = db.get_queued_message("s2").await.unwrap();
+    let queued = db.next_queued_message("s2").await.unwrap();
     assert_eq!(queued.unwrap().text, "second");
 
     // Drain so the run we started doesn't leak into the next test.
@@ -200,7 +206,7 @@ async fn drain_queued_delivers_after_clean_completion() {
     make_session(&db, "s3").await;
 
     // Pre-seed a queued message so a finished run will trigger a drain.
-    db.upsert_queued_message(NewQueuedMessage {
+    db.enqueue_message(NewQueuedMessage {
         session_id: "s3".into(),
         text: "follow-up".into(),
         queued_at: chrono::Utc::now().to_rfc3339(),
@@ -217,6 +223,8 @@ async fn drain_queued_delivers_after_clean_completion() {
             &db,
             &broadcaster,
             cfg("mock:echo"),
+            MidTurnPolicy::Queue,
+            false,
         )
         .await
         .unwrap();
@@ -225,11 +233,17 @@ async fn drain_queued_delivers_after_clean_completion() {
 
     // Drain — must dispatch the queued message as a fresh run.
     let drained = manager
-        .drain_queued("s3", &db, &broadcaster, cfg("mock:echo"))
+        .drain_queued(
+            "s3",
+            &db,
+            &broadcaster,
+            cfg("mock:echo"),
+            std::path::Path::new("/tmp"),
+        )
         .await
         .unwrap();
     assert!(drained, "drain_queued should report a delivery");
-    assert!(db.get_queued_message("s3").await.unwrap().is_none());
+    assert!(db.next_queued_message("s3").await.unwrap().is_none());
 
     let second = wait_for_completion(&mut rx, "s3").await;
     assert!(second.completed);
@@ -270,11 +284,13 @@ async fn drain_queued_delivers_after_interrupted_run() {
             &db,
             &broadcaster,
             cfg("mock:ask"),
+            MidTurnPolicy::Queue,
+            false,
         )
         .await
         .unwrap();
     tokio::time::sleep(Duration::from_millis(50)).await;
-    db.upsert_queued_message(NewQueuedMessage {
+    db.enqueue_message(NewQueuedMessage {
         session_id: "s4".into(),
         text: "drain-me".into(),
         queued_at: chrono::Utc::now().to_rfc3339(),
@@ -291,7 +307,13 @@ async fn drain_queued_delivers_after_interrupted_run() {
     // Drain MUST still deliver — failing runs cannot leave queue items
     // stranded.
     let drained = manager
-        .drain_queued("s4", &db, &broadcaster, cfg("mock:echo"))
+        .drain_queued(
+            "s4",
+            &db,
+            &broadcaster,
+            cfg("mock:echo"),
+            std::path::Path::new("/tmp"),
+        )
         .await
         .unwrap();
     assert!(drained);
@@ -306,7 +328,13 @@ async fn drain_queued_is_noop_when_nothing_queued() {
     make_session(&db, "s5").await;
 
     let drained = manager
-        .drain_queued("s5", &db, &broadcaster, cfg("mock:echo"))
+        .drain_queued(
+            "s5",
+            &db,
+            &broadcaster,
+            cfg("mock:echo"),
+            std::path::Path::new("/tmp"),
+        )
         .await
         .unwrap();
     assert!(!drained, "drain on empty queue should be a no-op");
@@ -318,7 +346,7 @@ async fn drain_queued_is_noop_while_already_running() {
     let mut rx = manager.take_completion_rx().await.unwrap();
     make_session(&db, "s6").await;
 
-    db.upsert_queued_message(NewQueuedMessage {
+    db.enqueue_message(NewQueuedMessage {
         session_id: "s6".into(),
         text: "later".into(),
         queued_at: chrono::Utc::now().to_rfc3339(),
@@ -335,6 +363,8 @@ async fn drain_queued_is_noop_while_already_running() {
             &db,
             &broadcaster,
             cfg("mock:ask"),
+            MidTurnPolicy::Queue,
+            false,
         )
         .await
         .unwrap();
@@ -342,12 +372,18 @@ async fn drain_queued_is_noop_while_already_running() {
 
     // Drain attempted while busy must skip — queue stays put.
     let drained = manager
-        .drain_queued("s6", &db, &broadcaster, cfg("mock:echo"))
+        .drain_queued(
+            "s6",
+            &db,
+            &broadcaster,
+            cfg("mock:echo"),
+            std::path::Path::new("/tmp"),
+        )
         .await
         .unwrap();
     assert!(!drained, "drain must skip while a run is in flight");
     assert!(
-        db.get_queued_message("s6").await.unwrap().is_some(),
+        db.next_queued_message("s6").await.unwrap().is_some(),
         "queue entry must survive a no-op drain"
     );
 
@@ -379,6 +415,8 @@ async fn concurrent_send_or_queue_never_double_spawns() {
             &db_a,
             &broadcaster_a,
             cfg("mock:ask"),
+            MidTurnPolicy::Queue,
+            false,
         )
         .await
         .unwrap()
@@ -390,6 +428,8 @@ async fn concurrent_send_or_queue_never_double_spawns() {
             &db_b,
             &broadcaster_b,
             cfg("mock:ask"),
+            MidTurnPolicy::Queue,
+            false,
         )
         .await
         .unwrap()
@@ -610,6 +650,8 @@ mod midstream {
                 &db,
                 &broadcaster,
                 cfg(),
+                peckboard::provider::manager::MidTurnPolicy::Queue,
+                false,
             )
             .await
             .unwrap();
@@ -619,9 +661,9 @@ mod midstream {
         tokio::time::sleep(Duration::from_millis(20)).await;
         assert!(manager.is_running("mid").await);
 
-        // Second send while running: the mid-stream-capable provider
-        // gets it via send_message, NOT the durable queue. Outcome is
-        // Queued (which now means "delivered mid-turn").
+        // Second send while running with the Inject policy: the
+        // mid-stream-capable provider gets it via send_message, NOT the
+        // durable queue. Outcome is Queued (delivered mid-turn).
         let second = manager
             .send_or_queue(
                 "mid",
@@ -629,6 +671,8 @@ mod midstream {
                 &db,
                 &broadcaster,
                 cfg(),
+                peckboard::provider::manager::MidTurnPolicy::Inject,
+                false,
             )
             .await
             .unwrap();
@@ -641,8 +685,56 @@ mod midstream {
             "both messages must reach the provider mid-stream"
         );
 
-        // No row was written to the persistent queue — the provider's
-        // own machinery (here: just a Vec) is the queue.
-        assert!(db.get_queued_message("mid").await.unwrap().is_none());
+        // No row was written to the persistent queue — with Inject the
+        // provider's own machinery (here: just a Vec) is the queue.
+        assert!(db.next_queued_message("mid").await.unwrap().is_none());
+    }
+
+    /// The DEFAULT policy for a mid-stream provider: a message sent while
+    /// a turn is in flight lands in the durable queue — the live turn is
+    /// NOT steered/interrupted. This is the core "never interrupt the
+    /// agent" contract; delivery happens via drain on completion.
+    #[tokio::test]
+    async fn mid_stream_provider_with_queue_policy_parks_message_in_db() {
+        let (manager, db, broadcaster, sent) = build_env().await;
+
+        manager
+            .send_or_queue(
+                "mid",
+                UserMessage::from_text("first"),
+                &db,
+                &broadcaster,
+                cfg(),
+                peckboard::provider::manager::MidTurnPolicy::Queue,
+                false,
+            )
+            .await
+            .unwrap();
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        assert!(manager.is_running("mid").await);
+
+        let second = manager
+            .send_or_queue(
+                "mid",
+                UserMessage::from_text("second"),
+                &db,
+                &broadcaster,
+                cfg(),
+                peckboard::provider::manager::MidTurnPolicy::Queue,
+                true,
+            )
+            .await
+            .unwrap();
+        assert_eq!(second, SendOutcome::Queued);
+
+        // The live turn saw ONLY the first message.
+        let calls = sent.lock().await.clone();
+        assert_eq!(calls, vec!["first".to_string()]);
+
+        // The second is parked in the durable queue, flagged as already
+        // recorded in the transcript.
+        let row = db.next_queued_message("mid").await.unwrap().unwrap();
+        assert_eq!(row.text, "second");
+        assert!(row.user_event_appended);
     }
 }

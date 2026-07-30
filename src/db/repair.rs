@@ -20,7 +20,7 @@ use diesel::sqlite::SqliteConnection;
 /// after `run_pending_migrations`.
 pub fn ensure_schema(conn: &mut SqliteConnection) -> anyhow::Result<()> {
     ensure_projects_worker_communication_columns(conn)?;
-    ensure_queued_messages_model_columns(conn)?;
+    ensure_queued_messages_fifo_shape(conn)?;
     ensure_card_dependencies_table(conn)?;
     ensure_todos_table(conn)?;
     ensure_cards_completed_at_column(conn)?;
@@ -1304,11 +1304,13 @@ fn ensure_user_tabs_check_constraint(conn: &mut SqliteConnection) -> anyhow::Res
     Ok(())
 }
 
-/// Backfill for the `model` / `effort` columns added to `queued_messages`
-/// in migration `1780879129_queued_message_model`. Migration is additive
-/// (NULL-able columns), but ALTER ADD COLUMN is not idempotent in SQLite,
-/// so DBs that somehow skipped the migration get healed here.
-fn ensure_queued_messages_model_columns(conn: &mut SqliteConnection) -> anyhow::Result<()> {
+/// Heal `queued_messages` to the FIFO shape from migration
+/// `1785340000_queued_messages_fifo` (id PK + attachment_ids +
+/// user_event_appended). Handles every older shape: the original
+/// single-slot table (PK session_id), with or without the model/effort
+/// columns from `1780879129_queued_message_model`. A rebuild (not ALTER)
+/// because SQLite can't change a table's primary key in place.
+fn ensure_queued_messages_fifo_shape(conn: &mut SqliteConnection) -> anyhow::Result<()> {
     let rows: Vec<PragmaColumn> = sql_query("PRAGMA table_info(queued_messages)").load(conn)?;
     let existing: Vec<String> = rows.into_iter().map(|r| r.name).collect();
     if existing.is_empty() {
@@ -1316,14 +1318,51 @@ fn ensure_queued_messages_model_columns(conn: &mut SqliteConnection) -> anyhow::
         // ALTER; let the caller surface the schema-missing error.
         return Ok(());
     }
-    if !existing.iter().any(|c| c == "model") {
-        tracing::info!("Repairing schema: adding queued_messages.model");
-        sql_query("ALTER TABLE queued_messages ADD COLUMN model TEXT").execute(conn)?;
+    let has = |c: &str| existing.iter().any(|e| e == c);
+    if !has("id") {
+        tracing::info!("Repairing schema: rebuilding queued_messages as FIFO");
+        let model_sel = if has("model") { "model" } else { "NULL" };
+        let effort_sel = if has("effort") { "effort" } else { "NULL" };
+        sql_query(
+            "CREATE TABLE queued_messages_fifo (
+                id                  INTEGER PRIMARY KEY AUTOINCREMENT,
+                session_id          TEXT    NOT NULL,
+                text                TEXT    NOT NULL,
+                queued_at           TEXT    NOT NULL,
+                model               TEXT,
+                effort              TEXT,
+                attachment_ids      TEXT,
+                user_event_appended INTEGER NOT NULL DEFAULT 0
+            )",
+        )
+        .execute(conn)?;
+        sql_query(format!(
+            "INSERT INTO queued_messages_fifo
+                (session_id, text, queued_at, model, effort, user_event_appended)
+             SELECT session_id, text, queued_at, {model_sel}, {effort_sel}, 1
+             FROM queued_messages"
+        ))
+        .execute(conn)?;
+        sql_query("DROP TABLE queued_messages").execute(conn)?;
+        sql_query("ALTER TABLE queued_messages_fifo RENAME TO queued_messages").execute(conn)?;
+    } else {
+        if !has("attachment_ids") {
+            tracing::info!("Repairing schema: adding queued_messages.attachment_ids");
+            sql_query("ALTER TABLE queued_messages ADD COLUMN attachment_ids TEXT")
+                .execute(conn)?;
+        }
+        if !has("user_event_appended") {
+            tracing::info!("Repairing schema: adding queued_messages.user_event_appended");
+            sql_query(
+                "ALTER TABLE queued_messages ADD COLUMN user_event_appended INTEGER NOT NULL DEFAULT 0",
+            )
+            .execute(conn)?;
+        }
     }
-    if !existing.iter().any(|c| c == "effort") {
-        tracing::info!("Repairing schema: adding queued_messages.effort");
-        sql_query("ALTER TABLE queued_messages ADD COLUMN effort TEXT").execute(conn)?;
-    }
+    sql_query(
+        "CREATE INDEX IF NOT EXISTS idx_queued_messages_session ON queued_messages(session_id)",
+    )
+    .execute(conn)?;
     Ok(())
 }
 

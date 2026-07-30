@@ -101,7 +101,8 @@ impl Db {
             for sid in &session_ids {
                 events_deleted += diesel::delete(events::table.filter(events::session_id.eq(sid)))
                     .execute(conn)?;
-                diesel::delete(queued_messages::table.find(sid)).execute(conn)?;
+                diesel::delete(queued_messages::table.filter(queued_messages::session_id.eq(sid)))
+                    .execute(conn)?;
                 diesel::delete(todos::table.filter(todos::session_id.eq(sid))).execute(conn)?;
             }
             let sessions_deleted =
@@ -185,7 +186,8 @@ impl Db {
             for sid in &session_ids {
                 events_deleted += diesel::delete(events::table.filter(events::session_id.eq(sid)))
                     .execute(conn)?;
-                diesel::delete(queued_messages::table.find(sid)).execute(conn)?;
+                diesel::delete(queued_messages::table.filter(queued_messages::session_id.eq(sid)))
+                    .execute(conn)?;
                 diesel::delete(todos::table.filter(todos::session_id.eq(sid))).execute(conn)?;
             }
             let mut sessions_deleted = 0usize;
@@ -254,7 +256,8 @@ impl Db {
             for sid in &session_ids {
                 events_deleted += diesel::delete(events::table.filter(events::session_id.eq(sid)))
                     .execute(conn)?;
-                diesel::delete(queued_messages::table.find(sid)).execute(conn)?;
+                diesel::delete(queued_messages::table.filter(queued_messages::session_id.eq(sid)))
+                    .execute(conn)?;
                 diesel::delete(todos::table.filter(todos::session_id.eq(sid))).execute(conn)?;
             }
             let mut sessions_deleted = 0usize;

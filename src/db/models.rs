@@ -500,11 +500,19 @@ pub struct NewPushSubscription {
 #[derive(Queryable, Selectable, Serialize, Debug, Clone)]
 #[diesel(table_name = queued_messages)]
 pub struct QueuedMessage {
+    pub id: i64,
     pub session_id: String,
     pub text: String,
     pub queued_at: String,
     pub model: Option<String>,
     pub effort: Option<String>,
+    /// JSON array of attachment ids; bytes are re-resolved from the
+    /// attachments dir when the message is delivered.
+    pub attachment_ids: Option<String>,
+    /// True when the enqueuer already appended the `user` event (the
+    /// /message route does). The drain appends one only when false, so
+    /// a queued message never shows up twice in the transcript.
+    pub user_event_appended: bool,
 }
 
 #[derive(Insertable, Deserialize, Debug, Default)]
@@ -515,6 +523,8 @@ pub struct NewQueuedMessage {
     pub queued_at: String,
     pub model: Option<String>,
     pub effort: Option<String>,
+    pub attachment_ids: Option<String>,
+    pub user_event_appended: bool,
 }
 
 // ── Announcements ────────────────────────────────────────────────────

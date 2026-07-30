@@ -303,7 +303,7 @@ async fn drain_queue_skips_paused_project_and_drops_message() {
     let ts = chrono::Utc::now().to_rfc3339();
     state
         .db
-        .upsert_queued_message(NewQueuedMessage {
+        .enqueue_message(NewQueuedMessage {
             session_id: "ws1".into(),
             text: "do this next".into(),
             queued_at: ts,
@@ -328,7 +328,7 @@ async fn drain_queue_skips_paused_project_and_drops_message() {
 
     // No new agent run: queue dropped so the next listener pass can't
     // resurrect it either.
-    assert!(state.db.get_queued_message("ws1").await.unwrap().is_none());
+    assert!(state.db.next_queued_message("ws1").await.unwrap().is_none());
 }
 
 /// Active projects still drain normally — the pause gate must not turn
@@ -344,7 +344,7 @@ async fn drain_queue_proceeds_for_active_project() {
     let ts = chrono::Utc::now().to_rfc3339();
     state
         .db
-        .upsert_queued_message(NewQueuedMessage {
+        .enqueue_message(NewQueuedMessage {
             session_id: "ws1".into(),
             text: "hello".into(),
             // Mock model so the dispatch is deterministic and doesn't
@@ -352,6 +352,7 @@ async fn drain_queue_proceeds_for_active_project() {
             queued_at: ts,
             model: Some("mock:echo".into()),
             effort: None,
+            ..Default::default()
         })
         .await
         .unwrap();
@@ -359,7 +360,7 @@ async fn drain_queue_proceeds_for_active_project() {
     drain_queue_for_session(&state, "ws1").await.unwrap();
 
     // Active project + idle session ⇒ the drain consumes the message.
-    assert!(state.db.get_queued_message("ws1").await.unwrap().is_none());
+    assert!(state.db.next_queued_message("ws1").await.unwrap().is_none());
     // And persists the matching user event so the conversation log
     // reflects the actual delivery order.
     let events = state.db.events_tail("ws1", 10).await.unwrap();
@@ -386,7 +387,7 @@ async fn cancel_worker_for_card_move_drops_queued_message() {
     let ts = chrono::Utc::now().to_rfc3339();
     state
         .db
-        .upsert_queued_message(NewQueuedMessage {
+        .enqueue_message(NewQueuedMessage {
             session_id: "ws1".into(),
             text: "stale".into(),
             queued_at: ts,
@@ -398,7 +399,7 @@ async fn cancel_worker_for_card_move_drops_queued_message() {
     cancel_worker_for_card_move(&state, "ws1").await;
 
     assert!(
-        state.db.get_queued_message("ws1").await.unwrap().is_none(),
+        state.db.next_queued_message("ws1").await.unwrap().is_none(),
         "card move must drop the queued message so drain can't resurrect"
     );
 }
@@ -420,7 +421,7 @@ async fn pause_clears_all_project_worker_queues() {
     for sid in ["ws1", "ws2"] {
         state
             .db
-            .upsert_queued_message(NewQueuedMessage {
+            .enqueue_message(NewQueuedMessage {
                 session_id: sid.into(),
                 text: "queued".into(),
                 queued_at: ts.clone(),
@@ -436,8 +437,8 @@ async fn pause_clears_all_project_worker_queues() {
         .await
         .unwrap();
     assert_eq!(n, 2, "every worker on the paused project should be cleared");
-    assert!(state.db.get_queued_message("ws1").await.unwrap().is_none());
-    assert!(state.db.get_queued_message("ws2").await.unwrap().is_none());
+    assert!(state.db.next_queued_message("ws1").await.unwrap().is_none());
+    assert!(state.db.next_queued_message("ws2").await.unwrap().is_none());
 }
 
 // ── worker-session resume ───────────────────────────────────────────────

@@ -592,12 +592,11 @@ async fn move_session_succeeds_for_chat_session() {
     seed_folder(&db, "f2").await;
     seed_session(&db, "chat", "f1", None, false, false, None).await;
     // Pre-existing queued message — must be dropped by the move.
-    db.upsert_queued_message(peckboard::db::models::NewQueuedMessage {
+    db.enqueue_message(peckboard::db::models::NewQueuedMessage {
         session_id: "chat".into(),
         text: "pending text".into(),
         queued_at: chrono::Utc::now().to_rfc3339(),
-        model: None,
-        effort: None,
+        ..Default::default()
     })
     .await
     .unwrap();
@@ -609,7 +608,7 @@ async fn move_session_succeeds_for_chat_session() {
     };
     assert_eq!(session.folder_id, "f2");
     // Queued message wiped.
-    assert!(db.get_queued_message("chat").await.unwrap().is_none());
+    assert!(db.next_queued_message("chat").await.unwrap().is_none());
 }
 
 #[tokio::test]

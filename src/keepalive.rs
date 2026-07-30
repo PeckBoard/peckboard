@@ -315,6 +315,8 @@ async fn ping(
             db,
             broadcaster,
             config,
+            crate::provider::manager::MidTurnPolicy::Queue,
+            false,
         )
         .await;
 

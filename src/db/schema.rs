@@ -166,12 +166,15 @@ diesel::table! {
 }
 
 diesel::table! {
-    queued_messages (session_id) {
+    queued_messages (id) {
+        id -> BigInt,
         session_id -> Text,
         text -> Text,
         queued_at -> Text,
         model -> Nullable<Text>,
         effort -> Nullable<Text>,
+        attachment_ids -> Nullable<Text>,
+        user_event_appended -> Bool,
     }
 }
 

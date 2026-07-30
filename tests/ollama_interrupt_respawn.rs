@@ -237,6 +237,8 @@ async fn send_and_queue_followup(state: &Arc<AppState>) {
             &state.db,
             &state.broadcaster,
             config(),
+            peckboard::provider::manager::MidTurnPolicy::Queue,
+            true,
         )
         .await
         .unwrap();
@@ -257,11 +259,13 @@ async fn send_and_queue_followup(state: &Arc<AppState>) {
             &state.db,
             &state.broadcaster,
             config(),
+            peckboard::provider::manager::MidTurnPolicy::Queue,
+            true,
         )
         .await
         .unwrap();
     assert!(
-        state.db.get_queued_message("s1").await.unwrap().is_some(),
+        state.db.next_queued_message("s1").await.unwrap().is_some(),
         "the follow-up must have been queued (Ollama is per-turn)"
     );
 }
@@ -307,7 +311,7 @@ async fn assert_stop_is_final(state: &Arc<AppState>, path_status: StatusCode, la
         later.saturating_sub(after)
     );
     assert!(
-        state.db.get_queued_message("s1").await.unwrap().is_none(),
+        state.db.next_queued_message("s1").await.unwrap().is_none(),
         "{label}: the queued follow-up must be cleared by an explicit stop"
     );
 }
@@ -348,7 +352,7 @@ async fn interrupt_drains_queued_followup_into_fresh_run() {
     // the queue empties AND a run is in flight again.
     let mut drained_into_run = false;
     for _ in 0..300 {
-        let queue_empty = state.db.get_queued_message("s1").await.unwrap().is_none();
+        let queue_empty = state.db.next_queued_message("s1").await.unwrap().is_none();
         let running = state.session_manager.is_running("s1").await;
         if queue_empty && running {
             drained_into_run = true;

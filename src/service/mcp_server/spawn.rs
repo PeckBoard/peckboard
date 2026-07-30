@@ -78,7 +78,7 @@ impl AppExpertDispatcher {
     /// Deliver a user message with attachments to `session_id` and resume it —
     /// the attachment-carrying twin of `resume_session`, used by the
     /// session-control plugin's `send_message`. Resumes via `send_or_queue`
-    /// (spawn if idle, inject/queue if running), exactly like a user message.
+    /// (spawn if idle, durable-queue if running — never interrupts the turn).
     pub async fn send_message_with_attachments(
         &self,
         session_id: &str,
@@ -89,10 +89,25 @@ impl AppExpertDispatcher {
         let config = self
             .spawn_config_for(session_id, serde_json::Value::Null)
             .await?;
-        let message = crate::provider::message::UserMessage { text, attachments };
+        let message = crate::provider::message::UserMessage {
+            text,
+            attachments,
+            attachment_ids: Vec::new(),
+        };
+        // Queue while busy: an agent-to-agent message never interrupts
+        // the target's in-flight work. No user event exists yet, so the
+        // drain appends one at delivery.
         state
             .session_manager
-            .send_or_queue(session_id, message, &state.db, &state.broadcaster, config)
+            .send_or_queue(
+                session_id,
+                message,
+                &state.db,
+                &state.broadcaster,
+                config,
+                crate::provider::manager::MidTurnPolicy::Queue,
+                false,
+            )
             .await?;
         Ok(())
     }
@@ -486,8 +501,11 @@ impl ExpertDispatcher for AppExpertDispatcher {
                 .spawn_config_for(session_id, serde_json::Value::Null)
                 .await?;
 
-            // Resume exactly like a user message: send_or_queue spawns a fresh
-            // run if idle, or queues / injects mid-stream if already running.
+            // Resume exactly like a user message: send_or_queue spawns a
+            // fresh run if idle, or parks the text in the durable queue if
+            // a turn is in flight (delivered when it finishes — never
+            // interrupts). No user event exists yet, so the drain appends
+            // one at delivery.
             state
                 .session_manager
                 .send_or_queue(
@@ -496,6 +514,8 @@ impl ExpertDispatcher for AppExpertDispatcher {
                     &state.db,
                     &state.broadcaster,
                     config,
+                    crate::provider::manager::MidTurnPolicy::Queue,
+                    false,
                 )
                 .await?;
             Ok(())

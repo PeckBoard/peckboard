@@ -2,7 +2,7 @@ import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useStat
 import { useVirtualizer } from '@tanstack/react-virtual'
 import { highlightPlugins } from './markdownHighlight'
 import SafeMarkdown from './SafeMarkdown'
-import type { CostTable, Event, Session } from '../types/api'
+import type { CostTable, Event, QueuedMessage, Session } from '../types/api'
 import { authedFetch } from '../store/auth'
 import { useWsStore } from '../store/ws'
 import { useSessionsStore, type PendingUserMessage } from '../store/sessions'
@@ -1175,29 +1175,29 @@ export default function ChatView({
     void fetchOlderEvents(sessionId)
   }, [fetchOlderEvents, sessionId])
 
-  // Queued-turn indicator. The backend broadcasts `queue` WS frames
-  // (store/ws.ts re-dispatches them as `peckboard:queue` window events);
-  // the durable queue is then confirmed via GET so the chip never shows
-  // for a mid-turn message that was already injected into the running
-  // stream (that path broadcasts `set` too, but stores nothing).
-  const [queuedText, setQueuedText] = useState<string | null>(null)
+  // Queued-turn indicator. While the agent is mid-turn, sends are parked
+  // in the durable per-session FIFO (the backend never interrupts a
+  // working agent); each row renders as a chip with a "Send now" (force
+  // through, interrupts) and a remove button. The backend broadcasts
+  // `queue` WS frames (store/ws.ts re-dispatches them as `peckboard:queue`
+  // window events); every frame just triggers a refetch of the durable
+  // list, so the chips reflect exactly what will be delivered.
+  const [queuedMessages, setQueuedMessages] = useState<QueuedMessage[]>([])
   useEffect(() => {
     let cancelled = false
-    setQueuedText(null)
+    setQueuedMessages([])
     const refresh = () => {
       authedFetch(`/api/sessions/${sessionId}/queue`)
         .then((res) => (res.ok ? res.json() : null))
-        .then((msg: { text?: string } | null) => {
-          if (!cancelled) setQueuedText(typeof msg?.text === 'string' ? msg.text : null)
+        .then((data: { messages?: QueuedMessage[] } | null) => {
+          if (!cancelled) setQueuedMessages(Array.isArray(data?.messages) ? data.messages : [])
         })
         .catch(() => {})
     }
     refresh()
-    const onQueue = (e: CustomEvent<{ session_id?: string; data?: { action?: string } }>) => {
+    const onQueue = (e: CustomEvent<{ session_id?: string }>) => {
       if (e.detail?.session_id !== sessionId) return
-      if (e.detail?.data?.action === 'set') refresh()
-      // `drained` / `deleted` — the message was dispatched or discarded.
-      else setQueuedText(null)
+      refresh()
     }
     window.addEventListener('peckboard:queue', onQueue as EventListener)
     return () => {
@@ -1205,6 +1205,28 @@ export default function ChatView({
       window.removeEventListener('peckboard:queue', onQueue as EventListener)
     }
   }, [sessionId])
+
+  // Optimistically drop the chip on click; the WS `queue` frame refetch
+  // corrects if the request lost a race (e.g. the drain delivered it).
+  const forceQueuedMessage = useCallback(
+    (id: number) => {
+      setQueuedMessages((prev) => prev.filter((m) => m.id !== id))
+      void authedFetch(`/api/sessions/${sessionId}/queue/${id}/force`, { method: 'POST' }).catch(
+        () => {},
+      )
+    },
+    [sessionId],
+  )
+  const removeQueuedMessage = useCallback(
+    (id: number) => {
+      setQueuedMessages((prev) => prev.filter((m) => m.id !== id))
+      void authedFetch(`/api/sessions/${sessionId}/queue/${id}`, { method: 'DELETE' }).catch(
+        () => {},
+      )
+    },
+    [sessionId],
+  )
+  const queuedTexts = useMemo(() => new Set(queuedMessages.map((m) => m.text)), [queuedMessages])
 
   // Live `todo` events are authoritative once any arrive; before then, fall
   // back to the snapshot fetched at load time. After a clear (events loaded
@@ -1905,21 +1927,41 @@ export default function ChatView({
               <div className="chat-time chat-time-user" data-testid="chat-pending-status">
                 {streamDeniedReason
                   ? 'Sent — reply not shown live'
-                  : queuedText === p.text
+                  : queuedTexts.has(p.text)
                     ? 'Queued'
                     : 'Sending...'}
               </div>
             </div>
           </div>
         ))}
-        {queuedText !== null && (
-          <div className="chat-row chat-row-system">
-            <div className="chat-queued-chip" data-testid="chat-queued-chip" title={queuedText}>
+        {queuedMessages.map((q) => (
+          <div key={q.id} className="chat-row chat-row-system">
+            <div className="chat-queued-chip" data-testid="chat-queued-chip" title={q.text}>
               <span className="chat-queued-dot" aria-hidden="true" />
-              <span>Queued — sends when the agent finishes</span>
+              <span className="chat-queued-text">{q.text}</span>
+              <span className="chat-queued-hint">Queued — sends when the agent finishes</span>
+              <button
+                type="button"
+                className="chat-queued-send"
+                data-testid="chat-queued-force"
+                title="Send now — interrupts what the agent is working on"
+                onClick={() => forceQueuedMessage(q.id)}
+              >
+                Send now
+              </button>
+              <button
+                type="button"
+                className="chat-queued-remove"
+                data-testid="chat-queued-remove"
+                aria-label="Remove queued message"
+                title="Remove from queue"
+                onClick={() => removeQueuedMessage(q.id)}
+              >
+                ×
+              </button>
             </div>
           </div>
-        )}
+        ))}
         {/* Thinking indicator + inline Interrupt — shown at the end of the
             message log when the agent is working. Combining them keeps the
             "stop the agent" affordance attached to the activity it's

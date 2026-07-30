@@ -395,9 +395,13 @@ export interface PushSubscription {
 }
 
 export interface QueuedMessage {
+  /** Per-message handle for the force ("send now") and remove routes. */
+  id: number
   session_id: string
   text: string
   queued_at: string
+  model?: string | null
+  effort?: string | null
 }
 
 export interface Announcement {

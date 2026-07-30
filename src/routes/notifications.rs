@@ -65,7 +65,7 @@ pub fn router(state: Arc<AppState>) -> Router<Arc<AppState>> {
     public.merge(protected)
 }
 
-/// The queued-message routes read and write the message that will be sent
+/// The queued-message routes read and write the messages that will be sent
 /// into a specific session, so they carry the same owner-or-shared-board
 /// gate as the session routes themselves (`require_session_access`) rather
 /// than being reachable by any logged-in user.
@@ -73,9 +73,17 @@ fn session_scoped(state: Arc<AppState>) -> Router<Arc<AppState>> {
     Router::new()
         .route(
             "/api/sessions/{id}/queue",
-            post(upsert_queued_message)
-                .get(get_queued_message)
-                .delete(delete_queued_message),
+            post(enqueue_queued_message)
+                .get(list_queued_messages)
+                .delete(clear_queued_messages),
+        )
+        .route(
+            "/api/sessions/{id}/queue/{msg_id}",
+            axum::routing::delete(delete_queued_message),
+        )
+        .route(
+            "/api/sessions/{id}/queue/{msg_id}/force",
+            post(force_queued_message),
         )
         .route_layer(middleware::from_fn_with_state(
             state,
@@ -262,10 +270,13 @@ async fn delete_announcement(
     Ok(StatusCode::NO_CONTENT)
 }
 
-// ── Queued Messages ────────────────────────────────────────────────
+// ── Queued Messages ──────────────────────────────────
 
-/// POST /api/sessions/:id/queue
-async fn upsert_queued_message(
+/// POST /api/sessions/:id/queue — append a message to the session's FIFO
+/// queue. Machine path (the UI sends through /message, which queues
+/// internally when the agent is busy); no `user` event is appended here,
+/// so the drain records one at delivery.
+async fn enqueue_queued_message(
     State(state): State<Arc<AppState>>,
     Path(session_id): Path<String>,
     Json(body): Json<QueueMessageRequest>,
@@ -276,12 +287,14 @@ async fn upsert_queued_message(
 
     let msg = state
         .db
-        .upsert_queued_message(NewQueuedMessage {
+        .enqueue_message(NewQueuedMessage {
             session_id,
             text: body.text,
             queued_at: now,
             model: body.model,
             effort: body.effort,
+            attachment_ids: None,
+            user_event_appended: false,
         })
         .await
         .map_err(|e| {
@@ -296,7 +309,7 @@ async fn upsert_queued_message(
         .broadcast(crate::ws::broadcaster::WsEvent {
             event_type: "queue".into(),
             session_id: broadcast_session_id,
-            data: serde_json::json!({ "action": "set", "text": broadcast_text }),
+            data: serde_json::json!({ "action": "set", "id": msg.id, "text": broadcast_text }),
         });
 
     Ok::<_, (StatusCode, Json<serde_json::Value>)>((
@@ -305,14 +318,15 @@ async fn upsert_queued_message(
     ))
 }
 
-/// GET /api/sessions/:id/queue
-async fn get_queued_message(
+/// GET /api/sessions/:id/queue — every queued message, oldest (next to
+/// deliver) first. Always 200; an empty queue is `{ "messages": [] }`.
+async fn list_queued_messages(
     State(state): State<Arc<AppState>>,
     Path(session_id): Path<String>,
 ) -> impl IntoResponse {
-    let msg = state
+    let messages = state
         .db
-        .get_queued_message(&session_id)
+        .list_queued_messages(&session_id)
         .await
         .map_err(|e| {
             (
@@ -321,23 +335,55 @@ async fn get_queued_message(
             )
         })?;
 
-    match msg {
-        Some(m) => Ok(Json(serde_json::json!(m))),
-        None => Err((
-            StatusCode::NOT_FOUND,
-            Json(serde_json::json!({ "error": "no queued message" })),
-        )),
-    }
+    Ok::<_, (StatusCode, Json<serde_json::Value>)>(Json(
+        serde_json::json!({ "messages": messages }),
+    ))
 }
 
-/// DELETE /api/sessions/:id/queue
-async fn delete_queued_message(
+/// DELETE /api/sessions/:id/queue — drop every queued message.
+async fn clear_queued_messages(
     State(state): State<Arc<AppState>>,
     Path(session_id): Path<String>,
 ) -> impl IntoResponse {
     let deleted = state
         .db
-        .delete_queued_message(&session_id)
+        .clear_queued_messages(&session_id)
+        .await
+        .map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({ "error": e.to_string() })),
+            )
+        })?;
+
+    if deleted == 0 {
+        return Err((
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({ "error": "no queued message" })),
+        ));
+    }
+
+    state
+        .broadcaster
+        .broadcast(crate::ws::broadcaster::WsEvent {
+            event_type: "queue".into(),
+            session_id: session_id.clone(),
+            data: serde_json::json!({ "action": "deleted" }),
+        });
+
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// DELETE /api/sessions/:id/queue/:msg_id — remove one queued message
+/// (the ✕ on its chip). 404 when the row is already gone — e.g. the
+/// drain delivered it between the click and the request.
+async fn delete_queued_message(
+    State(state): State<Arc<AppState>>,
+    Path((session_id, msg_id)): Path<(String, i64)>,
+) -> impl IntoResponse {
+    let deleted = state
+        .db
+        .delete_queued_message_by_id(&session_id, msg_id)
         .await
         .map_err(|e| {
             (
@@ -358,10 +404,90 @@ async fn delete_queued_message(
         .broadcast(crate::ws::broadcaster::WsEvent {
             event_type: "queue".into(),
             session_id: session_id.clone(),
-            data: serde_json::json!({ "action": "deleted" }),
+            data: serde_json::json!({ "action": "deleted", "id": msg_id }),
         });
 
     Ok(StatusCode::NO_CONTENT)
+}
+
+/// POST /api/sessions/:id/queue/:msg_id/force — the per-message "send
+/// now" button. Pops the row and delivers it immediately: a mid-stream
+/// provider (Claude) gets it injected into the live turn (which steers/
+/// interrupts the agent's current work); a per-turn provider has its run
+/// cancelled first. Queue order for the remaining rows is untouched.
+async fn force_queued_message(
+    State(state): State<Arc<AppState>>,
+    Path((session_id, msg_id)): Path<(String, i64)>,
+) -> impl IntoResponse {
+    let err500 = |e: String| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({ "error": e })),
+        )
+    };
+
+    let Some(session) = state
+        .db
+        .get_session(&session_id)
+        .await
+        .map_err(|e| err500(e.to_string()))?
+    else {
+        return Err((
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({ "error": "session not found" })),
+        ));
+    };
+
+    let Some(queued) = state
+        .db
+        .get_queued_message_by_id(&session_id, msg_id)
+        .await
+        .map_err(|e| err500(e.to_string()))?
+    else {
+        return Err((
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({ "error": "no queued message" })),
+        ));
+    };
+
+    // Pop the row BEFORE dispatching so the completion listener's drain
+    // (or a double-click) can't deliver it a second time.
+    if !state
+        .db
+        .delete_queued_message_by_id(&session_id, msg_id)
+        .await
+        .map_err(|e| err500(e.to_string()))?
+    {
+        return Err((
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({ "error": "no queued message" })),
+        ));
+    }
+
+    let config = crate::worker::orchestrator::queued_resume_config(
+        &state,
+        &session,
+        queued.model.clone(),
+        queued.effort.clone(),
+    )
+    .await;
+
+    state
+        .session_manager
+        .force_queued(
+            &session_id,
+            queued,
+            &state.db,
+            &state.broadcaster,
+            config,
+            &state.config.data_dir,
+        )
+        .await
+        .map_err(|e| err500(e.to_string()))?;
+
+    Ok::<_, (StatusCode, Json<serde_json::Value>)>(Json(
+        serde_json::json!({ "status": "forced", "id": msg_id }),
+    ))
 }
 
 #[cfg(test)]
@@ -387,12 +513,14 @@ mod tests {
     async fn seed_queued_message(state: &Arc<AppState>, session_id: &str) {
         state
             .db
-            .upsert_queued_message(NewQueuedMessage {
+            .enqueue_message(NewQueuedMessage {
                 session_id: session_id.into(),
                 text: "queued-secret".into(),
                 queued_at: chrono::Utc::now().to_rfc3339(),
                 model: None,
                 effort: None,
+                attachment_ids: None,
+                user_event_appended: false,
             })
             .await
             .unwrap();
@@ -449,10 +577,49 @@ mod tests {
         assert!(
             state
                 .db
-                .get_queued_message("s-theirs")
+                .list_queued_messages("s-theirs")
                 .await
                 .unwrap()
-                .is_none()
+                .is_empty()
+        );
+    }
+
+    /// A non-owner must not be able to force or delete a queued message
+    /// by id either — those routes dispatch into / mutate the session.
+    #[tokio::test]
+    async fn non_owner_cannot_force_or_delete_queued_message() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = test_state(dir.path());
+        let token = seed_authenticated_user(&state, "user").await;
+        seed_session(&state, "s-theirs", Some("u2"), None).await;
+        seed_queued_message(&state, "s-theirs").await;
+        let msg_id = state.db.list_queued_messages("s-theirs").await.unwrap()[0].id;
+
+        for (method, uri) in [
+            (
+                "POST",
+                format!("/api/sessions/s-theirs/queue/{msg_id}/force"),
+            ),
+            ("DELETE", format!("/api/sessions/s-theirs/queue/{msg_id}")),
+        ] {
+            let request = Request::builder()
+                .method(method)
+                .uri(&uri)
+                .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                .body(Body::empty())
+                .unwrap();
+            let response = app(state.clone()).oneshot(request).await.unwrap();
+            assert_eq!(response.status(), StatusCode::NOT_FOUND, "{method} {uri}");
+        }
+        assert_eq!(
+            state
+                .db
+                .list_queued_messages("s-theirs")
+                .await
+                .unwrap()
+                .len(),
+            1,
+            "gate must not consume the row"
         );
     }
 

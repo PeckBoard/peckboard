@@ -327,10 +327,9 @@ pub(super) async fn send_message(
 
     // Always append the user event up front so the chat transcript
     // reflects the order the user typed in, regardless of whether the
-    // agent is mid-turn or idle. In stream-json mode the Claude CLI
-    // accepts new user envelopes on stdin at any time and consumes
-    // them after the current `result` — there is no peckboard-layer
-    // queue to gate this on.
+    // agent is mid-turn or idle. A mid-turn send lands in the durable
+    // queue below with `user_event_appended = true`, so the drain
+    // delivers it later without writing a duplicate event.
     let mut user_data = serde_json::json!({ "text": resolved_text });
     if let Some(ref ids) = attachment_ids {
         user_data["attachmentIds"] = serde_json::json!(ids);
@@ -424,21 +423,30 @@ pub(super) async fn send_message(
     // goes out as typed here. The user event above already recorded it.
     let dispatch_text = resolved_text;
 
-    // `send_or_queue` acquires the per-session lock internally,
-    // dispatches through the long-lived child (spawning lazily on
-    // the first turn) and returns `Queued` iff the agent was
-    // already mid-turn when the bytes hit stdin.
+    // `send_or_queue` acquires the per-session lock internally. Idle:
+    // dispatches through the long-lived child (spawning lazily on the
+    // first turn). Mid-turn: `MidTurnPolicy::Queue` persists the message
+    // in the durable FIFO — the running agent is never interrupted; the
+    // completion listener delivers queued messages when it finishes.
+    // The user event was already appended above, so the drain won't
+    // append a second one.
     let outcome = state
         .session_manager
         .send_or_queue(
             &id,
             UserMessage {
                 text: dispatch_text,
-                attachments: user_attachments.into_iter().map(|(_, a)| a).collect(),
+                attachments: user_attachments.iter().map(|(_, a)| a.clone()).collect(),
+                attachment_ids: user_attachments
+                    .iter()
+                    .map(|(aid, _)| aid.clone())
+                    .collect(),
             },
             &state.db,
             &state.broadcaster,
             config,
+            crate::provider::manager::MidTurnPolicy::Queue,
+            true,
         )
         .await;
 

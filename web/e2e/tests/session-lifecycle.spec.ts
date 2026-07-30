@@ -236,7 +236,9 @@ test('POST /message while busy queues and is auto-drained on completion', async 
       headers: authHeader,
     })
     expect(queueGet.ok()).toBeTruthy()
-    expect(((await queueGet.json()) as { text: string }).text).toBe('queued payload')
+    const queueBody = (await queueGet.json()) as { messages: { text: string }[] }
+    expect(queueBody.messages.length).toBe(1)
+    expect(queueBody.messages[0].text).toBe('queued payload')
 
     // While the first agent is busy, exactly ONE agent-start so far.
     expect(events.filter((e) => e.kind === 'agent-start').length).toBe(1)
@@ -269,7 +271,8 @@ test('POST /message while busy queues and is auto-drained on completion', async 
     const queueAfter = await request.get(`/api/sessions/${session.id}/queue`, {
       headers: authHeader,
     })
-    expect(queueAfter.status()).toBe(404)
+    expect(queueAfter.ok()).toBeTruthy()
+    expect(((await queueAfter.json()) as { messages: unknown[] }).messages.length).toBe(0)
   } finally {
     collector.stop()
   }

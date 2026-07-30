@@ -261,9 +261,22 @@ pub async fn begin_handover(
                 .await?;
         }
         None => {
+            // Inject: the doc turn must not park behind the durable queue
+            // — the handover is already claimed and the completion
+            // listener is waiting on this turn's result. Appended=true:
+            // the synthetic prompt stays out of the transcript, matching
+            // the locked dispatch path.
             state
                 .session_manager
-                .send_or_queue(session_id, message, &state.db, &state.broadcaster, config)
+                .send_or_queue(
+                    session_id,
+                    message,
+                    &state.db,
+                    &state.broadcaster,
+                    config,
+                    crate::provider::manager::MidTurnPolicy::Inject,
+                    true,
+                )
                 .await?;
         }
     }
@@ -345,7 +358,7 @@ pub async fn maybe_auto_compact(state: &Arc<AppState>, session_id: &str) -> anyh
     if occupancy < WORKER_COMPACT_CONTEXT_THRESHOLD {
         return Ok(false);
     }
-    if matches!(state.db.get_queued_message(session_id).await, Ok(Some(_))) {
+    if matches!(state.db.next_queued_message(session_id).await, Ok(Some(_))) {
         return Ok(false);
     }
     if !card_resumes_session(state, &session).await {

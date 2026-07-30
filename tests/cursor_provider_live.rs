@@ -162,6 +162,8 @@ async fn cursor_auto_turn_completes_end_to_end() {
             &db,
             &broadcaster,
             config,
+            peckboard::provider::manager::MidTurnPolicy::Queue,
+            false,
         )
         .await
         .expect("dispatch succeeds");
@@ -454,6 +456,8 @@ async fn cursor_mcp_tool_roundtrip() {
             &db,
             &broadcaster,
             config,
+            peckboard::provider::manager::MidTurnPolicy::Queue,
+            false,
         )
         .await
         .expect("dispatch succeeds");

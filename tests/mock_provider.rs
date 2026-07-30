@@ -92,6 +92,8 @@ async fn mock_echo_flows_through_dispatcher() {
             &db,
             &broadcaster,
             config,
+            peckboard::provider::manager::MidTurnPolicy::Queue,
+            true,
         )
         .await
         .expect("dispatch succeeds");
@@ -169,6 +171,8 @@ async fn mock_todo_emits_normalized_todo_event() {
             &db,
             &broadcaster,
             config,
+            peckboard::provider::manager::MidTurnPolicy::Queue,
+            true,
         )
         .await
         .expect("dispatch succeeds");

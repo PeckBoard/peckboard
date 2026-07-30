@@ -395,6 +395,10 @@ pub async fn resolve_question(
             is_pre_hatcher: false,
         };
 
+        // Inject: the answer must reach the agent that asked — if its
+        // turn is still winding down, a queued answer would stall the
+        // conversation instead of resuming it. The user event was
+        // appended above.
         if let Err(e) = state_clone
             .session_manager
             .send_or_queue(
@@ -403,6 +407,8 @@ pub async fn resolve_question(
                 &state_clone.db,
                 &state_clone.broadcaster,
                 config,
+                crate::provider::manager::MidTurnPolicy::Inject,
+                true,
             )
             .await
         {

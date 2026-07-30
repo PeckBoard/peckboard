@@ -7,16 +7,19 @@
 //!
 //! Multimodal providers (Claude in stream-json mode) read
 //! `attachments` and emit image content blocks; per-turn providers
-//! (mock, ollama) read only `text`. Attachments don't survive the
-//! durable queue path: the per-turn provider path persists `text`
-//! alone, because the only consumers of that path can't make use of
-//! the bytes anyway.
+//! (mock, ollama) read only `text`. The durable queue persists
+//! `attachment_ids` (not bytes); delivery re-resolves them from the
+//! attachments dir, so a queued send keeps its images.
 
 /// One user turn bound for an `AgentProvider`.
 #[derive(Debug, Clone, Default)]
 pub struct UserMessage {
     pub text: String,
     pub attachments: Vec<UserAttachment>,
+    /// Ids of `attachments` in the session's attachments dir. Carried so
+    /// the durable queue can persist a mid-turn send without copying the
+    /// bytes into SQLite — delivery re-resolves ids to bytes.
+    pub attachment_ids: Vec<String>,
 }
 
 /// One attached file. Bytes are owned so the provider doesn't have to
@@ -34,6 +37,7 @@ impl UserMessage {
         Self {
             text: text.into(),
             attachments: Vec::new(),
+            attachment_ids: Vec::new(),
         }
     }
 }

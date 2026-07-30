@@ -105,7 +105,7 @@ fn cancel_stale_worker(ctx: &ToolCallContext, session_id: &str) {
     tracing::info!(session_id = %session_id, "MCP: cancelling worker after card move");
     tokio::spawn(async move {
         crate::provider::manager::cancel_via_registry(&registry, &session_id).await;
-        let _ = db.delete_queued_message(&session_id).await;
+        let _ = db.clear_queued_messages(&session_id).await;
     });
 }
 

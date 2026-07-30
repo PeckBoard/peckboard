@@ -884,10 +884,10 @@ async fn spawn_worker_for_card(
 /// explicitly excludes.
 pub async fn cancel_worker_for_card_move(state: &Arc<AppState>, session_id: &str) {
     state.session_manager.cancel_and_wait(session_id).await;
-    // Also drop any persisted queued message — the worker is going away
+    // Also drop any persisted queued messages — the worker is going away
     // because the card moved, not because the user wants their last input
     // delivered to a fresh run.
-    let _ = state.db.delete_queued_message(session_id).await;
+    let _ = state.db.clear_queued_messages(session_id).await;
 }
 
 /// Handle a worker session completing (called after `stream_events` finishes
@@ -1269,31 +1269,63 @@ pub async fn drain_queue_for_session(
         && let Ok(Some(project)) = state.db.get_project(project_id).await
         && project.status != "active"
     {
-        if let Ok(Some(_)) = state.db.get_queued_message(session_id).await {
-            let _ = state.db.delete_queued_message(session_id).await;
+        if let Ok(n) = state.db.clear_queued_messages(session_id).await
+            && n > 0
+        {
             tracing::info!(
                 session_id = %session_id,
                 project_id = %project_id,
-                "drain_queue_for_session: dropping queued message for paused project"
+                "drain_queue_for_session: dropping queued messages for paused project"
             );
         }
         return Ok(());
     }
 
-    // Peek at the queued message so we can use the model/effort the user
-    // picked when they enqueued, if any. Falls back to the session →
+    // Peek at the next queued message so we can use the model/effort the
+    // user picked when they enqueued, if any. Falls back to the session →
     // card → project chain. The drain helper itself re-checks the queue
     // under the per-session lock, so this peek does NOT consume.
-    let queued_peek = state.db.get_queued_message(session_id).await.ok().flatten();
+    let queued_peek = state
+        .db
+        .next_queued_message(session_id)
+        .await
+        .ok()
+        .flatten();
+    let config = queued_resume_config(
+        state,
+        &session,
+        queued_peek.as_ref().and_then(|q| q.model.clone()),
+        queued_peek.as_ref().and_then(|q| q.effort.clone()),
+    )
+    .await;
 
-    let mut model: Option<String> = queued_peek
-        .as_ref()
-        .and_then(|q| q.model.clone())
-        .or_else(|| session.model.clone());
-    let mut effort: Option<String> = queued_peek
-        .as_ref()
-        .and_then(|q| q.effort.clone())
-        .or_else(|| session.effort.clone());
+    state
+        .session_manager
+        .drain_queued(
+            session_id,
+            &state.db,
+            &state.broadcaster,
+            config,
+            &state.config.data_dir,
+        )
+        .await?;
+    Ok(())
+}
+
+/// Build the `SpawnConfig` for delivering a queued message: model/effort
+/// from the queue row when the user picked one at enqueue time, else the
+/// session → card → project chain; plus a fresh MCP token + config.
+/// Shared by the completion-listener drain and the per-message "send
+/// now" force route.
+pub async fn queued_resume_config(
+    state: &Arc<AppState>,
+    session: &crate::db::models::Session,
+    queued_model: Option<String>,
+    queued_effort: Option<String>,
+) -> SpawnConfig {
+    let session_id = session.id.as_str();
+    let mut model: Option<String> = queued_model.or_else(|| session.model.clone());
+    let mut effort: Option<String> = queued_effort.or_else(|| session.effort.clone());
     if model.is_none() || effort.is_none() {
         if let Some(ref card_id) = session.card_id {
             if let Ok(Some(card)) = state.db.get_card(card_id).await {
@@ -1330,7 +1362,7 @@ pub async fn drain_queue_for_session(
     .ok()
     .map(|p| p.to_string_lossy().to_string());
 
-    let config = SpawnConfig {
+    SpawnConfig {
         model: model.unwrap_or_else(|| "default".into()),
         effort,
         working_dir: String::new(),
@@ -1347,13 +1379,7 @@ pub async fn drain_queue_for_session(
         // Set from the session row in SessionManager::final_config.
         is_worker: false,
         is_pre_hatcher: false,
-    };
-
-    state
-        .session_manager
-        .drain_queued(session_id, &state.db, &state.broadcaster, config)
-        .await?;
-    Ok(())
+    }
 }
 
 /// After a worker crash, count consecutive crashes for the owning card

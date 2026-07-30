@@ -1042,7 +1042,7 @@ mod tests {
         .await
         .unwrap();
 
-        db.upsert_queued_message(NewQueuedMessage {
+        db.enqueue_message(NewQueuedMessage {
             session_id: "s1".into(),
             text: "hello".into(),
             queued_at: ts.clone(),
@@ -1051,27 +1051,47 @@ mod tests {
         .await
         .unwrap();
 
-        let msg = db.get_queued_message("s1").await.unwrap().unwrap();
+        let msg = db.next_queued_message("s1").await.unwrap().unwrap();
         assert_eq!(msg.text, "hello");
 
-        // Upsert should replace
-        db.upsert_queued_message(NewQueuedMessage {
-            session_id: "s1".into(),
-            text: "updated".into(),
-            queued_at: now(),
-            model: Some("mock:echo".into()),
-            effort: Some("medium".into()),
-        })
-        .await
-        .unwrap();
+        // A second enqueue appends (FIFO) — it must NOT overwrite.
+        let second = db
+            .enqueue_message(NewQueuedMessage {
+                session_id: "s1".into(),
+                text: "updated".into(),
+                queued_at: now(),
+                model: Some("mock:echo".into()),
+                effort: Some("medium".into()),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
 
-        let msg = db.get_queued_message("s1").await.unwrap().unwrap();
-        assert_eq!(msg.text, "updated");
-        assert_eq!(msg.model.as_deref(), Some("mock:echo"));
-        assert_eq!(msg.effort.as_deref(), Some("medium"));
+        let all = db.list_queued_messages("s1").await.unwrap();
+        assert_eq!(all.len(), 2);
+        assert_eq!(all[0].text, "hello", "oldest first");
+        assert_eq!(all[1].text, "updated");
+        assert_eq!(all[1].model.as_deref(), Some("mock:echo"));
+        assert_eq!(all[1].effort.as_deref(), Some("medium"));
 
-        assert!(db.delete_queued_message("s1").await.unwrap());
-        assert!(db.get_queued_message("s1").await.unwrap().is_none());
+        // next_queued_message keeps returning the head until it's removed.
+        let head = db.next_queued_message("s1").await.unwrap().unwrap();
+        assert_eq!(head.text, "hello");
+        assert!(db.delete_queued_message_by_id("s1", head.id).await.unwrap());
+        let head = db.next_queued_message("s1").await.unwrap().unwrap();
+        assert_eq!(head.text, "updated");
+        assert_eq!(head.id, second.id);
+
+        // By-id fetch is session-scoped.
+        assert!(
+            db.get_queued_message_by_id("other", head.id)
+                .await
+                .unwrap()
+                .is_none()
+        );
+
+        assert_eq!(db.clear_queued_messages("s1").await.unwrap(), 1);
+        assert!(db.next_queued_message("s1").await.unwrap().is_none());
     }
 
     /// Bulk-delete every queued message belonging to a worker on the
@@ -1142,7 +1162,7 @@ mod tests {
                     .await
                     .unwrap();
                 db_ref
-                    .upsert_queued_message(NewQueuedMessage {
+                    .enqueue_message(NewQueuedMessage {
                         session_id: id,
                         text: "msg".into(),
                         queued_at: ts2,
@@ -1160,14 +1180,14 @@ mod tests {
         let deleted = db.delete_queued_messages_for_project("p1").await.unwrap();
         assert_eq!(deleted, 2, "should delete both p1-worker queues");
 
-        assert!(db.get_queued_message("w1").await.unwrap().is_none());
-        assert!(db.get_queued_message("w2").await.unwrap().is_none());
+        assert!(db.next_queued_message("w1").await.unwrap().is_none());
+        assert!(db.next_queued_message("w2").await.unwrap().is_none());
         assert!(
-            db.get_queued_message("w3").await.unwrap().is_some(),
+            db.next_queued_message("w3").await.unwrap().is_some(),
             "p2 worker preserved"
         );
         assert!(
-            db.get_queued_message("plain").await.unwrap().is_some(),
+            db.next_queued_message("plain").await.unwrap().is_some(),
             "plain session preserved"
         );
     }
@@ -2122,7 +2142,7 @@ mod tests {
         assert!(!db.delete_user("nonexistent").await.unwrap());
         assert!(!db.delete_auth_session("nonexistent").await.unwrap());
         assert!(!db.delete_push_subscription("nonexistent").await.unwrap());
-        assert!(!db.delete_queued_message("nonexistent").await.unwrap());
+        assert_eq!(db.clear_queued_messages("nonexistent").await.unwrap(), 0);
         assert!(!db.delete_announcement("nonexistent").await.unwrap());
     }
 

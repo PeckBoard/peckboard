@@ -1146,6 +1146,7 @@ mod tests {
                 mime_type: "image/png".into(),
                 data: vec![0xDE, 0xAD, 0xBE, 0xEF],
             }],
+            attachment_ids: Vec::new(),
         };
         let frame = build_user_message_frame(&msg);
         let parsed: serde_json::Value = serde_json::from_str(&frame).unwrap();
@@ -1174,6 +1175,7 @@ mod tests {
                 mime_type: "text/plain".into(),
                 data: b"hello".to_vec(),
             }],
+            attachment_ids: Vec::new(),
         };
         let frame = build_user_message_frame(&msg);
         let parsed: serde_json::Value = serde_json::from_str(&frame).unwrap();

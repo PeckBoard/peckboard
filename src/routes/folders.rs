@@ -389,11 +389,11 @@ async fn cancel_sessions_and_revoke_tokens(state: &AppState, session_ids: &[Stri
         if state.session_manager.is_running(sid).await {
             state.session_manager.cancel_and_wait(sid).await;
         }
-        // Drop any queued message so a deferred resume can't pop into
+        // Drop any queued messages so a deferred resume can't pop into
         // the agent process after the DB row was rewritten to a new
-        // folder. The move helpers also clear the queued_messages row;
+        // folder. The move helpers also clear the queued_messages rows;
         // doing both is safe and inexpensive.
-        let _ = state.db.delete_queued_message(sid).await;
+        let _ = state.db.clear_queued_messages(sid).await;
         state.mcp_tokens.revoke_by_session(sid).await;
     }
 }
