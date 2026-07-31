@@ -150,9 +150,11 @@ export default function ReviewView({ reviewId, onBack }: Props) {
   const [focusLines, setFocusLines] = useState<{ start: number; end: number } | null>(null)
   const [confirmError, setConfirmError] = useState<string | null>(null)
   const [flash, setFlash] = useState(false)
-  /** Model for the FIRST pass ('' = Auto): the session is created on it.
-      Once the session exists the picker reads and writes the session. */
-  const [pendingModel, setPendingModel] = useState('')
+  /** Model for the FIRST pass: preselected from the app-wide default
+      (Settings → Default Model) until the user picks one; the session is
+      created on it. Once the session exists the picker reads and writes
+      the session. */
+  const [chosenPendingModel, setChosenPendingModel] = useState<string | null>(null)
   /** The live session's model, fetched when the session appears. */
   const [sessionModel, setSessionModel] = useState<string | null>(null)
   /** The pull request this review is tied to, plus what we'd suggest. `null`
@@ -232,9 +234,13 @@ export default function ReviewView({ reviewId, onBack }: Props) {
   // toolbar and PlanView read.
   const models = useResourcesStore((s) => s.models)
   const fetchModels = useResourcesStore((s) => s.fetchModels)
+  const defaultModel = useResourcesStore((s) => s.defaultModel)
+  const fetchDefaultModel = useResourcesStore((s) => s.fetchDefaultModel)
+  const pendingModel = chosenPendingModel ?? defaultModel
   useEffect(() => {
     void fetchModels()
-  }, [fetchModels])
+    void fetchDefaultModel()
+  }, [fetchModels, fetchDefaultModel])
 
   // The pass endpoint only honours `model` on the session-creating pass,
   // so once a session exists the picker reads the session row instead of
@@ -250,7 +256,7 @@ export default function ReviewView({ reviewId, onBack }: Props) {
         if (!stale && s) setSessionModel(s.model ?? '')
       })
       .catch(() => {
-        /* the picker keeps saying Auto; the next open refetches nothing —
+        /* the picker keeps its current label; the next open refetches nothing —
            harmless, the pass itself is unaffected */
       })
     return () => {
@@ -260,7 +266,7 @@ export default function ReviewView({ reviewId, onBack }: Props) {
 
   const changeModel = (id: string) => {
     if (!sessionId) {
-      setPendingModel(id)
+      setChosenPendingModel(id)
       return
     }
     // Same PATCH the chat toolbar uses, handover and child-recycling
@@ -690,7 +696,11 @@ export default function ReviewView({ reviewId, onBack }: Props) {
             value={sessionId ? (sessionModel ?? '') : pendingModel}
             onChange={changeModel}
             models={models}
-            defaultLabel="Auto"
+            valueLabel={
+              (sessionId ? (sessionModel ?? '') : pendingModel)
+                ? undefined
+                : (models.find((m) => m.id === defaultModel)?.display_name ?? 'Default')
+            }
             triggerClassName="review-view__model"
             showChevron={false}
             align="right"

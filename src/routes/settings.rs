@@ -50,6 +50,12 @@ const CAVEMAN_LEVELS: &[&str] = &["off", "lite", "full"];
 /// cheapest priced model).
 const PRE_HATCHER_MODEL_KEY: &str = "pre_hatcher_model";
 
+/// Plugin-store key for the app-wide default model (`{"model":
+/// "provider:model"}`; empty/missing ⇒ effort-based routing). Sessions,
+/// cards, and reviews dispatched without an explicit model resolve to this
+/// in `provider::manager::send_message_locked`.
+pub const DEFAULT_MODEL_KEY: &str = "default_model";
+
 /// Plugin-store key for the pre-hatcher research system-prompt selection — a
 /// library prompt NAME (see `system_prompts`). Empty/missing ⇒ the default.
 const PRE_HATCHER_SYSTEM_PROMPT_KEY: &str = "pre_hatcher_system_prompt";
@@ -118,6 +124,10 @@ fn user_router() -> Router<Arc<AppState>> {
         .route(
             "/api/settings/pre-hatcher-prompt",
             get(get_pre_hatcher_prompt).put(set_pre_hatcher_prompt),
+        )
+        .route(
+            "/api/settings/default-model",
+            get(get_default_model).put(set_default_model),
         )
         .route("/api/settings/providers", get(get_providers))
         .route("/api/settings/providers/{id}", put(set_provider_hidden))
@@ -305,6 +315,68 @@ async fn set_pre_hatcher(
     }
 }
 
+/// The app-wide default model, or `None` when unset/empty/auto. The dispatch
+/// path reads the same key straight off the blocking store
+/// (`provider::manager::send_message_locked`); this helper serves the route.
+async fn default_model_setting(state: &Arc<AppState>) -> Option<String> {
+    let db = state.db.clone();
+    let raw = tokio::task::spawn_blocking(move || {
+        db.plugin_store_get_blocking(SETTINGS_NS, SETTINGS_COLLECTION, DEFAULT_MODEL_KEY)
+    })
+    .await;
+    match raw {
+        Ok(Ok(Some(json))) => serde_json::from_str::<serde_json::Value>(&json)
+            .ok()
+            .and_then(|v| v.get("model").and_then(|m| m.as_str()).map(str::to_string))
+            .filter(|m| !crate::provider::is_auto_model(m)),
+        _ => None,
+    }
+}
+
+/// GET /api/settings/default-model → `{"model": "provider:model" | ""}`
+/// ("" = unset: dispatch falls back to effort-based routing).
+async fn get_default_model(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+    let model = default_model_setting(&state).await.unwrap_or_default();
+    Json(serde_json::json!({ "model": model }))
+}
+
+#[derive(serde::Deserialize)]
+struct DefaultModelBody {
+    model: String,
+}
+
+/// PUT /api/settings/default-model `{"model": "provider:model" | ""}` → 204.
+/// Empty clears the setting. Applies to every session, card, and review
+/// dispatched without an explicit model, from its next turn.
+async fn set_default_model(
+    State(state): State<Arc<AppState>>,
+    Json(body): Json<DefaultModelBody>,
+) -> impl IntoResponse {
+    let model = body.model.trim().to_string();
+    if model.chars().count() > 200 {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({ "error": "model id too long" })),
+        ));
+    }
+    let db = state.db.clone();
+    let value = serde_json::json!({ "model": model }).to_string();
+    let res = tokio::task::spawn_blocking(move || {
+        db.plugin_store_put_blocking(SETTINGS_NS, SETTINGS_COLLECTION, DEFAULT_MODEL_KEY, &value)
+    })
+    .await;
+    match res {
+        Ok(Ok(_)) => Ok(StatusCode::NO_CONTENT),
+        Ok(Err(e)) => Err((
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({ "error": e.to_string() })),
+        )),
+        Err(e) => Err((
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({ "error": e.to_string() })),
+        )),
+    }
+}
 /// The pre-hatcher research system-prompt NAME: the configured library name,
 /// or [`PRE_HATCHER_DEFAULT_SYSTEM_PROMPT`] when unset/empty. Read per turn by
 /// the `session.message.before` dispatch path, which resolves it to a body.

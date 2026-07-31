@@ -177,9 +177,16 @@ interface ResourcesState {
   models: ModelInfo[]
   providers: ProviderInfo[]
   systemPrompts: SystemPromptInfo[]
+  /** App-wide default model (Settings → Default Model). `''` = unset. */
+  defaultModel: string
+  /** True once `/api/settings/default-model` has answered (even with `''`). */
+  defaultModelLoaded: boolean
   fetchWorkflows: () => Promise<void>
   fetchModels: () => Promise<void>
   fetchSystemPrompts: () => Promise<void>
+  fetchDefaultModel: () => Promise<void>
+  /** Reflect a Settings-page save without refetching. */
+  setDefaultModelLocal: (model: string) => void
 }
 
 export const useResourcesStore = create<ResourcesState>((set) => ({
@@ -187,6 +194,8 @@ export const useResourcesStore = create<ResourcesState>((set) => ({
   models: [],
   providers: [],
   systemPrompts: [],
+  defaultModel: '',
+  defaultModelLoaded: false,
 
   fetchWorkflows: async () => {
     try {
@@ -223,4 +232,20 @@ export const useResourcesStore = create<ResourcesState>((set) => ({
       /* ignore */
     }
   },
+
+  fetchDefaultModel: async () => {
+    try {
+      const res = await authedFetch('/api/settings/default-model')
+      if (!res.ok) return
+      const data = await res.json()
+      set({
+        defaultModel: typeof data?.model === 'string' ? data.model : '',
+        defaultModelLoaded: true,
+      })
+    } catch {
+      /* ignore */
+    }
+  },
+
+  setDefaultModelLocal: (model: string) => set({ defaultModel: model, defaultModelLoaded: true }),
 }))

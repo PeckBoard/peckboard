@@ -784,7 +784,7 @@ test.describe('document review — desktop', () => {
     // No session yet: the picker holds the choice the session will be
     // created on. Deliberately NOT armReviewer — picking `mock:doc-review`
     // here is the UI's own version of that pin.
-    await expect(page.getByTestId('review-model')).toContainText('Auto')
+    await expect(page.getByTestId('review-model')).toContainText('Default')
     await page.getByTestId('review-model').click()
     await page.locator('.model-picker-search').fill('doc-review')
     await page.getByTestId('review-model-option-mock:doc-review').click()
@@ -824,7 +824,7 @@ test.describe('document review — desktop', () => {
         { timeout: 10_000, message: 'the model switch never landed on the session' },
       )
       .toBe('mock:happy-path')
-    await expect(page.getByTestId('review-model')).not.toContainText('Auto')
+    await expect(page.getByTestId('review-model')).toContainText('Mock: happy path')
   })
 
   test('the wizard reviews a markdown file from a repo worktree', async ({ request, page }) => {

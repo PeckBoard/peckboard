@@ -22,6 +22,8 @@ export default function NewRepeatingTaskModal({ initial, onClose, onSaved }: Pro
   const models = useResourcesStore((s) => s.models)
   const providers = useResourcesStore((s) => s.providers)
   const fetchModels = useResourcesStore((s) => s.fetchModels)
+  const defaultModel = useResourcesStore((s) => s.defaultModel)
+  const fetchDefaultModel = useResourcesStore((s) => s.fetchDefaultModel)
 
   const editing = !!initial
 
@@ -43,14 +45,17 @@ export default function NewRepeatingTaskModal({ initial, onClose, onSaved }: Pro
     initial?.schedule_kind ?? 'interval',
   )
   const [scheduleValue, setScheduleValue] = useState<Record<string, number>>(initialScheduleValue)
-  const [model, setModel] = useState<string>(initial?.model ?? '')
+  const [chosenModel, setChosenModel] = useState<string | null>(null)
+  // The app-wide default model (Settings → Default Model) preselects — for
+  // a new task and for a legacy task saved without one.
+  const model = chosenModel ?? initial?.model ?? defaultModel
   const [effort, setEffort] = useState<string>(initial?.effort ?? '')
   // Effort options follow the chosen model's provider.
   const effortOptions = useMemo(() => effortOptionsForModel(model, providers), [model, providers])
   // Clear a now-invalid effort back to Default on model change so we never
   // save one the provider can't use.
   const handleModelChange = (id: string) => {
-    setModel(id)
+    setChosenModel(id)
     const opts = effortOptionsForModel(id, providers)
     if (providers.length > 0 && effort && !opts.some((o) => o.value === effort)) setEffort('')
   }
@@ -61,7 +66,8 @@ export default function NewRepeatingTaskModal({ initial, onClose, onSaved }: Pro
   useEffect(() => {
     fetchFolders()
     fetchModels()
-  }, [fetchFolders, fetchModels])
+    fetchDefaultModel()
+  }, [fetchFolders, fetchModels, fetchDefaultModel])
 
   // The requirement the form doesn't meet yet. Shown next to the disabled
   // primary action so a blocked Create never leaves the user guessing.
@@ -225,9 +231,7 @@ export default function NewRepeatingTaskModal({ initial, onClose, onSaved }: Pro
             models={models as ModelInfo[]}
             testId="repeating-task-model"
           />
-          <p className="form-help">
-            Each spawned run starts on this model. &quot;Default&quot; uses the system default.
-          </p>
+          <p className="form-help">Each spawned run starts on this model.</p>
         </div>
 
         <div className="form-field">

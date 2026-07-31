@@ -94,7 +94,7 @@ type SubPage =
  */
 const SUB_PAGES: { id: SubPage; title: string; blurb: string; adminOnly?: boolean }[] = [
   { id: 'appearance', title: 'Appearance', blurb: 'Theme, accent color and confirmations' },
-  { id: 'chat', title: 'Chat', blurb: 'Caveman mode and the pre-hatcher model' },
+  { id: 'chat', title: 'Chat', blurb: 'Default model, caveman mode and the pre-hatcher model' },
   {
     id: 'prompts',
     title: 'System Prompts',
@@ -173,6 +173,9 @@ export default function SettingsPage({ onBack, initialSubPage = null }: Props) {
   const [preHatchModel, setPreHatchModel] = useState<string>('')
   const models = useResourcesStore((s) => s.models)
   const fetchModels = useResourcesStore((s) => s.fetchModels)
+  const defaultModel = useResourcesStore((s) => s.defaultModel)
+  const fetchDefaultModel = useResourcesStore((s) => s.fetchDefaultModel)
+  const setDefaultModelLocal = useResourcesStore((s) => s.setDefaultModelLocal)
   const [providerVisibility, setProviderVisibility] = useState<ProviderInfo[]>([])
   const [backupStatus, setBackupStatus] = useState<BackupStatus | null>(null)
   // One inline save error at a time, tagged with the section that owns the
@@ -213,6 +216,10 @@ export default function SettingsPage({ onBack, initialSubPage = null }: Props) {
   useEffect(() => {
     fetchModels()
   }, [fetchModels])
+
+  useEffect(() => {
+    fetchDefaultModel()
+  }, [fetchDefaultModel])
 
   useEffect(() => {
     authedFetch('/api/settings/pre-hatcher')
@@ -303,6 +310,18 @@ export default function SettingsPage({ onBack, initialSubPage = null }: Props) {
       setPreHatchModel(prev)
       setSaveError({ scope: 'prehatch', message: e.message })
     })
+  }
+
+  const changeDefaultModel = (model: string) => {
+    const prev = defaultModel
+    setDefaultModelLocal(model)
+    setSaveError(null)
+    void putSetting('/api/settings/default-model', { model }, 'Could not save default model').catch(
+      (e: Error) => {
+        setDefaultModelLocal(prev)
+        setSaveError({ scope: 'default-model', message: e.message })
+      },
+    )
   }
   const changeTheme = (t: Theme) => {
     setTheme(t)
@@ -471,6 +490,28 @@ export default function SettingsPage({ onBack, initialSubPage = null }: Props) {
 
       {activeSubPage === 'chat' && (
         <>
+          <section className="settings-section" data-testid="default-model-section">
+            <h3>Default Model</h3>
+            <p className="form-hint">
+              Preselected for new sessions, cards, and reviews, and used for anything dispatched
+              without an explicit model. Until one is chosen, PeckBoard routes by effort (low→Haiku,
+              medium→Sonnet, high→Opus, higher→Fable).
+            </p>
+            <ModelPicker
+              value={defaultModel}
+              onChange={changeDefaultModel}
+              models={models}
+              ariaLabel="Default model"
+              testId="default-model"
+              emptyHint="Loading models…"
+              onOpen={fetchModels}
+            />
+            {saveError?.scope === 'default-model' && (
+              <p className="form-error" role="alert" data-testid="settings-error-default-model">
+                {saveError.message}
+              </p>
+            )}
+          </section>
           <section className="settings-section" data-testid="caveman-section">
             <h3>Caveman Mode</h3>
             <p className="form-hint">

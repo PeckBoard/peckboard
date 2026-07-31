@@ -193,6 +193,7 @@ export default function EditProjectModal({ project, onClose }: Props) {
             <ModelPicker
               id="edit-project-model"
               value={model}
+              defaultLabel="App default"
               onChange={handleModelChange}
               models={models}
               testId="edit-project-model"

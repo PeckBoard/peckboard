@@ -45,7 +45,7 @@ export default function CardFormModal(props: CardFormProps) {
   const [description, setDescription] = useState(card?.description ?? '')
   const [priority, setPriority] = useState(card?.priority ?? 2)
   const [workflow, setWorkflow] = useState(card?.workflow ?? '')
-  const [model, setModel] = useState(card?.model ?? '')
+  const [chosenModel, setChosenModel] = useState<string | null>(null)
   const [effort, setEffort] = useState(card?.effort ?? '')
   const [blocked, setBlocked] = useState(card?.blocked ?? false)
   const [blockReason, setBlockReason] = useState(card?.block_reason ?? '')
@@ -69,6 +69,12 @@ export default function CardFormModal(props: CardFormProps) {
   const models = useResourcesStore((s) => s.models)
   const providers = useResourcesStore((s) => s.providers)
   const fetchModels = useResourcesStore((s) => s.fetchModels)
+  const defaultModel = useResourcesStore((s) => s.defaultModel)
+  const fetchDefaultModel = useResourcesStore((s) => s.fetchDefaultModel)
+  // The app-wide default model (Settings → Default Model) preselects for a
+  // new card — and for a legacy card that never pinned one — until the user
+  // picks explicitly.
+  const model = chosenModel ?? card?.model ?? defaultModel
   const [priorities, setPriorities] = useState<{ label: string; value: number }[]>([
     { label: 'Critical', value: 0 },
     { label: 'High', value: 1 },
@@ -79,20 +85,21 @@ export default function CardFormModal(props: CardFormProps) {
   useEffect(() => {
     fetchWorkflows()
     fetchModels()
+    fetchDefaultModel()
     authedFetch('/api/priorities')
       .then((res) => (res.ok ? res.json() : null))
       .then((data) => {
         if (data?.priorities) setPriorities(data.priorities)
       })
       .catch(() => {})
-  }, [fetchWorkflows, fetchModels])
+  }, [fetchWorkflows, fetchModels, fetchDefaultModel])
 
   // Effort options follow the chosen model's provider.
   const effortOptions = useMemo(() => effortOptionsForModel(model, providers), [model, providers])
   // Clear a now-invalid effort back to Default on model change so we never
   // save one the provider can't use.
   const handleModelChange = (id: string) => {
-    setModel(id)
+    setChosenModel(id)
     const opts = effortOptionsForModel(id, providers)
     if (providers.length > 0 && effort && !opts.some((o) => o.value === effort)) setEffort('')
   }

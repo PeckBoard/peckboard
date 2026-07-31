@@ -298,11 +298,33 @@ impl SessionManager {
         // auto-model routing below.
         let resolved_effort = session.effort.clone().or_else(|| config.effort.clone());
 
-        // Auto mode: an unset model (legacy "default" included) routes to
-        // the best model for the task by effort — cheap tasks stop paying
-        // frontier rates and hard ones aren't underpowered.
+        // Unset model (legacy "default"/"auto" included): the app-wide
+        // default-model setting wins; with none configured, fall back to
+        // effort-based routing so a fresh install still dispatches sensibly.
         let final_model = if crate::provider::is_auto_model(&requested_model) {
-            crate::provider::auto_model(resolved_effort.as_deref(), session.is_worker).to_string()
+            let db2 = db.clone();
+            let configured = tokio::task::spawn_blocking(move || {
+                db2.plugin_store_get_blocking(
+                    crate::routes::settings::SETTINGS_NS,
+                    crate::routes::settings::SETTINGS_COLLECTION,
+                    crate::routes::settings::DEFAULT_MODEL_KEY,
+                )
+            })
+            .await
+            .ok()
+            .and_then(|r| r.ok())
+            .flatten()
+            .and_then(|raw| {
+                serde_json::from_str::<serde_json::Value>(&raw)
+                    .ok()
+                    .and_then(|v| v.get("model").and_then(|m| m.as_str()).map(str::to_string))
+            })
+            .filter(|m| !crate::provider::is_auto_model(m));
+            match configured {
+                Some(m) => m,
+                None => crate::provider::auto_model(resolved_effort.as_deref(), session.is_worker)
+                    .to_string(),
+            }
         } else {
             requested_model
         };

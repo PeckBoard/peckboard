@@ -27,12 +27,17 @@ export default function NewSessionModal({ onClose, onCreated }: Props) {
   const models = useResourcesStore((s) => s.models)
   const providers = useResourcesStore((s) => s.providers)
   const fetchModels = useResourcesStore((s) => s.fetchModels)
+  const defaultModel = useResourcesStore((s) => s.defaultModel)
+  const fetchDefaultModel = useResourcesStore((s) => s.fetchDefaultModel)
 
   const [name, setName] = useState('')
   // Same derived-default pattern as NewProjectModal — see comment there.
   const [chosenFolderId, setChosenFolderId] = useState<string | null>(null)
   const folderId = chosenFolderId ?? folders[0]?.id ?? ''
-  const [model, setModel] = useState('')
+  // Same derived-default pattern as the folder above: the app-wide default
+  // model (Settings → Default Model) preselects until the user picks one.
+  const [chosenModel, setChosenModel] = useState<string | null>(null)
+  const model = chosenModel ?? defaultModel
   const [effort, setEffort] = useState('')
   // Chat sessions default OFF (workers default ON); a NULL column inherits
   // that, so an unchecked box just leaves auto-switch off.
@@ -61,6 +66,10 @@ export default function NewSessionModal({ onClose, onCreated }: Props) {
     fetchModels()
   }, [fetchModels])
 
+  useEffect(() => {
+    fetchDefaultModel()
+  }, [fetchDefaultModel])
+
   // One-shot probe for the playwright-video plugin. Failures just leave
   // the bug-hunt preset hidden.
   useEffect(() => {
@@ -84,7 +93,7 @@ export default function NewSessionModal({ onClose, onCreated }: Props) {
   // Clear a now-invalid effort back to Default on model change so we never
   // submit one the provider can't use.
   const handleModelChange = (id: string) => {
-    setModel(id)
+    setChosenModel(id)
     const opts = effortOptionsForModel(id, providers)
     if (providers.length > 0 && effort && !opts.some((o) => o.value === effort)) setEffort('')
   }
@@ -243,7 +252,6 @@ export default function NewSessionModal({ onClose, onCreated }: Props) {
             value={model}
             onChange={handleModelChange}
             models={models}
-            defaultLabel="Auto"
             ariaLabel="Select model"
             testId="new-session-model"
           />

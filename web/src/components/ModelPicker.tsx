@@ -9,7 +9,8 @@ interface ModelPickerProps {
   onChange: (id: string) => void
   /** Flat model catalogue, e.g. `useResourcesStore(s => s.models)`. */
   models: ModelInfo[]
-  /** Label for the empty/`''` option that clears the override. */
+  /** Label for the empty/`''` option. When omitted, no empty row is
+   *  rendered — the picker only offers real models. */
   defaultLabel?: string
   /** Override the trigger's text (e.g. a prefix-stripped name). Falls back to
    *  the selected model's display name, then the raw id, then `defaultLabel`. */
@@ -50,7 +51,7 @@ export default function ModelPicker({
   value,
   onChange,
   models,
-  defaultLabel = 'Auto',
+  defaultLabel,
   valueLabel,
   triggerClassName = 'form-input model-picker-trigger',
   showChevron = true,
@@ -64,13 +65,16 @@ export default function ModelPicker({
 }: ModelPickerProps) {
   const selectedLabel =
     valueLabel ??
-    (value ? (models.find((m) => m.id === value)?.display_name ?? value) : defaultLabel)
+    (value
+      ? (models.find((m) => m.id === value)?.display_name ?? value)
+      : (defaultLabel ?? 'Select model…'))
 
-  // The default ("") option is just another row, so arrow-key navigation and
-  // Enter work uniformly over it. It drops out of the list as soon as the
-  // query stops matching its label.
+  // When a `defaultLabel` is given, the empty ("") option is just another
+  // row, so arrow-key navigation and Enter work uniformly over it. Without
+  // one there is no empty row — the picker only offers real models.
   const items = useMemo<MenuItem[]>(() => {
-    const rows: MenuItem[] = [{ id: '', display_name: defaultLabel }, ...models].map((m) => ({
+    const defaultRow = defaultLabel === undefined ? [] : [{ id: '', display_name: defaultLabel }]
+    const rows: MenuItem[] = [...defaultRow, ...models].map((m) => ({
       label: m.display_name,
       // The raw id carries the provider and account, so typing "cursor" or an
       // account name narrows the list even though neither is in the label.

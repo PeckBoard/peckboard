@@ -331,6 +331,7 @@ export default function NewProjectModal({ onClose }: Props) {
                   value={model}
                   onChange={handleModelChange}
                   models={models}
+                  defaultLabel="App default"
                   testId="new-project-model"
                 />
                 <p className="form-hint">

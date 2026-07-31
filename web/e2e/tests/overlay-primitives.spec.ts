@@ -73,7 +73,7 @@ test('model picker: arrows + Enter pick a model, Escape closes only the popup', 
   await expect(modal).toBeVisible({ timeout: 10_000 })
 
   const trigger = page.getByTestId('new-session-model')
-  await expect(trigger).toContainText('Auto')
+  await expect(trigger).toContainText('Select model…')
   await trigger.click()
 
   // The popup is a combobox over a listbox — the semantics ModelPicker had
@@ -153,9 +153,9 @@ test('cross-provider switch prompt is a real dialog: Escape cancels it', async (
   const trigger = page.getByTestId('chat-toolbar-model')
   await expect(trigger).toBeVisible({ timeout: 10_000 })
   await trigger.click()
-  // "Auto" hands the session back to the default provider — a continuity-key
+  // Switching to a Claude model leaves the mock provider — a continuity-key
   // change, so the switch has to be confirmed.
-  await page.getByTestId('chat-toolbar-model-option-default').click()
+  await page.getByTestId('chat-toolbar-model-option-claude:claude-opus-4-8').click()
 
   const dialog = page.getByTestId('model-switch-prompt')
   await expect(dialog).toBeVisible()

@@ -46,6 +46,14 @@ test('model picker filters the catalogue as you type', async ({ request, page, b
   expect(baseURL, 'baseURL configured').toBeTruthy()
 
   const { token, authHeader } = await authenticate(request)
+
+  // The app-wide default model preselects in the modal. Set it up-front —
+  // and restore it right after the label assert to keep the window where
+  // other parallel specs could observe the changed global as small as
+  // possible.
+  const putDefault = (model: string) =>
+    request.put('/api/settings/default-model', { headers: authHeader, data: { model } })
+  expect((await putDefault('mock:echo')).ok()).toBeTruthy()
   const { sessionId } = await seedSession(request, authHeader)
 
   await page.addInitScript((t) => localStorage.setItem('peckboard_token', t), token)
@@ -58,8 +66,9 @@ test('model picker filters the catalogue as you type', async ({ request, page, b
   // The model field is now a combobox trigger, not a native <select>.
   const trigger = page.getByTestId('new-session-model')
   await expect(trigger).toBeVisible({ timeout: 10_000 })
-  // Nothing chosen yet → shows the default label.
-  await expect(trigger).toContainText('Auto')
+  // The configured default model arrives preselected.
+  await expect(trigger).toContainText('Mock: echo')
+  expect((await putDefault('')).ok()).toBeTruthy()
 
   await trigger.click()
   const search = page.getByTestId('new-session-model-search')

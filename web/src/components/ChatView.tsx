@@ -899,6 +899,11 @@ export default function ChatView({
   const [modelsError, setModelsError] = useState(false)
   const systemPrompts = useResourcesStore((s) => s.systemPrompts)
   const fetchSystemPrompts = useResourcesStore((s) => s.fetchSystemPrompts)
+  const appDefaultModel = useResourcesStore((s) => s.defaultModel)
+  const fetchDefaultModel = useResourcesStore((s) => s.fetchDefaultModel)
+  useEffect(() => {
+    void fetchDefaultModel()
+  }, [fetchDefaultModel])
   const [loadedTodos, setLoadedTodos] = useState<TodoItem[]>([])
   // Session id whose session-detail / todo-snapshot fetch failed. The
   // chat itself still works, so this only drives a retry banner rather
@@ -1505,9 +1510,11 @@ export default function ChatView({
   const workingLabel = modelThinks(sessionModel, availableProviders) ? 'Thinking...' : 'Working...'
 
   const modelDisplayName = (id: string | null | undefined): string => {
-    if (!id) return 'auto'
-    const m = availableModels.find((x) => x.id === id)
-    return m?.display_name ?? id
+    // An unpinned session dispatches on the app-wide default model.
+    const effective = id || appDefaultModel
+    if (!effective) return 'Default'
+    const m = availableModels.find((x) => x.id === effective)
+    return m?.display_name ?? effective
   }
 
   // Three-dot menu. Order is shared with the TabBar context menu (see
@@ -1724,7 +1731,6 @@ export default function ChatView({
           showChevron={false}
           align="left"
           ariaLabel="Change model"
-          defaultLabel="Auto"
           emptyHint={modelsError ? 'Failed to load models — reopen to retry' : 'Loading models…'}
           onOpen={() => {
             // Reopening after a failed fetch clears the error flag, which

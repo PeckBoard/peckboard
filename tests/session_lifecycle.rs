@@ -738,3 +738,43 @@ mod midstream {
         assert!(row.user_event_appended);
     }
 }
+
+// ── Default-model setting resolves an unset model at dispatch ───────────
+
+#[tokio::test]
+async fn dispatch_resolves_unset_model_to_default_model_setting() {
+    let (manager, db, broadcaster) = build_env().await;
+    let mut rx = manager.take_completion_rx().await.unwrap();
+    make_session(&db, "s-default").await;
+
+    db.plugin_store_put_blocking(
+        peckboard::routes::settings::SETTINGS_NS,
+        peckboard::routes::settings::SETTINGS_COLLECTION,
+        peckboard::routes::settings::DEFAULT_MODEL_KEY,
+        &serde_json::json!({ "model": "mock:echo" }).to_string(),
+    )
+    .unwrap();
+
+    let outcome = manager
+        .send_or_queue(
+            "s-default",
+            UserMessage::from_text("ping"),
+            &db,
+            &broadcaster,
+            cfg(""), // unset model — must resolve to the configured default
+            MidTurnPolicy::Queue,
+            false,
+        )
+        .await
+        .unwrap();
+    assert!(matches!(outcome, SendOutcome::Started));
+
+    // The mock provider actually ran the turn: a clean completion. Falling
+    // back to effort-based routing would have targeted a Claude alias and
+    // failed to spawn in this environment (no CLI).
+    let completion = wait_for_completion(&mut rx, "s-default").await;
+    assert!(
+        completion.completed,
+        "mock:echo run should complete cleanly"
+    );
+}

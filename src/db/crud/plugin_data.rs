@@ -16,8 +16,9 @@ use crate::db::schema::*;
 impl Db {
     /// Upsert one document into a plugin's store. `data` is stored verbatim
     /// (already JSON-encoded by the caller). `created_at` is preserved across
-    /// updates; `updated_at` advances.
-    pub(crate) fn plugin_store_put_blocking(
+    /// updates; `updated_at` advances. Public so integration tests can seed
+    /// app settings (`core.settings`) the way the settings routes do.
+    pub fn plugin_store_put_blocking(
         &self,
         plugin_id: &str,
         collection: &str,
