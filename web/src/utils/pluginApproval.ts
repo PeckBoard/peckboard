@@ -1,6 +1,20 @@
 import { authedFetch } from '../store/auth'
 import type { McpOauthConfig } from './mcpServers'
 
+/** Host-side runtime usage counters for one installed plugin. */
+export interface WasmPluginStats {
+  calls: number
+  errors: number
+  rebuilds: number
+  /** Total wall-clock time spent executing this plugin, milliseconds. */
+  busy_ms: number
+  /** Most recent call's duration, milliseconds. */
+  last_call_ms?: number | null
+  /** RFC3339 completion time of the most recent call. */
+  last_call_at?: string | null
+  /** Installed `.wasm` size on disk. */
+  wasm_bytes: number
+}
 /** A loaded WASM plugin and its approval status, from `/api/plugins`. */
 export interface WasmPlugin {
   name: string
@@ -16,6 +30,8 @@ export interface WasmPlugin {
    *  built-in plugin's, rendered by the shared settings form. */
   settings_schema?: { fields: { key: string }[] }
   error?: string | null
+  /** Runtime usage counters + wasm size, for the plugins page. */
+  stats?: WasmPluginStats | null
 }
 
 /**

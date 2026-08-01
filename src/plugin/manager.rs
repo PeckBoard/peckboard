@@ -1,6 +1,7 @@
 use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use extism::{Manifest as ExtismManifest, Plugin, PluginBuilder, Wasm};
@@ -169,6 +170,12 @@ enum ApprovalState {
 struct LoadedPlugin {
     name: String,
     manifest: PluginManifest,
+    /// Dedicated second instance for the `provider.*` hook family: one
+    /// `provider.send` turn can hold an instance for the whole provider
+    /// budget (default 300 s), and routing the family here keeps the main
+    /// instance — the plugin's HTTP/MCP/notify surface — responsive while a
+    /// turn runs. `None` unless the manifest declares `provider.send`.
+    provider_plugin: Option<Arc<Mutex<PluginCell>>>,
     plugin: Arc<Mutex<PluginCell>>,
     /// Canonical (sorted, newline-joined) form of `manifest.hooks` — the
     /// exact string an approval decision is stored and compared against.
@@ -193,6 +200,12 @@ struct LoadedPlugin {
     /// into. `sync_plugin_providers` clears it, dispatches the plugin's
     /// `provider.register` hook, then applies whatever the plugin staged.
     pending_provider: PendingProviderSlot,
+    /// Host-side runtime counters (calls, errors, busy time), shared with
+    /// [`PluginCell::call_handle`]; snapshotted into the catalog entry.
+    stats: Arc<PluginRuntimeStats>,
+    /// Size of the installed `.wasm` on disk, captured at load (0 when the
+    /// file wasn't readable at that moment).
+    wasm_bytes: u64,
 }
 
 impl LoadedPlugin {
@@ -222,6 +235,7 @@ impl LoadedPlugin {
             settings_schema: SettingsSchema::new(self.manifest.settings.clone()),
             status: self.status_label(),
             error: self.init_error.clone(),
+            stats: self.stats.snapshot(self.wasm_bytes),
         }
     }
 }
@@ -281,6 +295,88 @@ pub struct WasmPluginInfo {
     pub status: &'static str,
     /// Present only when `status` is `init_failed`.
     pub error: Option<String>,
+    /// Runtime usage counters + wasm size, for the plugins page.
+    pub stats: WasmPluginStats,
+}
+
+/// Host-side runtime counters for one loaded plugin. Updated at the single
+/// dispatch choke point ([`PluginCell::call_handle`]) and read lock-free by
+/// the `/api/plugins` catalog — a stats read must never queue behind a
+/// running wasm call.
+#[derive(Default)]
+pub struct PluginRuntimeStats {
+    /// Completed `handle` calls, every hook.
+    calls: AtomicU64,
+    /// Calls that returned an error (trap, epoch timeout, poisoned instance).
+    errors: AtomicU64,
+    /// Instance rebuilds after a failed call (the healing path).
+    rebuilds: AtomicU64,
+    /// Total wall-clock time spent inside `handle`, microseconds.
+    busy_micros: AtomicU64,
+    /// Duration of the most recent call, microseconds.
+    last_call_micros: AtomicU64,
+    /// Unix millis when the most recent call finished (0 = never called).
+    last_call_unix_ms: AtomicU64,
+}
+
+impl PluginRuntimeStats {
+    /// Record one finished `handle` call.
+    fn record_call(&self, elapsed: Duration, failed: bool) {
+        let micros = elapsed.as_micros().min(u64::MAX as u128) as u64;
+        self.calls.fetch_add(1, Ordering::Relaxed);
+        if failed {
+            self.errors.fetch_add(1, Ordering::Relaxed);
+        }
+        self.busy_micros.fetch_add(micros, Ordering::Relaxed);
+        self.last_call_micros.store(micros, Ordering::Relaxed);
+        let now_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis().min(u64::MAX as u128) as u64)
+            .unwrap_or(0);
+        self.last_call_unix_ms.store(now_ms, Ordering::Relaxed);
+    }
+
+    /// Count one instance rebuild (the healing path).
+    fn record_rebuild(&self) {
+        self.rebuilds.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Wire-shape snapshot for the catalog entry.
+    fn snapshot(&self, wasm_bytes: u64) -> WasmPluginStats {
+        let calls = self.calls.load(Ordering::Relaxed);
+        let last_ms = self.last_call_unix_ms.load(Ordering::Relaxed);
+        WasmPluginStats {
+            calls,
+            errors: self.errors.load(Ordering::Relaxed),
+            rebuilds: self.rebuilds.load(Ordering::Relaxed),
+            busy_ms: self.busy_micros.load(Ordering::Relaxed) / 1_000,
+            last_call_ms: (calls > 0)
+                .then(|| self.last_call_micros.load(Ordering::Relaxed) / 1_000),
+            last_call_at: (last_ms > 0).then(|| {
+                chrono::DateTime::<chrono::Utc>::from_timestamp_millis(last_ms as i64)
+                    .map(|t| t.to_rfc3339())
+                    .unwrap_or_default()
+            }),
+            wasm_bytes,
+        }
+    }
+}
+
+/// Per-plugin resource usage the `/api/plugins` catalog reports — what the
+/// plugins page renders on each installed plugin's card.
+#[derive(Debug, Clone, Serialize, Default)]
+pub struct WasmPluginStats {
+    pub calls: u64,
+    pub errors: u64,
+    pub rebuilds: u64,
+    /// Total wall-clock time spent executing this plugin, milliseconds.
+    pub busy_ms: u64,
+    /// Most recent call's duration, milliseconds.
+    pub last_call_ms: Option<u64>,
+    /// RFC3339 completion time of the most recent call.
+    pub last_call_at: Option<String>,
+    /// Installed `.wasm` size on disk.
+    pub wasm_bytes: u64,
 }
 
 /// Canonical form of a hook set for approval storage and comparison:
@@ -459,6 +555,8 @@ struct PluginCell {
     /// Rebuild a fresh instance: same wasm, host functions, shared slots,
     /// and call budget as the one it replaces.
     rebuild: Box<dyn Fn() -> anyhow::Result<Plugin> + Send + Sync>,
+    /// Runtime counters shared with the catalog (see [`PluginRuntimeStats`]).
+    stats: Arc<PluginRuntimeStats>,
 }
 
 impl PluginCell {
@@ -467,11 +565,14 @@ impl PluginCell {
     /// plugin) so the failure can't poison later calls. Returns the original
     /// error either way.
     fn call_handle(&mut self, input: String) -> Result<String, extism::Error> {
+        let started = std::time::Instant::now();
         let result = self.plugin.call::<String, String>("handle", input);
+        self.stats.record_call(started.elapsed(), result.is_err());
         if result.is_err() {
             match (self.rebuild)() {
                 Ok(fresh) => {
                     self.plugin = fresh;
+                    self.stats.record_rebuild();
                     let config = read_plugin_config(&self.plugins_dir, &self.name);
                     if let Err(e) = run_init(&mut self.plugin, config) {
                         warn!(
@@ -494,6 +595,29 @@ impl PluginCell {
     }
 }
 
+/// Run `f` against a plugin's instance on a blocking-pool thread, acquiring
+/// the per-plugin lock there. Wasm calls burn real CPU (QuickJS) and host
+/// functions may legitimately block (process exec, sync locks); on an async
+/// worker that starves the runtime — and blocking-only APIs panic outright
+/// (live incident 2026-07-31: an env-var `blocking_lock` inside diff-viewer's
+/// exec host call panicked on a runtime worker and poisoned the extism
+/// instance lock, wedging the plugin). Provider dispatches (`provider.send`
+/// & co) keep their own spawn_blocking shape with custom budgets; every
+/// other hook dispatch funnels through here.
+async fn with_cell_blocking<F>(
+    plugin: Arc<Mutex<PluginCell>>,
+    f: F,
+) -> Result<String, extism::Error>
+where
+    F: FnOnce(&mut PluginCell) -> Result<String, extism::Error> + Send + 'static,
+{
+    tokio::task::spawn_blocking(move || {
+        let mut guard = plugin.blocking_lock();
+        f(&mut guard)
+    })
+    .await
+    .unwrap_or_else(|e| Err(extism::Error::msg(format!("plugin call task failed: {e}"))))
+}
 /// Process-global plugin manager for fire-and-forget notification hooks.
 ///
 /// Set once from `main.rs` after the `PluginManager` is built; sites that
@@ -931,37 +1055,24 @@ impl PluginManager {
             }
         }
 
-        // Resolve the operator's stored approval for this exact hook set.
-        // Resolve the operator's stored approval for this exact hook set.
-        // A plugin may declare a larger per-call budget than the 2 s default
-        // for slow host-side tool work (see `PluginManifest::call_timeout_secs`).
-        // Extism fixes the timeout at construction, so rebuild the instance
-        // with the clamped budget when one was declared. Not part of the
-        // approval grant: a timeout is not a capability — the ceiling bounds it.
-        //
-        // A plugin handling `provider.send` gets at least the provider-send
-        // budget (default 300s): one dispatch of that hook runs a FULL agent
-        // turn, HTTP round-trips included, which the normal 2–180s clamp
-        // would cut short. The raised instance timeout necessarily also
-        // applies to the plugin's ordinary hook calls — extism has one
-        // timeout per instance — which is acceptable because dispatch
-        // serialises per plugin anyway.
-        let mut call_timeout = plugin_manifest
+        // Resolve the per-call budget. A plugin may declare a larger budget
+        // than the 2 s default for slow host-side tool work (see
+        // `PluginManifest::call_timeout_secs`); extism fixes the timeout at
+        // construction, so rebuild the instance with the clamped budget when
+        // one was declared. Not part of the approval grant: a timeout is not
+        // a capability — the ceiling bounds it. (`provider.send` runs on a
+        // dedicated second instance with the provider budget, built below —
+        // the main instance keeps the ordinary clamp.)
+        let call_timeout = plugin_manifest
             .call_timeout_secs
             .map(|s| Duration::from_secs(s).clamp(CALL_TIMEOUT, self.max_call_timeout))
             .unwrap_or(CALL_TIMEOUT);
-        if plugin_manifest
-            .hooks
-            .iter()
-            .any(|h| h == PROVIDER_SEND_HOOK)
-        {
-            call_timeout = call_timeout.max(self.provider_send_timeout);
-        }
         if call_timeout != CALL_TIMEOUT {
             plugin = build_plugin(call_timeout)?;
         }
-        // for every hook), so a missing decision — or one made against a
-        // different hook set — leaves it `Pending`, not active.
+        // Resolve the operator's stored approval for this exact hook set —
+        // a missing decision, or one made against a different hook set,
+        // leaves it `Pending`, not active.
         let hooks_canonical = canonical_grant(&plugin_manifest.hooks, &plugin_manifest.permissions);
         let stored = self
             .db
@@ -992,6 +1103,12 @@ impl PluginManager {
             info!("Plugin '{name}' loaded but inert — awaiting hook approval");
         }
 
+        // One stats cell for the plugin's whole life — shared by the instance
+        // (which records calls) and the catalog entry (which snapshots it).
+        let stats = Arc::new(PluginRuntimeStats::default());
+        let wasm_bytes = std::fs::metadata(self.plugins_dir.join(format!("{name}.wasm")))
+            .map(|m| m.len())
+            .unwrap_or(0);
         let cell = {
             let rebuild = build_plugin.clone();
             PluginCell {
@@ -999,7 +1116,38 @@ impl PluginManager {
                 name: name.clone(),
                 plugins_dir: self.plugins_dir.clone(),
                 rebuild: Box::new(move || rebuild(call_timeout)),
+                stats: stats.clone(),
             }
+        };
+        // Provider plugins get a SECOND instance dedicated to the
+        // `provider.*` hook family (send/register/models/interrupt), with
+        // the provider-send budget. Shares the plugin's stats cell and the
+        // same host wiring/slots — provider hooks land no user/invocation
+        // context, so nothing races.
+        let provider_plugin = if plugin_manifest
+            .hooks
+            .iter()
+            .any(|h| h == PROVIDER_SEND_HOOK)
+        {
+            let provider_timeout = call_timeout.max(self.provider_send_timeout);
+            let mut provider_instance = build_plugin(provider_timeout)?;
+            if approval == ApprovalState::Approved && init_error.is_none() {
+                let init_config = read_plugin_config(&self.plugins_dir, &name);
+                if let Err(e) = run_init(&mut provider_instance, init_config) {
+                    warn!("Plugin '{name}' provider-instance init failed: {e}");
+                    init_error = Some(e);
+                }
+            }
+            let rebuild = build_plugin.clone();
+            Some(Arc::new(Mutex::new(PluginCell {
+                plugin: provider_instance,
+                name: name.clone(),
+                plugins_dir: self.plugins_dir.clone(),
+                rebuild: Box::new(move || rebuild(provider_timeout)),
+                stats: stats.clone(),
+            })))
+        } else {
+            None
         };
         Ok(LoadedPlugin {
             name,
@@ -1007,10 +1155,13 @@ impl PluginManager {
             plugin: Arc::new(Mutex::new(cell)),
             hooks_canonical,
             approval,
+            provider_plugin,
             init_error,
             invocation,
             user,
             pending_provider,
+            stats,
+            wasm_bytes,
         })
     }
 
@@ -1044,10 +1195,8 @@ impl PluginManager {
                 "payload": current_payload,
             });
 
-            let result = {
-                let mut guard = plugin.lock().await;
-                guard.call_handle(call_input.to_string())
-            };
+            let input = call_input.to_string();
+            let result = with_cell_blocking(plugin, move |cell| cell.call_handle(input)).await;
 
             match result {
                 Ok(output) => match serde_json::from_str::<Verdict>(&output) {
@@ -1127,25 +1276,28 @@ impl PluginManager {
                 "hook": hook,
                 "payload": current_payload,
             });
-            let result = {
-                let mut guard = plugin.lock().await;
-                // Land the trusted user context only while this call holds the
-                // instance, then clear it before releasing the lock so a
-                // concurrent dispatch can't clobber it mid-call.
-                if let Ok(mut slot) = user_slot.write() {
-                    *slot = Some(super::host::UserContext {
-                        user_id: user_id.to_string(),
-                        folder_id: folder_id.clone(),
-                        project_id: project_id.clone(),
-                        session_id: session_id.clone(),
-                    });
+            let input = call_input.to_string();
+            let slot = user_slot.clone();
+            // Land the trusted user context only while the call holds the
+            // instance, then clear it before releasing the lock so a
+            // concurrent dispatch can't clobber it mid-call.
+            let ctx = super::host::UserContext {
+                user_id: user_id.to_string(),
+                folder_id: folder_id.clone(),
+                project_id: project_id.clone(),
+                session_id: session_id.clone(),
+            };
+            let result = with_cell_blocking(plugin, move |cell| {
+                if let Ok(mut s) = slot.write() {
+                    *s = Some(ctx);
                 }
-                let out = guard.call_handle(call_input.to_string());
-                if let Ok(mut slot) = user_slot.write() {
-                    *slot = None;
+                let out = cell.call_handle(input);
+                if let Ok(mut s) = slot.write() {
+                    *s = None;
                 }
                 out
-            };
+            })
+            .await;
             match result {
                 Ok(output) => match serde_json::from_str::<Verdict>(&output) {
                     Ok(Verdict::Allow { payload }) => {
@@ -1207,26 +1359,29 @@ impl PluginManager {
 
         let call_input = serde_json::json!({ "hook": hook, "payload": payload }).to_string();
         for (name, plugin, user_slot) in targets {
-            let result = {
-                let mut guard = plugin.lock().await;
-                // Land the trusted user context only while this call holds the
-                // instance (a notification carries no request scope), then clear
-                // it before releasing the lock so a concurrent dispatch can't
-                // clobber it mid-call.
-                if let Ok(mut slot) = user_slot.write() {
-                    *slot = Some(super::host::UserContext {
-                        user_id: user_id.to_string(),
-                        folder_id: None,
-                        project_id: None,
-                        session_id: None,
-                    });
+            let input = call_input.clone();
+            let slot = user_slot.clone();
+            // Land the trusted user context only while the call holds the
+            // instance (a notification carries no request scope), then clear
+            // it before releasing the lock so a concurrent dispatch can't
+            // clobber it mid-call.
+            let ctx = super::host::UserContext {
+                user_id: user_id.to_string(),
+                folder_id: None,
+                project_id: None,
+                session_id: None,
+            };
+            let result = with_cell_blocking(plugin, move |cell| {
+                if let Ok(mut s) = slot.write() {
+                    *s = Some(ctx);
                 }
-                let out = guard.call_handle(call_input.clone());
-                if let Ok(mut slot) = user_slot.write() {
-                    *slot = None;
+                let out = cell.call_handle(input);
+                if let Ok(mut s) = slot.write() {
+                    *s = None;
                 }
                 out
-            };
+            })
+            .await;
             if let Err(e) = result {
                 warn!("Plugin '{name}' failed on authed hook '{hook}': {e}");
             }
@@ -1258,10 +1413,8 @@ impl PluginManager {
                     .collect()
             };
             for (name, plugin) in targets {
-                let result = {
-                    let mut guard = plugin.lock().await;
-                    guard.call_handle(call_input.clone())
-                };
+                let input = call_input.clone();
+                let result = with_cell_blocking(plugin, move |cell| cell.call_handle(input)).await;
                 if let Err(e) = result {
                     warn!("Plugin '{name}' failed on notify hook '{hook}': {e}");
                 }
@@ -1295,7 +1448,11 @@ impl PluginManager {
                         && p.is_active()
                         && p.manifest.hooks.iter().any(|h| h == PROVIDER_SEND_HOOK)
                 })
-                .map(|p| p.plugin.clone())
+                .map(|p| {
+                    p.provider_plugin
+                        .clone()
+                        .unwrap_or_else(|| p.plugin.clone())
+                })
         };
         let Some(plugin) = target else {
             return Err(format!(
@@ -1360,7 +1517,11 @@ impl PluginManager {
                         && p.is_active()
                         && p.manifest.hooks.iter().any(|h| h == PROVIDER_MODELS_HOOK)
                 })
-                .map(|p| p.plugin.clone())?
+                .map(|p| {
+                    p.provider_plugin
+                        .clone()
+                        .unwrap_or_else(|| p.plugin.clone())
+                })?
         };
         let provider_id = {
             let owned = self.plugin_providers.lock().await;
@@ -1447,7 +1608,11 @@ impl PluginManager {
                                 .iter()
                                 .any(|h| h == PROVIDER_INTERRUPT_HOOK)
                     })
-                    .map(|p| p.plugin.clone())
+                    .map(|p| {
+                        p.provider_plugin
+                            .clone()
+                            .unwrap_or_else(|| p.plugin.clone())
+                    })
             };
             let Some(plugin) = target else {
                 return;
@@ -1521,7 +1686,15 @@ impl PluginManager {
                 .filter(|p| {
                     p.is_active() && p.manifest.hooks.iter().any(|h| h == PROVIDER_REGISTER_HOOK)
                 })
-                .map(|p| (p.name.clone(), p.plugin.clone(), p.pending_provider.clone()))
+                .map(|p| {
+                    (
+                        p.name.clone(),
+                        p.provider_plugin
+                            .clone()
+                            .unwrap_or_else(|| p.plugin.clone()),
+                        p.pending_provider.clone(),
+                    )
+                })
                 .collect()
         };
 
@@ -1691,10 +1864,8 @@ impl PluginManager {
                 "payload": req_payload,
             });
 
-            let result = {
-                let mut guard = plugin.lock().await;
-                guard.call_handle(call_input.to_string())
-            };
+            let input = call_input.to_string();
+            let result = with_cell_blocking(plugin, move |cell| cell.call_handle(input)).await;
 
             match result {
                 Ok(output) => match serde_json::from_str::<Verdict>(&output) {
@@ -1802,25 +1973,28 @@ impl PluginManager {
                 "payload": req_payload,
             });
 
-            let result = {
-                let mut guard = plugin.lock().await;
-                // Land the trusted user context only while this call holds the
-                // instance, then clear it before releasing the lock — so a
-                // concurrent authed request can't clobber it mid-call.
-                if let Ok(mut slot) = user_slot.write() {
-                    *slot = Some(super::host::UserContext {
-                        user_id: user_id.to_string(),
-                        folder_id: scope.folder_id.clone(),
-                        project_id: scope.project_id.clone(),
-                        session_id: scope.session_id.clone(),
-                    });
+            let input = call_input.to_string();
+            let slot = user_slot.clone();
+            // Land the trusted user context only while the call holds the
+            // instance, then clear it before releasing the lock — so a
+            // concurrent authed request can't clobber it mid-call.
+            let ctx = super::host::UserContext {
+                user_id: user_id.to_string(),
+                folder_id: scope.folder_id.clone(),
+                project_id: scope.project_id.clone(),
+                session_id: scope.session_id.clone(),
+            };
+            let result = with_cell_blocking(plugin, move |cell| {
+                if let Ok(mut s) = slot.write() {
+                    *s = Some(ctx);
                 }
-                let out = guard.call_handle(call_input.to_string());
-                if let Ok(mut slot) = user_slot.write() {
-                    *slot = None;
+                let out = cell.call_handle(input);
+                if let Ok(mut s) = slot.write() {
+                    *s = None;
                 }
                 out
-            };
+            })
+            .await;
 
             match result {
                 Ok(output) => match serde_json::from_str::<Verdict>(&output) {
@@ -1934,12 +2108,15 @@ impl PluginManager {
         // (up to 2s) `init` call.
         let target = {
             let plugins = self.plugins.lock().await;
-            plugins
-                .iter()
-                .find(|p| p.name == plugin_id)
-                .map(|p| (p.plugin.clone(), p.hooks_canonical.clone()))
+            plugins.iter().find(|p| p.name == plugin_id).map(|p| {
+                (
+                    p.plugin.clone(),
+                    p.provider_plugin.clone(),
+                    p.hooks_canonical.clone(),
+                )
+            })
         };
-        let Some((plugin, hooks_canonical)) = target else {
+        let Some((plugin, provider_plugin, hooks_canonical)) = target else {
             return Ok(None);
         };
 
@@ -1955,13 +2132,25 @@ impl PluginManager {
 
         // Approving runs the deferred `init`; denying leaves the plugin
         // inert with `init` never run.
+        // Approving runs the deferred `init` — on the provider instance too,
+        // when the plugin has one; denying leaves the plugin inert with
+        // `init` never run.
         let mut init_error = None;
         let new_state = if approve {
             let init_config = read_plugin_config(&self.plugins_dir, plugin_id);
-            let mut guard = plugin.lock().await;
-            if let Err(e) = run_init(&mut guard.plugin, init_config) {
-                warn!("Plugin '{plugin_id}' init failed on approval: {e}");
-                init_error = Some(e);
+            {
+                let mut guard = plugin.lock().await;
+                if let Err(e) = run_init(&mut guard.plugin, init_config.clone()) {
+                    warn!("Plugin '{plugin_id}' init failed on approval: {e}");
+                    init_error = Some(e);
+                }
+            }
+            if let Some(pp) = provider_plugin {
+                let mut guard = pp.lock().await;
+                if let Err(e) = run_init(&mut guard.plugin, init_config) {
+                    warn!("Plugin '{plugin_id}' provider-instance init failed on approval: {e}");
+                    init_error = init_error.or(Some(e));
+                }
             }
             ApprovalState::Approved
         } else {
@@ -2371,21 +2560,28 @@ impl PluginManager {
                 "payload": &payload,
             });
 
-            // Hold the per-plugin instance lock only across the (fast) guest
-            // call. The trusted context is landed and cleared *inside* the lock
-            // so its lifetime matches exactly this call (see `caller_ctx`).
+            // The instance lock is held only across the guest call — on a
+            // blocking thread (see `with_cell_blocking`). The trusted context
+            // is landed and cleared *inside* the lock so its lifetime matches
+            // exactly this call (see `caller_ctx`).
             let output = {
-                let mut guard = plugin.lock().await;
-                if let Some(ref ctx) = caller_ctx
-                    && let Ok(mut slot) = invocation.write()
-                {
-                    *slot = Some(ctx.clone());
-                }
-                let out = guard.call_handle(call_input.to_string());
-                if let Ok(mut slot) = invocation.write() {
-                    *slot = None;
-                }
-                out
+                let input = call_input.to_string();
+                let plugin = plugin.clone();
+                let invocation = invocation.clone();
+                let ctx = caller_ctx.clone();
+                with_cell_blocking(plugin, move |cell| {
+                    if let Some(ctx) = ctx
+                        && let Ok(mut slot) = invocation.write()
+                    {
+                        *slot = Some(ctx);
+                    }
+                    let out = cell.call_handle(input);
+                    if let Ok(mut slot) = invocation.write() {
+                        *slot = None;
+                    }
+                    out
+                })
+                .await
             };
 
             let output = match output {

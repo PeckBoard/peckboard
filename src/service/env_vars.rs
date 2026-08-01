@@ -15,7 +15,7 @@
 //! the channel payloads nor the cache are ever persisted or logged.
 
 use std::collections::HashMap;
-use std::sync::{Arc, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 use aes_gcm::aead::{Aead, KeyInit};
@@ -25,7 +25,7 @@ use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD as B64;
 use rand::RngCore;
 use rand::rngs::OsRng;
-use tokio::sync::{Mutex, oneshot};
+use tokio::sync::oneshot;
 
 /// How long a user's decrypted values stay cached after an unlock before the
 /// next use re-prompts. 30 minutes.
@@ -144,6 +144,18 @@ impl EnvUnlockRegistry {
         Self::default()
     }
 
+    /// Lock the inner state, recovering from a poisoned lock. Every
+    /// critical section is a short, panic-free map operation, so a poisoned
+    /// guard still holds valid state; recovering (instead of erroring or
+    /// panicking) keeps one panicked holder from wedging env vars for the
+    /// life of the process. Safe on any thread — including async runtime
+    /// workers (this replaced a tokio `blocking_lock` that panicked there).
+    fn lock_inner(&self) -> std::sync::MutexGuard<'_, Inner> {
+        self.inner
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
     /// Register a use-time unlock prompt for `user_id` covering `var_names`.
     /// Returns the request id and a receiver that resolves when the prompt is
     /// answered (`Some(map)` = unlocked values, `None` = user cancelled) or
@@ -155,7 +167,7 @@ impl EnvUnlockRegistry {
     ) -> (String, oneshot::Receiver<Option<ValueMap>>) {
         let request_id = uuid::Uuid::new_v4().to_string();
         let (tx, rx) = oneshot::channel();
-        self.inner.lock().await.pending.insert(
+        self.lock_inner().pending.insert(
             request_id.clone(),
             Pending {
                 user_id: user_id.to_string(),
@@ -169,9 +181,7 @@ impl EnvUnlockRegistry {
     /// The user id a pending request belongs to, or `None` if unknown. Lets a
     /// route authorize the answerer without consuming the request.
     pub async fn pending_user(&self, request_id: &str) -> Option<String> {
-        self.inner
-            .lock()
-            .await
+        self.lock_inner()
             .pending
             .get(request_id)
             .map(|p| p.user_id.clone())
@@ -182,7 +192,7 @@ impl EnvUnlockRegistry {
     /// wrong-password attempt must NOT be routed here — the caller simply
     /// doesn't call `resolve`, leaving the request open for a retry.
     pub async fn resolve(&self, request_id: &str, decrypted: Option<ValueMap>) -> bool {
-        let pending = self.inner.lock().await.pending.remove(request_id);
+        let pending = self.lock_inner().pending.remove(request_id);
         match pending {
             Some(p) => p.tx.send(decrypted).is_ok(),
             None => false,
@@ -196,7 +206,7 @@ impl EnvUnlockRegistry {
     /// request would leave the rest blocking until timeout. Returns how many
     /// requests were resolved.
     pub async fn resolve_all_for_user(&self, user_id: &str, values: &ValueMap) -> usize {
-        let mut g = self.inner.lock().await;
+        let mut g = self.lock_inner();
         let ids: Vec<String> = g
             .pending
             .iter()
@@ -214,7 +224,7 @@ impl EnvUnlockRegistry {
     /// Drop a pending request without answering (timeout path). A late
     /// `resolve` for the same id then returns `false`.
     pub async fn drop_request(&self, request_id: &str) {
-        self.inner.lock().await.pending.remove(request_id);
+        self.lock_inner().pending.remove(request_id);
     }
 
     /// Cache a user's decrypted values for [`UNLOCK_CACHE_TTL_SECS`].
@@ -231,33 +241,30 @@ impl EnvUnlockRegistry {
 
     /// Drop a user's cached values (explicit lock, e.g. on logout).
     pub async fn lock_user(&self, user_id: &str) {
-        self.inner.lock().await.cache.remove(user_id);
+        self.lock_inner().cache.remove(user_id);
     }
 
     // ── time-injectable internals (used directly by tests) ────────────────
 
     async fn cache_put_at(&self, user_id: &str, values: ValueMap, expires_at: Instant) {
-        self.inner
-            .lock()
-            .await
+        self.lock_inner()
             .cache
             .insert(user_id.to_string(), CacheEntry { values, expires_at });
     }
 
     async fn cache_get_at(&self, user_id: &str, now: Instant) -> Option<ValueMap> {
-        let mut g = self.inner.lock().await;
+        let mut g = self.lock_inner();
         g.cache.retain(|_, e| e.expires_at > now);
         g.cache.get(user_id).map(|e| e.values.clone())
     }
 
-    /// Blocking snapshot of every owner's unexpired cached plaintexts,
-    /// merged var id → value (ids are unique DB-wide, so a value appears
-    /// at most once). Purges expired entries as a side effect. Uses
-    /// `Mutex::blocking_lock` — callable only OUTSIDE the async runtime's
-    /// worker threads (the blocking command-exec path qualifies).
+    /// Snapshot of every owner's unexpired cached plaintexts, merged
+    /// var id → value (ids are unique DB-wide, so a value appears at most
+    /// once). Purges expired entries as a side effect. Callable from any
+    /// thread — sync and async paths alike.
     pub fn all_cached_values_blocking(&self) -> HashMap<String, String> {
         let now = Instant::now();
-        let mut g = self.inner.blocking_lock();
+        let mut g = self.lock_inner();
         g.cache.retain(|_, e| e.expires_at > now);
         let mut out = HashMap::new();
         for entry in g.cache.values() {
@@ -418,5 +425,19 @@ mod tests {
 
         reg.lock_user("u1").await;
         assert!(reg.cache_get("u1").await.is_none());
+    }
+
+    #[tokio::test]
+    async fn snapshot_safe_on_async_runtime_worker() {
+        let reg = EnvUnlockRegistry::new();
+        let mut vals = ValueMap::new();
+        vals.insert("id1".into(), "v".into());
+        reg.cache_put("u1", vals).await;
+        // Regression (2026-07-31): this used tokio `blocking_lock`, which
+        // panics when called on an async runtime worker — exactly where
+        // plugin HTTP dispatch invoked it via the exec host function. The
+        // panic poisoned the extism instance lock and wedged the plugin.
+        let all = reg.all_cached_values_blocking();
+        assert_eq!(all.get("id1").map(String::as_str), Some("v"));
     }
 }

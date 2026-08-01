@@ -88,6 +88,15 @@ test('WASM plugin settings live on Plugin Settings and save through the shared f
             permissions: ['provide_mcp_tools', 'http_request'],
             status: 'approved',
             error: null,
+            stats: {
+              calls: 42,
+              errors: 1,
+              rebuilds: 0,
+              busy_ms: 1234,
+              last_call_ms: 87,
+              last_call_at: '2026-07-31T20:00:00Z',
+              wasm_bytes: 215018,
+            },
             settings_schema: SCHEMA,
           },
         ],
@@ -166,8 +175,19 @@ test('WASM plugin settings live on Plugin Settings and save through the shared f
   const row = page.getByTestId('wasm-plugin-nginx-manager')
   await expect(row).toBeVisible({ timeout: 10_000 })
   await expect(page.getByTestId('wasm-plugin-settings-nginx-manager')).toHaveCount(0)
+  // Each installed plugin advertises its resource usage: compact chips on
+  // the row (wasm size, calls, busy time)…
+  const usage = row.getByTestId('wasm-plugin-usage')
+  await expect(usage).toBeVisible()
+  await expect(usage).toContainText('calls')
   await row.getByTestId('wasm-plugin-open-nginx-manager').click()
   const details = page.getByTestId('plugin-details-nginx-manager')
   await expect(details).toBeVisible()
   await expect(details.getByRole('button', { name: 'Settings' })).toHaveCount(0)
+  // …and the full counter grid in the details modal.
+  const usageBlock = details.getByTestId('plugin-usage')
+  await expect(usageBlock).toBeVisible()
+  await expect(usageBlock).toContainText('Wasm size')
+  await expect(usageBlock).toContainText('Instance rebuilds')
+  await page.screenshot({ path: 'e2e/test-results/wasm-plugin-usage.png' })
 })

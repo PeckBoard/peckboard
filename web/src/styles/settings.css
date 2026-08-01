@@ -532,6 +532,47 @@
 }
 .plugin-row .plugin-approval-remove {
   flex: none;
+  /* Per-plugin resource usage: compact chips on the row… */
+  .wasm-plugin-usage {
+    flex: none;
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+  }
+  .wasm-plugin-usage-chip {
+    color: var(--text3);
+    font-size: var(--text-2xs, 10px);
+    line-height: 1.4;
+    padding: 1px 6px;
+    border: 1px solid var(--border);
+    border-radius: 999px;
+    white-space: nowrap;
+  }
+  .wasm-plugin-usage-chip--errors {
+    color: var(--danger, #c33);
+    border-color: color-mix(in srgb, var(--danger, #c33) 45%, transparent);
+  }
+  /* …and the fuller grid in the details modal. */
+  .plugin-usage {
+    margin-top: 12px;
+  }
+  .plugin-usage-grid {
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    gap: 8px 12px;
+    margin: 6px 0 0;
+  }
+  .plugin-usage-item dt {
+    color: var(--text3);
+    font-size: var(--text-2xs, 10px);
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+  }
+  .plugin-usage-item dd {
+    margin: 1px 0 0;
+    font-size: var(--text-sm);
+    font-variant-numeric: tabular-nums;
+  }
 }
 
 /* Plugin details modal (opened from a compact row). */

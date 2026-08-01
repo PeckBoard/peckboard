@@ -5,7 +5,12 @@ import PluginPanelModal from './PluginPanelModal'
 import ConfirmDialog from './ConfirmDialog'
 import HookList from './HookList'
 import PermissionList from './PermissionList'
-import { decidePluginApproval, uninstallPlugin, type WasmPlugin } from '../utils/pluginApproval'
+import {
+  decidePluginApproval,
+  uninstallPlugin,
+  type WasmPlugin,
+  type WasmPluginStats,
+} from '../utils/pluginApproval'
 
 interface Permission {
   id: string
@@ -228,6 +233,7 @@ function WasmPluginList({
               <span className="wasm-plugin-name">{p.name}</span>
               {badgeFor(p.status)}
               <span className="plugin-row-summary">{firstSentence(p.description)}</span>
+              {p.stats && <PluginUsageChips stats={p.stats} />}
             </button>
             {isAdmin && (
               <button
@@ -265,6 +271,7 @@ function WasmPluginList({
           )}
           <HookList hooks={detailsFor.hooks} title="Hooks" />
           <PermissionList permissions={detailsFor.permissions} title="Permissions" />
+          <PluginUsageBlock stats={detailsFor.stats} />
           <PluginPanelList panels={panels.filter((panel) => panel.plugin === detailsFor.name)} />
           {error && (
             <p className="plugin-card-error" role="alert" data-testid="plugin-details-error">
@@ -328,6 +335,82 @@ function SourceRepo({ repository }: { repository: string }) {
     <a className="wasm-plugin-repo" href={repository} target="_blank" rel="noreferrer noopener">
       {label}
     </a>
+  )
+}
+
+/** Human-readable byte size: 2.3 MB, 412 kB. */
+function fmtBytes(n: number): string {
+  if (n <= 0) return '—'
+  if (n < 1024) return `${n} B`
+  if (n < 1024 * 1024) return `${(n / 1024).toFixed(n < 10240 ? 1 : 0)} kB`
+  return `${(n / (1024 * 1024)).toFixed(1)} MB`
+}
+
+/** Human-readable duration from milliseconds: 840 ms, 2.1 s, 3.5 min. */
+function fmtDuration(ms: number): string {
+  if (ms < 1000) return `${ms} ms`
+  if (ms < 60_000) return `${(ms / 1000).toFixed(1)} s`
+  return `${(ms / 60_000).toFixed(1)} min`
+}
+
+/**
+ * Compact per-plugin resource usage on the row: wasm size, call count, and
+ * total execution time, plus an error chip only when something failed.
+ * Counters are per-process — they reset when the server restarts or the
+ * plugin is reinstalled.
+ */
+function PluginUsageChips({ stats }: { stats: WasmPluginStats }) {
+  return (
+    <span className="wasm-plugin-usage" data-testid="wasm-plugin-usage">
+      <span className="wasm-plugin-usage-chip">{fmtBytes(stats.wasm_bytes)}</span>
+      <span className="wasm-plugin-usage-chip">
+        {stats.calls.toLocaleString()} {stats.calls === 1 ? 'call' : 'calls'}
+      </span>
+      <span className="wasm-plugin-usage-chip">{fmtDuration(stats.busy_ms)} busy</span>
+      {stats.errors > 0 && (
+        <span className="wasm-plugin-usage-chip wasm-plugin-usage-chip--errors">
+          {stats.errors.toLocaleString()} {stats.errors === 1 ? 'error' : 'errors'}
+        </span>
+      )}
+    </span>
+  )
+}
+
+/**
+ * Fuller usage list for the details modal: every counter the host tracks,
+ * including instance rebuilds (the self-healing path) and the last call.
+ */
+function PluginUsageBlock({ stats }: { stats?: WasmPluginStats | null }) {
+  if (!stats) return null
+  const rows: [string, string][] = [
+    ['Wasm size', fmtBytes(stats.wasm_bytes)],
+    ['Calls', stats.calls.toLocaleString()],
+    ['Errors', stats.errors.toLocaleString()],
+    ['Instance rebuilds', stats.rebuilds.toLocaleString()],
+    ['Total execution time', fmtDuration(stats.busy_ms)],
+    [
+      'Last call',
+      stats.last_call_ms == null
+        ? 'never'
+        : `${fmtDuration(stats.last_call_ms)}${
+            stats.last_call_at ? ` · ${new Date(stats.last_call_at).toLocaleString()}` : ''
+          }`,
+    ],
+  ]
+  return (
+    <div className="plugin-usage" data-testid="plugin-usage">
+      <div className="plugin-panels-title" title="Counted since the server started">
+        Resource usage
+      </div>
+      <dl className="plugin-usage-grid">
+        {rows.map(([label, value]) => (
+          <div key={label} className="plugin-usage-item">
+            <dt>{label}</dt>
+            <dd>{value}</dd>
+          </div>
+        ))}
+      </dl>
+    </div>
   )
 }
 
