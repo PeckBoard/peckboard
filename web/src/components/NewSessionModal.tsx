@@ -6,6 +6,7 @@ import { effortOptionsForModel, useResourcesStore } from '../store/resources'
 import Modal from './Modal'
 import ModelPicker from './ModelPicker'
 import SystemPromptPicker from './SystemPromptPicker'
+import PickerLoadError from './PickerLoadError'
 import { PRESET_PROMPTS, presetSessionName } from '../utils/presetPrompts'
 import type { WasmPlugin } from '../utils/pluginApproval'
 
@@ -27,6 +28,7 @@ export default function NewSessionModal({ onClose, onCreated }: Props) {
   const models = useResourcesStore((s) => s.models)
   const providers = useResourcesStore((s) => s.providers)
   const fetchModels = useResourcesStore((s) => s.fetchModels)
+  const modelsLoadError = useResourcesStore((s) => s.resourceErrors.models)
   const defaultModel = useResourcesStore((s) => s.defaultModel)
   const fetchDefaultModel = useResourcesStore((s) => s.fetchDefaultModel)
 
@@ -255,6 +257,9 @@ export default function NewSessionModal({ onClose, onCreated }: Props) {
             ariaLabel="Select model"
             testId="new-session-model"
           />
+          {modelsLoadError && models.length === 0 && (
+            <PickerLoadError label="models" onRetry={fetchModels} />
+          )}
         </div>
         <div className="form-field">
           <label className="form-label" htmlFor="new-session-effort">

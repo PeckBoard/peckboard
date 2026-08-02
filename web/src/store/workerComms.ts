@@ -24,6 +24,14 @@ interface WorkerCommsState {
   workersByProject: Record<string, WorkerInfo[]>
   messagesByProject: Record<string, CommMessage[]>
   loadingByProject: Record<string, boolean>
+  /** True when the project-wide fetch itself failed (not an individual
+   *  worker's event scan) — previous data is kept, but the view must not
+   *  read a stale/absent list as "no communications". */
+  errorByProject: Record<string, boolean>
+  /** Count of workers whose event-history scan failed this fetch, so a
+   *  partial failure (some workers loaded, some didn't) is visible instead
+   *  of silently dropping their messages. */
+  unreachableByProject: Record<string, number>
   fetchComms: (projectId: string) => Promise<void>
 }
 
@@ -38,14 +46,26 @@ export const useWorkerCommsStore = create<WorkerCommsState>((set) => ({
   workersByProject: {},
   messagesByProject: {},
   loadingByProject: {},
+  errorByProject: {},
+  unreachableByProject: {},
 
   fetchComms: async (projectId: string) => {
     set((s) => ({
       loadingByProject: { ...s.loadingByProject, [projectId]: true },
     }))
     try {
-      const sessRes = await authedFetch(`/api/projects/${projectId}`)
-      const projData = sessRes.ok ? await sessRes.json() : null
+      let sessRes: Response
+      try {
+        sessRes = await authedFetch(`/api/projects/${projectId}`)
+      } catch {
+        set((s) => ({ errorByProject: { ...s.errorByProject, [projectId]: true } }))
+        return
+      }
+      if (!sessRes.ok) {
+        set((s) => ({ errorByProject: { ...s.errorByProject, [projectId]: true } }))
+        return
+      }
+      const projData = await sessRes.json()
       const cards: CardLite[] = projData?.cards ?? []
 
       const workerMap: Record<string, WorkerInfo> = {}
@@ -63,6 +83,7 @@ export const useWorkerCommsStore = create<WorkerCommsState>((set) => ({
       }
 
       const comms: CommMessage[] = []
+      let unreachable = 0
       for (const w of Object.values(workerMap)) {
         try {
           // `?after_seq=0` opts into the unbounded WS-catchup mode of
@@ -73,7 +94,10 @@ export const useWorkerCommsStore = create<WorkerCommsState>((set) => ({
           // for `source: worker-*` user events scattered throughout
           // the timeline.
           const evRes = await authedFetch(`/api/sessions/${w.session_id}/events?after_seq=0`)
-          if (!evRes.ok) continue
+          if (!evRes.ok) {
+            unreachable++
+            continue
+          }
           const events: Event[] = await evRes.json()
           for (const e of events) {
             if (e.kind !== 'user') continue
@@ -119,7 +143,7 @@ export const useWorkerCommsStore = create<WorkerCommsState>((set) => ({
             })
           }
         } catch {
-          /* skip individual worker scan errors */
+          unreachable++
         }
       }
 
@@ -128,7 +152,11 @@ export const useWorkerCommsStore = create<WorkerCommsState>((set) => ({
       set((s) => ({
         workersByProject: { ...s.workersByProject, [projectId]: Object.values(workerMap) },
         messagesByProject: { ...s.messagesByProject, [projectId]: comms },
+        errorByProject: { ...s.errorByProject, [projectId]: false },
+        unreachableByProject: { ...s.unreachableByProject, [projectId]: unreachable },
       }))
+    } catch {
+      set((s) => ({ errorByProject: { ...s.errorByProject, [projectId]: true } }))
     } finally {
       set((s) => ({
         loadingByProject: { ...s.loadingByProject, [projectId]: false },

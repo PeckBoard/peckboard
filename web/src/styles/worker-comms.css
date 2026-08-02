@@ -28,6 +28,17 @@
   color: var(--text3);
 }
 
+.worker-comms-notice {
+  padding: 8px 16px;
+  background: var(--warning-bg);
+  border: 1px solid var(--warning);
+  border-radius: var(--radius-md);
+  color: var(--text);
+  font-size: var(--text-sm);
+  margin-bottom: 16px;
+  flex-shrink: 0;
+}
+
 .worker-comms-legend {
   display: flex;
   flex-wrap: wrap;

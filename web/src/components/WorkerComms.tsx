@@ -57,6 +57,8 @@ export default function WorkerComms({ projectId, onClose }: WorkerCommsProps) {
   const messages =
     useWorkerCommsStore((s) => s.messagesByProject[projectId]) ?? (EMPTY_MESSAGES as CommMessage[])
   const loading = useWorkerCommsStore((s) => s.loadingByProject[projectId]) ?? true
+  const loadError = useWorkerCommsStore((s) => s.errorByProject[projectId]) ?? false
+  const unreachable = useWorkerCommsStore((s) => s.unreachableByProject[projectId]) ?? 0
   const fetchComms = useWorkerCommsStore((s) => s.fetchComms)
   const scrollRef = useRef<HTMLDivElement>(null)
   const addEventListener = useWsStore((s) => s.addEventListener)
@@ -126,6 +128,13 @@ export default function WorkerComms({ projectId, onClose }: WorkerCommsProps) {
         <span className="worker-comms-count">{messages.length} messages</span>
       </div>
 
+      {unreachable > 0 && (
+        <div className="worker-comms-notice" role="status">
+          {unreachable} worker{unreachable === 1 ? '' : 's'} unreachable — messages may be
+          incomplete.
+        </div>
+      )}
+
       {/* Worker legend */}
       <div className="worker-comms-legend">
         {workers.map((w) => (
@@ -147,7 +156,15 @@ export default function WorkerComms({ projectId, onClose }: WorkerCommsProps) {
             <div className="loading-spinner" />
           </div>
         )}
-        {!loading && messages.length === 0 && (
+        {!loading && loadError && (
+          <div className="worker-comms-empty" role="alert">
+            Failed to load worker communications.{' '}
+            <button type="button" className="form-link-btn" onClick={() => fetchComms(projectId)}>
+              Retry
+            </button>
+          </div>
+        )}
+        {!loading && !loadError && messages.length === 0 && (
           <div className="worker-comms-empty">No inter-worker communications yet.</div>
         )}
         {messages.map((msg) => (

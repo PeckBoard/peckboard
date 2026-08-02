@@ -6,6 +6,7 @@ import type { Card } from '../types/api'
 import DependencyPickerModal from './DependencyPickerModal'
 import Modal from './Modal'
 import ModelPicker from './ModelPicker'
+import PickerLoadError from './PickerLoadError'
 import SystemPromptPicker from './SystemPromptPicker'
 import WorkflowSelect from './WorkflowSelect'
 
@@ -69,6 +70,7 @@ export default function CardFormModal(props: CardFormProps) {
   const models = useResourcesStore((s) => s.models)
   const providers = useResourcesStore((s) => s.providers)
   const fetchModels = useResourcesStore((s) => s.fetchModels)
+  const modelsLoadError = useResourcesStore((s) => s.resourceErrors.models)
   const defaultModel = useResourcesStore((s) => s.defaultModel)
   const fetchDefaultModel = useResourcesStore((s) => s.fetchDefaultModel)
   // The app-wide default model (Settings → Default Model) preselects for a
@@ -271,6 +273,9 @@ export default function CardFormModal(props: CardFormProps) {
               models={models as ModelInfo[]}
               testId="card-model"
             />
+            {modelsLoadError && models.length === 0 && (
+              <PickerLoadError label="models" onRetry={fetchModels} />
+            )}
           </div>
           <div className="form-field">
             <label className="form-label" htmlFor="card-system-prompt">

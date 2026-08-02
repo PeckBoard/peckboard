@@ -1,6 +1,7 @@
 import { useEffect } from 'react'
 import { useResourcesStore } from '../store/resources'
 import ModelPicker from './ModelPicker'
+import PickerLoadError from './PickerLoadError'
 
 interface SystemPromptPickerProps {
   value: string | null
@@ -25,6 +26,7 @@ export default function SystemPromptPicker({
 }: SystemPromptPickerProps) {
   const systemPrompts = useResourcesStore((s) => s.systemPrompts)
   const fetchSystemPrompts = useResourcesStore((s) => s.fetchSystemPrompts)
+  const loadError = useResourcesStore((s) => s.resourceErrors.systemPrompts)
 
   useEffect(() => {
     fetchSystemPrompts()
@@ -34,16 +36,21 @@ export default function SystemPromptPicker({
   const models = systemPrompts.map((p) => ({ id: p.name, display_name: p.name }))
 
   return (
-    <ModelPicker
-      value={value ?? ''}
-      onChange={(next) => onChange(next || null)}
-      models={models}
-      defaultLabel="(none)"
-      ariaLabel="Select system prompt"
-      emptyHint="Loading system prompts…"
-      testId={testId}
-      id={id}
-      disabled={disabled}
-    />
+    <>
+      <ModelPicker
+        value={value ?? ''}
+        onChange={(next) => onChange(next || null)}
+        models={models}
+        defaultLabel="(none)"
+        ariaLabel="Select system prompt"
+        emptyHint="Loading system prompts…"
+        testId={testId}
+        id={id}
+        disabled={disabled}
+      />
+      {loadError && systemPrompts.length === 0 && (
+        <PickerLoadError label="system prompts" onRetry={fetchSystemPrompts} />
+      )}
+    </>
   )
 }
