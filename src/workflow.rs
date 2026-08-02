@@ -346,15 +346,113 @@ pub const WORKFLOWS: &[Workflow] = &[
     },
 ];
 
-/// Look up a workflow by exact id.
-pub fn workflow_by_id(id: &str) -> Option<&'static Workflow> {
+/// Owned, serializable form of a workflow step. Built-ins convert into
+/// this via [`WorkflowStep`]'s `From` impl below; custom workflows are
+/// stored this way directly (see `db::crud::custom_workflows`).
+#[derive(Debug, Clone, Serialize)]
+pub struct WorkflowStepDef {
+    pub step: String,
+    pub instructions: String,
+}
+
+impl From<&WorkflowStep> for WorkflowStepDef {
+    fn from(s: &WorkflowStep) -> Self {
+        WorkflowStepDef {
+            step: s.step.to_string(),
+            instructions: s.instructions.to_string(),
+        }
+    }
+}
+
+/// Owned, serializable form of a workflow — the shape every caller (HTTP
+/// routes, MCP handlers, the orchestrator) actually works with. Built-ins
+/// convert from the `&'static Workflow` registry below; user-defined
+/// workflows are loaded from the `custom_workflows` DB table into the
+/// in-memory registry at startup and after every mutation.
+///
+/// `&'static` return types don't work once workflows can be created at
+/// runtime, so every public lookup in this module returns an owned
+/// `WorkflowDef` rather than a reference into `WORKFLOWS`.
+#[derive(Debug, Clone, Serialize)]
+pub struct WorkflowDef {
+    pub id: String,
+    pub name: String,
+    pub description: String,
+    pub priority: u32,
+    /// "builtin" or "custom" — lets the picker and management UI tag
+    /// entries and lets routes reject writes to built-ins.
+    pub source: &'static str,
+    pub steps: Vec<WorkflowStepDef>,
+}
+
+impl From<&'static Workflow> for WorkflowDef {
+    fn from(w: &'static Workflow) -> Self {
+        WorkflowDef {
+            id: w.id.to_string(),
+            name: w.name.to_string(),
+            description: w.description.to_string(),
+            priority: w.priority,
+            source: "builtin",
+            steps: w.steps.iter().map(WorkflowStepDef::from).collect(),
+        }
+    }
+}
+
+/// In-memory registry of user-defined workflows, primed from the DB at
+/// startup and refreshed after every create/update/delete. Built-ins never
+/// go in here — they stay in the `WORKFLOWS` const above and are always
+/// read-only.
+static CUSTOM_WORKFLOWS: std::sync::RwLock<Vec<WorkflowDef>> = std::sync::RwLock::new(Vec::new());
+
+/// Replace the full set of custom workflows held in memory. Called at
+/// startup (after loading from the DB) and after any CRUD mutation so
+/// every reader — the orchestrator, the worker prompt builder, the HTTP
+/// listing — sees the change immediately without a DB round-trip.
+pub fn set_custom_workflows(defs: Vec<WorkflowDef>) {
+    let mut guard = CUSTOM_WORKFLOWS
+        .write()
+        .expect("workflow registry poisoned");
+    *guard = defs;
+}
+
+/// Every workflow — built-ins first (in their fixed order), then custom
+/// workflows. Callers that need a stable display order (the picker) sort
+/// by `priority`/`name` themselves; this just returns the full set.
+pub fn all_workflows() -> Vec<WorkflowDef> {
+    let mut all: Vec<WorkflowDef> = WORKFLOWS.iter().map(WorkflowDef::from).collect();
+    all.extend(
+        CUSTOM_WORKFLOWS
+            .read()
+            .expect("workflow registry poisoned")
+            .iter()
+            .cloned(),
+    );
+    all
+}
+
+/// Look up a built-in workflow by exact id. Built-ins only — use
+/// [`workflow_by_id`] to resolve across built-in + custom.
+fn builtin_by_id(id: &str) -> Option<&'static Workflow> {
     WORKFLOWS.iter().find(|w| w.id == id)
+}
+
+/// Look up a workflow by exact id across built-ins and custom workflows.
+pub fn workflow_by_id(id: &str) -> Option<WorkflowDef> {
+    if let Some(w) = builtin_by_id(id) {
+        return Some(WorkflowDef::from(w));
+    }
+    CUSTOM_WORKFLOWS
+        .read()
+        .expect("workflow registry poisoned")
+        .iter()
+        .find(|w| w.id == id)
+        .cloned()
 }
 
 /// The default workflow definition. Infallible — the default id is always
 /// present in [`WORKFLOWS`].
-pub fn default_workflow() -> &'static Workflow {
-    workflow_by_id(DEFAULT_WORKFLOW_ID).expect("default workflow must exist")
+pub fn default_workflow() -> WorkflowDef {
+    WorkflowDef::from(builtin_by_id(DEFAULT_WORKFLOW_ID).expect("default workflow must exist"))
 }
 
 /// Resolve a workflow id to its ordered step names, falling back to the
@@ -366,22 +464,105 @@ pub fn default_workflow() -> &'static Workflow {
 /// the fallback path.
 pub fn steps_for(id: Option<&str>) -> Vec<String> {
     let wf = id.and_then(workflow_by_id).unwrap_or_else(default_workflow);
-    wf.steps.iter().map(|s| s.step.to_string()).collect()
+    wf.steps.into_iter().map(|s| s.step).collect()
 }
 
 /// Look up the per-step instructions for a workflow/step combination. Returns
 /// `None` when the workflow doesn't define the step or the step's
 /// instructions are empty.
-pub fn step_instructions(workflow_id: Option<&str>, step: &str) -> Option<&'static str> {
+pub fn step_instructions(workflow_id: Option<&str>, step: &str) -> Option<String> {
     let wf = workflow_id
         .and_then(workflow_by_id)
         .unwrap_or_else(default_workflow);
     wf.steps
-        .iter()
+        .into_iter()
         .find(|s| s.step == step)
         .map(|s| s.instructions)
         .filter(|i| !i.is_empty())
 }
+/// Max steps a custom workflow may declare. Generous enough for any real
+/// use case; guards against pathological input.
+const MAX_CUSTOM_WORKFLOW_STEPS: usize = 12;
+const MAX_CUSTOM_WORKFLOW_NAME_LEN: usize = 200;
+
+/// Validate a custom workflow's name: non-empty, length-bounded, and not a
+/// case-insensitive collision with any existing workflow (built-in or
+/// custom) other than `self_id` (the workflow being updated, if any).
+pub fn validate_workflow_name(name: &str, self_id: Option<&str>) -> Result<(), String> {
+    if name.trim().is_empty() {
+        return Err("name must not be empty".to_string());
+    }
+    if name.chars().count() > MAX_CUSTOM_WORKFLOW_NAME_LEN {
+        return Err(format!(
+            "name must be at most {MAX_CUSTOM_WORKFLOW_NAME_LEN} characters"
+        ));
+    }
+    let lower = name.trim().to_lowercase();
+    let collides = all_workflows()
+        .into_iter()
+        .any(|w| Some(w.id.as_str()) != self_id && w.name.trim().to_lowercase() == lower);
+    if collides {
+        return Err(format!("a workflow named '{name}' already exists"));
+    }
+    Ok(())
+}
+
+/// Validate a custom workflow's step list against the same shape the
+/// orchestrator requires of every workflow (see the `every_workflow_*`
+/// test below): starts at `backlog`, ends at `done`, unique step names,
+/// and every non-terminal step carries non-empty instructions (a step
+/// with no instructions never gets a worker prompt to run, and an empty
+/// per-project override on it is rejected by
+/// `PUT /api/projects/:id/workflow-instructions`).
+pub fn validate_workflow_steps(steps: &[WorkflowStepDef]) -> Result<(), String> {
+    if steps.len() < 3 {
+        return Err("a workflow needs at least 3 steps (backlog, one working step, done)".into());
+    }
+    if steps.len() > MAX_CUSTOM_WORKFLOW_STEPS {
+        return Err(format!(
+            "a workflow may have at most {MAX_CUSTOM_WORKFLOW_STEPS} steps"
+        ));
+    }
+    if steps.first().map(|s| s.step.as_str()) != Some("backlog") {
+        return Err("the first step must be 'backlog'".into());
+    }
+    if steps.last().map(|s| s.step.as_str()) != Some("done") {
+        return Err("the last step must be 'done'".into());
+    }
+    let mut seen = std::collections::HashSet::new();
+    for s in steps {
+        if !STEP_NAME_RE.is_match(&s.step) {
+            return Err(format!(
+                "step '{}' is invalid: step names must be lowercase, start with a letter, and \
+                 contain only letters, digits, and underscores",
+                s.step
+            ));
+        }
+        if !seen.insert(s.step.clone()) {
+            return Err(format!("step '{}' is defined more than once", s.step));
+        }
+    }
+    for (i, s) in steps.iter().enumerate() {
+        let is_terminal = i == 0 || i == steps.len() - 1;
+        if is_terminal && !s.instructions.trim().is_empty() {
+            return Err(format!(
+                "step '{}' is terminal and must not have instructions",
+                s.step
+            ));
+        }
+        if !is_terminal && s.instructions.trim().is_empty() {
+            return Err(format!(
+                "step '{}' must have non-empty instructions — a step with no \
+                 instructions never runs a worker",
+                s.step
+            ));
+        }
+    }
+    Ok(())
+}
+
+static STEP_NAME_RE: std::sync::LazyLock<regex::Regex> =
+    std::sync::LazyLock::new(|| regex::Regex::new(r"^[a-z][a-z0-9_]*$").unwrap());
 
 #[cfg(test)]
 mod tests {
@@ -451,5 +632,113 @@ mod tests {
         assert!(step_instructions(Some("task"), "review").is_none());
         // Unknown workflow falls back to default, which has no review step.
         assert!(step_instructions(Some("does-not-exist"), "review").is_none());
+    }
+
+    fn valid_custom_steps() -> Vec<WorkflowStepDef> {
+        vec![
+            WorkflowStepDef {
+                step: "backlog".to_string(),
+                instructions: String::new(),
+            },
+            WorkflowStepDef {
+                step: "in_progress".to_string(),
+                instructions: "Do the thing.".to_string(),
+            },
+            WorkflowStepDef {
+                step: "done".to_string(),
+                instructions: String::new(),
+            },
+        ]
+    }
+
+    #[test]
+    fn validate_workflow_steps_accepts_a_well_formed_workflow() {
+        assert!(validate_workflow_steps(&valid_custom_steps()).is_ok());
+    }
+
+    #[test]
+    fn validate_workflow_steps_rejects_wrong_start_or_end() {
+        let mut steps = valid_custom_steps();
+        steps[0].step = "todo".to_string();
+        assert!(validate_workflow_steps(&steps).is_err());
+
+        let mut steps = valid_custom_steps();
+        steps[2].step = "finished".to_string();
+        assert!(validate_workflow_steps(&steps).is_err());
+    }
+
+    #[test]
+    fn validate_workflow_steps_rejects_empty_middle_instructions() {
+        let mut steps = valid_custom_steps();
+        steps[1].instructions = String::new();
+        assert!(validate_workflow_steps(&steps).is_err());
+    }
+
+    #[test]
+    fn validate_workflow_steps_rejects_instructions_on_terminal_steps() {
+        let mut steps = valid_custom_steps();
+        steps[0].instructions = "should not be here".to_string();
+        assert!(validate_workflow_steps(&steps).is_err());
+    }
+
+    #[test]
+    fn validate_workflow_steps_rejects_duplicate_or_malformed_step_names() {
+        let mut steps = valid_custom_steps();
+        steps[1].step = "backlog".to_string();
+        assert!(validate_workflow_steps(&steps).is_err());
+
+        let mut steps = valid_custom_steps();
+        steps[1].step = "In Progress".to_string();
+        assert!(validate_workflow_steps(&steps).is_err());
+    }
+
+    #[test]
+    fn validate_workflow_name_rejects_builtin_collision_case_insensitively() {
+        assert!(validate_workflow_name("task", None).is_err());
+        assert!(validate_workflow_name("TASK", None).is_err());
+        assert!(validate_workflow_name("My New Workflow", None).is_ok());
+    }
+
+    #[test]
+    fn validate_workflow_name_rejects_empty() {
+        assert!(validate_workflow_name("   ", None).is_err());
+    }
+
+    // Registry tests share the process-wide `CUSTOM_WORKFLOWS` static, so
+    // they run as one test to avoid interleaving with other `#[test]`
+    // threads that might call `set_custom_workflows`.
+    #[test]
+    fn registry_merges_builtins_and_custom_workflows() {
+        let custom = WorkflowDef {
+            id: "my-custom-id".to_string(),
+            name: "My Custom Flow".to_string(),
+            description: "desc".to_string(),
+            priority: 1000,
+            source: "custom",
+            steps: valid_custom_steps(),
+        };
+        set_custom_workflows(vec![custom]);
+
+        let all = all_workflows();
+        assert!(all.iter().any(|w| w.id == "task" && w.source == "builtin"));
+        assert!(
+            all.iter()
+                .any(|w| w.id == "my-custom-id" && w.source == "custom")
+        );
+
+        let resolved = workflow_by_id("my-custom-id").expect("custom workflow must resolve");
+        assert_eq!(resolved.name, "My Custom Flow");
+        assert_eq!(
+            steps_for(Some("my-custom-id")),
+            vec!["backlog", "in_progress", "done"]
+        );
+        assert_eq!(
+            step_instructions(Some("my-custom-id"), "in_progress").as_deref(),
+            Some("Do the thing.")
+        );
+
+        // Clean up so this test doesn't leak into any test added later in
+        // this module.
+        set_custom_workflows(Vec::new());
     }
 }

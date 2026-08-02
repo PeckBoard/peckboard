@@ -34,7 +34,6 @@ static CAFFEINATE: Mutex<CaffeinateState> = Mutex::new(CaffeinateState {
 pub fn router(state: Arc<AppState>) -> Router<Arc<AppState>> {
     Router::new()
         .route("/api/models", get(list_models))
-        .route("/api/workflows", get(list_workflows))
         .route("/api/priorities", get(list_priorities))
         .route("/api/keep-awake", get(get_keep_awake).put(put_keep_awake))
         .route("/api/config", get(get_config).put(put_config))
@@ -98,10 +97,6 @@ async fn list_models(State(state): State<Arc<AppState>>) -> impl IntoResponse {
             "images_in": p.capabilities.model_images_in(m),
         }))).collect::<Vec<_>>(),
     }))
-}
-/// GET /api/workflows — list built-in workflow definitions
-async fn list_workflows() -> impl IntoResponse {
-    Json(serde_json::json!({ "workflows": crate::workflow::WORKFLOWS }))
 }
 
 /// GET /api/priorities — list card priority levels

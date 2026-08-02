@@ -11,6 +11,9 @@ export interface WorkflowInfo {
   name: string
   description: string
   priority: number
+  /** "builtin" (read-only, defined in code) or "custom" (user-defined via
+   *  Settings → Workflows / the `/api/workflows` CRUD routes). */
+  source: 'builtin' | 'custom'
   steps: (string | WorkflowStepInfo)[]
 }
 export interface ModelInfo {
@@ -186,6 +189,15 @@ interface ResourcesState {
   defaultModel: string
   /** True once `/api/settings/default-model` has answered (even with `''`). */
   defaultModelLoaded: boolean
+  /** True when the most recent fetch for that resource failed. Cleared on
+   *  the next successful fetch — lets pickers show a Retry instead of a
+   *  silent empty list. */
+  resourceErrors: {
+    workflows: boolean
+    models: boolean
+    systemPrompts: boolean
+    defaultModel: boolean
+  }
   fetchWorkflows: () => Promise<void>
   fetchModels: () => Promise<void>
   fetchSystemPrompts: () => Promise<void>
@@ -201,54 +213,71 @@ export const useResourcesStore = create<ResourcesState>((set) => ({
   systemPrompts: [],
   defaultModel: '',
   defaultModelLoaded: false,
+  resourceErrors: { workflows: false, models: false, systemPrompts: false, defaultModel: false },
 
   fetchWorkflows: async () => {
     try {
       const res = await authedFetch('/api/workflows')
-      if (!res.ok) return
+      if (!res.ok) {
+        set((s) => ({ resourceErrors: { ...s.resourceErrors, workflows: true } }))
+        return
+      }
       const data = await res.json()
       if (data?.workflows) set({ workflows: data.workflows })
+      set((s) => ({ resourceErrors: { ...s.resourceErrors, workflows: false } }))
     } catch {
-      /* ignore fetch errors — caller renders empty list */
+      set((s) => ({ resourceErrors: { ...s.resourceErrors, workflows: true } }))
     }
   },
 
   fetchModels: async () => {
     try {
       const res = await authedFetch('/api/models')
-      if (!res.ok) return
+      if (!res.ok) {
+        set((s) => ({ resourceErrors: { ...s.resourceErrors, models: true } }))
+        return
+      }
       const data = await res.json()
       const patch: Partial<ResourcesState> = {}
       if (data?.models) patch.models = data.models
       if (data?.providers) patch.providers = data.providers
       if (Object.keys(patch).length > 0) set(patch)
+      set((s) => ({ resourceErrors: { ...s.resourceErrors, models: false } }))
     } catch {
-      /* ignore */
+      set((s) => ({ resourceErrors: { ...s.resourceErrors, models: true } }))
     }
   },
 
   fetchSystemPrompts: async () => {
     try {
       const res = await authedFetch('/api/system-prompts')
-      if (!res.ok) return
+      if (!res.ok) {
+        set((s) => ({ resourceErrors: { ...s.resourceErrors, systemPrompts: true } }))
+        return
+      }
       const data = await res.json()
       if (data?.prompts) set({ systemPrompts: data.prompts })
+      set((s) => ({ resourceErrors: { ...s.resourceErrors, systemPrompts: false } }))
     } catch {
-      /* ignore */
+      set((s) => ({ resourceErrors: { ...s.resourceErrors, systemPrompts: true } }))
     }
   },
 
   fetchDefaultModel: async () => {
     try {
       const res = await authedFetch('/api/settings/default-model')
-      if (!res.ok) return
+      if (!res.ok) {
+        set((s) => ({ resourceErrors: { ...s.resourceErrors, defaultModel: true } }))
+        return
+      }
       const data = await res.json()
-      set({
+      set((s) => ({
         defaultModel: typeof data?.model === 'string' ? data.model : '',
         defaultModelLoaded: true,
-      })
+        resourceErrors: { ...s.resourceErrors, defaultModel: false },
+      }))
     } catch {
-      /* ignore */
+      set((s) => ({ resourceErrors: { ...s.resourceErrors, defaultModel: true } }))
     }
   },
 

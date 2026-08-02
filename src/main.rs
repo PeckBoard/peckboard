@@ -80,6 +80,12 @@ async fn main() -> anyhow::Result<()> {
         Err(e) => tracing::warn!("Failed to seed default system prompts: {e}"),
     }
 
+    // Prime the in-memory custom-workflow registry so the orchestrator and
+    // every route see user-defined workflows from the first request.
+    if let Err(e) = peckboard::routes::workflows::reload_registry(&db).await {
+        tracing::warn!("Failed to load custom workflows: {e}");
+    }
+
     // First-run bootstrap: create the sole admin user if the DB is empty.
     // Peckboard does not expose self-service registration — operators
     // get one auto-generated admin and can mint additional users from

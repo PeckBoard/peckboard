@@ -28,6 +28,7 @@ pub mod system_prompts;
 pub mod tool_images;
 pub mod update;
 pub mod usage;
+pub mod workflows;
 
 use crate::frontend::static_handler;
 use crate::state::AppState;
@@ -78,6 +79,7 @@ pub fn api_router(state: Arc<AppState>) -> Router<Arc<AppState>> {
         .merge(usage::router(state.clone()))
         .merge(usage::trends::router(state.clone()))
         .merge(update::router(state.clone()))
+        .merge(workflows::router(state.clone()))
         .merge(misc::router(state))
         .fallback(static_handler)
 }

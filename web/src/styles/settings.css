@@ -1075,6 +1075,84 @@ a.wasm-plugin-repo:hover {
   flex-shrink: 0;
 }
 
+/* ═════════════════════════════════════════════════
+   Custom workflows (Settings → Workflows)
+   ═════════════════════════════════════════════════ */
+
+.custom-workflows-list {
+  list-style: none;
+  margin: 10px 0 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.custom-workflow-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--surface);
+}
+.custom-workflow-meta {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  min-width: 0;
+  flex: 1;
+}
+.custom-workflow-name {
+  font-weight: 600;
+  color: var(--text);
+}
+.custom-workflow-source {
+  font-size: var(--text-xs);
+  color: var(--text2);
+  background: var(--surface2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: 1px 6px;
+}
+.custom-workflow-source-custom {
+  color: var(--accent);
+  border-color: var(--accent);
+}
+.custom-workflow-desc {
+  font-size: var(--text-sm);
+  color: var(--text3);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.custom-workflow-actions {
+  display: flex;
+  gap: 6px;
+  flex-shrink: 0;
+}
+.workflow-steps-editor {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-top: 4px;
+}
+.workflow-step-row {
+  display: grid;
+  grid-template-columns: 140px 1fr auto;
+  gap: 8px;
+  align-items: start;
+}
+.workflow-step-name {
+  font-family: var(--font-mono, monospace);
+  font-size: var(--text-sm);
+}
+.workflow-step-instructions {
+  resize: vertical;
+}
+
 /* ═══════════════════════════════════════════════════
    Settings hub navigation (sub-page cards)
    ═══════════════════════════════════════════════════ */

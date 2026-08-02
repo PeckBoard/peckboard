@@ -16,6 +16,7 @@ import GrokAccountsSection from './GrokAccountsSection'
 import KimiAccountsSection from './KimiAccountsSection'
 import ApprovedCommandsSection from './ApprovedCommandsSection'
 import SoftwareUpdate from './SoftwareUpdate'
+import CustomWorkflowsSection from './CustomWorkflowsSection'
 import PluginSettingsForm from './PluginSettingsForm'
 import SystemPromptsSection from './SystemPromptsSection'
 import ModelPicker from './ModelPicker'
@@ -71,6 +72,7 @@ type SubPage =
   | 'appearance'
   | 'chat'
   | 'prompts'
+  | 'workflows'
   | 'plugins'
   | 'plugin-settings'
   | 'providers'
@@ -100,6 +102,11 @@ const SUB_PAGES: { id: SubPage; title: string; blurb: string; adminOnly?: boolea
     id: 'prompts',
     title: 'System Prompts',
     blurb: 'Named prompts the cost-aware auto-switch picks from',
+  },
+  {
+    id: 'workflows',
+    title: 'Workflows',
+    blurb: 'Define custom step sequences for projects and cards',
   },
   {
     id: 'providers',
@@ -784,6 +791,7 @@ export default function SettingsPage({ onBack, initialSubPage = null }: Props) {
         <PluginRegistryPanel onManagePlugins={() => setSubPage('plugins')} />
       )}
       {activeSubPage === 'prompts' && <SystemPromptsSection />}
+      {activeSubPage === 'workflows' && <CustomWorkflowsSection />}
     </div>
   )
 }

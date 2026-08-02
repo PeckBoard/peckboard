@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
 import { useResourcesStore, type WorkflowInfo } from '../store/resources'
 import Dropdown, { type MenuItem } from './Dropdown'
+import PickerLoadError from './PickerLoadError'
 
 interface Props {
   /** Currently selected workflow id. In the card form, '' means "inherit
@@ -38,6 +39,7 @@ export default function WorkflowSelect({
 }: Props) {
   const workflows = useResourcesStore((s) => s.workflows)
   const fetchWorkflows = useResourcesStore((s) => s.fetchWorkflows)
+  const loadError = useResourcesStore((s) => s.resourceErrors.workflows)
   const [anchor, setAnchor] = useState<{ x: number; y: number; width: number } | null>(null)
   const triggerRef = useRef<HTMLButtonElement>(null)
 
@@ -88,6 +90,7 @@ export default function WorkflowSelect({
         ({
           label: wf.name,
           description: wf.description,
+          hint: wf.source === 'custom' ? 'custom' : undefined,
           active: value === wf.id,
           onSelect: () => onChange(wf.id),
         }) satisfies MenuItem,
@@ -120,6 +123,9 @@ export default function WorkflowSelect({
           maxWidth={anchor.width}
           className="workflow-select-dropdown"
         />
+      )}
+      {loadError && workflows.length === 0 && (
+        <PickerLoadError label="workflows" onRetry={fetchWorkflows} />
       )}
     </div>
   )

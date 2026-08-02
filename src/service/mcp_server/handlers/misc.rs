@@ -215,8 +215,8 @@ impl McpToolRegistry {
                 std::collections::HashMap::new()
             };
 
-        let workflows: Vec<Value> = crate::workflow::WORKFLOWS
-            .iter()
+        let workflows: Vec<Value> = crate::workflow::all_workflows()
+            .into_iter()
             .map(|wf| {
                 let steps: Vec<Value> = wf
                     .steps
@@ -239,6 +239,7 @@ impl McpToolRegistry {
                     "name": wf.name,
                     "description": wf.description,
                     "priority": wf.priority,
+                    "source": wf.source,
                     "steps": steps,
                 })
             })

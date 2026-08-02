@@ -7,6 +7,7 @@ mod auth_sessions;
 mod cards;
 mod cascades;
 mod claude_accounts;
+mod custom_workflows;
 mod dependencies;
 mod doc_review_anchors;
 mod doc_reviews;
@@ -33,6 +34,7 @@ mod users;
 mod workflow_instructions;
 
 pub use claude_accounts::AccountModelUsage;
+pub use custom_workflows::{CustomWorkflowWithSteps, WorkflowReference};
 pub use doc_reviews::RESOLUTION_ACTIONS;
 pub use folders::{MoveFolderOutcome, ProjectMoveReport, RepeatingTaskMoveReport};
 pub use plugin_approvals::{APPROVAL_APPROVED, APPROVAL_DENIED};
