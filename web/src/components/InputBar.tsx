@@ -79,6 +79,11 @@ export default function InputBar({
   const [handoverCancelError, setHandoverCancelError] = useState<string | null>(null)
   const textareaRef = useRef<HTMLTextAreaElement>(null)
   const fileInputRef = useRef<HTMLInputElement>(null)
+  // Files being dragged over the window (drop-to-attach). Depth-counted
+  // because dragenter/dragleave fire per element as the drag crosses
+  // children; the overlay must only clear when the drag leaves the window.
+  const [dragActive, setDragActive] = useState(false)
+  const dragDepth = useRef(0)
 
   const resizeTextarea = useCallback(() => {
     const ta = textareaRef.current
@@ -227,6 +232,45 @@ export default function InputBar({
     [uploadFiles],
   )
 
+  // Drop-to-attach, Slack-style: listeners live on `document` so a file
+  // dropped anywhere over the chat lands in the composer, not just on the
+  // input bar's few pixels. Gated on the drag carrying `Files` so the tab
+  // strip's chip drag-reorder (plain HTML5 DnD, no files) is untouched.
+  // `dragover` must preventDefault or the browser navigates to the file.
+  useEffect(() => {
+    const hasFiles = (e: DragEvent) => Array.from(e.dataTransfer?.types ?? []).includes('Files')
+    const onDragEnter = (e: DragEvent) => {
+      if (!hasFiles(e)) return
+      dragDepth.current += 1
+      setDragActive(true)
+    }
+    const onDragOver = (e: DragEvent) => {
+      if (hasFiles(e)) e.preventDefault()
+    }
+    const onDragLeave = (e: DragEvent) => {
+      if (!hasFiles(e)) return
+      dragDepth.current = Math.max(0, dragDepth.current - 1)
+      if (dragDepth.current === 0) setDragActive(false)
+    }
+    const onDrop = (e: DragEvent) => {
+      dragDepth.current = 0
+      setDragActive(false)
+      if (!hasFiles(e)) return
+      e.preventDefault()
+      const files = Array.from(e.dataTransfer?.files ?? [])
+      if (files.length > 0) void uploadFiles(files)
+    }
+    document.addEventListener('dragenter', onDragEnter)
+    document.addEventListener('dragover', onDragOver)
+    document.addEventListener('dragleave', onDragLeave)
+    document.addEventListener('drop', onDrop)
+    return () => {
+      document.removeEventListener('dragenter', onDragEnter)
+      document.removeEventListener('dragover', onDragOver)
+      document.removeEventListener('dragleave', onDragLeave)
+      document.removeEventListener('drop', onDrop)
+    }
+  }, [uploadFiles])
   const removeAttachment = useCallback((id: string) => {
     setAttachments((prev) => prev.filter((a) => a.id !== id))
   }, [])
@@ -382,6 +426,11 @@ export default function InputBar({
 
   return (
     <div className="input-bar">
+      {dragActive && (
+        <div className="composer-drop-overlay" data-testid="composer-drop-overlay" role="status">
+          {attachDisabledReason ?? 'Drop files to attach'}
+        </div>
+      )}
       {handoverActive && (
         <div className="handover-banner" role="status" data-testid="handover-banner">
           <span className="handover-spinner" aria-hidden="true" />

@@ -215,3 +215,39 @@
   font-size: var(--text-xs);
   font-weight: 500;
 }
+
+/* Keyboard-shortcuts cheat sheet (ShortcutsModal, opened with `?`). */
+.shortcuts-list {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  margin: 16px 0 0;
+}
+.shortcuts-row {
+  display: flex;
+  align-items: baseline;
+  gap: 12px;
+}
+.shortcuts-keys {
+  flex: 0 0 96px;
+  display: flex;
+  align-items: center;
+  gap: 3px;
+  white-space: nowrap;
+}
+.shortcuts-keys kbd {
+  padding: 2px 7px;
+  border: 1px solid var(--border);
+  border-bottom-width: 2px;
+  border-radius: var(--radius);
+  background: var(--surface2);
+  color: var(--text);
+  font-family: inherit;
+  font-size: var(--text-xs);
+  font-weight: 600;
+}
+.shortcuts-action {
+  margin: 0;
+  color: var(--text2);
+  font-size: var(--text-sm);
+}

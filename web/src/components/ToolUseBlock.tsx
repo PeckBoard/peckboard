@@ -180,7 +180,17 @@ function parseTestCounts(text: string): string {
 const PRE_CLAMP_LINES = 40
 const PRE_CLAMP_SLACK = 8
 
-function CopyButton({ text }: { text: string }) {
+/** Copy-to-clipboard button with transient "Copied" feedback. Exported so
+ *  chat bubbles (ChatView) reuse the exact ClampedPre interaction. */
+export function CopyButton({
+  text,
+  className,
+  label,
+}: {
+  text: string
+  className?: string
+  label?: string
+}) {
   const [copied, setCopied] = useState(false)
   useEffect(() => {
     if (!copied) return
@@ -190,8 +200,9 @@ function CopyButton({ text }: { text: string }) {
   return (
     <button
       type="button"
-      className="tool-mini-btn"
-      title="Copy to clipboard"
+      className={className ?? 'tool-mini-btn'}
+      title={label ?? 'Copy to clipboard'}
+      aria-label={label ?? 'Copy to clipboard'}
       onClick={() => {
         void navigator.clipboard?.writeText(text).then(() => setCopied(true))
       }}

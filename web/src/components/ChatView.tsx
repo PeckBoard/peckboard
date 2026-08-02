@@ -19,7 +19,7 @@ import { useUsageStore } from '../store/usage'
 import { usageCost } from '../util/cost'
 import { downloadTranscript } from '../util/transcript'
 import InputBar from './InputBar'
-import ToolUseBlock from './ToolUseBlock'
+import ToolUseBlock, { CopyButton } from './ToolUseBlock'
 import DiffBlock from './DiffBlock'
 import ConfirmDialog from './ConfirmDialog'
 import Modal from './Modal'
@@ -468,6 +468,7 @@ const ChatRow = memo(function ChatRow({
       return (
         <div className="chat-row chat-row-user">
           <div className="chat-bubble chat-bubble-user">
+            <CopyButton text={item.text} className="chat-bubble-copy" label="Copy message" />
             {item.preHatchEnriched && (
               <div
                 className="chat-prehatch-badge"
@@ -519,6 +520,7 @@ const ChatRow = memo(function ChatRow({
       return (
         <div className="chat-row chat-row-assistant">
           <div className="chat-bubble chat-bubble-assistant">
+            <CopyButton text={item.text} className="chat-bubble-copy" label="Copy message" />
             <SafeMarkdown
               className="chat-markdown"
               rehypePlugins={highlightPlugins}

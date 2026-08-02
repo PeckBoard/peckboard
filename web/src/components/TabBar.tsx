@@ -1,4 +1,4 @@
-import { useCallback, useLayoutEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react'
 import { useTabsStore, type Tab } from '../store/tabs'
 import { useContextMenu } from '../hooks/useContextMenu'
 import { MenuButton, type MenuItem } from './Dropdown'
@@ -46,6 +46,30 @@ export default function TabBar({ kinds, onNewSession }: TabBarProps) {
   const closeTab = useTabsStore((s) => s.closeTab)
   const moveTab = useTabsStore((s) => s.moveTab)
 
+  // Cmd/Ctrl+1..9 activates the Nth visible tab (global shortcut; the
+  // cheat sheet in ShortcutsModal lists it). Lives here rather than in
+  // App.tsx because this component owns the kind registry that knows how
+  // to activate each tab type. The registry object is rebuilt on every
+  // parent render, so the handler reads it through a ref (updated in an
+  // effect) instead of re-binding the listener each time.
+  const kindsRef = useRef(kinds)
+  useEffect(() => {
+    kindsRef.current = kinds
+  })
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (!(e.metaKey || e.ctrlKey) || e.altKey || e.shiftKey) return
+      if (e.key < '1' || e.key > '9') return
+      const reg = kindsRef.current
+      const shown = useTabsStore.getState().tabs.filter((t) => reg[t.itemType])
+      const tab = shown[Number(e.key) - 1]
+      if (!tab) return
+      e.preventDefault()
+      reg[tab.itemType].onActivate(tab)
+    }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [])
   // Index of the chip currently being dragged. A ref (not state)
   // because it only needs to survive from dragstart to drop and
   // shouldn't trigger re-renders; `dragOver` *is* state so the drop

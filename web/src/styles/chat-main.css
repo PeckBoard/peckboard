@@ -422,12 +422,51 @@
 }
 
 .chat-bubble {
+  position: relative;
   max-width: 72%;
   padding: 10px 14px;
   font-size: var(--text-base);
   line-height: 1.6;
   white-space: pre-wrap;
   word-break: break-word;
+}
+
+/* Hover/focus-revealed "Copy" on message bubbles. Sits astride the
+   bubble's top edge (not over the text) and copies the raw markdown
+   source. Hidden until the bubble is hovered or the button itself has
+   keyboard focus; on touch devices (no hover) it stays visible. */
+.chat-bubble-copy {
+  position: absolute;
+  top: -10px;
+  right: 8px;
+  padding: 2px 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-full);
+  background: var(--surface2);
+  color: var(--text2);
+  font-family: inherit;
+  font-size: var(--text-xs);
+  font-weight: 600;
+  cursor: pointer;
+  opacity: 0;
+  transition:
+    opacity var(--transition),
+    background var(--transition),
+    color var(--transition);
+}
+.chat-bubble:hover .chat-bubble-copy,
+.chat-bubble:focus-within .chat-bubble-copy,
+.chat-bubble-copy:focus-visible {
+  opacity: 1;
+}
+.chat-bubble-copy:hover {
+  background: var(--surface3);
+  color: var(--text);
+}
+@media (hover: none) {
+  .chat-bubble-copy {
+    opacity: 1;
+  }
 }
 
 .chat-bubble-user {

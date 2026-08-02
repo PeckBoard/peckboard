@@ -21,6 +21,7 @@ import PluginFullPage from './components/PluginFullPage'
 import PluginApprovalPrompt from './components/PluginApprovalPrompt'
 import { PluginIcon } from './components/PluginIcon'
 import NewSessionModal from './components/NewSessionModal'
+import ShortcutsModal from './components/ShortcutsModal'
 import NewProjectModal from './components/NewProjectModal'
 import FoldersPage from './components/ManageFoldersModal'
 import ConfirmDialog from './components/ConfirmDialog'
@@ -321,6 +322,7 @@ function App() {
   const [activeReportId, setActiveReportId] = useState<string | null>(initialReportId)
   const repeatingTasks = useRepeatingTasksStore((s) => s.tasks)
   const [showNewSession, setShowNewSession] = useState(false)
+  const [showShortcuts, setShowShortcuts] = useState(false)
   const [showNewProject, setShowNewProject] = useState(false)
   const [confirmDeleteId, setConfirmDeleteId] = useState<string | null>(null)
   const [selectedSessions, setSelectedSessions] = useState<Set<string>>(() => new Set())
@@ -496,6 +498,56 @@ function App() {
     window.addEventListener('popstate', onPopState)
     return () => window.removeEventListener('popstate', onPopState)
   }, [setActiveSession, setActiveProject])
+
+  // Global keyboard shortcuts (Cmd/Ctrl+1..9 tab switching lives in
+  // TabBar, which owns the tab-kind registry). Modifier combos fire
+  // anywhere (matching Slack/Linear, Cmd/Ctrl+K works mid-typing); bare
+  // keys (`n`, `?`) only fire outside text inputs and while no dialog is
+  // open. Nothing here touches combos users rely on from the browser
+  // (Cmd/Ctrl+W/T/L…) — and Cmd/Ctrl+N is browser-reserved and never
+  // reaches the page, which is why New Session is the bare `n`.
+  // Cmd/Ctrl+F is handled by ChatView (transcript search) when a chat is
+  // open.
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      const mod = e.metaKey || e.ctrlKey
+      if (mod && !e.altKey && !e.shiftKey && e.key.toLowerCase() === 'k') {
+        e.preventDefault()
+        setActiveSession(null)
+        navigate('sessions', null)
+        // The search box mounts with the list view; focus it once rendered.
+        requestAnimationFrame(() => {
+          document.querySelector<HTMLInputElement>('[data-testid="session-filter"]')?.focus()
+        })
+        return
+      }
+      if (mod || e.altKey) return
+      const t = e.target as HTMLElement | null
+      if (
+        t &&
+        (t.tagName === 'INPUT' ||
+          t.tagName === 'TEXTAREA' ||
+          t.tagName === 'SELECT' ||
+          t.isContentEditable)
+      ) {
+        return
+      }
+      // Modals portal onto body as `.modal-backdrop`; bare keys must not
+      // fire underneath one (e.g. `n` while a confirm dialog is up).
+      if (document.querySelector('.modal-backdrop')) return
+      if (e.key === '?') {
+        e.preventDefault()
+        setShowShortcuts(true)
+        return
+      }
+      if (e.key === 'n') {
+        e.preventDefault()
+        setShowNewSession(true)
+      }
+    }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [navigate, setActiveSession])
 
   // When activeSessionId changes, update URL.
   useEffect(() => {
@@ -1087,7 +1139,6 @@ function App() {
     report: reportKind,
     doc_review: docReviewKind,
   }
-
   const confirmDeleteRepeatingTask = async () => {
     if (!confirmDeleteRepeatingTaskId) return
     const id = confirmDeleteRepeatingTaskId
@@ -1717,6 +1768,7 @@ function App() {
         </div>
       </main>
 
+      {showShortcuts && <ShortcutsModal onClose={() => setShowShortcuts(false)} />}
       {showNewSession && (
         <NewSessionModal
           onClose={() => setShowNewSession(false)}
