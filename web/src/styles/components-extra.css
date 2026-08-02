@@ -756,3 +756,50 @@ select.form-input {
 .model-picker-item-highlight:not(:disabled) {
   background: var(--surface-hover, var(--bg));
 }
+
+/* Provider sections inside the searchable picker (Dropdown `group` rows).
+   Headings are non-interactive; the "not configured" tag is a warn-only
+   hint — rows stay selectable, just subdued. */
+.dropdown-group {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+.dropdown-group-heading {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 10px 3px;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--text2);
+}
+.dropdown-group + .dropdown-group .dropdown-group-heading {
+  margin-top: 4px;
+  border-top: 1px solid var(--border);
+  padding-top: 8px;
+}
+.dropdown-group-tag {
+  font-weight: 500;
+  letter-spacing: normal;
+  text-transform: none;
+  padding: 1px 6px;
+  border-radius: 999px;
+  background: var(--warning-bg);
+  border: 1px solid var(--warning);
+  color: var(--text2);
+}
+.dropdown-item-dimmed:not(:disabled) {
+  color: var(--text3);
+}
+.dropdown-footer {
+  border-top: 1px solid var(--border);
+  padding: 8px 10px 4px;
+  font-size: var(--text-sm);
+  color: var(--text2);
+}
+.dropdown-footer a {
+  color: var(--accent);
+}

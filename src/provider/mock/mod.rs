@@ -77,6 +77,17 @@ impl AgentProvider for MockProvider {
         "mock"
     }
 
+    /// Deterministic e2e hook for the picker's "not configured" hint:
+    /// real providers' status depends on host credentials, so tests set
+    /// `PECKBOARD_MOCK_UNCONFIGURED=1` to make the mock provider report
+    /// "no usable auth" instead.
+    async fn auth_configured(&self) -> Option<bool> {
+        match std::env::var("PECKBOARD_MOCK_UNCONFIGURED").as_deref() {
+            Ok("1") => Some(false),
+            _ => None,
+        }
+    }
+
     fn model_price(&self, model_id: &str) -> Option<(f64, f64)> {
         // Scripted prices so tests can exercise cheapest-model selection:
         // `echo` is the cheap tier, `happy-path` the expensive one; the

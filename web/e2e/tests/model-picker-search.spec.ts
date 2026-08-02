@@ -103,3 +103,63 @@ test('model picker filters the catalogue as you type', async ({ request, page, b
     })
     .toBe('mock:happy-path')
 })
+
+test('model picker groups by provider and flags unconfigured providers', async ({
+  request,
+  page,
+  baseURL,
+}) => {
+  expect(baseURL, 'baseURL configured').toBeTruthy()
+
+  const { token, authHeader } = await authenticate(request)
+  const { sessionId } = await seedSession(request, authHeader)
+
+  // Deterministic "no usable auth" signal: serve the real catalogue but
+  // mark the mock provider unconfigured — real providers' `configured`
+  // depends on host credentials, which vary per machine.
+  await page.route('**/api/models', async (route) => {
+    const res = await route.fetch()
+    const body = (await res.json()) as {
+      providers: Array<{ id: string; configured?: boolean | null }>
+    }
+    for (const p of body.providers) if (p.id === 'mock') p.configured = false
+    await route.fulfill({ response: res, json: body })
+  })
+
+  await page.addInitScript((t) => localStorage.setItem('peckboard_token', t), token)
+  await page.goto(`/sessions/${sessionId}`)
+  await expect(page.locator('.tabbar')).toBeVisible({ timeout: 10_000 })
+
+  await page.locator('.tab-new').click()
+  const trigger = page.getByTestId('new-session-model')
+  await expect(trigger).toBeVisible({ timeout: 10_000 })
+  await trigger.click()
+  const search = page.getByTestId('new-session-model-search')
+  await expect(search).toBeVisible()
+
+  // The mock provider's models sit under a section heading carrying the
+  // "not configured" tag, and its rows render subdued but stay selectable.
+  const mockGroup = page.locator('.dropdown-group', { hasText: 'Mock' })
+  await expect(mockGroup.locator('.dropdown-group-label')).toHaveText('Mock')
+  await expect(mockGroup.locator('.dropdown-group-tag')).toHaveText('not configured')
+  expect(await mockGroup.locator('.dropdown-item-dimmed').count()).toBeGreaterThan(0)
+
+  // Warn-only footer points at Settings → Providers & Accounts.
+  const footerLink = page.locator('.dropdown-footer a')
+  await expect(footerLink).toHaveText('Settings → Providers & Accounts')
+  await expect(footerLink).toHaveAttribute('href', '/settings')
+
+  // Search still works across groups: a match keeps its group heading, a
+  // group with no matches disappears heading and all.
+  await search.fill('happy')
+  await expect(page.getByRole('option', { name: 'Mock: happy path' })).toBeVisible()
+  await expect(mockGroup.locator('.dropdown-group-label')).toHaveText('Mock')
+  await search.fill('no-such-model-xyz')
+  await expect(page.locator('.dropdown-group-heading')).toHaveCount(0)
+  await search.fill('')
+
+  // "Not configured" is a hint, not a block — selection still works.
+  await page.getByRole('option', { name: 'Mock: happy path' }).click()
+  await expect(search).toHaveCount(0)
+  await expect(trigger).toContainText('Mock: happy path')
+})

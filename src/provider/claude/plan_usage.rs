@@ -124,6 +124,27 @@ fn host_oauth_token() -> Option<String> {
         .map(str::to_string)
 }
 
+/// Whether a host-level Claude login looks present, for the model picker's
+/// "not configured" hint. Best-effort: the `.credentials.json` token (Linux/
+/// Windows), falling back to an `oauthAccount` entry in `~/.claude.json`
+/// (which the CLI writes on all platforms, including macOS where the token
+/// itself lives in the keychain). False negatives only produce a warning
+/// tag, never a block.
+pub(crate) fn host_login_detected() -> bool {
+    if host_oauth_token().is_some() {
+        return true;
+    }
+    let Some(home) = dirs::home_dir() else {
+        return false;
+    };
+    let Ok(raw) = std::fs::read_to_string(home.join(".claude.json")) else {
+        return false;
+    };
+    serde_json::from_str::<serde_json::Value>(&raw)
+        .ok()
+        .is_some_and(|v| v.get("oauthAccount").is_some_and(|a| !a.is_null()))
+}
+
 /// Fetch one login's plan usage from the OAuth usage endpoint.
 async fn fetch(client: &reqwest::Client, token: &str) -> anyhow::Result<PlanUsage> {
     let resp = client

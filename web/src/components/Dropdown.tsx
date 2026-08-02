@@ -1,4 +1,5 @@
 import {
+  Fragment,
   useCallback,
   useEffect,
   useId,
@@ -45,6 +46,14 @@ export interface MenuItem {
   hidden?: boolean
   /** Extra text matched by a searchable submenu's filter, never displayed.
    *  E.g. a model's full id, which carries the provider and account. */
+  /** Section this row belongs to (e.g. its provider). Consecutive rows
+   *  sharing a `group.id` render under one non-interactive heading;
+   *  filtering hides a heading along with its last matching row. `tag`
+   *  renders as a small chip next to the heading (e.g. "not configured"). */
+  group?: { id: string; label: string; tag?: string }
+  /** Render the row subdued (e.g. a model whose provider has no usable
+   *  auth). Still selectable — a visual hint, not a disable. */
+  dimmed?: boolean
   searchText?: string
   /** With `submenu`: render a filter input at the top of the flyout and make
    *  the list scrollable. For long single-choice lists (model catalogue). */
@@ -86,6 +95,10 @@ interface DropdownProps {
   /** Accessible name for the searchable variant's option list. */
   listLabel?: string
   searchPlaceholder?: string
+  /** Rendered pinned under the option list, outside filtering and keyboard
+   *  navigation — e.g. a "provider not configured" hint with a settings
+   *  link. Searchable variant only. */
+  footer?: ReactNode
 }
 
 const MENU_MARGIN = 8
@@ -115,6 +128,7 @@ export default function Dropdown({
   searchTestId,
   emptyLabel,
   listLabel,
+  footer,
 }: DropdownProps) {
   const ref = useRef<HTMLDivElement | null>(null)
   const [pos, setPos] = useState<{ left: number; top: number }>(() => ({
@@ -248,7 +262,7 @@ export default function Dropdown({
   if (!searchable && visible.length === 0) return null
 
   let selIdx = -1
-  const rows = filtered.map((item, idx) => {
+  const makeRow = (item: MenuItem, idx: number) => {
     const isSelectable = !item.divider && !item.disabled && !!item.onSelect
     if (isSelectable) selIdx++
     const at = selIdx
@@ -263,7 +277,37 @@ export default function Dropdown({
         onHover={searchable && isSelectable ? () => setHighlight(at) : undefined}
       />
     )
+  }
+  // Consecutive rows sharing a `group.id` render inside one labelled
+  // `role="group"` under a heading. Grouping happens AFTER filtering, so a
+  // provider whose models all miss the query disappears heading and all,
+  // and search keeps working across groups.
+  const segments: { group?: MenuItem['group']; nodes: ReactNode[] }[] = []
+  filtered.forEach((item, idx) => {
+    const node = makeRow(item, idx)
+    const last = segments[segments.length - 1]
+    if (last && (last.group?.id ?? null) === (item.group?.id ?? null)) last.nodes.push(node)
+    else segments.push({ group: item.group, nodes: [node] })
   })
+  const rowCount = filtered.length
+  const rows = segments.map((seg, i) =>
+    seg.group ? (
+      <div
+        key={`grp-${seg.group.id}`}
+        className="dropdown-group"
+        role="group"
+        aria-labelledby={`${baseId}-grp-${i}`}
+      >
+        <div className="dropdown-group-heading" id={`${baseId}-grp-${i}`} role="presentation">
+          <span className="dropdown-group-label">{seg.group.label}</span>
+          {seg.group.tag && <span className="dropdown-group-tag">{seg.group.tag}</span>}
+        </div>
+        {seg.nodes}
+      </div>
+    ) : (
+      <Fragment key={`seg-${i}`}>{seg.nodes}</Fragment>
+    ),
+  )
 
   return createPortal(
     <div
@@ -311,7 +355,7 @@ export default function Dropdown({
             role="listbox"
             aria-label={listLabel ?? searchPlaceholder ?? 'Options'}
           >
-            {rows.length > 0 ? (
+            {rowCount > 0 ? (
               rows
             ) : (
               <button type="button" className="dropdown-item" disabled>
@@ -319,6 +363,7 @@ export default function Dropdown({
               </button>
             )}
           </div>
+          {footer && <div className="dropdown-footer">{footer}</div>}
         </>
       ) : (
         rows
@@ -404,7 +449,7 @@ function MenuRow({
       role={listbox ? 'option' : 'menuitem'}
       aria-selected={listbox ? !!item.active : undefined}
       type="button"
-      className={`dropdown-item${item.danger ? ' dropdown-item-danger' : ''}${item.active ? ' dropdown-item-active' : ''}${item.description ? ' dropdown-item-with-desc' : ''}${highlighted ? ' model-picker-item-highlight' : ''}`}
+      className={`dropdown-item${item.danger ? ' dropdown-item-danger' : ''}${item.active ? ' dropdown-item-active' : ''}${item.description ? ' dropdown-item-with-desc' : ''}${item.dimmed ? ' dropdown-item-dimmed' : ''}${highlighted ? ' model-picker-item-highlight' : ''}`}
       disabled={item.disabled}
       onMouseEnter={onHover}
       onClick={(e) => {
@@ -462,6 +507,8 @@ interface MenuButtonProps {
   disabled?: boolean
   /** Fired when the popup opens — e.g. to (re)fetch the list it shows. */
   onOpen?: () => void
+  /** Pinned under the searchable popup's list — see `DropdownProps.footer`. */
+  footer?: ReactNode
   /** Trigger glyph. Defaults to the 3-dot SVG. */
   children?: ReactNode
 }
@@ -483,6 +530,7 @@ export function MenuButton({
   searchTestId,
   emptyLabel,
   listLabel,
+  footer,
   haspopup = 'menu',
   matchTriggerWidth,
   minWidth,
@@ -566,6 +614,7 @@ export function MenuButton({
           searchTestId={searchTestId}
           emptyLabel={emptyLabel}
           listLabel={listLabel}
+          footer={footer}
           minWidth={matchTriggerWidth ? Math.max(triggerWidth, minWidth ?? 0) : minWidth}
         />
       )}

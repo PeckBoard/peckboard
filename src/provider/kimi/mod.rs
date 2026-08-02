@@ -289,6 +289,25 @@ impl AgentProvider for KimiProvider {
         Some(base.into_iter().chain(account_variants).collect())
     }
 
+    async fn auth_configured(&self) -> Option<bool> {
+        if let Some(db) = &self.db {
+            match db.list_kimi_accounts().await {
+                Ok(accounts) if !accounts.is_empty() => return Some(true),
+                Ok(_) => {}
+                // Can't tell — don't warn on a transient DB error.
+                Err(_) => return None,
+            }
+        }
+        if std::env::var("KIMI_API_KEY").is_ok_and(|v| !v.is_empty()) {
+            return Some(true);
+        }
+        // Host-level login: the CLI writes tokens into ~/.kimi-code/config.toml.
+        let host = dirs::home_dir()
+            .map(|h| h.join(".kimi-code").join("config.toml"))
+            .is_some_and(|p| std::fs::metadata(&p).is_ok_and(|m| m.len() > 0));
+        Some(host)
+    }
+
     async fn send_message(&self, ctx: SendMessageContext) -> anyhow::Result<()> {
         let SendMessageContext {
             session_id,

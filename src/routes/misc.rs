@@ -61,6 +61,7 @@ async fn list_models(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     // lists once, then derive the flat list from the same snapshot so a
     // provider's `dynamic_models` is only computed a single time per call.
     let providers = state.provider_registry.list_providers_with_models().await;
+    let auth = state.provider_registry.provider_auth_status().await;
     let hidden = hidden_providers(&state).await;
     let providers: Vec<_> = providers
         .into_iter()
@@ -84,6 +85,9 @@ async fn list_models(State(state): State<Arc<AppState>>) -> impl IntoResponse {
                 "label": e.label,
             })).collect::<Vec<_>>(),
             "capabilities": p.capabilities,
+            // Best-effort auth hint for the picker: false = no account and
+            // no host credential detected; null = unknown/not applicable.
+            "configured": auth.get(&p.id).copied().flatten(),
         })).collect::<Vec<_>>(),
         "models": providers.iter().flat_map(|p| p.models.iter().map(move |m| serde_json::json!({
             "id": format!("{}:{}", p.id, m.id),

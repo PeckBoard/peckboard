@@ -1,6 +1,6 @@
 import { useMemo } from 'react'
 import { MenuButton, type MenuItem } from './Dropdown'
-import type { ModelInfo } from '../store/resources'
+import { useResourcesStore, type ModelInfo } from '../store/resources'
 
 interface ModelPickerProps {
   /** Currently-selected model id. `''` means "no override" (the default option). */
@@ -72,25 +72,66 @@ export default function ModelPicker({
   // When a `defaultLabel` is given, the empty ("") option is just another
   // row, so arrow-key navigation and Enter work uniformly over it. Without
   // one there is no empty row — the picker only offers real models.
+  const providers = useResourcesStore((s) => s.providers)
+
+  // When a `defaultLabel` is given, the empty ("") option is just another
+  // row, so arrow-key navigation and Enter work uniformly over it. Without
+  // one there is no empty row — the picker only offers real models.
   const items = useMemo<MenuItem[]>(() => {
     const defaultRow = defaultLabel === undefined ? [] : [{ id: '', display_name: defaultLabel }]
-    const rows: MenuItem[] = [...defaultRow, ...models].map((m) => ({
-      label: m.display_name,
-      // The raw id carries the provider and account, so typing "cursor" or an
-      // account name narrows the list even though neither is in the label.
-      searchText: m.id,
-      active: m.id === value,
-      onSelect: () => onChange(m.id),
-      testId: testId ? `${testId}-option-${m.id || 'default'}` : undefined,
-    }))
+    const rows: MenuItem[] = [...defaultRow, ...models].map((m) => {
+      // Model ids are `provider:model`; group rows under their provider
+      // section. Ids without a known provider prefix (a reuse like
+      // SystemPromptPicker, or the empty default row) stay ungrouped.
+      const providerId = m.id.includes(':') ? m.id.split(':')[0] : undefined
+      const provider = providerId ? providers.find((p) => p.id === providerId) : undefined
+      const unconfigured = provider?.configured === false
+      return {
+        label: m.display_name,
+        // The raw id carries the provider and account, so typing "cursor" or an
+        // account name narrows the list even though neither is in the label.
+        searchText: m.id,
+        active: m.id === value,
+        onSelect: () => onChange(m.id),
+        testId: testId ? `${testId}-option-${m.id || 'default'}` : undefined,
+        group: provider
+          ? {
+              id: provider.id,
+              label: provider.display_name,
+              tag: unconfigured ? 'not configured' : undefined,
+            }
+          : undefined,
+        dimmed: unconfigured,
+      }
+    })
     // Nothing but the default option means the catalogue never arrived; say
     // so rather than leaving the user staring at a one-row list.
     if (models.length === 0 && emptyHint) rows.push({ label: emptyHint, disabled: true })
     return rows
-  }, [models, defaultLabel, value, onChange, testId, emptyHint])
+  }, [models, providers, defaultLabel, value, onChange, testId, emptyHint])
+
+  // Warn-only hint when a listed provider has no detected auth: host-level
+  // logins can exist that the backend can't see, so selection is never
+  // blocked — the user just gets pointed at Settings before a worker
+  // spawns and dies on auth.
+  const hasUnconfigured = useMemo(
+    () =>
+      providers.some(
+        (p) => p.configured === false && models.some((m) => m.id.startsWith(`${p.id}:`)),
+      ),
+    [providers, models],
+  )
 
   return (
     <MenuButton
+      footer={
+        hasUnconfigured ? (
+          <span className="model-picker-config-hint">
+            Some providers aren&apos;t configured.{' '}
+            <a href="/settings">Settings → Providers &amp; Accounts</a>
+          </span>
+        ) : undefined
+      }
       items={items}
       ariaLabel={ariaLabel}
       triggerClassName={triggerClassName}

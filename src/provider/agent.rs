@@ -81,6 +81,17 @@ pub trait AgentProvider: Send + Sync + 'static {
         None
     }
 
+    /// Whether this provider has usable auth right now, for the model
+    /// picker's "not configured" hint. `Some(true)` = a stored account or
+    /// detected host-level credential exists; `Some(false)` = neither was
+    /// found (the UI warns, but never blocks — detection is best-effort,
+    /// e.g. a macOS keychain login is invisible here); `None` = not
+    /// applicable / unknown (local providers, plugins), no hint shown.
+    /// Read-only catalog path only, like [`Self::dynamic_models`].
+    async fn auth_configured(&self) -> Option<bool> {
+        None
+    }
+
     /// Published price of `model_id` in USD per million tokens as
     /// `(input, output)`, as defined by this provider. `None` means the
     /// provider carries no price for the model — callers must treat that as

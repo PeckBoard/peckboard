@@ -272,6 +272,25 @@ impl ProviderRegistry {
         out
     }
 
+    /// Best-effort auth status per provider id, for the model picker's
+    /// "not configured" hint (see [`AgentProvider::auth_configured`]).
+    /// Same locking discipline as `list_providers_with_models`: the
+    /// registry lock is released before the async provider calls.
+    pub async fn provider_auth_status(&self) -> std::collections::HashMap<String, Option<bool>> {
+        let entries: Vec<(String, Arc<dyn AgentProvider>)> = {
+            let providers = self.providers.lock().await;
+            providers
+                .values()
+                .map(|r| (r.info.id.clone(), r.provider.clone()))
+                .collect()
+        };
+        let mut out = std::collections::HashMap::with_capacity(entries.len());
+        for (id, provider) in entries {
+            out.insert(id, provider.auth_configured().await);
+        }
+        out
+    }
+
     /// List all models across all providers, with provider:model format
     /// IDs. Resolves each provider's effective (dynamic-or-static) model
     /// list, so settings-derived models are included.

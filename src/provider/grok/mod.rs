@@ -206,6 +206,25 @@ impl AgentProvider for GrokProvider {
         Some(self.account_scoped_models().await)
     }
 
+    async fn auth_configured(&self) -> Option<bool> {
+        if let Some(db) = &self.db {
+            match db.list_grok_accounts().await {
+                Ok(accounts) if !accounts.is_empty() => return Some(true),
+                Ok(_) => {}
+                // Can't tell — don't warn on a transient DB error.
+                Err(_) => return None,
+            }
+        }
+        if std::env::var("XAI_API_KEY").is_ok_and(|v| !v.is_empty()) {
+            return Some(true);
+        }
+        // Host-level login: the CLI writes auth.json into ~/.grok.
+        let host = dirs::home_dir()
+            .map(|h| h.join(".grok").join("auth.json"))
+            .is_some_and(|p| std::fs::metadata(&p).is_ok_and(|m| m.len() > 0));
+        Some(host)
+    }
+
     async fn send_message(&self, ctx: SendMessageContext) -> anyhow::Result<()> {
         let SendMessageContext {
             session_id,

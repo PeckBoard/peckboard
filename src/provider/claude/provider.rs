@@ -269,6 +269,23 @@ impl AgentProvider for ClaudeProvider {
         Some(self.account_scoped_models().await)
     }
 
+    async fn auth_configured(&self) -> Option<bool> {
+        if let Some(db) = &self.db {
+            match db.list_claude_accounts().await {
+                Ok(accounts) if !accounts.is_empty() => return Some(true),
+                Ok(_) => {}
+                // Can't tell — don't warn on a transient DB error.
+                Err(_) => return None,
+            }
+        }
+        let env_key = |k: &str| std::env::var(k).is_ok_and(|v| !v.is_empty());
+        Some(
+            super::plan_usage::host_login_detected()
+                || env_key("ANTHROPIC_API_KEY")
+                || env_key("CLAUDE_CODE_OAUTH_TOKEN"),
+        )
+    }
+
     fn model_price(&self, model_id: &str) -> Option<(f64, f64)> {
         crate::routes::usage::cost::known_rates_for(model_id)
             .map(|r| (r.input_per_mtok, r.output_per_mtok))

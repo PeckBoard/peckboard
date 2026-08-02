@@ -75,6 +75,11 @@ export interface ProviderInfo {
    *  effort control, so only the "Default" option is offered. */
   effort_levels?: EffortLevel[]
   capabilities?: ProviderCapabilities
+  /** Best-effort auth hint from `/api/models`: `false` = no account and no
+   *  host-level credential detected (the picker warns, selection still
+   *  allowed); `true` = something usable found; `null`/absent = unknown or
+   *  not applicable (local providers, plugins) — no hint shown. */
+  configured?: boolean | null
 }
 
 /** The always-present "Default" effort option (no override — the provider
