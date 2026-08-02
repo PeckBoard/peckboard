@@ -328,6 +328,12 @@ pub struct Card {
     /// this card, if any. Resolved to a body and applied to the worker
     /// session's `system_prompt` at spawn. `None` = none attached.
     pub system_prompt_name: Option<String>,
+    /// Why this card's git worktree is still unmerged: `dirty`, `conflict`,
+    /// or `cleanup_failed`. `None` = nothing pending. Durable so the state
+    /// survives a restart and the UI can offer a retry.
+    pub worktree_unmerged_reason: Option<String>,
+    /// Git stderr / explanation behind `worktree_unmerged_reason`.
+    pub worktree_unmerged_detail: Option<String>,
 }
 
 #[derive(Insertable, Deserialize, Debug)]
@@ -367,6 +373,8 @@ pub struct UpdateCard {
     pub updated_at: Option<String>,
     pub completed_at: Option<Option<String>>,
     pub system_prompt_name: Option<Option<String>>,
+    pub worktree_unmerged_reason: Option<Option<String>>,
+    pub worktree_unmerged_detail: Option<Option<String>>,
     pub model_autoswitch: Option<Option<bool>>,
 }
 

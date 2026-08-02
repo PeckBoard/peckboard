@@ -233,6 +233,10 @@ pub fn router(state: Arc<AppState>) -> Router<Arc<AppState>> {
             post(cards::cancel_card_wont_do),
         )
         .route(
+            "/api/projects/{id}/cards/{card_id}/retry-merge",
+            post(cards::retry_card_merge),
+        )
+        .route(
             "/api/projects/{id}/cards/{card_id}/reports",
             get(cards::list_card_reports),
         )

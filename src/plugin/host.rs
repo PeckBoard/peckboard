@@ -580,6 +580,8 @@ pub(crate) fn update_card_impl(db: &Db, input: &str) -> String {
         updated_at: Some(now),
         completed_at: None,
         system_prompt_name: None,
+        worktree_unmerged_reason: None,
+        worktree_unmerged_detail: None,
         model_autoswitch: None,
     };
 

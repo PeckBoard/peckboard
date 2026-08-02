@@ -895,6 +895,8 @@ mod tests {
             model_autoswitch: None,
             completed_at: None,
             system_prompt_name: None,
+            worktree_unmerged_reason: None,
+            worktree_unmerged_detail: None,
         }
     }
 

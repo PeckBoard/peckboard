@@ -135,6 +135,19 @@
 .chat-handover-failed a {
   color: var(--accent);
 }
+
+/* Worktree merge notice: the way forward for an unmerged card worktree,
+   sitting under the reason + git output in the same crash-row chrome. */
+.chat-worktree-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  margin-top: 6px;
+  color: var(--text2);
+  font-size: 13px;
+}
 .fetch-error-banner button {
   padding: 3px 12px;
   border: 1px solid var(--danger);

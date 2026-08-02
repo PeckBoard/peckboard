@@ -206,6 +206,22 @@ export type DisplayItem =
       key: string
     }
   | {
+      /** `worktree-done`: the card's git worktree was merged back into the
+       *  project folder — or couldn't be. An unmerged one carries the git
+       *  error and the ids the "Retry merge" button posts to. */
+      type: 'worktree-merge'
+      merged: boolean
+      /** 'dirty' | 'conflict' | 'cleanup_failed'; absent when fully done. */
+      reason?: string
+      /** Git stderr / `status --porcelain` output behind `reason`. */
+      detail?: string
+      branch?: string
+      cardId?: string
+      projectId?: string
+      ts: number
+      key: string
+    }
+  | {
       /** Fallback for event kinds this build doesn't recognize (plugin
        *  providers, future backend kinds): rendered as a collapsed row
        *  instead of being silently dropped. */
@@ -245,6 +261,8 @@ export function displayItemSearchText(item: DisplayItem): string {
       return item.model
     case 'agent-crashed':
       return item.stderr ? `${item.reason}\n${item.stderr}` : item.reason
+    case 'worktree-merge':
+      return [item.branch, item.reason, item.detail].filter(Boolean).join('\n')
     case 'handover':
       return item.doc
     case 'question':
@@ -964,6 +982,23 @@ function foldEvent(st: FoldState, ev: Event): void {
         tempSessionId:
           typeof ev.data.temp_session_id === 'string' ? ev.data.temp_session_id : undefined,
         model: typeof ev.data.model === 'string' ? ev.data.model : undefined,
+      })
+      break
+    }
+    case 'worktree-done': {
+      flushAssistant(st)
+      const str = (k: string): string | undefined =>
+        typeof ev.data[k] === 'string' ? (ev.data[k] as string) : undefined
+      items.push({
+        type: 'worktree-merge',
+        merged: ev.data.merged === true,
+        reason: str('reason'),
+        detail: str('detail'),
+        branch: str('branch'),
+        cardId: str('cardId'),
+        projectId: str('projectId'),
+        ts: ev.ts,
+        key: ev.id,
       })
       break
     }

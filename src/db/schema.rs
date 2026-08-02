@@ -109,6 +109,8 @@ diesel::table! {
         completed_at -> Nullable<Text>,
         model_autoswitch -> Nullable<Bool>,
         system_prompt_name -> Nullable<Text>,
+        worktree_unmerged_reason -> Nullable<Text>,
+        worktree_unmerged_detail -> Nullable<Text>,
     }
 }
 

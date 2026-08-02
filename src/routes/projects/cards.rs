@@ -523,6 +523,8 @@ pub(super) async fn update_card(
                 system_prompt_name: system_prompt_name_update,
                 updated_at: Some(chrono::Utc::now().to_rfc3339()),
                 // Leave to update_card_atomic's stamper — it knows the
+                worktree_unmerged_reason: None,
+                worktree_unmerged_detail: None,
                 // prev_step from the read it already did.
                 completed_at: None,
             })
@@ -844,6 +846,73 @@ pub(super) async fn cancel_card_wont_do(
         })?;
 
     Ok::<_, (StatusCode, Json<serde_json::Value>)>(Json(serde_json::json!({ "ok": true })))
+}
+
+/// POST /api/projects/:id/cards/:card_id/retry-merge -- re-run the merge +
+/// cleanup of the card's git worktree after the user resolved the conflict.
+/// Returns the git error text when it still can't be merged.
+pub(super) async fn retry_card_merge(
+    State(state): State<Arc<AppState>>,
+    Path((project_id, card_id)): Path<(String, String)>,
+) -> impl IntoResponse {
+    let err500 = |e: anyhow::Error| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({ "error": e.to_string() })),
+        )
+    };
+    let not_found = |what: &str| {
+        (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({ "error": format!("{what} not found") })),
+        )
+    };
+
+    let card = state
+        .db
+        .get_card(&card_id)
+        .await
+        .map_err(err500)?
+        .ok_or_else(|| not_found("card"))?;
+    let project = state
+        .db
+        .get_project(&project_id)
+        .await
+        .map_err(err500)?
+        .ok_or_else(|| not_found("project"))?;
+    let folder = state
+        .db
+        .get_folder(&project.folder_id)
+        .await
+        .map_err(err500)?
+        .ok_or_else(|| not_found("folder"))?;
+
+    // Narrate into the worker's transcript when there is one to narrate to.
+    let session_id = card
+        .worker_session_id
+        .clone()
+        .or_else(|| card.last_worker_session_id.clone());
+
+    tracing::info!(card_id = %card_id, "Retrying worktree merge");
+    let outcome = crate::worker::worktree::merge_worktree(
+        &folder.path,
+        &card_id,
+        session_id.as_deref(),
+        &state.db,
+    )
+    .await;
+
+    if outcome.is_clean() {
+        return Ok(Json(serde_json::json!({ "ok": true, "merged": true })));
+    }
+    Err((
+        StatusCode::CONFLICT,
+        Json(serde_json::json!({
+            "error": outcome.detail.unwrap_or_else(|| "merge failed".into()),
+            "reason": outcome.reason,
+            "merged": outcome.merged,
+        })),
+    ))
 }
 
 /// GET /api/projects/:id/cards/:card_id/reports -- list reports written by this card's worker

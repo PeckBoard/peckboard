@@ -43,6 +43,20 @@ pub fn branch_name(id8: &str) -> String {
 /// If `isolation_on` is false, or the folder is not a git repo root (no
 /// `.git`), or any git command fails, returns `folder_path` unchanged and
 /// appends a `worktree-downgrade` session event on failure.
+/// A `git` invocation with any inherited repo-pointing environment stripped.
+///
+/// Every call here names its repo with `-C`, but a stray `GIT_DIR` /
+/// `GIT_WORK_TREE` / `GIT_INDEX_FILE` in the environment (git sets these for
+/// hook subprocesses) silently retargets the command at a different repo.
+fn git_command(args: &[&str]) -> tokio::process::Command {
+    let mut cmd = tokio::process::Command::new("git");
+    cmd.args(args)
+        .env_remove("GIT_DIR")
+        .env_remove("GIT_WORK_TREE")
+        .env_remove("GIT_INDEX_FILE");
+    cmd
+}
+
 ///
 /// If the worktree already exists, reuses it (idempotent).
 pub async fn ensure_worktree(
@@ -74,18 +88,18 @@ pub async fn ensure_worktree(
     append_peckboard_exclude(folder_path).await;
 
     // Create the worktree: git worktree add <path> -b card/<id8>
-    let result = tokio::process::Command::new("git")
-        .args([
-            "-C",
-            folder_path,
-            "worktree",
-            "add",
-            wt_path.to_string_lossy().as_ref(),
-            "-b",
-            &branch,
-        ])
-        .output()
-        .await;
+    // Create the worktree: git worktree add <path> -b card/<id8>
+    let result = git_command(&[
+        "-C",
+        folder_path,
+        "worktree",
+        "add",
+        wt_path.to_string_lossy().as_ref(),
+        "-b",
+        &branch,
+    ])
+    .output()
+    .await;
 
     match result {
         Ok(out) if out.status.success() => wt_path.to_string_lossy().to_string(),
@@ -140,120 +154,253 @@ async fn append_downgrade_event(session_id: &str, db: &Db, reason: &str) {
         .await;
 }
 
-// ── finalize_worktree ─────────────────────────────────────────────────────────
+// ── merge / finalize ──────────────────────────────────────────────────────────
 
-/// Called when a card reaches a terminal step.
-///
-/// - Worktree missing → noop.
-/// - Dirty → leave worktree + append `worktree-done {merged:false, reason:"dirty"}`.
-/// - Clean, no conflict → fast-forward merge into the main folder's HEAD branch,
-///   remove the worktree, delete the branch, append `{merged:true}`.
-/// - Main folder dirty or merge conflict → abort, leave, append `{merged:false,
-///   reason:"conflict"}`.
+/// Outcome of one merge-and-cleanup attempt on a card's worktree.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MergeOutcome {
+    /// True when the card's branch is merged into the main folder's HEAD.
+    pub merged: bool,
+    /// `dirty` | `conflict` | `cleanup_failed`; `None` when fully done.
+    pub reason: Option<String>,
+    /// Git stderr / explanation behind `reason`.
+    pub detail: Option<String>,
+}
+
+impl MergeOutcome {
+    fn done() -> Self {
+        Self {
+            merged: true,
+            reason: None,
+            detail: None,
+        }
+    }
+
+    fn unmerged(reason: &str, detail: impl Into<String>) -> Self {
+        Self {
+            merged: false,
+            reason: Some(reason.to_string()),
+            detail: Some(detail.into()),
+        }
+    }
+
+    /// Merged, but removing the worktree or deleting the branch failed —
+    /// the stale worktree needs a retry, so it stays flagged on the card.
+    fn cleanup_failed(detail: impl Into<String>) -> Self {
+        Self {
+            merged: true,
+            reason: Some("cleanup_failed".into()),
+            detail: Some(detail.into()),
+        }
+    }
+
+    /// True when nothing is left to do for this card's worktree.
+    pub fn is_clean(&self) -> bool {
+        self.reason.is_none()
+    }
+}
+
+/// Called when a card reaches a terminal step. Thin wrapper over
+/// [`merge_worktree`] for callers that always have a live session.
 pub async fn finalize_worktree(folder_path: &str, card_id: &str, session_id: &str, db: &Db) {
+    merge_worktree(folder_path, card_id, Some(session_id), db).await;
+}
+
+/// Merge a card's worktree back into the main folder, then clean it up.
+///
+/// - Worktree missing → noop (`merged: true`), no event.
+/// - Worktree dirty → leave it, `reason: "dirty"`.
+/// - Main folder dirty or merge conflict → abort the merge, leave the
+///   worktree, `reason: "conflict"` carrying the git stderr.
+/// - Merged but `worktree remove` / `branch -d` failed → `reason:
+///   "cleanup_failed"` carrying the git stderr, so a stale worktree is
+///   visible instead of rotting silently.
+///
+/// Every outcome is persisted on the card (`worktree_unmerged_reason` /
+/// `worktree_unmerged_detail`) so it survives a restart, and — when
+/// `session_id` is set — appended to the transcript as a `worktree-done`
+/// event carrying `cardId` / `projectId` so the UI can offer a retry.
+pub async fn merge_worktree(
+    folder_path: &str,
+    card_id: &str,
+    session_id: Option<&str>,
+    db: &Db,
+) -> MergeOutcome {
     let id8 = card_id8(card_id);
     let wt_path = worktree_path(folder_path, &id8);
     let branch = branch_name(&id8);
+    let card = db.get_card(card_id).await.ok().flatten();
 
+    // No worktree: nothing to merge. Stay silent (this runs for every card
+    // in non-isolated projects too) but clear any stale flag.
     if !wt_path.exists() {
-        return;
+        persist_outcome(db, card_id, card.as_ref(), &MergeOutcome::done()).await;
+        return MergeOutcome::done();
     }
 
     let wt_str = wt_path.to_string_lossy().to_string();
 
-    // Check worktree dirty.
-    if is_dirty(&wt_str).await {
-        let _ = db
-            .append_event(
-                session_id,
-                "worktree-done",
-                serde_json::json!({ "merged": false, "reason": "dirty", "branch": branch }),
-            )
-            .await;
-        return;
-    }
-
-    // Check main folder dirty (treat as conflict to avoid losing user work).
-    if is_dirty(folder_path).await {
-        let _ = db
-            .append_event(
-                session_id,
-                "worktree-done",
-                serde_json::json!({ "merged": false, "reason": "conflict", "branch": branch }),
-            )
-            .await;
-        return;
-    }
-
-    // Try fast-forward first, fall back to non-interactive merge.
-    let ff = tokio::process::Command::new("git")
-        .args(["-C", folder_path, "merge", "--ff-only", &branch])
-        .output()
-        .await;
-
-    let merged = match ff {
-        Ok(out) if out.status.success() => true,
-        _ => {
-            // Try regular merge.
-            let merge = tokio::process::Command::new("git")
-                .args(["-C", folder_path, "merge", "--no-edit", &branch])
-                .output()
-                .await;
-            match merge {
-                Ok(out) if out.status.success() => true,
-                _ => {
-                    // Abort and leave the worktree for the user to resolve.
-                    let _ = tokio::process::Command::new("git")
-                        .args(["-C", folder_path, "merge", "--abort"])
-                        .output()
-                        .await;
-                    let _ = db
-                        .append_event(
-                            session_id,
-                            "worktree-done",
-                            serde_json::json!({
-                                "merged": false,
-                                "reason": "conflict",
-                                "branch": branch,
-                            }),
-                        )
-                        .await;
-                    return;
+    let outcome = if let Some(status) = dirty_status(&wt_str).await {
+        MergeOutcome::unmerged("dirty", status)
+    } else if let Some(status) = dirty_status(folder_path).await {
+        // Main folder dirty — treat as a conflict to avoid losing user work.
+        MergeOutcome::unmerged(
+            "conflict",
+            format!("the project folder has uncommitted changes:\n{status}"),
+        )
+    } else {
+        match run_merge(folder_path, &branch).await {
+            Err(detail) => MergeOutcome::unmerged("conflict", detail),
+            Ok(()) => match cleanup_worktree(folder_path, &wt_str, &branch).await {
+                Ok(()) => MergeOutcome::done(),
+                Err(detail) => {
+                    // Never swallowed: logged here and carried into the
+                    // `worktree-done` event + the card's persisted state.
+                    tracing::warn!(card_id, "worktree cleanup failed: {detail}");
+                    MergeOutcome::cleanup_failed(detail)
                 }
-            }
+            },
         }
     };
 
-    if merged {
-        // Remove worktree and delete branch.
-        let _ = tokio::process::Command::new("git")
-            .args(["-C", folder_path, "worktree", "remove", &wt_str])
-            .output()
-            .await;
-        let _ = tokio::process::Command::new("git")
-            .args(["-C", folder_path, "branch", "-d", &branch])
-            .output()
-            .await;
-        let _ = db
-            .append_event(
-                session_id,
-                "worktree-done",
-                serde_json::json!({ "merged": true, "branch": branch }),
-            )
-            .await;
+    persist_outcome(db, card_id, card.as_ref(), &outcome).await;
+    emit_done_event(db, session_id, card.as_ref(), card_id, &branch, &outcome).await;
+    outcome
+}
+
+/// Fast-forward if possible, otherwise a non-interactive merge; a failed
+/// merge is aborted so the main folder is left untouched. `Err` carries the
+/// git stderr.
+async fn run_merge(folder_path: &str, branch: &str) -> Result<(), String> {
+    if let Ok(out) = git_command(&["-C", folder_path, "merge", "--ff-only", branch])
+        .output()
+        .await
+        && out.status.success()
+    {
+        return Ok(());
+    }
+
+    let merge = git_command(&["-C", folder_path, "merge", "--no-edit", branch])
+        .output()
+        .await;
+    match merge {
+        Ok(out) if out.status.success() => Ok(()),
+        other => {
+            let detail = match other {
+                Ok(out) => git_error(&out),
+                Err(e) => e.to_string(),
+            };
+            // Abort and leave the worktree for the user to resolve.
+            let _ = git_command(&["-C", folder_path, "merge", "--abort"])
+                .output()
+                .await;
+            Err(detail)
+        }
+    }
+}
+
+/// Remove the worktree and delete its branch. `Err` carries the git stderr
+/// of whichever step failed — callers must surface it, not swallow it.
+async fn cleanup_worktree(folder_path: &str, wt_str: &str, branch: &str) -> Result<(), String> {
+    run_git(&["-C", folder_path, "worktree", "remove", wt_str]).await?;
+    run_git(&["-C", folder_path, "branch", "-d", branch]).await
+}
+
+/// Run a git command, mapping a non-zero exit or spawn failure to its stderr.
+async fn run_git(args: &[&str]) -> Result<(), String> {
+    match git_command(args).output().await {
+        Ok(out) if out.status.success() => Ok(()),
+        Ok(out) => Err(git_error(&out)),
+        Err(e) => Err(e.to_string()),
+    }
+}
+
+/// stderr of a failed git invocation, falling back to stdout then the code.
+fn git_error(out: &std::process::Output) -> String {
+    let stderr = String::from_utf8_lossy(&out.stderr).trim().to_string();
+    if !stderr.is_empty() {
+        return stderr;
+    }
+    let stdout = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    if !stdout.is_empty() {
+        return stdout;
+    }
+    format!("git exited with {}", out.status)
+}
+
+/// Write the outcome onto the card, skipping the write when nothing changed
+/// (the common "no worktree, nothing pending" path).
+async fn persist_outcome(
+    db: &Db,
+    card_id: &str,
+    card: Option<&crate::db::models::Card>,
+    outcome: &MergeOutcome,
+) {
+    if let Some(card) = card
+        && card.worktree_unmerged_reason.as_deref() == outcome.reason.as_deref()
+        && card.worktree_unmerged_detail.as_deref() == outcome.detail.as_deref()
+    {
+        return;
+    }
+    if let Err(e) = db
+        .update_card(
+            card_id,
+            crate::db::models::UpdateCard {
+                worktree_unmerged_reason: Some(outcome.reason.clone()),
+                worktree_unmerged_detail: Some(outcome.detail.clone()),
+                ..Default::default()
+            },
+        )
+        .await
+    {
+        tracing::warn!(card_id, "failed to persist worktree merge state: {e}");
+    }
+}
+
+async fn emit_done_event(
+    db: &Db,
+    session_id: Option<&str>,
+    card: Option<&crate::db::models::Card>,
+    card_id: &str,
+    branch: &str,
+    outcome: &MergeOutcome,
+) {
+    let Some(session_id) = session_id else {
+        return;
+    };
+    let mut data = serde_json::json!({
+        "merged": outcome.merged,
+        "branch": branch,
+        "cardId": card_id,
+    });
+    if let Some(project_id) = card.map(|c| c.project_id.as_str()) {
+        data["projectId"] = serde_json::json!(project_id);
+    }
+    if let Some(reason) = &outcome.reason {
+        data["reason"] = serde_json::json!(reason);
+    }
+    if let Some(detail) = &outcome.detail {
+        data["detail"] = serde_json::json!(detail);
+    }
+    let _ = db.append_event(session_id, "worktree-done", data).await;
+}
+
+/// `git status --porcelain` output when the repo has changes, else `None`.
+/// A git failure counts as dirty (with the error as the status) to be safe.
+async fn dirty_status(repo_path: &str) -> Option<String> {
+    match git_command(&["-C", repo_path, "status", "--porcelain"])
+        .output()
+        .await
+    {
+        Ok(out) if out.stdout.is_empty() => None,
+        Ok(out) => Some(String::from_utf8_lossy(&out.stdout).trim().to_string()),
+        Err(e) => Some(format!("git status failed: {e}")),
     }
 }
 
 /// Returns true if `git status --porcelain` shows any changes.
 async fn is_dirty(repo_path: &str) -> bool {
-    match tokio::process::Command::new("git")
-        .args(["-C", repo_path, "status", "--porcelain"])
-        .output()
-        .await
-    {
-        Ok(out) => !out.stdout.is_empty(),
-        Err(_) => true, // treat error as dirty to be safe
-    }
+    dirty_status(repo_path).await.is_some()
 }
 
 // ── prune_worktrees ───────────────────────────────────────────────────────────
@@ -268,10 +415,9 @@ pub async fn prune_worktrees(folder_path: &str, terminal_id8s: &[String]) {
     }
 
     // git worktree prune cleans up stale administrative files.
-    let _ = tokio::process::Command::new("git")
-        .args(["-C", folder_path, "worktree", "prune"])
-        .output()
-        .await;
+    if let Err(e) = run_git(&["-C", folder_path, "worktree", "prune"]).await {
+        tracing::warn!(folder_path, "git worktree prune failed: {e}");
+    }
 
     for id8 in terminal_id8s {
         let wt_path = worktree_path(folder_path, id8);
@@ -280,15 +426,10 @@ pub async fn prune_worktrees(folder_path: &str, terminal_id8s: &[String]) {
         }
         let wt_str = wt_path.to_string_lossy().to_string();
         if !is_dirty(&wt_str).await {
-            let _ = tokio::process::Command::new("git")
-                .args(["-C", folder_path, "worktree", "remove", &wt_str])
-                .output()
-                .await;
             let branch = branch_name(id8);
-            let _ = tokio::process::Command::new("git")
-                .args(["-C", folder_path, "branch", "-d", &branch])
-                .output()
-                .await;
+            if let Err(e) = cleanup_worktree(folder_path, &wt_str, &branch).await {
+                tracing::warn!(folder_path, id8, "worktree cleanup failed: {e}");
+            }
         }
     }
 }
@@ -352,5 +493,143 @@ mod tests {
             count, 1,
             "expected exactly one .peckboard/ line, got {count}"
         );
+    }
+
+    // ── merge_worktree ───────────────────────────────────────────────
+
+    /// Run a git command in `dir`, panicking with its stderr on failure.
+    /// Same env scrubbing as [`git_command`] — `cargo test` under a git hook
+    /// inherits a `GIT_DIR` that would point these at the wrong repo.
+    fn git(dir: &std::path::Path, args: &[&str]) {
+        let out = std::process::Command::new("git")
+            .arg("-C")
+            .arg(dir)
+            .args(args)
+            .env_remove("GIT_DIR")
+            .env_remove("GIT_WORK_TREE")
+            .env_remove("GIT_INDEX_FILE")
+            .output()
+            .expect("git");
+        assert!(
+            out.status.success(),
+            "git {args:?}: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+
+    /// A git repo with one commit, plus a DB holding folder/project/card
+    /// rows pointing at it. Returns (repo dir, db, card id).
+    async fn repo_with_card() -> (tempfile::TempDir, Db, String) {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().to_path_buf();
+        git(&path, &["init", "-b", "main"]);
+        git(&path, &["config", "user.email", "t@example.com"]);
+        git(&path, &["config", "user.name", "Test"]);
+        std::fs::write(path.join("README.md"), "hello\n").unwrap();
+        git(&path, &["add", "."]);
+        git(&path, &["commit", "-m", "init"]);
+
+        let db = Db::in_memory().unwrap();
+        let ts = chrono::Utc::now().to_rfc3339();
+        db.create_folder(crate::db::models::NewFolder {
+            id: "f1".into(),
+            name: "Folder".into(),
+            path: path.to_string_lossy().to_string(),
+            created_at: ts.clone(),
+        })
+        .await
+        .unwrap();
+        db.create_project(crate::db::models::NewProject {
+            id: "p1".into(),
+            name: "Project".into(),
+            context: String::new(),
+            folder_id: "f1".into(),
+            worker_count: 1,
+            status: "active".into(),
+            workflow: "task".into(),
+            model: None,
+            effort: None,
+            parallel_instructions: false,
+            auto_notify_changes: false,
+            worker_communication: false,
+            created_at: ts.clone(),
+            last_accessed_at: ts.clone(),
+            budget_usd_cents: None,
+            budget_period: None,
+            worktree_isolation: true,
+        })
+        .await
+        .unwrap();
+        let card_id = "a1b2c3d4-0000-0000-0000-000000000000".to_string();
+        db.create_card(crate::db::models::NewCard {
+            id: card_id.clone(),
+            project_id: "p1".into(),
+            title: "Card".into(),
+            description: String::new(),
+            step: "backlog".into(),
+            priority: 1,
+            workflow: "task".into(),
+            model: None,
+            effort: None,
+            blocked: false,
+            block_reason: None,
+            created_at: ts.clone(),
+            updated_at: ts,
+            system_prompt_name: None,
+        })
+        .await
+        .unwrap();
+        (dir, db, card_id)
+    }
+
+    /// Committed work merges back, the worktree + branch are gone, and the
+    /// card carries no unmerged flag.
+    #[tokio::test]
+    async fn test_merge_worktree_clean_merges_and_clears_card() {
+        let (dir, db, card_id) = repo_with_card().await;
+        let folder = dir.path().to_string_lossy().to_string();
+
+        let wt = ensure_worktree(&folder, &card_id, true, "s1", &db).await;
+        assert_ne!(wt, folder, "expected an isolated worktree");
+        std::fs::write(std::path::Path::new(&wt).join("new.txt"), "work\n").unwrap();
+        let wt_path = std::path::PathBuf::from(&wt);
+        git(&wt_path, &["add", "."]);
+        git(&wt_path, &["commit", "-m", "card work"]);
+
+        let outcome = merge_worktree(&folder, &card_id, None, &db).await;
+        assert!(outcome.is_clean(), "{outcome:?}");
+        assert!(dir.path().join("new.txt").exists(), "merge did not land");
+        assert!(!wt_path.exists(), "worktree not removed");
+
+        let card = db.get_card(&card_id).await.unwrap().unwrap();
+        assert_eq!(card.worktree_unmerged_reason, None);
+    }
+
+    /// Uncommitted work leaves the worktree in place and the reason is
+    /// persisted on the card so it survives a restart.
+    #[tokio::test]
+    async fn test_merge_worktree_dirty_persists_reason_on_card() {
+        let (dir, db, card_id) = repo_with_card().await;
+        let folder = dir.path().to_string_lossy().to_string();
+
+        let wt = ensure_worktree(&folder, &card_id, true, "s1", &db).await;
+        std::fs::write(std::path::Path::new(&wt).join("scratch.txt"), "wip\n").unwrap();
+
+        let outcome = merge_worktree(&folder, &card_id, None, &db).await;
+        assert_eq!(outcome.reason.as_deref(), Some("dirty"));
+        assert!(outcome.detail.unwrap().contains("scratch.txt"));
+        assert!(std::path::Path::new(&wt).exists(), "worktree was removed");
+
+        let card = db.get_card(&card_id).await.unwrap().unwrap();
+        assert_eq!(card.worktree_unmerged_reason.as_deref(), Some("dirty"));
+
+        // Resolving it (commit) and retrying merges and clears the flag.
+        let wt_path = std::path::PathBuf::from(&wt);
+        git(&wt_path, &["add", "."]);
+        git(&wt_path, &["commit", "-m", "resolved"]);
+        let retry = merge_worktree(&folder, &card_id, None, &db).await;
+        assert!(retry.is_clean(), "{retry:?}");
+        let card = db.get_card(&card_id).await.unwrap().unwrap();
+        assert_eq!(card.worktree_unmerged_reason, None);
     }
 }

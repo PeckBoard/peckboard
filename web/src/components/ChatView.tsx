@@ -851,6 +851,8 @@ const ChatRow = memo(function ChatRow({
           <ResolvedQuestionCard questions={item.questions} answers={item.answers} />
         </div>
       )
+    case 'worktree-merge':
+      return <WorktreeMergeRow item={item} />
     case 'unknown':
       // Fallback for event kinds this build doesn't recognize (plugin
       // providers, future backend kinds) — visible, with the payload on
@@ -869,6 +871,108 @@ const ChatRow = memo(function ChatRow({
       )
   }
 })
+
+/** `worktree-done` notice. A worktree that couldn't be merged (dirty tree,
+ *  conflict) or couldn't be cleaned up keeps its git output in a <details>
+ *  and offers a retry, so a resolved conflict doesn't have to wait for the
+ *  janitor to notice the worktree went clean. */
+const WORKTREE_REASON_LABEL: Record<string, string> = {
+  dirty: 'uncommitted changes in the worktree',
+  conflict: 'merge conflict',
+  cleanup_failed: 'the worktree could not be removed',
+}
+
+function WorktreeMergeRow({ item }: { item: Extract<DisplayItem, { type: 'worktree-merge' }> }) {
+  const [busy, setBusy] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+  const [resolved, setResolved] = useState(false)
+  const pending = item.reason !== undefined
+  const canRetry = Boolean(item.cardId && item.projectId)
+
+  const retry = async () => {
+    if (!item.cardId || !item.projectId) return
+    setBusy(true)
+    setError(null)
+    try {
+      const res = await authedFetch(
+        `/api/projects/${item.projectId}/cards/${item.cardId}/retry-merge`,
+        { method: 'POST' },
+      )
+      const data = (await res.json().catch(() => ({}))) as { error?: string }
+      if (!res.ok) throw new Error(data?.error || `HTTP ${res.status}`)
+      setResolved(true)
+    } catch (e) {
+      setError(describeActionError(e, "Couldn't merge the worktree."))
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  // Once it merges, the row stops reading as an error: neutral label, no
+  // stale reason chip.
+  const alert = pending && !resolved
+  const label = !alert
+    ? 'Worktree merged'
+    : item.merged
+      ? 'Worktree cleanup failed'
+      : 'Worktree not merged'
+
+  return (
+    <div className="chat-row chat-row-system">
+      <div
+        className={`chat-crash-row${alert ? '' : ' chat-worktree-row-ok'}`}
+        data-testid="chat-worktree-merge"
+      >
+        <div className="chat-agent-start">
+          <span className="chat-agent-start-label">{label}</span>
+          <span className="chat-agent-start-detail">
+            {[
+              item.branch,
+              alert && item.reason && (WORKTREE_REASON_LABEL[item.reason] ?? item.reason),
+            ]
+              .filter(Boolean)
+              .join(' — ')}
+          </span>
+          <span className="chat-agent-start-time">{formatTime(item.ts)}</span>
+        </div>
+        {item.detail && !resolved && (
+          <details className="chat-crash-details" data-testid="chat-worktree-detail">
+            <summary>git output</summary>
+            <pre className="tool-pre tool-pre-stderr">{item.detail}</pre>
+          </details>
+        )}
+        {pending && !resolved && canRetry && (
+          <div className="chat-worktree-actions">
+            <span>Resolve it in the worktree, then merge it back.</span>
+            <button
+              type="button"
+              className="btn-secondary btn-sm"
+              onClick={() => void retry()}
+              disabled={busy}
+              data-testid="chat-worktree-retry"
+            >
+              {busy ? 'Merging…' : 'Retry merge'}
+            </button>
+          </div>
+        )}
+        {resolved && (
+          <div className="chat-worktree-actions" data-testid="chat-worktree-retry-ok">
+            <span>Merged — the worktree and its branch are cleaned up.</span>
+          </div>
+        )}
+        {error && (
+          <div
+            className="chat-handover-failed"
+            role="alert"
+            data-testid="chat-worktree-retry-error"
+          >
+            <span className="chat-handover-failed-reason">{error}</span>
+          </div>
+        )}
+      </div>
+    </div>
+  )
+}
 /** A confirm-gated session action. `run` rejects on failure; the dialog
  *  stays open and shows the reason (or `failMessage` when the thrown
  *  value isn't human-readable) so the user can retry in place. */

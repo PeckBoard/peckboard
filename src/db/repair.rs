@@ -53,6 +53,7 @@ pub fn ensure_schema(conn: &mut SqliteConnection) -> anyhow::Result<()> {
     ensure_system_prompts_table(conn)?;
     ensure_plans_tables(conn)?;
     ensure_projects_worktree_isolation_column(conn)?;
+    ensure_cards_worktree_unmerged_columns(conn)?;
     ensure_projects_budget_columns(conn)?;
     ensure_sessions_pending_plan_review_column(conn)?;
     ensure_doc_review_tables(conn)?;
@@ -610,6 +611,24 @@ fn ensure_system_prompt_name_columns(conn: &mut SqliteConnection) -> anyhow::Res
                 "ALTER TABLE {table} ADD COLUMN system_prompt_name TEXT"
             ))
             .execute(conn)?;
+        }
+    }
+    Ok(())
+}
+/// Heal DBs that predate `1786100000_cards_worktree_unmerged`. Both
+/// `ALTER TABLE cards ADD COLUMN` statements are non-idempotent, so each is
+/// detected-and-added here. Nullable TEXT (NULL reason = no unmerged
+/// worktree pending), mirroring the migration.
+fn ensure_cards_worktree_unmerged_columns(conn: &mut SqliteConnection) -> anyhow::Result<()> {
+    let rows: Vec<PragmaColumn> = sql_query("PRAGMA table_info(cards)").load(conn)?;
+    let existing: Vec<String> = rows.into_iter().map(|r| r.name).collect();
+    if existing.is_empty() {
+        return Ok(());
+    }
+    for col in ["worktree_unmerged_reason", "worktree_unmerged_detail"] {
+        if !existing.iter().any(|c| c == col) {
+            tracing::info!("Repairing schema: adding cards.{col}");
+            sql_query(format!("ALTER TABLE cards ADD COLUMN {col} TEXT")).execute(conn)?;
         }
     }
     Ok(())

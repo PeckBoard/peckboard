@@ -1202,6 +1202,10 @@
 .chat-crash-row .chat-agent-start-label {
   color: var(--danger);
 }
+/* A merged worktree is good news — don't borrow the crash row's red. */
+.chat-crash-row.chat-worktree-row-ok .chat-agent-start-label {
+  color: var(--text2);
+}
 .chat-crash-details {
   align-self: stretch;
   font-size: var(--text-xs);
