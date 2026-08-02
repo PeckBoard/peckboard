@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useState } from 'react'
 import type { Event } from '../types/api'
 import { authedFetch } from '../store/auth'
+import { useTabsStore } from '../store/tabs'
 import { buildDisplayItems } from './chat/events'
 import { getCommandLine, getSummary, getToolLabel } from './chat/toolDisplay'
 
@@ -51,7 +52,22 @@ export default function SubagentTranscript({ sessionId }: { sessionId: string })
           <span className="subagent-title">Subagent transcript</span>
           {expanded && events !== null && !finished && <span className="tool-spinner" />}
         </button>
-        <a className="subagent-open" href={`/sessions/${sessionId}`}>
+        <a
+          className="subagent-open"
+          href={`/sessions/${sessionId}`}
+          onClick={(e) => {
+            // Plain left click stays in the SPA; modified clicks keep the
+            // browser's open-in-new-tab behaviour via the real href.
+            if (e.button !== 0 || e.metaKey || e.ctrlKey || e.shiftKey || e.altKey) return
+            e.preventDefault()
+            const path = `/sessions/${sessionId}`
+            if (window.location.pathname !== path) {
+              window.history.pushState(null, '', path)
+            }
+            window.dispatchEvent(new PopStateEvent('popstate'))
+            void useTabsStore.getState().openTab('session', sessionId)
+          }}
+        >
           Open session ↗
         </a>
       </div>

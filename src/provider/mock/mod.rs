@@ -424,6 +424,50 @@ async fn run_scenario(
             )
             .await;
         }
+        "subagent" => {
+            // Renders a spawn_subagent tool card with the condensed
+            // SubagentTranscript attached. The child session id is taken from
+            // the user message so e2e specs can point the card at a real
+            // session they created beforehand.
+            let child_id = message.trim().to_string();
+            let tool_id = format!("tool-{}", uuid::Uuid::new_v4());
+            emit_event(
+                db,
+                broadcaster,
+                session_id,
+                ProviderEvent::ToolStart {
+                    tool_use_id: tool_id.clone(),
+                    name: "mcp__peckboard__spawn_subagent".into(),
+                    input: serde_json::json!({ "name": "child", "prompt": "Do the thing." }),
+                },
+            )
+            .await;
+            tick().await;
+            emit_event(
+                db,
+                broadcaster,
+                session_id,
+                ProviderEvent::ToolEnd {
+                    tool_use_id: tool_id,
+                    output: Some(
+                        serde_json::json!({ "subagent_session_id": child_id }).to_string(),
+                    ),
+                    error: None,
+                    images: Vec::new(),
+                },
+            )
+            .await;
+            tick().await;
+            emit_event(
+                db,
+                broadcaster,
+                session_id,
+                ProviderEvent::Text {
+                    text: "Subagent spawned.".into(),
+                },
+            )
+            .await;
+        }
         "usage" => {
             // A turn that exercises everything the usage dashboard reads:
             // a Read tool call (drives the file_read / cache-read breakdown
@@ -1664,6 +1708,12 @@ pub fn mock_model_infos() -> Vec<ModelInfo> {
         ModelInfo {
             id: "run-command".into(),
             display_name: "Mock: run command".into(),
+            capabilities: vec!["mock".into(), "tools".into()],
+            tier: 2,
+        },
+        ModelInfo {
+            id: "subagent".into(),
+            display_name: "Mock: spawn subagent".into(),
             capabilities: vec!["mock".into(), "tools".into()],
             tier: 2,
         },
