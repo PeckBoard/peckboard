@@ -263,8 +263,13 @@ function App() {
   const terminateAgent = useSessionsStore((s) => s.terminateAgent)
   const fetchEvents = useSessionsStore((s) => s.fetchEvents)
   const processing = useSessionsStore((s) => s.processing)
-  const unreadSessions = useSessionsStore((s) => s.unreadSessions)
   const markSessionRead = useSessionsStore((s) => s.markSessionRead)
+  const unreadSessions = useSessionsStore((s) => s.unreadSessions)
+  const sessionSearchResults = useSessionsStore((s) => s.sessionSearchResults)
+  const sessionSearchNextCursor = useSessionsStore((s) => s.sessionSearchNextCursor)
+  const sessionSearchLoading = useSessionsStore((s) => s.sessionSearchLoading)
+  const setSessionSearchQuery = useSessionsStore((s) => s.setSessionSearchQuery)
+  const fetchMoreSessionSearch = useSessionsStore((s) => s.fetchMoreSessionSearch)
   const projects = useProjectsStore((s) => s.projects)
   const projectsLoaded = useProjectsStore((s) => s.projectsLoaded)
   const activeProjectId = useProjectsStore((s) => s.activeProjectId)
@@ -319,6 +324,12 @@ function App() {
   const [showNewProject, setShowNewProject] = useState(false)
   const [confirmDeleteId, setConfirmDeleteId] = useState<string | null>(null)
   const [selectedSessions, setSelectedSessions] = useState<Set<string>>(() => new Set())
+  const [sessionFilterInput, setSessionFilterInput] = useState('')
+  const sessionSearchActive = sessionFilterInput.trim() !== ''
+  const chatSessionSearchResults = useMemo(
+    () => (sessionSearchResults ?? []).filter((s) => !s.is_expert),
+    [sessionSearchResults],
+  )
   const [confirmDeleteProjectId, setConfirmDeleteProjectId] = useState<string | null>(null)
   const [confirmClearSessionId, setConfirmClearSessionId] = useState<string | null>(null)
   const [confirmTerminateSessionId, setConfirmTerminateSessionId] = useState<string | null>(null)
@@ -662,6 +673,16 @@ function App() {
       }
     }
   }, [authenticated, connect, disconnect, fetchSessions, fetchProjects, fetchFolders])
+
+  // Debounce the sessions-sidebar search box: fire the server query
+  // ~250ms after the user stops typing rather than on every keystroke,
+  // since each query is a paginated network round trip.
+  useEffect(() => {
+    const handle = setTimeout(() => {
+      void setSessionSearchQuery(sessionFilterInput)
+    }, 250)
+    return () => clearTimeout(handle)
+  }, [sessionFilterInput, setSessionSearchQuery])
 
   // Open / promote a tab whenever the user activates a session or
   // project — this is what makes "MRU + cross-device sync" Just Work,
@@ -1442,9 +1463,22 @@ function App() {
                     title="Sessions"
                     actionLabel="+ New session"
                     onAction={() => setShowNewSession(true)}
+                    extras={
+                      chatSessions.length > 0 || sessionSearchActive ? (
+                        <input
+                          className="list-view-search"
+                          type="search"
+                          placeholder="Search sessions…"
+                          aria-label="Search sessions by name"
+                          data-testid="session-filter"
+                          value={sessionFilterInput}
+                          onChange={(e) => setSessionFilterInput(e.target.value)}
+                        />
+                      ) : undefined
+                    }
                   />
                   <List
-                    items={chatSessions}
+                    items={sessionSearchActive ? chatSessionSearchResults : chatSessions}
                     getKey={(s) => s.id}
                     activeId={activeSessionId}
                     onActivate={(s) => {
@@ -1486,25 +1520,35 @@ function App() {
                       </>
                     )}
                     onScroll={(e) => {
-                      if (!sessionsNextCursor || sessionsLoadingMore) return
                       const el = e.currentTarget
-                      if (el.scrollHeight - el.scrollTop - el.clientHeight < 200) {
-                        void fetchMoreSessions()
+                      if (el.scrollHeight - el.scrollTop - el.clientHeight >= 200) return
+                      if (sessionSearchActive) {
+                        if (!sessionSearchNextCursor || sessionSearchLoading) return
+                        void fetchMoreSessionSearch()
+                        return
                       }
+                      if (!sessionsNextCursor || sessionsLoadingMore) return
+                      void fetchMoreSessions()
                     }}
                     emptyState={
-                      <div className="list-view-empty">
-                        <p>No sessions yet</p>
-                        <button
-                          className="list-view-empty-action"
-                          onClick={() => setShowNewSession(true)}
-                        >
-                          Create your first session
-                        </button>
-                      </div>
+                      sessionSearchActive ? (
+                        <div className="list-view-empty" data-testid="session-filter-empty">
+                          <p>No sessions match “{sessionFilterInput.trim()}”</p>
+                        </div>
+                      ) : (
+                        <div className="list-view-empty">
+                          <p>No sessions yet</p>
+                          <button
+                            className="list-view-empty-action"
+                            onClick={() => setShowNewSession(true)}
+                          >
+                            Create your first session
+                          </button>
+                        </div>
+                      )
                     }
                     footer={
-                      sessionsLoadingMore ? (
+                      (sessionSearchActive ? sessionSearchLoading : sessionsLoadingMore) ? (
                         <div className="list-view-loading-more" data-testid="sessions-loading-more">
                           Loading more sessions…
                         </div>

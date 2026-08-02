@@ -57,6 +57,10 @@ struct ListSessionsQuery {
     /// entire table by passing `?limit=99999999` and re-introduce the
     /// pre-pagination O(N) behaviour we just removed.
     limit: Option<i64>,
+    /// Case-insensitive substring filter on session name. Composed with
+    /// the keyset cursor (not a replacement for it) so search results
+    /// stay paginated the same way an unfiltered list is.
+    q: Option<String>,
 }
 
 /// Default page size for `GET /api/sessions`. Tuned for the sidebar UI:
@@ -246,15 +250,19 @@ async fn list_sessions(
         Some(user.user_id.as_str())
     };
 
+    // Empty/whitespace-only query is treated as "no filter" so a
+    // cleared search box behaves identically to never having searched.
+    let q = params.q.as_deref().map(str::trim).filter(|s| !s.is_empty());
+
     let sessions = if let Some(folder_id) = params.folder_id {
         state
             .db
-            .list_plain_sessions_by_folder_page(&folder_id, owner, cursor, limit)
+            .list_plain_sessions_by_folder_page(&folder_id, owner, q, cursor, limit)
             .await
     } else {
         state
             .db
-            .list_plain_sessions_page(owner, cursor, limit)
+            .list_plain_sessions_page(owner, q, cursor, limit)
             .await
     };
 

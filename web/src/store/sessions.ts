@@ -116,8 +116,23 @@ interface SessionsState {
    *  affordance as if history were exhausted. */
   olderEventsErrorBySession: Record<string, boolean>
   pendingUserMessages: Record<string, PendingUserMessage[]>
+  /** Current sessions-sidebar search text. Empty string means "not
+   *  searching" — the plain paginated `sessions` list is shown. */
+  sessionSearchQuery: string
+  /** Server-matched results for `sessionSearchQuery`, or `null` when no
+   *  search is active. Kept separate from `sessions` so switching the
+   *  search box back to empty instantly restores the base list without
+   *  a re-fetch. */
+  sessionSearchResults: Session[] | null
+  sessionSearchNextCursor: SessionsCursor | null
+  sessionSearchLoading: boolean
   fetchSessions: () => Promise<void>
   fetchMoreSessions: () => Promise<void>
+  /** Set the sessions-sidebar search text and (debounced by the caller)
+   *  fetch matching sessions from the server. Passing '' clears search
+   *  state and reverts the sidebar to the paginated base list. */
+  setSessionSearchQuery: (q: string) => Promise<void>
+  fetchMoreSessionSearch: () => Promise<void>
   fetchEvents: (sessionId: string) => Promise<void>
   fetchOlderEvents: (sessionId: string) => Promise<void>
   appendEvent: (event: Event) => void
@@ -188,6 +203,12 @@ const SESSIONS_PAGE_SIZE = 100
  *  another page-full per click. */
 const EVENTS_PAGE_SIZE = 200
 
+// Incremented on every sessions-search request; a response only commits
+// if it's still the latest request when it lands. Guards against a fast
+// keystroke's later request resolving before an earlier one, which would
+// otherwise flash stale results.
+let sessionSearchRequestId = 0
+
 export const useSessionsStore = create<SessionsState>((set, get) => ({
   sessions: [],
   sessionsLoaded: false,
@@ -204,6 +225,10 @@ export const useSessionsStore = create<SessionsState>((set, get) => ({
   hasMoreOlderEventsBySession: {},
   olderEventsErrorBySession: {},
   pendingUserMessages: {},
+  sessionSearchQuery: '',
+  sessionSearchResults: null,
+  sessionSearchNextCursor: null,
+  sessionSearchLoading: false,
 
   fetchSessions: async () => {
     const res = await authedFetch(`/api/sessions?limit=${SESSIONS_PAGE_SIZE}`)
@@ -251,6 +276,71 @@ export const useSessionsStore = create<SessionsState>((set, get) => ({
     }
   },
 
+  setSessionSearchQuery: async (q: string) => {
+    const trimmed = q.trim()
+    set({ sessionSearchQuery: q })
+    if (!trimmed) {
+      set({
+        sessionSearchResults: null,
+        sessionSearchNextCursor: null,
+        sessionSearchLoading: false,
+      })
+      return
+    }
+    const requestId = ++sessionSearchRequestId
+    set({ sessionSearchLoading: true })
+    try {
+      const params = new URLSearchParams({ limit: String(SESSIONS_PAGE_SIZE), q: trimmed })
+      const res = await authedFetch(`/api/sessions?${params.toString()}`)
+      if (requestId !== sessionSearchRequestId) return
+      if (!res.ok) {
+        set({ sessionSearchLoading: false })
+        return
+      }
+      const body: { items: Session[]; next_cursor: SessionsCursor | null } = await res.json()
+      set({
+        sessionSearchResults: body.items,
+        sessionSearchNextCursor: body.next_cursor,
+        sessionSearchLoading: false,
+      })
+    } catch {
+      if (requestId === sessionSearchRequestId) set({ sessionSearchLoading: false })
+    }
+  },
+
+  fetchMoreSessionSearch: async () => {
+    const { sessionSearchQuery, sessionSearchNextCursor, sessionSearchLoading } = get()
+    const trimmed = sessionSearchQuery.trim()
+    if (!trimmed || !sessionSearchNextCursor || sessionSearchLoading) return
+    const requestId = sessionSearchRequestId
+    set({ sessionSearchLoading: true })
+    try {
+      const params = new URLSearchParams({
+        limit: String(SESSIONS_PAGE_SIZE),
+        q: trimmed,
+        cursor_la: sessionSearchNextCursor.last_activity,
+        cursor_id: sessionSearchNextCursor.id,
+      })
+      const res = await authedFetch(`/api/sessions?${params.toString()}`)
+      if (requestId !== sessionSearchRequestId) return
+      if (!res.ok) {
+        set({ sessionSearchLoading: false })
+        return
+      }
+      const body: { items: Session[]; next_cursor: SessionsCursor | null } = await res.json()
+      set((s) => {
+        const existing = new Set((s.sessionSearchResults ?? []).map((x) => x.id))
+        const fresh = body.items.filter((x) => !existing.has(x.id))
+        return {
+          sessionSearchResults: [...(s.sessionSearchResults ?? []), ...fresh],
+          sessionSearchNextCursor: body.next_cursor,
+          sessionSearchLoading: false,
+        }
+      })
+    } catch {
+      if (requestId === sessionSearchRequestId) set({ sessionSearchLoading: false })
+    }
+  },
   fetchEvents: async (sessionId: string) => {
     set((s) => ({
       loadingEventsBySession: { ...s.loadingEventsBySession, [sessionId]: true },

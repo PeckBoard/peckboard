@@ -2338,8 +2338,10 @@ mod tests {
     async fn list_plain_sessions_page_returns_newest_first_and_respects_limit() {
         let db = test_db();
         seed_paginated_sessions(&db, "f1", 5).await;
-
-        let page = db.list_plain_sessions_page(None, None, 3).await.unwrap();
+        let page = db
+            .list_plain_sessions_page(None, None, None, 3)
+            .await
+            .unwrap();
         assert_eq!(page.len(), 3, "limit must cap row count");
         // Newest first: we inserted s000 oldest, s004 newest, so the
         // first page is s004, s003, s002.
@@ -2352,15 +2354,17 @@ mod tests {
         let db = test_db();
         seed_paginated_sessions(&db, "f1", 7).await;
 
-        // Page 1
-        let p1 = db.list_plain_sessions_page(None, None, 3).await.unwrap();
+        let p1 = db
+            .list_plain_sessions_page(None, None, None, 3)
+            .await
+            .unwrap();
         let last = p1.last().unwrap();
         let cursor = (last.last_activity.clone(), last.id.clone());
 
         // Page 2 — must start with the row immediately older than the
         // page-1 tail and continue in strict order.
         let p2 = db
-            .list_plain_sessions_page(None, Some(cursor), 3)
+            .list_plain_sessions_page(None, None, Some(cursor), 3)
             .await
             .unwrap();
         let p2_ids: Vec<&str> = p2.iter().map(|s| s.id.as_str()).collect();
@@ -2370,7 +2374,7 @@ mod tests {
         let last2 = p2.last().unwrap();
         let cursor2 = (last2.last_activity.clone(), last2.id.clone());
         let p3 = db
-            .list_plain_sessions_page(None, Some(cursor2), 3)
+            .list_plain_sessions_page(None, None, Some(cursor2), 3)
             .await
             .unwrap();
         assert_eq!(
@@ -2412,12 +2416,14 @@ mod tests {
             .await
             .unwrap();
         }
-
-        let p1 = db.list_plain_sessions_page(None, None, 2).await.unwrap();
+        let p1 = db
+            .list_plain_sessions_page(None, None, None, 2)
+            .await
+            .unwrap();
         assert_eq!(p1.len(), 2);
         let cursor = (p1[1].last_activity.clone(), p1[1].id.clone());
         let p2 = db
-            .list_plain_sessions_page(None, Some(cursor), 2)
+            .list_plain_sessions_page(None, None, Some(cursor), 2)
             .await
             .unwrap();
         assert_eq!(p2.len(), 1);
@@ -2466,7 +2472,10 @@ mod tests {
             .await
             .unwrap();
         }
-        let page = db.list_plain_sessions_page(None, None, 10).await.unwrap();
+        let page = db
+            .list_plain_sessions_page(None, None, None, 10)
+            .await
+            .unwrap();
         let ids: Vec<&str> = page.iter().map(|s| s.id.as_str()).collect();
         assert_eq!(ids, vec!["plain"]);
     }
@@ -2510,7 +2519,7 @@ mod tests {
         }
 
         let mine = db
-            .list_plain_sessions_page(Some("u1"), None, 10)
+            .list_plain_sessions_page(Some("u1"), None, None, 10)
             .await
             .unwrap();
         assert_eq!(
@@ -2518,8 +2527,92 @@ mod tests {
             vec!["mine"]
         );
 
-        let all = db.list_plain_sessions_page(None, None, 10).await.unwrap();
+        let all = db
+            .list_plain_sessions_page(None, None, None, 10)
+            .await
+            .unwrap();
         assert_eq!(all.len(), 3, "owner = None (admin) must see every session");
+    }
+
+    #[tokio::test]
+    async fn list_plain_sessions_page_filters_by_name_substring_case_insensitively() {
+        let db = test_db();
+        db.create_folder(NewFolder {
+            id: "f1".into(),
+            name: "f".into(),
+            path: "/tmp/f1".into(),
+            created_at: chrono::Utc::now().to_rfc3339(),
+        })
+        .await
+        .unwrap();
+        for name in ["Alpha review", "beta ALPHA build", "gamma"] {
+            let ts = chrono::Utc::now().to_rfc3339();
+            db.create_session(NewSession {
+                id: name.to_string(),
+                name: name.into(),
+                folder_id: "f1".into(),
+                model: None,
+                effort: None,
+                is_worker: false,
+                project_id: None,
+                card_id: None,
+                conversation_id: None,
+                created_at: ts.clone(),
+                last_activity: ts,
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        }
+
+        let matches = db
+            .list_plain_sessions_page(None, Some("alpha"), None, 10)
+            .await
+            .unwrap();
+        let mut names: Vec<&str> = matches.iter().map(|s| s.name.as_str()).collect();
+        names.sort();
+        assert_eq!(names, vec!["Alpha review", "beta ALPHA build"]);
+    }
+
+    #[tokio::test]
+    async fn list_plain_sessions_page_name_filter_escapes_like_wildcards() {
+        let db = test_db();
+        db.create_folder(NewFolder {
+            id: "f1".into(),
+            name: "f".into(),
+            path: "/tmp/f1".into(),
+            created_at: chrono::Utc::now().to_rfc3339(),
+        })
+        .await
+        .unwrap();
+        for name in ["100% done", "1000 done"] {
+            let ts = chrono::Utc::now().to_rfc3339();
+            db.create_session(NewSession {
+                id: name.to_string(),
+                name: name.into(),
+                folder_id: "f1".into(),
+                model: None,
+                effort: None,
+                is_worker: false,
+                project_id: None,
+                card_id: None,
+                conversation_id: None,
+                created_at: ts.clone(),
+                last_activity: ts,
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        }
+
+        // A literal `%` in the query must match only the literal `%`,
+        // not act as a SQL wildcard matching every row.
+        let matches = db
+            .list_plain_sessions_page(None, Some("100%"), None, 10)
+            .await
+            .unwrap();
+        assert_eq!(matches.len(), 1);
+        assert_eq!(matches[0].name, "100% done");
     }
 
     #[tokio::test]
@@ -2555,7 +2648,7 @@ mod tests {
             }
         }
         let page = db
-            .list_plain_sessions_by_folder_page("fa", None, None, 10)
+            .list_plain_sessions_by_folder_page("fa", None, None, None, 10)
             .await
             .unwrap();
         let ids: Vec<String> = page.iter().map(|s| s.id.clone()).collect();
