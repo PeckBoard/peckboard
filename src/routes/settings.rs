@@ -640,9 +640,20 @@ pub async fn hidden_providers(state: &Arc<AppState>) -> HashSet<String> {
 
 /// GET /api/settings/providers → `{"providers":[{"id","display_name","hidden"}]}`
 /// All registered providers (static list), sorted by display_name.
+/// Whether the built-in `mock` provider (used by e2e's `mock:*` models)
+/// should appear in the Providers & Accounts settings UI. It's always
+/// registered and always reachable via `/api/models` — gating here only
+/// hides the toggle from production users, it never affects registration
+/// or model dispatch.
+fn dev_providers_visible() -> bool {
+    cfg!(debug_assertions) || std::env::var("PECKBOARD_SHOW_MOCK_PROVIDER").is_ok_and(|v| v == "1")
+}
+
 async fn get_providers(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     let hidden = hidden_providers(&state).await;
+    let show_mock = dev_providers_visible();
     let mut providers = state.provider_registry.list_providers().await;
+    providers.retain(|p| show_mock || p.id != "mock");
     providers.sort_by(|a, b| a.display_name.cmp(&b.display_name));
     Json(serde_json::json!({
         "providers": providers.iter().map(|p| serde_json::json!({

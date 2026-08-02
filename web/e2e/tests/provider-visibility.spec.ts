@@ -158,3 +158,15 @@ test('hiding a provider via API removes its models from /api/models', async ({ r
   const restored = await fetchModels(request, authHeader)
   expect(restored.providers.find((p) => p.id === 'mock')).toBeTruthy()
 })
+
+test('the Mock provider toggle is hidden from production settings', async ({ request, page }) => {
+  const { token } = await authenticate(request)
+  await loadAppAt(page, token, '/')
+
+  const settingsPage = await navigateToProviders(page)
+
+  // ollama is a real (non-dev) provider and stays visible — sanity check
+  // that the providers list itself rendered before asserting an absence.
+  await expect(settingsPage.getByTestId('provider-toggle-ollama')).toBeVisible()
+  await expect(settingsPage.getByTestId('provider-toggle-mock')).toHaveCount(0)
+})

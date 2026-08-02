@@ -36,6 +36,11 @@ struct ChangeFolderRequest {
     target_folder_id: String,
 }
 
+#[derive(Deserialize)]
+struct RenameFolderRequest {
+    name: String,
+}
+
 pub fn router(state: Arc<AppState>) -> Router<Arc<AppState>> {
     Router::new()
         .merge(admin_router())
@@ -56,7 +61,10 @@ fn admin_router() -> Router<Arc<AppState>> {
     Router::new()
         .route("/api/folders", post(create_folder))
         .route("/api/folders/browse", get(browse_folder_path))
-        .route("/api/folders/{id}", delete(delete_folder))
+        .route(
+            "/api/folders/{id}",
+            delete(delete_folder).patch(rename_folder),
+        )
         .route(
             "/api/folders/{id}/delete-sessions",
             post(delete_with_sessions),
@@ -366,6 +374,50 @@ async fn delete_folder(
             Json(serde_json::json!({ "error": "folder not found" })),
         )),
     }
+}
+
+async fn rename_folder(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+    Json(body): Json<RenameFolderRequest>,
+) -> impl IntoResponse {
+    let name = body.name.trim().to_string();
+    if name.is_empty() {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({ "error": "name cannot be empty" })),
+        ));
+    }
+
+    let taken = state.db.folder_name_taken(&name, &id).await.map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({ "error": e.to_string() })),
+        )
+    })?;
+    if taken {
+        return Err((
+            StatusCode::CONFLICT,
+            Json(serde_json::json!({ "error": "a folder with that name already exists" })),
+        ));
+    }
+
+    let folder = state
+        .db
+        .rename_folder(&id, &name)
+        .await
+        .map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({ "error": e.to_string() })),
+            )
+        })?
+        .ok_or((
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({ "error": "folder not found" })),
+        ))?;
+
+    Ok(Json(serde_json::json!(folder)))
 }
 
 /// POST /api/folders/:id/delete-sessions — delete all sessions in folder, then delete folder
@@ -912,7 +964,9 @@ async fn list_repos(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::auth::middleware::tests::{seed_authenticated_user, seed_session, test_state};
+    use crate::auth::middleware::tests::{
+        seed_authenticated_user, seed_authenticated_user_with_suffix, seed_session, test_state,
+    };
     use axum::body::Body;
     use axum::http::{Request, header};
     use tower::ServiceExt;
@@ -1005,6 +1059,87 @@ mod tests {
         let response = app(state.clone()).oneshot(delete).await.unwrap();
         assert_eq!(response.status(), StatusCode::NO_CONTENT);
         assert!(state.db.list_folders().await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn admin_can_rename_a_folder_and_duplicates_are_rejected() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = test_state(dir.path());
+        let token = seed_authenticated_user(&state, "admin").await;
+        let workspace_a = tempfile::tempdir().unwrap();
+        let workspace_b = tempfile::tempdir().unwrap();
+
+        app(state.clone())
+            .oneshot(create_request(
+                &token,
+                "alpha",
+                workspace_a.path().to_str().unwrap(),
+            ))
+            .await
+            .unwrap();
+        app(state.clone())
+            .oneshot(create_request(
+                &token,
+                "beta",
+                workspace_b.path().to_str().unwrap(),
+            ))
+            .await
+            .unwrap();
+        let folders = state.db.list_folders().await.unwrap();
+        let alpha_id = folders
+            .iter()
+            .find(|f| f.name == "alpha")
+            .unwrap()
+            .id
+            .clone();
+
+        let rename = |name: &str, id: &str, token: &str| {
+            Request::builder()
+                .method("PATCH")
+                .uri(format!("/api/folders/{id}"))
+                .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(serde_json::json!({ "name": name }).to_string()))
+                .unwrap()
+        };
+
+        // Duplicate name (case-insensitive) is rejected.
+        let response = app(state.clone())
+            .oneshot(rename("BETA", &alpha_id, &token))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::CONFLICT);
+
+        // Empty name is rejected.
+        let response = app(state.clone())
+            .oneshot(rename("   ", &alpha_id, &token))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+
+        // A real rename succeeds and sticks.
+        let response = app(state.clone())
+            .oneshot(rename("alpha-renamed", &alpha_id, &token))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let renamed = state.db.get_folder(&alpha_id).await.unwrap().unwrap();
+        assert_eq!(renamed.name, "alpha-renamed");
+
+        // Non-admin cannot rename.
+        let user_token = seed_authenticated_user_with_suffix(&state, "user", "2").await;
+        let response = app(state.clone())
+            .oneshot(rename("nope", &alpha_id, &user_token))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+
+        // Unknown id 404s.
+        let response = app(state)
+            .oneshot(rename("whatever", "missing-id", &token))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
     }
 
     #[tokio::test]

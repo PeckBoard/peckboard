@@ -245,6 +245,50 @@ pub(crate) mod tests {
         token
     }
 
+    /// Like [`seed_authenticated_user`], but for tests that need more than
+    /// one distinct user in the same DB — the default helper hardcodes a
+    /// single id/username/session, so a second call collides on the users
+    /// table's unique username constraint. `suffix` must be unique per call.
+    pub(crate) async fn seed_authenticated_user_with_suffix(
+        state: &Arc<AppState>,
+        role: &str,
+        suffix: &str,
+    ) -> String {
+        let now_str = chrono::Utc::now().to_rfc3339();
+        let user_id = format!("u1-{suffix}");
+        state
+            .db
+            .create_user(NewUser {
+                id: user_id.clone(),
+                username: format!("alice-{suffix}"),
+                email: None,
+                password_hash: "x".into(),
+                role: role.into(),
+                created_at: now_str.clone(),
+                updated_at: now_str,
+            })
+            .await
+            .unwrap();
+
+        let session_id = format!("as1-{suffix}");
+        state
+            .db
+            .create_auth_session(NewAuthSession {
+                id: session_id.clone(),
+                user_id: user_id.clone(),
+                token_hash: format!("deadbeef-{suffix}"),
+                created_at: 0,
+                expires_at: i64::MAX,
+                user_agent: None,
+                ip_address: None,
+            })
+            .await
+            .unwrap();
+
+        let (token, _) = create_token(&state.jwt_secret, &user_id, role, &session_id).unwrap();
+        token
+    }
+
     fn protected_app(state: Arc<AppState>) -> Router {
         async fn whoami(axum::Extension(user): axum::Extension<AuthUser>) -> String {
             format!("{}:{}:{}", user.user_id, user.role, user.session_id)

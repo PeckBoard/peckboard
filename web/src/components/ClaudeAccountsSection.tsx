@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { useAuthStore } from '../store/auth'
 import { useClaudeAccountsStore } from '../store/claudeAccounts'
 import type { ClaudeAccount, PlanUsageEntry, WarnLevel } from '../types/api'
@@ -53,6 +53,48 @@ function planLine(entry: PlanUsageEntry): string | null {
   return parts.length > 0 ? parts.join('  ·  ') : null
 }
 
+type PlanErrorClass = 'rate-limit' | 'auth' | 'other'
+
+/** Backoff schedule for automatic retries while plan usage is rate-limited. */
+const RATE_LIMIT_RETRY_DELAYS_MS = [30_000, 60_000, 120_000]
+
+/** Bucket a raw plan-usage error string so the UI can show a friendly message. */
+function classifyPlanError(message: string): PlanErrorClass {
+  const m = message.toLowerCase()
+  if (m.includes('429') || m.includes('rate_limit') || m.includes('rate limit')) return 'rate-limit'
+  if (
+    m.includes('401') ||
+    m.includes('403') ||
+    m.includes('authentication') ||
+    m.includes('unauthorized') ||
+    m.includes('oauth') ||
+    m.includes('permission')
+  ) {
+    return 'auth'
+  }
+  return 'other'
+}
+
+/** Friendly plan-usage error message; the raw payload sits behind a `<details>`. */
+function PlanErrorNotice({ error }: { error: string }) {
+  const cls = classifyPlanError(error)
+  const friendly =
+    cls === 'rate-limit'
+      ? 'Rate limited by the API — retrying automatically.'
+      : cls === 'auth'
+        ? 'Authentication failed — re-add this account to refresh its credentials.'
+        : "Couldn't fetch plan usage."
+  return (
+    <div className="acct-plan-error" data-plan-error-class={cls}>
+      <span>{friendly}</span>
+      <details className="acct-plan-error-details">
+        <summary>Details</summary>
+        <pre>{error}</pre>
+      </details>
+    </div>
+  )
+}
+
 /**
  * Subscription plan usage for the host's own ("Default") login — the same
  * numbers `claude /usage` shows, polled by the server every 30 minutes.
@@ -88,7 +130,7 @@ function PlanUsagePanel({
           {entry?.last_error ? 'Plan usage unavailable.' : 'Waiting for first poll…'}
         </div>
       )}
-      {entry?.last_error && <div className="acct-plan-error">{entry.last_error}</div>}
+      {entry?.last_error && <PlanErrorNotice error={entry.last_error} />}
       {entry?.fetched_at != null && (
         <div className="acct-plan-updated">
           Updated {new Date(entry.fetched_at).toLocaleTimeString()} · refreshes every 30 min
@@ -146,12 +188,9 @@ function AccountRow({
             <span>{accountPlanLine}</span>
           </div>
         ) : plan?.last_error && account.kind === 'oauth_token' ? (
-          <div
-            className="acct-row-sub acct-plan-row acct-plan-error"
-            data-testid={`acct-plan-error-${account.id}`}
-          >
+          <div className="acct-row-sub acct-plan-row" data-testid={`acct-plan-error-${account.id}`}>
             <span className="acct-plan-label">Plan</span>
-            <span>{plan.last_error}</span>
+            <PlanErrorNotice error={plan.last_error} />
           </div>
         ) : null}
       </div>
@@ -209,6 +248,25 @@ export default function ClaudeAccountsSection() {
     void fetchAccounts()
     void fetchPlanUsage()
   }, [fetchAccounts, fetchPlanUsage])
+
+  const rateLimitAttemptsRef = useRef(0)
+
+  useEffect(() => {
+    const anyRateLimited = Object.values(planUsage).some(
+      (entry) => entry.last_error != null && classifyPlanError(entry.last_error) === 'rate-limit',
+    )
+    if (!anyRateLimited) {
+      rateLimitAttemptsRef.current = 0
+      return
+    }
+    if (rateLimitAttemptsRef.current >= RATE_LIMIT_RETRY_DELAYS_MS.length) return
+    const delay = RATE_LIMIT_RETRY_DELAYS_MS[rateLimitAttemptsRef.current]
+    const timer = setTimeout(() => {
+      rateLimitAttemptsRef.current += 1
+      void refreshPlanUsage()
+    }, delay)
+    return () => clearTimeout(timer)
+  }, [planUsage, refreshPlanUsage])
 
   return (
     <section className="settings-section" data-testid="claude-accounts-section">
