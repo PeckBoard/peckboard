@@ -1135,6 +1135,15 @@ enum RoundOutcome {
         text: String,
         tool_calls: Vec<ToolCall>,
     },
+    /// The user cancelled mid-round. `Crashed{Interrupted}` was already
+    /// emitted; `text`/`tool_calls` carry whatever had streamed in before
+    /// the cancel fired (both empty when the cancel landed before any
+    /// content arrived) so the caller can persist the partial turn instead
+    /// of dropping it.
+    Interrupted {
+        text: String,
+        tool_calls: Vec<ToolCall>,
+    },
     /// A failure was already reported via a `Crashed` event; the caller
     /// should stop and report the turn as not-completed.
     Failed,
@@ -1356,6 +1365,23 @@ async fn run_chat_stream(args: ChatStreamArgs<'_>) -> turn::TurnResult {
         .await;
         let (text, tool_calls) = match outcome {
             RoundOutcome::Message { text, tool_calls } => (text, tool_calls),
+            RoundOutcome::Interrupted { text, tool_calls } => {
+                emit_usage(db, broadcaster, session_id, model_label, &usage).await;
+                // Persist what streamed in before the cancel landed (may
+                // be nothing) so the next turn still has this exchange
+                // instead of silently forgetting it happened.
+                if !text.is_empty() || !tool_calls.is_empty() {
+                    let marked = if text.is_empty() {
+                        text
+                    } else {
+                        format!("{text}\n\n[Response interrupted by user]")
+                    };
+                    let calls_for_replay = (!tool_calls.is_empty()).then(|| tool_calls.clone());
+                    new_messages.push(ChatMessage::assistant(marked, calls_for_replay));
+                }
+                persist_partial(session_id, conversations, new_messages).await;
+                return errors.failure();
+            }
             RoundOutcome::Failed => {
                 emit_usage(db, broadcaster, session_id, model_label, &usage).await;
                 return errors.failure();
@@ -1413,6 +1439,11 @@ async fn run_chat_stream(args: ChatStreamArgs<'_>) -> turn::TurnResult {
                         &errors,
                     )
                     .await;
+                    // The assistant message that requested this round's
+                    // tool calls (and everything from earlier rounds) is
+                    // already in `new_messages` — persist it rather than
+                    // dropping the whole exchange.
+                    persist_partial(session_id, conversations, new_messages).await;
                     return errors.failure();
                 }
                 m = async {
@@ -1547,7 +1578,10 @@ async fn stream_one_round(round: StreamRound<'_>) -> RoundOutcome {
                 errors,
             )
             .await;
-            return RoundOutcome::Failed;
+            return RoundOutcome::Interrupted {
+                text: String::new(),
+                tool_calls: Vec::new(),
+            };
         }
         r = response_fut => match r {
             Ok(r) => r,
@@ -1611,7 +1645,7 @@ async fn stream_one_round(round: StreamRound<'_>) -> RoundOutcome {
                     errors,
                 )
                 .await;
-                return RoundOutcome::Failed;
+                return RoundOutcome::Interrupted { text, tool_calls };
             }
             chunk = stream.next() => {
                 let Some(chunk) = chunk else { break; };
@@ -2047,6 +2081,23 @@ async fn finalize(
     .await;
 }
 
+/// Merge an interrupted round's partial exchange into the session's
+/// history instead of dropping it, so the next turn (whatever the user
+/// sends after the interrupt) still has whatever the model produced —
+/// text, tool calls it had already requested, and any tool results from
+/// completed earlier rounds. No `Completed` event here (unlike
+/// `finalize`): the caller already emitted `Crashed{Interrupted}`.
+async fn persist_partial(
+    session_id: &str,
+    conversations: &Arc<Mutex<HashMap<String, Vec<ChatMessage>>>>,
+    new_messages: Vec<ChatMessage>,
+) {
+    let mut map = conversations.lock().await;
+    let history = map.entry(session_id.to_string()).or_default();
+    history.extend(new_messages);
+    trim_history(history, MAX_HISTORY_MESSAGES);
+}
+
 /// Drop earlier messages once the transcript exceeds `cap`. Keeps the
 /// most recent `cap` entries; never truncates mid-pair so the oldest
 /// remaining message is always a `user`-role turn.
@@ -2116,6 +2167,39 @@ mod tests {
         assert!(chunk.done);
         assert_eq!(chunk.prompt_eval_count, Some(26));
         assert_eq!(chunk.eval_count, Some(298));
+    }
+
+    /// The interrupt fix this module carries: `persist_partial` is what the
+    /// cancel branches in `stream_one_round` / the tool-call loop call
+    /// instead of just crashing and walking away, so a turn the user
+    /// stopped mid-answer still leaves its partial exchange in history for
+    /// the next turn — rather than the model having no memory of it.
+    #[tokio::test]
+    async fn persist_partial_merges_the_interrupted_turn_into_history() {
+        let conversations: Arc<Mutex<HashMap<String, Vec<ChatMessage>>>> = Arc::default();
+        let session_id = "s1";
+        conversations.lock().await.insert(
+            session_id.to_string(),
+            vec![ChatMessage::user("hi".to_string(), None)],
+        );
+
+        let partial = vec![ChatMessage::assistant(
+            "half of an answer\n\n[Response interrupted by user]".to_string(),
+            None,
+        )];
+        persist_partial(session_id, &conversations, partial).await;
+
+        let history = conversations.lock().await.get(session_id).cloned().unwrap();
+        assert_eq!(history.len(), 2);
+        assert_eq!(history[0].role, "user");
+        assert_eq!(history[1].role, "assistant");
+        assert!(
+            history[1]
+                .content
+                .contains("[Response interrupted by user]"),
+            "the interrupted turn's partial text must survive into history: {:?}",
+            history[1].content,
+        );
     }
 
     /// Streamed deltas carry no counters at all — they must not be read as

@@ -178,9 +178,14 @@ impl BuiltinPlugin for KimiPlugin {
                     // is a property of the configured model alias.
                     effort_levels: vec![],
                     // Per-turn CLI: attachments are dropped, no Usage
-                    // events are parsed, interrupt kills the child, and
-                    // answers arrive as a fresh turn. The resume hint id
-                    // resumes the conversation across turns.
+                    // events are parsed, and answers arrive as a fresh
+                    // turn. The resume hint id resumes the conversation
+                    // across turns. Interrupt sends SIGINT and drains
+                    // stdout for a couple seconds (`turn::graceful_cancel`)
+                    // before SIGKILL, so a frame the CLI flushes in
+                    // response still reaches the transcript — but kimi has
+                    // no stdin/control channel to settle a turn in-band,
+                    // so this stays `HardKill`, not `Soft`.
                     capabilities: ProviderCapabilities {
                         supports_thinking: true,
                         supports_images_in: false,

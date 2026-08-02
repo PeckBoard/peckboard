@@ -280,8 +280,18 @@ pub async fn run_turn(spec: TurnSpec<'_>, stream: &mut dyn TurnStream) -> TurnRe
     let outcome = loop {
         tokio::select! {
             _ = cancel.notified() => {
-                let _ = child.start_kill();
-                break TurnOutcome::Cancelled;
+                break graceful_cancel(
+                    &mut child,
+                    &mut lines,
+                    stream,
+                    db,
+                    broadcaster,
+                    session_id,
+                    provider,
+                    plugins,
+                    &mut saw_any,
+                )
+                .await;
             }
             _ = abort_notify.notified() => {
                 let _ = child.start_kill();
@@ -294,46 +304,17 @@ pub async fn run_turn(spec: TurnSpec<'_>, stream: &mut dyn TurnStream) -> TurnRe
             line = lines.next_line() => {
                 match line {
                     Ok(Some(line)) => {
-                        let trimmed = line.trim();
-                        if trimmed.is_empty() {
-                            continue;
-                        }
-                        let Ok(json) = serde_json::from_str::<serde_json::Value>(trimmed) else {
-                            // Non-JSON noise on stdout — log and skip.
-                            tracing::debug!(
-                                session_id = %session_id,
-                                "{provider}: non-JSON stdout line ignored"
-                            );
-                            continue;
-                        };
-                        for event in stream.on_line(&json) {
-                            // `Started` alone is not "output" for
-                            // `success_on_output`: cursor-agent prints its
-                            // init frame before failing turns too, and the
-                            // parser's synthetic Started must not turn that
-                            // failure into a clean completion.
-                            saw_any |= !matches!(event, ProviderEvent::Started { .. });
-                            // Assistant text is the one thing a todo-hook
-                            // plugin can parse; clone it before the event is
-                            // moved into the persistence path.
-                            let todo_text = match (&event, plugins) {
-                                (ProviderEvent::Text { text }, Some(_)) => Some(text.clone()),
-                                _ => None,
-                            };
-                            emit_event(db, broadcaster, session_id, event).await;
-                            if let (Some(text), Some(plugins)) = (todo_text, plugins) {
-                                crate::plugin::todo_hook::emit_plugin_todos(
-                                    plugins,
-                                    db,
-                                    broadcaster,
-                                    session_id,
-                                    crate::plugin::todo_hook::assistant_text_payload(
-                                        provider, &text,
-                                    ),
-                                )
-                                .await;
-                            }
-                        }
+                        emit_line_events(
+                            &line,
+                            stream,
+                            db,
+                            broadcaster,
+                            session_id,
+                            provider,
+                            plugins,
+                            &mut saw_any,
+                        )
+                        .await;
                     }
                     Ok(None) => break TurnOutcome::Eof,
                     Err(e) => {
@@ -476,6 +457,147 @@ pub async fn run_turn(spec: TurnSpec<'_>, stream: &mut dyn TurnStream) -> TurnRe
             )
             .await;
             TurnResult::failed(reason, CrashKind::Unknown)
+        }
+    }
+}
+
+/// Parse one raw stdout line into provider events, persist each one, and
+/// feed assistant text to the todo hook — shared by the main stdout loop
+/// and [`graceful_cancel`]'s post-signal drain, so a line the CLI writes
+/// during the interrupt grace window is handled identically to one from
+/// mid-turn.
+#[allow(clippy::too_many_arguments)]
+async fn emit_line_events(
+    line: &str,
+    stream: &mut dyn TurnStream,
+    db: &crate::db::Db,
+    broadcaster: &crate::ws::broadcaster::Broadcaster,
+    session_id: &str,
+    provider: &str,
+    plugins: Option<&crate::plugin::manager::PluginManager>,
+    saw_any: &mut bool,
+) {
+    let trimmed = line.trim();
+    if trimmed.is_empty() {
+        return;
+    }
+    let Ok(json) = serde_json::from_str::<serde_json::Value>(trimmed) else {
+        // Non-JSON noise on stdout — log and skip.
+        tracing::debug!(
+            session_id = %session_id,
+            "{provider}: non-JSON stdout line ignored"
+        );
+        return;
+    };
+    for event in stream.on_line(&json) {
+        // `Started` alone is not "output" for `success_on_output`:
+        // cursor-agent prints its init frame before failing turns too, and
+        // the parser's synthetic Started must not turn that failure into a
+        // clean completion.
+        *saw_any |= !matches!(event, ProviderEvent::Started { .. });
+        // Assistant text is the one thing a todo-hook plugin can parse;
+        // clone it before the event is moved into the persistence path.
+        let todo_text = match (&event, plugins) {
+            (ProviderEvent::Text { text }, Some(_)) => Some(text.clone()),
+            _ => None,
+        };
+        emit_event(db, broadcaster, session_id, event).await;
+        if let (Some(text), Some(plugins)) = (todo_text, plugins) {
+            crate::plugin::todo_hook::emit_plugin_todos(
+                plugins,
+                db,
+                broadcaster,
+                session_id,
+                crate::plugin::todo_hook::assistant_text_payload(provider, &text),
+            )
+            .await;
+        }
+    }
+}
+
+/// Grace window after SIGINT before giving up and SIGKILLing: long enough
+/// for a CLI to flush its last buffered stdout frame, short enough that an
+/// interrupt still feels immediate.
+const INTERRUPT_DRAIN_SECS: u64 = 2;
+
+/// Send SIGINT to the child. `true` when a signal was actually delivered (a
+/// pid was available); the caller hard-kills immediately when this returns
+/// `false` instead of waiting out a grace window for nothing.
+#[cfg(unix)]
+async fn send_interrupt_signal(child: &tokio::process::Child) -> bool {
+    match child.id() {
+        Some(pid) => {
+            // SAFETY: `kill` with a pid tokio just reported for this child
+            // and the standard SIGINT signal number; ESRCH (already exited)
+            // is a harmless race — the drain loop below handles that case
+            // either way.
+            unsafe {
+                libc::kill(pid as libc::pid_t, libc::SIGINT);
+            }
+            true
+        }
+        None => false,
+    }
+}
+
+#[cfg(not(unix))]
+async fn send_interrupt_signal(_child: &tokio::process::Child) -> bool {
+    // No portable "ask nicely" signal outside unix — the caller falls back
+    // to an immediate hard kill.
+    false
+}
+
+/// Cancel path for `cursor`/`grok`/`kimi`: none of the three CLIs exposes an
+/// in-band control channel (no stdin — see `TurnSpec`'s `Stdio::null()`),
+/// so there is no way to ask the run to wind down cleanly. The next best
+/// thing is SIGINT plus a short drain: many CLIs (and the shells/tools they
+/// spawn) treat SIGINT as "stop after the current step" and flush one more
+/// stdout frame before exiting, which — unlike a bare SIGKILL — still
+/// reaches `stream` and gets persisted. If nothing arrives within
+/// `INTERRUPT_DRAIN_SECS` (the CLI ignored the signal, or there's no pid to
+/// signal at all on a non-unix host), this falls back to the same
+/// `start_kill` the hard-kill path always used. `InterruptKind::HardKill`
+/// stays the declared capability regardless — the UI still promises a hard
+/// stop; this only reduces how much output that stop throws away.
+#[allow(clippy::too_many_arguments)]
+async fn graceful_cancel(
+    child: &mut tokio::process::Child,
+    lines: &mut tokio::io::Lines<BufReader<tokio::process::ChildStdout>>,
+    stream: &mut dyn TurnStream,
+    db: &crate::db::Db,
+    broadcaster: &crate::ws::broadcaster::Broadcaster,
+    session_id: &str,
+    provider: &str,
+    plugins: Option<&crate::plugin::manager::PluginManager>,
+    saw_any: &mut bool,
+) -> TurnOutcome {
+    if !send_interrupt_signal(child).await {
+        let _ = child.start_kill();
+        return TurnOutcome::Cancelled;
+    }
+
+    let grace = tokio::time::sleep(std::time::Duration::from_secs(INTERRUPT_DRAIN_SECS));
+    tokio::pin!(grace);
+    loop {
+        tokio::select! {
+            _ = &mut grace => {
+                let _ = child.start_kill();
+                return TurnOutcome::Cancelled;
+            }
+            line = lines.next_line() => {
+                match line {
+                    Ok(Some(line)) => {
+                        emit_line_events(
+                            &line, stream, db, broadcaster, session_id, provider, plugins, saw_any,
+                        )
+                        .await;
+                    }
+                    Ok(None) | Err(_) => {
+                        let _ = child.start_kill();
+                        return TurnOutcome::Cancelled;
+                    }
+                }
+            }
         }
     }
 }
@@ -803,6 +925,93 @@ mod tests {
         assert!(
             started.elapsed() < std::time::Duration::from_secs(20),
             "the turn should end at its own deadline, not the child's",
+        );
+    }
+
+    /// SIGINT-then-drain: `cursor`/`grok`/`kimi` have no stdin channel, so
+    /// there is no in-band way to ask a run to wind down — the harness
+    /// signals instead. A CLI that traps the signal and emits one more
+    /// frame before exiting gets that frame into the transcript rather
+    /// than losing it to a bare SIGKILL.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn cancel_drains_a_frame_the_child_emits_after_sigint() {
+        let db = session_db().await;
+        let broadcaster = Broadcaster::new();
+        let env = HashMap::new();
+        // bash defers running a trap until the *foreground command*
+        // returns, so a signal caught while blocked in an external `sleep`
+        // would sit unhandled until that child's own timer expired — not
+        // a useful stand-in for a CLI's own signal handler. A builtin-only
+        // busy loop has no such gap: bash checks for a pending trap after
+        // every simple command, so `on_int` runs within microseconds of
+        // the signal, same as a real CLI's async signal handler would.
+        let script = "stop=0\non_int() { printf '{\"text\":\"post-sigint\"}\\n'; stop=1; }\ntrap on_int INT\nwhile [ \"$stop\" = 0 ]; do :; done\nexit 0\n";
+        let args = vec!["-c".to_string(), script.to_string()];
+        let mut stream = EchoStream::default();
+        let cancel = Arc::new(Notify::new());
+        let notifier = cancel.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+            notifier.notify_one();
+        });
+
+        let result = run_turn(
+            spec("bash", &args, &env, &db, &broadcaster, cancel, 30),
+            &mut stream,
+        )
+        .await;
+
+        assert!(!result.completed);
+        assert_eq!(stream.seen, vec!["post-sigint".to_string()]);
+        let kinds: Vec<String> = db
+            .events_tail("s1", 100)
+            .await
+            .unwrap()
+            .iter()
+            .map(|e| e.kind.clone())
+            .collect();
+        assert!(
+            kinds.iter().any(|k| k == "agent-text"),
+            "the frame the child emitted after SIGINT reached the transcript: {kinds:?}",
+        );
+    }
+
+    /// A child that ignores SIGINT (`trap '' INT`) still gets stopped —
+    /// just later, after the drain grace window expires and the harness
+    /// falls back to SIGKILL.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn cancel_hard_kills_after_grace_window_when_child_ignores_sigint() {
+        let db = session_db().await;
+        let broadcaster = Broadcaster::new();
+        let env = HashMap::new();
+        let script = "trap '' INT\nsleep 3\n";
+        let args = vec!["-c".to_string(), script.to_string()];
+        let mut stream = EchoStream::default();
+        let cancel = Arc::new(Notify::new());
+        let notifier = cancel.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+            notifier.notify_one();
+        });
+
+        let started = std::time::Instant::now();
+        let result = run_turn(
+            spec("bash", &args, &env, &db, &broadcaster, cancel, 30),
+            &mut stream,
+        )
+        .await;
+        let elapsed = started.elapsed();
+
+        assert!(!result.completed);
+        assert!(
+            elapsed >= std::time::Duration::from_secs(INTERRUPT_DRAIN_SECS),
+            "should wait out the full grace window before hard-killing: {elapsed:?}",
+        );
+        assert!(
+            elapsed < std::time::Duration::from_secs(10),
+            "hard kill should follow the grace window promptly: {elapsed:?}",
         );
     }
     /// The plugin todo hook on the shared harness — the seam `cursor`,

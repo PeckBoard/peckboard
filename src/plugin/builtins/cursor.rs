@@ -151,11 +151,16 @@ impl BuiltinPlugin for CursorPlugin {
                     // effort control to expose.
                     effort_levels: vec![],
                     // Per-turn CLI: attachments are dropped (text-only for
-                    // now), interrupt kills the child, answers arrive as a
-                    // fresh turn. `--resume` continues the conversation and
-                    // the stream carries per-turn Usage events. Thinking is
-                    // per-model, tagged from the id convention in
-                    // `cursor::model_info`.
+                    // now), answers arrive as a fresh turn. `--resume`
+                    // continues the conversation and the stream carries
+                    // per-turn Usage events. Thinking is per-model, tagged
+                    // from the id convention in `cursor::model_info`.
+                    // Interrupt sends SIGINT and drains stdout for a
+                    // couple seconds (`turn::graceful_cancel`) before
+                    // SIGKILL, so a frame the CLI flushes in response
+                    // still reaches the transcript — but cursor-agent has
+                    // no stdin/control channel to settle a turn in-band,
+                    // so this stays `HardKill`, not `Soft`.
                     capabilities: ProviderCapabilities {
                         supports_thinking: true,
                         supports_images_in: false,

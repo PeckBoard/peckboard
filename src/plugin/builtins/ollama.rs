@@ -224,12 +224,19 @@ impl BuiltinPlugin for OllamaPlugin {
                     models: default_models(),
                     // Local models have no reasoning-effort control.
                     effort_levels: vec![],
-                    // HTTP per-turn provider: interrupt aborts the in-flight
-                    // request, answers arrive as a fresh turn, and the full
-                    // history is replayed each turn (resume for free). Image
-                    // support is per-model — the /api/show probe's `vision`
-                    // tag refines this provider-level allow (see
-                    // `ModelInfo::images_in_hint`). No Usage events yet.
+                    // HTTP per-turn provider: interrupt aborts the
+                    // in-flight `/api/chat` request (there's no server-side
+                    // "stop generating" call, only closing the connection),
+                    // answers arrive as a fresh turn, and the full history
+                    // is replayed each turn (resume for free). Whatever
+                    // text/tool-calls had already streamed in before the
+                    // abort are still merged into that history
+                    // (`persist_partial`) rather than dropped, but the
+                    // request itself is still hard-aborted, so this stays
+                    // `HardKill`, not `Soft`. Image support is per-model —
+                    // the /api/show probe's `vision` tag refines this
+                    // provider-level allow (see `ModelInfo::images_in_hint`).
+                    // No Usage events yet.
                     capabilities: ProviderCapabilities {
                         supports_thinking: true,
                         supports_images_in: true,
