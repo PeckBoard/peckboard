@@ -84,13 +84,14 @@ const RATE_FIELD: Record<TokenKind, keyof ModelRates> = {
 }
 
 /** Rates for a model id from a fetched `CostTable`, tolerating the `claude:`
- *  provider prefix usage rows may carry. Falls back to the Opus tier
+ *  provider prefix and `@account` suffix usage rows may carry (via
+ *  `bareModel`). Falls back to the Opus tier
  *  (the backend's default) when the model is unknown, so an unrecognized
  *  model is never silently free. Returns null only for an empty table. */
 export function ratesFor(table: CostTable, model: string | null): ModelRates | null {
   const rates = table.rates
   if (model) {
-    const bare = model.startsWith('claude:') ? model.slice('claude:'.length) : model
+    const bare = bareModel(model)
     if (rates[bare]) return rates[bare]
     if (rates[model]) return rates[model]
   }

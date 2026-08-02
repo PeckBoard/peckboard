@@ -236,14 +236,20 @@ pub async fn run_turn(spec: TurnSpec<'_>, stream: &mut dyn TurnStream) -> TurnRe
     // Drain stderr concurrently: accumulate a bounded buffer for crash
     // reporting AND notify on any `abort` marker (an unauthenticated CLI
     // that would otherwise block forever on an interactive login prompt).
+    // Buffer and matched markers live in shared state (not the task's
+    // return value) so they stay readable even when the drain task itself
+    // outlives the child — a grandchild holding the write end keeps the
+    // task pending past the bounded join below.
     let abort_notify = Arc::new(Notify::new());
     let abort_setter = abort_notify.clone();
+    let stderr_state: Arc<std::sync::Mutex<(String, Vec<usize>)>> = Arc::default();
     let stderr_task = stderr.map(|s| {
+        let state = stderr_state.clone();
         tokio::spawn(async move {
-            let mut buf = String::new();
-            let mut matched: Vec<usize> = Vec::new();
             let mut lines = BufReader::new(s).lines();
             while let Ok(Some(line)) = lines.next_line().await {
+                let mut st = state.lock().expect("stderr state poisoned");
+                let (buf, matched) = &mut *st;
                 for (i, m) in stderr_markers.iter().enumerate() {
                     if !matched.contains(&i) && line.contains(m.marker) {
                         matched.push(i);
@@ -259,7 +265,6 @@ pub async fn run_turn(spec: TurnSpec<'_>, stream: &mut dyn TurnStream) -> TurnRe
                     buf.push_str(&line);
                 }
             }
-            (buf.trim().to_string(), matched)
         })
     });
 
@@ -302,7 +307,12 @@ pub async fn run_turn(spec: TurnSpec<'_>, stream: &mut dyn TurnStream) -> TurnRe
                             continue;
                         };
                         for event in stream.on_line(&json) {
-                            saw_any = true;
+                            // `Started` alone is not "output" for
+                            // `success_on_output`: cursor-agent prints its
+                            // init frame before failing turns too, and the
+                            // parser's synthetic Started must not turn that
+                            // failure into a clean completion.
+                            saw_any |= !matches!(event, ProviderEvent::Started { .. });
                             // Assistant text is the one thing a todo-hook
                             // plugin can parse; clone it before the event is
                             // moved into the persistence path.
@@ -341,9 +351,16 @@ pub async fn run_turn(spec: TurnSpec<'_>, stream: &mut dyn TurnStream) -> TurnRe
 
     // Let the child fully exit and collect its status + stderr.
     let status = child.wait().await.ok();
-    let (stderr_text, matched) = match stderr_task {
-        Some(t) => t.await.unwrap_or_default(),
-        None => (String::new(), Vec::new()),
+    let (stderr_text, matched) = {
+        if let Some(t) = stderr_task {
+            // Bounded join: a grandchild that inherited the stderr write
+            // end (a tool call's daemon) can hold the pipe open after the
+            // child is gone; without the cap the drain never EOFs and the
+            // turn never returns. Mirrors the 2s guard in claude/process.
+            let _ = tokio::time::timeout(std::time::Duration::from_secs(2), t).await;
+        }
+        let st = stderr_state.lock().expect("stderr state poisoned");
+        (st.0.trim().to_string(), st.1.clone())
     };
     // Markers matched on stderr, resolved back to their definitions.
     let matched: Vec<&StderrMarker> = matched.into_iter().map(|i| &stderr_markers[i]).collect();
@@ -679,6 +696,13 @@ mod tests {
                     text: text.to_string(),
                 }];
             }
+            if json.get("start").is_some() {
+                return vec![ProviderEvent::Started {
+                    model: "test:model".into(),
+                    conversation_id: None,
+                    metadata: serde_json::Value::Null,
+                }];
+            }
             Vec::new()
         }
         fn take_conversation_id(&mut self) -> Option<String> {
@@ -993,6 +1017,34 @@ mod tests {
         assert!(run_turn(s, &mut stream).await.completed);
     }
 
+    /// A synthetic `Started` alone is not output: a CLI that prints its
+    /// init frame and then dies non-zero must still report the crash
+    /// even with `success_on_output` set.
+    #[tokio::test]
+    async fn success_on_output_ignores_a_started_only_stream() {
+        let db = session_db().await;
+        let broadcaster = Broadcaster::new();
+        let env = HashMap::new();
+        let args = vec![
+            "-c".to_string(),
+            r#"echo '{"start":true}'; echo boom >&2; exit 1"#.to_string(),
+        ];
+        let mut stream = EchoStream::default();
+        let mut s = spec(
+            "sh",
+            &args,
+            &env,
+            &db,
+            &broadcaster,
+            Arc::new(Notify::new()),
+            30,
+        );
+        s.success_on_output = true;
+
+        let result = run_turn(s, &mut stream).await;
+        assert!(!result.completed);
+        assert_eq!(result.error.as_deref(), Some("boom"));
+    }
     #[tokio::test]
     async fn spawn_failure_emits_started_then_crashed_with_the_hint() {
         let db = session_db().await;

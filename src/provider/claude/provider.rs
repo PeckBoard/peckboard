@@ -116,19 +116,30 @@ impl ClaudeProvider {
 
     async fn sweep_idle(&self, idle_ms: u64) {
         let now = now_ms();
-        let to_kill: Vec<(String, Arc<Notify>)> = {
+        let to_recycle: Vec<(String, mpsc::Sender<StdinMsg>, Arc<Notify>)> = {
             let runs = self.runs.lock().await;
             runs.iter()
                 .filter(|(_, r)| {
                     !r.turn_active.load(Ordering::Acquire)
                         && now.saturating_sub(r.last_activity.load(Ordering::Acquire)) >= idle_ms
                 })
-                .map(|(sid, r)| (sid.clone(), r.cancel.clone()))
+                .map(|(sid, r)| (sid.clone(), r.stdin_tx.clone(), r.cancel.clone()))
                 .collect()
         };
-        for (sid, cancel) in to_kill {
-            tracing::info!(session_id = %sid, "Idle reaper killing stale claude run");
-            cancel.notify_one();
+        for (sid, stdin_tx, cancel) in to_recycle {
+            tracing::info!(session_id = %sid, "Idle reaper recycling stale claude run");
+            // Graceful shutdown, NOT the user-cancel signal: cancel makes
+            // the stream loop report Crashed{interrupted}/completed:false,
+            // which the UI shows as a crash and the worker orchestrator
+            // counts toward crash-loop auto-pause. ShutdownAfterTurn with
+            // no turn in flight closes stdin, the CLI exits on EOF, and
+            // the loop's exit decision stays silent — the documented
+            // idle-reap behavior.
+            if stdin_tx.try_send(StdinMsg::ShutdownAfterTurn).is_err() {
+                // Channel full/closed — the run is wedged or already
+                // winding down; fall back to the hard kill.
+                cancel.notify_one();
+            }
         }
     }
 

@@ -309,6 +309,19 @@ pub struct OllamaProvider {
 }
 
 impl OllamaProvider {
+    /// Fire the cancel notify for `session_id`'s in-flight run, if any.
+    /// Shared by `cancel` (which also drops history) and `interrupt`
+    /// (which must keep it).
+    async fn cancel_run(&self, session_id: &str) {
+        let cancel = {
+            let runs = self.runs.lock().await;
+            runs.get(session_id).map(|r| r.cancel.clone())
+        };
+        if let Some(c) = cancel {
+            tracing::info!(session_id = %session_id, "Cancelling ollama run");
+            c.notify_one();
+        }
+    }
     pub fn new(settings: PluginSettingsStore) -> Self {
         OllamaProvider {
             settings,
@@ -759,14 +772,7 @@ impl AgentProvider for OllamaProvider {
     }
 
     async fn cancel(&self, session_id: &str) {
-        let cancel = {
-            let runs = self.runs.lock().await;
-            runs.get(session_id).map(|r| r.cancel.clone())
-        };
-        if let Some(c) = cancel {
-            tracing::info!(session_id = %session_id, "Cancelling ollama run");
-            c.notify_one();
-        }
+        self.cancel_run(session_id).await;
         // Per `wait_for_termination` semantics: drop history alongside
         // cancel so a fresh /clear-style restart begins from scratch.
         // Keys we still have a run for will be re-inserted by the next
@@ -775,7 +781,11 @@ impl AgentProvider for OllamaProvider {
     }
 
     async fn interrupt(&self, session_id: &str) {
-        self.cancel(session_id).await;
+        // Stop the in-flight turn but KEEP `conversations` — ollama is
+        // stateless, so that map is the session's only memory. Dropping
+        // it here made an interrupt silently restart the chat from
+        // turn 1.
+        self.cancel_run(session_id).await;
     }
 
     async fn write_stdin(&self, _session_id: &str, _text: &str) -> bool {

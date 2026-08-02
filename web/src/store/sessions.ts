@@ -363,10 +363,20 @@ export const useSessionsStore = create<SessionsState>((set, get) => ({
         // bubble (the duplicate path is rare but happens on resume).
         return clearMatchingPending(s, event)
       }
+      // Resume/resync replays can deliver events OLDER than the current
+      // tail (a full replay reaches below the HTTP snapshot window). The
+      // straight append is the hot path; re-sort only when an
+      // out-of-order seq actually lands so old turns never render below
+      // new ones.
+      const last = existing[existing.length - 1]
+      const appended =
+        last !== undefined && event.seq < last.seq
+          ? [...existing, event].sort((a, b) => a.seq - b.seq)
+          : [...existing, event]
       const nextEvents = {
         eventsBySession: {
           ...s.eventsBySession,
-          [event.session_id]: [...existing, event],
+          [event.session_id]: appended,
         },
       }
       return { ...nextEvents, ...clearMatchingPending(s, event) }

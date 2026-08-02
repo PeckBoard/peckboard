@@ -248,20 +248,26 @@ impl ProviderRegistry {
     ///
     /// This is the catalog form the `/api/models` route and the MCP
     /// `list_models` tool consume so a settings change shows up without a
-    /// restart. Calling `dynamic_models()` under the registry lock is safe
-    /// — providers read their own settings store, never the registry.
+    /// restart. `dynamic_models()` can be slow — the Claude provider
+    /// probes its CLI with a ~10s cap on a discovery-cache miss — so the
+    /// registry lock is released BEFORE the calls: holding it would stall
+    /// `get_provider` (send/interrupt/cancel paths) app-wide for the
+    /// whole probe.
     pub async fn list_providers_with_models(&self) -> Vec<ProviderInfo> {
-        let providers = self.providers.lock().await;
-        let mut out = Vec::with_capacity(providers.len());
-        for registered in providers.values() {
-            let models = match registered.provider.dynamic_models().await {
+        let entries: Vec<(ProviderInfo, Arc<dyn AgentProvider>)> = {
+            let providers = self.providers.lock().await;
+            providers
+                .values()
+                .map(|r| (r.info.clone(), r.provider.clone()))
+                .collect()
+        };
+        let mut out = Vec::with_capacity(entries.len());
+        for (info, provider) in entries {
+            let models = match provider.dynamic_models().await {
                 Some(models) => models,
-                None => registered.info.models.clone(),
+                None => info.models.clone(),
             };
-            out.push(ProviderInfo {
-                models,
-                ..registered.info.clone()
-            });
+            out.push(ProviderInfo { models, ..info });
         }
         out
     }

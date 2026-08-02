@@ -72,12 +72,24 @@ export default function MermaidBlock({ code }: { code: string }) {
     }
   }, [code])
 
-  if (error) {
-    return (
-      <pre className="md-mermaid-error" data-testid="mermaid-error">
-        <code>{code}</code>
-      </pre>
-    )
-  }
-  return <div className="md-mermaid" data-testid="mermaid-diagram" ref={ref} />
+  // The render target stays mounted through the error state: the success
+  // path needs `ref.current` to write the SVG into (and to clear `error`),
+  // so a streamed fence that failed on a partial chunk can still recover
+  // once the completed source renders. Unmounting the div froze the first
+  // error forever.
+  return (
+    <>
+      {error && (
+        <pre className="md-mermaid-error" data-testid="mermaid-error">
+          <code>{code}</code>
+        </pre>
+      )}
+      <div
+        className="md-mermaid"
+        data-testid="mermaid-diagram"
+        ref={ref}
+        style={error ? { display: 'none' } : undefined}
+      />
+    </>
+  )
 }
