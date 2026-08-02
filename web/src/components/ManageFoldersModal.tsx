@@ -5,11 +5,13 @@ import type { Folder } from '../types/api'
 import Modal from './Modal'
 import ConfirmDialog from './ConfirmDialog'
 import PathAutocomplete from './PathAutocomplete'
+import RenameModal from './RenameModal'
 
 export default function FoldersPage() {
   const folders = useFoldersStore((s) => s.folders)
   const fetchFolders = useFoldersStore((s) => s.fetchFolders)
   const createFolder = useFoldersStore((s) => s.createFolder)
+  const renameFolder = useFoldersStore((s) => s.renameFolder)
   // Registering a folder hands out host file access (it becomes the cwd and
   // file scope of every agent spawned inside it) and deleting one destroys
   // another user's work, so both are admin-only on the API. Mirror that here
@@ -34,6 +36,7 @@ export default function FoldersPage() {
   const [confirmFolder, setConfirmFolder] = useState<Folder | null>(null)
   const [confirmError, setConfirmError] = useState<string | null>(null)
   const [confirmBusy, setConfirmBusy] = useState(false)
+  const [renameTarget, setRenameTarget] = useState<Folder | null>(null)
 
   useEffect(() => {
     fetchFolders()
@@ -140,18 +143,29 @@ export default function FoldersPage() {
                 <span className="folder-path">{f.path}</span>
               </div>
               {isAdmin && (
-                <button
-                  className="folder-delete"
-                  onClick={() => {
-                    setConfirmError(null)
-                    setConfirmFolder(f)
-                  }}
-                  title="Delete folder"
-                  aria-label={`Delete folder ${f.name}`}
-                  data-testid={`folder-delete-${f.name}`}
-                >
-                  &times;
-                </button>
+                <div className="folder-row-actions">
+                  <button
+                    className="btn-secondary"
+                    onClick={() => setRenameTarget(f)}
+                    title="Rename folder"
+                    aria-label={`Rename folder ${f.name}`}
+                    data-testid={`folder-rename-${f.name}`}
+                  >
+                    Rename
+                  </button>
+                  <button
+                    className="folder-delete"
+                    onClick={() => {
+                      setConfirmError(null)
+                      setConfirmFolder(f)
+                    }}
+                    title="Delete folder"
+                    aria-label={`Delete folder ${f.name}`}
+                    data-testid={`folder-delete-${f.name}`}
+                  >
+                    &times;
+                  </button>
+                </div>
               )}
             </div>
           ))}
@@ -220,6 +234,18 @@ export default function FoldersPage() {
             </p>
           )}
         </section>
+      )}
+
+      {renameTarget && (
+        <RenameModal
+          title="Rename folder"
+          label="Folder name"
+          initialValue={renameTarget.name}
+          onSubmit={async (name) => {
+            await renameFolder(renameTarget.id, name)
+          }}
+          onClose={() => setRenameTarget(null)}
+        />
       )}
 
       {/* Delete folder dialog — shown when folder has sessions */}

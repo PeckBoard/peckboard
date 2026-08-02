@@ -195,6 +195,11 @@
   color: var(--text3);
   font-family: var(--font-mono);
 }
+.folder-row-actions {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
 /* Report list item */
 .report-list-item {
   flex: 1;

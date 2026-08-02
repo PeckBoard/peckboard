@@ -153,7 +153,7 @@ export default function RangeBar() {
       </div>
 
       <p className="usage-range-caption" data-testid="usage-range-caption" aria-live="polite">
-        Showing {describeRange(resolved)} · times in local time ({localZone()})
+        Showing {describeRange(resolved)} · times in {localZone()}
         {lastUpdated > 0 && (
           <>
             {' · '}

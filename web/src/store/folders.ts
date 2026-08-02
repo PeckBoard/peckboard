@@ -7,6 +7,7 @@ interface FoldersState {
   fetchFolders: () => Promise<void>
   createFolder: (name: string, path: string, create?: boolean) => Promise<Folder>
   deleteFolder: (id: string) => Promise<void>
+  renameFolder: (id: string, name: string) => Promise<Folder>
 }
 
 export const useFoldersStore = create<FoldersState>((set) => ({
@@ -42,5 +43,20 @@ export const useFoldersStore = create<FoldersState>((set) => ({
       throw new Error(err.error || 'Failed to delete folder')
     }
     set((s) => ({ folders: s.folders.filter((f) => f.id !== id) }))
+  },
+
+  renameFolder: async (id: string, name: string) => {
+    const res = await authedFetch(`/api/folders/${id}`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name }),
+    })
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({ error: 'Failed to rename folder' }))
+      throw new Error(err.error || 'Failed to rename folder')
+    }
+    const folder: Folder = await res.json()
+    set((s) => ({ folders: s.folders.map((f) => (f.id === id ? folder : f)) }))
+    return folder
   },
 }))

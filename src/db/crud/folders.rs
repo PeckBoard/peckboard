@@ -63,6 +63,40 @@ impl Db {
         .await
     }
 
+    /// Case-insensitive duplicate check against every other folder's name.
+    pub async fn folder_name_taken(&self, name: &str, exclude_id: &str) -> anyhow::Result<bool> {
+        let name = name.to_lowercase();
+        let exclude_id = exclude_id.to_string();
+        self.with_conn(move |conn| {
+            let others: Vec<String> = folders::table
+                .filter(folders::id.ne(&exclude_id))
+                .select(folders::name)
+                .load(conn)?;
+            Ok(others.iter().any(|n| n.to_lowercase() == name))
+        })
+        .await
+    }
+
+    pub async fn rename_folder(&self, id: &str, name: &str) -> anyhow::Result<Option<Folder>> {
+        let id = id.to_string();
+        let name = name.to_string();
+        self.with_conn(move |conn| {
+            let count = diesel::update(folders::table.find(&id))
+                .set(folders::name.eq(&name))
+                .execute(conn)?;
+            if count == 0 {
+                return Ok(None);
+            }
+            folders::table
+                .find(&id)
+                .select(Folder::as_select())
+                .first(conn)
+                .optional()
+                .map_err(Into::into)
+        })
+        .await
+    }
+
     /// Move a single session into a different folder, atomically. The
     /// session must be a plain (non-worker, non-expert) chat session —
     /// workers and experts inherit their project's folder, so moving one
