@@ -122,4 +122,55 @@ impl Db {
         })
         .await
     }
+
+    /// Delete events older than `before_ts_ms` belonging to any of
+    /// `session_ids`. Used by the retention sweeper's event-age bound,
+    /// restricted by the caller to idle ("terminal") sessions.
+    pub async fn delete_old_events_for_sessions(
+        &self,
+        session_ids: &[String],
+        before_ts_ms: i64,
+    ) -> anyhow::Result<usize> {
+        let ids = session_ids.to_vec();
+        self.with_conn(move |conn| {
+            diesel::delete(
+                events::table
+                    .filter(events::session_id.eq_any(&ids))
+                    .filter(events::ts.lt(before_ts_ms)),
+            )
+            .execute(conn)
+            .map_err(Into::into)
+        })
+        .await
+    }
+
+    /// Trim `session_id`'s events down to the newest `max_count`, deleting
+    /// the rest. Used by the retention sweeper's per-session event-count
+    /// bound.
+    pub async fn trim_events_to_count(
+        &self,
+        session_id: &str,
+        max_count: i64,
+    ) -> anyhow::Result<usize> {
+        let session_id = session_id.to_string();
+        self.with_conn(move |conn| {
+            let keep_ids: Vec<String> = events::table
+                .filter(events::session_id.eq(&session_id))
+                .order((events::ts.desc(), events::seq.desc()))
+                .limit(max_count)
+                .select(events::id)
+                .load(conn)?;
+            if keep_ids.is_empty() {
+                return Ok(0);
+            }
+            diesel::delete(
+                events::table
+                    .filter(events::session_id.eq(&session_id))
+                    .filter(diesel::dsl::not(events::id.eq_any(&keep_ids))),
+            )
+            .execute(conn)
+            .map_err(Into::into)
+        })
+        .await
+    }
 }

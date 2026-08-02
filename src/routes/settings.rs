@@ -66,6 +66,10 @@ const PRE_HATCHER_SYSTEM_PROMPT_KEY: &str = "pre_hatcher_system_prompt";
 pub const PRE_HATCHER_DEFAULT_SYSTEM_PROMPT: &str = "fable 5";
 const HIDDEN_PROVIDERS_KEY: &str = "hidden_providers";
 
+/// Plugin-store key for data-retention limits (repeating-task run sessions,
+/// terminal-session events, report files). See [`RetentionSettings`].
+pub const RETENTION_KEY: &str = "retention";
+
 /// Plugin-store key for the Claude permission-bypass escape hatch
 /// (`{"bypass": bool}`; missing ⇒ false = enforced). See
 /// `claude_bypass_permissions_for_db`.
@@ -84,9 +88,6 @@ pub fn router(state: Arc<AppState>) -> Router<Arc<AppState>> {
 /// request body. None of that is partitioned per user, so an admin-created
 /// non-admin must not be able to reach it.
 ///
-/// Layers run outer-to-inner on the request, so `require_admin` is appended
-/// here and `require_auth` in [`router`] afterwards, which puts `AuthUser`
-/// into the extensions before this middleware reads it.
 fn admin_router() -> Router<Arc<AppState>> {
     Router::new()
         .route("/api/settings/approved-commands", get(list_approved))
@@ -107,6 +108,10 @@ fn admin_router() -> Router<Arc<AppState>> {
             post(check_mcp_command),
         )
         .route("/api/settings/mcp-servers/probe", post(probe_mcp_server))
+        .route(
+            "/api/settings/retention",
+            get(get_retention).put(set_retention),
+        )
         .route_layer(middleware::from_fn(require_admin))
 }
 
@@ -363,6 +368,107 @@ async fn set_default_model(
     let value = serde_json::json!({ "model": model }).to_string();
     let res = tokio::task::spawn_blocking(move || {
         db.plugin_store_put_blocking(SETTINGS_NS, SETTINGS_COLLECTION, DEFAULT_MODEL_KEY, &value)
+    })
+    .await;
+    match res {
+        Ok(Ok(_)) => Ok(StatusCode::NO_CONTENT),
+        Ok(Err(e)) => Err((
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({ "error": e.to_string() })),
+        )),
+        Err(e) => Err((
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({ "error": e.to_string() })),
+        )),
+    }
+}
+
+/// Data-retention limits enforced by the periodic sweeper
+/// (`service::retention`). Every field is a count/day bound; `0` means
+/// "keep forever" — the default, so upgrading to this feature never starts
+/// deleting existing data until an admin opts in.
+#[derive(serde::Serialize, serde::Deserialize, Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub struct RetentionSettings {
+    /// Delete a repeating-task run session once it's older than this many
+    /// days (by `last_activity`). 0 = no age bound.
+    #[serde(default)]
+    pub repeating_session_max_age_days: u32,
+    /// Per repeating task, keep only the newest N run sessions. 0 = no
+    /// count bound.
+    #[serde(default)]
+    pub repeating_session_max_per_task: u32,
+    /// For non-worker sessions idle longer than this many days, delete
+    /// their events older than the same cutoff. 0 = no age bound.
+    #[serde(default)]
+    pub event_max_age_days: u32,
+    /// For any non-worker session, keep only the newest N events. 0 = no
+    /// count bound.
+    #[serde(default)]
+    pub event_max_count_per_session: u32,
+    /// Delete report files older than this many days (by mtime). 0 = no
+    /// age bound.
+    #[serde(default)]
+    pub report_max_age_days: u32,
+    /// Keep only the newest N report files overall. 0 = no count bound.
+    #[serde(default)]
+    pub report_max_count: u32,
+}
+
+impl RetentionSettings {
+    const MAX_BOUND: u32 = 36_500; // 100 years / 100k rows-ish — guards against fat-fingered input, not a real limit
+
+    fn validate(&self) -> Result<(), &'static str> {
+        let fields = [
+            self.repeating_session_max_age_days,
+            self.repeating_session_max_per_task,
+            self.event_max_age_days,
+            self.event_max_count_per_session,
+            self.report_max_age_days,
+            self.report_max_count,
+        ];
+        if fields.iter().any(|&v| v > Self::MAX_BOUND) {
+            return Err("retention values must be 36500 or less");
+        }
+        Ok(())
+    }
+}
+
+/// Read the retention settings from the plugin store. Defaults to
+/// [`RetentionSettings::default`] (everything 0 = keep forever) on
+/// missing/unparseable data.
+pub async fn retention_settings(state: &AppState) -> RetentionSettings {
+    let db = state.db.clone();
+    let raw = tokio::task::spawn_blocking(move || {
+        db.plugin_store_get_blocking(SETTINGS_NS, SETTINGS_COLLECTION, RETENTION_KEY)
+    })
+    .await;
+    match raw {
+        Ok(Ok(Some(json))) => serde_json::from_str(&json).unwrap_or_default(),
+        _ => RetentionSettings::default(),
+    }
+}
+
+/// GET /api/settings/retention → [`RetentionSettings`] as JSON.
+async fn get_retention(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+    Json(retention_settings(&state).await)
+}
+
+/// PUT /api/settings/retention → 204. Applies on the sweeper's next hourly
+/// tick (it reloads settings every pass), not immediately.
+async fn set_retention(
+    State(state): State<Arc<AppState>>,
+    Json(body): Json<RetentionSettings>,
+) -> impl IntoResponse {
+    if let Err(msg) = body.validate() {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({ "error": msg })),
+        ));
+    }
+    let db = state.db.clone();
+    let value = serde_json::to_string(&body).unwrap();
+    let res = tokio::task::spawn_blocking(move || {
+        db.plugin_store_put_blocking(SETTINGS_NS, SETTINGS_COLLECTION, RETENTION_KEY, &value)
     })
     .await;
     match res {

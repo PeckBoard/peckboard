@@ -9,10 +9,21 @@ use axum::{
     // put is used via .put() method on route
 };
 use serde::{Deserialize, Serialize};
+use std::io::Read;
 use std::sync::Arc;
 
 use crate::auth::middleware::require_auth;
 use crate::state::AppState;
+
+/// How many bytes of a report file the list endpoint reads to parse
+/// frontmatter + build a preview. Frontmatter lives at the top of the file
+/// and is always tiny; this bounds the list endpoint's I/O to a small,
+/// constant amount per file regardless of report body size.
+const LIST_HEAD_BYTES: u64 = 8 * 1024;
+
+/// How many characters of the (frontmatter-stripped) body to surface as a
+/// list-view preview.
+const PREVIEW_CHARS: usize = 240;
 
 #[derive(Serialize)]
 struct ReportMeta {
@@ -24,6 +35,11 @@ struct ReportMeta {
     session_name: Option<String>,
     session_created_at: Option<String>,
     project_name: Option<String>,
+    /// First ~240 chars of the body (whitespace-collapsed), for list views.
+    /// Not necessarily the whole report if it's larger than
+    /// [`LIST_HEAD_BYTES`] — use `GET /api/reports/:folder/:file` for the
+    /// full content.
+    preview: String,
 }
 
 #[derive(Serialize)]
@@ -43,13 +59,35 @@ pub fn router(state: Arc<AppState>) -> Router<Arc<AppState>> {
         .route("/api/reports", get(list_reports))
         .route(
             "/api/reports/{folder}/{file}",
-            get(get_report).put(update_report),
+            get(get_report).put(update_report).delete(delete_report),
         )
         .route(
             "/api/reports/{folder}/{file}/download",
             get(download_report),
         )
         .route_layer(middleware::from_fn_with_state(state, require_auth))
+}
+
+/// Read up to `max_bytes` of a file as a lossy UTF-8 string. Used by the
+/// list endpoint so it doesn't pull whole report bodies into memory just to
+/// parse a few frontmatter lines.
+fn read_head(path: &std::path::Path, max_bytes: u64) -> Option<String> {
+    let file = std::fs::File::open(path).ok()?;
+    let mut buf = Vec::new();
+    file.take(max_bytes).read_to_end(&mut buf).ok()?;
+    Some(String::from_utf8_lossy(&buf).into_owned())
+}
+
+/// Collapse whitespace and truncate the (frontmatter-stripped) body to
+/// [`PREVIEW_CHARS`] characters for list-view display.
+fn make_preview(body: &str) -> String {
+    let collapsed = body.split_whitespace().collect::<Vec<_>>().join(" ");
+    if collapsed.chars().count() <= PREVIEW_CHARS {
+        collapsed
+    } else {
+        let truncated: String = collapsed.chars().take(PREVIEW_CHARS).collect();
+        format!("{truncated}…")
+    }
 }
 
 /// GET /api/reports — list all report metadata
@@ -69,9 +107,8 @@ async fn list_reports(State(state): State<Arc<AppState>>) -> impl IntoResponse {
                             if file_path.extension().map_or(false, |e| e == "md") {
                                 let file_name =
                                     file_entry.file_name().to_string_lossy().to_string();
-                                if let Ok(content) = std::fs::read_to_string(&file_path) {
-                                    let meta =
-                                        parse_frontmatter(&content, &folder_name, &file_name);
+                                if let Some(head) = read_head(&file_path, LIST_HEAD_BYTES) {
+                                    let meta = parse_frontmatter(&head, &folder_name, &file_name);
                                     reports.push(meta);
                                 }
                             }
@@ -161,6 +198,39 @@ async fn update_report(
     };
 
     std::fs::write(&file_path, new_content).map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({"error": e.to_string()})),
+        )
+    })?;
+
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// DELETE /api/reports/:folder/:file → 204. Missing file → 404.
+async fn delete_report(
+    State(state): State<Arc<AppState>>,
+    Path((folder, file)): Path<(String, String)>,
+) -> impl IntoResponse {
+    let (safe_folder, safe_file) = match (safe_segment(&folder, false), safe_segment(&file, true)) {
+        (Some(f), Some(fi)) => (f, fi),
+        _ => return Err(bad_path()),
+    };
+    let file_path = state
+        .config
+        .data_dir
+        .join("reports")
+        .join(&safe_folder)
+        .join(&safe_file);
+
+    if !file_path.exists() {
+        return Err((
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({"error": "report not found"})),
+        ));
+    }
+
+    std::fs::remove_file(&file_path).map_err(|e| {
         (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(serde_json::json!({"error": e.to_string()})),
@@ -275,6 +345,8 @@ fn parse_frontmatter(content: &str, folder: &str, file: &str) -> ReportMeta {
         }
     }
 
+    let body_preview = make_preview(&strip_frontmatter(content));
+
     ReportMeta {
         folder: folder.to_string(),
         file: file.to_string(),
@@ -284,6 +356,7 @@ fn parse_frontmatter(content: &str, folder: &str, file: &str) -> ReportMeta {
         project_name,
         session_name,
         session_created_at,
+        preview: body_preview,
     }
 }
 
@@ -360,7 +433,22 @@ mod tests {
             session_name: None,
             session_created_at: None,
             project_name: None,
+            preview: String::new(),
         }
+    }
+
+    #[test]
+    fn make_preview_collapses_whitespace_and_truncates() {
+        let long = "word ".repeat(100);
+        let preview = make_preview(&long);
+        assert!(preview.chars().count() <= PREVIEW_CHARS + 1);
+        assert!(preview.ends_with('…'));
+        assert!(!preview.contains("  "));
+    }
+
+    #[test]
+    fn make_preview_keeps_short_body_untouched() {
+        assert_eq!(make_preview("hello   world\n\nfoo"), "hello world foo");
     }
 
     #[test]

@@ -469,6 +469,78 @@ impl Db {
         .await
     }
 
+    /// Non-worker, non-permanent sessions spawned by a repeating task —
+    /// the run history the retention sweeper prunes. Ordered by
+    /// `(repeating_task_id, last_activity desc)` so the sweeper can walk
+    /// each task's runs newest-first to apply a per-task keep-count.
+    pub async fn list_repeating_run_sessions(
+        &self,
+    ) -> anyhow::Result<Vec<(String, String, String)>> {
+        self.with_conn(move |conn| {
+            let rows: Vec<(String, Option<String>, String)> = sessions::table
+                .filter(sessions::repeating_task_id.is_not_null())
+                .filter(sessions::is_worker.eq(false))
+                .filter(sessions::is_permanent.eq(false))
+                .order((
+                    sessions::repeating_task_id.asc(),
+                    sessions::last_activity.desc(),
+                ))
+                .select((
+                    sessions::id,
+                    sessions::repeating_task_id,
+                    sessions::last_activity,
+                ))
+                .load(conn)?;
+            Ok(rows
+                .into_iter()
+                .filter_map(|(id, task_id, last_activity)| {
+                    task_id.map(|task_id| (id, task_id, last_activity))
+                })
+                .collect())
+        })
+        .await
+    }
+
+    /// Ids of non-worker sessions idle since before `before_rfc3339` — the
+    /// "terminal" sessions the event sweeper is allowed to prune events
+    /// from. Worker sessions are excluded: their event history backs
+    /// kanban chips / pipeline bookkeeping (`db::list_recent_worker_events`)
+    /// even after the underlying run finishes.
+    pub async fn list_idle_non_worker_session_ids(
+        &self,
+        before_rfc3339: &str,
+    ) -> anyhow::Result<Vec<String>> {
+        let before = before_rfc3339.to_string();
+        self.with_conn(move |conn| {
+            sessions::table
+                .filter(sessions::is_worker.eq(false))
+                .filter(sessions::last_activity.lt(&before))
+                .select(sessions::id)
+                .load(conn)
+                .map_err(Into::into)
+        })
+        .await
+    }
+
+    /// Ids of non-worker sessions whose event count exceeds `min_count` —
+    /// candidates for the event sweeper's per-session count trim.
+    pub async fn list_non_worker_session_ids_over_event_count(
+        &self,
+        min_count: i64,
+    ) -> anyhow::Result<Vec<String>> {
+        self.with_conn(move |conn| {
+            sessions::table
+                .inner_join(events::table.on(events::session_id.eq(sessions::id)))
+                .filter(sessions::is_worker.eq(false))
+                .group_by(sessions::id)
+                .having(diesel::dsl::count(events::id).gt(min_count))
+                .select(sessions::id)
+                .load(conn)
+                .map_err(Into::into)
+        })
+        .await
+    }
+
     /// Synchronous twin of [`create_session`], for WASM plugin host
     /// functions that run inside a blocking extism call. Same insert +
     /// return-the-row logic.

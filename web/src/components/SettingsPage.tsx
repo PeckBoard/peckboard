@@ -24,6 +24,7 @@ import PluginsSection from './PluginsSection'
 import PluginSettingsSection from './PluginSettingsSection'
 import PluginRegistryPanel from './PluginRegistryPanel'
 import McpServersSection from './McpServersSection'
+import RetentionSettingsSection from './RetentionSettingsSection'
 import EnvVarsSection from './EnvVarsSection'
 import AgentVarsSection from './AgentVarsSection'
 import ConfirmDialog from './ConfirmDialog'
@@ -767,6 +768,8 @@ export default function SettingsPage({ onBack, initialSubPage = null }: Props) {
               )}
             </section>
           )}
+
+          {user?.role === 'admin' && <RetentionSettingsSection />}
         </>
       )}
 

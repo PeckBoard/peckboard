@@ -1582,6 +1582,221 @@ mod tests {
         let orphans = db.list_orphan_temp_session_ids().await.unwrap();
         assert_eq!(orphans, vec!["orphan".to_string()]);
     }
+    // ── retention sweeper queries ───────────────────────────────────
+
+    #[tokio::test]
+    async fn test_list_repeating_run_sessions() {
+        let db = test_db();
+        let ts = now();
+
+        db.create_folder(NewFolder {
+            id: "f".into(),
+            name: "F".into(),
+            path: "/tmp/f".into(),
+            created_at: ts.clone(),
+        })
+        .await
+        .unwrap();
+        db.create_repeating_task(NewRepeatingTask {
+            id: "t1".into(),
+            name: "T1".into(),
+            description: String::new(),
+            folder_id: "f".into(),
+            prompt: "p".into(),
+            schedule_kind: "interval".into(),
+            schedule_value: "1h".into(),
+            model: None,
+            effort: None,
+            enabled: true,
+            next_run_at: None,
+            last_run_at: None,
+            created_at: ts.clone(),
+            updated_at: ts.clone(),
+        })
+        .await
+        .unwrap();
+
+        // Older run, newer run, a worker run (excluded), a permanent run
+        // (excluded), and a plain session with no repeating_task_id
+        // (excluded).
+        for (id, is_worker, is_permanent, repeating_task_id, last_activity) in [
+            ("old", false, false, Some("t1"), "2026-01-01T00:00:00+00:00"),
+            ("new", false, false, Some("t1"), "2026-06-01T00:00:00+00:00"),
+            (
+                "worker",
+                true,
+                false,
+                Some("t1"),
+                "2026-06-01T00:00:00+00:00",
+            ),
+            (
+                "permanent",
+                false,
+                true,
+                Some("t1"),
+                "2026-06-01T00:00:00+00:00",
+            ),
+            ("plain", false, false, None, "2026-06-01T00:00:00+00:00"),
+        ] {
+            db.create_session(NewSession {
+                id: id.into(),
+                name: id.into(),
+                folder_id: "f".into(),
+                is_worker,
+                is_permanent,
+                repeating_task_id: repeating_task_id.map(str::to_string),
+                created_at: ts.clone(),
+                last_activity: last_activity.into(),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        }
+
+        let rows = db.list_repeating_run_sessions().await.unwrap();
+        let ids: Vec<&str> = rows.iter().map(|(id, _, _)| id.as_str()).collect();
+        // Only the two plain repeating-task-run sessions, newest first.
+        assert_eq!(ids, vec!["new", "old"]);
+        assert!(rows.iter().all(|(_, task_id, _)| task_id == "t1"));
+    }
+
+    #[tokio::test]
+    async fn test_list_idle_non_worker_session_ids() {
+        let db = test_db();
+        let ts = now();
+
+        db.create_folder(NewFolder {
+            id: "f".into(),
+            name: "F".into(),
+            path: "/tmp/f".into(),
+            created_at: ts.clone(),
+        })
+        .await
+        .unwrap();
+
+        for (id, is_worker, last_activity) in [
+            ("idle", false, "2026-01-01T00:00:00+00:00"),
+            ("recent", false, "2026-06-01T00:00:00+00:00"),
+            ("idle-worker", true, "2026-01-01T00:00:00+00:00"),
+        ] {
+            db.create_session(NewSession {
+                id: id.into(),
+                name: id.into(),
+                folder_id: "f".into(),
+                is_worker,
+                created_at: ts.clone(),
+                last_activity: last_activity.into(),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        }
+
+        let idle = db
+            .list_idle_non_worker_session_ids("2026-03-01T00:00:00+00:00")
+            .await
+            .unwrap();
+        assert_eq!(idle, vec!["idle".to_string()]);
+    }
+
+    #[tokio::test]
+    async fn test_delete_old_events_for_sessions() {
+        let db = test_db();
+        let ts = now();
+
+        db.create_folder(NewFolder {
+            id: "f".into(),
+            name: "F".into(),
+            path: "/tmp/f".into(),
+            created_at: ts.clone(),
+        })
+        .await
+        .unwrap();
+        db.create_session(NewSession {
+            id: "s1".into(),
+            name: "s1".into(),
+            folder_id: "f".into(),
+            created_at: ts.clone(),
+            last_activity: ts.clone(),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+
+        for (id, seq, ts_ms) in [("e1", 1, 1000i64), ("e2", 2, 5000i64)] {
+            db.create_event(NewEvent {
+                id: id.into(),
+                session_id: "s1".into(),
+                seq,
+                ts: ts_ms,
+                kind: "message".into(),
+                data: "{}".into(),
+            })
+            .await
+            .unwrap();
+        }
+
+        let deleted = db
+            .delete_old_events_for_sessions(&["s1".to_string()], 3000)
+            .await
+            .unwrap();
+        assert_eq!(deleted, 1);
+        let remaining = db.list_events_by_session("s1", None).await.unwrap();
+        assert_eq!(remaining.len(), 1);
+        assert_eq!(remaining[0].id, "e2");
+    }
+
+    #[tokio::test]
+    async fn test_trim_events_to_count() {
+        let db = test_db();
+        let ts = now();
+
+        db.create_folder(NewFolder {
+            id: "f".into(),
+            name: "F".into(),
+            path: "/tmp/f".into(),
+            created_at: ts.clone(),
+        })
+        .await
+        .unwrap();
+        db.create_session(NewSession {
+            id: "s1".into(),
+            name: "s1".into(),
+            folder_id: "f".into(),
+            created_at: ts.clone(),
+            last_activity: ts.clone(),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+
+        for i in 0..5 {
+            db.create_event(NewEvent {
+                id: format!("e{i}"),
+                session_id: "s1".into(),
+                seq: i,
+                ts: i as i64 * 1000,
+                kind: "message".into(),
+                data: "{}".into(),
+            })
+            .await
+            .unwrap();
+        }
+
+        let over = db
+            .list_non_worker_session_ids_over_event_count(3)
+            .await
+            .unwrap();
+        assert_eq!(over, vec!["s1".to_string()]);
+
+        let trimmed = db.trim_events_to_count("s1", 3).await.unwrap();
+        assert_eq!(trimmed, 2);
+        let remaining = db.list_events_by_session("s1", None).await.unwrap();
+        assert_eq!(remaining.len(), 3);
+        // Newest 3 by (ts, seq) kept: e2, e3, e4.
+        let ids: Vec<&str> = remaining.iter().map(|e| e.id.as_str()).collect();
+        assert_eq!(ids, vec!["e2", "e3", "e4"]);
+    }
 
     // ── repeating-task tabs are a first-class kind ──────────────────
 
