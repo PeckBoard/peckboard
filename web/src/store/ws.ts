@@ -49,6 +49,10 @@ let reconnectTimer: ReturnType<typeof setTimeout> | null = null
 let reconnectAttempts = 0
 let intentionalClose = false
 const listeners = new Set<EventListener>()
+// Refcounts so a session that's subscribed from two places at once (e.g. a
+// SubagentTranscript card and the full ChatView of the same child session)
+// doesn't get unsubscribed out from under the other when one side closes.
+const subRefCounts = new Map<string, number>()
 
 function clearReconnectTimer() {
   if (reconnectTimer !== null) {
@@ -358,6 +362,9 @@ export const useWsStore = create<WsState>((set, get) => ({
   },
 
   subscribe: (sessionId: string) => {
+    const count = subRefCounts.get(sessionId) ?? 0
+    subRefCounts.set(sessionId, count + 1)
+    if (count > 0) return
     const { subscribedSessions, lastSeqBySession, deniedSessions } = get()
     subscribedSessions.add(sessionId)
     // Drop any earlier refusal: an explicit re-subscribe is a fresh attempt
@@ -367,7 +374,6 @@ export const useWsStore = create<WsState>((set, get) => ({
     void _wasDenied
     set({ subscribedSessions: new Set(subscribedSessions), deniedSessions: remainingDenied })
     sendJson({ type: 'subscribe', session_id: sessionId })
-    sendJson({ type: 'subscribe', session_id: sessionId })
     // Auto-resume from last known seq
     const lastSeq = lastSeqBySession[sessionId]
     if (lastSeq !== undefined) {
@@ -376,12 +382,17 @@ export const useWsStore = create<WsState>((set, get) => ({
   },
 
   unsubscribe: (sessionId: string) => {
+    const count = subRefCounts.get(sessionId) ?? 0
+    if (count > 1) {
+      subRefCounts.set(sessionId, count - 1)
+      return
+    }
+    subRefCounts.delete(sessionId)
     const { subscribedSessions } = get()
     subscribedSessions.delete(sessionId)
     set({ subscribedSessions: new Set(subscribedSessions) })
     sendJson({ type: 'unsubscribe', session_id: sessionId })
   },
-
   resume: (sessionId: string, lastSeq: number) => {
     sendJson({ type: 'resume', session_id: sessionId, last_seq: lastSeq })
   },
