@@ -28,6 +28,7 @@ pub fn ensure_schema(conn: &mut SqliteConnection) -> anyhow::Result<()> {
     ensure_repeating_tasks_schema(conn)?;
     ensure_sessions_pagination_indexes(conn)?;
     ensure_projects_workflow_column(conn)?;
+    ensure_custom_workflows_tables(conn)?;
     ensure_cards_workflow_column(conn)?;
     ensure_projects_pause_reason_column(conn)?;
     ensure_project_workflow_instructions_table(conn)?;
@@ -59,6 +60,8 @@ pub fn ensure_schema(conn: &mut SqliteConnection) -> anyhow::Result<()> {
     ensure_doc_review_tables(conn)?;
     ensure_sessions_pending_doc_review_column(conn)?;
     ensure_sessions_is_temp_column(conn)?;
+    ensure_repeating_tasks_timezone_column(conn)?;
+    ensure_repeating_task_runs_table(conn)?;
     backfill_session_owners(conn)?;
     Ok(())
 }
@@ -395,6 +398,37 @@ fn ensure_project_workflow_instructions_table(conn: &mut SqliteConnection) -> an
     sql_query(
         "CREATE INDEX IF NOT EXISTS idx_pwi_project \
          ON project_workflow_instructions (project_id)",
+    )
+    .execute(conn)?;
+    Ok(())
+}
+/// Heal DBs that predate `1786200000_custom_workflows`.
+fn ensure_custom_workflows_tables(conn: &mut SqliteConnection) -> anyhow::Result<()> {
+    log_if_healing_table(conn, "custom_workflows")?;
+    sql_query(
+        "CREATE TABLE IF NOT EXISTS custom_workflows (
+            id           TEXT PRIMARY KEY,
+            name         TEXT NOT NULL,
+            description  TEXT NOT NULL,
+            priority     INTEGER NOT NULL,
+            created_at   TEXT NOT NULL,
+            updated_at   TEXT NOT NULL
+        )",
+    )
+    .execute(conn)?;
+    sql_query(
+        "CREATE TABLE IF NOT EXISTS custom_workflow_steps (
+            workflow_id  TEXT NOT NULL REFERENCES custom_workflows(id) ON DELETE CASCADE,
+            position     INTEGER NOT NULL,
+            step         TEXT NOT NULL,
+            instructions TEXT NOT NULL,
+            PRIMARY KEY (workflow_id, position)
+        )",
+    )
+    .execute(conn)?;
+    sql_query(
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_custom_workflow_steps_step \
+         ON custom_workflow_steps (workflow_id, step)",
     )
     .execute(conn)?;
     Ok(())
@@ -1380,6 +1414,46 @@ fn ensure_queued_messages_fifo_shape(conn: &mut SqliteConnection) -> anyhow::Res
     }
     sql_query(
         "CREATE INDEX IF NOT EXISTS idx_queued_messages_session ON queued_messages(session_id)",
+    )
+    .execute(conn)?;
+    Ok(())
+}
+
+/// Heal DBs that predate `1785657542_repeating_task_tz_and_runs`. The
+/// `ALTER TABLE repeating_tasks ADD COLUMN timezone` is the only
+/// non-idempotent part; NULL means "UTC" so a healed row behaves
+/// exactly like it did before this migration existed.
+fn ensure_repeating_tasks_timezone_column(conn: &mut SqliteConnection) -> anyhow::Result<()> {
+    let rows: Vec<PragmaColumn> = sql_query("PRAGMA table_info(repeating_tasks)").load(conn)?;
+    let existing: Vec<String> = rows.into_iter().map(|r| r.name).collect();
+    if existing.is_empty() {
+        return Ok(());
+    }
+    if !existing.iter().any(|c| c == "timezone") {
+        tracing::info!("Repairing schema: adding repeating_tasks.timezone");
+        sql_query("ALTER TABLE repeating_tasks ADD COLUMN timezone TEXT").execute(conn)?;
+    }
+    Ok(())
+}
+
+/// Heal DBs that predate `1785657542_repeating_task_tz_and_runs`:
+/// per-dispatch run history for repeating tasks.
+fn ensure_repeating_task_runs_table(conn: &mut SqliteConnection) -> anyhow::Result<()> {
+    log_if_healing_table(conn, "repeating_task_runs")?;
+    sql_query(
+        "CREATE TABLE IF NOT EXISTS repeating_task_runs (
+            id          TEXT    PRIMARY KEY NOT NULL,
+            task_id     TEXT    NOT NULL REFERENCES repeating_tasks(id),
+            session_id  TEXT,
+            started_at  TEXT    NOT NULL,
+            status      TEXT    NOT NULL CHECK (status IN ('spawned', 'already_running', 'throttled', 'failed')),
+            trigger     TEXT    NOT NULL CHECK (trigger IN ('scheduler', 'manual')),
+            detail      TEXT
+        )",
+    )
+    .execute(conn)?;
+    sql_query(
+        "CREATE INDEX IF NOT EXISTS idx_repeating_task_runs_task ON repeating_task_runs (task_id, started_at)",
     )
     .execute(conn)?;
     Ok(())

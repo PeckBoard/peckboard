@@ -193,6 +193,7 @@ pub struct RepeatingTask {
     pub last_run_at: Option<String>,
     pub created_at: String,
     pub updated_at: String,
+    pub timezone: Option<String>,
 }
 
 #[derive(Insertable, Debug)]
@@ -212,6 +213,7 @@ pub struct NewRepeatingTask {
     pub last_run_at: Option<String>,
     pub created_at: String,
     pub updated_at: String,
+    pub timezone: Option<String>,
 }
 
 #[derive(AsChangeset, Debug, Default)]
@@ -229,6 +231,31 @@ pub struct UpdateRepeatingTask {
     pub next_run_at: Option<Option<String>>,
     pub last_run_at: Option<Option<String>>,
     pub updated_at: Option<String>,
+    pub timezone: Option<Option<String>>,
+}
+
+#[derive(Queryable, Selectable, Serialize, Debug, Clone)]
+#[diesel(table_name = repeating_task_runs)]
+pub struct RepeatingTaskRun {
+    pub id: String,
+    pub task_id: String,
+    pub session_id: Option<String>,
+    pub started_at: String,
+    pub status: String,
+    pub trigger: String,
+    pub detail: Option<String>,
+}
+
+#[derive(Insertable, Debug)]
+#[diesel(table_name = repeating_task_runs)]
+pub struct NewRepeatingTaskRun {
+    pub id: String,
+    pub task_id: String,
+    pub session_id: Option<String>,
+    pub started_at: String,
+    pub status: String,
+    pub trigger: String,
+    pub detail: Option<String>,
 }
 
 // ── Projects ─────────────────────────────────────────────────────────
@@ -1186,4 +1213,26 @@ pub struct NewDocReviewPrLink {
     pub file_path: String,
     pub last_synced_at: Option<String>,
     pub created_at: String,
+}
+
+// ── Custom workflows ─────────────────────────────────────────────────
+
+#[derive(Queryable, Selectable, Insertable, Serialize, Debug, Clone)]
+#[diesel(table_name = custom_workflows)]
+pub struct CustomWorkflowRow {
+    pub id: String,
+    pub name: String,
+    pub description: String,
+    pub priority: i32,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+#[derive(Queryable, Selectable, Insertable, Serialize, Debug, Clone)]
+#[diesel(table_name = custom_workflow_steps)]
+pub struct CustomWorkflowStepRow {
+    pub workflow_id: String,
+    pub position: i32,
+    pub step: String,
+    pub instructions: String,
 }

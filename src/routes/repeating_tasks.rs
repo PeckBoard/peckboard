@@ -34,6 +34,11 @@ pub struct CreateRepeatingTaskRequest {
     pub effort: Option<String>,
     #[serde(default = "default_enabled")]
     pub enabled: bool,
+    /// IANA zone name (e.g. "America/New_York"). `None` means UTC —
+    /// also the behaviour for every task created before this field
+    /// existed.
+    #[serde(default)]
+    pub timezone: Option<String>,
 }
 
 fn default_enabled() -> bool {
@@ -51,6 +56,7 @@ pub struct UpdateRepeatingTaskRequest {
     pub model: Option<Option<String>>,
     pub effort: Option<Option<String>>,
     pub enabled: Option<bool>,
+    pub timezone: Option<Option<String>>,
 }
 
 #[derive(Deserialize)]
@@ -74,6 +80,10 @@ pub fn router(state: Arc<AppState>) -> Router<Arc<AppState>> {
         .route(
             "/api/repeating-tasks/{id}/sessions",
             get(list_repeating_task_sessions),
+        )
+        .route(
+            "/api/repeating-tasks/{id}/runs",
+            get(list_repeating_task_runs),
         )
         .route_layer(middleware::from_fn_with_state(state, require_auth))
 }
@@ -132,6 +142,20 @@ fn validate_schedule(
     Ok(value_str)
 }
 
+/// `None` means UTC; anything else must be a valid IANA zone name so a
+/// typo doesn't silently fall back to UTC for the schedule's lifetime.
+fn validate_timezone(
+    tz: Option<&str>,
+) -> Result<Option<String>, (StatusCode, Json<serde_json::Value>)> {
+    match tz {
+        None => Ok(None),
+        Some(z) => z
+            .parse::<chrono_tz::Tz>()
+            .map(|_| Some(z.to_string()))
+            .map_err(|_| bad_request(format!("unknown timezone: {z}"))),
+    }
+}
+
 async fn create_repeating_task(
     State(state): State<Arc<AppState>>,
     Json(body): Json<CreateRepeatingTaskRequest>,
@@ -139,6 +163,7 @@ async fn create_repeating_task(
     let name = validate_name(&body.name)?;
     let prompt = validate_prompt(&body.prompt)?;
     let schedule_value = validate_schedule(&body.schedule_kind, &body.schedule_value)?;
+    let timezone = validate_timezone(body.timezone.as_deref())?;
 
     // Verify folder exists; without this the task row would reference a
     // non-existent folder and every dispatch would error out at run time.
@@ -156,7 +181,7 @@ async fn create_repeating_task(
     let id = uuid::Uuid::new_v4().to_string();
 
     // Construct a draft to compute next_run_at — we don't have a stored
-    // row yet but next_run_at_after only cares about kind+value.
+    // row yet but next_run_at_after only cares about kind+value+timezone.
     let draft = crate::db::models::RepeatingTask {
         id: id.clone(),
         name: name.clone(),
@@ -172,6 +197,7 @@ async fn create_repeating_task(
         last_run_at: None,
         created_at: now.clone(),
         updated_at: now.clone(),
+        timezone: timezone.clone(),
     };
     // Disabled tasks must not surface in the due-task scan, so leave
     // next_run_at empty until the task is enabled.
@@ -198,6 +224,7 @@ async fn create_repeating_task(
             last_run_at: None,
             created_at: now.clone(),
             updated_at: now,
+            timezone,
         })
         .await
         .map_err(internal_error)?;
@@ -264,6 +291,10 @@ async fn update_repeating_task(
         Some(p) => Some(validate_prompt(p)?),
         None => None,
     };
+    let timezone = match &body.timezone {
+        Some(tz) => Some(validate_timezone(tz.as_deref())?),
+        None => None,
+    };
 
     // Schedule kind/value must be edited together so we can re-validate.
     // If only one is supplied, fall back to the existing other field.
@@ -296,11 +327,13 @@ async fn update_repeating_task(
 
     let now = chrono::Utc::now().to_rfc3339();
 
-    // Recompute next_run_at when schedule or enabled flag changes. We
-    // don't disturb it on a pure name/prompt edit so a long interval
-    // task doesn't get reset by an unrelated description tweak.
-    let recompute_next =
-        schedule_kind.is_some() || schedule_value.is_some() || body.enabled.is_some();
+    // Recompute next_run_at when schedule, timezone, or enabled flag
+    // changes. We don't disturb it on a pure name/prompt edit so a long
+    // interval task doesn't get reset by an unrelated description tweak.
+    let recompute_next = schedule_kind.is_some()
+        || schedule_value.is_some()
+        || timezone.is_some()
+        || body.enabled.is_some();
     let mut next_run_at_update: Option<Option<String>> = None;
     if recompute_next {
         let draft = crate::db::models::RepeatingTask {
@@ -325,6 +358,7 @@ async fn update_repeating_task(
             last_run_at: existing.last_run_at.clone(),
             created_at: existing.created_at.clone(),
             updated_at: now.clone(),
+            timezone: timezone.clone().unwrap_or(existing.timezone.clone()),
         };
         if draft.enabled {
             next_run_at_update = Some(initial_next_run_at(&draft));
@@ -347,6 +381,7 @@ async fn update_repeating_task(
         next_run_at: next_run_at_update,
         last_run_at: None,
         updated_at: Some(now),
+        timezone,
     };
 
     let updated = state
@@ -450,4 +485,26 @@ async fn list_repeating_task_sessions(
         .await
         .map_err(internal_error)?;
     Ok::<_, (StatusCode, Json<serde_json::Value>)>(Json(serde_json::json!(sessions)))
+}
+
+/// GET /api/repeating-tasks/:id/runs -- newest-first dispatch history.
+async fn list_repeating_task_runs(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> impl IntoResponse {
+    if state
+        .db
+        .get_repeating_task(&id)
+        .await
+        .map_err(internal_error)?
+        .is_none()
+    {
+        return Err(not_found());
+    }
+    let runs = state
+        .db
+        .list_repeating_task_runs(&id, 50)
+        .await
+        .map_err(internal_error)?;
+    Ok::<_, (StatusCode, Json<serde_json::Value>)>(Json(serde_json::json!(runs)))
 }

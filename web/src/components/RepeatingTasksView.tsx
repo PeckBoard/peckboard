@@ -34,6 +34,13 @@ function formatRelative(dateStr: string | null): string {
   return new Date(dateStr).toLocaleString()
 }
 
+const RUN_STATUS_LABEL: Record<string, string> = {
+  spawned: 'Spawned',
+  already_running: 'Already running',
+  throttled: 'Throttled',
+  failed: 'Failed',
+}
+
 export default function RepeatingTasksView({ activeTaskId, onNavigate, onOpenSession }: Props) {
   const tasks = useRepeatingTasksStore((s) => s.tasks)
   const loaded = useRepeatingTasksStore((s) => s.loaded)
@@ -44,6 +51,8 @@ export default function RepeatingTasksView({ activeTaskId, onNavigate, onOpenSes
   const applyChange = useRepeatingTasksStore((s) => s.applyChange)
   const sessionsByTask = useRepeatingTasksStore((s) => s.sessionsByTask)
   const fetchSessionsForTask = useRepeatingTasksStore((s) => s.fetchSessionsForTask)
+  const runsByTask = useRepeatingTasksStore((s) => s.runsByTask)
+  const fetchRunsForTask = useRepeatingTasksStore((s) => s.fetchRunsForTask)
   const folders = useFoldersStore((s) => s.folders)
   const fetchFolders = useFoldersStore((s) => s.fetchFolders)
 
@@ -82,8 +91,9 @@ export default function RepeatingTasksView({ activeTaskId, onNavigate, onOpenSes
       }
       const taskId = detail?.data?.taskId
       if (taskId) {
-        // Refresh sessions for the task so the new run shows up.
+        // Refresh sessions + run history for the task so the new run shows up.
         fetchSessionsForTask(taskId).catch(() => {})
+        fetchRunsForTask(taskId).catch(() => {})
       }
       // Also refresh the task itself so last_run_at / next_run_at are current.
       fetchTasks().catch(() => {})
@@ -94,14 +104,15 @@ export default function RepeatingTasksView({ activeTaskId, onNavigate, onOpenSes
       window.removeEventListener('peckboard:repeating-task-changed', onChange)
       window.removeEventListener('peckboard:repeating-task-run', onRun)
     }
-  }, [applyChange, fetchSessionsForTask, fetchTasks])
+  }, [applyChange, fetchSessionsForTask, fetchRunsForTask, fetchTasks])
 
-  // Fetch sessions when a detail view is opened
+  // Fetch sessions + run history when a detail view is opened
   useEffect(() => {
     if (activeTaskId) {
       fetchSessionsForTask(activeTaskId).catch(() => {})
+      fetchRunsForTask(activeTaskId).catch(() => {})
     }
-  }, [activeTaskId, fetchSessionsForTask])
+  }, [activeTaskId, fetchSessionsForTask, fetchRunsForTask])
 
   const handleToggleEnabled = async (task: RepeatingTask) => {
     try {
@@ -159,6 +170,7 @@ export default function RepeatingTasksView({ activeTaskId, onNavigate, onOpenSes
       )
     }
     const taskSessions = sessionsByTask[task.id] ?? []
+    const taskRuns = runsByTask[task.id] ?? []
     return (
       <div className="list-view">
         <div className="list-view-header">
@@ -189,7 +201,9 @@ export default function RepeatingTasksView({ activeTaskId, onNavigate, onOpenSes
               <dt>Folder</dt>
               <dd>{folderMap.get(task.folder_id) ?? task.folder_id}</dd>
               <dt>Schedule</dt>
-              <dd>{describeSchedule(task.schedule_kind, task.schedule_value)}</dd>
+              <dd>{describeSchedule(task.schedule_kind, task.schedule_value, task.timezone)}</dd>
+              <dt>Timezone</dt>
+              <dd>{task.timezone ?? 'UTC'}</dd>
               <dt>Model</dt>
               <dd>{task.model ?? 'Default'}</dd>
               <dt>Effort</dt>
@@ -208,6 +222,46 @@ export default function RepeatingTasksView({ activeTaskId, onNavigate, onOpenSes
 
             {runStatusTaskId === task.id && runStatus && (
               <div className="repeating-task-run-status">{runStatus}</div>
+            )}
+
+            <h3>Run history ({taskRuns.length})</h3>
+            {taskRuns.length === 0 ? (
+              <p className="form-help">No runs yet.</p>
+            ) : (
+              <div className="list-view-rows" data-testid="repeating-task-runs">
+                {taskRuns.map((r) => (
+                  <div key={r.id} className="list-view-row">
+                    {r.session_id ? (
+                      <button
+                        className="list-view-item"
+                        onClick={() => onOpenSession(r.session_id!)}
+                        title="Open session"
+                      >
+                        <span className={`status-badge status-${r.status}`}>
+                          {RUN_STATUS_LABEL[r.status] ?? r.status}
+                        </span>
+                        <span className="list-view-name">{r.trigger}</span>
+                        <span className="list-view-meta">
+                          <span className="list-view-time">{formatRelative(r.started_at)}</span>
+                        </span>
+                      </button>
+                    ) : (
+                      <div className="list-view-item" style={{ cursor: 'default' }}>
+                        <span className={`status-badge status-${r.status}`}>
+                          {RUN_STATUS_LABEL[r.status] ?? r.status}
+                        </span>
+                        <span className="list-view-name">
+                          {r.trigger}
+                          {r.detail ? ` — ${r.detail}` : ''}
+                        </span>
+                        <span className="list-view-meta">
+                          <span className="list-view-time">{formatRelative(r.started_at)}</span>
+                        </span>
+                      </div>
+                    )}
+                  </div>
+                ))}
+              </div>
             )}
 
             <h3>Sessions ({taskSessions.length})</h3>
@@ -283,7 +337,7 @@ export default function RepeatingTasksView({ activeTaskId, onNavigate, onOpenSes
                   <span className="list-view-tag">{folderMap.get(t.folder_id)}</span>
                 )}
                 <span className="list-view-tag">
-                  {describeSchedule(t.schedule_kind, t.schedule_value)}
+                  {describeSchedule(t.schedule_kind, t.schedule_value, t.timezone)}
                 </span>
                 <span className="list-view-time">
                   {t.enabled

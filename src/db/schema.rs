@@ -62,6 +62,19 @@ diesel::table! {
         last_run_at -> Nullable<Text>,
         created_at -> Text,
         updated_at -> Text,
+        timezone -> Nullable<Text>,
+    }
+}
+
+diesel::table! {
+    repeating_task_runs (id) {
+        id -> Text,
+        task_id -> Text,
+        session_id -> Nullable<Text>,
+        started_at -> Text,
+        status -> Text,
+        trigger -> Text,
+        detail -> Nullable<Text>,
     }
 }
 
@@ -447,6 +460,25 @@ diesel::table! {
         external_id -> Nullable<Text>,
     }
 }
+diesel::table! {
+    custom_workflows (id) {
+        id -> Text,
+        name -> Text,
+        description -> Text,
+        priority -> Integer,
+        created_at -> Text,
+        updated_at -> Text,
+    }
+}
+
+diesel::table! {
+    custom_workflow_steps (workflow_id, position) {
+        workflow_id -> Text,
+        position -> Integer,
+        step -> Text,
+        instructions -> Text,
+    }
+}
 
 diesel::table! {
     doc_review_pr_links (review_id) {
@@ -461,6 +493,7 @@ diesel::table! {
 }
 
 diesel::joinable!(sessions -> folders (folder_id));
+diesel::joinable!(custom_workflow_steps -> custom_workflows (workflow_id));
 diesel::joinable!(sessions -> projects (project_id));
 diesel::joinable!(sessions -> repeating_tasks (repeating_task_id));
 diesel::joinable!(projects -> folders (folder_id));
@@ -512,5 +545,7 @@ diesel::allow_tables_to_appear_in_same_query!(
     doc_reviews,
     doc_review_versions,
     doc_review_comments,
+    custom_workflows,
+    custom_workflow_steps,
     doc_review_pr_links,
 );

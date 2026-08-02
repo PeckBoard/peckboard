@@ -15,30 +15,48 @@ export const MAX_INTERVAL_MINUTES = 525600
  */
 export function scheduleProblem(
   kind: RepeatingScheduleKind,
-  value: Record<string, number>,
+  value: Record<string, number | string>,
 ): string {
-  if (kind !== 'interval') return ''
-  const minutes = value.minutes
-  if (!Number.isFinite(minutes) || minutes < MIN_INTERVAL_MINUTES) {
-    return `Every (minutes) must be at least ${MIN_INTERVAL_MINUTES}`
+  if (kind === 'interval') {
+    const minutes = value.minutes
+    if (
+      typeof minutes !== 'number' ||
+      !Number.isFinite(minutes) ||
+      minutes < MIN_INTERVAL_MINUTES
+    ) {
+      return `Every (minutes) must be at least ${MIN_INTERVAL_MINUTES}`
+    }
+    if (minutes > MAX_INTERVAL_MINUTES) {
+      return `Every (minutes) must be at most ${MAX_INTERVAL_MINUTES}`
+    }
+    return ''
   }
-  if (minutes > MAX_INTERVAL_MINUTES) {
-    return `Every (minutes) must be at most ${MAX_INTERVAL_MINUTES}`
+  if (kind === 'once') {
+    const at = value.at
+    if (typeof at !== 'string' || !at) {
+      return 'Pick a date and time'
+    }
+    return ''
   }
   return ''
 }
 
 /** Render a one-line human description of a schedule for list/detail views. */
-export function describeSchedule(kind: RepeatingScheduleKind, valueJson: string): string {
-  let parsed: Record<string, number>
+export function describeSchedule(
+  kind: RepeatingScheduleKind,
+  valueJson: string,
+  timezone?: string | null,
+): string {
+  let parsed: Record<string, number | string>
   try {
     parsed = JSON.parse(valueJson)
   } catch {
     return 'Invalid schedule'
   }
+  const tz = timezone ? ` (${timezone})` : ''
   switch (kind) {
     case 'interval': {
-      const m = parsed.minutes ?? 0
+      const m = Number(parsed.minutes ?? 0)
       if (m % 1440 === 0) return `Every ${m / 1440} day${m === 1440 ? '' : 's'}`
       if (m % 60 === 0) return `Every ${m / 60} hour${m === 60 ? '' : 's'}`
       return `Every ${m} minute${m === 1 ? '' : 's'}`
@@ -46,13 +64,23 @@ export function describeSchedule(kind: RepeatingScheduleKind, valueJson: string)
     case 'daily': {
       const h = String(parsed.hour ?? 0).padStart(2, '0')
       const min = String(parsed.minute ?? 0).padStart(2, '0')
-      return `Daily at ${h}:${min} UTC`
+      return `Daily at ${h}:${min}${tz}`
     }
     case 'weekly': {
       const h = String(parsed.hour ?? 0).padStart(2, '0')
       const min = String(parsed.minute ?? 0).padStart(2, '0')
-      const day = WEEKDAYS[parsed.weekday ?? 0] ?? '?'
-      return `${day}s at ${h}:${min} UTC`
+      const day = WEEKDAYS[Number(parsed.weekday ?? 0)] ?? '?'
+      return `${day}s at ${h}:${min}${tz}`
+    }
+    case 'monthly': {
+      const h = String(parsed.hour ?? 0).padStart(2, '0')
+      const min = String(parsed.minute ?? 0).padStart(2, '0')
+      const day = parsed.day ?? 1
+      return `Monthly on day ${day} at ${h}:${min}${tz}`
+    }
+    case 'once': {
+      const at = parsed.at ?? ''
+      return `Once at ${at}${tz}`
     }
   }
 }

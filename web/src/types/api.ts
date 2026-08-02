@@ -46,7 +46,7 @@ export interface Session {
   system_prompt_name?: string | null
 }
 
-export type RepeatingScheduleKind = 'interval' | 'daily' | 'weekly'
+export type RepeatingScheduleKind = 'interval' | 'daily' | 'weekly' | 'monthly' | 'once'
 
 export interface RepeatingTask {
   id: string
@@ -64,8 +64,22 @@ export interface RepeatingTask {
   last_run_at: string | null
   created_at: string
   updated_at: string
+  /** IANA zone name (e.g. "America/New_York"). `null` means UTC. */
+  timezone: string | null
 }
 
+export type RepeatingTaskRunStatus = 'spawned' | 'already_running' | 'throttled' | 'failed'
+export type RepeatingTaskRunTrigger = 'scheduler' | 'manual'
+
+export interface RepeatingTaskRun {
+  id: string
+  task_id: string
+  session_id: string | null
+  started_at: string
+  status: RepeatingTaskRunStatus
+  trigger: RepeatingTaskRunTrigger
+  detail: string | null
+}
 export interface Project {
   id: string
   name: string

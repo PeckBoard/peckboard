@@ -1612,6 +1612,7 @@ mod tests {
             last_run_at: None,
             created_at: ts.clone(),
             updated_at: ts.clone(),
+            timezone: None,
         })
         .await
         .unwrap();
@@ -1843,6 +1844,7 @@ mod tests {
             last_run_at: None,
             created_at: ts.clone(),
             updated_at: ts.clone(),
+            timezone: None,
         })
         .await
         .unwrap();
@@ -1911,6 +1913,7 @@ mod tests {
             last_run_at: None,
             created_at: ts.clone(),
             updated_at: ts.clone(),
+            timezone: None,
         })
         .await
         .unwrap();
@@ -3467,5 +3470,134 @@ mod tests {
                 .as_deref(),
             Some("u1")
         );
+    }
+
+    #[tokio::test]
+    async fn test_custom_workflow_crud_and_references() {
+        let db = test_db();
+        let ts = now();
+
+        // Nothing yet.
+        assert!(db.list_custom_workflows().await.unwrap().is_empty());
+        assert!(db.get_custom_workflow("wf1").await.unwrap().is_none());
+
+        let steps = vec![
+            CustomWorkflowStepRow {
+                workflow_id: "wf1".into(),
+                position: 0,
+                step: "backlog".into(),
+                instructions: "".into(),
+            },
+            CustomWorkflowStepRow {
+                workflow_id: "wf1".into(),
+                position: 1,
+                step: "in_progress".into(),
+                instructions: "Do the thing.".into(),
+            },
+            CustomWorkflowStepRow {
+                workflow_id: "wf1".into(),
+                position: 2,
+                step: "done".into(),
+                instructions: "".into(),
+            },
+        ];
+        let created = db
+            .create_custom_workflow(
+                CustomWorkflowRow {
+                    id: "wf1".into(),
+                    name: "My Flow".into(),
+                    description: "a flow".into(),
+                    priority: 1000,
+                    created_at: ts.clone(),
+                    updated_at: ts.clone(),
+                },
+                steps,
+            )
+            .await
+            .unwrap();
+        assert_eq!(created.steps.len(), 3);
+
+        let listed = db.list_custom_workflows().await.unwrap();
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].row.name, "My Flow");
+
+        // No references yet: safe to delete (but we exercise update first).
+        let updated_steps = vec![
+            CustomWorkflowStepRow {
+                workflow_id: "wf1".into(),
+                position: 0,
+                step: "backlog".into(),
+                instructions: "".into(),
+            },
+            CustomWorkflowStepRow {
+                workflow_id: "wf1".into(),
+                position: 1,
+                step: "review".into(),
+                instructions: "Review it.".into(),
+            },
+            CustomWorkflowStepRow {
+                workflow_id: "wf1".into(),
+                position: 2,
+                step: "done".into(),
+                instructions: "".into(),
+            },
+        ];
+        let updated = db
+            .update_custom_workflow(
+                "wf1",
+                "My Flow v2".into(),
+                "updated".into(),
+                2000,
+                updated_steps,
+                now(),
+            )
+            .await
+            .unwrap()
+            .expect("update must find the row");
+        assert_eq!(updated.row.name, "My Flow v2");
+        assert_eq!(updated.steps[1].step, "review");
+
+        // References: create a project pointing at wf1.
+        db.create_folder(NewFolder {
+            id: "f1".into(),
+            name: "F".into(),
+            path: "/tmp/f".into(),
+            created_at: ts.clone(),
+        })
+        .await
+        .unwrap();
+        db.create_project(NewProject {
+            id: "p1".into(),
+            name: "Uses wf1".into(),
+            context: "".into(),
+            folder_id: "f1".into(),
+            worker_count: 1,
+            status: "active".into(),
+            workflow: "wf1".into(),
+            model: None,
+            effort: None,
+            parallel_instructions: false,
+            auto_notify_changes: true,
+            worker_communication: false,
+            created_at: ts.clone(),
+            last_accessed_at: ts.clone(),
+            budget_usd_cents: None,
+            budget_period: None,
+            worktree_isolation: false,
+        })
+        .await
+        .unwrap();
+
+        let (refs, card_count) = db.custom_workflow_references("wf1").await.unwrap();
+        assert_eq!(refs.len(), 1);
+        assert_eq!(refs[0].project_id, "p1");
+        assert_eq!(card_count, 0);
+
+        // Delete anyway (route layer is what enforces the 409 block — the
+        // DB method itself just deletes) and confirm the cascade removed
+        // the steps too.
+        assert!(db.delete_custom_workflow("wf1").await.unwrap());
+        assert!(db.get_custom_workflow("wf1").await.unwrap().is_none());
+        assert!(!db.delete_custom_workflow("wf1").await.unwrap());
     }
 }

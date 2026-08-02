@@ -28,11 +28,11 @@ export default function NewRepeatingTaskModal({ initial, onClose, onSaved }: Pro
   const editing = !!initial
 
   const initialScheduleValue = useMemo(() => {
-    if (!initial) return { minutes: 60 } as Record<string, number>
+    if (!initial) return { minutes: 60 } as Record<string, number | string>
     try {
-      return JSON.parse(initial.schedule_value) as Record<string, number>
+      return JSON.parse(initial.schedule_value) as Record<string, number | string>
     } catch {
-      return { minutes: 60 } as Record<string, number>
+      return { minutes: 60 } as Record<string, number | string>
     }
   }, [initial])
 
@@ -44,7 +44,9 @@ export default function NewRepeatingTaskModal({ initial, onClose, onSaved }: Pro
   const [scheduleKind, setScheduleKind] = useState<RepeatingScheduleKind>(
     initial?.schedule_kind ?? 'interval',
   )
-  const [scheduleValue, setScheduleValue] = useState<Record<string, number>>(initialScheduleValue)
+  const [scheduleValue, setScheduleValue] =
+    useState<Record<string, number | string>>(initialScheduleValue)
+  const [timezone, setTimezone] = useState<string>(initial?.timezone ?? '')
   const [chosenModel, setChosenModel] = useState<string | null>(null)
   // The app-wide default model (Settings → Default Model) preselects — for
   // a new task and for a legacy task saved without one.
@@ -111,6 +113,7 @@ export default function NewRepeatingTaskModal({ initial, onClose, onSaved }: Pro
           model: model || null,
           effort: effort || null,
           enabled,
+          timezone: timezone || null,
         })
         onSaved?.(task)
       } else {
@@ -124,6 +127,7 @@ export default function NewRepeatingTaskModal({ initial, onClose, onSaved }: Pro
           model: model || null,
           effort: effort || null,
           enabled,
+          timezone: timezone || null,
         })
         onSaved?.(task)
       }
@@ -218,6 +222,8 @@ export default function NewRepeatingTaskModal({ initial, onClose, onSaved }: Pro
             setScheduleKind(k)
             setScheduleValue(v)
           }}
+          timezone={timezone}
+          onTimezoneChange={setTimezone}
         />
 
         <div className="form-field">

@@ -161,6 +161,7 @@ impl McpToolRegistry {
             last_run_at: None,
             created_at: now.clone(),
             updated_at: now.clone(),
+            timezone: None,
         };
         let next_run_at = if enabled {
             initial_next_run_at(&draft)
@@ -185,6 +186,7 @@ impl McpToolRegistry {
                 last_run_at: None,
                 created_at: now.clone(),
                 updated_at: now,
+                timezone: None,
             })
             .await?;
 
@@ -273,6 +275,7 @@ impl McpToolRegistry {
                 last_run_at: existing.last_run_at.clone(),
                 created_at: existing.created_at.clone(),
                 updated_at: now.clone(),
+                timezone: existing.timezone.clone(),
             };
             if draft.enabled {
                 Some(initial_next_run_at(&draft))
@@ -300,6 +303,7 @@ impl McpToolRegistry {
                     next_run_at,
                     last_run_at: None,
                     updated_at: Some(now),
+                    timezone: None,
                 },
             )
             .await?
@@ -444,6 +448,7 @@ mod tests {
             last_run_at: None,
             created_at: ts.clone(),
             updated_at: ts,
+            timezone: None,
         })
         .await
         .unwrap();
@@ -480,6 +485,7 @@ mod tests {
             last_run_at: None,
             created_at: ts.clone(),
             updated_at: ts,
+            timezone: None,
         })
         .await
         .unwrap();
@@ -515,6 +521,7 @@ mod tests {
                 last_run_at: None,
                 created_at: ts.clone(),
                 updated_at: ts.clone(),
+                timezone: None,
             })
             .await
             .unwrap();

@@ -108,6 +108,9 @@ impl Db {
             diesel::update(sessions::table.filter(sessions::repeating_task_id.eq(&id)))
                 .set(sessions::repeating_task_id.eq::<Option<String>>(None))
                 .execute(conn)?;
+            // Run-history rows carry an FK to the task; delete them first.
+            diesel::delete(repeating_task_runs::table.filter(repeating_task_runs::task_id.eq(&id)))
+                .execute(conn)?;
             // Drop any user_tabs entries pointing at this task — mirrors
             // delete_session/delete_project. user_tabs is polymorphic
             // (no FK cascade), so this is the only path that prevents
@@ -134,6 +137,63 @@ impl Db {
                 .filter(sessions::repeating_task_id.eq(&task_id))
                 .select(Session::as_select())
                 .order(sessions::created_at.desc())
+                .load(conn)
+                .map_err(Into::into)
+        })
+        .await
+    }
+
+    /// Record the dispatch outcome of a scheduler tick or manual "Run
+    /// now" -- not the eventual agent result, which is already visible
+    /// via the spawned session's own event stream. Prunes to the newest
+    /// `keep` rows for the task so a fast interval schedule can't grow
+    /// this table unbounded.
+    pub async fn create_repeating_task_run(
+        &self,
+        new: NewRepeatingTaskRun,
+        keep: i64,
+    ) -> anyhow::Result<RepeatingTaskRun> {
+        let task_id = new.task_id.clone();
+        let row = self
+            .with_conn(move |conn| {
+                diesel::insert_into(repeating_task_runs::table)
+                    .values(&new)
+                    .returning(RepeatingTaskRun::as_returning())
+                    .get_result(conn)
+                    .map_err(anyhow::Error::from)
+            })
+            .await?;
+        self.with_conn(move |conn| {
+            let keep_ids: Vec<String> = repeating_task_runs::table
+                .filter(repeating_task_runs::task_id.eq(&task_id))
+                .select(repeating_task_runs::id)
+                .order(repeating_task_runs::started_at.desc())
+                .limit(keep)
+                .load(conn)?;
+            diesel::delete(
+                repeating_task_runs::table
+                    .filter(repeating_task_runs::task_id.eq(&task_id))
+                    .filter(repeating_task_runs::id.ne_all(&keep_ids)),
+            )
+            .execute(conn)?;
+            Ok(())
+        })
+        .await?;
+        Ok(row)
+    }
+
+    pub async fn list_repeating_task_runs(
+        &self,
+        task_id: &str,
+        limit: i64,
+    ) -> anyhow::Result<Vec<RepeatingTaskRun>> {
+        let task_id = task_id.to_string();
+        self.with_conn(move |conn| {
+            repeating_task_runs::table
+                .filter(repeating_task_runs::task_id.eq(&task_id))
+                .select(RepeatingTaskRun::as_select())
+                .order(repeating_task_runs::started_at.desc())
+                .limit(limit)
                 .load(conn)
                 .map_err(Into::into)
         })

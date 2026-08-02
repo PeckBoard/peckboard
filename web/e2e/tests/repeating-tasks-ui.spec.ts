@@ -250,3 +250,75 @@ test('pause flips visible badge between active and paused', async ({ page, baseU
   await page.getByRole('button', { name: /^resume$/i }).click()
   await expect(page.getByRole('button', { name: /^pause$/i })).toBeVisible()
 })
+
+test('monthly schedule + timezone picker round-trip through create and edit', async ({
+  page,
+  baseURL,
+  request,
+}) => {
+  expect(baseURL).toBeTruthy()
+  const token = await authenticate(request)
+  const authHeader = { Authorization: `Bearer ${token}` }
+
+  const folderPath = mkdtempSync(path.join(tmpdir(), 'peckboard-e2e-ui-rt-monthly-'))
+  const folderRes = await request.post('/api/folders', {
+    headers: authHeader,
+    data: { name: 'e2e-ui-rt-monthly', path: folderPath },
+  })
+  expect(folderRes.ok()).toBeTruthy()
+  const folder = (await folderRes.json()) as { id: string }
+
+  await loginUi(page, baseURL!)
+  await expect(page.locator('.rail')).toBeVisible()
+  await page.locator('.rail-btn[title="Repeating Tasks"]').click()
+  await expect(page.getByRole('heading', { name: 'Repeating Tasks' })).toBeVisible()
+
+  await page.getByRole('button', { name: /new task/i }).click()
+  await expect(page.getByRole('heading', { name: /new repeating task/i })).toBeVisible()
+
+  const taskName = `monthly-tz-task-${Date.now()}`
+  await page.getByPlaceholder(/daily project sweep/i).fill(taskName)
+  await page.locator('select.form-input').first().selectOption({ value: folder.id })
+  await page.getByPlaceholder(/message sent to the new session/i).fill('do thing')
+
+  // Switch to monthly: the day-of-month select and timezone picker appear.
+  await page.getByLabel('Schedule').selectOption('monthly')
+  await expect(page.getByLabel('Day of month')).toBeVisible()
+  await page.getByLabel('Day of month').selectOption('31')
+
+  // Timezone is a searchable combobox, not a plain select.
+  await page.getByTestId('repeating-task-timezone').click()
+  await page.getByPlaceholder(/search timezones/i).fill('New_York')
+  await page.getByRole('option', { name: 'America/New_York' }).click()
+  await expect(page.getByTestId('repeating-task-timezone')).toContainText('America/New_York')
+
+  await page.getByRole('button', { name: /create task/i }).click()
+
+  await expect(page.getByRole('heading', { name: taskName })).toBeVisible()
+  await expect(page.getByText(/Monthly on day 31/)).toBeVisible()
+  await expect(page.getByText('America/New_York', { exact: true })).toBeVisible()
+
+  // Confirm the API round-trip: kind, clamped-at-31 day, and timezone all
+  // persisted, not just rendered client-side.
+  const listRes = await request.get('/api/repeating-tasks', { headers: authHeader })
+  const tasks = (await listRes.json()) as Array<{
+    id: string
+    name: string
+    schedule_kind: string
+    schedule_value: string
+    timezone: string | null
+  }>
+  const created = tasks.find((t) => t.name === taskName)
+  expect(created, 'created task missing from list').toBeTruthy()
+  expect(created!.schedule_kind).toBe('monthly')
+  expect(JSON.parse(created!.schedule_value)).toMatchObject({ day: 31 })
+  expect(created!.timezone).toBe('America/New_York')
+
+  // Reopen the edit modal and confirm the fields reload with the saved
+  // values (not silently reset to defaults).
+  await page.getByRole('button', { name: /^edit$/i }).click()
+  await expect(page.getByRole('heading', { name: /edit repeating task/i })).toBeVisible()
+  await expect(page.getByLabel('Schedule')).toHaveValue('monthly')
+  await expect(page.getByLabel('Day of month')).toHaveValue('31')
+  await expect(page.getByTestId('repeating-task-timezone')).toContainText('America/New_York')
+})

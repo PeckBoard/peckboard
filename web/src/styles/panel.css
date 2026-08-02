@@ -80,3 +80,21 @@
   background: var(--surface3);
   color: var(--text3);
 }
+
+/* Repeating-task run-history outcomes. */
+.status-spawned {
+  background: var(--success-bg);
+  color: var(--success);
+}
+.status-already_running {
+  background: var(--warning-bg);
+  color: var(--warning);
+}
+.status-throttled {
+  background: var(--warning-bg);
+  color: var(--warning);
+}
+.status-failed {
+  background: var(--danger-bg);
+  color: var(--danger);
+}

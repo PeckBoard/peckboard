@@ -1,5 +1,5 @@
 import { create } from 'zustand'
-import type { RepeatingScheduleKind, RepeatingTask, Session } from '../types/api'
+import type { RepeatingScheduleKind, RepeatingTask, RepeatingTaskRun, Session } from '../types/api'
 import { authedFetch } from './auth'
 import { useTabsStore } from './tabs'
 
@@ -7,6 +7,8 @@ export type ScheduleValue =
   | { kind: 'interval'; minutes: number }
   | { kind: 'daily'; hour: number; minute: number }
   | { kind: 'weekly'; weekday: number; hour: number; minute: number }
+  | { kind: 'monthly'; day: number; hour: number; minute: number }
+  | { kind: 'once'; at: string }
 
 export interface CreateRepeatingTaskInput {
   name: string
@@ -14,10 +16,12 @@ export interface CreateRepeatingTaskInput {
   folder_id: string
   prompt: string
   schedule_kind: RepeatingScheduleKind
-  schedule_value: Record<string, number>
+  schedule_value: Record<string, number | string>
   model?: string | null
   effort?: string | null
   enabled?: boolean
+  /** IANA zone name, or null/omitted for UTC. */
+  timezone?: string | null
 }
 
 export interface UpdateRepeatingTaskInput {
@@ -25,18 +29,21 @@ export interface UpdateRepeatingTaskInput {
   description?: string
   prompt?: string
   schedule_kind?: RepeatingScheduleKind
-  schedule_value?: Record<string, number>
+  schedule_value?: Record<string, number | string>
   model?: string | null
   effort?: string | null
   enabled?: boolean
+  timezone?: string | null
 }
 
 interface RepeatingTasksState {
   tasks: RepeatingTask[]
   loaded: boolean
   sessionsByTask: Record<string, Session[]>
+  runsByTask: Record<string, RepeatingTaskRun[]>
   fetchTasks: () => Promise<void>
   fetchSessionsForTask: (taskId: string) => Promise<void>
+  fetchRunsForTask: (taskId: string) => Promise<void>
   createTask: (input: CreateRepeatingTaskInput) => Promise<RepeatingTask>
   updateTask: (id: string, input: UpdateRepeatingTaskInput) => Promise<RepeatingTask>
   deleteTask: (id: string) => Promise<void>
@@ -50,6 +57,7 @@ export const useRepeatingTasksStore = create<RepeatingTasksState>((set, get) => 
   tasks: [],
   loaded: false,
   sessionsByTask: {},
+  runsByTask: {},
 
   fetchTasks: async () => {
     const res = await authedFetch('/api/repeating-tasks')
@@ -78,6 +86,24 @@ export const useRepeatingTasksStore = create<RepeatingTasksState>((set, get) => 
     }
     const sessions: Session[] = await res.json()
     set((s) => ({ sessionsByTask: { ...s.sessionsByTask, [taskId]: sessions } }))
+  },
+
+  fetchRunsForTask: async (taskId: string) => {
+    const res = await authedFetch(`/api/repeating-tasks/${taskId}/runs`)
+    if (!res.ok) {
+      if (res.status === 404) {
+        set((s) => {
+          const next = { ...s.runsByTask }
+          delete next[taskId]
+          return { runsByTask: next }
+        })
+        return
+      }
+      const err = await res.json().catch(() => ({ error: 'Failed to load run history' }))
+      throw new Error(err.error || 'Failed to load run history')
+    }
+    const runs: RepeatingTaskRun[] = await res.json()
+    set((s) => ({ runsByTask: { ...s.runsByTask, [taskId]: runs } }))
   },
 
   createTask: async (input: CreateRepeatingTaskInput) => {
@@ -119,9 +145,12 @@ export const useRepeatingTasksStore = create<RepeatingTasksState>((set, get) => 
     set((s) => {
       const sessions = { ...s.sessionsByTask }
       delete sessions[id]
+      const runs = { ...s.runsByTask }
+      delete runs[id]
       return {
         tasks: s.tasks.filter((t) => t.id !== id),
         sessionsByTask: sessions,
+        runsByTask: runs,
       }
     })
     // Drop the strip chip immediately. The server-side cascade in
@@ -138,9 +167,10 @@ export const useRepeatingTasksStore = create<RepeatingTasksState>((set, get) => 
       throw new Error(err.error || 'Failed to run task')
     }
     const body = (await res.json()) as { status: 'spawned' | 'already_running' | 'disabled' }
-    // Optimistically refresh the sessions list so the new session shows
-    // up without waiting for a navigation away and back.
+    // Optimistically refresh the sessions + run history so the new run
+    // shows up without waiting for a navigation away and back.
     void get().fetchSessionsForTask(id)
+    void get().fetchRunsForTask(id)
     return body.status
   },
 

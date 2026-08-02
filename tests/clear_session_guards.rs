@@ -179,6 +179,7 @@ async fn seed(state: &AppState) {
             last_run_at: None,
             created_at: ts.clone(),
             updated_at: ts.clone(),
+            timezone: None,
         })
         .await
         .unwrap();

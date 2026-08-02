@@ -10,20 +10,30 @@
 //!   so callers cannot bypass the lock.
 //! * There is no public free function for "start a run for task T" —
 //!   external callers must go through `try_run_now` / the scheduler
-//!   loop, both of which acquire a lock first.
 //!
 //! Schedule format (`schedule_kind` / `schedule_value`):
-//! - `interval`  → `{ "minutes": N }`         — fire every N minutes
-//! - `daily`     → `{ "hour": H, "minute": M }` — fire daily at HH:MM UTC
+//! - `interval`  → `{ "minutes": N }`         — fire every N minutes (timezone-independent)
+//! - `daily`     → `{ "hour": H, "minute": M }` — fire daily at HH:MM in the task's timezone
 //! - `weekly`    → `{ "weekday": 0..=6, "hour": H, "minute": M }` — fire weekly,
-//!                  weekday is 0=Mon … 6=Sun (matches `chrono::Weekday::num_days_from_monday`)
+//!   weekday is 0=Mon … 6=Sun (matches `chrono::Weekday::num_days_from_monday`)
+//! - `monthly`   → `{ "day": 1..=31, "hour": H, "minute": M }` — fire monthly, `day`
+//!   clamped to the target month's length
+//! - `once`      → `{ "at": "YYYY-MM-DDTHH:MM" }` — fire once at that local wall-clock
+//!   instant, then the task disables itself
+//!                  instant, then the task disables itself
+//!
+//! `RepeatingTask::timezone` is an optional IANA zone name (e.g.
+//! `"America/New_York"`); `NULL` means UTC, which is also the behaviour
+//! of every task row created before this column existed. `daily` /
+//! `weekly` / `monthly` / `once` resolve their wall-clock time in that
+//! zone via `chrono-tz`, so a schedule survives a DST transition instead
+//! of drifting an hour. `interval` is pure duration math and unaffected.
 
+use chrono::{DateTime, Datelike, Duration, TimeZone, Timelike, Utc};
+use serde::Deserialize;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::PathBuf;
 use std::sync::Arc;
-
-use chrono::{DateTime, Datelike, Duration, Timelike, Utc};
-use serde::Deserialize;
 use tokio::sync::{Mutex, OwnedMutexGuard};
 
 use crate::db::Db;
@@ -49,6 +59,41 @@ pub struct RunContext<'a> {
     /// would violate the "never run quicker than the schedule, never
     /// more than once per minute" invariant. See [`RunAuditor`].
     pub auditor: &'a RunAuditor,
+}
+
+/// Newest run-history rows kept per task. A fast interval task (e.g.
+/// every minute) would otherwise grow this table without bound.
+const RUN_HISTORY_KEEP: i64 = 100;
+
+/// Record the *dispatch* outcome of a scheduler tick or manual "Run now"
+/// -- not the eventual agent result, which already shows up in the
+/// spawned session's own event stream. Best-effort: a failure to persist
+/// history must never fail the dispatch itself, so errors are logged and
+/// swallowed, matching the `let _ = db.update_repeating_task(...)` calls
+/// elsewhere in this module.
+async fn record_run(
+    db: &Db,
+    task_id: &str,
+    session_id: Option<&str>,
+    status: &str,
+    trigger: RunTrigger,
+    detail: Option<String>,
+) {
+    let new = crate::db::models::NewRepeatingTaskRun {
+        id: uuid::Uuid::new_v4().to_string(),
+        task_id: task_id.to_string(),
+        session_id: session_id.map(|s| s.to_string()),
+        started_at: Utc::now().to_rfc3339(),
+        status: status.to_string(),
+        trigger: match trigger {
+            RunTrigger::Scheduler => "scheduler".to_string(),
+            RunTrigger::Manual => "manual".to_string(),
+        },
+        detail,
+    };
+    if let Err(e) = db.create_repeating_task_run(new, RUN_HISTORY_KEEP).await {
+        tracing::warn!(task_id = %task_id, "Failed to record repeating-task run history: {e}");
+    }
 }
 
 /// Smallest practical interval. Stops the scheduler from chewing CPU and
@@ -332,6 +377,15 @@ impl RepeatingTaskManager {
                     },
                 )
                 .await;
+            record_run(
+                db,
+                task_id,
+                None,
+                "throttled",
+                trigger,
+                Some(reason.clone()),
+            )
+            .await;
             return Ok(StartOutcome::Throttled(reason));
         }
 
@@ -360,6 +414,7 @@ impl RepeatingTaskManager {
                         },
                     )
                     .await;
+                record_run(db, task_id, Some(&s.id), "already_running", trigger, None).await;
                 return Ok(StartOutcome::AlreadyRunning);
             }
         }
@@ -494,6 +549,15 @@ impl RepeatingTaskManager {
                     }),
                 });
             }
+            record_run(
+                db,
+                task_id,
+                Some(&session_id),
+                "failed",
+                trigger,
+                Some(e.to_string()),
+            )
+            .await;
             return Err(e);
         }
 
@@ -502,17 +566,28 @@ impl RepeatingTaskManager {
         // was paused or the machine slept past several due times we
         // catch up to "now + interval", not 12 retries in a row.
         let next = next_run_at_after(&task, now_dt);
+        // A "once" schedule is consumed by firing: disable the task so
+        // it drops out of the due-task scan instead of re-triggering
+        // (next_run_at is already None once `at` has passed, but leaving
+        // `enabled` on would still surface it as "next run: never" and
+        // let a manual Run-now fire it again).
+        let is_once = matches!(
+            Schedule::parse(&task.schedule_kind, &task.schedule_value),
+            Ok(Schedule::Once { .. })
+        );
         let _ = db
             .update_repeating_task(
                 task_id,
                 UpdateRepeatingTask {
                     last_run_at: Some(Some(now.clone())),
                     next_run_at: Some(next),
+                    enabled: if is_once { Some(false) } else { None },
                     updated_at: Some(now.clone()),
                     ..Default::default()
                 },
             )
             .await;
+        record_run(db, task_id, Some(&session.id), "spawned", trigger, None).await;
 
         broadcaster.broadcast(WsEvent {
             event_type: "repeating-task-run".into(),
@@ -548,6 +623,15 @@ impl RepeatingTaskManager {
 /// time (so invalid input is rejected at the route boundary) and inside
 /// `next_run_at_after` (so a corrupted row can't infinite-loop the
 /// scheduler).
+///
+/// Cron expressions were deliberately left out: `monthly` + `weekly` +
+/// `daily` + `once` already cover every recurrence shape a repeating
+/// task realistically needs, and a cron field would duplicate that
+/// coverage while adding a free-text expression to validate, describe
+/// in the UI, and reason about for DST (cron has no timezone concept of
+/// its own). Revisit only if a concrete need surfaces (e.g. "every
+/// weekday", "last Friday of the month") that the fixed-shape kinds
+/// can't express.
 #[derive(Debug, Clone)]
 pub enum Schedule {
     Interval {
@@ -561,6 +645,18 @@ pub enum Schedule {
         weekday: u32,
         hour: u32,
         minute: u32,
+    },
+    Monthly {
+        day: u32,
+        hour: u32,
+        minute: u32,
+    },
+    /// Fire once at the given wall-clock instant (interpreted in the
+    /// task's timezone), then the caller disables the task. Unlike the
+    /// other kinds this carries no implicit recurrence: `next_run_at_after`
+    /// returns `None` once `at` is in the past.
+    Once {
+        at: chrono::NaiveDateTime,
     },
 }
 
@@ -578,6 +674,17 @@ struct WeeklyValue {
     weekday: u32,
     hour: u32,
     minute: u32,
+}
+#[derive(Deserialize)]
+struct MonthlyValue {
+    day: u32,
+    hour: u32,
+    minute: u32,
+}
+#[derive(Deserialize)]
+struct OnceValue {
+    /// Naive local wall-clock, `YYYY-MM-DDTHH:MM` (seconds optional).
+    at: String,
 }
 
 impl Schedule {
@@ -617,14 +724,103 @@ impl Schedule {
                     minute: v.minute,
                 })
             }
+            "monthly" => {
+                let v: MonthlyValue = serde_json::from_str(value_json)
+                    .map_err(|e| anyhow::anyhow!("invalid monthly schedule value: {e}"))?;
+                if v.day < 1 || v.day > 31 || v.hour > 23 || v.minute > 59 {
+                    anyhow::bail!("monthly day/hour/minute out of range");
+                }
+                Ok(Schedule::Monthly {
+                    day: v.day,
+                    hour: v.hour,
+                    minute: v.minute,
+                })
+            }
+            "once" => {
+                let v: OnceValue = serde_json::from_str(value_json)
+                    .map_err(|e| anyhow::anyhow!("invalid once schedule value: {e}"))?;
+                let at = chrono::NaiveDateTime::parse_from_str(&v.at, "%Y-%m-%dT%H:%M:%S")
+                    .or_else(|_| chrono::NaiveDateTime::parse_from_str(&v.at, "%Y-%m-%dT%H:%M"))
+                    .map_err(|e| anyhow::anyhow!("invalid once schedule value: {e}"))?;
+                Ok(Schedule::Once { at })
+            }
             other => anyhow::bail!("unknown schedule_kind: {other}"),
         }
     }
 }
 
+/// Resolve a task's IANA timezone. `None` (legacy rows created before
+/// this column existed) and an unparseable zone string both fall back to
+/// UTC — preserving the exact pre-timezone behaviour rather than failing
+/// the scheduler tick.
+fn task_tz(task: &RepeatingTask) -> chrono_tz::Tz {
+    task.timezone
+        .as_deref()
+        .and_then(|s| s.parse::<chrono_tz::Tz>().ok())
+        .unwrap_or(chrono_tz::UTC)
+}
+
+/// Map a naive local wall-clock time to a UTC instant in `tz`, handling
+/// the two DST edge cases:
+/// - Fall-back (a local time that occurs twice): take the earlier
+///   (first) occurrence, matching how most calendar apps interpret it.
+/// - Spring-forward (a local time that never occurs, e.g. 02:30 on the
+///   day clocks jump from 02:00 to 03:00): step forward minute by minute
+///   until landing on a valid instant, so "02:30" resolves to the first
+///   valid wall-clock time after the gap instead of silently dropping
+///   the run.
+fn resolve_local(tz: &chrono_tz::Tz, naive: chrono::NaiveDateTime) -> DateTime<Utc> {
+    use chrono::offset::LocalResult;
+    match tz.from_local_datetime(&naive) {
+        LocalResult::Single(dt) => dt.with_timezone(&Utc),
+        LocalResult::Ambiguous(earliest, _latest) => earliest.with_timezone(&Utc),
+        LocalResult::None => {
+            let mut candidate = naive;
+            for _ in 0..180 {
+                candidate += Duration::minutes(1);
+                if let LocalResult::Single(dt) = tz.from_local_datetime(&candidate) {
+                    return dt.with_timezone(&Utc);
+                }
+            }
+            // Unreachable in practice (DST gaps are at most a couple of
+            // hours); treat the naive value as UTC rather than panic.
+            DateTime::<Utc>::from_naive_utc_and_offset(naive, Utc)
+        }
+    }
+}
+
+fn last_day_of_month(year: i32, month: u32) -> u32 {
+    let (ny, nm) = next_calendar_month(year, month);
+    chrono::NaiveDate::from_ymd_opt(ny, nm, 1)
+        .and_then(|d| d.pred_opt())
+        .map(|d| d.day())
+        .unwrap_or(28)
+}
+
+fn next_calendar_month(year: i32, month: u32) -> (i32, u32) {
+    if month == 12 {
+        (year + 1, 1)
+    } else {
+        (year, month + 1)
+    }
+}
+
+/// Build a monthly candidate, clamping `day` to the target month's
+/// length (e.g. day=31 in February lands on the 28th/29th).
+fn monthly_candidate(
+    year: i32,
+    month: u32,
+    day: u32,
+    hour: u32,
+    minute: u32,
+) -> Option<chrono::NaiveDateTime> {
+    let clamped = day.min(last_day_of_month(year, month));
+    chrono::NaiveDate::from_ymd_opt(year, month, clamped)?.and_hms_opt(hour, minute, 0)
+}
+
 /// Compute the next `next_run_at` *after* `now` for a task. Returns
-/// `None` only if the schedule string is corrupted, in which case the
-/// scheduler will keep the row idle instead of spinning.
+/// `None` if the schedule string is corrupted (scheduler leaves the row
+/// idle instead of spinning) or if a `once` schedule has already fired.
 pub fn next_run_at_after(task: &RepeatingTask, now: DateTime<Utc>) -> Option<String> {
     let sched = match Schedule::parse(&task.schedule_kind, &task.schedule_value) {
         Ok(s) => s,
@@ -636,38 +832,59 @@ pub fn next_run_at_after(task: &RepeatingTask, now: DateTime<Utc>) -> Option<Str
     let next = match sched {
         Schedule::Interval { minutes } => {
             // Floor to whole minutes so the timestamps stay readable.
+            // Pure duration math -- timezone-independent by design.
             let next = now + Duration::minutes(minutes);
             next.with_second(0).and_then(|t| t.with_nanosecond(0))?
         }
         Schedule::Daily { hour, minute } => {
-            let mut candidate = now
-                .with_hour(hour)?
-                .with_minute(minute)?
-                .with_second(0)?
-                .with_nanosecond(0)?;
-            if candidate <= now {
-                candidate += Duration::days(1);
+            let tz = task_tz(task);
+            let now_local = now.with_timezone(&tz).naive_local();
+            let mut date = now_local.date();
+            let mut candidate = date.and_hms_opt(hour, minute, 0)?;
+            if candidate <= now_local {
+                date += Duration::days(1);
+                candidate = date.and_hms_opt(hour, minute, 0)?;
             }
-            candidate
+            resolve_local(&tz, candidate)
         }
         Schedule::Weekly {
             weekday,
             hour,
             minute,
         } => {
-            let mut candidate = now
-                .with_hour(hour)?
-                .with_minute(minute)?
-                .with_second(0)?
-                .with_nanosecond(0)?;
+            let tz = task_tz(task);
+            let now_local = now.with_timezone(&tz).naive_local();
+            let mut date = now_local.date();
+            let mut candidate = date.and_hms_opt(hour, minute, 0)?;
             // Step to the matching weekday at or after the current day.
-            let current = now.weekday().num_days_from_monday();
+            let current = now_local.weekday().num_days_from_monday();
             let mut delta = (weekday + 7 - current) % 7;
-            if delta == 0 && candidate <= now {
+            if delta == 0 && candidate <= now_local {
                 delta = 7;
             }
-            candidate += Duration::days(delta as i64);
-            candidate
+            date += Duration::days(delta as i64);
+            candidate = date.and_hms_opt(hour, minute, 0)?;
+            resolve_local(&tz, candidate)
+        }
+        Schedule::Monthly { day, hour, minute } => {
+            let tz = task_tz(task);
+            let now_local = now.with_timezone(&tz).naive_local();
+            let mut year = now_local.year();
+            let mut month = now_local.month();
+            let mut candidate = monthly_candidate(year, month, day, hour, minute)?;
+            if candidate <= now_local {
+                (year, month) = next_calendar_month(year, month);
+                candidate = monthly_candidate(year, month, day, hour, minute)?;
+            }
+            resolve_local(&tz, candidate)
+        }
+        Schedule::Once { at } => {
+            let tz = task_tz(task);
+            let candidate_utc = resolve_local(&tz, at);
+            if candidate_utc <= now {
+                return None;
+            }
+            candidate_utc
         }
     };
     Some(next.to_rfc3339())
@@ -782,6 +999,10 @@ pub fn min_run_gap_seconds(task: &RepeatingTask) -> i64 {
             Schedule::Interval { minutes } => minutes.saturating_mul(60),
             Schedule::Daily { .. } => 86_400,
             Schedule::Weekly { .. } => 7 * 86_400,
+            Schedule::Monthly { .. } => 28 * 86_400,
+            // A one-shot has no recurrence cadence to floor; fall back
+            // to the absolute scheduler-gap floor.
+            Schedule::Once { .. } => MIN_SCHEDULER_GAP_SECONDS,
         })
         .unwrap_or(MIN_SCHEDULER_GAP_SECONDS);
     schedule_floor.max(MIN_SCHEDULER_GAP_SECONDS)
@@ -1150,6 +1371,14 @@ mod tests {
             last_run_at: None,
             created_at: "2026-01-01T00:00:00Z".into(),
             updated_at: "2026-01-01T00:00:00Z".into(),
+            timezone: None,
+        }
+    }
+
+    fn make_task_tz(kind: &str, value: &str, tz: &str) -> RepeatingTask {
+        RepeatingTask {
+            timezone: Some(tz.to_string()),
+            ..make_task(kind, value)
         }
     }
 
@@ -1481,6 +1710,7 @@ mod tests {
             last_run_at: None,
             created_at: ts.clone(),
             updated_at: ts.clone(),
+            timezone: None,
         })
         .await
         .unwrap();
@@ -1550,6 +1780,7 @@ mod tests {
             last_run_at: None,
             created_at: ts.clone(),
             updated_at: ts.clone(),
+            timezone: None,
         })
         .await
         .unwrap();
@@ -1610,6 +1841,7 @@ mod tests {
             last_run_at: None,
             created_at: ts.clone(),
             updated_at: ts.clone(),
+            timezone: None,
         })
         .await
         .unwrap();
@@ -1646,5 +1878,84 @@ mod tests {
         let now = Utc.with_ymd_and_hms(2026, 6, 9, 10, 0, 0).unwrap();
         let next: DateTime<Utc> = next_run_at_after(&task, now).unwrap().parse().unwrap();
         assert_eq!(next, Utc.with_ymd_and_hms(2026, 6, 16, 8, 0, 0).unwrap());
+    }
+
+    #[test]
+    fn monthly_clamps_to_last_day_of_short_month() {
+        let task = make_task("monthly", r#"{"day":31,"hour":9,"minute":0}"#);
+        // 09:00 on Jan 31 has already passed -> roll to Feb, clamped to 28
+        // (2026 is not a leap year).
+        let now = Utc.with_ymd_and_hms(2026, 1, 31, 10, 0, 0).unwrap();
+        let next: DateTime<Utc> = next_run_at_after(&task, now).unwrap().parse().unwrap();
+        assert_eq!(next, Utc.with_ymd_and_hms(2026, 2, 28, 9, 0, 0).unwrap());
+    }
+
+    #[test]
+    fn monthly_uses_current_month_when_day_still_ahead() {
+        let task = make_task("monthly", r#"{"day":15,"hour":9,"minute":0}"#);
+        let now = Utc.with_ymd_and_hms(2026, 1, 1, 0, 0, 0).unwrap();
+        let next: DateTime<Utc> = next_run_at_after(&task, now).unwrap().parse().unwrap();
+        assert_eq!(next, Utc.with_ymd_and_hms(2026, 1, 15, 9, 0, 0).unwrap());
+    }
+
+    #[test]
+    fn once_fires_at_the_configured_instant() {
+        let task = make_task("once", r#"{"at":"2026-12-25T09:00"}"#);
+        let now = Utc.with_ymd_and_hms(2026, 12, 1, 0, 0, 0).unwrap();
+        let next: DateTime<Utc> = next_run_at_after(&task, now).unwrap().parse().unwrap();
+        assert_eq!(next, Utc.with_ymd_and_hms(2026, 12, 25, 9, 0, 0).unwrap());
+    }
+
+    #[test]
+    fn once_returns_none_after_it_has_passed() {
+        let task = make_task("once", r#"{"at":"2026-12-25T09:00"}"#);
+        let now = Utc.with_ymd_and_hms(2026, 12, 26, 0, 0, 0).unwrap();
+        assert!(next_run_at_after(&task, now).is_none());
+    }
+
+    #[test]
+    fn unknown_timezone_falls_back_to_utc() {
+        let with_bogus_tz = make_task_tz("daily", r#"{"hour":9,"minute":0}"#, "Not/AZone");
+        let with_no_tz = make_task("daily", r#"{"hour":9,"minute":0}"#);
+        let now = Utc.with_ymd_and_hms(2026, 6, 9, 0, 0, 0).unwrap();
+        assert_eq!(
+            next_run_at_after(&with_bogus_tz, now),
+            next_run_at_after(&with_no_tz, now),
+        );
+    }
+
+    #[test]
+    fn daily_wall_clock_survives_spring_forward_dst_transition() {
+        // America/New_York: DST starts 2026-03-08 (clocks jump 02:00 -> 03:00).
+        // A 09:00 daily schedule should land at 13:00 UTC once DST is in
+        // effect, not drift by an hour.
+        let task = make_task_tz("daily", r#"{"hour":9,"minute":0}"#, "America/New_York");
+        let now = Utc.with_ymd_and_hms(2026, 3, 8, 0, 0, 0).unwrap();
+        let next: DateTime<Utc> = next_run_at_after(&task, now).unwrap().parse().unwrap();
+        assert_eq!(next, Utc.with_ymd_and_hms(2026, 3, 8, 13, 0, 0).unwrap());
+    }
+
+    #[test]
+    fn daily_schedule_in_the_spring_forward_gap_steps_to_first_valid_instant() {
+        // 02:30 local never occurs on 2026-03-08 (America/New_York jumps
+        // 02:00 -> 03:00). The resolver should land on 03:00 EDT (07:00 UTC)
+        // instead of silently dropping the run.
+        let task = make_task_tz("daily", r#"{"hour":2,"minute":30}"#, "America/New_York");
+        // now = 2026-03-08T06:00:00Z = 01:00 EST local, before the gap.
+        let now = Utc.with_ymd_and_hms(2026, 3, 8, 6, 0, 0).unwrap();
+        let next: DateTime<Utc> = next_run_at_after(&task, now).unwrap().parse().unwrap();
+        assert_eq!(next, Utc.with_ymd_and_hms(2026, 3, 8, 7, 0, 0).unwrap());
+    }
+
+    #[test]
+    fn daily_schedule_in_the_fall_back_window_uses_earliest_occurrence() {
+        // 01:30 local occurs twice on 2026-11-01 (America/New_York falls
+        // back 02:00 EDT -> 01:00 EST). The resolver takes the earlier
+        // (still-EDT) occurrence: 01:30 EDT = 05:30 UTC.
+        let task = make_task_tz("daily", r#"{"hour":1,"minute":30}"#, "America/New_York");
+        // now = 2026-11-01T04:00:00Z = 00:00 EDT local, before the window.
+        let now = Utc.with_ymd_and_hms(2026, 11, 1, 4, 0, 0).unwrap();
+        let next: DateTime<Utc> = next_run_at_after(&task, now).unwrap().parse().unwrap();
+        assert_eq!(next, Utc.with_ymd_and_hms(2026, 11, 1, 5, 30, 0).unwrap());
     }
 }

@@ -583,7 +583,7 @@ pub fn build_worker_prompt(
     }
     if let Some(step_text) = step_instructions {
         prompt.push_str("### Step-Specific Instructions\n\n");
-        prompt.push_str(step_text);
+        prompt.push_str(&step_text);
         prompt.push_str("\n\n");
     }
     // Per-project extension to the step prompt — additional instructions on

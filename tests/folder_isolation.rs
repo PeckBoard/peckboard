@@ -668,6 +668,7 @@ async fn move_repeating_task_updates_task_and_spawned_sessions() {
         last_run_at: None,
         created_at: ts.clone(),
         updated_at: ts.clone(),
+        timezone: None,
     })
     .await
     .unwrap();

@@ -95,6 +95,7 @@ async fn seed_task(db: &Db, id: &str, folder_id: &str, prompt: &str, model: Opti
         last_run_at: None,
         created_at: ts.clone(),
         updated_at: ts.clone(),
+        timezone: None,
     };
     let next = initial_next_run_at(&draft);
     db.create_repeating_task(NewRepeatingTask {
@@ -112,6 +113,7 @@ async fn seed_task(db: &Db, id: &str, folder_id: &str, prompt: &str, model: Opti
         last_run_at: None,
         created_at: ts.clone(),
         updated_at: ts,
+        timezone: None,
     })
     .await
     .unwrap();
@@ -311,6 +313,50 @@ async fn force_run_spawns_a_session_for_the_task() {
     let after = env.db.get_repeating_task("t1").await.unwrap().unwrap();
     assert!(after.last_run_at.is_some());
     assert!(after.next_run_at.is_some());
+}
+
+#[tokio::test]
+async fn force_run_records_run_history() {
+    let env = fresh_state().await;
+    let tmp = tempfile::tempdir().unwrap();
+    seed_folder(&env.db, "f1", tmp.path().to_str().unwrap()).await;
+    seed_task(&env.db, "t1", "f1", "hello", Some("mock:happy-path")).await;
+
+    let outcome = env
+        .rtm
+        .try_run_now("t1", env.run_ctx(), false)
+        .await
+        .unwrap();
+    assert_eq!(outcome, StartOutcome::Spawned);
+
+    let session_id = {
+        let sessions = env.db.list_sessions_by_repeating_task("t1").await.unwrap();
+        sessions[0].id.clone()
+    };
+    for _ in 0..50 {
+        if !env.session_manager.is_running(&session_id).await {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+    env.session_manager.cancel_and_wait(&session_id).await;
+
+    let runs = env.db.list_repeating_task_runs("t1", 50).await.unwrap();
+    assert_eq!(runs.len(), 1, "expected one dispatch recorded");
+    assert_eq!(runs[0].status, "spawned");
+    assert_eq!(runs[0].trigger, "manual");
+    assert_eq!(runs[0].session_id.as_deref(), Some(session_id.as_str()));
+
+    // A second force-run while the first session is detached should
+    // record another "spawned" row -- run history isn't deduplicated.
+    let outcome2 = env
+        .rtm
+        .try_run_now("t1", env.run_ctx(), false)
+        .await
+        .unwrap();
+    assert_eq!(outcome2, StartOutcome::Spawned);
+    let runs = env.db.list_repeating_task_runs("t1", 50).await.unwrap();
+    assert_eq!(runs.len(), 2);
 }
 
 #[tokio::test]
