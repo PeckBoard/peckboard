@@ -44,12 +44,13 @@ impl McpToolRegistry {
             );
         }
 
+        let limits = crate::subagent::load_limits(&ctx.db).await;
         let active = ctx.db.count_active_subagents(&ctx.session_id).await?;
-        if active >= crate::subagent::MAX_CONCURRENT_SUBAGENTS {
+        if active >= limits.max_concurrent {
             anyhow::bail!(
                 "subagent limit reached ({active} in flight, max {}). Results arrive \
                  automatically as they finish; peek with list_sessions / read_worker_session.",
-                crate::subagent::MAX_CONCURRENT_SUBAGENTS
+                limits.max_concurrent
             );
         }
 

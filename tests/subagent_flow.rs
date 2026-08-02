@@ -131,7 +131,7 @@ async fn concurrent_cap_frees_up_after_completion_claim() {
     let pctx = ctx(&db, "parent", "f1");
 
     let mut first_child = None;
-    for i in 0..peckboard::subagent::MAX_CONCURRENT_SUBAGENTS {
+    for i in 0..peckboard::subagent::DEFAULT_MAX_CONCURRENT_SUBAGENTS {
         let r = spawn(&registry, &pctx, &format!("s{i}")).await.unwrap();
         first_child.get_or_insert_with(|| r["subagent_session_id"].as_str().unwrap().to_string());
     }
@@ -225,5 +225,126 @@ async fn claim_and_compose_crash_and_missing_parent() {
             .unwrap()
             .subagent_completed_at
             .is_some()
+    );
+}
+
+#[tokio::test]
+async fn restart_reconcile_frees_slot_and_notifies_parent() {
+    let db = Arc::new(Db::in_memory().unwrap());
+    seed_folder(&db, "f1").await;
+    seed_session(&db, "parent", "f1", None).await;
+    // Fill the parent's cap with subagents that never reported back —
+    // simulating a server restart mid-run (no `subagent_completed_at`).
+    for i in 0..peckboard::subagent::DEFAULT_MAX_CONCURRENT_SUBAGENTS {
+        seed_session(&db, &format!("sub: s{i}"), "f1", Some("parent")).await;
+    }
+
+    let reconciled = peckboard::subagent::reconcile_orphan_subagents(&db).await;
+    assert_eq!(
+        reconciled as i64,
+        peckboard::subagent::DEFAULT_MAX_CONCURRENT_SUBAGENTS
+    );
+
+    for i in 0..peckboard::subagent::DEFAULT_MAX_CONCURRENT_SUBAGENTS {
+        let child = db
+            .get_session(&format!("sub: s{i}"))
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(child.subagent_completed_at.is_some());
+    }
+
+    // Parent got one result event per orphan, each explaining the restart.
+    let events = db.events_tail("parent", 50).await.unwrap();
+    let restart_events: Vec<_> = events
+        .iter()
+        .filter(|e| e.data.contains("terminated by server restart"))
+        .collect();
+    assert_eq!(
+        restart_events.len() as i64,
+        peckboard::subagent::DEFAULT_MAX_CONCURRENT_SUBAGENTS
+    );
+
+    // The cap is freed: a new subagent can be spawned now.
+    let registry = McpToolRegistry::new();
+    spawn(&registry, &ctx(&db, "parent", "f1"), "fits-now")
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn reconcile_is_idempotent() {
+    let db = Db::in_memory().unwrap();
+    seed_folder(&db, "f1").await;
+    seed_session(&db, "parent", "f1", None).await;
+    seed_session(&db, "sub: a", "f1", Some("parent")).await;
+
+    assert_eq!(
+        peckboard::subagent::reconcile_orphan_subagents(&db).await,
+        1
+    );
+    assert_eq!(
+        peckboard::subagent::reconcile_orphan_subagents(&db).await,
+        0
+    );
+
+    let events = db.events_tail("parent", 50).await.unwrap();
+    assert_eq!(events.len(), 1, "second pass must not re-notify the parent");
+}
+
+#[tokio::test]
+async fn subagent_limits_setting_overrides_defaults_and_clamps() {
+    let db = Db::in_memory().unwrap();
+
+    // No setting stored → defaults.
+    let limits = peckboard::subagent::load_limits(&db).await;
+    assert_eq!(
+        limits.max_concurrent,
+        peckboard::subagent::DEFAULT_MAX_CONCURRENT_SUBAGENTS
+    );
+    assert_eq!(
+        limits.result_char_cap,
+        peckboard::subagent::DEFAULT_RESULT_CHAR_CAP
+    );
+
+    // Valid override applies.
+    db.plugin_store_put_blocking(
+        peckboard::routes::settings::SETTINGS_NS,
+        peckboard::routes::settings::SETTINGS_COLLECTION,
+        "subagent_limits",
+        &serde_json::json!({ "max_concurrent": 2, "result_char_cap": 1000 }).to_string(),
+    )
+    .unwrap();
+    let limits = peckboard::subagent::load_limits(&db).await;
+    assert_eq!(limits.max_concurrent, 2);
+    assert_eq!(limits.result_char_cap, 1000);
+
+    // Enforced at the spawn cap.
+    let registry = McpToolRegistry::new();
+    seed_folder(&db, "f1").await;
+    seed_session(&db, "parent", "f1", None).await;
+    let pctx = ctx(&Arc::new(db), "parent", "f1");
+    spawn(&registry, &pctx, "a").await.unwrap();
+    spawn(&registry, &pctx, "b").await.unwrap();
+    let err = spawn(&registry, &pctx, "c").await.unwrap_err();
+    assert!(err.to_string().contains("max 2"));
+
+    // Out-of-range values fall back to defaults rather than crashing.
+    let db2 = Db::in_memory().unwrap();
+    db2.plugin_store_put_blocking(
+        peckboard::routes::settings::SETTINGS_NS,
+        peckboard::routes::settings::SETTINGS_COLLECTION,
+        "subagent_limits",
+        &serde_json::json!({ "max_concurrent": 0, "result_char_cap": 1 }).to_string(),
+    )
+    .unwrap();
+    let limits = peckboard::subagent::load_limits(&db2).await;
+    assert_eq!(
+        limits.max_concurrent,
+        peckboard::subagent::DEFAULT_MAX_CONCURRENT_SUBAGENTS
+    );
+    assert_eq!(
+        limits.result_char_cap,
+        peckboard::subagent::DEFAULT_RESULT_CHAR_CAP
     );
 }

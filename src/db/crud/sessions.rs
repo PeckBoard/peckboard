@@ -4,6 +4,23 @@ use crate::db::Db;
 use crate::db::models::*;
 use crate::db::schema::*;
 
+/// Escape `%`, `_`, and `\` in a user-supplied substring so it's safe to
+/// drop into a `LIKE '%...%' ESCAPE '\'` pattern without the user's own
+/// wildcards changing the match semantics, then wrap it for a
+/// contains-match.
+fn escape_like_pattern(raw: &str) -> String {
+    let mut escaped = String::with_capacity(raw.len() + 2);
+    escaped.push('%');
+    for ch in raw.chars() {
+        if matches!(ch, '\\' | '%' | '_') {
+            escaped.push('\\');
+        }
+        escaped.push(ch);
+    }
+    escaped.push('%');
+    escaped
+}
+
 impl Db {
     pub async fn create_session(&self, new: NewSession) -> anyhow::Result<Session> {
         self.with_conn(move |conn| {
@@ -185,6 +202,22 @@ impl Db {
         .await
     }
 
+    /// Every subagent session still marked incomplete (`parent_session_id`
+    /// set, `subagent_completed_at IS NULL`) regardless of parent. Used by
+    /// the startup reconcile pass to find subagents orphaned by a server
+    /// restart — the in-process completion listener that would normally
+    /// stamp `subagent_completed_at` never ran for them.
+    pub async fn list_incomplete_subagents(&self) -> anyhow::Result<Vec<Session>> {
+        self.with_conn(move |conn| {
+            sessions::table
+                .filter(sessions::parent_session_id.is_not_null())
+                .filter(sessions::subagent_completed_at.is_null())
+                .select(Session::as_select())
+                .load(conn)
+                .map_err(Into::into)
+        })
+        .await
+    }
     /// Claim a subagent's completion: stamp `subagent_completed_at` iff it
     /// is still NULL. Returns true only for the call that won the claim —
     /// the completion listener can fire more than once per session (crash
@@ -260,10 +293,12 @@ impl Db {
     pub async fn list_plain_sessions_page(
         &self,
         owner: Option<&str>,
+        name_filter: Option<&str>,
         before: Option<(String, String)>,
         limit: i64,
     ) -> anyhow::Result<Vec<Session>> {
         let owner = owner.map(|s| s.to_string());
+        let name_filter = name_filter.map(escape_like_pattern);
         self.with_conn(move |conn| {
             let mut query = sessions::table
                 .filter(sessions::is_worker.eq(false))
@@ -271,6 +306,9 @@ impl Db {
                 .into_boxed();
             if let Some(owner) = &owner {
                 query = query.filter(sessions::user_id.eq(owner));
+            }
+            if let Some(pattern) = &name_filter {
+                query = query.filter(sessions::name.like(pattern).escape('\\'));
             }
             if let Some((cursor_la, cursor_id)) = before {
                 let la_for_eq = cursor_la.clone();
@@ -297,11 +335,13 @@ impl Db {
         &self,
         folder_id: &str,
         owner: Option<&str>,
+        name_filter: Option<&str>,
         before: Option<(String, String)>,
         limit: i64,
     ) -> anyhow::Result<Vec<Session>> {
         let folder_id = folder_id.to_string();
         let owner = owner.map(|s| s.to_string());
+        let name_filter = name_filter.map(escape_like_pattern);
         self.with_conn(move |conn| {
             let mut query = sessions::table
                 .filter(sessions::folder_id.eq(&folder_id))
@@ -310,6 +350,9 @@ impl Db {
                 .into_boxed();
             if let Some(owner) = &owner {
                 query = query.filter(sessions::user_id.eq(owner));
+            }
+            if let Some(pattern) = &name_filter {
+                query = query.filter(sessions::name.like(pattern).escape('\\'));
             }
             if let Some((cursor_la, cursor_id)) = before {
                 let la_for_eq = cursor_la.clone();

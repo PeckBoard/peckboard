@@ -312,6 +312,19 @@ async fn main() -> anyhow::Result<()> {
     // anymore (a client died between create and tab-open, or a
     // last-tab-close delete failed mid-way). One-shot at boot; failures
     // are retried on the next boot.
+
+    // Subagent orphan reconcile: a subagent whose completion was only ever
+    // going to be stamped by the in-process completion listener never gets
+    // that chance if the server restarts mid-run — it would otherwise sit
+    // "running" forever, occupying its parent's concurrent-subagent slot.
+    // One-shot at boot, before any provider traffic starts.
+    let reconciled = peckboard::subagent::reconcile_orphan_subagents(&state.db).await;
+    if reconciled > 0 {
+        tracing::info!(
+            count = reconciled,
+            "Reconciled orphaned subagent sessions at startup"
+        );
+    }
     peckboard::routes::sessions::sweep_orphan_temp_sessions(&state).await;
     let app = api_router(state.clone())
         .layer(axum::extract::DefaultBodyLimit::max(20 * 1024 * 1024))
