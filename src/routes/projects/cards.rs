@@ -276,7 +276,12 @@ pub(super) async fn list_cards(
         .db
         .list_dependencies_by_project(&project_id)
         .await
-        .unwrap_or_default();
+        .map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({ "error": e.to_string() })),
+            )
+        })?;
     let mut deps_by_card: std::collections::HashMap<&str, Vec<&str>> =
         std::collections::HashMap::new();
     for (card_id, dep_id) in &edges {
@@ -311,6 +316,16 @@ pub(super) async fn list_cards(
                     .unwrap_or(0);
                 if ctx > 0 {
                     obj.insert("context_tokens".into(), serde_json::json!(ctx));
+                }
+                // Seed the board's per-card error chip: the session's most
+                // recent failed agent turn (crash, or a Completed turn
+                // carrying an `error`, e.g. an expired login). Live updates
+                // then ride the streamed `agent-end` / `agent-start` events.
+                if let Ok(Some((err, kind))) = state.db.latest_worker_error(sid).await {
+                    obj.insert("last_worker_error".into(), serde_json::json!(err));
+                    if let Some(kind) = kind {
+                        obj.insert("last_worker_error_kind".into(), serde_json::json!(kind));
+                    }
                 }
             }
         }

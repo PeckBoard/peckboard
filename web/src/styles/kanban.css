@@ -22,6 +22,14 @@
 .kanban-board .kanban-board-header {
   flex-shrink: 0;
 }
+/* Pushed right of the title/badges, left of the icon buttons — the
+   usual toolbar-search placement. Fixed width rather than flex-grow
+   so it doesn't crowd the action buttons on a narrow board. */
+.kanban-board-header .kanban-filter {
+  margin-left: auto;
+  width: 200px;
+  flex-shrink: 0;
+}
 /* The actual scroll area: everything below the header (pause banner,
    todo summary, question trigger, the kanban columns). Takes the
    remaining flex space and owns the vertical scroll. Padding lives
@@ -397,6 +405,22 @@
   /* `--danger` straight on `--danger-bg` is only 3.4:1 in light theme.
      Mixing a quarter of `--text` in pulls it to ~5:1 in light and keeps
      ~5.5:1 in dark, where `--text` is near-white. */
+  color: color-mix(in srgb, var(--danger) 75%, var(--text));
+  font-size: var(--text-xs);
+  font-weight: 600;
+  line-height: 1.4;
+  white-space: nowrap;
+  cursor: help;
+}
+/* Worker-failure badge next to the context chip: the card's worker session's
+   latest agent turn ended in an error (crash / auth failure). Same muted
+   danger treatment as the blocked chip; the tooltip carries the error. */
+.kanban-card-error-chip {
+  flex-shrink: 0;
+  padding: 1px 6px;
+  background: var(--danger-bg);
+  border: 1px solid var(--danger-border);
+  border-radius: var(--radius);
   color: color-mix(in srgb, var(--danger) 75%, var(--text));
   font-size: var(--text-xs);
   font-weight: 600;

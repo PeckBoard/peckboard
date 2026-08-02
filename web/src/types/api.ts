@@ -122,6 +122,13 @@ export interface Card {
    *  seeded by the cards fetch; live updates ride the streamed `agent-usage`
    *  events. Absent for terminal cards and cards without a worker session. */
   context_tokens?: number
+  /** Error text of the worker session's most recent failed agent turn
+   *  (crash or errored completion, e.g. an expired login), seeded by the
+   *  cards fetch; live updates ride the streamed `agent-end` events.
+   *  Absent when the latest turn didn't fail. */
+  last_worker_error?: string
+  /** Machine classification of `last_worker_error` (e.g. 'auth_expired'). */
+  last_worker_error_kind?: string
   /** Cost-aware model auto-switch opt-in for this card's workers. null =
    *  inherit the default (ON — cards spawn workers); true/false forces it. */
   model_autoswitch?: boolean | null

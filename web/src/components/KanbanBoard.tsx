@@ -82,6 +82,7 @@ export default function KanbanBoard({
   useEffect(() => {
     fetchSpend()
   }, [fetchSpend])
+  const [cardFilter, setCardFilter] = useState('')
   const todosByCard = useProjectTodos(cards)
   const [selectedCard, setSelectedCard] = useState<Card | null>(null)
   const [showAddForm, setShowAddForm] = useState(false)
@@ -157,6 +158,10 @@ export default function KanbanBoard({
   // `last_worker_session_id` so the badge keeps updating between chunk
   // dispatches (e.g. during an auto-compaction doc turn).
   const ctxSessionToCardRef = useRef<Record<string, string>>({})
+  // cardId -> error text of the worker's latest failed turn, live from
+  // streamed `agent-end` events (null = a live event cleared the seed).
+  // Seeded per card by `last_worker_error` on the cards fetch.
+  const [errByCard, setErrByCard] = useState<Record<string, string | null>>({})
   const cardReports = useProjectsStore((s) =>
     selectedCard ? (s.cardReportsByCard[selectedCard.id] ?? EMPTY_REPORTS) : EMPTY_REPORTS,
   )
@@ -325,6 +330,25 @@ export default function KanbanBoard({
         if (ctxCard && ctx > 0) setCtxByCard((prev) => ({ ...prev, [ctxCard]: ctx }))
         return
       }
+      // Error badge: a failed agent-end (crash, or a Completed turn carrying
+      // an `error`, e.g. an expired login) marks the card; the next
+      // agent-start (respawn / retry underway) clears it.
+      if (event.kind === 'agent-end') {
+        const errCard = ctxSessionToCardRef.current[event.session_id]
+        if (errCard) {
+          const crashed = (event.data?.status as string) === 'crashed'
+          const errText = crashed
+            ? ((event.data?.reason as string) ?? 'Agent crashed')
+            : typeof event.data?.error === 'string' && event.data.error !== ''
+              ? (event.data.error as string)
+              : null
+          setErrByCard((prev) => ({ ...prev, [errCard]: errText }))
+        }
+      }
+      if (event.kind === 'agent-start') {
+        const errCard = ctxSessionToCardRef.current[event.session_id]
+        if (errCard) setErrByCard((prev) => ({ ...prev, [errCard]: null }))
+      }
       // A `handover` event (worker auto-compaction) restarts the worker's
       // conversation — drop the card's live occupancy so the badge doesn't
       // keep showing the pre-compaction window until the next turn reports.
@@ -491,8 +515,15 @@ export default function KanbanBoard({
       .map((id) => cardById.get(id))
       .filter((c): c is Card => c != null && normalizeStep(c.step) !== 'done')
 
+  const cardFilterQuery = cardFilter.trim().toLowerCase()
+  const cardMatchesFilter = (card: Card): boolean => {
+    if (!cardFilterQuery) return true
+    if (card.title.toLowerCase().includes(cardFilterQuery)) return true
+    return (card.description ?? '').toLowerCase().includes(cardFilterQuery)
+  }
+
   const cardsByStep = (step: string) => {
-    const rows = cards.filter((c) => normalizeStep(c.step) === step)
+    const rows = cards.filter((c) => normalizeStep(c.step) === step && cardMatchesFilter(c))
     // Done column shows most-recently-finished first so a freshly
     // completed card jumps to the top instead of being buried behind
     // older completions in priority order. Backend list is sorted by
@@ -782,6 +813,15 @@ export default function KanbanBoard({
               {(spendInfo.budget_usd_cents / 100).toFixed(2)} ({spendInfo.budget_period})
             </span>
           )}
+        <input
+          type="search"
+          className="list-view-search kanban-filter"
+          placeholder="Filter cards…"
+          aria-label="Filter cards by title or description"
+          data-testid="kanban-filter"
+          value={cardFilter}
+          onChange={(e) => setCardFilter(e.target.value)}
+        />
         <button
           type="button"
           className="kanban-header-icon-btn"
@@ -1076,7 +1116,14 @@ export default function KanbanBoard({
                 >
                   <header className="kanban-column-header">
                     <h3>{step.label}</h3>
-                    <span className="kanban-count" aria-label={`${rowCards.length} cards`}>
+                    <span
+                      className="kanban-count"
+                      aria-label={
+                        cardFilterQuery
+                          ? `${rowCards.length} matching cards`
+                          : `${rowCards.length} cards`
+                      }
+                    >
                       {rowCards.length}
                     </span>
                   </header>
@@ -1084,7 +1131,9 @@ export default function KanbanBoard({
                     {/* Only a fetch that succeeded may claim the step is empty;
                       a failed one shows the banner above instead. */}
                     {rowCards.length === 0 && !cardsError && (
-                      <span className="kanban-cards-empty">No cards in {step.label}</span>
+                      <span className="kanban-cards-empty">
+                        {cardFilterQuery ? 'No matching cards' : `No cards in ${step.label}`}
+                      </span>
                     )}
                     {rowCards.map((card, cardIndex) => {
                       const todos = todosByCard[card.id]
@@ -1115,6 +1164,14 @@ export default function KanbanBoard({
                       const workerCtx = priorityLocked
                         ? 0
                         : (ctxByCard[card.id] ?? card.context_tokens ?? 0)
+                      // Worker error badge: live agent-end verdict (null =
+                      // cleared) falls back to the fetch-time seed; hidden
+                      // once the card is terminal.
+                      const workerErr = priorityLocked
+                        ? null
+                        : card.id in errByCard
+                          ? errByCard[card.id]
+                          : (card.last_worker_error ?? null)
                       const expanded = expandedCardIds.has(card.id)
                       return (
                         <div
@@ -1177,6 +1234,15 @@ export default function KanbanBoard({
                               </span>
                             )}
                             <div className="kanban-card-actions" data-no-toggle>
+                              {workerErr && (
+                                <span
+                                  className="kanban-card-error-chip"
+                                  data-testid="card-error-chip"
+                                  title={workerErr}
+                                >
+                                  Error
+                                </span>
+                              )}
                               {workerCtx > 0 && (
                                 <span
                                   className={`kanban-card-ctx${

@@ -921,6 +921,27 @@ async fn run_scenario(
             .await;
             return false;
         }
+        "auth-error" => {
+            // A turn that FAILS without the process crashing — the Claude
+            // CLI's is_error `result` (e.g. an expired login's 401). Mirrors
+            // the real provider: a Completed agent-end whose result-meta
+            // carries `error` + `errorKind`, so e2e can drive the error
+            // status pill, the failed-turn chat row, and the kanban chip.
+            emit_event(
+                db,
+                broadcaster,
+                session_id,
+                ProviderEvent::Completed {
+                    conversation_id: Some(conv_id),
+                    result_meta: serde_json::json!({
+                        "error": "Failed to authenticate: OAuth session expired and could not be refreshed",
+                        "errorKind": "auth_expired",
+                    }),
+                },
+            )
+            .await;
+            return false;
+        }
         "markdown" => {
             // A single assistant text chunk containing markdown features the
             // renderer is expected to handle: heading, bold, list, inline

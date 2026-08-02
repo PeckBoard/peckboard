@@ -49,7 +49,7 @@ import {
 // Coarse announcement key: `working` and `tool` collapse into one "busy"
 // state so an agentic turn that runs ten tools doesn't announce twenty
 // times. Only a change of key is worth speaking.
-type AnnounceKey = 'busy' | 'idle' | 'crashed' | 'questioning'
+type AnnounceKey = 'busy' | 'idle' | 'crashed' | 'error' | 'questioning'
 function announceKey(status: AgentStatus): AnnounceKey {
   return status === 'working' || status === 'tool' ? 'busy' : status
 }
@@ -70,6 +70,8 @@ function announcementFor(key: AnnounceKey, hasReply: boolean): string {
       // announcement is a second copy of that string in the DOM, and specs
       // (plus users searching the page) should not see it twice.
       return 'The agent stopped unexpectedly'
+    case 'error':
+      return 'The agent turn failed'
     case 'questioning':
       return 'Agent is awaiting your answer'
   }
@@ -534,6 +536,17 @@ const ChatRow = memo(function ChatRow({
               {item.model}
               {item.effort ? `, ${item.effort}` : ''}
             </span>
+            {item.retry !== undefined && (
+              <span
+                className="chat-retry-chip"
+                data-testid="chat-retry-chip"
+                title={`Attempt ${item.retry + 1} — ${
+                  item.retry === 1 ? 'the previous turn' : `the previous ${item.retry} turns`
+                } failed`}
+              >
+                retry {item.retry}
+              </span>
+            )}
             <span className="chat-agent-start-time">{formatTime(item.ts)}</span>
           </div>
         </div>
@@ -552,14 +565,18 @@ const ChatRow = memo(function ChatRow({
       // `interrupt` so all agent lifecycle notices read the same.
       // The reason sits in the detail chip; exit code and stderr
       // (when the `agent-end` payload carried them) expand below
-      // for debugging without leaving the chat.
+      // for debugging without leaving the chat. Auth failures get a
+      // remediation line pointing at Settings → Providers & Accounts.
       const hasStderr = typeof item.stderr === 'string' && item.stderr !== ''
+      const authFailure = item.errorKind === 'auth_expired'
       return (
         <div className="chat-row chat-row-system">
           <div className="chat-crash-row">
             <div className="chat-agent-start">
-              <span className="chat-agent-start-label">Agent crashed</span>
-              <span className="chat-agent-start-detail">
+              <span className="chat-agent-start-label">
+                {item.crashed === false ? 'Agent failed' : 'Agent crashed'}
+              </span>
+              <span className="chat-agent-start-detail chat-crash-reason">
                 {item.reason}
                 {item.exitCode !== undefined ? ` (exit ${item.exitCode})` : ''}
               </span>
@@ -570,6 +587,21 @@ const ChatRow = memo(function ChatRow({
                 <summary>stderr</summary>
                 <pre className="tool-pre tool-pre-stderr">{item.stderr}</pre>
               </details>
+            )}
+            {authFailure && (
+              <div
+                className="chat-handover-failed"
+                role="alert"
+                data-testid="chat-crash-auth-remedy"
+              >
+                <span>
+                  The account&apos;s login expired.{' '}
+                  <a href="/settings">
+                    Add or refresh an account in Settings → Providers &amp; Accounts
+                  </a>
+                  , then retry.
+                </span>
+              </div>
             )}
           </div>
         </div>

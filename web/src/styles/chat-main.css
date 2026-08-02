@@ -1217,6 +1217,19 @@
   text-align: left;
   max-height: 240px;
 }
+/* Failed-turn reason reads as an error, not informational gray. */
+.chat-crash-row .chat-crash-reason {
+  color: var(--danger);
+}
+/* Compact "retry N" chip on an agent-start that follows failed turns. */
+.chat-retry-chip {
+  flex: none;
+  padding: 0 6px;
+  border: 1px solid var(--danger);
+  border-radius: 999px;
+  font-size: var(--text-xs);
+  color: var(--danger);
+}
 
 /* Markdown inside the user's accent bubble: keep links, inline code and
    quotes readable against the accent fill. */

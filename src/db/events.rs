@@ -215,6 +215,42 @@ impl Db {
         .await
     }
 
+    /// Error text (and machine `errorKind`) of a session's most recent failed
+    /// agent turn, or `None` when the newest turn activity isn't a failure.
+    /// Walks the event tail newest-first: a `user` or `agent-start` seen
+    /// before any agent-end means a new attempt is underway (no stale badge);
+    /// the newest `agent-end` then decides — `status:"crashed"` or a
+    /// Completed event carrying an `error` field is a failure, a clean
+    /// complete is not. Seeds the kanban card error chip in `list_cards`.
+    pub async fn latest_worker_error(
+        &self,
+        session_id: &str,
+    ) -> anyhow::Result<Option<(String, Option<String>)>> {
+        let events = self.events_tail(session_id, 24).await?;
+        for event in events.iter().rev() {
+            match event.kind.as_str() {
+                "user" | "agent-start" => return Ok(None),
+                "agent-end" => {
+                    let Ok(data) = serde_json::from_str::<serde_json::Value>(&event.data) else {
+                        return Ok(None);
+                    };
+                    let kind = data
+                        .get("errorKind")
+                        .and_then(|k| k.as_str())
+                        .map(str::to_string);
+                    let status = data.get("status").and_then(|s| s.as_str());
+                    let text = if status == Some("crashed") {
+                        data.get("reason").and_then(|r| r.as_str())
+                    } else {
+                        data.get("error").and_then(|e| e.as_str())
+                    };
+                    return Ok(text.map(|t| (t.to_string(), kind)));
+                }
+                _ => {}
+            }
+        }
+        Ok(None)
+    }
     /// Pull the most recent `scan_limit` events (by `ts` descending) across
     /// one or more sessions, optionally restricted to a set of event kinds.
     /// Returned newest-first. This is the SQL coarse filter behind the

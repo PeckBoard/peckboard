@@ -140,10 +140,25 @@ export type DisplayItem =
       ts: number
     }
   | { type: 'step'; label: string; key: string }
-  | { type: 'agent-start'; model: string; effort: string; ts: number; key: string }
+  | {
+      type: 'agent-start'
+      model: string
+      effort: string
+      /** Attempt number when this start follows N consecutive failed turns
+       *  (orchestrator respawn / user resend) — renders a "retry N" chip. */
+      retry?: number
+      ts: number
+      key: string
+    }
   | {
       type: 'agent-crashed'
       reason: string
+      /** Machine classification off the `agent-end` payload (`errorKind`),
+       *  e.g. 'auth_expired' — drives remediation hints. */
+      errorKind?: string
+      /** True for a process crash (`status: "crashed"`); false for a turn
+       *  that completed with an error result (e.g. auth failure). */
+      crashed?: boolean
       /** Exit code / stderr tail off the `agent-end` payload — expandable
        *  in the crash row so debugging doesn't require the API. */
       exitCode?: number
@@ -202,7 +217,7 @@ export type DisplayItem =
     }
 
 /** Derive agent status from events for the toolbar indicator. */
-export type AgentStatus = 'idle' | 'working' | 'tool' | 'crashed' | 'questioning'
+export type AgentStatus = 'idle' | 'working' | 'tool' | 'crashed' | 'error' | 'questioning'
 
 export function deriveAgentStatus(events: Event[]): AgentStatus {
   for (let i = events.length - 1; i >= 0; i--) {
@@ -211,10 +226,13 @@ export function deriveAgentStatus(events: Event[]): AgentStatus {
       // A crashed turn ends the process too — reporting it as "Idle" told the
       // user everything was fine while an "Agent crashed" row sat right below
       // the pill. `status` is camelCase-free, but tolerate a snake_case
-      // spelling in case a provider ever emits one.
+      // spelling in case a provider ever emits one. A Completed turn that
+      // carries an `error` (the CLI's is_error result, e.g. an expired
+      // login) is just as failed — 'error', not 'idle'.
       const data = events[i].data
       const status = (data.status as string) ?? (data.agent_status as string)
-      return status === 'crashed' ? 'crashed' : 'idle'
+      if (status === 'crashed') return 'crashed'
+      return typeof data.error === 'string' && data.error !== '' ? 'error' : 'idle'
     }
     if (kind === 'pre-hatch' || kind === 'pre-ignite') return 'working'
     if (kind === 'question') {
@@ -261,6 +279,8 @@ export function getStatusLabel(status: AgentStatus): string {
       return 'Using tool...'
     case 'crashed':
       return 'Crashed'
+    case 'error':
+      return 'Error'
     case 'questioning':
       return 'Awaiting answer'
   }
@@ -275,6 +295,7 @@ export function getStatusDotClass(status: AgentStatus): string {
     case 'tool':
       return 'status-dot status-dot-tool'
     case 'crashed':
+    case 'error':
       return 'status-dot status-dot-crashed'
     case 'questioning':
       return 'status-dot status-dot-questioning'
@@ -381,6 +402,9 @@ interface FoldState {
   /** Dedupe tool starts from streaming + snapshot. */
   seenToolIds: Set<string>
   pendingInterrupt: boolean
+  /** Consecutive turns that ended in a failure (crash or error result) —
+   *  the next agent-start renders as "retry N". */
+  errorStreak: number
   /** ts of the latest `user` / `agent-start` — anchors the turn duration
    *  shown on the usage chip. */
   turnAnchorTs: number
@@ -408,6 +432,7 @@ function newFoldState(): FoldState {
     openTools: new Map(),
     seenToolIds: new Set(),
     pendingInterrupt: false,
+    errorStreak: 0,
     turnAnchorTs: 0,
     prevContextTokens: 0,
     questionItems: new Map(),
@@ -631,7 +656,14 @@ function foldEvent(st: FoldState, ev: Event): void {
       // Strip provider prefix for display
       const displayModel = model.replace(/^claude:/, '')
       const effort = (ev.data.effort as string) ?? ''
-      items.push({ type: 'agent-start', model: displayModel, effort, ts: ev.ts, key: ev.id })
+      items.push({
+        type: 'agent-start',
+        model: displayModel,
+        effort,
+        retry: st.errorStreak > 0 ? st.errorStreak : undefined,
+        ts: ev.ts,
+        key: ev.id,
+      })
       break
     }
     case 'agent-end': {
@@ -641,23 +673,38 @@ function foldEvent(st: FoldState, ev: Event): void {
       const wasInterrupted = st.pendingInterrupt && reason === 'interrupted'
       st.pendingInterrupt = false
       if (wasInterrupted) {
+        st.errorStreak = 0
         break
       }
-      if ((ev.data.status as string) === 'crashed') {
+      const crashed = (ev.data.status as string) === 'crashed'
+      // A Completed turn can still carry an error (the CLI's is_error
+      // result, e.g. an expired login's 401) — render it as a failure,
+      // not as the green ready line.
+      const errorText =
+        typeof ev.data.error === 'string' && ev.data.error !== '' ? ev.data.error : undefined
+      if (crashed || errorText !== undefined) {
         const exitCode = typeof ev.data.exitCode === 'number' ? ev.data.exitCode : undefined
         const stderr =
           typeof ev.data.stderr === 'string' && ev.data.stderr.trim() !== ''
             ? ev.data.stderr
             : undefined
+        const errorKind =
+          typeof ev.data.errorKind === 'string' && ev.data.errorKind !== ''
+            ? ev.data.errorKind
+            : undefined
+        st.errorStreak += 1
         items.push({
           type: 'agent-crashed',
-          reason,
+          reason: crashed ? reason : (errorText ?? reason),
+          errorKind,
+          crashed,
           exitCode,
           stderr,
           key: ev.id,
           ts: ev.ts,
         })
       } else {
+        st.errorStreak = 0
         items.push({
           type: 'status',
           text: 'Ready for your next message.',
@@ -684,6 +731,9 @@ function foldEvent(st: FoldState, ev: Event): void {
     case 'handover': {
       flushAssistant(st)
       st.prevContextTokens = 0
+      // A handover restarts the conversation — the next start is a fresh
+      // attempt, not a retry of the failed streak.
+      st.errorStreak = 0
       items.push({
         type: 'handover',
         from: (ev.data.from as string) ?? '',

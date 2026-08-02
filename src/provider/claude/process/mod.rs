@@ -873,13 +873,31 @@ pub async fn stream_events(
                 .max()
                 .unwrap_or(0);
             emit_turn_usage(&db, &broadcaster, &session_id, turn_usages).await;
+            // A failed turn (is_error result, e.g. an expired login's 401)
+            // still ends with this Completed event so downstream consumers
+            // keep their conversationId — but the UI needs to know the turn
+            // errored, so the error text and its CrashKind classification
+            // ride along as extra result-meta keys.
+            let mut turn_meta = result_meta(&json);
+            if let Some(err) = last_result_error.as_deref() {
+                if !turn_meta.is_object() {
+                    turn_meta = serde_json::json!({});
+                }
+                if let Some(obj) = turn_meta.as_object_mut() {
+                    obj.insert("error".into(), serde_json::json!(err));
+                    obj.insert(
+                        "errorKind".into(),
+                        serde_json::json!(CrashKind::classify(err).as_str()),
+                    );
+                }
+            }
             emit_event(
                 &db,
                 &broadcaster,
                 &session_id,
                 ProviderEvent::Completed {
                     conversation_id: parser_state.conversation_id.clone(),
-                    result_meta: result_meta(&json),
+                    result_meta: turn_meta,
                 },
             )
             .await;
@@ -1663,6 +1681,54 @@ mod tests {
             outcome.error.as_deref().unwrap_or("").contains("401"),
             "outcome must carry the CLI's error text, got {:?}",
             outcome.error
+        );
+    }
+
+    #[tokio::test]
+    async fn error_result_emits_completed_agent_end_with_error_metadata() {
+        // The UI half of the same failure: the Completed agent-end for an
+        // is_error result must carry the CLI's error text and its CrashKind
+        // classification, or the chat renders the green "ready" line and
+        // the status pill says Idle while the turn actually failed.
+        let session = "loop-error-result-event";
+        let (db, tx, _cancel, turn_active, handle) = spawn_cat_loop(session).await;
+
+        tx.send(StdinMsg::UserTurn(UserMessage::from_text("hello")))
+            .await
+            .unwrap();
+        wait_for_turn_active(&turn_active, true, 2_000).await;
+
+        tx.send(StdinMsg::ShutdownAfterTurn).await.unwrap();
+        tx.send(StdinMsg::RawLine(fake_error_result_frame("conv-e2")))
+            .await
+            .unwrap();
+
+        timeout(std::time::Duration::from_secs(5), handle)
+            .await
+            .expect("stream loop must exit within 5s")
+            .expect("task must not panic");
+
+        let events = db.list_events_by_session(session, None).await.unwrap();
+        let end = events
+            .iter()
+            .find(|e| e.kind == "agent-end")
+            .expect("agent-end present");
+        let data: serde_json::Value = serde_json::from_str(&end.data).unwrap();
+        assert_eq!(
+            data.get("status").and_then(|v| v.as_str()),
+            Some("complete")
+        );
+        assert!(
+            data.get("error")
+                .and_then(|v| v.as_str())
+                .unwrap_or_default()
+                .contains("401"),
+            "agent-end must carry the CLI's error text, got {data}"
+        );
+        assert_eq!(
+            data.get("errorKind").and_then(|v| v.as_str()),
+            Some("auth_expired"),
+            "agent-end must classify the error, got {data}"
         );
     }
 

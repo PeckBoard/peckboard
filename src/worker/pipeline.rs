@@ -749,8 +749,8 @@ fn crash_counts(error_kind: Option<&str>, reason: Option<&str>) -> bool {
 
 /// Walk a card's lifecycle events oldest-first and return how many
 /// consecutive process crashes have happened since the last "reset"
-/// marker: a successful turn (`agent-end status=complete`), a step
-/// change, or an explicit [`PAUSE_CLEARED_KIND`] event appended when the
+/// marker: a successful turn (`agent-end status=complete` with no `error`
+/// field — an errored complete counts as a failed attempt instead), a step
 /// user resumes the owning project. Crashes in the exclusion list (see
 /// [`crash_counts`]) are ignored — they aren't agent failures, so they
 /// shouldn't decide whether the card "keeps failing".
@@ -770,7 +770,19 @@ pub fn count_consecutive_crashes(events: &[Event]) -> u32 {
                             crash_count += 1;
                         }
                     }
-                    Some("complete") => crash_count = 0,
+                    // A Completed turn that carries an `error` (the CLI's
+                    // is_error result, e.g. an expired login's 401) is a
+                    // failed attempt, not a reset — otherwise auth-failed
+                    // workers respawn forever without tripping auto-pause.
+                    Some("complete") => {
+                        let error = data.get("error").and_then(|e| e.as_str());
+                        let error_kind = data.get("errorKind").and_then(|k| k.as_str());
+                        match error {
+                            Some(err) if crash_counts(error_kind, Some(err)) => crash_count += 1,
+                            Some(_) => {}
+                            None => crash_count = 0,
+                        }
+                    }
                     _ => {}
                 }
             }
@@ -1269,6 +1281,39 @@ mod tests {
             ),
         ];
         assert_eq!(count_consecutive_crashes(&events), 1);
+    }
+
+    /// A Completed agent-end carrying an `error` (is_error result, e.g. an
+    /// expired login) counts as a failed attempt; a plain complete resets;
+    /// an errored complete whose kind is excluded (interrupted) does neither.
+    #[test]
+    fn test_count_consecutive_crashes_counts_errored_completions() {
+        let events = vec![
+            make_event(
+                "agent-end",
+                r#"{"status":"complete","error":"Failed to authenticate. API Error: 401","errorKind":"auth_expired"}"#,
+            ),
+            make_event(
+                "agent-end",
+                r#"{"status":"complete","error":"Failed to authenticate. API Error: 401","errorKind":"auth_expired"}"#,
+            ),
+        ];
+        assert_eq!(count_consecutive_crashes(&events), 2);
+
+        let reset = vec![
+            make_event(
+                "agent-end",
+                r#"{"status":"complete","error":"x","errorKind":"unknown"}"#,
+            ),
+            make_event("agent-end", r#"{"status":"complete"}"#),
+        ];
+        assert_eq!(count_consecutive_crashes(&reset), 0);
+
+        let excluded = vec![make_event(
+            "agent-end",
+            r#"{"status":"complete","error":"stopped","errorKind":"interrupted"}"#,
+        )];
+        assert_eq!(count_consecutive_crashes(&excluded), 0);
     }
 
     #[test]
