@@ -216,6 +216,47 @@ export type DisplayItem =
       key: string
     }
 
+/** Flatten a display item to the text the in-transcript search matches
+ *  against. Lives next to DisplayItem so a new variant gets added to both. */
+export function displayItemSearchText(item: DisplayItem): string {
+  switch (item.type) {
+    case 'user':
+      return item.preHatchOriginal ? `${item.text}\n${item.preHatchOriginal}` : item.text
+    case 'pre-hatch':
+    case 'assistant':
+    case 'thinking':
+    case 'status':
+    case 'system':
+      return item.text
+    case 'tool': {
+      const parts = [item.toolName]
+      if (item.input) parts.push(JSON.stringify(item.input))
+      if (typeof item.output === 'string') parts.push(item.output)
+      else if (item.output) parts.push(JSON.stringify(item.output))
+      if (item.error) parts.push(item.error)
+      if (item.diff) parts.push(item.diff.path, item.diff.diff)
+      return parts.join('\n')
+    }
+    case 'file-diff':
+      return `${item.diff.path}\n${item.diff.diff}`
+    case 'step':
+      return item.label
+    case 'agent-start':
+      return item.model
+    case 'agent-crashed':
+      return item.stderr ? `${item.reason}\n${item.stderr}` : item.reason
+    case 'handover':
+      return item.doc
+    case 'question':
+    case 'question-resolved':
+      return item.questions
+        .map((q) => [q.header ?? '', q.question, ...(q.options ?? [])].join('\n'))
+        .join('\n')
+    default:
+      return ''
+  }
+}
+
 /** Derive agent status from events for the toolbar indicator. */
 export type AgentStatus = 'idle' | 'working' | 'tool' | 'crashed' | 'error' | 'questioning'
 

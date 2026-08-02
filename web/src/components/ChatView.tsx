@@ -37,6 +37,7 @@ import {
   EMPTY_EVENTS,
   createDisplayItemsFolder,
   deriveAgentStatus,
+  displayItemSearchText,
   formatTime,
   getStatusDotClass,
   getStatusLabel,
@@ -82,7 +83,9 @@ function announcementFor(key: AnnounceKey, hasReply: boolean): string {
 // fresh-array warning from React fast refresh).
 const EMPTY_TODOS: TodoItem[] = []
 const EMPTY_PENDING_MESSAGES: PendingUserMessage[] = []
-
+// Stable empty match list — a fresh [] per render would re-fire the
+// search effects that depend on it.
+const NO_MATCHES: number[] = []
 /** Live stopwatch; isolated so the 1s tick re-renders only this span. */
 function ElapsedSince({ since }: { since: number }) {
   const [now, setNow] = useState(() => Date.now())
@@ -971,6 +974,16 @@ export default function ChatView({
    *  shifts down by the height of the loaded page and the user loses
    *  their reading position. `null` whenever no restore is pending. */
   const pendingOlderScrollRestore = useRef<number | null>(null)
+  // Jump-to-latest pill: `userScrolledUp` mirrored into state (refs don't
+  // re-render) plus "content arrived below the viewport while scrolled up".
+  const [scrolledUp, setScrolledUp] = useState(false)
+  const [newBelow, setNewBelow] = useState(false)
+  // In-transcript search state (see the search block further down).
+  const [searchOpen, setSearchOpen] = useState(false)
+  const [searchQuery, setSearchQuery] = useState('')
+  const [activeMatch, setActiveMatch] = useState(0)
+  const [loadingAllHistory, setLoadingAllHistory] = useState(false)
+  const searchInputRef = useRef<HTMLInputElement>(null)
 
   const subscribe = useWsStore((s) => s.subscribe)
   /** Set when the server refused this session's live stream. Streaming is
@@ -1096,9 +1109,15 @@ export default function ChatView({
     fetchSystemPrompts()
   }, [fetchSystemPrompts])
 
-  // Fetch initial events
+  // Fetch initial events; a session switch also resets the scroll/pill/
+  // search state that described the previous transcript.
   useEffect(() => {
     userScrolledUp.current = false
+    setScrolledUp(false)
+    setNewBelow(false)
+    setSearchOpen(false)
+    setSearchQuery('')
+    setActiveMatch(0)
     fetchEvents(sessionId)
   }, [sessionId, fetchEvents])
 
@@ -1164,6 +1183,16 @@ export default function ChatView({
     setListOffset(wrap.getBoundingClientRect().top - el.getBoundingClientRect().top + el.scrollTop)
   }, [hasMoreOlderEvents, displayItems.length])
   const virtualTotal = rowVirtualizer.getTotalSize()
+  const handleLoadOlder = useCallback(() => {
+    const el = scrollRef.current
+    if (el) {
+      // Capture the current "distance from top of content" so the
+      // scroll effect below can restore it after the new rows render.
+      pendingOlderScrollRestore.current = el.scrollHeight - el.scrollTop
+    }
+    void fetchOlderEvents(sessionId)
+  }, [fetchOlderEvents, sessionId])
+
   // Scroll handling
   const handleScroll = useCallback(() => {
     const el = scrollRef.current
@@ -1171,7 +1200,33 @@ export default function ChatView({
     const threshold = 60
     const atBottom = el.scrollHeight - el.scrollTop - el.clientHeight < threshold
     userScrolledUp.current = !atBottom
-  }, [])
+    setScrolledUp(!atBottom)
+    if (atBottom) setNewBelow(false)
+    // Auto-load the next history page as the user nears the top — same
+    // pattern as the sessions list. The store's loading flag debounces a
+    // fast scroll to one page at a time; the manual button stays as the
+    // keyboard-reachable fallback and carries the error/retry state.
+    if (el.scrollTop < 200 && hasMoreOlderEvents && !loadingOlderEvents && !olderEventsError) {
+      handleLoadOlder()
+    }
+  }, [hasMoreOlderEvents, loadingOlderEvents, olderEventsError, handleLoadOlder])
+
+  // Arm the jump-to-latest pill when events grew while the user was
+  // scrolled up. Declared BEFORE the auto-scroll effect below: that
+  // effect clears `pendingOlderScrollRestore`, which is how this one
+  // tells a "Load older" prepend (not new content) from a live append.
+  const prevEventCount = useRef(0)
+  useEffect(() => {
+    const prev = prevEventCount.current
+    prevEventCount.current = events.length
+    if (
+      events.length > prev &&
+      userScrolledUp.current &&
+      pendingOlderScrollRestore.current === null
+    ) {
+      setNewBelow(true)
+    }
+  }, [events])
 
   useEffect(() => {
     const el = scrollRef.current
@@ -1202,14 +1257,108 @@ export default function ChatView({
     }
   }, [events, virtualTotal])
 
-  const handleLoadOlder = useCallback(() => {
+  const jumpToLatest = useCallback(() => {
     const el = scrollRef.current
-    if (el) {
-      // Capture the current "distance from top of content" so the
-      // useEffect above can restore it after the new rows render.
-      pendingOlderScrollRestore.current = el.scrollHeight - el.scrollTop
+    if (!el) return
+    userScrolledUp.current = false
+    setScrolledUp(false)
+    setNewBelow(false)
+    el.scrollTop = el.scrollHeight
+  }, [])
+
+  // ─── In-transcript search ─── the virtualized feed unmounts off-screen
+  // rows, so the browser's own Ctrl+F can't see them; this searches the
+  // loaded event list instead and scrolls the virtualizer to each match.
+  const searchMatches = useMemo(() => {
+    const q = searchQuery.trim().toLowerCase()
+    if (!searchOpen || q === '') return NO_MATCHES
+    const out: number[] = []
+    for (let i = 0; i < displayItems.length; i++) {
+      if (displayItemSearchText(displayItems[i]).toLowerCase().includes(q)) out.push(i)
     }
-    void fetchOlderEvents(sessionId)
+    return out
+  }, [searchOpen, searchQuery, displayItems])
+
+  const gotoMatch = useCallback(
+    (next: number) => {
+      if (searchMatches.length === 0) return
+      const idx = ((next % searchMatches.length) + searchMatches.length) % searchMatches.length
+      setActiveMatch(idx)
+      // Reading a match is an explicit scroll-away — don't let the
+      // autoscroll snap the viewport back to the bottom mid-navigation.
+      userScrolledUp.current = true
+      setScrolledUp(true)
+      rowVirtualizer.scrollToIndex(searchMatches[idx], { align: 'center' })
+    },
+    [searchMatches, rowVirtualizer],
+  )
+
+  // Jump to the first match when the query changes. Guarded by the
+  // last-jumped query so live appends (which rebuild `searchMatches`)
+  // only clamp the active index instead of yanking back to match 1.
+  const lastJumpedQuery = useRef('')
+  useEffect(() => {
+    const q = searchQuery.trim().toLowerCase()
+    if (!searchOpen || q === '') {
+      lastJumpedQuery.current = ''
+      return
+    }
+    if (lastJumpedQuery.current === q) {
+      if (activeMatch >= searchMatches.length) {
+        setActiveMatch(Math.max(0, searchMatches.length - 1))
+      }
+      return
+    }
+    lastJumpedQuery.current = q
+    setActiveMatch(0)
+    if (searchMatches.length > 0) {
+      userScrolledUp.current = true
+      setScrolledUp(true)
+      rowVirtualizer.scrollToIndex(searchMatches[0], { align: 'center' })
+    }
+  }, [searchOpen, searchQuery, searchMatches, activeMatch, rowVirtualizer])
+
+  const openSearch = useCallback(() => {
+    setSearchOpen(true)
+    // The input mounts on the state flip; focus it after paint.
+    window.requestAnimationFrame(() => searchInputRef.current?.select())
+  }, [])
+  const closeSearch = useCallback(() => {
+    setSearchOpen(false)
+    setSearchQuery('')
+    setActiveMatch(0)
+  }, [])
+
+  // Ctrl/Cmd+F while a chat is open searches the transcript, not the DOM.
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if ((e.ctrlKey || e.metaKey) && !e.altKey && !e.shiftKey && e.key.toLowerCase() === 'f') {
+        e.preventDefault()
+        setSearchOpen(true)
+        window.requestAnimationFrame(() => searchInputRef.current?.select())
+      }
+    }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [])
+
+  // "Load full history": page through the remaining backlog so matches
+  // cover the whole conversation, not just what's loaded. Stops on error
+  // (the load-older banner takes over); the iteration cap is a backstop.
+  const loadAllHistory = useCallback(async () => {
+    setLoadingAllHistory(true)
+    try {
+      for (let i = 0; i < 500; i++) {
+        const st = useSessionsStore.getState()
+        if (st.hasMoreOlderEventsBySession[sessionId] === false) break
+        if (st.olderEventsErrorBySession[sessionId]) break
+        const el = scrollRef.current
+        if (el) pendingOlderScrollRestore.current = el.scrollHeight - el.scrollTop
+        await fetchOlderEvents(sessionId)
+      }
+    } finally {
+      setLoadingAllHistory(false)
+    }
   }, [fetchOlderEvents, sessionId])
 
   // Queued-turn indicator. While the agent is mid-turn, sends are parked
@@ -1790,6 +1939,29 @@ export default function ChatView({
             {Math.round(contextTokens / 1000)}k ctx
           </span>
         )}
+        <button
+          type="button"
+          className="chat-toolbar-search"
+          aria-label="Search transcript"
+          aria-expanded={searchOpen}
+          title="Search transcript (Ctrl+F)"
+          data-testid="chat-search-toggle"
+          onClick={() => (searchOpen ? closeSearch() : openSearch())}
+        >
+          <svg
+            width="15"
+            height="15"
+            viewBox="0 0 24 24"
+            fill="none"
+            stroke="currentColor"
+            strokeWidth="2.2"
+            strokeLinecap="round"
+            aria-hidden="true"
+          >
+            <circle cx="11" cy="11" r="7" />
+            <line x1="16.5" y1="16.5" x2="21" y2="21" />
+          </svg>
+        </button>
         <MenuButton
           ariaLabel="Session menu"
           triggerClassName="chat-toolbar-menu"
@@ -1797,6 +1969,81 @@ export default function ChatView({
           testId="chat-toolbar-menu"
         />
       </div>
+      {searchOpen && (
+        <div className="chat-search-bar" role="search" data-testid="chat-search-bar">
+          <input
+            ref={searchInputRef}
+            className="chat-search-input"
+            type="search"
+            placeholder="Search transcript…"
+            aria-label="Search transcript"
+            data-testid="chat-search-input"
+            value={searchQuery}
+            onChange={(e) => setSearchQuery(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === 'Enter') {
+                e.preventDefault()
+                gotoMatch(activeMatch + (e.shiftKey ? -1 : 1))
+              } else if (e.key === 'Escape') {
+                e.preventDefault()
+                closeSearch()
+              }
+            }}
+          />
+          <span className="chat-search-count" aria-live="polite" data-testid="chat-search-count">
+            {searchQuery.trim() === ''
+              ? ''
+              : searchMatches.length === 0
+                ? 'No matches'
+                : `${activeMatch + 1}/${searchMatches.length}`}
+          </span>
+          <button
+            type="button"
+            className="chat-search-nav"
+            aria-label="Previous match"
+            title="Previous match (Shift+Enter)"
+            data-testid="chat-search-prev"
+            onClick={() => gotoMatch(activeMatch - 1)}
+            disabled={searchMatches.length === 0}
+          >
+            ↑
+          </button>
+          <button
+            type="button"
+            className="chat-search-nav"
+            aria-label="Next match"
+            title="Next match (Enter)"
+            data-testid="chat-search-next"
+            onClick={() => gotoMatch(activeMatch + 1)}
+            disabled={searchMatches.length === 0}
+          >
+            ↓
+          </button>
+          {hasMoreOlderEvents && (
+            <span className="chat-search-scope" data-testid="chat-search-scope">
+              Searching loaded messages only.
+              <button
+                type="button"
+                className="chat-search-load-all"
+                data-testid="chat-search-load-all"
+                onClick={() => void loadAllHistory()}
+                disabled={loadingAllHistory}
+              >
+                {loadingAllHistory ? 'Loading full history…' : 'Load full history'}
+              </button>
+            </span>
+          )}
+          <button
+            type="button"
+            className="chat-search-close"
+            aria-label="Close search"
+            data-testid="chat-search-close"
+            onClick={closeSearch}
+          >
+            ×
+          </button>
+        </div>
+      )}
 
       {metaError && (
         <div className="fetch-error-banner" role="alert" data-testid="chat-meta-error">
@@ -1936,7 +2183,9 @@ export default function ChatView({
                 key={item.key}
                 data-index={vi.index}
                 ref={rowVirtualizer.measureElement}
-                className="chat-vrow"
+                className={`chat-vrow${
+                  searchOpen && searchMatches[activeMatch] === vi.index ? ' chat-vrow-match' : ''
+                }`}
                 style={{
                   transform: `translateY(${vi.start - rowVirtualizer.options.scrollMargin}px)`,
                 }}
@@ -2065,6 +2314,20 @@ export default function ChatView({
               </div>
             )}
           </div>
+        )}
+        {/* Jump-to-latest: sticky inside the scroller so it rides the
+            bottom edge of the viewport while the user reads older rows.
+            Rendered only when new content actually arrived below, so it
+            never occupies space when the view is following the stream. */}
+        {scrolledUp && newBelow && (
+          <button
+            type="button"
+            className="chat-jump-latest"
+            data-testid="chat-jump-latest"
+            onClick={jumpToLatest}
+          >
+            <span aria-hidden="true">↓</span> New messages
+          </button>
         )}
       </div>
 

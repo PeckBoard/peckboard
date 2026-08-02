@@ -1252,3 +1252,131 @@
 .chat-thinking-markdown {
   font-style: normal;
 }
+
+/* ─── Jump-to-Latest Pill ─── */
+/* Sticky inside the scroller: while the user is scrolled up it rides the
+   bottom edge of the viewport. It only renders when new content arrived
+   below, so it never takes space while the view follows the stream. */
+.chat-jump-latest {
+  position: sticky;
+  bottom: var(--space-2);
+  align-self: center;
+  z-index: 5;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  border: none;
+  border-radius: var(--radius-full);
+  background: var(--accent);
+  color: var(--text-inverse);
+  font-size: var(--text-sm);
+  font-weight: 600;
+  padding: 6px 14px;
+  cursor: pointer;
+  box-shadow: var(--shadow-lg);
+  transition: background var(--transition);
+}
+
+.chat-jump-latest:hover {
+  background: var(--accent-hover);
+}
+
+/* ─── In-Transcript Search ─── */
+.chat-search-bar {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  padding: var(--space-2) 24px;
+  border-bottom: 1px solid var(--border);
+  background: var(--surface);
+}
+
+.chat-search-input {
+  flex: 0 1 260px;
+  min-width: 120px;
+  padding: 6px 10px;
+  font-size: var(--text-sm);
+  color: var(--text);
+  background: var(--surface2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+}
+
+.chat-search-input:focus {
+  outline: none;
+  border-color: var(--accent);
+  box-shadow: 0 0 0 2px var(--accent-subtle);
+}
+
+.chat-search-count {
+  min-width: 56px;
+  text-align: center;
+  font-size: var(--text-xs);
+  color: var(--text2);
+  white-space: nowrap;
+}
+
+.chat-search-nav,
+.chat-search-close {
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: transparent;
+  color: var(--text2);
+  font-size: var(--text-sm);
+  line-height: 1;
+  padding: 6px 9px;
+  cursor: pointer;
+  transition: all var(--transition);
+}
+
+.chat-search-nav:hover:not(:disabled),
+.chat-search-close:hover {
+  background: var(--surface-hover);
+  color: var(--text);
+}
+
+.chat-search-nav:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+.chat-search-close {
+  margin-left: auto;
+}
+
+.chat-search-scope {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+  font-size: var(--text-xs);
+  color: var(--text2);
+}
+
+.chat-search-load-all {
+  border: none;
+  background: none;
+  padding: 0;
+  font-size: var(--text-xs);
+  color: var(--accent);
+  text-decoration: underline;
+  cursor: pointer;
+}
+
+.chat-search-load-all:hover:not(:disabled) {
+  color: var(--accent-hover);
+}
+
+.chat-search-load-all:disabled {
+  opacity: 0.6;
+  cursor: default;
+  text-decoration: none;
+}
+
+/* The active search match — inset outline so it can't bleed under the
+   neighbouring virtualized rows. */
+.chat-vrow-match {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
+  border-radius: var(--radius);
+}

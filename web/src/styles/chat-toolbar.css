@@ -143,6 +143,29 @@
 .chat-toolbar-menu:hover {
   background: var(--surface-hover);
   color: var(--text);
+
+  /* Same chrome as .chat-toolbar-menu; separate class so specs that click
+   `.chat-toolbar-menu` keep a single match. */
+  .chat-toolbar-search {
+    width: 30px;
+    height: 30px;
+    border: none;
+    border-radius: var(--radius);
+    background: transparent;
+    color: var(--text3);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    cursor: pointer;
+    flex-shrink: 0;
+    transition: all var(--transition);
+  }
+
+  .chat-toolbar-search:hover,
+  .chat-toolbar-search[aria-expanded='true'] {
+    background: var(--surface-hover);
+    color: var(--text);
+  }
 }
 
 .chat-toolbar-dropdown {
