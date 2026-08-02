@@ -291,6 +291,28 @@ impl ProviderRegistry {
         out
     }
 
+    /// Provider candidates for auto-model resolution: id, best-effort auth
+    /// status, and the STATIC model catalog (not `dynamic_models` — that can
+    /// probe a CLI and is too slow for the dispatch hot path this feeds).
+    /// Excludes the `mock` provider: it is the scripted dev/test vehicle and
+    /// must never be auto-routed to for real work.
+    pub async fn auto_model_candidates(&self) -> Vec<crate::provider::AutoCandidate> {
+        let providers = self.providers.lock().await;
+        let mut out = Vec::with_capacity(providers.len());
+        for r in providers.values() {
+            if r.info.id == "mock" {
+                continue;
+            }
+            let auth = r.provider.auth_configured().await;
+            out.push(crate::provider::AutoCandidate {
+                provider_id: r.info.id.clone(),
+                auth,
+                models: r.info.models.clone(),
+            });
+        }
+        out
+    }
+
     /// List all models across all providers, with provider:model format
     /// IDs. Resolves each provider's effective (dynamic-or-static) model
     /// list, so settings-derived models are included.

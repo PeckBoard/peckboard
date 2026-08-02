@@ -382,16 +382,35 @@
   flex-shrink: 0;
   min-height: 24px;
 }
+/* The title is the card's primary open affordance — a real button that
+   opens the detail modal directly (the ⋮ menu's View and the expanded
+   body's View button remain as secondary paths). Button chrome is
+   stripped so it still reads as the card heading. */
 .kanban-card-title {
   flex: 1 1 auto;
+  padding: 0;
+  background: none;
+  border: none;
+  font-family: inherit;
   font-size: var(--text-sm);
   font-weight: 600;
   color: var(--text);
   line-height: 1.3;
+  text-align: left;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
   min-width: 0;
+  cursor: pointer;
+  border-radius: var(--radius-sm);
+}
+.kanban-card-title:hover {
+  color: var(--accent-hover);
+  text-decoration: underline;
+}
+.kanban-card-title:focus-visible {
+  outline: 2px solid var(--ring);
+  outline-offset: 2px;
 }
 /* Blocked marker on the always-visible header, so a collapsed card says
    why it is stalled instead of relying on the 3px left border alone.
@@ -583,6 +602,68 @@
 .kanban-card-action-btn:hover {
   background: color-mix(in srgb, var(--kanban-card-bg) 80%, black);
   border-color: color-mix(in srgb, var(--kanban-card-bg) 65%, black);
+}
+/* Inline-expand disclosure. Tapping the card's whitespace still toggles,
+   but the chevron makes the expand affordance visible now that the title
+   opens the detail modal instead. */
+.kanban-card-expand-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 26px;
+  background: none;
+  border: none;
+  color: var(--text3);
+  cursor: pointer;
+  border-radius: var(--radius);
+  transition:
+    background var(--transition),
+    color var(--transition);
+}
+.kanban-card-expand-btn svg {
+  transition: transform 0.15s ease;
+}
+.kanban-card-expand-btn[aria-expanded='true'] svg {
+  transform: rotate(180deg);
+}
+.kanban-card-expand-btn:hover {
+  background: var(--surface2);
+  color: var(--text);
+}
+.kanban-card-expand-btn:focus-visible,
+.kanban-card-move-btn:focus-visible,
+.kanban-card-menu-btn:focus-visible {
+  outline: 2px solid var(--ring);
+  outline-offset: -2px;
+}
+/* Touch-only move affordance: HTML5 drag never fires on touch, so
+   coarse-pointer devices get an always-visible button that opens the
+   bottom move sheet (see mobile.css). Hidden on fine pointers — there
+   drag plus the ⋮ menu cover the same ground. */
+.kanban-card-move-btn {
+  display: none;
+  align-items: center;
+  justify-content: center;
+  width: 32px;
+  height: 30px;
+  background: none;
+  border: none;
+  color: var(--text3);
+  cursor: pointer;
+  border-radius: var(--radius);
+  transition:
+    background var(--transition),
+    color var(--transition);
+}
+.kanban-card-move-btn:hover {
+  background: var(--surface2);
+  color: var(--text);
+}
+@media (pointer: coarse) {
+  .kanban-card-move-btn {
+    display: inline-flex;
+  }
 }
 .kanban-card-menu-btn {
   background: none;

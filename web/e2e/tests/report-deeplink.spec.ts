@@ -181,8 +181,8 @@ test('kanban card report row opens that exact report and the URL is shareable', 
 
   const boardCard = page.locator('.kanban-card', { hasText: 'Deep link card' })
   await expect(boardCard.locator('.kanban-card-title')).toBeVisible({ timeout: 10_000 })
+  // Title click opens the card detail modal directly.
   await boardCard.locator('.kanban-card-title').click()
-  await boardCard.locator('[data-testid="card-quick-view"]').click()
 
   const reportLink = page.locator('.modal [data-testid="card-report-link"]')
   await expect(reportLink).toBeVisible({ timeout: 10_000 })

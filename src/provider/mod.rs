@@ -80,6 +80,96 @@ pub fn auto_model(effort: Option<&str>, is_worker: bool) -> &'static str {
         }
     }
 }
+
+/// One provider's usability info for auto-model resolution: id, best-effort
+/// auth status (see `AgentProvider::auth_configured`), and its model
+/// catalog with tier metadata.
+pub struct AutoCandidate {
+    pub provider_id: String,
+    pub auth: Option<bool>,
+    pub models: Vec<stream::ModelInfo>,
+}
+
+/// Maps effort (plus worker/chat role, mirroring `auto_model`'s own
+/// fallback) onto a provider-agnostic "how capable a tier do we want"
+/// rank. Not comparable across providers by absolute value — only used to
+/// pick the highest tier within one provider's own tier range that is
+/// <= this rank, clamping down when the provider doesn't go that high.
+fn auto_effort_rank(effort: Option<&str>, is_worker: bool) -> i32 {
+    match effort {
+        Some("low") => 0,
+        Some("medium") => 1,
+        Some("high") => 2,
+        Some("xhigh") | Some("max") => 3,
+        _ => {
+            if is_worker {
+                1
+            } else {
+                2
+            }
+        }
+    }
+}
+
+/// Provider-aware auto-model resolution. Prefers Claude (unchanged
+/// `auto_model` alias behaviour) when it's usable; otherwise picks the
+/// highest-tier model from the best usable non-Claude provider, ranking
+/// credentialed providers (`auth == Some(true)`) ahead of providers with no
+/// auth signal (local providers like ollama, `auth == None`) ahead of
+/// providers known to lack auth (`auth == Some(false)`, excluded entirely).
+/// Ties between equally-ranked providers break on provider id for
+/// determinism. Returns an error naming Settings → Providers & Accounts
+/// when nothing usable exists, rather than defaulting silently.
+pub fn resolve_auto_model(
+    candidates: &[AutoCandidate],
+    effort: Option<&str>,
+    is_worker: bool,
+) -> anyhow::Result<String> {
+    let usable = |c: &AutoCandidate| c.auth != Some(false) && !c.models.is_empty();
+
+    if candidates
+        .iter()
+        .any(|c| c.provider_id == "claude" && usable(c))
+    {
+        return Ok(auto_model(effort, is_worker).to_string());
+    }
+
+    let mut ranked: Vec<&AutoCandidate> = candidates.iter().filter(|c| usable(c)).collect();
+    ranked.sort_by(|a, b| {
+        let a_credentialed = a.auth == Some(true);
+        let b_credentialed = b.auth == Some(true);
+        b_credentialed
+            .cmp(&a_credentialed)
+            .then_with(|| a.provider_id.cmp(&b.provider_id))
+    });
+
+    let chosen = ranked.into_iter().next().ok_or_else(|| {
+        anyhow::anyhow!(
+            "Auto mode has no usable AI provider: add credentials or a local provider in \
+             Settings \u{2192} Providers & Accounts."
+        )
+    })?;
+
+    let target_rank = auto_effort_rank(effort, is_worker);
+    let mut tiers: Vec<i32> = chosen.models.iter().map(|m| m.tier).collect();
+    tiers.sort_unstable();
+    tiers.dedup();
+    let tier = tiers
+        .iter()
+        .rev()
+        .find(|&&t| t <= target_rank)
+        .copied()
+        .or_else(|| tiers.first().copied())
+        .unwrap_or(0);
+
+    let model = chosen
+        .models
+        .iter()
+        .find(|m| m.tier == tier)
+        .expect("tier was selected from chosen.models");
+
+    Ok(format!("{}:{}", chosen.provider_id, model.id))
+}
 #[cfg(test)]
 mod auto_tests {
     use super::*;
@@ -98,6 +188,134 @@ mod auto_tests {
         assert_eq!(auto_model(None, false), "opus");
         // Junk effort falls back by role rather than panicking.
         assert_eq!(auto_model(Some("very high"), false), "opus");
+    }
+
+    fn model(id: &str, tier: i32) -> stream::ModelInfo {
+        stream::ModelInfo {
+            id: id.into(),
+            display_name: id.into(),
+            capabilities: vec![],
+            tier,
+        }
+    }
+
+    fn claude_models() -> Vec<stream::ModelInfo> {
+        vec![
+            model("claude-haiku-4-5", 1),
+            model("claude-sonnet-4-6", 2),
+            model("claude-opus-4-8", 3),
+            model("claude-fable-5", 4),
+        ]
+    }
+
+    #[test]
+    fn resolve_auto_model_prefers_claude_when_usable() {
+        let candidates = vec![
+            AutoCandidate {
+                provider_id: "claude".into(),
+                auth: Some(true),
+                models: claude_models(),
+            },
+            AutoCandidate {
+                provider_id: "ollama".into(),
+                auth: None,
+                models: vec![model("llama3", 0)],
+            },
+        ];
+        // Identical to plain `auto_model` — no regression when Claude works.
+        assert_eq!(
+            resolve_auto_model(&candidates, Some("high"), false).unwrap(),
+            auto_model(Some("high"), false)
+        );
+        assert_eq!(
+            resolve_auto_model(&candidates, None, true).unwrap(),
+            auto_model(None, true)
+        );
+    }
+
+    #[test]
+    fn resolve_auto_model_falls_back_to_ollama_when_claude_unusable() {
+        let candidates = vec![
+            AutoCandidate {
+                provider_id: "claude".into(),
+                auth: Some(false),
+                models: claude_models(),
+            },
+            AutoCandidate {
+                provider_id: "ollama".into(),
+                auth: None,
+                models: vec![model("llama3", 0)],
+            },
+        ];
+        assert_eq!(
+            resolve_auto_model(&candidates, Some("high"), false).unwrap(),
+            "ollama:llama3"
+        );
+    }
+
+    #[test]
+    fn resolve_auto_model_prefers_credentialed_provider_over_local() {
+        let candidates = vec![
+            AutoCandidate {
+                provider_id: "ollama".into(),
+                auth: None,
+                models: vec![model("llama3", 0)],
+            },
+            AutoCandidate {
+                provider_id: "grok".into(),
+                auth: Some(true),
+                models: vec![model("grok-4", 0)],
+            },
+        ];
+        assert_eq!(
+            resolve_auto_model(&candidates, None, false).unwrap(),
+            "grok:grok-4"
+        );
+    }
+
+    #[test]
+    fn resolve_auto_model_picks_tier_by_effort_within_chosen_provider() {
+        let candidates = vec![AutoCandidate {
+            provider_id: "grok".into(),
+            auth: Some(true),
+            models: vec![
+                model("grok-mini", 0),
+                model("grok-4", 1),
+                model("grok-max", 2),
+            ],
+        }];
+        assert_eq!(
+            resolve_auto_model(&candidates, Some("low"), false).unwrap(),
+            "grok:grok-mini"
+        );
+        assert_eq!(
+            resolve_auto_model(&candidates, Some("high"), false).unwrap(),
+            "grok:grok-max"
+        );
+        // No effort, chat role ranks 2 — clamps to the top tier available.
+        assert_eq!(
+            resolve_auto_model(&candidates, None, false).unwrap(),
+            "grok:grok-max"
+        );
+    }
+
+    #[test]
+    fn resolve_auto_model_errors_when_nothing_usable() {
+        let candidates = vec![
+            AutoCandidate {
+                provider_id: "claude".into(),
+                auth: Some(false),
+                models: claude_models(),
+            },
+            AutoCandidate {
+                provider_id: "ollama".into(),
+                auth: Some(false),
+                models: vec![],
+            },
+        ];
+        let err = resolve_auto_model(&candidates, None, false).unwrap_err();
+        assert!(err.to_string().contains("Settings"));
+        assert!(err.to_string().contains("Providers & Accounts"));
     }
 }
 

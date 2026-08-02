@@ -116,8 +116,8 @@ test('card description renders markdown and escapes embedded raw HTML on the boa
 
   // Cards are collapsed by default — header only — so the description
   // markdown only renders after the user expands the card. Tap the
-  // card header to expand.
-  await card.locator('.kanban-card-title').click()
+  // expand chevron (the title itself opens the detail modal).
+  await card.getByTestId('card-expand-toggle').click()
 
   // Markdown was rendered to real DOM elements (not as raw `#`/`**` text).
   const desc = card.locator('.kanban-card-desc-markdown')
@@ -159,10 +159,9 @@ test('card detail modal renders markdown and escapes embedded raw HTML', async (
     timeout: 10_000,
   })
 
-  // Cards are collapsed by default. Tap the card to expand its body,
-  // then click the View action button to open the detail modal.
+  // The card title is the primary open affordance — clicking it opens
+  // the detail modal directly.
   await card.locator('.kanban-card-title').click()
-  await card.locator('[data-testid="card-quick-view"]').click()
 
   const modal = page.locator('.modal')
   await expect(modal.locator('h2', { hasText: 'Markdown smoke' })).toBeVisible({ timeout: 5_000 })
@@ -192,7 +191,7 @@ test('a card description renders a mermaid fence as a diagram', async ({ request
   await expect(card.locator('.kanban-card-title', { hasText: 'Markdown smoke' })).toBeVisible({
     timeout: 10_000,
   })
-  await card.locator('.kanban-card-title').click()
+  await card.getByTestId('card-expand-toggle').click()
 
   const desc = card.locator('.kanban-card-desc-markdown')
   await expect(

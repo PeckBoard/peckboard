@@ -133,6 +133,10 @@ export default function KanbanBoard({
   }
   const [editingCard, setEditingCard] = useState<Card | null>(null)
   const [showComms, setShowComms] = useState(false)
+  // Card whose "Move" bottom sheet is open — the touch-first replacement
+  // for drag. Rendered through the shared portal Modal so iOS WebKit can't
+  // clip it inside the board scroller.
+  const [moveSheetCard, setMoveSheetCard] = useState<Card | null>(null)
   // Cards are collapsed by default — header only. Tapping the card toggles
   // its entry in this set. Independent per card so opening one doesn't
   // collapse the others.
@@ -1221,9 +1225,18 @@ export default function KanbanBoard({
                                 updateCard(projectId, card.id, { priority: next })
                               }
                             />
-                            <span className="kanban-card-title" title={card.title}>
+                            <button
+                              type="button"
+                              className="kanban-card-title"
+                              title={card.title}
+                              data-no-toggle
+                              onClick={(e) => {
+                                e.stopPropagation()
+                                setSelectedCard(card)
+                              }}
+                            >
                               {card.title}
-                            </span>
+                            </button>
                             {card.blocked && (
                               <span
                                 className="kanban-card-blocked-chip"
@@ -1257,6 +1270,61 @@ export default function KanbanBoard({
                                   {Math.round(workerCtx / 1000)}k
                                 </span>
                               )}
+                              <button
+                                type="button"
+                                className="kanban-card-move-btn"
+                                data-testid="card-move-btn"
+                                aria-label={`Move ${card.title}`}
+                                title="Move to step"
+                                onClick={(e) => {
+                                  e.stopPropagation()
+                                  setMoveSheetCard(card)
+                                }}
+                              >
+                                <svg
+                                  width="14"
+                                  height="14"
+                                  viewBox="0 0 24 24"
+                                  fill="none"
+                                  stroke="currentColor"
+                                  strokeWidth="2"
+                                  strokeLinecap="round"
+                                  strokeLinejoin="round"
+                                  aria-hidden="true"
+                                >
+                                  <path d="M5 9l-3 3 3 3" />
+                                  <path d="M9 5l3-3 3 3" />
+                                  <path d="M15 19l-3 3-3-3" />
+                                  <path d="M19 9l3 3-3 3" />
+                                  <path d="M2 12h20" />
+                                  <path d="M12 2v20" />
+                                </svg>
+                              </button>
+                              <button
+                                type="button"
+                                className="kanban-card-expand-btn"
+                                data-testid="card-expand-toggle"
+                                aria-expanded={expanded}
+                                aria-label={expanded ? 'Collapse card' : 'Expand card'}
+                                onClick={(e) => {
+                                  e.stopPropagation()
+                                  toggleCardExpanded(card.id)
+                                }}
+                              >
+                                <svg
+                                  width="12"
+                                  height="12"
+                                  viewBox="0 0 24 24"
+                                  fill="none"
+                                  stroke="currentColor"
+                                  strokeWidth="2"
+                                  strokeLinecap="round"
+                                  strokeLinejoin="round"
+                                  aria-hidden="true"
+                                >
+                                  <path d="M6 9l6 6 6-6" />
+                                </svg>
+                              </button>
                               <button
                                 className="kanban-card-menu-btn"
                                 aria-label="Card menu"
@@ -1577,6 +1645,38 @@ export default function KanbanBoard({
         </Modal>
       )}
 
+      {moveSheetCard && (
+        <Modal
+          onClose={() => setMoveSheetCard(null)}
+          className="kanban-move-sheet"
+          backdropClassName="kanban-move-sheet__backdrop"
+          data-testid="card-move-sheet"
+        >
+          <div className="kanban-move-sheet__grip" aria-hidden="true" />
+          <h2 className="kanban-move-sheet__title">Move “{moveSheetCard.title}”</h2>
+          <div className="kanban-move-sheet__list">
+            {moveTargetsFor(moveSheetCard).map((key) => {
+              const current = normalizeStep(moveSheetCard.step) === key
+              return (
+                <button
+                  key={key}
+                  type="button"
+                  className="kanban-move-sheet__step"
+                  disabled={current}
+                  data-testid={`card-move-step-${key}`}
+                  onClick={() => {
+                    setMoveSheetCard(null)
+                    void requestMoveCardToStep(moveSheetCard.id, key)
+                  }}
+                >
+                  <span>{STEPS.find((s) => s.key === key)?.label ?? key}</span>
+                  {current && <span className="kanban-move-sheet__hint">Current</span>}
+                </button>
+              )
+            })}
+          </div>
+        </Modal>
+      )}
       {selectedCard && (
         <Modal onClose={() => setSelectedCard(null)}>
           <h2>{selectedCard.title}</h2>

@@ -322,8 +322,14 @@ impl SessionManager {
             .filter(|m| !crate::provider::is_auto_model(m));
             match configured {
                 Some(m) => m,
-                None => crate::provider::auto_model(resolved_effort.as_deref(), session.is_worker)
-                    .to_string(),
+                None => {
+                    let candidates = self.registry.auto_model_candidates().await;
+                    crate::provider::resolve_auto_model(
+                        &candidates,
+                        resolved_effort.as_deref(),
+                        session.is_worker,
+                    )?
+                }
             }
         } else {
             requested_model
