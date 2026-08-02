@@ -55,6 +55,7 @@ pub fn router(state: Arc<AppState>) -> Router<Arc<AppState>> {
 fn admin_router() -> Router<Arc<AppState>> {
     Router::new()
         .route("/api/folders", post(create_folder))
+        .route("/api/folders/browse", get(browse_folder_path))
         .route("/api/folders/{id}", delete(delete_folder))
         .route(
             "/api/folders/{id}/delete-sessions",
@@ -235,6 +236,87 @@ async fn create_folder(
         })?;
 
     Ok((StatusCode::CREATED, Json(serde_json::json!(folder))))
+}
+
+#[derive(Deserialize)]
+struct BrowseQuery {
+    path: String,
+}
+
+/// GET /api/folders/browse?path=… — directory suggestions for the folder
+/// registration path field. Admin-only (same gate as create_folder): it
+/// discloses host directory names, which only the admin who can register
+/// folders is entitled to see. Returns subdirectory names only — never file
+/// names or contents — and never creates anything on disk.
+async fn browse_folder_path(Query(q): Query<BrowseQuery>) -> impl IntoResponse {
+    let typed = q.path.trim();
+    let typed_path = std::path::Path::new(typed);
+    if typed.is_empty() || !typed_path.is_absolute() {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({ "error": "path must be absolute" })),
+        ));
+    }
+
+    // Canonicalize so a symlink chain can't make "exists" lie about what
+    // would actually be registered; a path that doesn't resolve is simply
+    // reported as not existing rather than an error — a partially typed
+    // path is the normal case for this endpoint.
+    let exists = typed_path
+        .canonicalize()
+        .map(|resolved| resolved.is_dir())
+        .unwrap_or(false);
+
+    // The typed text is either a directory to list, or a parent directory
+    // plus a partial final segment to prefix-filter by.
+    let (base, prefix) = if typed.ends_with('/') || exists {
+        (typed_path.to_path_buf(), String::new())
+    } else {
+        (
+            typed_path
+                .parent()
+                .map(std::path::Path::to_path_buf)
+                .unwrap_or_else(|| std::path::PathBuf::from("/")),
+            typed_path
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_default(),
+        )
+    };
+
+    const MAX_SUGGESTIONS: usize = 100;
+    let mut truncated = false;
+    let mut dirs = Vec::new();
+    if let Ok(entries) = std::fs::read_dir(&base) {
+        let prefix_lower = prefix.to_lowercase();
+        let mut names: Vec<String> = entries
+            .filter_map(|e| e.ok())
+            // DirEntry::file_type does not follow symlinks (lstat), so a
+            // symlink to a directory is not suggested — defensive, and it
+            // also keeps plain files out.
+            .filter(|e| e.file_type().map(|t| t.is_dir()).unwrap_or(false))
+            .filter_map(|e| e.file_name().into_string().ok())
+            .filter(|n| prefix_lower.is_empty() || n.to_lowercase().starts_with(&prefix_lower))
+            // Hidden directories only appear when explicitly asked for.
+            .filter(|n| prefix.starts_with('.') || !n.starts_with('.'))
+            .collect();
+        names.sort();
+        truncated = names.len() > MAX_SUGGESTIONS;
+        names.truncate(MAX_SUGGESTIONS);
+        dirs = names
+            .into_iter()
+            .map(|name| {
+                let path = base.join(&name);
+                serde_json::json!({ "name": name, "path": path.to_string_lossy() })
+            })
+            .collect();
+    }
+
+    Ok::<_, (StatusCode, Json<serde_json::Value>)>(Json(serde_json::json!({
+        "exists": exists,
+        "dirs": dirs,
+        "truncated": truncated,
+    })))
 }
 
 /// GET /api/folders
@@ -982,6 +1064,85 @@ mod tests {
             !inside_data_dir.exists(),
             "a refused path must not be created on disk"
         );
+    }
+
+    fn browse_request(token: &str, path: &str) -> Request<Body> {
+        let query = format!("path={}", urlencoding::encode(path));
+        Request::builder()
+            .uri(format!("/api/folders/browse?{query}"))
+            .header(header::AUTHORIZATION, format!("Bearer {token}"))
+            .body(Body::empty())
+            .unwrap()
+    }
+
+    async fn body_json(response: axum::response::Response) -> serde_json::Value {
+        let bytes = axum::body::to_bytes(response.into_body(), 64 * 1024)
+            .await
+            .unwrap();
+        serde_json::from_slice(&bytes).unwrap()
+    }
+
+    #[tokio::test]
+    async fn browse_lists_subdirs_prefix_filters_and_reports_existence() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = test_state(dir.path());
+        let token = seed_authenticated_user(&state, "admin").await;
+        let workspace = tempfile::tempdir().unwrap();
+        let root = workspace.path();
+        for sub in ["alpha", "august", "beta", ".hidden"] {
+            std::fs::create_dir_all(root.join(sub)).unwrap();
+        }
+        std::fs::write(root.join("a-file.txt"), "not a dir").unwrap();
+
+        // Existing dir: exists=true, all visible subdirs listed, files and
+        // hidden dirs excluded.
+        let response = app(state.clone())
+            .oneshot(browse_request(&token, root.to_str().unwrap()))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let json = body_json(response).await;
+        assert_eq!(json["exists"], true);
+        let names: Vec<&str> = json["dirs"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|d| d["name"].as_str().unwrap())
+            .collect();
+        assert_eq!(names, vec!["alpha", "august", "beta"]);
+
+        // Partial final segment: exists=false, prefix-filtered suggestions
+        // with full paths.
+        let partial = root.join("a");
+        let response = app(state.clone())
+            .oneshot(browse_request(&token, partial.to_str().unwrap()))
+            .await
+            .unwrap();
+        let json = body_json(response).await;
+        assert_eq!(json["exists"], false);
+        let dirs = json["dirs"].as_array().unwrap();
+        assert_eq!(dirs.len(), 2);
+        assert_eq!(dirs[0]["name"], "alpha");
+        assert_eq!(dirs[0]["path"], root.join("alpha").to_str().unwrap());
+
+        // Relative paths are refused.
+        let response = app(state.clone())
+            .oneshot(browse_request(&token, "not/absolute"))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn browse_is_admin_only() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = test_state(dir.path());
+        let token = seed_authenticated_user(&state, "user").await;
+        let response = app(state)
+            .oneshot(browse_request(&token, "/"))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
     }
 
     /// Seed a folder `f1` rooted at `workspace` and return a user token.

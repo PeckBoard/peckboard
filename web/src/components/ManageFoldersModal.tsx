@@ -4,6 +4,7 @@ import { authedFetch, useAuthStore } from '../store/auth'
 import type { Folder } from '../types/api'
 import Modal from './Modal'
 import ConfirmDialog from './ConfirmDialog'
+import PathAutocomplete from './PathAutocomplete'
 
 export default function FoldersPage() {
   const folders = useFoldersStore((s) => s.folders)
@@ -18,6 +19,9 @@ export default function FoldersPage() {
   const [name, setName] = useState('')
   const [path, setPath] = useState('')
   const [createDir, setCreateDir] = useState(false)
+  // Server verdict on the typed path (null until it's an absolute path):
+  // drives the exists / will-be-created status line under the field.
+  const [pathExists, setPathExists] = useState<boolean | null>(null)
   const [error, setError] = useState('')
   const [creating, setCreating] = useState(false)
   const [deleteTarget, setDeleteTarget] = useState<Folder | null>(null)
@@ -44,6 +48,7 @@ export default function FoldersPage() {
       setName('')
       setPath('')
       setCreateDir(false)
+      setPathExists(null)
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to create folder')
     } finally {
@@ -170,13 +175,28 @@ export default function FoldersPage() {
               value={name}
               onChange={(e) => setName(e.target.value)}
             />
-            <input
-              className="form-input"
-              placeholder="Path (e.g. /Users/me/projects)"
+            <PathAutocomplete
               value={path}
-              onChange={(e) => setPath(e.target.value)}
-              onKeyDown={(e) => e.key === 'Enter' && handleCreate()}
+              onChange={setPath}
+              onSubmit={handleCreate}
+              onExistsChange={setPathExists}
+              placeholder="Path (e.g. /Users/me/projects)"
+              testId="folder-path-input"
             />
+            {path.trim().startsWith('/') && pathExists !== null && (
+              <p
+                className="form-hint"
+                data-testid="folder-path-status"
+                role="status"
+                style={{ margin: 0 }}
+              >
+                {pathExists
+                  ? 'Directory exists on the server.'
+                  : createDir
+                    ? "Directory doesn't exist yet — it will be created."
+                    : "Directory doesn't exist — check 'Create directory' below or fix the path."}
+              </p>
+            )}
             <label className="form-checkbox-label" style={{ fontSize: 'var(--text-sm)' }}>
               <input
                 type="checkbox"
