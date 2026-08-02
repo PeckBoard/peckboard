@@ -306,13 +306,13 @@ async fn main() -> anyhow::Result<()> {
 
     // Scheduled backups: write tar.gz snapshots on a configured interval.
     // No-op unless backupIntervalHours + backupDir are set in config.json.
+    peckboard::service::backup::spawn_scheduler(state.db.clone(), state.config.data_dir.clone());
 
     // Data-retention sweep: hourly bound on repeating-task run sessions,
     // idle-session events, and report files. No-op passes until an admin
     // sets a non-zero limit in Settings → Server (all-zero default = keep
     // forever).
     peckboard::service::retention::spawn_sweeper(state.clone());
-    peckboard::service::backup::spawn_scheduler(state.db.clone(), state.config.data_dir.clone());
 
     // Temp-session orphan sweep: delete temp sessions no tab points at
     // anymore (a client died between create and tab-open, or a

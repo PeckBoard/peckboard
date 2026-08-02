@@ -42,7 +42,7 @@ const FIELDS: Array<{
   {
     key: 'event_max_count_per_session',
     label: 'Session events — max kept per session',
-    hint: 'Keep only this many of the newest events per session.',
+    hint: 'Keep only this many of the newest events per session. Applies to running sessions too, so a long live session loses its earliest transcript.',
   },
   {
     key: 'report_max_age_days',

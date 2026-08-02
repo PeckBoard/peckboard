@@ -88,6 +88,9 @@ pub fn router(state: Arc<AppState>) -> Router<Arc<AppState>> {
 /// request body. None of that is partitioned per user, so an admin-created
 /// non-admin must not be able to reach it.
 ///
+/// Layers run outer-to-inner on the request, so `require_admin` is appended
+/// here and `require_auth` in [`router`] afterwards, which puts `AuthUser`
+/// into the extensions before this middleware reads it.
 fn admin_router() -> Router<Arc<AppState>> {
     Router::new()
         .route("/api/settings/approved-commands", get(list_approved))
