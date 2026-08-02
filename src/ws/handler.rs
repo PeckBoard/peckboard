@@ -9,6 +9,7 @@ use futures_util::{SinkExt, StreamExt};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::Instant;
 use tokio::sync::broadcast::error::RecvError;
 use tokio::time::{Duration, timeout};
 
@@ -26,6 +27,22 @@ const RESUME_PAGE_SIZE: i64 = 500;
 /// refused. Kept in one place so the WS test and the UI copy stay in sync.
 const STREAM_DENIED_REASON: &str = "You don't have access to this session's live updates.";
 
+/// How often the server pings an idle connection. Half-open sockets
+/// (sleeping laptops, dropped mobile connections) otherwise linger until a
+/// TCP-level timeout and keep their broadcast slot allocated.
+const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(30);
+
+/// Grace window since the last frame of any kind (client message, Pong, or
+/// auto-answered Ping) before a connection is considered dead and dropped.
+const HEARTBEAT_TIMEOUT: Duration = Duration::from_secs(90);
+
+/// True once `elapsed` since the last frame from the client exceeds the
+
+/// heartbeat grace window. Pulled out as a pure fn so the threshold logic is
+/// unit-testable without spinning up a socket.
+fn heartbeat_expired(elapsed: Duration) -> bool {
+    elapsed > HEARTBEAT_TIMEOUT
+}
 /// Incoming frame types from the client.
 #[derive(Debug, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
@@ -172,6 +189,13 @@ async fn handle_connection(socket: WebSocket, state: Arc<AppState>) {
     let mut auth_check_interval = tokio::time::interval(Duration::from_secs(10));
     auth_check_interval.tick().await; // consume the immediate first tick
 
+    // Ping/pong heartbeat: detects half-open sockets (sleeping laptops,
+    // dropped mobile connections) that would otherwise linger until a TCP
+    // timeout, keeping their broadcast slot allocated indefinitely.
+    let mut heartbeat_interval = tokio::time::interval(HEARTBEAT_INTERVAL);
+    heartbeat_interval.tick().await; // consume the immediate first tick
+    let mut last_seen = Instant::now();
+
     // Main message loop
     loop {
         tokio::select! {
@@ -196,8 +220,31 @@ async fn handle_connection(socket: WebSocket, state: Arc<AppState>) {
                     break;
                 }
             }
+            // Ping the client, or drop it if it's gone quiet for too long.
+            // A dropped connection falls through to the cleanup below,
+            // which releases its broadcast subscriptions.
+            _ = heartbeat_interval.tick() => {
+                if heartbeat_expired(last_seen.elapsed()) {
+                    tracing::info!("WS client {client_id} heartbeat timeout, closing");
+                    let _ = sender
+                        .send(Message::Close(Some(axum::extract::ws::CloseFrame {
+                            code: 1001,
+                            reason: "heartbeat timeout".into(),
+                        })))
+                        .await;
+                    break;
+                }
+                // tungstenite auto-answers client-initiated Pings with a
+                // Pong, so we only need to originate our own Ping here.
+                if sender.send(Message::Ping(Vec::new().into())).await.is_err() {
+                    break;
+                }
+            }
             // Handle incoming client frames
             msg = receiver.next() => {
+                if matches!(msg, Some(Ok(_))) {
+                    last_seen = Instant::now();
+                }
                 match msg {
                     Some(Ok(Message::Text(text))) => {
                         if let Ok(frame) = serde_json::from_str::<ClientFrame>(&text) {
@@ -485,6 +532,13 @@ async fn handle_connection(socket: WebSocket, state: Arc<AppState>) {
 mod tests {
     use super::*;
     use crate::auth::middleware::tests::test_state;
+
+    #[test]
+    fn heartbeat_expired_at_grace_window() {
+        assert!(!heartbeat_expired(Duration::from_secs(89)));
+        assert!(!heartbeat_expired(HEARTBEAT_TIMEOUT));
+        assert!(heartbeat_expired(Duration::from_secs(91)));
+    }
     use crate::db::models::{NewFolder, NewProject, NewSession, NewUser};
 
     async fn seed_user(state: &Arc<AppState>, id: &str, username: &str, role: &str) {
