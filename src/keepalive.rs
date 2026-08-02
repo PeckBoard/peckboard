@@ -1,7 +1,7 @@
 //! Provider login keep-alive.
 //!
-//! Auth tokens for the CLI-backed providers (Claude, Grok, Cursor) go stale
-//! if a login sits unused. This background task periodically spins up a
+//! Auth tokens for the CLI-backed providers (Claude, Grok, Cursor, Kimi) go
+//! stale if a login sits unused. This background task periodically spins up a
 //! throwaway session per login, sends a one-word "hi", waits for the turn to
 //! finish, then tears the session down — just enough real traffic to refresh
 //! the token.
@@ -11,11 +11,13 @@
 //! large Peckboard prompt), no MCP tools are wired in, and the user message
 //! is a single token.
 //!
-//! Scope is "every auth login": for Claude and Grok that means the host
+//! Scope is "every auth login": for Claude, Grok and Kimi that means the host
 //! default login **and** each stored account (the account rides on the model
 //! id as an `@<account_id>` suffix, which the provider turns into per-account
-//! credential env). Cursor has a single system login. Mock/Ollama have no
-//! login and are skipped.
+//! credential env). Cursor has a single system login. Of the built-in
+//! providers only Mock (a fake) and Ollama (local models, no remote auth) are
+//! skipped; providers contributed by third-party plugins aren't covered by
+//! this static list.
 
 use std::collections::HashMap;
 use std::path::Path;
@@ -35,13 +37,14 @@ use crate::ws::broadcaster::Broadcaster;
 /// of `GET /api/folders` (see `routes::folders`) so it never shows in the UI.
 pub const KEEPALIVE_FOLDER_ID: &str = "__peckboard_keepalive__";
 
-/// Providers with a login worth refreshing, in dispatch order. Mock/Ollama
-/// have no remote auth and are intentionally absent.
-const AUTH_PROVIDERS: &[&str] = &["claude", "grok", "cursor"];
+/// Providers with a login worth refreshing, in dispatch order. Mock (a fake)
+/// and Ollama (local, no remote auth) are intentionally absent — they have no
+/// token to go stale.
+const AUTH_PROVIDERS: &[&str] = &["claude", "grok", "cursor", "kimi"];
 
 /// Providers whose logins are multi-account (a login per stored account plus
 /// the host default). Others get a single default ping.
-const MULTI_ACCOUNT_PROVIDERS: &[&str] = &["claude", "grok"];
+const MULTI_ACCOUNT_PROVIDERS: &[&str] = &["claude", "grok", "kimi"];
 
 /// Per-login cap: how long to wait for the "hi" turn before force-killing the
 /// run and cleaning up. A hung/unauthenticated CLI is bounded by this.
@@ -215,6 +218,10 @@ async fn collect_targets(db: &Db, registry: &ProviderRegistry) -> Vec<Target> {
                 .map(|v| v.into_iter().map(|a| (a.id, a.name)).collect::<Vec<_>>()),
             "grok" => db
                 .list_grok_accounts()
+                .await
+                .map(|v| v.into_iter().map(|a| (a.id, a.name)).collect::<Vec<_>>()),
+            "kimi" => db
+                .list_kimi_accounts()
                 .await
                 .map(|v| v.into_iter().map(|a| (a.id, a.name)).collect::<Vec<_>>()),
             _ => Ok(Vec::new()),
