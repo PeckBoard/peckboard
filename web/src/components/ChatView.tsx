@@ -8,6 +8,8 @@ import { useWsStore } from '../store/ws'
 import { useSessionsStore, type PendingUserMessage } from '../store/sessions'
 import {
   effortOptionsForModel,
+  effortSelectOptions,
+  sessionModelPatch,
   imagesAllowedForModel,
   interruptAffordanceForModel,
   modelThinks,
@@ -1840,10 +1842,16 @@ export default function ChatView({
   // Mirror of the backend continuity key (provider + account). Switching
   // across it means the incoming model starts cold, so confirm with the
   // user before the PATCH: hand over a summary, or clear & switch fresh.
+  // The `@` suffix is an account only for providers with stored accounts —
+  // ollama reuses it for named servers, where the implicit-default and
+  // explicit forms of the same target would fake a boundary. The backend
+  // still parks a real handover on the PATCH either way; this only decides
+  // whether to ask first.
+  const ACCOUNT_PROVIDERS = new Set(['claude', 'grok', 'kimi', 'mock'])
   const continuityKey = (id: string | null | undefined): string => {
     const m = id || appDefaultModel || ''
     const provider = m.includes(':') ? m.slice(0, m.indexOf(':')) : 'claude'
-    const at = m.lastIndexOf('@')
+    const at = ACCOUNT_PROVIDERS.has(provider) ? m.lastIndexOf('@') : -1
     return `${provider}@${at >= 0 ? m.slice(at + 1) : ''}`
   }
   const requestModelChange = (id: string) => {
@@ -1851,10 +1859,12 @@ export default function ChatView({
     if (crosses && events.length > 0 && !sessionDetail?.is_worker) {
       setPendingModelSwitch(id)
     } else {
-      patchSession({ model: id })
+      // Clears effort in the same PATCH when the target provider has no
+      // matching level — the modals do this via their on-change guard; the
+      // chat switch was the odd one out and kept sending a stale effort.
+      patchSession(sessionModelPatch(id, sessionDetail?.effort, availableProviders))
     }
   }
-
   const autoswitchOn = sessionDetail?.model_autoswitch ?? !!sessionDetail?.is_worker
   const sessionMenuItems: MenuItem[] = [
     { label: 'Rename', onSelect: handleRename, testId: 'chat-menu-rename' },
@@ -1915,7 +1925,12 @@ export default function ChatView({
               active: m.id === sessionDetail?.model,
               onSelect: () => requestModelChange(m.id),
             }))
-          : [{ label: 'Loading models…', disabled: true }],
+          : [
+              {
+                label: modelsError ? 'Failed to load models — reopen to retry' : 'Loading models…',
+                disabled: true,
+              },
+            ],
     },
     {
       label: 'System prompt',
@@ -1938,16 +1953,20 @@ export default function ChatView({
     {
       label: 'Effort',
       hint: sessionDetail?.effort ?? 'default',
-      submenu: effortOptions.map((o) => ({
+      // A stored effort the current provider doesn't offer (provider
+      // switched or removed) shows as an explicit disabled "(unavailable)"
+      // row instead of a hint with no matching entry; picking Default (or
+      // any level) clears it.
+      submenu: effortSelectOptions(effortOptions, sessionDetail?.effort ?? '').map((o) => ({
         label: o.label,
         active: (sessionDetail?.effort ?? '') === o.value,
+        disabled: !effortOptions.some((x) => x.value === o.value),
         onSelect: () => patchSession({ effort: o.value || null }),
       })),
     },
     {
       label: 'Auto-switch model',
       hint: autoswitchOn ? 'On' : 'Off',
-      active: autoswitchOn,
       onSelect: () => patchSession({ model_autoswitch: !autoswitchOn }),
       testId: 'chat-menu-autoswitch',
     },
@@ -2101,6 +2120,12 @@ export default function ChatView({
           triggerClassName="chat-toolbar-menu"
           items={sessionMenuItems}
           testId="chat-toolbar-menu"
+          onOpen={() => {
+            // Same re-arm as the toolbar picker: clearing the flag lets the
+            // catalogue load effect retry, so the Model submenu isn't stuck
+            // on a dead "Loading models…" row after a failed fetch.
+            if (modelsError) setModelsError(false)
+          }}
         />
       </div>
       {searchOpen && (
@@ -2495,7 +2520,7 @@ export default function ChatView({
                   )
                   return
                 }
-                patchSession({ model: target })
+                patchSession(sessionModelPatch(target, sessionDetail?.effort, availableProviders))
               })()
             },
           }}
@@ -2505,7 +2530,7 @@ export default function ChatView({
           onConfirm={() => {
             const target = pendingModelSwitch
             setPendingModelSwitch(null)
-            patchSession({ model: target })
+            patchSession(sessionModelPatch(target, sessionDetail?.effort, availableProviders))
           }}
           onCancel={() => setPendingModelSwitch(null)}
         />

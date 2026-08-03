@@ -3,6 +3,7 @@ use serde::Deserialize;
 use std::sync::Arc;
 
 use crate::db::models::{Card, NewCard, UpdateCard};
+use crate::routes::misc::explicit_null;
 use crate::state::AppState;
 
 use super::{apply_dependencies, card_json_with_deps};
@@ -85,6 +86,10 @@ pub(super) struct UpdateCardRequest {
     /// un-pin a model.
     #[serde(default, deserialize_with = "explicit_null")]
     model: Option<Option<String>>,
+    /// Explicit `null` clears the effort override (see `explicit_null`);
+    /// absent leaves it alone. Without this the effort picker's "Default"
+    /// choice was silently dropped on update.
+    #[serde(default, deserialize_with = "explicit_null")]
     effort: Option<Option<String>>,
     worker_session_id: Option<Option<String>>,
     last_worker_session_id: Option<Option<String>>,
@@ -100,20 +105,6 @@ pub(super) struct UpdateCardRequest {
     model_autoswitch: Option<Option<bool>>,
     /// When present, replaces the card's full dependency set.
     depends_on: Option<Vec<String>>,
-}
-
-/// Deserialize an `Option<Option<T>>` so an explicit JSON `null` survives.
-///
-/// Serde collapses `null` into the OUTER `None`, which makes "clear this
-/// field" indistinguishable from "leave it alone" — the update then silently
-/// keeps the old value. With this, an absent key stays `None` (serde's
-/// `default`) and `null` arrives as `Some(None)`.
-fn explicit_null<'de, D, T>(de: D) -> Result<Option<Option<T>>, D::Error>
-where
-    D: serde::Deserializer<'de>,
-    T: serde::Deserialize<'de>,
-{
-    Option::<T>::deserialize(de).map(Some)
 }
 
 /// POST /api/projects/:id/cards

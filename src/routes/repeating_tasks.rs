@@ -19,6 +19,7 @@ use std::sync::Arc;
 use crate::auth::middleware::require_auth;
 use crate::db::models::{NewRepeatingTask, UpdateRepeatingTask};
 use crate::repeating::{RunContext, Schedule, StartOutcome, initial_next_run_at};
+use crate::routes::misc::explicit_null;
 use crate::state::AppState;
 
 #[derive(Deserialize)]
@@ -54,6 +55,10 @@ pub struct UpdateRepeatingTaskRequest {
     pub schedule_kind: Option<String>,
     pub schedule_value: Option<serde_json::Value>,
     pub model: Option<Option<String>>,
+    /// Explicit `null` clears the effort override (see `explicit_null`);
+    /// absent leaves it alone. Without this the edit form's "Default"
+    /// choice was silently dropped.
+    #[serde(default, deserialize_with = "explicit_null")]
     pub effort: Option<Option<String>>,
     pub enabled: Option<bool>,
     pub timezone: Option<Option<String>>,

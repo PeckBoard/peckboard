@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState, type FormEvent } from 'react'
 import { useProjectsStore } from '../store/projects'
 import {
   effortOptionsForModel,
+  effortSelectOptions,
   modelGoneFromCatalogue,
   useResourcesStore,
 } from '../store/resources'
@@ -113,10 +114,13 @@ export default function CardFormModal(props: CardFormProps) {
   }, [fetchWorkflows, fetchModels, fetchDefaultModel])
 
   // Effort options follow the effective model's provider — for an inherit
-  // card that is the inherited model, not an empty id.
+  // card that is the inherited model, not an empty id. A stored effort the
+  // provider doesn't offer (provider removed, catalogue fetch failed) is
+  // appended as an explicit "(unavailable)" row so it can't render blank
+  // and silently round-trip.
   const effortOptions = useMemo(
-    () => effortOptionsForModel(model || inheritedModel, providers),
-    [model, inheritedModel, providers],
+    () => effortSelectOptions(effortOptionsForModel(model || inheritedModel, providers), effort),
+    [model, inheritedModel, providers, effort],
   )
   // Clear a now-invalid effort back to Default on model change so we never
   // save one the provider can't use.

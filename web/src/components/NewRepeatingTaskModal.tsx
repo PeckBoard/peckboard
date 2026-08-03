@@ -4,12 +4,14 @@ import { useFoldersStore } from '../store/folders'
 import { useRepeatingTasksStore, type UpdateRepeatingTaskInput } from '../store/repeatingTasks'
 import {
   effortOptionsForModel,
+  effortSelectOptions,
   modelGoneFromCatalogue,
   useResourcesStore,
   type ModelInfo,
 } from '../store/resources'
 import Modal from './Modal'
 import ModelPicker from './ModelPicker'
+import PickerLoadError from './PickerLoadError'
 import ModelGoneNotice from './ModelGoneNotice'
 import RepeatingTaskScheduleEditor from './RepeatingTaskScheduleEditor'
 import { scheduleProblem } from '../utils/repeatingSchedule'
@@ -28,6 +30,7 @@ export default function NewRepeatingTaskModal({ initial, onClose, onSaved }: Pro
   const models = useResourcesStore((s) => s.models)
   const providers = useResourcesStore((s) => s.providers)
   const fetchModels = useResourcesStore((s) => s.fetchModels)
+  const modelsLoadError = useResourcesStore((s) => s.resourceErrors.models)
   const defaultModel = useResourcesStore((s) => s.defaultModel)
   const fetchDefaultModel = useResourcesStore((s) => s.fetchDefaultModel)
 
@@ -61,8 +64,13 @@ export default function NewRepeatingTaskModal({ initial, onClose, onSaved }: Pro
   const defaultModelGone = modelGoneFromCatalogue(defaultModel, models)
   const model = chosenModel ?? initial?.model ?? (defaultModelGone ? '' : defaultModel)
   const [effort, setEffort] = useState<string>(initial?.effort ?? '')
-  // Effort options follow the chosen model's provider.
-  const effortOptions = useMemo(() => effortOptionsForModel(model, providers), [model, providers])
+  // Effort options follow the chosen model's provider. A stored effort the
+  // provider doesn't offer is appended as an explicit "(unavailable)" row
+  // so it can't render blank and silently round-trip.
+  const effortOptions = useMemo(
+    () => effortSelectOptions(effortOptionsForModel(model, providers), effort),
+    [model, providers, effort],
+  )
   // Clear a now-invalid effort back to Default on model change so we never
   // save one the provider can't use.
   const handleModelChange = (id: string) => {
@@ -251,6 +259,9 @@ export default function NewRepeatingTaskModal({ initial, onClose, onSaved }: Pro
             models={models as ModelInfo[]}
             testId="repeating-task-model"
           />
+          {modelsLoadError && models.length === 0 && (
+            <PickerLoadError label="models" onRetry={fetchModels} />
+          )}
           <p className="form-help">Each spawned run starts on this model.</p>
           {chosenModel === null && !initial?.model && defaultModelGone && (
             <ModelGoneNotice modelId={defaultModel} />

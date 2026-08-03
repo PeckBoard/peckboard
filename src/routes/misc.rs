@@ -54,6 +54,20 @@ pub fn is_valid_priority(value: i32) -> bool {
     DEFAULT_PRIORITIES.iter().any(|(_, v, _)| *v == value)
 }
 
+/// Deserialize an `Option<Option<T>>` so an explicit JSON `null` survives.
+///
+/// Serde collapses `null` into the OUTER `None`, which makes "clear this
+/// field" indistinguishable from "leave it alone" — the update then silently
+/// keeps the old value. With this, an absent key stays `None` (serde's
+/// `default`) and `null` arrives as `Some(None)`.
+pub fn explicit_null<'de, D, T>(de: D) -> Result<Option<Option<T>>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: serde::Deserialize<'de>,
+{
+    Option::<T>::deserialize(de).map(Some)
+}
+
 /// GET /api/models — list all available models across providers
 async fn list_models(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     // Resolve providers with their effective (settings-derived) model

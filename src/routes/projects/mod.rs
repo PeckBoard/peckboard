@@ -18,6 +18,7 @@ use std::sync::Arc;
 
 use crate::auth::middleware::require_auth;
 use crate::db::models::{Card, NewProject, UpdateProject};
+use crate::routes::misc::explicit_null;
 use crate::state::AppState;
 use crate::workflow;
 
@@ -62,6 +63,10 @@ struct UpdateProjectRequest {
     status: Option<String>,
     workflow: Option<String>,
     model: Option<Option<String>>,
+    /// Explicit `null` clears the effort override (see `explicit_null`);
+    /// absent leaves it alone. Without this the edit form's "Default"
+    /// choice was silently dropped.
+    #[serde(default, deserialize_with = "explicit_null")]
     effort: Option<Option<String>>,
     parallel_instructions: Option<bool>,
     auto_notify_changes: Option<bool>,

@@ -11,6 +11,7 @@ pub(crate) use dispatch::dismiss_pending_questions;
 
 use crate::auth::middleware::{AuthUser, require_auth, require_session_access};
 use crate::db::models::{NewSession, UpdateSession};
+use crate::routes::misc::explicit_null;
 use crate::state::AppState;
 use axum::{
     Extension, Json, Router,
@@ -79,6 +80,12 @@ const MAX_SESSION_PAGE_SIZE: i64 = 500;
 struct UpdateSessionRequest {
     name: Option<String>,
     model: Option<Option<String>>,
+    /// Explicit `null` clears the effort override (see `explicit_null` —
+    /// serde otherwise collapses it into "absent" and the clear is silently
+    /// dropped). Absent leaves the stored effort alone. This is what lets a
+    /// model switch to a ladder-less provider drop a stale effort in the
+    /// same PATCH.
+    #[serde(default, deserialize_with = "explicit_null")]
     effort: Option<Option<String>>,
     project_id: Option<Option<String>>,
     card_id: Option<Option<String>>,

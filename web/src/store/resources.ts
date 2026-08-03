@@ -1,5 +1,6 @@
 import { create } from 'zustand'
 import { authedFetch } from './auth'
+import type { EffortLevel } from '../lib/effort'
 
 export interface WorkflowStepInfo {
   step: string
@@ -33,13 +34,17 @@ export interface ModelInfo {
   images_in?: boolean | null
 }
 
-/** One selectable reasoning-effort level, as served per-provider by
- *  `/api/models`. `id` is passed to the provider's `--effort` flag; `label`
- *  is shown in the effort picker. */
-export interface EffortLevel {
-  id: string
-  label: string
-}
+// Effort helpers live in `../lib/effort` (pure module, no store imports) so
+// the e2e suite can unit-test them in node; re-exported here so existing
+// imports keep working.
+export {
+  DEFAULT_EFFORT_OPTION,
+  effortOptionsForModel,
+  effortSelectOptions,
+  effortValidForModel,
+  sessionModelPatch,
+} from '../lib/effort'
+export type { EffortLevel, EffortOption } from '../lib/effort'
 
 export type InterruptKind = 'soft' | 'cooperative' | 'hard_kill'
 export type AnswerTransport = 'stdin' | 'new_turn'
@@ -109,27 +114,6 @@ export interface ProviderInfo {
    *  allowed); `true` = something usable found; `null`/absent = unknown or
    *  not applicable (local providers, plugins) — no hint shown. */
   configured?: boolean | null
-}
-
-/** The always-present "Default" effort option (no override — the provider
- *  decides). Value is `''` so it round-trips as "no effort" everywhere. */
-export const DEFAULT_EFFORT_OPTION = { value: '', label: 'Default' }
-
-/**
- * Effort dropdown options for a given model id. Derives the provider from the
- * `provider:model` prefix (bare ids default to `claude`, matching the backend),
- * then returns "Default" followed by that provider's effort levels. This is how
- * the effort picker "loads effort levels from the provider" once a model is
- * chosen — Claude/Grok expose the full ladder, Cursor/Ollama/Mock only Default.
- */
-export function effortOptionsForModel(
-  modelId: string | null | undefined,
-  providers: ProviderInfo[],
-): { value: string; label: string }[] {
-  const providerId = modelId && modelId.includes(':') ? modelId.split(':')[0] : 'claude'
-  const provider = providers.find((p) => p.id === providerId)
-  const levels = provider?.effort_levels ?? []
-  return [DEFAULT_EFFORT_OPTION, ...levels.map((l) => ({ value: l.id, label: l.label }))]
 }
 
 /** True when a stored model id no longer exists in the live catalogue —
@@ -247,6 +231,7 @@ interface ResourcesState {
 let workflowsRequestId = 0
 let modelsRequestId = 0
 let systemPromptsRequestId = 0
+let defaultModelRequestId = 0
 
 export const useResourcesStore = create<ResourcesState>((set) => ({
   workflows: [],
@@ -321,22 +306,32 @@ export const useResourcesStore = create<ResourcesState>((set) => ({
   },
 
   fetchDefaultModel: async () => {
+    const requestId = ++defaultModelRequestId
     try {
       const res = await authedFetch('/api/settings/default-model')
+      if (requestId !== defaultModelRequestId) return
       if (!res.ok) {
         set((s) => ({ resourceErrors: { ...s.resourceErrors, defaultModel: true } }))
         return
       }
       const data = await res.json()
+      if (requestId !== defaultModelRequestId) return
       set((s) => ({
         defaultModel: typeof data?.model === 'string' ? data.model : '',
         defaultModelLoaded: true,
         resourceErrors: { ...s.resourceErrors, defaultModel: false },
       }))
     } catch {
-      set((s) => ({ resourceErrors: { ...s.resourceErrors, defaultModel: true } }))
+      if (requestId === defaultModelRequestId) {
+        set((s) => ({ resourceErrors: { ...s.resourceErrors, defaultModel: true } }))
+      }
     }
   },
 
-  setDefaultModelLocal: (model: string) => set({ defaultModel: model, defaultModelLoaded: true }),
+  // Bumping the request id also drops any in-flight GET — a slow response
+  // arriving after the save must not revert the value just written.
+  setDefaultModelLocal: (model: string) => {
+    ++defaultModelRequestId
+    set({ defaultModel: model, defaultModelLoaded: true })
+  },
 }))

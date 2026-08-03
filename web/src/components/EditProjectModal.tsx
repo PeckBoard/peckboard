@@ -1,22 +1,17 @@
 import { useEffect, useMemo, useState, type FormEvent } from 'react'
 import { useProjectsStore } from '../store/projects'
-import { authedFetch } from '../store/auth'
-import { effortOptionsForModel, type ProviderInfo } from '../store/resources'
+import { effortOptionsForModel, effortSelectOptions, useResourcesStore } from '../store/resources'
 import type { Project } from '../types/api'
 import Modal from './Modal'
 import ModelPicker from './ModelPicker'
 import WorkflowSelect from './WorkflowSelect'
 import WorkflowInstructionsModal from './WorkflowInstructionsModal'
 import FieldError from './FieldError'
+import PickerLoadError from './PickerLoadError'
 
 interface Props {
   project: Project
   onClose: () => void
-}
-
-interface ModelInfo {
-  id: string
-  display_name: string
 }
 
 export default function EditProjectModal({ project, onClose }: Props) {
@@ -40,21 +35,22 @@ export default function EditProjectModal({ project, onClose }: Props) {
   const [error, setError] = useState('')
   const [showInstructions, setShowInstructions] = useState(false)
 
-  const [models, setModels] = useState<ModelInfo[]>([])
-  const [providers, setProviders] = useState<ProviderInfo[]>([])
+  const models = useResourcesStore((s) => s.models)
+  const providers = useResourcesStore((s) => s.providers)
+  const fetchModels = useResourcesStore((s) => s.fetchModels)
+  const modelsLoadError = useResourcesStore((s) => s.resourceErrors.models)
 
   useEffect(() => {
-    authedFetch('/api/models')
-      .then((res) => (res.ok ? res.json() : null))
-      .then((data) => {
-        if (data?.models) setModels(data.models)
-        if (data?.providers) setProviders(data.providers)
-      })
-      .catch(() => {})
-  }, [])
+    fetchModels()
+  }, [fetchModels])
 
-  // Effort options follow the chosen model's provider.
-  const effortOptions = useMemo(() => effortOptionsForModel(model, providers), [model, providers])
+  // Effort options follow the chosen model's provider. A stored effort the
+  // provider doesn't offer is appended as an explicit "(unavailable)" row
+  // so it can't render blank and silently round-trip.
+  const effortOptions = useMemo(
+    () => effortSelectOptions(effortOptionsForModel(model, providers), effort),
+    [model, providers, effort],
+  )
   // Clear a now-invalid effort back to Default on model change so we never
   // save one the provider can't use.
   const handleModelChange = (id: string) => {
@@ -198,6 +194,9 @@ export default function EditProjectModal({ project, onClose }: Props) {
               models={models}
               testId="edit-project-model"
             />
+            {modelsLoadError && models.length === 0 && (
+              <PickerLoadError label="models" onRetry={fetchModels} />
+            )}
           </div>
           <div className="form-field">
             <label className="form-label" htmlFor="edit-project-effort">
