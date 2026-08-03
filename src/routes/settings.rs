@@ -344,7 +344,7 @@ async fn set_pre_hatcher(
 /// The app-wide default model, or `None` when unset/empty/auto. The dispatch
 /// path reads the same key straight off the blocking store
 /// (`provider::manager::send_message_locked`); this helper serves the route.
-async fn default_model_setting(state: &Arc<AppState>) -> Option<String> {
+pub(crate) async fn default_model_setting(state: &Arc<AppState>) -> Option<String> {
     let db = state.db.clone();
     let raw = tokio::task::spawn_blocking(move || {
         db.plugin_store_get_blocking(SETTINGS_NS, SETTINGS_COLLECTION, DEFAULT_MODEL_KEY)

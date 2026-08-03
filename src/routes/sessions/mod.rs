@@ -506,6 +506,16 @@ async fn update_session(
     Ok(Json(serde_json::json!(session)))
 }
 
+/// Resolve the model a session actually dispatches on: its pinned model,
+/// else the app-wide default, else the literal fallback `"default"` used
+/// when nothing is configured. Mirrors the frontend's `modelDisplayName`
+/// resolution so the continuity check sees what really runs.
+fn effective_model<'a>(session_model: Option<&'a str>, app_default: &'a Option<String>) -> &'a str {
+    session_model
+        .or(app_default.as_deref())
+        .unwrap_or("default")
+}
+
 /// Decide whether a requested model change should trigger a handover, and
 /// return the target model id if so. `Ok(None)` means a plain switch: no
 /// model change requested, the change stays within the same
@@ -541,7 +551,8 @@ async fn maybe_handover_target(
             })),
         ));
     }
-    let current = session.model.as_deref().unwrap_or("default");
+    let app_default = crate::routes::settings::default_model_setting(state).await;
+    let current = effective_model(session.model.as_deref(), &app_default);
     if !crate::handover::needs_handover(current, new_model) {
         return Ok(None);
     }
@@ -1141,5 +1152,30 @@ mod truncate_tests {
         let body = "a".repeat(2500);
         let out = truncate_on_char_boundary(&body, 2000);
         assert_eq!(out, format!("{}... (truncated)", "a".repeat(2000)));
+    }
+}
+
+#[cfg(test)]
+mod effective_model_tests {
+    use super::effective_model;
+
+    #[test]
+    fn pinned_model_wins_over_default() {
+        let default = Some("cursor:gpt-5@acct".to_string());
+        assert_eq!(
+            effective_model(Some("claude:opus"), &default),
+            "claude:opus"
+        );
+    }
+
+    #[test]
+    fn unpinned_session_resolves_to_app_default() {
+        let default = Some("cursor:gpt-5@acct".to_string());
+        assert_eq!(effective_model(None, &default), "cursor:gpt-5@acct");
+    }
+
+    #[test]
+    fn unpinned_session_with_no_default_falls_back_to_literal() {
+        assert_eq!(effective_model(None, &None), "default");
     }
 }

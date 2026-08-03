@@ -1809,7 +1809,7 @@ export default function ChatView({
   // across it means the incoming model starts cold, so confirm with the
   // user before the PATCH: hand over a summary, or clear & switch fresh.
   const continuityKey = (id: string | null | undefined): string => {
-    const m = id ?? ''
+    const m = id || appDefaultModel || ''
     const provider = m.includes(':') ? m.slice(0, m.indexOf(':')) : 'claude'
     const at = m.lastIndexOf('@')
     return `${provider}@${at >= 0 ? m.slice(at + 1) : ''}`
