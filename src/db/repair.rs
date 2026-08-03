@@ -49,6 +49,7 @@ pub fn ensure_schema(conn: &mut SqliteConnection) -> anyhow::Result<()> {
     ensure_sessions_worker_step_column(conn)?;
     ensure_sessions_user_id_column(conn)?;
     ensure_sessions_context_reset_column(conn)?;
+    ensure_sessions_parent_link_columns(conn)?;
     ensure_model_autoswitch_columns(conn)?;
     ensure_system_prompt_name_columns(conn)?;
     ensure_system_prompts_table(conn)?;
@@ -604,6 +605,31 @@ fn ensure_sessions_context_reset_column(conn: &mut SqliteConnection) -> anyhow::
     Ok(())
 }
 
+/// Heal DBs that predate `1784200000_session_parent_link`, whose two
+/// `ALTER TABLE sessions ADD COLUMN` statements are non-idempotent. Both
+/// columns are additive + nullable TEXT (NULL `parent_session_id` = not a
+/// subagent; NULL `subagent_completed_at` = still running), so no backfill.
+/// The partial index mirrors the migration.
+fn ensure_sessions_parent_link_columns(conn: &mut SqliteConnection) -> anyhow::Result<()> {
+    let rows: Vec<PragmaColumn> = sql_query("PRAGMA table_info(sessions)").load(conn)?;
+    let existing: Vec<String> = rows.into_iter().map(|r| r.name).collect();
+    if existing.is_empty() {
+        return Ok(());
+    }
+    for col in ["parent_session_id", "subagent_completed_at"] {
+        if !existing.iter().any(|c| c == col) {
+            tracing::info!("Repairing schema: adding sessions.{col}");
+            sql_query(format!("ALTER TABLE sessions ADD COLUMN {col} TEXT")).execute(conn)?;
+        }
+    }
+    sql_query(
+        "CREATE INDEX IF NOT EXISTS idx_sessions_parent_session_id \
+         ON sessions(parent_session_id) WHERE parent_session_id IS NOT NULL",
+    )
+    .execute(conn)?;
+    Ok(())
+}
+
 /// Heal DBs that predate `1783700000_model_autoswitch`. The migration's two
 /// `ALTER TABLE … ADD COLUMN model_autoswitch` statements are non-idempotent,
 /// so each is detected-and-added here. Nullable BOOLEAN (NULL = inherit the
@@ -791,6 +817,43 @@ fn ensure_doc_review_tables(conn: &mut SqliteConnection) -> anyhow::Result<()> {
     .execute(conn)?;
     sql_query(
         "CREATE INDEX IF NOT EXISTS idx_doc_review_comments_status ON doc_review_comments (review_id, status)",
+    )
+    .execute(conn)?;
+    // `1785200001_doc_review_pr_links` adds these two with bare, non-idempotent
+    // ALTERs, and the CREATE TABLE above is a no-op on a DB that already has the
+    // table — so they are detected-and-added separately.
+    let comment_cols: Vec<String> = {
+        let rows: Vec<PragmaColumn> =
+            sql_query("PRAGMA table_info(doc_review_comments)").load(conn)?;
+        rows.into_iter().map(|r| r.name).collect()
+    };
+    for col in ["external_kind", "external_id"] {
+        if !comment_cols.iter().any(|c| c == col) {
+            tracing::info!("Repairing schema: adding doc_review_comments.{col}");
+            sql_query(format!(
+                "ALTER TABLE doc_review_comments ADD COLUMN {col} TEXT"
+            ))
+            .execute(conn)?;
+        }
+    }
+    // NULLs compare distinct in SQLite, so hand-written annotations still
+    // insert freely; only imported ids are held unique per review.
+    sql_query(
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_doc_review_comments_external \
+         ON doc_review_comments (review_id, external_id)",
+    )
+    .execute(conn)?;
+    log_if_healing_table(conn, "doc_review_pr_links")?;
+    sql_query(
+        "CREATE TABLE IF NOT EXISTS doc_review_pr_links (
+            review_id      TEXT    PRIMARY KEY NOT NULL REFERENCES doc_reviews(id) ON DELETE CASCADE,
+            owner          TEXT    NOT NULL,
+            repo           TEXT    NOT NULL,
+            number         INTEGER NOT NULL,
+            file_path      TEXT    NOT NULL,
+            last_synced_at TEXT,
+            created_at     TEXT    NOT NULL
+        )",
     )
     .execute(conn)?;
     Ok(())
@@ -1982,5 +2045,149 @@ mod tests {
         backfill_session_owners(&mut conn).unwrap();
         // Ambiguous ownership -> left NULL per the documented policy.
         assert_eq!(count(&mut conn, "user_id IS NULL"), 1);
+    }
+
+    /// A DB that predates `1784200000_session_parent_link` has a `sessions`
+    /// table without the subagent link columns, so every
+    /// `sessions::table.select(Session::as_select())` dies with "no such
+    /// column: parent_session_id". ensure_schema must add both plus the
+    /// partial index.
+    #[test]
+    fn ensure_schema_adds_sessions_parent_link_columns() {
+        let mut conn = SqliteConnection::establish(":memory:").unwrap();
+        // Other ensure_schema steps prod this table; stub the minimum.
+        sql_query(
+            "CREATE TABLE projects (
+                id TEXT PRIMARY KEY NOT NULL,
+                auto_notify_changes BOOLEAN NOT NULL DEFAULT 1,
+                worker_communication BOOLEAN NOT NULL DEFAULT 1
+            )",
+        )
+        .execute(&mut conn)
+        .unwrap();
+        sql_query("CREATE TABLE sessions (id TEXT PRIMARY KEY NOT NULL, name TEXT NOT NULL)")
+            .execute(&mut conn)
+            .unwrap();
+        sql_query("INSERT INTO sessions (id, name) VALUES ('s1', 'Chat')")
+            .execute(&mut conn)
+            .unwrap();
+
+        ensure_schema(&mut conn).unwrap();
+
+        let cols: Vec<String> = {
+            let rows: Vec<PragmaColumn> = sql_query("PRAGMA table_info(sessions)")
+                .load(&mut conn)
+                .unwrap();
+            rows.into_iter().map(|r| r.name).collect()
+        };
+        for expected in ["parent_session_id", "subagent_completed_at"] {
+            assert!(
+                cols.iter().any(|c| c == expected),
+                "missing {expected}; got {cols:?}",
+            );
+        }
+
+        let indexes: CountRow = sql_query(
+            "SELECT count(*) AS n FROM sqlite_master \
+             WHERE type = 'index' AND name = 'idx_sessions_parent_session_id'",
+        )
+        .get_result(&mut conn)
+        .unwrap();
+        assert_eq!(indexes.n, 1);
+
+        // The columns are readable, and the pre-existing row survived.
+        sql_query("UPDATE sessions SET parent_session_id = 'p1' WHERE id = 's1'")
+            .execute(&mut conn)
+            .unwrap();
+        assert_eq!(count(&mut conn, "parent_session_id = 'p1'"), 1);
+        assert_eq!(count(&mut conn, "subagent_completed_at IS NULL"), 1);
+
+        // Second run must be a no-op (no double-add error).
+        ensure_schema(&mut conn).unwrap();
+    }
+
+    /// A DB that predates `1785200001_doc_review_pr_links` already has
+    /// `doc_review_comments` with the original column set, so the
+    /// `CREATE TABLE IF NOT EXISTS` heal is a no-op on it. ensure_schema must
+    /// still add the two external-link columns (and the pr-links table).
+    #[test]
+    fn ensure_schema_adds_doc_review_comments_external_columns() {
+        let mut conn = SqliteConnection::establish(":memory:").unwrap();
+        // Other ensure_schema steps prod this table; stub the minimum.
+        sql_query(
+            "CREATE TABLE projects (
+                id TEXT PRIMARY KEY NOT NULL,
+                auto_notify_changes BOOLEAN NOT NULL DEFAULT 1,
+                worker_communication BOOLEAN NOT NULL DEFAULT 1
+            )",
+        )
+        .execute(&mut conn)
+        .unwrap();
+        sql_query(
+            "CREATE TABLE doc_review_comments (
+                id              TEXT    PRIMARY KEY NOT NULL,
+                review_id       TEXT    NOT NULL,
+                version         INTEGER NOT NULL,
+                start_line      INTEGER NOT NULL,
+                end_line        INTEGER NOT NULL,
+                quote           TEXT,
+                kind            TEXT    NOT NULL,
+                body            TEXT    NOT NULL,
+                status          TEXT    NOT NULL DEFAULT 'pending',
+                resolution_note TEXT,
+                created_at      TEXT    NOT NULL
+            )",
+        )
+        .execute(&mut conn)
+        .unwrap();
+        sql_query(
+            "INSERT INTO doc_review_comments \
+             (id, review_id, version, start_line, end_line, kind, body, created_at) \
+             VALUES ('c1', 'r1', 1, 1, 2, 'comment', 'hi', '2026-08-03T00:00:00Z')",
+        )
+        .execute(&mut conn)
+        .unwrap();
+
+        ensure_schema(&mut conn).unwrap();
+
+        let cols: Vec<String> = {
+            let rows: Vec<PragmaColumn> = sql_query("PRAGMA table_info(doc_review_comments)")
+                .load(&mut conn)
+                .unwrap();
+            rows.into_iter().map(|r| r.name).collect()
+        };
+        for expected in ["external_kind", "external_id"] {
+            assert!(
+                cols.iter().any(|c| c == expected),
+                "missing {expected}; got {cols:?}",
+            );
+        }
+
+        // The imported-annotation read path works on the healed table.
+        sql_query(
+            "UPDATE doc_review_comments \
+             SET external_kind = 'github_pr', external_id = '42' WHERE id = 'c1'",
+        )
+        .execute(&mut conn)
+        .unwrap();
+        let hit: CountRow = sql_query(
+            "SELECT count(*) AS n FROM doc_review_comments \
+             WHERE external_kind = 'github_pr' AND external_id = '42'",
+        )
+        .get_result(&mut conn)
+        .unwrap();
+        assert_eq!(hit.n, 1);
+
+        // The link table from the same migration is healed too.
+        let tables: CountRow = sql_query(
+            "SELECT count(*) AS n FROM sqlite_master \
+             WHERE type = 'table' AND name = 'doc_review_pr_links'",
+        )
+        .get_result(&mut conn)
+        .unwrap();
+        assert_eq!(tables.n, 1);
+
+        // Second run must be a no-op (no double-add error).
+        ensure_schema(&mut conn).unwrap();
     }
 }
