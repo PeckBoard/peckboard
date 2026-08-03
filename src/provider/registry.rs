@@ -304,17 +304,21 @@ impl ProviderRegistry {
         }
         out
     }
-
     /// Provider candidates for auto-model resolution: id, best-effort auth
     /// status, and the STATIC model catalog (not `dynamic_models` — that can
     /// probe a CLI and is too slow for the dispatch hot path this feeds).
     /// Excludes the `mock` provider: it is the scripted dev/test vehicle and
-    /// must never be auto-routed to for real work.
-    pub async fn auto_model_candidates(&self) -> Vec<crate::provider::AutoCandidate> {
+    /// must never be auto-routed to for real work. Also excludes any id in
+    /// `exclude` — the hidden/disabled set from Settings → Providers &
+    /// Accounts — so auto-routing never lands on a provider the user hid.
+    pub async fn auto_model_candidates(
+        &self,
+        exclude: &std::collections::HashSet<String>,
+    ) -> Vec<crate::provider::AutoCandidate> {
         let providers = self.providers.lock().await;
         let mut out = Vec::with_capacity(providers.len());
         for r in providers.values() {
-            if r.info.id == "mock" {
+            if r.info.id == "mock" || exclude.contains(&r.info.id) {
                 continue;
             }
             let auth = r.provider.auth_configured().await;
@@ -565,5 +569,81 @@ mod tests {
         );
         // Unknown provider → no answer.
         assert_eq!(registry.cheapest_model("nope").await, None);
+    }
+
+    #[tokio::test]
+    async fn auto_model_candidates_excludes_hidden_providers() {
+        let registry = ProviderRegistry::new();
+        registry
+            .register(
+                Arc::new(MockProvider::new()),
+                ProviderInfo {
+                    id: "claude".into(),
+                    display_name: "Claude".into(),
+                    models: vec![ModelInfo {
+                        id: "sonnet".into(),
+                        display_name: "Sonnet".into(),
+                        capabilities: vec![],
+                        tier: 2,
+                    }],
+                    effort_levels: standard_effort_levels(),
+                    capabilities: ProviderCapabilities::default(),
+                },
+            )
+            .await;
+        registry
+            .register(
+                Arc::new(MockProvider::new()),
+                ProviderInfo {
+                    id: "ollama".into(),
+                    display_name: "Ollama".into(),
+                    models: vec![ModelInfo {
+                        id: "llama3".into(),
+                        display_name: "Llama 3".into(),
+                        capabilities: vec![],
+                        tier: 1,
+                    }],
+                    effort_levels: standard_effort_levels(),
+                    capabilities: ProviderCapabilities::default(),
+                },
+            )
+            .await;
+
+        let hidden: std::collections::HashSet<String> = ["claude".to_string()].into();
+        let candidates = registry.auto_model_candidates(&hidden).await;
+        assert_eq!(candidates.len(), 1);
+        assert_eq!(candidates[0].provider_id, "ollama");
+
+        let resolved = crate::provider::resolve_auto_model(&candidates, None, false).unwrap();
+        assert_eq!(resolved, "ollama:llama3");
+    }
+
+    #[tokio::test]
+    async fn auto_model_candidates_all_hidden_yields_empty() {
+        let registry = ProviderRegistry::new();
+        registry
+            .register(
+                Arc::new(MockProvider::new()),
+                ProviderInfo {
+                    id: "claude".into(),
+                    display_name: "Claude".into(),
+                    models: vec![ModelInfo {
+                        id: "sonnet".into(),
+                        display_name: "Sonnet".into(),
+                        capabilities: vec![],
+                        tier: 2,
+                    }],
+                    effort_levels: standard_effort_levels(),
+                    capabilities: ProviderCapabilities::default(),
+                },
+            )
+            .await;
+
+        let hidden: std::collections::HashSet<String> = ["claude".to_string()].into();
+        let candidates = registry.auto_model_candidates(&hidden).await;
+        assert!(candidates.is_empty());
+
+        let err = crate::provider::resolve_auto_model(&candidates, None, false).unwrap_err();
+        assert!(err.to_string().contains("Settings"));
     }
 }

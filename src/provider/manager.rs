@@ -418,7 +418,8 @@ impl SessionManager {
             match configured {
                 Some(m) => m,
                 None => {
-                    let candidates = self.registry.auto_model_candidates().await;
+                    let hidden = crate::routes::settings::hidden_providers_for_db(db.clone()).await;
+                    let candidates = self.registry.auto_model_candidates(&hidden).await;
                     crate::provider::resolve_auto_model(
                         &candidates,
                         resolved_effort.as_deref(),

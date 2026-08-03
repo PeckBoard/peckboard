@@ -81,7 +81,8 @@ async fn resolve_effective_model(
     if let Some(configured) = crate::routes::settings::default_model_setting(state).await {
         return configured;
     }
-    let candidates = state.provider_registry.auto_model_candidates().await;
+    let hidden = crate::routes::settings::hidden_providers(state).await;
+    let candidates = state.provider_registry.auto_model_candidates(&hidden).await;
     match crate::provider::resolve_auto_model(&candidates, resolved_effort, false) {
         Ok(m) => m,
         Err(_) => resolved_model.to_string(),
