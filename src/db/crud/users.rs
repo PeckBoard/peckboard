@@ -69,8 +69,14 @@ impl Db {
     pub async fn delete_user(&self, id: &str) -> anyhow::Result<bool> {
         let id = id.to_string();
         self.with_conn(move |conn| {
-            let count = diesel::delete(users::table.find(&id)).execute(conn)?;
-            Ok(count > 0)
+            conn.transaction::<_, anyhow::Error, _>(|conn| {
+                diesel::delete(auth_sessions::table.filter(auth_sessions::user_id.eq(&id)))
+                    .execute(conn)?;
+                diesel::delete(user_tabs::table.filter(user_tabs::user_id.eq(&id)))
+                    .execute(conn)?;
+                let count = diesel::delete(users::table.find(&id)).execute(conn)?;
+                Ok(count > 0)
+            })
         })
         .await
     }

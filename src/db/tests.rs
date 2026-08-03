@@ -647,8 +647,23 @@ mod tests {
         let all = db.list_users().await.unwrap();
         assert_eq!(all.len(), 1);
 
+        db.create_auth_session(NewAuthSession {
+            id: "as1".into(),
+            user_id: "u1".into(),
+            token_hash: "th1".into(),
+            created_at: 0,
+            expires_at: i64::MAX,
+            user_agent: None,
+            ip_address: None,
+        })
+        .await
+        .unwrap();
+        db.upsert_user_tab("u1", "report", "r1").await.unwrap();
+
         assert!(db.delete_user("u1").await.unwrap());
         assert_eq!(db.count_users().await.unwrap(), 0);
+        assert!(db.get_auth_session("as1").await.unwrap().is_none());
+        assert!(db.list_user_tabs("u1").await.unwrap().is_empty());
     }
 
     // ── Env Vars ─────────────────────────────────────────────────────
