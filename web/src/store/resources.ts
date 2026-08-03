@@ -205,6 +205,9 @@ interface ResourcesState {
   /** Reflect a Settings-page save without refetching. */
   setDefaultModelLocal: (model: string) => void
 }
+let workflowsRequestId = 0
+let modelsRequestId = 0
+let systemPromptsRequestId = 0
 
 export const useResourcesStore = create<ResourcesState>((set) => ({
   workflows: [],
@@ -216,50 +219,65 @@ export const useResourcesStore = create<ResourcesState>((set) => ({
   resourceErrors: { workflows: false, models: false, systemPrompts: false, defaultModel: false },
 
   fetchWorkflows: async () => {
+    const requestId = ++workflowsRequestId
     try {
       const res = await authedFetch('/api/workflows')
+      if (requestId !== workflowsRequestId) return
       if (!res.ok) {
         set((s) => ({ resourceErrors: { ...s.resourceErrors, workflows: true } }))
         return
       }
       const data = await res.json()
+      if (requestId !== workflowsRequestId) return
       if (data?.workflows) set({ workflows: data.workflows })
       set((s) => ({ resourceErrors: { ...s.resourceErrors, workflows: false } }))
     } catch {
-      set((s) => ({ resourceErrors: { ...s.resourceErrors, workflows: true } }))
+      if (requestId === workflowsRequestId) {
+        set((s) => ({ resourceErrors: { ...s.resourceErrors, workflows: true } }))
+      }
     }
   },
 
   fetchModels: async () => {
+    const requestId = ++modelsRequestId
     try {
       const res = await authedFetch('/api/models')
+      if (requestId !== modelsRequestId) return
       if (!res.ok) {
         set((s) => ({ resourceErrors: { ...s.resourceErrors, models: true } }))
         return
       }
       const data = await res.json()
+      if (requestId !== modelsRequestId) return
       const patch: Partial<ResourcesState> = {}
       if (data?.models) patch.models = data.models
       if (data?.providers) patch.providers = data.providers
       if (Object.keys(patch).length > 0) set(patch)
       set((s) => ({ resourceErrors: { ...s.resourceErrors, models: false } }))
     } catch {
-      set((s) => ({ resourceErrors: { ...s.resourceErrors, models: true } }))
+      if (requestId === modelsRequestId) {
+        set((s) => ({ resourceErrors: { ...s.resourceErrors, models: true } }))
+      }
     }
   },
 
   fetchSystemPrompts: async () => {
+    const requestId = ++systemPromptsRequestId
     try {
       const res = await authedFetch('/api/system-prompts')
+      if (requestId !== systemPromptsRequestId) return
       if (!res.ok) {
         set((s) => ({ resourceErrors: { ...s.resourceErrors, systemPrompts: true } }))
         return
       }
       const data = await res.json()
+      if (requestId !== systemPromptsRequestId) return
       if (data?.prompts) set({ systemPrompts: data.prompts })
       set((s) => ({ resourceErrors: { ...s.resourceErrors, systemPrompts: false } }))
     } catch {
-      set((s) => ({ resourceErrors: { ...s.resourceErrors, systemPrompts: true } }))
+      if (requestId === systemPromptsRequestId) {
+        set((s) => ({ resourceErrors: { ...s.resourceErrors, systemPrompts: true } }))
+      }
     }
   },
 
