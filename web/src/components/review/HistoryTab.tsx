@@ -133,7 +133,7 @@ export default function HistoryTab({
   useEffect(() => {
     if (selection.length !== 2) return
     let cancelled = false
-    const [left, right] = selection
+    const [left, right] = [...selection].sort((a, b) => a - b)
     Promise.all([body(left), body(right)])
       .then(([a, b]) => {
         if (!cancelled) setDiff({ left, right, result: diffLines(a, b) })
@@ -152,8 +152,11 @@ export default function HistoryTab({
   }, [selection, body])
 
   /** Only show results that describe the pair on screen right now. */
-  const matches = (r: { left: number; right: number }) =>
-    selection.length === 2 && r.left === selection[0] && r.right === selection[1]
+  const matches = (r: { left: number; right: number }) => {
+    if (selection.length !== 2) return false
+    const [left, right] = [...selection].sort((a, b) => a - b)
+    return r.left === left && r.right === right
+  }
   const shownDiff = diff && matches(diff) ? diff : null
   const shownDiffError = diffError && matches(diffError) ? diffError.message : null
 
@@ -162,7 +165,7 @@ export default function HistoryTab({
   const toggle = (n: number) => {
     const next = selection.includes(n)
       ? selection.filter((v) => v !== n)
-      : [...selection, n].slice(-2).sort((a, b) => a - b)
+      : [...selection, n].slice(-2)
     setPicked({ at: currentVersion, versions: next })
   }
 
