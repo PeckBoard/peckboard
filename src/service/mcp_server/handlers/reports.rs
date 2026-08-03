@@ -15,6 +15,27 @@ fn reports_base_dir(ctx: &ToolCallContext) -> std::path::PathBuf {
             .join(".peckboard")
     })
 }
+/// Sanitize one path segment for report storage. Mirrors `routes::reports::safe_segment`:
+/// `.` is NOT in the allowlist, so `.` / `..` can never survive and escape the reports dir.
+fn safe_report_segment(s: &str) -> Option<String> {
+    if s.is_empty() {
+        return None;
+    }
+    let cleaned: String = s
+        .chars()
+        .map(|c| {
+            if c.is_alphanumeric() || c == '-' || c == '_' {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    if cleaned.chars().all(|c| c == '_') {
+        return None;
+    }
+    Some(cleaned)
+}
 
 impl McpToolRegistry {
     pub(crate) async fn handle_write_report(
@@ -180,24 +201,11 @@ impl McpToolRegistry {
             );
         }
 
-        // Sanitize folder and file names to prevent path traversal
-        let sanitize = |s: &str| -> String {
-            s.chars()
-                .map(|c| {
-                    if c.is_alphanumeric() || c == '-' || c == '_' || c == '.' {
-                        c
-                    } else {
-                        '_'
-                    }
-                })
-                .collect()
-        };
-        let safe_folder = sanitize(folder);
-        let safe_file = sanitize(file);
-
-        if safe_folder.is_empty() || safe_file.is_empty() {
-            anyhow::bail!("folder and file names must not be empty after sanitization");
-        }
+        // Sanitize folder and file names to prevent path traversal.
+        let safe_folder = safe_report_segment(folder)
+            .ok_or_else(|| anyhow::anyhow!("invalid folder name: '{folder}'"))?;
+        let safe_file = safe_report_segment(file)
+            .ok_or_else(|| anyhow::anyhow!("invalid file name: '{file}'"))?;
 
         // Decode base64
         use base64::Engine;
@@ -213,6 +221,13 @@ impl McpToolRegistry {
         let data_dir = reports_base_dir(ctx);
         let reports_dir = data_dir.join("reports").join(&safe_folder);
         std::fs::create_dir_all(&reports_dir)?;
+        // Defence in depth: the resolved dir must stay under <dataDir>/reports.
+        let reports_root = data_dir.join("reports");
+        let root_canon = std::fs::canonicalize(&reports_root)?;
+        let dir_canon = std::fs::canonicalize(&reports_dir)?;
+        if !dir_canon.starts_with(&root_canon) {
+            anyhow::bail!("resolved report path escapes the reports directory");
+        }
 
         let filename = format!("{safe_file}.{ext_lower}");
         let path = reports_dir.join(&filename);
@@ -441,5 +456,35 @@ impl McpToolRegistry {
             "file": file,
             "content": body,
         }))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::safe_report_segment;
+
+    #[test]
+    fn rejects_traversal_segments() {
+        assert_eq!(safe_report_segment(".."), None);
+        assert_eq!(safe_report_segment("."), None);
+        assert_eq!(safe_report_segment(""), None);
+        assert_eq!(safe_report_segment("..."), None);
+        assert_eq!(safe_report_segment("/"), None);
+    }
+
+    #[test]
+    fn keeps_ordinary_names_and_neutralises_separators() {
+        assert_eq!(
+            safe_report_segment("2026-08-03"),
+            Some("2026-08-03".to_string())
+        );
+        assert_eq!(
+            safe_report_segment("../etc/passwd"),
+            Some("___etc_passwd".to_string())
+        );
+        assert_eq!(
+            safe_report_segment("my.report"),
+            Some("my_report".to_string())
+        );
     }
 }
