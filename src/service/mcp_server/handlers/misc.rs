@@ -341,7 +341,8 @@ impl McpToolRegistry {
         let url = args
             .get("url")
             .and_then(|v| v.as_str())
-            .ok_or_else(|| anyhow::anyhow!("fetch_url requires 'url'"))?;
+            .ok_or_else(|| anyhow::anyhow!("fetch_url requires 'url'"))?
+            .to_string();
 
         let max_length = args
             .get("max_length")
@@ -350,23 +351,36 @@ impl McpToolRegistry {
 
         tracing::info!(session_id = %ctx.session_id, url = %url, "MCP tool: fetch_url");
 
-        let client = reqwest::Client::builder()
-            .timeout(std::time::Duration::from_secs(15))
-            .user_agent("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
-            .build()?;
+        // Route through the plugin host's hardened fetch (same containment as
+        // `fetch_web`): http/https + GET only, private/loopback/link-local/CGNAT
+        // targets refused, DNS-pinned against rebinding, no redirects followed,
+        // 5 MiB body cap. A bare `reqwest::Client::get(url)` here would be an
+        // unrestricted SSRF primitive reachable from worker/chat/pre-hatcher.
+        let fetch_input = serde_json::json!({ "url": url, "method": "GET" }).to_string();
+        let raw =
+            tokio::task::spawn_blocking(move || crate::plugin::host::http_fetch_impl(&fetch_input))
+                .await?;
+        let parsed: Value = serde_json::from_str(&raw)?;
 
-        let response = client.get(url).send().await?;
-        let status = response.status().as_u16();
-
-        if !response.status().is_success() {
+        if let Some(fetch_err) = parsed.get("error").and_then(|v| v.as_str()) {
+            return Ok(serde_json::json!({
+                "status": "error",
+                "message": fetch_err,
+            }));
+        }
+        let status = parsed.get("status").and_then(|v| v.as_u64()).unwrap_or(0) as u16;
+        if !(200..300).contains(&status) {
             return Ok(serde_json::json!({
                 "status": "error",
                 "http_status": status,
                 "message": format!("HTTP {status}")
             }));
         }
-
-        let body = response.text().await?;
+        let body = parsed
+            .get("body")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
 
         // Strip HTML tags for a rough text extraction
         let text = if body.contains('<') && body.contains('>') {
@@ -384,11 +398,13 @@ impl McpToolRegistry {
         };
 
         let truncated = if text.len() > max_length {
-            format!(
-                "{}... (truncated at {} chars)",
-                &text[..max_length],
-                max_length
-            )
+            // Byte-slicing an arbitrary fetched `&str` at a fixed offset can land
+            // mid-codepoint; walk back to the nearest char boundary first.
+            let mut end = max_length.min(text.len());
+            while end > 0 && !text.is_char_boundary(end) {
+                end -= 1;
+            }
+            format!("{}... (truncated at {} chars)", &text[..end], max_length)
         } else {
             text
         };
@@ -475,5 +491,96 @@ impl McpToolRegistry {
             "providers": provider_list,
             "total": models.len(),
         }))
+    }
+}
+
+#[cfg(test)]
+mod fetch_url_tests {
+    use super::McpToolRegistry;
+    use crate::service::mcp_server::context::ToolCallContext;
+    use std::sync::Arc;
+
+    async fn ctx_with_folder() -> (ToolCallContext, tempfile::TempDir) {
+        use crate::db::models::{NewFolder, NewSession};
+        let dir = tempfile::tempdir().unwrap();
+        let db = Arc::new(crate::db::Db::in_memory().unwrap());
+        let ts = chrono::Utc::now().to_rfc3339();
+        db.create_folder(NewFolder {
+            id: "f-1".into(),
+            name: "f-1".into(),
+            path: dir.path().to_string_lossy().to_string(),
+            created_at: ts.clone(),
+        })
+        .await
+        .unwrap();
+        db.create_session(NewSession {
+            id: "s-1".into(),
+            name: "s-1".into(),
+            folder_id: "f-1".into(),
+            model: None,
+            effort: None,
+            is_worker: false,
+            project_id: None,
+            card_id: None,
+            conversation_id: None,
+            created_at: ts.clone(),
+            last_activity: ts,
+            repeating_task_id: None,
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+        let ctx = ToolCallContext {
+            session_id: "s-1".into(),
+            project_id: None,
+            card_id: None,
+            folder_id: "f-1".into(),
+            db,
+            broadcaster: crate::ws::broadcaster::Broadcaster::new(),
+            provider_registry: None,
+            data_dir: None,
+        };
+        (ctx, dir)
+    }
+
+    async fn assert_refused(url: &str) {
+        let (ctx, _dir) = ctx_with_folder().await;
+        let reg = McpToolRegistry::new();
+        let out = reg
+            .handle_fetch_url(serde_json::json!({ "url": url }), &ctx)
+            .await
+            .unwrap();
+        assert_eq!(out["status"], "error", "expected refusal for {url}: {out}");
+    }
+
+    #[tokio::test]
+    async fn fetch_url_refuses_loopback() {
+        assert_refused("http://127.0.0.1:9/").await;
+    }
+
+    #[tokio::test]
+    async fn fetch_url_refuses_link_local_metadata_ip() {
+        assert_refused("http://169.254.169.254/latest/meta-data/").await;
+    }
+
+    #[tokio::test]
+    async fn fetch_url_refuses_non_http_scheme() {
+        assert_refused("file:///etc/passwd").await;
+    }
+
+    #[test]
+    fn truncate_does_not_panic_on_multibyte_boundary() {
+        // 9999 ascii bytes then a 3-byte codepoint straddling the default
+        // max_length=10000 boundary at byte offset 10000..10003.
+        let text: String = "a".repeat(9999) + "\u{2014}" + &"b".repeat(20);
+        let max_length = 10000usize;
+        assert!(text.len() > max_length);
+
+        let mut end = max_length.min(text.len());
+        while end > 0 && !text.is_char_boundary(end) {
+            end -= 1;
+        }
+        let truncated = format!("{}... (truncated at {} chars)", &text[..end], max_length);
+        assert!(truncated.starts_with(&"a".repeat(9999)));
     }
 }
