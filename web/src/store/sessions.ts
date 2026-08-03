@@ -2,6 +2,7 @@ import { create } from 'zustand'
 import type { Event, Session } from '../types/api'
 import { authedFetch } from './auth'
 import { useTabsStore } from './tabs'
+import { appendEventOrdered } from './eventOrder'
 
 const DRAFTS_KEY = 'peckboard_drafts'
 
@@ -454,15 +455,9 @@ export const useSessionsStore = create<SessionsState>((set, get) => ({
         return clearMatchingPending(s, event)
       }
       // Resume/resync replays can deliver events OLDER than the current
-      // tail (a full replay reaches below the HTTP snapshot window). The
-      // straight append is the hot path; re-sort only when an
-      // out-of-order seq actually lands so old turns never render below
-      // new ones.
-      const last = existing[existing.length - 1]
-      const appended =
-        last !== undefined && event.seq < last.seq
-          ? [...existing, event].sort((a, b) => a.seq - b.seq)
-          : [...existing, event]
+      // tail (a full replay reaches below the HTTP snapshot window), so
+      // keep the log seq-ordered instead of pushing blind.
+      const appended = appendEventOrdered(existing, event)
       const nextEvents = {
         eventsBySession: {
           ...s.eventsBySession,

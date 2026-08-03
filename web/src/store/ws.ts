@@ -2,6 +2,7 @@ import { create } from 'zustand'
 import type { Event } from '../types/api'
 import { useUiStore } from './ui'
 import { useSessionsStore } from './sessions'
+import { appendEventOrdered, nextLastSeq } from './eventOrder'
 
 const TOKEN_KEY = 'peckboard_token'
 const SEQ_KEY = 'peckboard_last_seq'
@@ -318,12 +319,15 @@ export const useWsStore = create<WsState>((set, get) => ({
         const existing = eventsBySession[sessionId] ?? []
         // Dedupe by seq
         if (existing.some((e) => e.seq === event.seq)) return
-        const updatedSeqs = { ...lastSeqBySession, [sessionId]: event.seq }
+        const updatedSeqs = {
+          ...lastSeqBySession,
+          [sessionId]: nextLastSeq(lastSeqBySession[sessionId], event.seq),
+        }
         saveLastSeqs(updatedSeqs)
         set({
           eventsBySession: {
             ...eventsBySession,
-            [sessionId]: [...existing, event],
+            [sessionId]: appendEventOrdered(existing, event),
           },
           lastSeqBySession: updatedSeqs,
         })
