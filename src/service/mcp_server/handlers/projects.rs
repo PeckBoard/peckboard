@@ -82,10 +82,14 @@ impl McpToolRegistry {
             .unwrap_or("")
             .to_string();
 
+        // Clamped: a negative worker_count casts to a huge usize in the
+        // orchestrator and removes the per-project cap; an out-of-range i64
+        // would wrap on `as i32`.
         let worker_count = args
             .get("worker_count")
             .and_then(|v| v.as_i64())
-            .unwrap_or(1) as i32;
+            .unwrap_or(1)
+            .clamp(0, i32::MAX as i64) as i32;
 
         // Project workflow is a required (NOT NULL) column. MCP callers
         // may pass an explicit `workflow`; otherwise we assign the
@@ -161,7 +165,7 @@ impl McpToolRegistry {
             worker_count: args
                 .get("worker_count")
                 .and_then(|v| v.as_i64())
-                .map(|n| n as i32),
+                .map(|n| n.clamp(0, i32::MAX as i64) as i32),
             status: args
                 .get("status")
                 .and_then(|v| v.as_str())

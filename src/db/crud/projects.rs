@@ -31,7 +31,10 @@ pub(crate) fn get_project_query(
 }
 
 impl Db {
-    pub async fn create_project(&self, new: NewProject) -> anyhow::Result<Project> {
+    pub async fn create_project(&self, mut new: NewProject) -> anyhow::Result<Project> {
+        // Last line of defense: a negative worker_count would cast to a huge
+        // usize in the orchestrator and uncap spawning entirely.
+        new.worker_count = new.worker_count.max(0);
         self.with_conn(move |conn| {
             diesel::insert_into(projects::table)
                 .values(&new)
@@ -78,8 +81,9 @@ impl Db {
     pub async fn update_project(
         &self,
         id: &str,
-        update: UpdateProject,
+        mut update: UpdateProject,
     ) -> anyhow::Result<Option<Project>> {
+        update.worker_count = update.worker_count.map(|n| n.max(0));
         let id = id.to_string();
         self.with_conn(move |conn| {
             diesel::update(projects::table.find(&id))

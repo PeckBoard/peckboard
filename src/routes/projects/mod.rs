@@ -270,6 +270,9 @@ async fn create_project(
     if crate::workflow::workflow_by_id(&workflow_id).is_none() {
         return Err(bad_request(format!("unknown workflow id '{workflow_id}'")));
     }
+    if body.worker_count < 0 {
+        return Err(bad_request("worker_count must be >= 0"));
+    }
     if let Some(ref p) = body.budget_period {
         validate_budget_period(p)?;
     }
@@ -392,6 +395,9 @@ async fn update_project(
         }
         None => None,
     };
+    if body.worker_count.is_some_and(|n| n < 0) {
+        return Err(bad_request("worker_count must be >= 0"));
+    }
     if let Some(Some(p)) = &body.budget_period {
         validate_budget_period(p)?;
     }

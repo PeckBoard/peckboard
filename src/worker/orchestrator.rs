@@ -232,7 +232,10 @@ pub async fn check_and_spawn_workers_at(state: &Arc<AppState>, now: chrono::Date
             .filter(|c| c.worker_session_id.is_some() && c.step != "done" && c.step != "wont_do")
             .count();
 
-        if active_workers >= project.worker_count as usize {
+        // `worker_count` is an i32; a negative value must not cast to a huge
+        // usize (that would uncap spawning entirely).
+        let cap = project.worker_count.max(0) as usize;
+        if active_workers >= cap {
             continue;
         }
 
@@ -325,7 +328,7 @@ pub async fn check_and_spawn_workers_at(state: &Arc<AppState>, now: chrono::Date
         }
         available.retain(|c| !backing_off.contains(c.id.as_str()));
 
-        let slots = (project.worker_count as usize) - active_workers;
+        let slots = cap.saturating_sub(active_workers);
         tracing::info!(
             project_id = %project.id,
             project_name = %project.name,
