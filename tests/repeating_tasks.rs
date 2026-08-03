@@ -648,3 +648,59 @@ async fn run_ctx_writes_mcp_config_for_spawned_session() {
 
     env.session_manager.cancel_and_wait(&session.id).await;
 }
+
+#[tokio::test]
+async fn scheduler_disables_task_with_corrupt_schedule_instead_of_refiring() {
+    // A row whose schedule_value can't be parsed has a NULL next_run_at,
+    // which `list_due_repeating_tasks` treats as "due now" — so it would
+    // spawn a fresh session every tick. The scheduler must refuse the
+    // dispatch and disable the row instead.
+    let env = fresh_state().await;
+    let tmp = tempfile::tempdir().unwrap();
+    seed_folder(&env.db, "f1", tmp.path().to_str().unwrap()).await;
+
+    let ts = chrono::Utc::now().to_rfc3339();
+    env.db
+        .create_repeating_task(NewRepeatingTask {
+            id: "t1".into(),
+            name: "t1".into(),
+            description: "".into(),
+            folder_id: "f1".into(),
+            prompt: "go".into(),
+            schedule_kind: "interval".into(),
+            schedule_value: r#"{"minutes":"banana"}"#.into(),
+            model: Some("mock:happy-path".into()),
+            effort: None,
+            enabled: true,
+            next_run_at: None,
+            last_run_at: None,
+            created_at: ts.clone(),
+            updated_at: ts,
+            timezone: None,
+        })
+        .await
+        .unwrap();
+
+    env.rtm.run_due_tasks(env.run_ctx()).await;
+
+    let sessions = env.db.list_sessions_by_repeating_task("t1").await.unwrap();
+    assert!(
+        sessions.is_empty(),
+        "corrupt schedule must not dispatch; got {:?}",
+        sessions.iter().map(|s| &s.id).collect::<Vec<_>>(),
+    );
+
+    let task = env.db.get_repeating_task("t1").await.unwrap().unwrap();
+    assert!(!task.enabled, "corrupt-schedule task must be disabled");
+    assert!(task.next_run_at.is_none());
+
+    // Second tick: the row is disabled, so it isn't even due any more.
+    env.rtm.run_due_tasks(env.run_ctx()).await;
+    assert!(
+        env.db
+            .list_sessions_by_repeating_task("t1")
+            .await
+            .unwrap()
+            .is_empty(),
+    );
+}

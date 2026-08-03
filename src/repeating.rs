@@ -344,6 +344,43 @@ impl RepeatingTaskManager {
         if respect_enabled && !task.enabled {
             return Ok(StartOutcome::Disabled);
         }
+        // Defence in depth: a row whose stored schedule can't be parsed
+        // has no computable next_run_at, and a NULL next_run_at is *not*
+        // idle — `list_due_repeating_tasks` selects `next_run_at IS NULL
+        // OR next_run_at <= now`, so an enabled corrupt row is
+        // perpetually due and would spawn a fresh session every tick.
+        // Refuse the scheduler dispatch and disable the row so it drops
+        // out of the due scan and an operator can see why it stopped.
+        if let (RunTrigger::Scheduler, Err(e)) = (
+            trigger,
+            Schedule::parse(&task.schedule_kind, &task.schedule_value),
+        ) {
+            tracing::error!(
+                task_id = %task_id,
+                "Corrupt schedule; disabling repeating task instead of dispatching: {e}",
+            );
+            let _ = db
+                .update_repeating_task(
+                    task_id,
+                    UpdateRepeatingTask {
+                        enabled: Some(false),
+                        next_run_at: Some(None),
+                        updated_at: Some(Utc::now().to_rfc3339()),
+                        ..Default::default()
+                    },
+                )
+                .await;
+            record_run(
+                db,
+                task_id,
+                None,
+                "corrupt_schedule",
+                trigger,
+                Some(format!("corrupt schedule: {e}")),
+            )
+            .await;
+            return Ok(StartOutcome::Disabled);
+        }
 
         // Inline run-policy guard. Manual triggers (operator clicked
         // "Run now") are explicitly exempt — the user asked for that
@@ -366,12 +403,13 @@ impl RepeatingTaskManager {
             // re-throttling it. Without this, a corrupted next_run_at
             // pointing into the past would loop the scheduler through
             // the guard every tick.
-            let next = next_run_at_after(&task, now_dt);
+            let (next, disable) = next_run_fields(&task, now_dt);
             let _ = db
                 .update_repeating_task(
                     task_id,
                     UpdateRepeatingTask {
                         next_run_at: Some(next),
+                        enabled: disable,
                         updated_at: Some(now_dt.to_rfc3339()),
                         ..Default::default()
                     },
@@ -403,12 +441,13 @@ impl RepeatingTaskManager {
                     "Repeating task already has a running session; skipping",
                 );
                 // Still bump next_run_at so we don't spin every tick.
-                let next = next_run_at_after(&task, Utc::now());
+                let (next, disable) = next_run_fields(&task, Utc::now());
                 let _ = db
                     .update_repeating_task(
                         task_id,
                         UpdateRepeatingTask {
                             next_run_at: Some(next),
+                            enabled: disable,
                             updated_at: Some(Utc::now().to_rfc3339()),
                             ..Default::default()
                         },
@@ -565,23 +604,20 @@ impl RepeatingTaskManager {
         // *now*, not from the previous next_run_at: if the scheduler
         // was paused or the machine slept past several due times we
         // catch up to "now + interval", not 12 retries in a row.
-        let next = next_run_at_after(&task, now_dt);
-        // A "once" schedule is consumed by firing: disable the task so
-        // it drops out of the due-task scan instead of re-triggering
-        // (next_run_at is already None once `at` has passed, but leaving
-        // `enabled` on would still surface it as "next run: never" and
-        // let a manual Run-now fire it again).
-        let is_once = matches!(
-            Schedule::parse(&task.schedule_kind, &task.schedule_value),
-            Ok(Schedule::Once { .. })
-        );
+        // `next_run_fields` also decides `enabled`: a "once" schedule is
+        // consumed by firing, so the task disables itself (next_run_at is
+        // already None once `at` has passed, but leaving `enabled` on
+        // would still surface it as "next run: never" and let a manual
+        // Run-now fire it again), and a corrupt schedule disables rather
+        // than leaving a NULL next_run_at that reads as "due now" forever.
+        let (next, disable) = next_run_fields(&task, now_dt);
         let _ = db
             .update_repeating_task(
                 task_id,
                 UpdateRepeatingTask {
                     last_run_at: Some(Some(now.clone())),
                     next_run_at: Some(next),
-                    enabled: if is_once { Some(false) } else { None },
+                    enabled: disable,
                     updated_at: Some(now.clone()),
                     ..Default::default()
                 },
@@ -819,13 +855,15 @@ fn monthly_candidate(
 }
 
 /// Compute the next `next_run_at` *after* `now` for a task. Returns
-/// `None` if the schedule string is corrupted (scheduler leaves the row
-/// idle instead of spinning) or if a `once` schedule has already fired.
+/// `None` if the schedule string is corrupted or if a `once` schedule
+/// has already fired. Callers persisting the result should go through
+/// [`next_run_fields`], which also disables the task in those cases — a
+/// NULL `next_run_at` on an enabled row reads as "due now", not idle.
 pub fn next_run_at_after(task: &RepeatingTask, now: DateTime<Utc>) -> Option<String> {
     let sched = match Schedule::parse(&task.schedule_kind, &task.schedule_value) {
         Ok(s) => s,
         Err(e) => {
-            tracing::error!(task_id = %task.id, "Corrupt schedule, leaving next_run_at unset: {e}");
+            tracing::warn!(task_id = %task.id, "Corrupt schedule, no next_run_at: {e}");
             return None;
         }
     };
@@ -888,6 +926,31 @@ pub fn next_run_at_after(task: &RepeatingTask, now: DateTime<Utc>) -> Option<Str
         }
     };
     Some(next.to_rfc3339())
+}
+
+/// The `next_run_at` + `enabled` fields to persist after a dispatch
+/// attempt, as `(next_run_at, enabled_override)`. `enabled_override` is
+/// `None` when the row's `enabled` flag should be left alone.
+///
+/// [`next_run_at_after`] returns `None` both when a `once` schedule is
+/// spent and when the stored schedule can't be parsed. Persisting that
+/// `None` alone is a money-loop hazard: `list_due_repeating_tasks`
+/// selects `next_run_at IS NULL OR next_run_at <= now`, so an enabled
+/// row with a NULL `next_run_at` is perpetually due and re-spawns a
+/// session on every tick (floored only by `MIN_SCHEDULER_GAP_SECONDS`).
+/// Both `None` cases therefore also disable the task.
+fn next_run_fields(task: &RepeatingTask, now: DateTime<Utc>) -> (Option<String>, Option<bool>) {
+    match Schedule::parse(&task.schedule_kind, &task.schedule_value) {
+        Err(e) => {
+            tracing::error!(
+                task_id = %task.id,
+                "Corrupt schedule, disabling repeating task: {e}",
+            );
+            (None, Some(false))
+        }
+        Ok(Schedule::Once { .. }) => (next_run_at_after(task, now), Some(false)),
+        Ok(_) => (next_run_at_after(task, now), None),
+    }
 }
 
 /// First `next_run_at` for a newly-created task: same as `next_run_at_after`
@@ -2152,5 +2215,31 @@ mod tests {
         assert_eq!(violations[0].gap_seconds, 90);
         // Floor derived from the 2026-03-08 -> 2026-03-09 spacing.
         assert_eq!(violations[0].min_gap_seconds, 86_400);
+    }
+
+    /// A row whose schedule can't be parsed must never be persisted as
+    /// "enabled with a NULL next_run_at" — that reads as "due now" to
+    /// `list_due_repeating_tasks` and re-fires every tick.
+    #[test]
+    fn next_run_fields_disables_task_with_corrupt_schedule() {
+        let task = make_task("interval", r#"{"minutes":"banana"}"#);
+        let now = Utc.with_ymd_and_hms(2026, 3, 1, 0, 0, 0).unwrap();
+        assert_eq!(next_run_fields(&task, now), (None, Some(false)));
+    }
+
+    #[test]
+    fn next_run_fields_disables_spent_once_task() {
+        let task = make_task("once", r#"{"at":"2020-01-01T00:00"}"#);
+        let now = Utc.with_ymd_and_hms(2026, 3, 1, 0, 0, 0).unwrap();
+        assert_eq!(next_run_fields(&task, now), (None, Some(false)));
+    }
+
+    #[test]
+    fn next_run_fields_leaves_enabled_alone_for_recurring_schedule() {
+        let task = make_task("interval", r#"{"minutes":30}"#);
+        let now = Utc.with_ymd_and_hms(2026, 3, 1, 0, 0, 0).unwrap();
+        let (next, disable) = next_run_fields(&task, now);
+        assert_eq!(disable, None);
+        assert!(next.is_some());
     }
 }
