@@ -94,6 +94,10 @@ async fn main() -> anyhow::Result<()> {
     // thing the operator sees.
     let bootstrap_outcome = ensure_admin_user(&db).await?;
 
+    // First-run setup wizard flag: only a fresh install (bootstrap admin
+    // just created) should ever see it; existing installs read completed.
+    peckboard::routes::settings::ensure_setup_state(&db, bootstrap_outcome.is_some()).await;
+
     // Startup state repair: fix dangling agent-starts from previous crash
     repair_dangling_sessions(&db).await?;
 

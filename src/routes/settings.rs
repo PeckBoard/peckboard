@@ -76,6 +76,13 @@ pub const RETENTION_KEY: &str = "retention";
 /// `claude_bypass_permissions_for_db`.
 const CLAUDE_BYPASS_KEY: &str = "claude_bypass_permissions";
 
+/// Plugin-store key for first-run setup wizard completion
+/// (`{"completed": bool}`). Missing ⇒ treated as `true` — fail safe, so an
+/// existing install is never trapped behind a wizard it never had. Written
+/// once at startup by `ensure_setup_state`, and again when an admin
+/// finishes the wizard via `POST /api/settings/setup/complete`.
+const SETUP_STATE_KEY: &str = "setup_state";
+
 pub fn router(state: Arc<AppState>) -> Router<Arc<AppState>> {
     admin_router()
         .merge(user_router())
@@ -124,6 +131,7 @@ fn admin_router() -> Router<Arc<AppState>> {
             post(upload_tls_cert).delete(delete_tls_cert),
         )
         .route("/api/settings/tls/regenerate", post(regenerate_tls_cert))
+        .route("/api/settings/setup/complete", post(complete_setup))
         .route_layer(middleware::from_fn(require_admin))
 }
 
@@ -147,6 +155,7 @@ fn user_router() -> Router<Arc<AppState>> {
             get(get_default_model).put(set_default_model),
         )
         .route("/api/settings/providers", get(get_providers))
+        .route("/api/settings/setup", get(get_setup))
         .route("/api/settings/providers/{id}", put(set_provider_hidden))
 }
 
@@ -392,6 +401,79 @@ async fn set_default_model(
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(serde_json::json!({ "error": e.to_string() })),
         )),
+    }
+}
+
+/// Whether first-run setup is complete. Missing/unparsable key ⇒ `true`
+/// (fail safe — never trap an existing install behind a wizard).
+async fn setup_completed(db: &Db) -> bool {
+    let db = db.clone();
+    let raw = tokio::task::spawn_blocking(move || {
+        db.plugin_store_get_blocking(SETTINGS_NS, SETTINGS_COLLECTION, SETUP_STATE_KEY)
+    })
+    .await;
+    match raw {
+        Ok(Ok(Some(json))) => serde_json::from_str::<serde_json::Value>(&json)
+            .ok()
+            .and_then(|v| v.get("completed").and_then(|c| c.as_bool()))
+            .unwrap_or(true),
+        _ => true,
+    }
+}
+
+/// GET /api/settings/setup → `{"completed": bool}`. Any authenticated user
+/// may read it — the UI needs it to decide whether to render the wizard.
+async fn get_setup(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+    let completed = setup_completed(&state.db).await;
+    Json(serde_json::json!({ "completed": completed }))
+}
+
+/// POST /api/settings/setup/complete → 204. Marks first-run setup done;
+/// only an admin (the one running the wizard) may finish it.
+async fn complete_setup(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+    let db = state.db.clone();
+    let value = serde_json::json!({ "completed": true }).to_string();
+    let res = tokio::task::spawn_blocking(move || {
+        db.plugin_store_put_blocking(SETTINGS_NS, SETTINGS_COLLECTION, SETUP_STATE_KEY, &value)
+    })
+    .await;
+    match res {
+        Ok(Ok(_)) => Ok(StatusCode::NO_CONTENT),
+        Ok(Err(e)) => Err((
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({ "error": e.to_string() })),
+        )),
+        Err(e) => Err((
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({ "error": e.to_string() })),
+        )),
+    }
+}
+
+/// Startup: write the first-run setup flag exactly once, and never touch
+/// it again if a key already exists. `fresh_install` is
+/// `ensure_admin_user`'s `Some(_)` signal — a bootstrap admin was just
+/// created because the DB was empty, so this is a brand-new install and
+/// the wizard should show. An existing install (`fresh_install = false`)
+/// must never see the wizard, so a missing key there is written as
+/// already completed.
+pub async fn ensure_setup_state(db: &Db, fresh_install: bool) {
+    let existing_db = db.clone();
+    let existing = tokio::task::spawn_blocking(move || {
+        existing_db.plugin_store_get_blocking(SETTINGS_NS, SETTINGS_COLLECTION, SETUP_STATE_KEY)
+    })
+    .await;
+    if matches!(existing, Ok(Ok(Some(_)))) {
+        return;
+    }
+    let db = db.clone();
+    let value = serde_json::json!({ "completed": !fresh_install }).to_string();
+    let res = tokio::task::spawn_blocking(move || {
+        db.plugin_store_put_blocking(SETTINGS_NS, SETTINGS_COLLECTION, SETUP_STATE_KEY, &value)
+    })
+    .await;
+    if let Ok(Err(e)) = res {
+        tracing::warn!("Failed to write first-run setup state: {e}");
     }
 }
 
@@ -1296,6 +1378,86 @@ mod tests {
         assert!(
             dir.path().join("certs/cert.pem").exists(),
             "the self-signed fallback is refreshed even while uploaded material serves"
+        );
+    }
+
+    /// A non-admin may check whether setup is done (the UI needs this to
+    /// decide whether to render the wizard) but must not be able to finish
+    /// it themselves.
+    #[tokio::test]
+    async fn non_admin_can_read_setup_but_not_complete_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = test_state(dir.path());
+        let token = seed_authenticated_user(&state, "user").await;
+
+        let (status, body) = call(&state, &token, "GET", "/api/settings/setup", None).await;
+        assert_eq!(status, StatusCode::OK, "got {body}");
+
+        let (status, _) = call(&state, &token, "POST", "/api/settings/setup/complete", None).await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+    }
+
+    /// A missing key must read as completed — fail safe, so an install
+    /// that predates this feature (or has otherwise never written the key)
+    /// never gets trapped behind a wizard it never had.
+    #[tokio::test]
+    async fn missing_setup_key_reads_as_completed() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = test_state(dir.path());
+        let token = seed_authenticated_user(&state, "admin").await;
+
+        let (status, body) = call(&state, &token, "GET", "/api/settings/setup", None).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["completed"], true);
+    }
+
+    /// `POST /api/settings/setup/complete` flips the flag, and it stays
+    /// flipped across subsequent reads.
+    #[tokio::test]
+    async fn complete_setup_flips_the_flag_and_it_sticks() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = test_state(dir.path());
+        let token = seed_authenticated_user(&state, "admin").await;
+
+        ensure_setup_state(&state.db, true).await;
+        let (_, body) = call(&state, &token, "GET", "/api/settings/setup", None).await;
+        assert_eq!(body["completed"], false);
+
+        let (status, _) = call(&state, &token, "POST", "/api/settings/setup/complete", None).await;
+        assert_eq!(status, StatusCode::NO_CONTENT);
+
+        let (_, body) = call(&state, &token, "GET", "/api/settings/setup", None).await;
+        assert_eq!(body["completed"], true);
+
+        // A repeated ensure_setup_state (as if the server restarted) must
+        // not clobber a completed flag back to false.
+        ensure_setup_state(&state.db, true).await;
+        let (_, body) = call(&state, &token, "GET", "/api/settings/setup", None).await;
+        assert_eq!(
+            body["completed"], true,
+            "ensure_setup_state must not overwrite an existing key"
+        );
+    }
+
+    /// Fresh install (bootstrap admin just created) starts the wizard
+    /// showing; an existing install (users already present) never sees it.
+    #[tokio::test]
+    async fn ensure_setup_state_matches_fresh_install_signal() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = test_state(dir.path());
+
+        ensure_setup_state(&state.db, true).await;
+        assert!(
+            !setup_completed(&state.db).await,
+            "fresh install must show the wizard"
+        );
+
+        let dir2 = tempfile::tempdir().unwrap();
+        let state2 = test_state(dir2.path());
+        ensure_setup_state(&state2.db, false).await;
+        assert!(
+            setup_completed(&state2.db).await,
+            "an existing install must never see the wizard"
         );
     }
 }
