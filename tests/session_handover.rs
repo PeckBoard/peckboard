@@ -489,6 +489,87 @@ async fn a_stale_completion_neither_finalizes_nor_aborts_the_handover() {
     assert!(doc.contains("HANDOVER"), "doc was: {doc}");
 }
 
+/// A completion whose `run_id` clears the handover watermark but was NOT
+/// dispatched as this handover's doc turn must not be swallowed as if it
+/// were: e.g. the orchestrator resumes an ordinary worker chunk into a
+/// session whose `handover_to_model` is still parked (a race between the
+/// doc turn's process exiting and this listener processing its stale
+/// park). Before the fix, any completion with `run_id >= watermark` was
+/// treated as the doc turn's: the chunk's real output would be recorded as
+/// the handover doc, `conversation_id` would be dropped (live context
+/// destroyed), and the caller's normal worker bookkeeping
+/// (`handle_worker_done`) would never run for the chunk that actually
+/// finished.
+#[tokio::test]
+async fn a_completion_without_the_doc_dispatch_mark_is_not_swallowed_as_the_doc_turn() {
+    let (state, _token) = build_state("mock:echo").await;
+
+    // Simulate what `begin_handover` parks in the DB, WITHOUT ever actually
+    // dispatching the doc turn through `SessionManager` — so the doc-dispatch
+    // mark is never set. This stands in for the race the fix defends
+    // against: the doc turn's process already exited (or never started)
+    // and nothing has cleared the park yet.
+    state
+        .db
+        .update_session(
+            "s1",
+            UpdateSession {
+                conversation_id: Some(Some("conv-1".into())),
+                handover_to_model: Some(Some("mock:echo@acct2".into())),
+                handover_run_id: Some(Some(0)),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+
+    // A real worker chunk dispatched into this session afterward completes
+    // with a run_id far above the watermark.
+    let consumed = peckboard::handover::handle_completion(
+        &state,
+        &peckboard::provider::agent::ProcessCompletion {
+            session_id: "s1".into(),
+            completed: true,
+            error: None,
+            error_kind: None,
+            run_id: 999,
+            turn_end_only: false,
+        },
+    )
+    .await;
+
+    assert!(
+        !consumed,
+        "must not be swallowed — the caller's normal worker/crash bookkeeping must run for it"
+    );
+
+    let s = state.db.get_session("s1").await.unwrap().unwrap();
+    assert_eq!(
+        s.handover_to_model, None,
+        "the stale park is aborted, not left dangling"
+    );
+    assert_eq!(
+        s.conversation_id.as_deref(),
+        Some("conv-1"),
+        "abort must not touch conversation_id — the real chunk's context is preserved"
+    );
+    assert_eq!(s.model.as_deref(), Some("mock:echo"), "model untouched");
+    assert_eq!(
+        s.pending_handover_doc, None,
+        "no doc captured from the chunk's real output"
+    );
+
+    let events = state.db.events_tail("s1", 50).await.unwrap();
+    assert!(
+        events.iter().any(|e| e.kind == "handover-aborted"),
+        "expected a handover-aborted marker, got: {events:?}"
+    );
+    assert!(
+        !events.iter().any(|e| e.kind == "handover"),
+        "must not finalize — that would record the chunk's output as the handover doc"
+    );
+}
+
 /// A compaction requested MID-TURN on a provider that can't absorb a
 /// mid-stream send must still run its doc turn.
 ///

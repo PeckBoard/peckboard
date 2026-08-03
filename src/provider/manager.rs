@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::collections::HashSet;
 use std::sync::Arc;
 
 use tokio::sync::Mutex;
@@ -88,6 +89,19 @@ pub struct SessionManager {
     /// `AppState.env_unlock`. `None` in tests (custom env injection skipped).
     /// Wired from `main` via [`Self::with_env_unlock`].
     env_unlock: Option<Arc<crate::service::env_vars::EnvUnlockRegistry>>,
+    /// Session ids whose in-flight handover has an actually-dispatched
+    /// doc-generation turn. Set by `crate::handover` right after the doc
+    /// turn's `send_message_locked` call returns `Ok`; cleared once the
+    /// handover finalizes or aborts. In-memory (not persisted): a
+    /// `handover_run_id` watermark alone only bounds runs dispatched
+    /// BEFORE the park, not ones dispatched after, so a completion whose
+    /// `run_id` clears that bar is not proof it's the doc turn's — e.g. the
+    /// orchestrator resuming an ordinary worker chunk into a session whose
+    /// handover hasn't been cleared yet. This set is the actual proof.
+    /// Resets empty on restart, which is safe: `reconcile_parked_handovers`
+    /// aborts every still-parked handover at startup before any completion
+    /// is processed.
+    handover_doc_dispatched: Arc<Mutex<HashSet<String>>>,
 }
 
 impl SessionManager {
@@ -101,6 +115,7 @@ impl SessionManager {
             plugins: Arc::new(PluginManager::empty()),
             askpass: None,
             env_unlock: None,
+            handover_doc_dispatched: Arc::new(Mutex::new(HashSet::new())),
         }
     }
     /// A second handle onto `other`'s **per-session lock map**, for observers
@@ -126,6 +141,7 @@ impl SessionManager {
             plugins: Arc::new(PluginManager::empty()),
             askpass: None,
             env_unlock: None,
+            handover_doc_dispatched: Arc::new(Mutex::new(HashSet::new())),
         }
     }
 
@@ -160,6 +176,33 @@ impl SessionManager {
     pub fn with_plugins(mut self, plugins: Arc<PluginManager>) -> Self {
         self.plugins = plugins;
         self
+    }
+
+    /// Mark that a handover doc-generation turn was actually dispatched
+    /// for `session_id` — called by `crate::handover` right after the doc
+    /// turn's `send_message_locked` returns `Ok`. `handle_completion` uses
+    /// this to tell that turn's completion from a later, unrelated
+    /// dispatch into the same still-parked session.
+    pub async fn mark_handover_doc_dispatched(&self, session_id: &str) {
+        self.handover_doc_dispatched
+            .lock()
+            .await
+            .insert(session_id.to_string());
+    }
+
+    /// Clear the mark — called once the handover finalizes or aborts, so a
+    /// later handover on the same session starts with a clean slate.
+    pub async fn clear_handover_doc_dispatched(&self, session_id: &str) {
+        self.handover_doc_dispatched.lock().await.remove(session_id);
+    }
+
+    /// Whether a doc-generation turn was actually dispatched for the
+    /// in-flight handover on `session_id`.
+    pub async fn is_handover_doc_dispatched(&self, session_id: &str) -> bool {
+        self.handover_doc_dispatched
+            .lock()
+            .await
+            .contains(session_id)
     }
 
     /// Take the completion receiver. Called once at startup to set up the

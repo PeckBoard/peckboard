@@ -300,9 +300,15 @@ pub async fn begin_handover(
     // session can take the turn; otherwise leave it to `handle_completion`.
     let config = doc_turn_config(from_model);
     let message = doc_turn_message(from_model, to_model);
+    // Tracks whether a doc turn was actually handed to `send_message_locked`
+    // (as opposed to deferred) so a successful dispatch can be marked —
+    // `handle_completion` needs that mark to tell the doc turn's completion
+    // from a later, unrelated dispatch into the same still-parked session.
+    let mut doc_turn_dispatched = false;
     let dispatch_result: anyhow::Result<()> = match lock {
         Some(lock) => {
             append_handover_start(state, session_id, from_model, to_model).await;
+            doc_turn_dispatched = true;
             state
                 .session_manager
                 .send_message_locked(lock, message, &state.db, &state.broadcaster, config)
@@ -326,6 +332,7 @@ pub async fn begin_handover(
                 Ok(())
             } else {
                 append_handover_start(state, session_id, from_model, to_model).await;
+                doc_turn_dispatched = true;
                 state
                     .session_manager
                     .send_message_locked(&lock, message, &state.db, &state.broadcaster, config)
@@ -333,6 +340,13 @@ pub async fn begin_handover(
             }
         }
     };
+
+    if doc_turn_dispatched && dispatch_result.is_ok() {
+        state
+            .session_manager
+            .mark_handover_doc_dispatched(session_id)
+            .await;
+    }
 
     // A synchronous dispatch failure (deleted account, uninstalled
     // provider, missing folder) leaves the flag parked in the DB above with
@@ -521,6 +535,10 @@ pub async fn finalize_handover(state: &Arc<AppState>, session_id: &str) -> anyho
         None => return Ok(()), // no handover in flight
     };
     let from_model = session.model.clone().unwrap_or_default();
+    state
+        .session_manager
+        .clear_handover_doc_dispatched(session_id)
+        .await;
 
     let doc = collect_handover_doc(state, session_id).await;
     if doc.trim().is_empty() && from_model == to_model {
@@ -642,6 +660,10 @@ pub async fn abort_handover(
         return Ok(()); // no handover in flight
     };
     let from_model = session.model.clone().unwrap_or_default();
+    state
+        .session_manager
+        .clear_handover_doc_dispatched(session_id)
+        .await;
 
     let data = serde_json::json!({
         "from": from_model,
@@ -789,6 +811,38 @@ pub async fn handle_completion(
         return true;
     }
 
+    if !state
+        .session_manager
+        .is_handover_doc_dispatched(session_id)
+        .await
+    {
+        // `run_id` clears the watermark but no doc turn was ever actually
+        // dispatched for this handover — e.g. the orchestrator resumed an
+        // ordinary worker chunk into a session whose handover is still
+        // parked (a race between the doc turn's process exiting and this
+        // listener processing its completion). Treating this completion as
+        // the doc turn's would record the chunk's real output as the
+        // handover doc and drop `conversation_id`, destroying live context,
+        // and would skip `handle_worker_done`'s card bookkeeping. Abort the
+        // stale park (context-preserving) and let the caller's normal
+        // worker/crash bookkeeping run for this real completion instead.
+        tracing::warn!(
+            session_id = %session_id,
+            run_id = completion.run_id,
+            completed = completion.completed,
+            "Completion clears the handover watermark but no doc turn was dispatched \
+             for it; aborting the stale park instead of swallowing a real completion"
+        );
+        let _guard = state.session_manager.lock_session(session_id).await;
+        if let Err(e) = abort_handover(state, session_id, Some("stale parked handover")).await {
+            tracing::error!(
+                session_id = %session_id,
+                "Failed to abort stale parked handover: {e}"
+            );
+        }
+        return false;
+    }
+
     {
         let _guard = state.session_manager.lock_session(session_id).await;
         // Only a CLEAN doc turn switches the model. A crashed or interrupted
@@ -860,8 +914,7 @@ async fn dispatch_deferred_doc_turn(state: &Arc<AppState>, session_id: &str) {
         to = %to_model,
         "Dispatching the handover doc turn deferred while the session was mid-turn"
     );
-    append_handover_start(state, session_id, &from_model, &to_model).await;
-    if let Err(e) = state
+    let result = state
         .session_manager
         .send_message_locked(
             &lock,
@@ -870,15 +923,14 @@ async fn dispatch_deferred_doc_turn(state: &Arc<AppState>, session_id: &str) {
             &state.broadcaster,
             doc_turn_config(&from_model),
         )
-        .await
-    {
-        tracing::error!(
-            session_id = %session_id,
-            "Deferred handover doc turn failed to dispatch: {e}"
-        );
-        // Same reasoning as `begin_handover`'s dispatch guard: with no run
-        // started, no completion will ever arrive to clear the parked
-        // flag. Abort now instead of leaving the session stuck.
+        .await;
+    if result.is_ok() {
+        state
+            .session_manager
+            .mark_handover_doc_dispatched(session_id)
+            .await;
+    }
+    if let Err(e) = result {
         let msg = e.to_string();
         if let Err(abort_err) = abort_handover(state, session_id, Some(&msg)).await {
             tracing::error!(
