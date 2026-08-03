@@ -8,7 +8,7 @@ Peckboard is distributed as a **single executable binary**. No additional files,
 
 - **Database migrations** — baked in via Diesel's `embed_migrations!()`
 - **Frontend assets** — the compiled React SPA is embedded in the binary
-- **TLS certificates** — generated at runtime via `rcgen` (no cert files shipped)
+- **TLS certificates** — self-signed by default (ECDSA P-256, generated at runtime, no cert files shipped); an operator-uploaded certificate overrides it and hot-swaps in with no restart
 - **Default config** — sensible defaults compiled in; data directory created on first run
 
 Download one file, run it.
@@ -38,7 +38,7 @@ Download one file, run it.
 All persistent data lives under a configurable data directory (default `~/.peckboard/`):
 
 - `peckboard.db` — SQLite database (sessions, projects, cards, events, auth, push subscriptions)
-- `certs/` — self-signed TLS certificate and key (generated on first run)
+- `certs/` — self-signed TLS certificate and key (generated on first run), plus an operator-uploaded pair once one is installed
 - `worker-mcp/` — per-session MCP config JSON files consumed by the Claude CLI
 - `reports/` — markdown reports and binary attachments organized by date folder
 - `attachments/` — per-session user-uploaded files
@@ -56,7 +56,7 @@ All persistent data lives under a configurable data directory (default `~/.peckb
 
 - HTTP on configurable port (default 3333)
 - HTTPS on configurable port (default 3334) with auto-generated self-signed cert
-- WebSocket upgrades on the same ports
-- MCP subprocess calls back to HTTP on loopback (bearer-token-gated, no TLS verification needed)
+- HTTP on configurable port (default 3344)
+- HTTPS on configurable port (default 3345), serving a self-signed cert by default or an uploaded one once installed
 - mDNS advertising for LAN discovery (`<name>.local`)
 - Server binds `0.0.0.0` — all routes require auth except login/status endpoints

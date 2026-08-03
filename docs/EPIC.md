@@ -7,6 +7,7 @@ Full implementation plan covering backend (Rust/Axum), frontend (React/Zustand/V
 Everything else depends on this. No features until the skeleton runs end-to-end.
 
 ### 1.1 Project Scaffolding
+
 - [ ] Set up React + Vite + TypeScript in `web/`
 - [ ] Configure Vite proxy to Axum backend (dev mode)
 - [ ] Configure `rust-embed` to serve `web/dist/` (production mode)
@@ -15,12 +16,14 @@ Everything else depends on this. No features until the skeleton runs end-to-end.
 - [ ] Verify dev workflow: `cargo run` + `cd web && npm run dev` both work together
 
 ### 1.2 Database Layer
+
 - [ ] Generate Diesel schema from existing migration (`diesel print-schema`)
 - [ ] Create Diesel models for all tables (insertable + queryable structs)
 - [ ] Implement CRUD operations for each table behind the `Db` wrapper
 - [ ] Write unit tests for all CRUD operations (in-memory SQLite)
 
 ### 1.3 Plugin Infrastructure
+
 - [ ] Implement plugin manager: scan `<dataDir>/plugins/`, load `.wasm` files
 - [ ] Implement hook dispatcher: manifest parsing, ordered dispatch, verdict handling (allow/cancel/modify/skip)
 - [ ] Implement sandbox enforcement: 128 MB memory limit, 2s timeout, no FS, no network
@@ -29,6 +32,7 @@ Everything else depends on this. No features until the skeleton runs end-to-end.
 - [ ] Write a test plugin (`.wasm`) that exercises the hook contract
 
 ### 1.4 Event Log
+
 - [ ] Implement event append (with seq assignment) and query functions (list, list_since, tail, latest_seq)
 - [ ] Implement event hooks (event.append.before/after)
 - [ ] Write unit tests: append ordering, seq monotonicity, tail queries, hook dispatch on append
@@ -40,6 +44,7 @@ Everything else depends on this. No features until the skeleton runs end-to-end.
 ## Phase 2: Auth and Users
 
 ### 2.1 Backend Auth
+
 - [ ] Implement Argon2 password hashing and verification
 - [ ] Implement user CRUD (create, read, update, delete) with role enforcement
 - [ ] Implement JWT token generation and validation
@@ -57,6 +62,7 @@ Everything else depends on this. No features until the skeleton runs end-to-end.
 - [ ] Write integration tests: full login flow, registration, token expiry, session revocation
 
 ### 2.2 Frontend Auth
+
 - [ ] Build LoginModal component
 - [ ] Build RegisterModal component (shown on first visit when no users exist)
 - [ ] Implement auth store slice (token storage in localStorage/sessionStorage, authed flag, login/logout actions)
@@ -65,6 +71,7 @@ Everything else depends on this. No features until the skeleton runs end-to-end.
 - [ ] Write unit tests: token storage, 401 handling, auth state transitions
 
 ### 2.3 User Management
+
 - [ ] Build user management page (admin only)
 - [ ] User list with role badges
 - [ ] Create user form (username, email, password, role)
@@ -81,6 +88,7 @@ Everything else depends on this. No features until the skeleton runs end-to-end.
 ## Phase 3: Folders and Sessions
 
 ### 3.1 Folder Management
+
 - [ ] Implement folder CRUD endpoints (POST/GET/DELETE /api/folders)
 - [ ] Implement folder deletion flow: check for sessions → prompt user (delete sessions / move sessions / cancel)
 - [ ] Wire folder hooks (create/delete/missing — before/after/failed)
@@ -89,6 +97,7 @@ Everything else depends on this. No features until the skeleton runs end-to-end.
 - [ ] Write integration tests: create folder → create session in folder → delete folder flow
 
 ### 3.2 Sessions Backend
+
 - [ ] Implement session CRUD endpoints (POST/GET/PATCH/DELETE /api/sessions)
 - [ ] Implement session list (filter out worker sessions)
 - [ ] Implement session clear endpoint
@@ -99,6 +108,7 @@ Everything else depends on this. No features until the skeleton runs end-to-end.
 - [ ] Write integration tests: create session → send message → replay events
 
 ### 3.3 Sessions Frontend
+
 - [ ] Build session list (sidebar/drawer)
 - [ ] Build new session modal (name + folder dropdown)
 - [ ] Build session toolbar (model chip, rename, clear, delete)
@@ -107,6 +117,7 @@ Everything else depends on this. No features until the skeleton runs end-to-end.
 - [ ] Write unit tests: store slice state transitions
 
 ### 3.4 WebSocket
+
 - [ ] Implement WS upgrade handler in Axum
 - [ ] Implement auth handshake (first frame = JWT, 10s timeout, code 4001 on failure)
 - [ ] Implement subscribe/unsubscribe/resume frames
@@ -128,6 +139,7 @@ Everything else depends on this. No features until the skeleton runs end-to-end.
 ## Phase 4: Claude CLI Integration
 
 ### 4.1 CLI Process Management
+
 - [ ] Implement Claude CLI spawning (build argv: `claude -p`, `--output-format stream-json`, `--verbose`, `--model`, `--effort`, `--resume`, `--mcp-config`, `--permission-prompt-tool`)
 - [ ] Implement stream-json parser: read stdout line by line, classify into event kinds (agent-start, agent-text, agent-tool-start, agent-tool-end, agent-end, control_request)
 - [ ] Implement event appending: each parsed chunk → event appended to session log → broadcast via WS
@@ -139,6 +151,7 @@ Everything else depends on this. No features until the skeleton runs end-to-end.
 - [ ] Write integration tests: spawn mock CLI → stream events → verify log
 
 ### 4.2 Session Messaging
+
 - [ ] Implement send message flow: append user event → spawn or resume CLI → stream response events
 - [ ] Implement cancel (kill process)
 - [ ] Implement interrupt (soft abort)
@@ -147,6 +160,7 @@ Everything else depends on this. No features until the skeleton runs end-to-end.
 - [ ] Write integration tests: send → receive → send again (resume) → cancel → resume
 
 ### 4.3 AskUserQuestion
+
 - [ ] Implement control_request handling (parse AskUserQuestion from CLI stdout)
 - [ ] Append question event to log
 - [ ] Implement answer/reject via WS frames → write control_response on CLI stdin → append question-resolved event
@@ -155,6 +169,7 @@ Everything else depends on this. No features until the skeleton runs end-to-end.
 - [ ] Write integration tests: CLI asks question → user answers → CLI receives answer
 
 ### 4.4 Chat UI
+
 - [ ] Build event log renderer: walk events → display items (user bubbles, streaming assistant text, tool-use blocks, step headers, system notices, question cards)
 - [ ] Implement live streaming display (new agent-text events append to current message in real time)
 - [ ] Implement tool-use display (collapsible blocks with name, input, output)
@@ -170,6 +185,7 @@ Everything else depends on this. No features until the skeleton runs end-to-end.
 ## Phase 5: Projects and Cards
 
 ### 5.1 Projects Backend
+
 - [ ] Implement project CRUD endpoints
 - [ ] Implement pause/resume endpoints
 - [ ] Wire project hooks (create/update/delete/pause/resume — before/after/failed)
@@ -177,6 +193,7 @@ Everything else depends on this. No features until the skeleton runs end-to-end.
 - [ ] Write integration tests: create → pause → resume → delete
 
 ### 5.2 Cards Backend
+
 - [ ] Implement card CRUD endpoints (nested under /api/projects/:id/cards)
 - [ ] Implement card edit policy enforcement (terminal read-only, backlog-only fields)
 - [ ] Implement step advancement
@@ -186,6 +203,7 @@ Everything else depends on this. No features until the skeleton runs end-to-end.
 - [ ] Write integration tests: create card → advance step → block → unblock → done
 
 ### 5.3 Projects and Cards Frontend
+
 - [ ] Build kanban board component (columns per pipeline step, drag-to-reorder within column)
 - [ ] Build card component (title, priority, status indicators, blocked badge, worker status)
 - [ ] Build card 3-dot menu (Session, Edit, Delete, Stop Worker, Restart Worker, Cancel as Won't Do)
@@ -202,6 +220,7 @@ Everything else depends on this. No features until the skeleton runs end-to-end.
 ## Phase 6: Worker Orchestration
 
 ### 6.1 MCP Server
+
 - [ ] Implement MCP stdio server (JSON-RPC over stdin/stdout)
 - [ ] Implement MCP tools: complete_step, finish_card, wont_do_card, ask_user, create_card, list_cards, list_projects, list_workflows, write_report, attach_report_file, update_card, update_project, create_project, pause_project, resume_project, delete_card, move_card_to_done, move_card_to_wont_do
 - [ ] Implement per-session MCP config file generation
@@ -211,6 +230,7 @@ Everything else depends on this. No features until the skeleton runs end-to-end.
 - [ ] Write integration tests: spawn MCP server → call tools → verify side effects
 
 ### 6.2 Worker Lifecycle
+
 - [ ] Implement worker prompt construction (project context + card title/description + workflow step instructions + handoff context)
 - [ ] Implement spawn flow: pick unassigned cards → resolve model/effort → create session → issue MCP token → write MCP config → send initial prompt
 - [ ] Implement checkAndSpawnWorkers with per-project spawn lock (coalesce, at most one queued)
@@ -218,12 +238,13 @@ Everything else depends on this. No features until the skeleton runs end-to-end.
 - [ ] Implement handleWorkerError: schedule recovery prompt (5s delay) on same session
 - [ ] Implement step advancement: kill CLI → respawn with --resume and new step instructions
 - [ ] Implement continue-retry backoff (2s/4s/8s/16s/32s, max 5, then wont-do)
-- [ ] Implement worker intent derivation (walk log tail for *-requested events)
+- [ ] Implement worker intent derivation (walk log tail for \*-requested events)
 - [ ] Wire worker hooks (spawn/prompt/done/error/recovery/stop/restart — before/after/failed)
 - [ ] Write unit tests: prompt construction, intent derivation, backoff calculation
 - [ ] Write integration tests (with mock CLI): spawn → run → complete_step → next step → finish
 
 ### 6.3 Money-Loop Defense
+
 - [ ] Implement detectRetryLoop (walk log tail, count consecutive crashes, threshold at 3)
 - [ ] Implement blocking: denied verdict → block card with reason, no agent-start appended
 - [ ] Implement spawn-time exception blocking (first failure blocks)
@@ -231,6 +252,7 @@ Everything else depends on this. No features until the skeleton runs end-to-end.
 - [ ] Write integration tests: simulate 4 consecutive crashes → verify card blocked
 
 ### 6.4 Wake-from-Sleep
+
 - [ ] Implement wake detector (poll Date.now every 10s, detect 3x gap)
 - [ ] Implement grace window (30s post-wake: suppress retry/crash counter increments, force allow on detectRetryLoop)
 - [ ] Implement idle sweeper skip on first post-wake sweep
@@ -239,6 +261,7 @@ Everything else depends on this. No features until the skeleton runs end-to-end.
 - [ ] Write unit tests: drift detection, grace window behavior
 
 ### 6.5 Worker Watchdog
+
 - [ ] Implement sweepOrphanWorkers (60s cadence): orphan sessions, stale refs, dead-but-claimed workers, unclaimed pipeline cards
 - [ ] Wire watchdog hooks (sweep/orphan/stale_ref/dead_worker/unclaimed — before/after)
 - [ ] Write unit tests: all four watchdog cases
@@ -251,6 +274,7 @@ Everything else depends on this. No features until the skeleton runs end-to-end.
 ## Phase 7: Reports
 
 ### 7.1 Reports Backend
+
 - [ ] Implement report storage (write markdown to `<dataDir>/reports/<date>/<file>.md` with frontmatter)
 - [ ] Implement report list, read, update endpoints
 - [ ] Implement report download (raw .md) and folder zip endpoints
@@ -262,6 +286,7 @@ Everything else depends on this. No features until the skeleton runs end-to-end.
 - [ ] Write integration tests: write report → read → update → download → zip
 
 ### 7.2 Reports Frontend
+
 - [ ] Build report browser (folder accordion, file list)
 - [ ] Build report viewer (rendered markdown with DOMPurify)
 - [ ] Build report editor (raw textarea with autosave)
@@ -277,6 +302,7 @@ Everything else depends on this. No features until the skeleton runs end-to-end.
 ## Phase 8: Session Attachments
 
 ### 8.1 Backend
+
 - [ ] Implement attachment upload endpoint (base64 JSON → UUID-keyed file on disk)
 - [ ] Implement attachment list/download/delete endpoints
 - [ ] Implement attachment cascade delete on session delete/clear
@@ -287,6 +313,7 @@ Everything else depends on this. No features until the skeleton runs end-to-end.
 - [ ] Write integration tests: upload → send message with attachment → verify CLI receives path
 
 ### 8.2 Frontend
+
 - [ ] Build file upload in input bar (button, drag-drop, multi-select)
 - [ ] Build pending attachment chips (preview before send)
 - [ ] Build attachment viewer (blob URL popup for protected downloads)
@@ -299,6 +326,7 @@ Everything else depends on this. No features until the skeleton runs end-to-end.
 ## Phase 9: Notifications and Announcements
 
 ### 9.1 Push Notifications
+
 - [ ] Implement VAPID key generation and persistence
 - [ ] Implement push subscription CRUD endpoints
 - [ ] Implement push send on: session completion, worker step completion, card terminal state
@@ -308,6 +336,7 @@ Everything else depends on this. No features until the skeleton runs end-to-end.
 - [ ] Write integration tests: subscribe → trigger notification → verify push sent
 
 ### 9.2 Announcements
+
 - [ ] Implement announcement CRUD (create, get current, dismiss with compare-and-clear)
 - [ ] Implement WS broadcast on announcement change
 - [ ] Wire announcement hooks (create/dismiss — before/after)
@@ -315,6 +344,7 @@ Everything else depends on this. No features until the skeleton runs end-to-end.
 - [ ] Write unit tests: compare-and-clear race safety
 
 ### 9.3 Queued Messages
+
 - [ ] Implement queue set/get/delete/deliver operations
 - [ ] Implement auto-deliver on agent turn completion
 - [ ] Wire queue hooks (set/deliver/delete — before/after)
@@ -328,6 +358,7 @@ Everything else depends on this. No features until the skeleton runs end-to-end.
 ## Phase 10: Supporting Features
 
 ### 10.1 Git Integration
+
 - [ ] Implement repo scanning (walk folders for .git directories)
 - [ ] Implement diff and commit log endpoints
 - [ ] Build diff viewer component (diff2html)
@@ -335,13 +366,15 @@ Everything else depends on this. No features until the skeleton runs end-to-end.
 - [ ] Write integration tests: scan → diff → commit log
 
 ### 10.2 TLS
-- [ ] Implement self-signed cert generation (ECDSA P-256, rcgen)
+
+- [x] Implement self-signed cert generation (ECDSA P-256, rcgen)
 - [ ] Implement auto-renewal (24h check, 30-day window)
 - [ ] Implement user-provided cert passthrough
 - [ ] Implement HTTPS listener alongside HTTP
 - [ ] Write unit tests: cert generation, renewal window
 
 ### 10.3 mDNS
+
 - [ ] Implement mDNS advertisement (`<name>.local` at HTTPS port)
 - [ ] Implement name generation (adjective-animal-color + digit)
 - [ ] Implement republish on wake
@@ -349,12 +382,14 @@ Everything else depends on this. No features until the skeleton runs end-to-end.
 - [ ] Write unit tests: name generation, DNS-label validation
 
 ### 10.4 Keep-Awake
+
 - [ ] Implement macOS `caffeinate` spawning with watchdog respawn
 - [ ] Implement platform detection (supported on macOS/Windows only)
 - [ ] Implement toggle endpoint and UI control
 - [ ] Write unit tests: spawn/kill, watchdog behavior
 
 ### 10.5 Model Registry
+
 - [ ] Implement alias seeding (opus/sonnet/haiku/default)
 - [ ] Implement model discovery from CLI transcripts
 - [ ] Implement model/effort resolution (card > step > project > config)
@@ -364,12 +399,14 @@ Everything else depends on this. No features until the skeleton runs end-to-end.
 - [ ] Write unit tests: resolution precedence, sanitization
 
 ### 10.6 Workflows
+
 - [ ] Implement built-in workflow registry (task, research, breakdown, fast-develop, deep-develop)
 - [ ] Implement workflow resolution for cards
 - [ ] Build workflow picker component
 - [ ] Write unit tests: step lookup, empty step skipping
 
 ### 10.7 Configuration
+
 - [ ] Implement config loading (CLI args > env > config.json > defaults)
 - [ ] Implement config get/put endpoints
 - [ ] Implement first-run bootstrap (no-users check → show registration)
@@ -378,6 +415,7 @@ Everything else depends on this. No features until the skeleton runs end-to-end.
 - [ ] Write unit tests: precedence, validation
 
 ### 10.8 Theming
+
 - [ ] Implement CSS custom properties (light/dark/auto)
 - [ ] Implement primary hue picker
 - [ ] Implement theme persistence (localStorage)
@@ -390,6 +428,7 @@ Everything else depends on this. No features until the skeleton runs end-to-end.
 ## Phase 11: Server Lifecycle and Hardening
 
 ### 11.1 Server Lifecycle
+
 - [ ] Implement graceful shutdown (signal handler, drain connections, stop workers, close DB)
 - [ ] Implement startup state repair (detect dangling agent-starts, synthesize agent-end{crashed})
 - [ ] Implement session recovery (resume workers with --resume, detect missing folders)
@@ -398,6 +437,7 @@ Everything else depends on this. No features until the skeleton runs end-to-end.
 - [ ] Write integration tests: start → create state → kill → restart → verify recovery
 
 ### 11.2 Security Hardening
+
 - [ ] Implement CSP headers
 - [ ] Implement origin/CSRF protection
 - [ ] Implement body size limits (20 MB JSON, 1 MB report body)
@@ -406,6 +446,7 @@ Everything else depends on this. No features until the skeleton runs end-to-end.
 - [ ] Write security-focused integration tests: cross-origin rejection, oversized body rejection, expired token rejection
 
 ### 11.3 Comprehensive E2E Tests
+
 - [ ] Set up Playwright for E2E testing
 - [ ] Implement mock/fake CLI provider (configurable: echo, streaming delay, tool use simulation, crash simulation)
 - [ ] E2E: First boot → register → create folder → create session → chat → see streaming response
