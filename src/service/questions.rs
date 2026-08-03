@@ -73,6 +73,10 @@ pub async fn resolve_question(
     // other kind of session.
     crate::service::doc_reviews::resume_after_question(&state.db, &state.broadcaster, &session_id)
         .await;
+    // A worker card parked by `ask_user` comes back into play now that the
+    // question is resolved. No-op for non-worker sessions and for cards
+    // blocked for any other reason.
+    clear_question_block(&state.db, &state.broadcaster, &session_id).await;
 
     let event_data = data;
     let rejected = event_data
@@ -417,4 +421,164 @@ pub async fn resolve_question(
     });
 
     Ok(event)
+}
+
+// ── ask_user card blocking ───────────────────────────────────────────
+//
+// A worker that asks the user is not making progress and must not be
+// resumed until the answer lands. Two mechanisms, both required:
+//
+//   1. `card.blocked` with [`ASK_USER_BLOCK_REASON`] — keeps the card out
+//      of the orchestrator's `available` filter and shows the human why
+//      the card is parked.
+//   2. The watchdog's stale-ref sweep skips cards whose worker session has
+//      an unanswered question, so the card keeps its `worker_session_id`.
+//
+// Without (2), the 90s `ORPHAN_GRACE_SECS` sweep unassigns the card;
+// answering then resumes the old session while the orchestrator spawns a
+// second worker on the now-free card. Without (1), the unassigned card is
+// respawned every orchestrator tick — a billed agent run and a duplicate
+// question every couple of minutes, forever (the AskUser path appends no
+// `NO_PROGRESS_KIND` event, so the no-progress backoff never engages).
+
+/// `block_reason` written when a worker parks its card on `ask_user`.
+/// Also the guard for un-blocking: a card blocked for any other reason
+/// (money-loop defense, a human) is never unblocked by an answer.
+pub const ASK_USER_BLOCK_REASON: &str = "Waiting for your answer to the worker's question";
+
+/// True when `session_id` has at least one `question` event with no
+/// matching `question-resolved`. Mirrors the resolution bookkeeping used
+/// by `dismiss_pending_questions` and `/api/projects/:id/pending-questions`
+/// (both `question_id` and `questionId` spellings).
+pub async fn session_has_pending_question(db: &crate::db::Db, session_id: &str) -> bool {
+    let events = match db.list_events_by_session(session_id, None).await {
+        Ok(events) => events,
+        Err(e) => {
+            // Fail closed: an unreadable event log must not license a
+            // respawn of a worker that may be waiting on the user.
+            tracing::warn!(
+                session_id = %session_id,
+                "Failed to scan events for pending questions: {e}"
+            );
+            return true;
+        }
+    };
+
+    let mut resolved: std::collections::HashSet<&str> = std::collections::HashSet::new();
+    let mut questions: Vec<&str> = Vec::new();
+    let parsed: Vec<Option<serde_json::Value>> = events
+        .iter()
+        .map(|e| serde_json::from_str::<serde_json::Value>(&e.data).ok())
+        .collect();
+    for (ev, data) in events.iter().zip(parsed.iter()) {
+        match ev.kind.as_str() {
+            "question" => questions.push(ev.id.as_str()),
+            "question-resolved" => {
+                if let Some(qid) = data.as_ref().and_then(|d| {
+                    d.get("question_id")
+                        .or_else(|| d.get("questionId"))
+                        .and_then(|v| v.as_str())
+                }) {
+                    resolved.insert(qid);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    questions.iter().any(|qid| !resolved.contains(qid))
+}
+
+/// Park `card_id` on the user's answer: set `blocked` with
+/// [`ASK_USER_BLOCK_REASON`] and broadcast the card update. No-op when the
+/// card is already blocked — an existing block (money-loop defense, a
+/// human) carries a reason we must not overwrite, and it already keeps the
+/// card out of the orchestrator's `available` filter.
+pub async fn block_card_for_question(
+    db: &crate::db::Db,
+    broadcaster: &crate::ws::broadcaster::Broadcaster,
+    card_id: &str,
+) {
+    let card = match db.get_card(card_id).await {
+        Ok(Some(card)) => card,
+        Ok(None) => return,
+        Err(e) => {
+            tracing::warn!(card_id = %card_id, "ask_user: get_card failed: {e}");
+            return;
+        }
+    };
+    if card.blocked {
+        return;
+    }
+    let update = crate::db::models::UpdateCard {
+        blocked: Some(true),
+        block_reason: Some(Some(ASK_USER_BLOCK_REASON.to_string())),
+        updated_at: Some(chrono::Utc::now().to_rfc3339()),
+        ..Default::default()
+    };
+    match db.update_card(card_id, update).await {
+        Ok(Some(updated)) => {
+            tracing::info!(card_id = %card_id, "Card blocked while a worker question is unanswered");
+            broadcast_card(broadcaster, &updated);
+        }
+        Ok(None) => {}
+        Err(e) => tracing::warn!(card_id = %card_id, "ask_user: failed to block card: {e}"),
+    }
+}
+
+/// Release an [`ASK_USER_BLOCK_REASON`] block on the card owned by
+/// `session_id`, once that session has no unanswered question left. Called
+/// from every path that resolves a question (a real answer, a dismissal, a
+/// superseding user message), so the card can never stay parked on a
+/// question nobody is going to answer.
+///
+/// Guarded twice: only a block this module wrote is cleared, and only when
+/// the last pending question is gone (a worker may ask several).
+pub async fn clear_question_block(
+    db: &crate::db::Db,
+    broadcaster: &crate::ws::broadcaster::Broadcaster,
+    session_id: &str,
+) {
+    let Ok(Some(session)) = db.get_session(session_id).await else {
+        return;
+    };
+    let Some(card_id) = session.card_id else {
+        return;
+    };
+    let card = match db.get_card(&card_id).await {
+        Ok(Some(card)) => card,
+        _ => return,
+    };
+    if !card.blocked || card.block_reason.as_deref() != Some(ASK_USER_BLOCK_REASON) {
+        return;
+    }
+    if session_has_pending_question(db, session_id).await {
+        return;
+    }
+    let update = crate::db::models::UpdateCard {
+        blocked: Some(false),
+        block_reason: Some(None),
+        updated_at: Some(chrono::Utc::now().to_rfc3339()),
+        ..Default::default()
+    };
+    match db.update_card(&card_id, update).await {
+        Ok(Some(updated)) => {
+            tracing::info!(card_id = %card_id, "Card unblocked — worker question resolved");
+            broadcast_card(broadcaster, &updated);
+        }
+        Ok(None) => {}
+        Err(e) => tracing::warn!(card_id = %card_id, "failed to unblock card after answer: {e}"),
+    }
+}
+
+/// Live kanban update, same shape as the MCP card handlers emit.
+fn broadcast_card(
+    broadcaster: &crate::ws::broadcaster::Broadcaster,
+    card: &crate::db::models::Card,
+) {
+    broadcaster.broadcast(crate::ws::broadcaster::WsEvent {
+        event_type: "card-update".into(),
+        session_id: card.project_id.clone(),
+        data: serde_json::json!({ "card": card }),
+    });
 }

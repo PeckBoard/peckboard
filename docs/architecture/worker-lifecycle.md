@@ -47,6 +47,19 @@ Worker signals completion via one of four MCP tools (logged as durable events be
 3. **`wont_do_card`** — park in 'wont-do' column for human triage
 4. **`ask_user`** — block card, surface question on kanban card
 
+`ask_user` specifics (`handlers/misc.rs` → `service::questions`): the card is
+set `blocked = true` with `block_reason = ASK_USER_BLOCK_REASON` and KEEPS its
+`worker_session_id`. The watchdog's stale-ref sweep skips any card whose worker
+session has a `question` event with no matching `question-resolved`, so the
+idle-but-waiting worker is never unassigned. Resolving the question (answer,
+dismiss, or a superseding user message) calls
+`questions::clear_question_block`, which unblocks the card only when no
+question is left pending and only when the block is this one — a money-loop or
+operator block is never cleared by an answer. Without both halves the card
+would be handed back to the orchestrator every ~90s and the worker respawned
+to re-ask the same question, with no backoff (the ask-user path appends no
+`no-progress` event).
+
 Fallback: message ending with "DONE" (works but less preferred)
 
 On done event, `handleWorkerDone`:

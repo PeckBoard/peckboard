@@ -1002,6 +1002,12 @@ pub(crate) async fn dismiss_pending_questions(
             ),
         }
     }
+
+    // Dismissing the last pending question releases an `ask_user` card
+    // block just like answering it does — otherwise the card stays parked
+    // on a question that is no longer on screen.
+    crate::service::questions::clear_question_block(&state.db, &state.broadcaster, session_id)
+        .await;
 }
 
 /// GET /api/sessions/:id/status -- derive agent status from the event tail.

@@ -173,6 +173,16 @@ impl McpToolRegistry {
         // the question card. No-op for every other kind of session.
         crate::service::doc_reviews::mark_needs_input(&ctx.db, &ctx.broadcaster, &ctx.session_id)
             .await;
+        // A worker asking the user is parked until the answer lands: block
+        // the card so the orchestrator's `available` filter skips it. The
+        // watchdog separately keeps `worker_session_id` on the card while a
+        // question is unanswered, so answering resumes THIS session instead
+        // of spawning a second worker. Released by
+        // `questions::clear_question_block` on answer/dismiss.
+        if let Some(ref card_id) = resolved_card_id {
+            crate::service::questions::block_card_for_question(&ctx.db, &ctx.broadcaster, card_id)
+                .await;
+        }
 
         Ok(serde_json::json!({
             "status": "ok",

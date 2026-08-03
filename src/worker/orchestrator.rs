@@ -290,6 +290,17 @@ pub async fn check_and_spawn_workers_at(state: &Arc<AppState>, now: chrono::Date
             if card.last_worker_session_id.is_none() {
                 continue;
             }
+            // Never resume a card whose last worker is still waiting on an
+            // unanswered `ask_user` question: that respawn re-asks the same
+            // question on a fresh billed run every tick. Normally the card
+            // is still assigned and blocked and never reaches this filter —
+            // this is the backstop for a card that lost either signal.
+            if let Some(sid) = card.last_worker_session_id.as_deref()
+                && crate::service::questions::session_has_pending_question(&state.db, sid).await
+            {
+                backing_off.insert(card.id.as_str());
+                continue;
+            }
             let events = state
                 .db
                 .card_lifecycle_events(&card.id, 256)
@@ -1097,11 +1108,21 @@ pub async fn handle_worker_done(state: &Arc<AppState>, session_id: &str) {
         }
 
         Some(WorkerIntent::AskUser { question }) => {
-            // Leave as-is; the ask-user-requested event is already in the log
-            // and will surface to the user through the normal event stream.
+            // Leave the card assigned; the ask-user-requested event is
+            // already in the log and will surface to the user through the
+            // normal event stream. Block it too (idempotent with the
+            // `ask_user` handler's own block) so the orchestrator's
+            // `available` filter skips the card even if the watchdog does
+            // clear the assignment.
+            crate::service::questions::block_card_for_question(
+                &state.db,
+                &state.broadcaster,
+                &card_id,
+            )
+            .await;
             tracing::info!(
                 card_id = %card_id,
-                "Worker asked user a question, leaving card assigned"
+                "Worker asked user a question, leaving card assigned and blocked"
             );
             let _ = question; // already recorded via MCP tool
         }

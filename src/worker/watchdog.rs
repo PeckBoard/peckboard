@@ -58,7 +58,10 @@ pub async fn start_watchdog(
 /// orchestrator spawn that's already replaced the assignment can't be
 /// clobbered. This pass is the runtime equivalent of
 /// `security::repair_dangling_sessions`, which only runs at startup.
-async fn sweep_stale_card_refs(db: &Db, session_manager: &SessionManager) {
+///
+/// `pub` so integration tests can run one sweep deterministically instead
+/// of waiting on the 60s loop.
+pub async fn sweep_stale_card_refs(db: &Db, session_manager: &SessionManager) {
     let projects = match db.list_projects().await {
         Ok(projects) => projects,
         Err(e) => {
@@ -83,6 +86,23 @@ async fn sweep_stale_card_refs(db: &Db, session_manager: &SessionManager) {
                 continue;
             };
             if card.step == "done" || card.step == "wont_do" {
+                continue;
+            }
+
+            // A worker waiting on `ask_user` is idle by design: its turn
+            // ended, so `is_running` is false and `last_activity` ages past
+            // the grace window while the human takes their time. Clearing
+            // the ref here would unassign the card, and answering later
+            // would then resume this session AND let the orchestrator spawn
+            // a second worker on the now-free card. Keep the assignment
+            // until the question is resolved (see
+            // `service::questions::clear_question_block`).
+            if crate::service::questions::session_has_pending_question(db, session_id).await {
+                tracing::debug!(
+                    card_id = %card.id,
+                    session_id = %session_id,
+                    "Watchdog: stale-ref sweep skipping card awaiting a user answer"
+                );
                 continue;
             }
 
@@ -764,5 +784,73 @@ mod tests {
         sweep_stale_card_refs(&db, &sm).await;
         let card = db.get_card("c1").await.unwrap().unwrap();
         assert!(card.worker_session_id.is_none());
+    }
+
+    /// The money-loop case: a worker asked the user and its turn ended, so
+    /// the session is idle and ages out of the grace window while the human
+    /// takes their time. Clearing the ref here would unassign the card and
+    /// hand it straight back to the orchestrator, which respawns the worker
+    /// to re-ask the same question on a fresh billed run — every ~90s,
+    /// uncapped (the ask-user path appends no NO_PROGRESS_KIND event, so
+    /// the no-progress backoff never engages).
+    #[tokio::test]
+    async fn stale_card_ref_with_unanswered_question_is_preserved() {
+        let db = setup().await;
+        let sm = SessionManager::new(std::sync::Arc::new(
+            crate::provider::registry::ProviderRegistry::new(),
+        ));
+        seed_session(&db, "ws-asking", &old_ts()).await;
+        seed_card_with_worker(&db, "c1", Some("ws-asking")).await;
+        db.append_event(
+            "ws-asking",
+            "question",
+            serde_json::json!({ "questions": [{ "question": "Which one?" }] }),
+        )
+        .await
+        .unwrap();
+
+        sweep_stale_card_refs(&db, &sm).await;
+
+        let card = db.get_card("c1").await.unwrap().unwrap();
+        assert_eq!(
+            card.worker_session_id.as_deref(),
+            Some("ws-asking"),
+            "a card awaiting a user answer must keep its worker assignment"
+        );
+    }
+
+    /// Once the question is answered the session is an ordinary idle
+    /// session again, so the normal stale-ref rules apply.
+    #[tokio::test]
+    async fn stale_card_ref_with_answered_question_is_cleared() {
+        let db = setup().await;
+        let sm = SessionManager::new(std::sync::Arc::new(
+            crate::provider::registry::ProviderRegistry::new(),
+        ));
+        seed_session(&db, "ws-answered", &old_ts()).await;
+        seed_card_with_worker(&db, "c1", Some("ws-answered")).await;
+        let question = db
+            .append_event(
+                "ws-answered",
+                "question",
+                serde_json::json!({ "questions": [{ "question": "Which one?" }] }),
+            )
+            .await
+            .unwrap();
+        db.append_event(
+            "ws-answered",
+            "question-resolved",
+            serde_json::json!({ "question_id": question.id, "answers": { "0": "this one" } }),
+        )
+        .await
+        .unwrap();
+
+        sweep_stale_card_refs(&db, &sm).await;
+
+        let card = db.get_card("c1").await.unwrap().unwrap();
+        assert!(
+            card.worker_session_id.is_none(),
+            "an answered question must not pin the card forever"
+        );
     }
 }
