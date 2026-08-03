@@ -412,14 +412,17 @@ async fn handle_connection(socket: WebSocket, state: Arc<AppState>) {
             event = broadcast_rx.recv() => {
                 match event {
                     Ok(ws_event) => {
-                    // Global events (card-update, announcement, queue) go to all clients
+                    // Global events (card-update, announcement, …) go to all
+                    // clients. `queue` is deliberately NOT here: its payload
+                    // names a session (and used to carry the message text), so
+                    // it must go through the per-client `is_subscribed` gate
+                    // that `may_stream_session` backs with owner-or-admin.
                     let is_global = matches!(
                         ws_event.event_type.as_str(),
                         "card-update"
                             | "card-delete"
                             | "worker-question"
                             | "announcement"
-                            | "queue"
                             | "project-update"
                             // session-deleted must reach every connected
                             // client — devices that had the session open

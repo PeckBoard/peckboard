@@ -283,7 +283,6 @@ async fn enqueue_queued_message(
 ) -> impl IntoResponse {
     let now = chrono::Utc::now().to_rfc3339();
     let broadcast_session_id = session_id.clone();
-    let broadcast_text = body.text.clone();
 
     let msg = state
         .db
@@ -309,7 +308,9 @@ async fn enqueue_queued_message(
         .broadcast(crate::ws::broadcaster::WsEvent {
             event_type: "queue".into(),
             session_id: broadcast_session_id,
-            data: serde_json::json!({ "action": "set", "id": msg.id, "text": broadcast_text }),
+            // No `text` on the wire — subscribers refetch the durable list
+            // through the access-checked queue endpoint.
+            data: serde_json::json!({ "action": "set", "id": msg.id }),
         });
 
     Ok::<_, (StatusCode, Json<serde_json::Value>)>((

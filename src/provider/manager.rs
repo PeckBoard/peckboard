@@ -687,10 +687,11 @@ impl SessionManager {
             broadcaster.broadcast(WsEvent {
                 event_type: "queue".into(),
                 session_id: session_id.to_string(),
+                // No `text`: subscribers refetch `/api/sessions/:id/queue`
+                // (which re-checks access) rather than trusting the frame.
                 data: serde_json::json!({
                     "action": "set",
                     "id": queued.id,
-                    "text": message.text,
                 }),
             });
             tracing::info!(
@@ -701,23 +702,16 @@ impl SessionManager {
             return Ok(SendOutcome::Queued);
         }
 
-        // Capture the text for the post-dispatch broadcast — the
-        // dispatch path moves the whole `UserMessage` into the
-        // provider context.
-        let mid_turn_text = if was_running {
-            Some(message.text.clone())
-        } else {
-            None
-        };
-
         self.send_message_locked(&lock, message, db, broadcaster, config)
             .await?;
 
-        if let Some(text) = mid_turn_text {
+        if was_running {
+            // Mid-turn inject: tell the session's subscribers the queue
+            // changed. No text — they refetch the durable list.
             broadcaster.broadcast(WsEvent {
                 event_type: "queue".into(),
                 session_id: session_id.to_string(),
-                data: serde_json::json!({ "action": "set", "text": text }),
+                data: serde_json::json!({ "action": "set" }),
             });
             tracing::info!(
                 session_id = %session_id,
