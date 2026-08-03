@@ -47,6 +47,8 @@ interface RepeatingTasksState {
   createTask: (input: CreateRepeatingTaskInput) => Promise<RepeatingTask>
   updateTask: (id: string, input: UpdateRepeatingTaskInput) => Promise<RepeatingTask>
   deleteTask: (id: string) => Promise<void>
+  /** Local-only cleanup for a task already deleted server-side (broadcast handler). */
+  removeTaskLocally: (id: string) => void
   /** Force-run. Returns the backend status string. */
   runNow: (id: string) => Promise<'spawned' | 'already_running' | 'disabled'>
   /** Apply a WS-driven mutation event (`repeating-task-changed`). */
@@ -135,13 +137,19 @@ export const useRepeatingTasksStore = create<RepeatingTasksState>((set, get) => 
     set((s) => ({ tasks: s.tasks.map((t) => (t.id === id ? task : t)) }))
     return task
   },
-
   deleteTask: async (id: string) => {
     const res = await authedFetch(`/api/repeating-tasks/${id}`, { method: 'DELETE' })
     if (!res.ok && res.status !== 404) {
       const err = await res.json().catch(() => ({ error: 'Failed to delete task' }))
       throw new Error(err.error || 'Failed to delete task')
     }
+    get().removeTaskLocally(id)
+  },
+
+  // Local-state cleanup shared by the user-initiated delete (after the
+  // network DELETE succeeds) and the `deleted` broadcast handler, whose
+  // row is already gone server-side so it must NOT re-issue a DELETE.
+  removeTaskLocally: (id: string) => {
     set((s) => {
       const sessions = { ...s.sessionsByTask }
       delete sessions[id]
@@ -153,10 +161,6 @@ export const useRepeatingTasksStore = create<RepeatingTasksState>((set, get) => 
         runsByTask: runs,
       }
     })
-    // Drop the strip chip immediately. The server-side cascade in
-    // delete_repeating_task removed the row already; this is the
-    // local-mirror cleanup + the in-flight `openTab` tombstone guard
-    // that stops a racing POST from resurrecting a phantom chip.
     useTabsStore.getState().removeTabsForItem('repeating_task', id)
   },
 
@@ -176,11 +180,7 @@ export const useRepeatingTasksStore = create<RepeatingTasksState>((set, get) => 
 
   applyChange: (action: string, payload: { id?: string; task?: RepeatingTask }) => {
     if (action === 'deleted' && payload.id) {
-      get()
-        .deleteTask(payload.id)
-        .catch(() => {
-          /* already removed locally */
-        })
+      get().removeTaskLocally(payload.id)
       return
     }
     if (!payload.task) return
