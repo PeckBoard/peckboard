@@ -182,6 +182,7 @@ async fn main() -> anyhow::Result<()> {
         mcp_tokens,
         push_service,
         env_unlock,
+        tls: Arc::new(peckboard::state::TlsState::new()),
     });
 
     // Now that `AppState` exists, bind the plugin agent-dispatch bridge. A
@@ -572,34 +573,66 @@ async fn main() -> anyhow::Result<()> {
         }
     }
 
-    // Start HTTPS listener if TLS certs can be loaded
-    let https_addr = format!("{}:{}", state.config.host, state.config.https_port);
-    let tls_handle = match tls::ensure_certs(&state.config.data_dir) {
-        Ok(tls_material) => {
-            // Install the default crypto provider for rustls (idempotent)
-            let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
-            match tls::load_tls_config(&tls_material) {
-                Ok(tls_acceptor) => {
-                    let https_app = app.clone();
-                    let https_listener = TcpListener::bind(&https_addr).await?;
-                    tracing::info!("Peckboard listening on https://{https_addr}");
-                    Some(tokio::spawn(serve_https(
-                        https_listener,
-                        tls_acceptor,
-                        https_app,
-                    )))
-                }
-                Err(e) => {
-                    tracing::warn!("Failed to load TLS config, HTTPS disabled: {e}");
-                    None
-                }
+    // Load TLS material into the hot-swappable resolver, then always bind
+    // the HTTPS listener — even with no cert loaded, the resolver returns
+    // `None` and handshakes just fail cleanly, so a certificate uploaded
+    // later starts working immediately with no restart. Only a TCP bind
+    // failure (port in use) skips the listener.
+    let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+
+    let mut tls_errors: Vec<String> = Vec::new();
+    let cert_loaded = match tls::ensure_certs(&state.config.data_dir) {
+        Ok(tls_material) => match state.tls.load_from(&state.config.data_dir, &tls_material) {
+            Ok(()) => true,
+            Err(e) => {
+                tracing::error!("Failed to load TLS certificate, HTTPS disabled: {e:#}");
+                tls_errors.push(format!("{e:#}"));
+                false
             }
-        }
+        },
         Err(e) => {
-            tracing::warn!("Failed to ensure TLS certs, HTTPS disabled: {e}");
-            None
+            tracing::error!("Failed to ensure TLS certs, HTTPS disabled: {e:#}");
+            state.tls.set_error(&format!("{e:#}"));
+            tls_errors.push(format!("{e:#}"));
+            false
         }
     };
+
+    let https_addr = format!("{}:{}", state.config.host, state.config.https_port);
+    let (tls_handle, bind_ok) = match TcpListener::bind(&https_addr).await {
+        Ok(https_listener) => {
+            let resolver: Arc<dyn rustls::server::ResolvesServerCert> =
+                Arc::new(peckboard::state::TlsCertResolver(state.tls.clone()));
+            let tls_acceptor = tls::acceptor_from_resolver(resolver);
+            let https_app = app.clone();
+            tracing::info!("Peckboard listening on https://{https_addr}");
+            (
+                Some(tokio::spawn(serve_https(
+                    https_listener,
+                    tls_acceptor,
+                    https_app,
+                ))),
+                true,
+            )
+        }
+        Err(e) => {
+            tracing::error!("Failed to bind HTTPS listener on {https_addr}: {e}");
+            tls_errors.push(format!(
+                "failed to bind HTTPS listener on {https_addr}: {e}"
+            ));
+            (None, false)
+        }
+    };
+
+    state.tls.set_https_enabled(cert_loaded && bind_ok);
+
+    if tls_errors.is_empty() {
+        if let Err(e) = tls::clear_failure_announcement(&state.db).await {
+            tracing::warn!("Failed to clear TLS failure announcement: {e}");
+        }
+    } else if let Err(e) = tls::announce_failure(&state.db, &tls_errors.join("; ")).await {
+        tracing::warn!("Failed to record TLS failure announcement: {e}");
+    }
 
     // Print the first-run admin credentials *last* so they sit below
     // the startup tracing noise and are the operator's final view

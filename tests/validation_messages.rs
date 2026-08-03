@@ -94,6 +94,7 @@ async fn build_fixture() -> Fixture {
         run_auditor: peckboard::repeating::RunAuditor::new(),
         mcp_tokens: McpTokenRegistry::new(),
         push_service,
+        tls: Arc::new(peckboard::state::TlsState::new()),
     });
     // The data dir has to outlive the state; the process is short-lived.
     std::mem::forget(tmp);

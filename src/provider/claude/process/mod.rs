@@ -230,6 +230,8 @@ pub struct LoopState {
     /// watchdog.
     pub turn_timeout: Option<std::time::Duration>,
     /// How long a soft interrupt waits for its settling `result` before
+    /// the loop falls back to hard-killing the child. Production uses
+    /// [`INTERRUPT_GRACE`]; tests shrink it.
     pub interrupt_grace: std::time::Duration,
     /// Channel to signal a lightweight, drain-only turn-end completion
     /// on — set only for dispatches whose provider keeps a long-lived

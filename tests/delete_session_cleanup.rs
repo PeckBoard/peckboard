@@ -203,6 +203,7 @@ async fn build_env() -> Env {
         run_auditor: peckboard::repeating::RunAuditor::new(),
         mcp_tokens: McpTokenRegistry::new(),
         push_service,
+        tls: Arc::new(peckboard::state::TlsState::new()),
     });
 
     std::mem::forget(tmp);

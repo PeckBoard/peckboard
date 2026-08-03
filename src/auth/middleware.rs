@@ -205,6 +205,7 @@ pub(crate) mod tests {
             mcp_tokens: crate::service::mcp_server::McpTokenRegistry::new(),
             env_unlock: Arc::new(crate::service::env_vars::EnvUnlockRegistry::new()),
             push_service: crate::service::push::PushService::new(dir),
+            tls: Arc::new(crate::state::TlsState::new()),
         })
     }
 

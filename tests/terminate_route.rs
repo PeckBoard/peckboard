@@ -108,6 +108,7 @@ async fn build_state() -> (Arc<AppState>, String) {
         provider_registry,
         session_manager,
         repeating_task_manager: peckboard::repeating::RepeatingTaskManager::new(),
+        tls: Arc::new(peckboard::state::TlsState::new()),
         run_auditor: peckboard::repeating::RunAuditor::new(),
         mcp_tokens: McpTokenRegistry::new(),
         push_service,

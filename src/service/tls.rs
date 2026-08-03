@@ -2,6 +2,7 @@
 
 use anyhow::{Context, Result};
 use rcgen::{CertificateParams, DnType, KeyPair, SanType};
+use rustls::sign::CertifiedKey;
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::io::BufReader;
@@ -9,6 +10,9 @@ use std::net::IpAddr;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tokio_rustls::TlsAcceptor;
+
+use crate::db::Db;
+use crate::db::models::NewAnnouncement;
 
 /// Which key material the HTTPS listener is actually serving.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -171,7 +175,7 @@ fn read_sidecar(path: &Path) -> Option<SelfSignedSidecar> {
 
 /// Structural check on a PEM pair: at least one certificate, exactly one
 /// usable private key. It does not verify that the two match — that is
-/// `load_tls_config`'s job when it builds the acceptor.
+/// `certified_key`'s job when it builds the resolver's key.
 fn validate_pem_pair(cert_pem: &[u8], key_pem: &[u8]) -> Result<()> {
     let certs: Vec<_> = rustls_pemfile::certs(&mut BufReader::new(cert_pem))
         .collect::<std::result::Result<Vec<_>, _>>()
@@ -523,8 +527,10 @@ fn parse_asn1_time(data: &[u8]) -> Option<i64> {
     Some(dt.timestamp())
 }
 
-/// Load cert/key into a TLS acceptor.
-pub fn load_tls_config(tls: &TlsMaterial) -> Result<TlsAcceptor> {
+/// Parse cert/key PEM into a `CertifiedKey` for the hot-swappable
+/// resolver. Does not build a `ServerConfig` — the resolver is built once
+/// at startup and each swap only replaces the key this returns.
+pub fn certified_key(tls: &TlsMaterial) -> Result<Arc<CertifiedKey>> {
     let cert_pem = fs::read(&tls.cert_path).context("failed to read cert.pem")?;
     let key_pem = fs::read(&tls.key_path).context("failed to read key.pem")?;
 
@@ -536,12 +542,51 @@ pub fn load_tls_config(tls: &TlsMaterial) -> Result<TlsAcceptor> {
         .context("failed to parse private key")?
         .context("no private key found in key.pem")?;
 
+    let signing_key = rustls::crypto::aws_lc_rs::sign::any_supported_type(&key)
+        .context("unsupported private key type")?;
+
+    Ok(Arc::new(CertifiedKey::new(certs, signing_key)))
+}
+
+/// Build a TLS acceptor backed by a `ResolvesServerCert` (rather than a
+/// fixed cert baked into the `ServerConfig`), so swapping the resolver's
+/// underlying key takes effect on the next handshake with no listener
+/// rebind.
+pub fn acceptor_from_resolver(
+    resolver: Arc<dyn rustls::server::ResolvesServerCert>,
+) -> TlsAcceptor {
     let config = rustls::ServerConfig::builder()
         .with_no_client_auth()
-        .with_single_cert(certs, key)
-        .context("failed to build TLS server config")?;
+        .with_cert_resolver(resolver);
 
-    Ok(TlsAcceptor::from(Arc::new(config)))
+    TlsAcceptor::from(Arc::new(config))
+}
+
+/// Fixed id for the "HTTPS is disabled" banner so restarts never
+/// duplicate it — each announce call deletes any existing row first.
+pub const TLS_FAILURE_ANNOUNCEMENT_ID: &str = "tls-startup-failure";
+
+/// Record (or refresh) the HTTPS-disabled banner shown to the next user
+/// who logs in. Delete-then-insert on the fixed id so it never
+/// duplicates across restarts.
+pub async fn announce_failure(db: &Db, detail: &str) -> Result<()> {
+    db.delete_announcement(TLS_FAILURE_ANNOUNCEMENT_ID).await?;
+    db.create_announcement(NewAnnouncement {
+        id: TLS_FAILURE_ANNOUNCEMENT_ID.to_string(),
+        kind: "tls_error".to_string(),
+        title: "HTTPS is disabled".to_string(),
+        message: "Peckboard is serving plain HTTP only".to_string(),
+        detail: Some(detail.to_string()),
+        created_at: chrono::Utc::now().to_rfc3339(),
+    })
+    .await?;
+    Ok(())
+}
+
+/// Clear the HTTPS-disabled banner after a successful TLS load/reload.
+pub async fn clear_failure_announcement(db: &Db) -> Result<()> {
+    db.delete_announcement(TLS_FAILURE_ANNOUNCEMENT_ID).await?;
+    Ok(())
 }
 
 #[cfg(test)]
@@ -661,7 +706,21 @@ mod tests {
         let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
         let tmp = TempDir::new().unwrap();
         let material = ensure_certs(tmp.path()).unwrap();
-        let _acceptor = load_tls_config(&material).unwrap();
+        let key = certified_key(&material).unwrap();
+        let resolver: Arc<dyn rustls::server::ResolvesServerCert> = Arc::new(FixedResolver(key));
+        let _acceptor = acceptor_from_resolver(resolver);
+    }
+
+    /// Test-only resolver: always returns the same key, standing in for
+    /// `state::TlsCertResolver` (defined in `state.rs`, which can't be
+    /// depended on from here without a cycle).
+    #[derive(Debug)]
+    struct FixedResolver(Arc<CertifiedKey>);
+
+    impl rustls::server::ResolvesServerCert for FixedResolver {
+        fn resolve(&self, _client_hello: rustls::server::ClientHello) -> Option<Arc<CertifiedKey>> {
+            Some(self.0.clone())
+        }
     }
 
     #[test]
@@ -740,5 +799,29 @@ mod tests {
         let material = install_uploaded(tmp.path(), &cert_pem, &key_pem).unwrap();
         let perms = fs::metadata(&material.key_path).unwrap().permissions();
         assert_eq!(perms.mode() & 0o777, 0o600);
+    }
+
+    #[tokio::test]
+    async fn test_announce_and_clear_failure_is_idempotent() {
+        let db = crate::db::Db::in_memory().unwrap();
+
+        announce_failure(&db, "boom").await.unwrap();
+        announce_failure(&db, "boom again").await.unwrap();
+
+        let all = db.list_announcements().await.unwrap();
+        assert_eq!(
+            all.len(),
+            1,
+            "repeated failures must not duplicate the banner"
+        );
+        assert_eq!(all[0].id, TLS_FAILURE_ANNOUNCEMENT_ID);
+        assert_eq!(all[0].kind, "tls_error");
+        assert_eq!(all[0].detail.as_deref(), Some("boom again"));
+
+        clear_failure_announcement(&db).await.unwrap();
+        assert!(db.list_announcements().await.unwrap().is_empty());
+
+        // Clearing when nothing is there is not an error.
+        clear_failure_announcement(&db).await.unwrap();
     }
 }

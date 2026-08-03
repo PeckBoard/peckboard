@@ -210,6 +210,7 @@ async fn build_state(session_model: &str) -> (Arc<AppState>, String) {
         run_auditor: peckboard::repeating::RunAuditor::new(),
         mcp_tokens: McpTokenRegistry::new(),
         push_service,
+        tls: Arc::new(peckboard::state::TlsState::new()),
     });
 
     std::mem::forget(tmp);

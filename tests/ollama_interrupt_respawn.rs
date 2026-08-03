@@ -205,6 +205,7 @@ async fn build_state(base_url: String) -> (Arc<AppState>, String) {
         run_auditor: peckboard::repeating::RunAuditor::new(),
         mcp_tokens: McpTokenRegistry::new(),
         push_service: PushService::new(tmp.path()),
+        tls: Arc::new(peckboard::state::TlsState::new()),
     });
     std::mem::forget(tmp);
 

@@ -61,6 +61,7 @@ async fn build_state() -> Arc<AppState> {
         repeating_task_manager: peckboard::repeating::RepeatingTaskManager::new(),
         run_auditor: peckboard::repeating::RunAuditor::new(),
         mcp_tokens: McpTokenRegistry::new(),
+        tls: Arc::new(peckboard::state::TlsState::new()),
         push_service: PushService::new(&std::env::temp_dir()),
     })
 }

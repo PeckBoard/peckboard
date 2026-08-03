@@ -86,6 +86,7 @@ async fn build_state_with_dir(dir: &std::path::Path, role: &str) -> (Arc<AppStat
         run_auditor: peckboard::repeating::RunAuditor::new(),
         mcp_tokens: McpTokenRegistry::new(),
         push_service,
+        tls: Arc::new(peckboard::state::TlsState::new()),
     });
     (state, token)
 }
