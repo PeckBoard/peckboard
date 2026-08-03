@@ -624,6 +624,7 @@ async fn main() -> anyhow::Result<()> {
         }
     };
 
+    state.tls.set_listener_bound(bind_ok);
     state.tls.set_https_enabled(cert_loaded && bind_ok);
 
     if tls_errors.is_empty() {

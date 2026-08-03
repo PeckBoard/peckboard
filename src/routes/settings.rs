@@ -31,6 +31,7 @@ use std::sync::Arc;
 use crate::auth::middleware::{require_admin, require_auth};
 use crate::db::Db;
 use crate::service::mcp_server::user_servers;
+use crate::service::tls::{self, TlsSource};
 use crate::state::AppState;
 
 /// Plugin id / collection the native `run_command` tool records "always"
@@ -83,10 +84,12 @@ pub fn router(state: Arc<AppState>) -> Router<Arc<AppState>> {
 
 /// Settings that read or mutate **host-wide** state: the Claude permission
 /// gate (`--dangerously-skip-permissions` for every project and every user on
-/// this host), the persistent `run_command` approval list, and the global MCP
+/// this host), the persistent `run_command` approval list, the global MCP
 /// server list — whose probe/check-command routes spawn a program named in the
-/// request body. None of that is partitioned per user, so an admin-created
-/// non-admin must not be able to reach it.
+/// request body — and the TLS routes, which read and replace the key material
+/// the whole host is served with.
+/// None of that is partitioned per user, so an admin-created non-admin must
+/// not be able to reach it.
 ///
 /// Layers run outer-to-inner on the request, so `require_admin` is appended
 /// here and `require_auth` in [`router`] afterwards, which puts `AuthUser`
@@ -115,6 +118,12 @@ fn admin_router() -> Router<Arc<AppState>> {
             "/api/settings/retention",
             get(get_retention).put(set_retention),
         )
+        .route("/api/settings/tls", get(get_tls))
+        .route(
+            "/api/settings/tls/cert",
+            post(upload_tls_cert).delete(delete_tls_cert),
+        )
+        .route("/api/settings/tls/regenerate", post(regenerate_tls_cert))
         .route_layer(middleware::from_fn(require_admin))
 }
 
@@ -863,4 +872,430 @@ async fn check_mcp_command(
         "hints": command_check::install_hints(&body.command),
         "suggested_folder_path": suggested.to_string_lossy().to_string(),
     }))
+}
+
+/// The TLS blob every route below answers with: what the HTTPS listener is
+/// serving right now, plus the port it listens on. `source` is spelled for
+/// the UI (`self-signed`), not with [`TlsSource`]'s snake_case serde name.
+fn tls_status_json(state: &AppState) -> serde_json::Value {
+    let status = state.tls.snapshot();
+    let source = match status.source {
+        Some(TlsSource::Uploaded) => "uploaded",
+        Some(TlsSource::SelfSigned) => "self-signed",
+        None => "none",
+    };
+    serde_json::json!({
+        "https_enabled": status.https_enabled,
+        "https_port": state.config.https_port,
+        "source": source,
+        "sans": status.sans,
+        "not_after": status.not_after,
+        "error": status.last_error,
+    })
+}
+
+/// GET /api/settings/tls → the current TLS status.
+async fn get_tls(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+    Json(tls_status_json(&state))
+}
+
+#[derive(serde::Deserialize)]
+struct TlsCertBody {
+    cert_pem: String,
+    key_pem: String,
+}
+
+/// Reject anything `rustls` would reject at handshake time: a malformed
+/// PEM, a missing private key, or a key that doesn't match the leaf —
+/// `with_single_cert` compares the two. We build against an explicit
+/// provider rather than the process default so validation doesn't depend
+/// on `main` having installed one.
+///
+/// This runs before anything touches the disk, so a bad upload can never
+/// displace working material.
+fn validate_cert_pair(cert_pem: &str, key_pem: &str) -> Result<(), String> {
+    let certs = rustls_pemfile::certs(&mut std::io::BufReader::new(cert_pem.as_bytes()))
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|e| format!("failed to parse certificate PEM: {e}"))?;
+    if certs.is_empty() {
+        return Err("no certificate found in the certificate PEM".to_string());
+    }
+
+    let key = rustls_pemfile::private_key(&mut std::io::BufReader::new(key_pem.as_bytes()))
+        .map_err(|e| format!("failed to parse private key PEM: {e}"))?
+        .ok_or_else(|| "no private key found in the key PEM".to_string())?;
+
+    rustls::ServerConfig::builder_with_provider(Arc::new(
+        rustls::crypto::aws_lc_rs::default_provider(),
+    ))
+    .with_safe_default_protocol_versions()
+    .map_err(|e| format!("failed to build a TLS config: {e}"))?
+    .with_no_client_auth()
+    .with_single_cert(certs, key)
+    .map_err(|e| format!("certificate and private key do not work together: {e}"))?;
+
+    Ok(())
+}
+
+/// Shared tail for the three mutating TLS routes. On success the startup
+/// failure banner is cleared and `https_enabled` is recomputed: the HTTPS
+/// listener is bound once at boot and serves whatever the resolver hands
+/// out, so a cert that loads now means HTTPS works now — as long as the
+/// socket bound in the first place.
+async fn finish_tls_change(
+    state: &Arc<AppState>,
+    res: Result<anyhow::Result<()>, tokio::task::JoinError>,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
+    let err = |e: String| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({ "error": e })),
+        )
+    };
+    match res {
+        Ok(Ok(())) => {
+            state
+                .tls
+                .set_https_enabled(state.tls.snapshot().listener_bound);
+            if let Err(e) = tls::clear_failure_announcement(&state.db).await {
+                tracing::warn!("Failed to clear TLS failure announcement: {e}");
+            }
+            Ok(Json(tls_status_json(state)))
+        }
+        Ok(Err(e)) => Err(err(format!("{e:#}"))),
+        Err(e) => Err(err(e.to_string())),
+    }
+}
+
+/// POST /api/settings/tls/cert → install an operator-supplied pair and
+/// hot-swap it in. 400 if the pair doesn't validate.
+async fn upload_tls_cert(
+    State(state): State<Arc<AppState>>,
+    Json(body): Json<TlsCertBody>,
+) -> impl IntoResponse {
+    if let Err(msg) = validate_cert_pair(&body.cert_pem, &body.key_pem) {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({ "error": msg })),
+        ));
+    }
+
+    let data_dir = state.config.data_dir.clone();
+    let tls_state = state.tls.clone();
+    let res = tokio::task::spawn_blocking(move || {
+        let material = tls::install_uploaded(&data_dir, &body.cert_pem, &body.key_pem)?;
+        tls_state.load_from(&data_dir, &material)
+    })
+    .await;
+    finish_tls_change(&state, res).await
+}
+
+/// DELETE /api/settings/tls/cert → drop the uploaded pair and fall back to
+/// the self-signed cert, generating one if none is on disk.
+async fn delete_tls_cert(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+    let data_dir = state.config.data_dir.clone();
+    let tls_state = state.tls.clone();
+    let res = tokio::task::spawn_blocking(move || {
+        tls::clear_uploaded(&data_dir)?;
+        let material = tls::ensure_certs(&data_dir)?;
+        tls_state.load_from(&data_dir, &material)
+    })
+    .await;
+    finish_tls_change(&state, res).await
+}
+
+/// POST /api/settings/tls/regenerate → issue a fresh self-signed cert over
+/// the SANs this host answers on *now*, so addresses gained since boot are
+/// covered. Uploaded material still wins if the operator has some
+/// installed: this refreshes the fallback, it does not revert to it (that's
+/// `DELETE /api/settings/tls/cert`).
+async fn regenerate_tls_cert(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+    let data_dir = state.config.data_dir.clone();
+    let tls_state = state.tls.clone();
+    let res = tokio::task::spawn_blocking(move || {
+        tls::regenerate_self_signed(&data_dir)?;
+        let material = tls::ensure_certs(&data_dir)?;
+        tls_state.load_from(&data_dir, &material)
+    })
+    .await;
+    finish_tls_change(&state, res).await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::auth::middleware::tests::{seed_authenticated_user, test_state};
+    use axum::body::Body;
+    use axum::http::{Request, header};
+    use tower::ServiceExt;
+
+    fn app(state: Arc<AppState>) -> Router {
+        Router::new().merge(router(state.clone())).with_state(state)
+    }
+
+    /// A throwaway cert/key pair standing in for operator-supplied material.
+    fn generate_pem_pair(dns: &str) -> (String, String) {
+        let key_pair = rcgen::KeyPair::generate_for(&rcgen::PKCS_ECDSA_P256_SHA256).unwrap();
+        let mut params = rcgen::CertificateParams::default();
+        params.subject_alt_names = vec![rcgen::SanType::DnsName(dns.try_into().unwrap())];
+        let cert = params.self_signed(&key_pair).unwrap();
+        (cert.pem(), key_pair.serialize_pem())
+    }
+
+    async fn call(
+        state: &Arc<AppState>,
+        token: &str,
+        method: &str,
+        uri: &str,
+        body: Option<serde_json::Value>,
+    ) -> (StatusCode, serde_json::Value) {
+        let builder = Request::builder()
+            .method(method)
+            .uri(uri)
+            .header(header::AUTHORIZATION, format!("Bearer {token}"));
+        let req = match body {
+            Some(v) => builder
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(v.to_string()))
+                .unwrap(),
+            None => builder.body(Body::empty()).unwrap(),
+        };
+        let resp = app(state.clone()).oneshot(req).await.unwrap();
+        let status = resp.status();
+        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json = serde_json::from_slice(&bytes).unwrap_or(serde_json::Value::Null);
+        (status, json)
+    }
+
+    /// The TLS routes read and replace the key material the whole host is
+    /// served with, so an admin-created non-admin must not reach any of
+    /// them — not even the read.
+    #[tokio::test]
+    async fn non_admin_cannot_reach_the_tls_routes() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = test_state(dir.path());
+        let token = seed_authenticated_user(&state, "user").await;
+        let (cert_pem, key_pem) = generate_pem_pair("uploaded.example");
+
+        for (method, uri, body) in [
+            ("GET", "/api/settings/tls", None),
+            (
+                "POST",
+                "/api/settings/tls/cert",
+                Some(serde_json::json!({ "cert_pem": cert_pem, "key_pem": key_pem })),
+            ),
+            ("DELETE", "/api/settings/tls/cert", None),
+            ("POST", "/api/settings/tls/regenerate", None),
+        ] {
+            let (status, _) = call(&state, &token, method, uri, body).await;
+            assert_eq!(status, StatusCode::FORBIDDEN, "{method} {uri}");
+        }
+        assert!(
+            !dir.path().join("certs").exists(),
+            "a rejected request must not write any cert material"
+        );
+    }
+
+    #[tokio::test]
+    async fn admin_reads_the_tls_status() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = test_state(dir.path());
+        let token = seed_authenticated_user(&state, "admin").await;
+
+        let (status, body) = call(&state, &token, "GET", "/api/settings/tls", None).await;
+        assert_eq!(status, StatusCode::OK);
+        // Nothing loaded in a bare test state.
+        assert_eq!(body["source"], "none");
+        assert_eq!(body["https_enabled"], false);
+        assert_eq!(body["https_port"], 0);
+        assert_eq!(body["error"], serde_json::Value::Null);
+    }
+
+    #[tokio::test]
+    async fn a_malformed_upload_is_rejected_before_anything_is_written() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = test_state(dir.path());
+        let token = seed_authenticated_user(&state, "admin").await;
+
+        let (status, body) = call(
+            &state,
+            &token,
+            "POST",
+            "/api/settings/tls/cert",
+            Some(serde_json::json!({ "cert_pem": "not a pem", "key_pem": "nor is this" })),
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert!(
+            body["error"].as_str().unwrap().contains("no certificate"),
+            "got {body}"
+        );
+        assert!(!dir.path().join("certs/uploaded-cert.pem").exists());
+    }
+
+    #[tokio::test]
+    async fn a_certificate_without_its_key_is_rejected() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = test_state(dir.path());
+        let token = seed_authenticated_user(&state, "admin").await;
+        let (cert_pem, _) = generate_pem_pair("uploaded.example");
+
+        let (status, body) = call(
+            &state,
+            &token,
+            "POST",
+            "/api/settings/tls/cert",
+            Some(serde_json::json!({ "cert_pem": cert_pem, "key_pem": "" })),
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert!(
+            body["error"].as_str().unwrap().contains("no private key"),
+            "got {body}"
+        );
+        assert!(!dir.path().join("certs/uploaded-cert.pem").exists());
+    }
+
+    /// Both halves parse, but they're from different pairs — the gate is
+    /// `with_single_cert`, which compares the key against the leaf.
+    #[tokio::test]
+    async fn a_key_that_does_not_match_the_certificate_is_rejected() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = test_state(dir.path());
+        let token = seed_authenticated_user(&state, "admin").await;
+        let (cert_pem, _) = generate_pem_pair("one.example");
+        let (_, key_pem) = generate_pem_pair("two.example");
+
+        let (status, body) = call(
+            &state,
+            &token,
+            "POST",
+            "/api/settings/tls/cert",
+            Some(serde_json::json!({ "cert_pem": cert_pem, "key_pem": key_pem })),
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::BAD_REQUEST, "got {body}");
+        assert!(
+            body["error"]
+                .as_str()
+                .unwrap()
+                .contains("do not work together"),
+            "got {body}"
+        );
+        assert!(!dir.path().join("certs/uploaded-cert.pem").exists());
+    }
+
+    #[tokio::test]
+    async fn admin_upload_hot_swaps_and_reports_uploaded() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = test_state(dir.path());
+        let token = seed_authenticated_user(&state, "admin").await;
+        let (cert_pem, key_pem) = generate_pem_pair("uploaded.example");
+
+        let (status, body) = call(
+            &state,
+            &token,
+            "POST",
+            "/api/settings/tls/cert",
+            Some(serde_json::json!({ "cert_pem": cert_pem, "key_pem": key_pem })),
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::OK, "got {body}");
+        assert_eq!(body["source"], "uploaded");
+        assert_eq!(body["error"], serde_json::Value::Null);
+        assert!(body["not_after"].is_string(), "got {body}");
+        assert!(dir.path().join("certs/uploaded-cert.pem").exists());
+        assert!(dir.path().join("certs/uploaded-key.pem").exists());
+
+        // The status route agrees, so the swap really landed in TlsState.
+        let (_, again) = call(&state, &token, "GET", "/api/settings/tls", None).await;
+        assert_eq!(again["source"], "uploaded");
+    }
+
+    #[tokio::test]
+    async fn deleting_the_uploaded_certificate_reverts_to_self_signed() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = test_state(dir.path());
+        let token = seed_authenticated_user(&state, "admin").await;
+        let (cert_pem, key_pem) = generate_pem_pair("uploaded.example");
+
+        let (status, _) = call(
+            &state,
+            &token,
+            "POST",
+            "/api/settings/tls/cert",
+            Some(serde_json::json!({ "cert_pem": cert_pem, "key_pem": key_pem })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+
+        let (status, body) = call(&state, &token, "DELETE", "/api/settings/tls/cert", None).await;
+        assert_eq!(status, StatusCode::OK, "got {body}");
+        assert_eq!(body["source"], "self-signed");
+        assert!(
+            !body["sans"].as_array().unwrap().is_empty(),
+            "self-signed material reports its SANs: {body}"
+        );
+        assert!(!dir.path().join("certs/uploaded-cert.pem").exists());
+        assert!(!dir.path().join("certs/uploaded-key.pem").exists());
+    }
+
+    #[tokio::test]
+    async fn regenerate_issues_a_fresh_self_signed_certificate() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = test_state(dir.path());
+        let token = seed_authenticated_user(&state, "admin").await;
+        let cert_path = dir.path().join("certs/cert.pem");
+
+        let (status, body) =
+            call(&state, &token, "POST", "/api/settings/tls/regenerate", None).await;
+        assert_eq!(status, StatusCode::OK, "got {body}");
+        assert_eq!(body["source"], "self-signed");
+        let first = std::fs::read_to_string(&cert_path).unwrap();
+
+        // A still-valid cert doesn't short-circuit the route the way
+        // `ensure_certs` would — this is the "pick up a new IP" path.
+        let (status, _) = call(&state, &token, "POST", "/api/settings/tls/regenerate", None).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_ne!(
+            first,
+            std::fs::read_to_string(&cert_path).unwrap(),
+            "regenerate must mint new material, not reuse the current cert"
+        );
+    }
+
+    /// Regenerate refreshes the self-signed fallback; it is not a way to
+    /// silently drop an operator's uploaded certificate.
+    #[tokio::test]
+    async fn regenerate_keeps_serving_uploaded_material() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = test_state(dir.path());
+        let token = seed_authenticated_user(&state, "admin").await;
+        let (cert_pem, key_pem) = generate_pem_pair("uploaded.example");
+
+        let (status, _) = call(
+            &state,
+            &token,
+            "POST",
+            "/api/settings/tls/cert",
+            Some(serde_json::json!({ "cert_pem": cert_pem, "key_pem": key_pem })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+
+        let (status, body) =
+            call(&state, &token, "POST", "/api/settings/tls/regenerate", None).await;
+        assert_eq!(status, StatusCode::OK, "got {body}");
+        assert_eq!(body["source"], "uploaded");
+        assert!(
+            dir.path().join("certs/cert.pem").exists(),
+            "the self-signed fallback is refreshed even while uploaded material serves"
+        );
+    }
 }

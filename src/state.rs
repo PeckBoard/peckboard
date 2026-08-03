@@ -22,6 +22,11 @@ pub struct TlsStatus {
     pub not_after: Option<chrono::DateTime<chrono::Utc>>,
     pub last_error: Option<String>,
     pub https_enabled: bool,
+    /// Whether the HTTPS listener actually bound at startup. Material
+    /// swapped in later only turns HTTPS back on if the socket is there,
+    /// so the settings routes consult this before flipping
+    /// `https_enabled`.
+    pub listener_bound: bool,
 }
 
 /// Hot-swappable TLS key material. The HTTPS listener is built once at
@@ -76,6 +81,10 @@ impl TlsState {
 
     pub fn set_error(&self, err: &str) {
         self.status.write().unwrap().last_error = Some(err.to_string());
+    }
+
+    pub fn set_listener_bound(&self, bound: bool) {
+        self.status.write().unwrap().listener_bound = bound;
     }
 
     pub fn set_https_enabled(&self, enabled: bool) {

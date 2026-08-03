@@ -283,6 +283,20 @@ pub fn ensure_certs(data_dir: &Path) -> Result<TlsMaterial> {
         }
     }
 
+    regenerate_self_signed(data_dir)
+}
+
+/// Generate a fresh self-signed cert, replacing whatever self-signed
+/// material is already on disk. Unlike [`ensure_certs`] this never
+/// short-circuits on a cert that is still valid, so the admin regenerate
+/// route picks up addresses the host has gained since boot.
+pub fn regenerate_self_signed(data_dir: &Path) -> Result<TlsMaterial> {
+    let dir = certs_dir(data_dir);
+    let cert_path = dir.join("cert.pem");
+    let key_path = dir.join("key.pem");
+    let sidecar = sidecar_path(data_dir);
+    let sans = san_strings();
+
     fs::create_dir_all(&dir).context("failed to create certs directory")?;
 
     // Generate ECDSA P-256 key pair
