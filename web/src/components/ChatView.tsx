@@ -594,7 +594,7 @@ const ChatRow = memo(function ChatRow({
               >
                 <span>
                   The account&apos;s login expired.{' '}
-                  <a href="/settings">
+                  <a href="/settings/providers">
                     Add or refresh an account in Settings → Providers &amp; Accounts
                   </a>
                   , then retry.
@@ -655,7 +655,7 @@ const ChatRow = memo(function ChatRow({
                 {item.compaction
                   ? 'Nothing was compacted and no context was lost. If your login expired, '
                   : 'The model was not switched. If your login expired, '}
-                <a href="/settings">log in again from Settings</a>
+                <a href="/settings/providers">log in again from Settings</a>
                 {item.compaction
                   ? ' and retry the compaction — or clear / switch sessions, accepting that this context will be lost.'
                   : ' and retry.'}
@@ -875,6 +875,7 @@ const WORKTREE_REASON_LABEL: Record<string, string> = {
   dirty: 'uncommitted changes in the worktree',
   conflict: 'merge conflict',
   cleanup_failed: 'the worktree could not be removed',
+  worktree_missing: 'the worktree was removed before its commits were merged',
 }
 
 function WorktreeMergeRow({ item }: { item: Extract<DisplayItem, { type: 'worktree-merge' }> }) {

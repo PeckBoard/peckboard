@@ -131,7 +131,7 @@ test('an admin can edit and save retention settings from the Server sub-page', a
 
   await openSettings(page, token)
   const settings = page.getByTestId('settings-page')
-  await settings.getByTestId('settings-nav-server').click()
+  await settings.getByTestId('settings-nav-data').click()
 
   const section = settings.getByTestId('retention-settings-section')
   await expect(section).toBeVisible()

@@ -152,10 +152,7 @@ test('a non-admin is refused by every host-wide settings API', async ({ request 
   expect(adminWrite.ok(), 'admin PUT claude-permissions').toBeTruthy()
 })
 
-test('the Settings hub hides Server and MCP Servers from a non-admin', async ({
-  request,
-  page,
-}) => {
+test('the Settings nav hides admin-only pages from a non-admin', async ({ request, page }) => {
   const { auth: adminAuth } = await authenticateAdmin(request)
   const { token } = await createNonAdmin(request, adminAuth, 'ui')
 
@@ -166,6 +163,9 @@ test('the Settings hub hides Server and MCP Servers from a non-admin', async ({
   await expect(settings.getByTestId('settings-nav-mcp')).toHaveCount(0)
   await expect(settings.getByTestId('settings-bypass-badge')).toHaveCount(0)
   await expect(settings.getByTestId('settings-nav-workflows')).toHaveCount(0)
+  await expect(settings.getByTestId('settings-nav-security')).toHaveCount(0)
+  await expect(settings.getByTestId('settings-nav-data')).toHaveCount(0)
+  await expect(settings.getByTestId('settings-nav-users')).toHaveCount(0)
 
   // The rest of the hub is untouched for a normal user.
   await expect(settings.getByTestId('settings-nav-appearance')).toBeVisible()
@@ -185,8 +185,9 @@ test('an admin still sees Server and MCP Servers in the Settings hub', async ({
   await expect(settings.getByTestId('settings-nav-server')).toBeVisible()
   await expect(settings.getByTestId('settings-nav-mcp')).toBeVisible()
 
-  // And the Server sub-page still opens with its permission control.
-  await settings.getByTestId('settings-nav-server').click()
+  // And the Security sub-page opens with the permission control that
+  // used to live on Server.
+  await settings.getByTestId('settings-nav-security').click()
   await expect(settings.getByTestId('claude-permissions-section')).toBeVisible()
 })
 

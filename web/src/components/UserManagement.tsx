@@ -53,13 +53,10 @@ export default function UserManagement() {
     fetchUsers()
   }, [fetchUsers])
 
+  // Rendered inside Settings → Users, which is admin-only in the nav; this
+  // guard only covers a direct deep link by a non-admin.
   if (currentUser?.role !== 'admin') {
-    return (
-      <div className="settings-page">
-        <h2>User Management</h2>
-        <p className="form-error">You do not have permission to access this page.</p>
-      </div>
-    )
+    return <p className="form-error">You do not have permission to access this page.</p>
   }
 
   const handleCreate = async (e: React.FormEvent) => {
@@ -146,9 +143,7 @@ export default function UserManagement() {
   const passwordError = fieldErrors.password || (newPassword ? passwordProblem(newPassword) : '')
 
   return (
-    <div className="settings-page">
-      <h2>User Management</h2>
-
+    <div className="user-management" data-testid="user-management">
       {error && (
         <p className="form-error" style={{ marginBottom: 16 }}>
           {error}

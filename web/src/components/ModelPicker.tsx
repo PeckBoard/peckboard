@@ -128,7 +128,7 @@ export default function ModelPicker({
         hasUnconfigured ? (
           <span className="model-picker-config-hint">
             Some providers aren&apos;t configured.{' '}
-            <a href="/settings">Settings → Providers &amp; Accounts</a>
+            <a href="/settings/providers">Settings → Providers &amp; Accounts</a>
           </span>
         ) : undefined
       }

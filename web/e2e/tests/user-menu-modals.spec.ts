@@ -62,7 +62,8 @@ test('user dropdown opens Settings page with a Plugins sub-page; rail Settings i
   await expect(settingsPage).toBeVisible()
   // Settings is a full-page view at `/settings`.
   await expect(page).toHaveURL(/\/settings$/)
-  // The hub view carries user info plus one nav card per sub-page.
+  // The default Account page carries user info; the persistent rail
+  // lists a nav entry per sub-page.
   await expect(settingsPage).toContainText('User Info')
   await expect(settingsPage.getByTestId('settings-nav-appearance')).toBeVisible()
   await expect(settingsPage.getByTestId('settings-nav-server')).toBeVisible()
@@ -75,9 +76,8 @@ test('user dropdown opens Settings page with a Plugins sub-page; rail Settings i
   await expect(keepAlive).toContainText('Provider Keep-Alive')
   await expect(keepAlive).toContainText(/Runs every hour|Runs every \d+ hours|disabled/)
 
-  // Back first returns to the hub, then to the underlying view.
-  await settingsPage.getByRole('button', { name: 'Back' }).click()
-  await expect(settingsPage.getByTestId('settings-nav-providers')).toBeVisible()
+  // Back exits Settings — the rail is persistent on desktop, so there is
+  // no intermediate hub step.
   await settingsPage.getByRole('button', { name: 'Back' }).click()
   await expect(settingsPage).toBeHidden()
 
@@ -90,7 +90,9 @@ test('user dropdown opens Settings page with a Plugins sub-page; rail Settings i
   await settingsPage.getByTestId('settings-nav-plugins').click()
   await expect(settingsPage.getByTestId('plugins-section')).toBeVisible()
 
-  // Back returns to the Settings hub.
-  await settingsPage.getByRole('button', { name: 'Back' }).click()
-  await expect(settingsPage.getByTestId('settings-nav-plugins')).toBeVisible()
+  // The persistent rail marks the open sub-page current.
+  await expect(settingsPage.getByTestId('settings-nav-plugins')).toHaveAttribute(
+    'aria-current',
+    'true',
+  )
 })

@@ -214,7 +214,7 @@ test('registry detail shows permissions up front and links to the approval', asy
   await expect(plugins).toBeVisible()
   await expect(plugins.locator('.plugin-badge--pending').first()).toContainText('Awaiting approval')
 })
-test('back from the registry tab returns to the settings hub', async ({
+test('registry page marks the rail entry current; back exits Settings', async ({
   request,
   page,
   baseURL,
@@ -231,12 +231,13 @@ test('back from the registry tab returns to the settings hub', async ({
   await page.getByTestId('browse-plugins').click()
   await expect(page.getByTestId('plugin-registry-panel')).toBeVisible()
 
-  // The Settings back button leaves the registry tab for the settings hub,
-  // where the Plugins and Plugin Registry entries are listed.
+  // The persistent settings rail lists both plugin pages and marks the
+  // open one; the Back button exits Settings entirely on desktop.
+  await expect(page.getByTestId('settings-nav-plugins')).toBeVisible()
+  await expect(page.getByTestId('settings-nav-registry')).toHaveAttribute('aria-current', 'true')
   await page.locator('.settings-back').click()
   await expect(page.getByTestId('plugin-registry-panel')).toHaveCount(0)
-  await expect(page.getByTestId('settings-nav-plugins')).toBeVisible()
-  await expect(page.getByTestId('settings-nav-registry')).toBeVisible()
+  await expect(page.getByTestId('settings-page')).toHaveCount(0)
 })
 /**
  * Mock a registry with two already-installed plugins that each have a newer

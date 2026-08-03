@@ -129,7 +129,7 @@ test('Environment Variables: scope select adds a folder-scoped var; id delete', 
   const folder = await ensureFolder(request, auth)
   await wipeVars(request, auth, '/api/env-vars')
 
-  await openSettings(page, token, 'settings-nav-env')
+  await openSettings(page, token, 'settings-nav-variables')
   const section = page.getByTestId('env-vars-section')
   await expect(section).toBeVisible({ timeout: 10_000 })
 

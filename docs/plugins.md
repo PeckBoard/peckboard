@@ -10,7 +10,7 @@ A _plugin_ is a WebAssembly module PeckBoard loads to add tools, pages, and beha
 
 ## Installing and Updating
 
-Open the Plugins panel in Settings to browse the registry. Installing downloads the plugin into the data directory, verifies its checksum and that your PeckBoard version is new enough, and loads it _inert_: it cannot act yet. An approval dialog then lists the exact hooks and permissions the plugin requests — approve to activate it, deny to keep it dormant. Updating an installed plugin follows the same flow, and an agent session can install or update one for you with the `upgrade_plugin` tool.
+Open Settings → Plugins → Plugin Registry to browse the registry. Installing downloads the plugin into the data directory, verifies its checksum and that your PeckBoard version is new enough, and loads it _inert_: it cannot act yet. An approval dialog then lists the exact hooks and permissions the plugin requests — approve to activate it, deny to keep it dormant. Updating an installed plugin follows the same flow, and an agent session can install or update one for you with the `upgrade_plugin` tool.
 ![The plugin registry's Browse tab listing installable plugins and MCP server templates, with search, kind, and category filters]({{ "/assets/screenshots/plugin-registry.png" | relative_url }})
 
 ```mermaid
@@ -25,7 +25,7 @@ graph LR
 
 Installed plugins are single `.wasm` files in `<data-dir>/plugins/`, loaded at startup into a sandbox with no filesystem or network of its own — every capability a plugin uses is a host function gated by a permission it declared. Approval is recorded against the plugin's exact hook set, so an update that asks for _different_ hooks drops back to pending and asks again; an update with unchanged hooks stays approved. Uninstalling deletes the `.wasm` and clears the plugin's stored approval and settings, so a reinstall starts clean.
 
-Plugins that need configuration declare settings fields in their manifest; PeckBoard renders a form for them under Settings → Plugins, and stores values per plugin. The same values can be provided in `config.json` under `plugins.<id>.config`, which wins over the UI on every start.
+Plugins that need configuration declare settings fields in their manifest; PeckBoard renders a form for them in the plugin's details modal — open Settings → Plugins and click the plugin's row, then find the Settings section — and stores values per plugin. The same values can be provided in `config.json` under `plugins.<id>.config`, which wins over the UI on every start.
 
 One historical note: the standard worker tools (file reading and editing, search, git, web fetch, `run_command`, `run_tests`, `math`) were once a plugin called `common-tools` but are now part of core — every session has them with nothing to install.
 

@@ -5,10 +5,10 @@ import { test, expect, type APIRequestContext, type Page } from '@playwright/tes
  *
  * A WASM plugin (nginx-manager here) can declare operator settings in its
  * manifest; the catalog carries them as `wasm_plugins[].settings_schema`
- * and the plugin gets a section on Settings → Plugin Settings
- * (`/plugin-settings`) rendering the same shared form built-in plugins
- * use, backed by the same `/api/plugins/:id/settings` routes. The
- * installed-plugins list itself offers NO settings entry point.
+ * and the plugin's details modal on Settings → Plugins (the legacy
+ * `/plugin-settings` URL redirects there) embeds the same shared form
+ * built-in plugins use, backed by the same `/api/plugins/:id/settings`
+ * routes.
  *
  * A real `.wasm` can't be compiled in CI (no wasm32 toolchain — see
  * `plugin-approval-prompt.spec.ts` for the same constraint), so the catalog
@@ -135,14 +135,15 @@ test('WASM plugin settings live on Plugin Settings and save through the shared f
     })
   })
 
-  // The /plugin-settings deep-link opens Settings → Plugin Settings, which
-  // lists a section per plugin that declares settings.
+  // The legacy /plugin-settings deep-link redirects to Settings → Plugins;
+  // an approved plugin's settings form lives in its details modal.
   await loadAppAt(page, token, '/plugin-settings')
-  const section = page.getByTestId('plugin-settings-section')
-  await expect(section).toBeVisible({ timeout: 10_000 })
+  const row = page.getByTestId('wasm-plugin-nginx-manager')
+  await expect(row).toBeVisible({ timeout: 10_000 })
+  await row.getByTestId('wasm-plugin-open-nginx-manager').click()
   const entry = page.getByTestId('plugin-settings-entry-nginx-manager')
   await expect(entry).toBeVisible()
-  await expect(entry).toContainText('nginx-manager')
+  await expect(entry).toContainText('Settings')
 
   // The shared form renders the manifest-declared fields.
   const form = entry.getByTestId('plugin-settings-nginx-manager')
@@ -169,21 +170,14 @@ test('WASM plugin settings live on Plugin Settings and save through the shared f
   await expect(form.locator('[data-field="api_key"] input')).toHaveValue('')
   await expect(form.locator('[data-field="api_key"] .plugin-setting-secret-set')).toBeVisible()
 
-  // The installed-plugins list itself no longer offers a Settings entry
-  // point — neither on the row nor in the details modal.
-  await page.goto('/plugins')
-  const row = page.getByTestId('wasm-plugin-nginx-manager')
-  await expect(row).toBeVisible({ timeout: 10_000 })
+  // Row chrome is unchanged: no row-level settings control; usage chips
+  // stay on the row (wasm size, calls, busy time)…
   await expect(page.getByTestId('wasm-plugin-settings-nginx-manager')).toHaveCount(0)
-  // Each installed plugin advertises its resource usage: compact chips on
-  // the row (wasm size, calls, busy time)…
   const usage = row.getByTestId('wasm-plugin-usage')
   await expect(usage).toBeVisible()
   await expect(usage).toContainText('calls')
-  await row.getByTestId('wasm-plugin-open-nginx-manager').click()
   const details = page.getByTestId('plugin-details-nginx-manager')
   await expect(details).toBeVisible()
-  await expect(details.getByRole('button', { name: 'Settings' })).toHaveCount(0)
   // …and the full counter grid in the details modal.
   const usageBlock = details.getByTestId('plugin-usage')
   await expect(usageBlock).toBeVisible()

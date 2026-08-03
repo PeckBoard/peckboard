@@ -85,7 +85,6 @@ test('toggling a provider off hides its section and models; toggle on restores; 
   // Pre-hatcher picker on the Chat sub-page: no Ollama model in the
   // catalogue. It is the searchable ModelPicker (a flat list, no optgroups),
   // so the check is on the option ids.
-  await settingsPage.getByRole('button', { name: 'Back' }).click()
   await settingsPage.getByTestId('settings-nav-chat').click()
   const preHatchPicker = settingsPage.getByTestId('prehatch-model')
   await expect(preHatchPicker).toBeVisible()
@@ -94,7 +93,6 @@ test('toggling a provider off hides its section and models; toggle on restores; 
   await page.keyboard.press('Escape')
 
   // --- Toggle back ON ---
-  await settingsPage.getByRole('button', { name: 'Back' }).click()
   await settingsPage.getByTestId('settings-nav-providers').click()
   const toggleOn = settingsPage.getByTestId('provider-toggle-ollama')
   await toggleOn.click()
@@ -107,7 +105,6 @@ test('toggling a provider off hides its section and models; toggle on restores; 
   // Pre-hatcher picker still renders the live catalogue. Ollama exposes no
   // models without a local ollama daemon, so its restoration isn't visible
   // in a flat model list — the /api/models assertion above is what pins it.
-  await settingsPage.getByRole('button', { name: 'Back' }).click()
   await settingsPage.getByTestId('settings-nav-chat').click()
   await expect(settingsPage.getByTestId('prehatch-model')).toBeVisible()
   await settingsPage.getByTestId('prehatch-model').click()
@@ -115,7 +112,6 @@ test('toggling a provider off hides its section and models; toggle on restores; 
   await page.keyboard.press('Escape')
 
   // --- Persist across reload ---
-  await settingsPage.getByRole('button', { name: 'Back' }).click()
   await settingsPage.getByTestId('settings-nav-providers').click()
   const togglePersist = settingsPage.getByTestId('provider-toggle-ollama')
   await togglePersist.click()

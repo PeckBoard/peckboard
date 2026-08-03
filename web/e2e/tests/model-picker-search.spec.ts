@@ -147,7 +147,7 @@ test('model picker groups by provider and flags unconfigured providers', async (
   // Warn-only footer points at Settings → Providers & Accounts.
   const footerLink = page.locator('.dropdown-footer a')
   await expect(footerLink).toHaveText('Settings → Providers & Accounts')
-  await expect(footerLink).toHaveAttribute('href', '/settings')
+  await expect(footerLink).toHaveAttribute('href', '/settings/providers')
 
   // Search still works across groups: a match keeps its group heading, a
   // group with no matches disappears heading and all.

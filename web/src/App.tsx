@@ -33,7 +33,6 @@ import ReviewListView from './components/review/ReviewListView'
 import ReviewView from './components/review/ReviewView'
 import RepeatingTasksView from './components/RepeatingTasksView'
 import UsageDashboard from './components/UsageDashboard'
-import UserManagement from './components/UserManagement'
 import ChangePasswordModal from './components/ChangePasswordModal'
 import SetupWizard from './components/SetupWizard'
 import TabBar from './components/TabBar'
@@ -60,7 +59,6 @@ type View =
   | 'usage'
   | 'folders'
   | 'reports'
-  | 'users'
   | 'settings'
   | 'pluginPage'
   | 'plan'
@@ -115,7 +113,7 @@ function parseRoute(): {
   view: View
   activeId: string | null
   sub: SessionSub
-  settingsSub?: 'plugins' | 'plugin-settings' | 'registry' | null
+  settingsSub?: string | null
 } {
   const path = window.location.pathname
   const segments = path.split('/').filter(Boolean)
@@ -151,13 +149,16 @@ function parseRoute(): {
     case 'folders':
       return { view: 'folders', activeId: null, sub: 'chat' }
     case 'settings':
-      return { view: 'settings', activeId: null, sub: 'chat' }
+      // `/settings/<sub>` deep-links a specific sub-page; bare `/settings`
+      // lands on the default page (SettingsPage validates the id).
+      return { view: 'settings', activeId: null, sub: 'chat', settingsSub: id }
     case 'plugins':
       return { view: 'settings', activeId: null, sub: 'chat', settingsSub: 'plugins' }
     case 'plugin-registry':
       return { view: 'settings', activeId: null, sub: 'chat', settingsSub: 'registry' }
     case 'plugin-settings':
-      return { view: 'settings', activeId: null, sub: 'chat', settingsSub: 'plugin-settings' }
+      // Retired page: plugin settings now live inline on Settings → Plugins.
+      return { view: 'settings', activeId: null, sub: 'chat', settingsSub: 'plugins' }
     case 'reports': {
       // `/reports` — index; `/reports/<folder>/<file>` — single report
       // viewer. We compose the same `<folder>/<file>` id the tab strip
@@ -173,7 +174,8 @@ function parseRoute(): {
       // `/review` — the index; `/review/<id>` — one document review.
       return { view: 'docReview', activeId: id, sub: 'chat' }
     case 'users':
-      return { view: 'users', activeId: null, sub: 'chat' }
+      // User management moved into Settings; the old URL keeps working.
+      return { view: 'settings', activeId: null, sub: 'chat', settingsSub: 'users' }
     case 'plugin-page':
       return {
         view: 'pluginPage',
@@ -361,11 +363,10 @@ function App() {
   const [announcement, setAnnouncement] = useState<Announcement | null>(null)
   const [userMenuOpen, setUserMenuOpen] = useState(false)
   const [showChangePassword, setShowChangePassword] = useState(false)
-  // Which Settings sub-page to open on mount. `/plugins` deep-links
-  // straight to Settings → Plugins; null lands on the Settings hub.
-  const [settingsSub, setSettingsSub] = useState<'plugins' | 'plugin-settings' | 'registry' | null>(
-    initialRoute.settingsSub ?? null,
-  )
+  // Which Settings sub-page to open on mount, parsed from the URL
+  // (`/settings/<sub>` or a legacy deep link like `/plugins`); null lands
+  // on the default page. SettingsPage validates unknown ids.
+  const [settingsSub, setSettingsSub] = useState<string | null>(initialRoute.settingsSub ?? null)
   // Plugin-contributed user-menu links (generic; populated from /api/plugins).
   const [uiPanels, setUiPanels] = useState<UiPanel[]>([])
   // Plugin-contributed left-rail entries (generic; same /api/plugins catalog).
@@ -1395,30 +1396,6 @@ function App() {
               <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z" />
             </svg>
           </button>
-          {user?.role === 'admin' && (
-            <button
-              className={`rail-btn ${view === 'users' ? 'active' : ''}`}
-              onClick={() => navigate('users')}
-              title="Users"
-              aria-label="Users"
-            >
-              <svg
-                width="18"
-                height="18"
-                viewBox="0 0 24 24"
-                fill="none"
-                stroke="currentColor"
-                strokeWidth="2"
-                strokeLinecap="round"
-                strokeLinejoin="round"
-              >
-                <path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2" />
-                <circle cx="9" cy="7" r="4" />
-                <path d="M23 21v-2a4 4 0 0 0-3-3.87" />
-                <path d="M16 3.13a4 4 0 0 1 0 7.75" />
-              </svg>
-            </button>
-          )}
         </div>
         <div className="rail-bottom">
           <div
@@ -1810,7 +1787,6 @@ function App() {
               ) : (
                 <ReviewListView />
               ))}
-            {view === 'users' && <UserManagement />}
             {view === 'settings' && (
               <SettingsPage
                 key={settingsSub ?? 'root'}

@@ -10,12 +10,12 @@ Besides WASM plugins, the registry catalogs _MCP servers_ — external tool serv
 
 ## Adding One
 
-Open Settings → MCP Servers and pick a server from the registry browser (the same Browse tab that installs plugins lists them under the MCP servers kind). Most servers need one piece of setup — an API key or a path — described right on the entry; the "Needs setup" column below says which. Servers marked "no" work as soon as they are added.
+Open Settings → Connections → MCP Servers and pick a server from the registry browser (the same Browse tab that installs plugins lists them under the MCP servers kind). Most servers need one piece of setup — an API key or a path — described right on the entry; the "Needs setup" column below says which. Servers marked "no" work as soon as they are added.
 
 <details markdown="1">
 <summary>How servers reach your sessions, and per-tool switches</summary>
 
-A configured server is merged into every session's MCP configuration at dispatch: stdio servers are launched as local processes, HTTP and SSE ones are connected remotely. Each server's tools can be toggled individually in Settings → MCP Servers, so an agent can keep a server's read tools while its write tools stay off. Claude and Ollama sessions enforce those per-tool switches; provider CLIs that manage their own MCP wiring (Cursor, Grok) see the server but cannot enforce per-tool state.
+A configured server is merged into every session's MCP configuration at dispatch: stdio servers are launched as local processes, HTTP and SSE ones are connected remotely. Each server's tools can be toggled individually in Settings → Connections → MCP Servers, so an agent can keep a server's read tools while its write tools stay off. Claude and Ollama sessions enforce those per-tool switches; provider CLIs that manage their own MCP wiring (Cursor, Grok) see the server but cannot enforce per-tool state.
 
 The registry ships entry templates — name, transport, command or URL, and the environment or header slots to fill. Nothing is fetched from third parties until a session actually starts the server.
 

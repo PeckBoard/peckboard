@@ -259,7 +259,7 @@ test('"Upgrade & restart" only POSTs the apply after the confirmation', async ({
   expect(applyCalls).toBe(1)
 })
 
-test('bypassing Claude tool permissions is confirmed and then badged on the settings hub', async ({
+test('bypassing Claude tool permissions is confirmed and then badged on the settings nav', async ({
   request,
   page,
 }) => {
@@ -273,7 +273,7 @@ test('bypassing Claude tool permissions is confirmed and then badged on the sett
 
   try {
     await loadAt(page, token, '/settings')
-    await page.locator('[data-testid="settings-nav-server"]').click()
+    await page.locator('[data-testid="settings-nav-security"]').click()
     const bypassBtn = page.locator('[data-testid="claude-permissions-bypass"]')
     await expect(bypassBtn).toBeVisible({ timeout: 10_000 })
 
@@ -287,14 +287,14 @@ test('bypassing Claude tool permissions is confirmed and then badged on the sett
     await expect(dialog).toHaveCount(0)
     expect(await bypassState()).toBe(false)
 
-    // Confirm → the mode flips and the hub carries a standing warning.
+    // Confirm → the mode flips and the Security nav item carries a
+    // standing warning badge (the nav is persistent on desktop).
     await bypassBtn.click()
     await expect(dialog).toBeVisible()
     await dialog.locator('[data-testid="confirm-dialog-confirm"]').click()
     await expect(dialog).toHaveCount(0)
     await expect.poll(() => bypassState()).toBe(true)
 
-    await page.getByRole('button', { name: '← Back' }).click()
     await expect(page.locator('[data-testid="settings-bypass-badge"]')).toBeVisible()
   } finally {
     // Host-wide setting — never leave it loosened for the rest of the suite.

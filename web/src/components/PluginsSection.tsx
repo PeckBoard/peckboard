@@ -5,6 +5,7 @@ import PluginPanelModal from './PluginPanelModal'
 import ConfirmDialog from './ConfirmDialog'
 import HookList from './HookList'
 import PermissionList from './PermissionList'
+import PluginSettingsForm from './PluginSettingsForm'
 import {
   decidePluginApproval,
   uninstallPlugin,
@@ -66,8 +67,8 @@ function firstSentence(text: string): string {
  * Lists every plugin (installed WASM + built-in) as a compact row: name,
  * status badge, one-sentence summary, and — for installed plugins — a
  * Remove button. Clicking a row opens a details modal with the full
- * description, hooks, permissions, contributed pages, and approval
- * controls. Plugin settings are NOT reachable from here; they live on
+ * controls. A plugin that declares settings gets its settings form right
+ * in that modal — the one place plugin configuration is edited.
  * Settings → Plugin Settings.
  */
 export default function PluginsSection({ onBrowseRegistry }: { onBrowseRegistry?: () => void }) {
@@ -273,6 +274,16 @@ function WasmPluginList({
           <PermissionList permissions={detailsFor.permissions} title="Permissions" />
           <PluginUsageBlock stats={detailsFor.stats} />
           <PluginPanelList panels={panels.filter((panel) => panel.plugin === detailsFor.name)} />
+          {detailsFor.status === 'approved' &&
+            (detailsFor.settings_schema?.fields?.length ?? 0) > 0 && (
+              <div
+                className="plugin-details-settings"
+                data-testid={`plugin-settings-entry-${detailsFor.name}`}
+              >
+                <div className="plugin-section-title">Settings</div>
+                <PluginSettingsForm pluginId={detailsFor.name} />
+              </div>
+            )}
           {error && (
             <p className="plugin-card-error" role="alert" data-testid="plugin-details-error">
               {error}
@@ -525,6 +536,15 @@ function PluginCard({ plugin }: { plugin: PluginEntry }) {
               </ul>
             )}
           </div>
+          {(plugin.settings_schema?.fields?.length ?? 0) > 0 && (
+            <div
+              className="plugin-details-settings"
+              data-testid={`plugin-settings-entry-${plugin.id}`}
+            >
+              <div className="plugin-section-title">Settings</div>
+              <PluginSettingsForm pluginId={plugin.id} />
+            </div>
+          )}
           <div className="form-actions">
             <button type="button" className="btn-secondary" onClick={() => setDetailsOpen(false)}>
               Close

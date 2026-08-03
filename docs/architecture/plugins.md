@@ -331,7 +331,7 @@ These are the two plugin-served HTTP surfaces, and they differ in who authentica
 
 **Mounting.** Core mounts a dedicated public prefix `/plugin-api/*` (see `src/routes/plugin_api.rs`) that is **not** behind the `/api/*` auth middleware. Every request under it is dispatched to `PluginManager::serve_http`, which finds the first loaded plugin whose `http_routes` match and asks it to serve the request. If no plugin claims the path, the request returns **404**.
 
-**Manifest declaration.** A plugin declares the hook plus the routes it owns. Routes are `"<METHOD> <PATH>"`; `METHOD` may be `*` for any method; paths use `:param` segments (and an optional trailing `*name` catch-all) like the router. The manifest also carries the plugin's **required identity metadata** — `description`, `version`, and `repository` — shown on the plugin's card in Settings:
+**Manifest declaration.** A plugin declares the hook plus the routes it owns. Routes are `"<METHOD> <PATH>"`; `METHOD` may be `*` for any method; paths use `:param` segments (and an optional trailing `*name` catch-all) like the router. The manifest also carries the plugin's **required identity metadata** — `description`, `version`, and `repository` — shown on the plugin's card in Settings → Plugins:
 
 ```json
 {
@@ -444,7 +444,7 @@ A plugin can contribute a **UI panel** — a page the Peckboard web app surfaces
 - `title` is the human label shown on the menu link.
 - `path` is the page the host embeds. It **must** be a same-origin, server-absolute path under the plugin-owned `/plugin-api/` prefix.
 
-**Surfacing.** Loaded plugins' panels are aggregated into the existing `GET /api/plugins` catalog response under a top-level `ui_panels` array, each entry tagged with the declaring plugin: `{ "plugin", "id", "title", "path" }`. The web app fetches this once and renders one menu item per panel in the user dropdown menu, with a stable test id `user-menu-plugin-<plugin>-<id>` (e.g. `user-menu-plugin-api-api-keys`). (The Settings → Plugins area also lists the same panels under "Plugin Pages"; both surfaces are generic and render whatever any plugin declares.)
+**Surfacing.** Loaded plugins' panels are aggregated into the existing `GET /api/plugins` catalog response under a top-level `ui_panels` array, each entry tagged with the declaring plugin: `{ "plugin", "id", "title", "path" }`. The web app fetches this once and renders one menu item per panel in the user dropdown menu, with a stable test id `user-menu-plugin-<plugin>-<id>` (e.g. `user-menu-plugin-api-api-keys`). (A plugin's details modal on Settings → Plugins also lists the same panels under "Plugin Pages"; both surfaces are generic and render whatever any plugin declares.)
 
 **Embedded page model.** Selecting a panel opens a modal (`data-testid="plugin-panel-modal"`) containing a sandboxed `<iframe>` (`data-testid="plugin-panel-frame"`) whose `src` is the panel `path`. The iframe is sandboxed with `allow-scripts allow-forms allow-popups` and **without** `allow-same-origin`, so the plugin-authored page runs with an opaque origin: it cannot reach the host app's session token in `localStorage`, and its `fetch` calls back to `/plugin-api/*` are cross-origin (the plugin answers CORS preflight and authenticates them with its own credentials). Forwarding the user's Peckboard session into the iframe is intentionally not done by this generic plumbing — a plugin page authenticates to `/plugin-api` with its own credentials (e.g. API keys).
 

@@ -39,7 +39,7 @@ peckboard --reset-password
 # prints admin:<new-password> and exits
 ```
 
-Sign in with those credentials in the web UI. There is no self-service registration: an admin creates further accounts from the user management page (the people icon in the navigation rail, visible to admins only), choosing a username, password, and a role of _user_ or _admin_. Any signed-in user can change their own password from the avatar menu in the bottom-left; an admin can reset another user's password, which also signs that user out everywhere.
+Sign in with those credentials in the web UI. There is no self-service registration: an admin creates further accounts from Settings → Administration → Users, choosing a username, password, and a role of _user_ or _admin_. Any signed-in user can change their own password from the avatar menu in the bottom-left; an admin can reset another user's password, which also signs that user out everywhere.
 
 <details markdown="1">
 <summary>Scripted setups: choosing the first account's credentials</summary>
@@ -64,9 +64,9 @@ A _mock model_ is a fake agent: instead of talking to a provider, it replays a f
 
 You choose a model when creating a session; the dropdown groups models by provider — Claude, Grok, Kimi, Cursor, Ollama, Mock — with _Server default_ at the top. An existing session can be switched from the model button in the chat toolbar. Projects have their own model setting, used for the worker sessions they spawn, and a card can override its project's choice.
 
-Providers and their accounts are managed in Settings → Providers & Accounts: toggle a provider off to hide its models everywhere, sign in Claude, Grok, and Kimi accounts (each then appears in every model picker as `[Name] Model`, with optional per-account budgets), and configure Ollama servers and the Cursor CLI. The same page shows the Claude subscription plan usage the `claude /usage` command reports.
+Providers and their accounts are managed in Settings → Connections → Providers & Accounts: toggle a provider off to hide its models everywhere, sign in Claude, Grok, and Kimi accounts (each then appears in every model picker as `[Name] Model`, with optional per-account budgets), and configure Ollama servers and the Cursor CLI. The same page shows the Claude subscription plan usage the `claude /usage` command reports.
 
-![Settings → Providers & Accounts: provider on/off toggles, Claude plan usage, and two signed-in Claude accounts with spend and budget badges]({{ "/assets/screenshots/providers.png" | relative_url }})
+![Settings → Connections → Providers & Accounts: provider on/off toggles, Claude plan usage, and two signed-in Claude accounts with spend and budget badges]({{ "/assets/screenshots/providers.png" | relative_url }})
 
 <details markdown="1">
 <summary>Available models</summary>
@@ -104,7 +104,7 @@ The mock provider offers one model per scripted scenario (use as `mock:<id>`):
 
 ## Data Storage
 
-All state lives in the data directory — `~/.peckboard` unless `--data-dir` or `PECKBOARD_DATA_DIR` says otherwise. The database is a single SQLite file at `<data-dir>/peckboard.db`; users, sessions, projects, cards, and event history are all in it. No external database or service is involved, so backing up an install means stopping the server and copying the directory — or downloading a backup archive from Settings → Server (admins only) and restoring it later with `peckboard --restore-from <file>`, adding `--force` to overwrite an existing database.
+All state lives in the data directory — `~/.peckboard` unless `--data-dir` or `PECKBOARD_DATA_DIR` says otherwise. The database is a single SQLite file at `<data-dir>/peckboard.db`; users, sessions, projects, cards, and event history are all in it. No external database or service is involved, so backing up an install means stopping the server and copying the directory — or downloading a backup archive from Settings → Administration → Data (admins only) and restoring it later with `peckboard --restore-from <file>`, adding `--force` to overwrite an existing database.
 
 <details markdown="1">
 <summary>What else is in the data directory</summary>

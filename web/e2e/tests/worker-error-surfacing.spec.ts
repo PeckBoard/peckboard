@@ -81,7 +81,7 @@ test('an errored turn shows a red failed row + remediation, not the green ready 
   // Auth failures link the user to Settings → Providers & Accounts.
   const remedy = page.getByTestId('chat-crash-auth-remedy')
   await expect(remedy).toBeVisible()
-  await expect(remedy.getByRole('link')).toHaveAttribute('href', '/settings')
+  await expect(remedy.getByRole('link')).toHaveAttribute('href', '/settings/providers')
 
   // Header pill says Error (red dot), not Idle.
   await expect(status).toHaveText('Error')

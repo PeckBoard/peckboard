@@ -1,5 +1,5 @@
 /**
- * e2e tests for the Backup section in Settings → Server.
+ * e2e tests for the Backup section in Settings → Data.
  *
  * The bootstrapped user is an admin, so the backup section must be visible.
  * The download endpoint is intercepted so no real archive is served.
@@ -26,14 +26,14 @@ async function loadAt(page: Page, token: string, route: string) {
   await page.goto(route)
 }
 
-test('Settings → Server shows Backup section for admin user', async ({ request, page }) => {
+test('Settings → Data shows Backup section for admin user', async ({ request, page }) => {
   const token = await authenticate(request)
   await loadAt(page, token, '/settings')
 
   const settingsPage = page.getByTestId('settings-page')
   await expect(settingsPage).toBeVisible({ timeout: 10_000 })
 
-  await settingsPage.getByTestId('settings-nav-server').click()
+  await settingsPage.getByTestId('settings-nav-data').click()
 
   const backupSection = settingsPage.getByTestId('backup-section')
   await expect(backupSection).toBeVisible()
@@ -70,7 +70,7 @@ test('Download backup button triggers GET /api/admin/backup', async ({ request, 
   const settingsPage = page.getByTestId('settings-page')
   await expect(settingsPage).toBeVisible({ timeout: 10_000 })
 
-  await settingsPage.getByTestId('settings-nav-server').click()
+  await settingsPage.getByTestId('settings-nav-data').click()
   await expect(settingsPage.getByTestId('backup-section')).toBeVisible()
 
   // Click the download button and wait for the intercepted request

@@ -1,8 +1,9 @@
 import { test, expect, type APIRequestContext, type Page } from '@playwright/test'
 
 /**
- * UI e2e for the Ollama settings form on Settings → Plugin Settings
- * (`/plugin-settings`).
+ * UI e2e for the Ollama settings form on Settings → Providers & Accounts
+ * (`/settings/providers`), where the built-in Ollama plugin's shared
+ * settings form is embedded.
  *
  * Verifies:
  *
@@ -36,9 +37,9 @@ async function loadAppAt(page: Page, token: string, route: string) {
   await page.goto(route)
 }
 
-/** The Ollama settings form inside its Plugin Settings section. */
+/** The Ollama settings form inside the Providers page's Ollama section. */
 function ollamaForm(page: Page) {
-  return page.getByTestId('plugin-settings-entry-ollama').getByTestId('plugin-settings-ollama')
+  return page.getByTestId('ollama-settings-section').getByTestId('plugin-settings-ollama')
 }
 
 test('Ollama plugin renders its settings form and round-trips saves', async ({
@@ -48,9 +49,9 @@ test('Ollama plugin renders its settings form and round-trips saves', async ({
 }) => {
   expect(baseURL, 'baseURL configured').toBeTruthy()
   const token = await authenticate(request)
-  await loadAppAt(page, token, '/plugin-settings')
+  await loadAppAt(page, token, '/settings/providers')
 
-  await expect(page.getByTestId('plugin-settings-section')).toBeVisible({ timeout: 10_000 })
+  await expect(page.getByTestId('ollama-settings-section')).toBeVisible({ timeout: 10_000 })
   const settings = ollamaForm(page)
   await expect(settings).toBeVisible({ timeout: 10_000 })
   await expect(settings.locator('[data-field="base_url"]')).toBeVisible()
@@ -116,9 +117,9 @@ test('additional models registered in settings appear in the model catalog', asy
 }) => {
   expect(baseURL, 'baseURL configured').toBeTruthy()
   const token = await authenticate(request)
-  await loadAppAt(page, token, '/plugin-settings')
+  await loadAppAt(page, token, '/settings/providers')
 
-  await expect(page.getByTestId('plugin-settings-section')).toBeVisible({ timeout: 10_000 })
+  await expect(page.getByTestId('ollama-settings-section')).toBeVisible({ timeout: 10_000 })
   const settings = ollamaForm(page)
   await expect(settings).toBeVisible({ timeout: 10_000 })
 

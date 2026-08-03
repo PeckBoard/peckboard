@@ -33,7 +33,7 @@ that never left the process.
 
 ## Wiring it up
 
-Settings → MCP Servers → the server's Sign in panel → **Public callback
+Settings → Connections → MCP Servers → the server's Sign in panel → **Public callback
 broker**. Registry entries can ship it too, as `oauth.redirect_broker`:
 
 ```json

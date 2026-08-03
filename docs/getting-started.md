@@ -25,7 +25,7 @@ chmod +x peckboard-macos-arm64
 ./peckboard-macos-arm64
 ```
 
-The web interface, database, and TLS certificate generator are all inside the binary, so there is nothing else to install. Running agents on Claude models needs the Claude Code CLI — `claude` installed and signed in on the same machine; the Grok, Kimi, and Cursor providers sign in from Settings, Ollama connects to an Ollama server you point it at, and the built-in mock models work with nothing installed at all.
+The web interface, database, and TLS certificate generator are all inside the binary, so there is nothing else to install. Running agents on Claude models needs the Claude Code CLI — `claude` installed and signed in on the same machine; the Grok, Kimi, and Cursor providers sign in from Settings → Connections → Providers & Accounts, Ollama connects to an Ollama server you point it at, and the built-in mock models work with nothing installed at all.
 
 ## Build from Source
 
@@ -59,7 +59,7 @@ The frontend build must come first: `cargo build --release` embeds whatever is i
 
 On its first start the server creates an admin account and prints the username and password to the terminal in a banner. Copy them — they are shown only once. If they are lost, run the binary again with `--reset-password` to print a new password; the [Configuration]({{ "/configuration.html" | relative_url }}) page covers accounts, ports, and the data directory in detail.
 
-Open `http://localhost:3344` in a browser and sign in with the printed credentials. The server also listens for HTTPS on port `3345` with a self-signed certificate covering `localhost`, the loopback addresses, and every address this machine answers on — browsers still warn on the first HTTPS visit for a self-signed cert (only uploading your own certificate in Settings removes that warning); plain HTTP is fine for a first look.
+Open `http://localhost:3344` in a browser and sign in with the printed credentials. The server also listens for HTTPS on port `3345` with a self-signed certificate covering `localhost`, the loopback addresses, and every address this machine answers on — browsers still warn on the first HTTPS visit for a self-signed cert (only uploading your own certificate under Settings → Administration → TLS / HTTPS removes that warning); plain HTTP is fine for a first look.
 
 Signing in for the first time opens a short setup wizard: set a new password (the printed one is one-time), pick which model providers are visible, choose a default model, register a workspace folder, and review the TLS certificate. It only appears once, on a fresh install, and every step it covers can be redone later from Settings.
 

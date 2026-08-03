@@ -119,24 +119,28 @@ users | settings | pluginPage | plan`.
 `SessionSub` (`App.tsx:94`) is ``'chat' | 'todos' | `plugin:${string}` ``
 and is only meaningful for the `sessions` and `projects` views.
 
-| Path                                               | View                                |
-| -------------------------------------------------- | ----------------------------------- |
-| `/`                                                | sessions (list)                     |
-| `/sessions/:id`                                    | session chat                        |
-| `/sessions/:id/todos`                              | session todos                       |
-| `/sessions/:id/plugin/:itemId`                     | plugin full page, session-scoped    |
-| `/projects/:id`                                    | kanban board                        |
-| `/projects/:id/todos`                              | project todos                       |
-| `/projects/:id/plugin/:itemId`                     | plugin full page, project-scoped    |
-| `/repeating-tasks`, `/repeating-tasks/:id`         | repeating tasks                     |
-| `/usage`                                           | usage dashboard                     |
-| `/folders`                                         | folders page                        |
-| `/reports`, `/reports/:folder/:file`               | report browser / viewer             |
-| `/plan/:id`                                        | plan viewer                         |
-| `/users`                                           | user management (admin)             |
-| `/settings`                                        | settings                            |
-| `/plugins`, `/plugin-settings`, `/plugin-registry` | settings, deep-linked to a sub-page |
-| `/plugin-page/:plugin/:itemId`                     | plugin full page, rail entry        |
+| Path                                                         | View                                           |
+| ------------------------------------------------------------ | ---------------------------------------------- |
+| `/`                                                          | sessions (list)                                |
+| `/sessions/:id`                                              | session chat                                   |
+| `/sessions/:id/todos`                                        | session todos                                  |
+| `/sessions/:id/plugin/:itemId`                               | plugin full page, session-scoped               |
+| `/projects/:id`                                              | kanban board                                   |
+| `/projects/:id/todos`                                        | project todos                                  |
+| `/projects/:id/plugin/:itemId`                               | plugin full page, project-scoped               |
+| `/repeating-tasks`, `/repeating-tasks/:id`                   | repeating tasks                                |
+| `/usage`                                                     | usage dashboard                                |
+| `/folders`                                                   | folders page                                   |
+| `/reports`, `/reports/:folder/:file`                         | report browser / viewer                        |
+| `/plan/:id`                                                  | plan viewer                                    |
+| `/settings`, `/settings/:sub`                                | settings, optionally deep-linked to a sub-page |
+| `/plugins`, `/plugin-settings`, `/plugin-registry`, `/users` | legacy redirects into settings sub-pages       |
+| `/plugin-page/:plugin/:itemId`                               | plugin full page, rail entry                   |
+
+The settings view keeps the active sub-page id as a string
+(`settingsSub`); `/settings/<id>` deep-links straight to that page. The
+legacy paths redirect into the matching sub-page — `/users` lands on
+Settings → Users, which replaced the standalone user-management view.
 
 Unknown first segments fall back to `sessions`. For the reports view the
 `activeId` is the encoded `<folder>/<file>` pair — the same id used as the
@@ -152,7 +156,7 @@ report tab's `item_id`.
   stacks and the rail becomes a horizontal top bar under 768px
   (`useMediaQuery` in `App.tsx`, layout in `styles/mobile.css`). Contains the brand
   mark, Sessions, plugin-contributed rail entries, Repeating Tasks,
-  Projects, Reports, Usage, a separator, Folders, Users (admin only), the
+  Projects, Reports, Usage, a separator, Folders, the
   connection status dot, and the avatar button whose menu is portaled to
   `document.body` (Settings, plugin UI panels, Change password, Sign out).
 - `main.content`
@@ -171,8 +175,8 @@ report tab's `item_id`.
     - `folders` → `FoldersPage` (`components/ManageFoldersModal.tsx`)
     - `reports` → `ReportBrowser` / `ReportView`
     - `plan` → `PlanView`
-    - `users` → `UserManagement`
-    - `settings` → `SettingsPage`
+    - `settings` → `SettingsPage` (grouped sidebar with search; includes
+      user management, formerly its own `users` view)
     - `pluginPage` → `PluginFullPage`
 - Modals rendered as siblings: `NewSessionModal`, `NewProjectModal`,
   `ChangePasswordModal`, `PluginPanelModal`, `RenameModal`, and one
