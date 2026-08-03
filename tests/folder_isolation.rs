@@ -12,9 +12,11 @@ use std::sync::Arc;
 
 use peckboard::db::Db;
 use peckboard::db::crud::MoveFolderOutcome;
-use peckboard::db::models::{NewFolder, NewProject, NewRepeatingTask, NewSession};
+use peckboard::db::models::{NewCard, NewFolder, NewProject, NewRepeatingTask, NewSession};
 use peckboard::service::mcp_server::{McpToolRegistry, ToolCallContext};
 use peckboard::ws::broadcaster::Broadcaster;
+
+// ── Helpers ─────────────────────────────────────────────────────────
 
 // ── Helpers ─────────────────────────────────────────────────────────
 
@@ -739,4 +741,70 @@ async fn move_repeating_task_updates_task_and_spawned_sessions() {
         db.get_session("spawn").await.unwrap().unwrap().folder_id,
         "f2",
     );
+}
+
+// ── card-dependency tools respect the folder boundary ────────────────
+
+async fn seed_card(db: &Db, id: &str, project_id: &str, title: &str) {
+    let ts = chrono::Utc::now().to_rfc3339();
+    db.create_card(NewCard {
+        id: id.into(),
+        project_id: project_id.into(),
+        title: title.into(),
+        description: "".into(),
+        step: "backlog".into(),
+        priority: 1,
+        workflow: "task".into(),
+        model: None,
+        effort: None,
+        blocked: false,
+        block_reason: None,
+        created_at: ts.clone(),
+        updated_at: ts,
+        system_prompt_name: None,
+    })
+    .await
+    .unwrap();
+}
+
+#[tokio::test]
+async fn list_card_dependencies_on_foreign_folder_card_is_not_found() {
+    let db = Arc::new(Db::in_memory().unwrap());
+    two_folders_two_projects(&db).await;
+    seed_card(&db, "secret-card", "p2", "Secret F2 Card").await;
+    seed_session(&db, "chat-f1", "f1", None, false, false, None).await;
+    let registry = McpToolRegistry::new();
+
+    let err = registry
+        .handle_tool_call(
+            "list_card_dependencies",
+            serde_json::json!({ "card_id": "secret-card" }),
+            &ctx(&db, "chat-f1", "f1", None),
+        )
+        .await
+        .unwrap_err();
+    let msg = err.to_string();
+    assert!(msg.contains("not found"), "got: {msg}");
+    assert!(!msg.contains("Secret F2 Card"), "title leaked: {msg}");
+}
+
+#[tokio::test]
+async fn get_card_dependency_tree_on_foreign_folder_card_is_not_found() {
+    let db = Arc::new(Db::in_memory().unwrap());
+    two_folders_two_projects(&db).await;
+    seed_card(&db, "secret-card", "p2", "Secret F2 Card").await;
+    seed_session(&db, "chat-f1", "f1", None, false, false, None).await;
+    let registry = McpToolRegistry::new();
+
+    let err = registry
+        .handle_tool_call(
+            "get_card_dependency_tree",
+            serde_json::json!({ "card_id": "secret-card" }),
+            &ctx(&db, "chat-f1", "f1", None),
+        )
+        .await
+        .unwrap_err();
+    let msg = err.to_string();
+    assert!(msg.contains("not found"), "got: {msg}");
+    assert!(!msg.contains("Secret F2 Card"), "title leaked: {msg}");
 }

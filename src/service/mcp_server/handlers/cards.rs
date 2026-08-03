@@ -776,15 +776,11 @@ impl McpToolRegistry {
 
         tracing::info!(session_id = %ctx.session_id, card_id = %card_id, "MCP tool: list_card_dependencies");
 
-        let card = ctx
-            .db
-            .get_card(card_id)
-            .await?
-            .ok_or_else(|| anyhow::anyhow!("card not found: {card_id}"))?;
+        let scope = ctx.scope_card(card_id).await?;
 
         // Resolve dependency ids against the card's own project so we can
         // report each prerequisite's title and step.
-        let project_cards = ctx.db.list_cards_by_project(&card.project_id).await?;
+        let project_cards = ctx.db.list_cards_by_project(scope.as_str()).await?;
         let info_by_id: std::collections::HashMap<&str, &Card> =
             project_cards.iter().map(|c| (c.id.as_str(), c)).collect();
 
@@ -826,16 +822,12 @@ impl McpToolRegistry {
 
         tracing::info!(session_id = %ctx.session_id, card_id = %card_id, "MCP tool: get_card_dependency_tree");
 
-        let card = ctx
-            .db
-            .get_card(card_id)
-            .await?
-            .ok_or_else(|| anyhow::anyhow!("card not found: {card_id}"))?;
+        let scope = ctx.scope_card(card_id).await?;
 
-        let cards = ctx.db.list_cards_by_project(&card.project_id).await?;
+        let cards = ctx.db.list_cards_by_project(scope.as_str()).await?;
         let edges = ctx
             .db
-            .list_dependencies_by_project(&card.project_id)
+            .list_dependencies_by_project(scope.as_str())
             .await
             .unwrap_or_default();
 
