@@ -995,7 +995,23 @@ pub async fn handle_worker_done(state: &Arc<AppState>, session_id: &str) {
         }
     };
 
-    let intent = scheduler::derive_worker_intent(&events);
+    let mut intent = scheduler::derive_worker_intent(&events);
+
+    // `derive_worker_intent` only bounds its scan by the latest `step-change`,
+    // so an `ask-user-requested` from a question the user has ALREADY answered
+    // is still returned on every later turn that ends without a step change.
+    // Acting on it would re-block the card with no question left to answer and
+    // no path to clear it, so downgrade a stale AskUser to Continue.
+    if matches!(intent, Some(WorkerIntent::AskUser { .. }))
+        && !crate::service::questions::session_has_pending_question(&state.db, session_id).await
+    {
+        tracing::debug!(
+            session_id = %session_id,
+            card_id = %card_id,
+            "handle_worker_done: ask-user intent already answered, treating as Continue"
+        );
+        intent = Some(WorkerIntent::Continue);
+    }
     let now = chrono::Utc::now().to_rfc3339();
 
     // 3. Act on intent

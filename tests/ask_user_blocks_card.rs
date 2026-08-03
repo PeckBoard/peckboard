@@ -284,3 +284,107 @@ async fn ask_user_parks_card_until_answered_then_resumes_once() {
         "answering must not spawn a duplicate worker"
     );
 }
+
+/// A worker whose question was already answered keeps working and ends its
+/// turn as an ordinary "Continue" (no `complete_step`/`finish_card`, so no
+/// `step-change` event). `derive_worker_intent` still sees the old
+/// `ask-user-requested` in its window; `handle_worker_done` must not act on
+/// it, or the card is re-blocked on a question nobody can answer.
+#[tokio::test]
+async fn answered_question_does_not_reblock_card_on_plain_turn_end() {
+    let state = build_state().await;
+    seed_project_and_card(&state).await;
+
+    let mut completion_rx = state
+        .session_manager
+        .take_completion_rx()
+        .await
+        .expect("completion rx available");
+
+    let now = chrono::Utc::now();
+    check_and_spawn_workers_at(&state, now).await;
+
+    let card = state.db.get_card("c1").await.unwrap().unwrap();
+    let session_id = card
+        .worker_session_id
+        .clone()
+        .expect("orchestrator must spawn a worker for the card");
+
+    tokio::time::timeout(Duration::from_secs(5), completion_rx.recv())
+        .await
+        .expect("mock turn must complete")
+        .expect("completion channel open");
+
+    let tools = McpToolRegistry::new();
+    let ctx = ToolCallContext {
+        session_id: session_id.clone(),
+        project_id: Some("p1".into()),
+        card_id: Some("c1".into()),
+        db: Arc::new(state.db.clone()),
+        broadcaster: state.broadcaster.clone(),
+        provider_registry: None,
+        data_dir: None,
+        folder_id: "f1".into(),
+    };
+    tools
+        .handle_tool_call(
+            "ask_user",
+            serde_json::json!({
+                "questions": [{ "question": "Which database?", "header": "Setup" }]
+            }),
+            &ctx,
+        )
+        .await
+        .unwrap();
+    handle_worker_done(&state, &session_id).await;
+    assert!(state.db.get_card("c1").await.unwrap().unwrap().blocked);
+
+    let question_id = state
+        .db
+        .list_events_by_session(&session_id, None)
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|e| e.kind == "question")
+        .expect("ask_user must append a question event")
+        .id;
+    resolve_question(
+        state.clone(),
+        "u1".into(),
+        session_id.clone(),
+        serde_json::json!({
+            "question_id": question_id,
+            "answers": { "0": "SQLite" }
+        }),
+    )
+    .await
+    .unwrap();
+
+    tokio::time::timeout(Duration::from_secs(5), completion_rx.recv())
+        .await
+        .expect("the answered worker must resume")
+        .expect("completion channel open");
+
+    let card = state.db.get_card("c1").await.unwrap().unwrap();
+    assert!(!card.blocked, "answering must unblock the card");
+
+    // The resumed turn ends without advancing the card: plain Continue.
+    handle_worker_done(&state, &session_id).await;
+
+    let card = state.db.get_card("c1").await.unwrap().unwrap();
+    assert!(
+        !card.blocked,
+        "a resolved question must not re-block the card: {:?}",
+        card.block_reason
+    );
+    assert_eq!(card.block_reason, None);
+    assert_eq!(
+        card.worker_session_id, None,
+        "the Continue path clears the assignment"
+    );
+    assert_eq!(
+        card.last_worker_session_id.as_deref(),
+        Some(session_id.as_str()),
+        "the Continue path stamps last_worker_session_id so the session resumes"
+    );
+}
