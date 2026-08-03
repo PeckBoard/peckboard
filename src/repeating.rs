@@ -145,6 +145,9 @@ pub enum StartOutcome {
     /// Task is disabled. (Force-run with `respect_enabled = false`
     /// bypasses this.)
     Disabled,
+    /// The task has a `once` schedule that already fired. Refused on
+    /// every path, including force-run — see [`is_consumed_once`].
+    ConsumedOnce,
     /// The run-policy guard refused the dispatch because the gap since
     /// `last_run_at` is below the schedule's minimum. Carries a human-
     /// readable reason for log/UI surfacing. Only Scheduler-triggered
@@ -260,7 +263,9 @@ impl RepeatingTaskManager {
     /// the per-task lock, checks no run is in flight, and dispatches.
     ///
     /// `respect_enabled = true` skips disabled tasks; the force-run route
-    /// passes `false` so the operator can always trigger a one-off.
+    /// passes `false` so the operator can always trigger a one-off. The
+    /// one exception is a `once` schedule that already fired: that is
+    /// refused on every path with [`StartOutcome::ConsumedOnce`].
     ///
     /// Manual runs always bypass the run-policy throttle — see [`RunTrigger`].
     pub async fn try_run_now(
@@ -344,6 +349,31 @@ impl RepeatingTaskManager {
         if respect_enabled && !task.enabled {
             return Ok(StartOutcome::Disabled);
         }
+
+        // A `once` schedule is consumed by firing: `next_run_fields`
+        // clears `next_run_at` and flips `enabled` off. That guard alone
+        // is not enough, because the force-run route passes
+        // `respect_enabled = false` and would sail straight past the
+        // `enabled` check above. Refuse explicitly instead, so "a once
+        // task fires exactly once" holds for every dispatch path.
+        // Re-arming the task (edit its `at` to a future time, or flip
+        // `enabled` back on) recomputes `next_run_at`, which clears the
+        // consumed state and makes force-run work again; a `once` task
+        // that has never fired stays manually runnable even if its `at`
+        // is already in the past. See [`is_consumed_once`].
+        if is_consumed_once(&task) {
+            tracing::debug!(
+                task_id = %task_id,
+                ?trigger,
+                "Refusing dispatch: `once` schedule already fired",
+            );
+            // No `record_run` row: the `repeating_task_runs.status` CHECK
+            // constraint only admits spawned/already_running/throttled/
+            // failed, and a rejected insert would just log a warning.
+            // The refusal surfaces as a 409 on the force-run route.
+            return Ok(StartOutcome::ConsumedOnce);
+        }
+
         // Defence in depth: a row whose stored schedule can't be parsed
         // has no computable next_run_at, and a NULL next_run_at is *not*
         // idle — `list_due_repeating_tasks` selects `next_run_at IS NULL
@@ -607,9 +637,10 @@ impl RepeatingTaskManager {
         // `next_run_fields` also decides `enabled`: a "once" schedule is
         // consumed by firing, so the task disables itself (next_run_at is
         // already None once `at` has passed, but leaving `enabled` on
-        // would still surface it as "next run: never" and let a manual
-        // Run-now fire it again), and a corrupt schedule disables rather
-        // than leaving a NULL next_run_at that reads as "due now" forever.
+        // would still surface it as "next run: never"). Force-run ignores
+        // `enabled`, so re-firing is blocked separately by the
+        // `is_consumed_once` guard at the top of this function. A corrupt
+        // schedule disables rather
         let (next, disable) = next_run_fields(&task, now_dt);
         let _ = db
             .update_repeating_task(
@@ -953,6 +984,27 @@ fn next_run_fields(task: &RepeatingTask, now: DateTime<Utc>) -> (Option<String>,
     }
 }
 
+/// Has this task's `once` schedule already been spent?
+///
+/// True for a `once` schedule that has fired (`last_run_at` is set) and
+/// has not been re-armed since. "Re-armed" is exactly the state in which
+/// the scheduler itself would fire the task again: `enabled` back on
+/// *and* a pending `next_run_at` — which is what the update route
+/// recomputes when the operator edits the `at` (or flips `enabled`).
+/// Keeping the two in step means force-run refuses a run precisely when
+/// the scheduler would never produce one either.
+///
+/// Used to refuse dispatch on *every* path, force-run included — the
+/// `enabled = false` written by [`next_run_fields`] on its own is not
+/// enough, because force-run passes `respect_enabled = false`.
+fn is_consumed_once(task: &RepeatingTask) -> bool {
+    let is_once = matches!(
+        Schedule::parse(&task.schedule_kind, &task.schedule_value),
+        Ok(Schedule::Once { .. })
+    );
+    let re_armed = task.enabled && task.next_run_at.is_some();
+    is_once && task.last_run_at.is_some() && !re_armed
+}
 /// First `next_run_at` for a newly-created task: same as `next_run_at_after`
 /// but rounded down to the next whole minute when "interval" so the
 /// first tick lines up with a human-readable clock.

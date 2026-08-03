@@ -704,3 +704,154 @@ async fn scheduler_disables_task_with_corrupt_schedule_instead_of_refiring() {
             .is_empty(),
     );
 }
+
+/// Seed a `once` task whose `at` is `days_ahead` days in the future, so
+/// it parses cleanly and has a pending `next_run_at` regardless of the
+/// host timezone.
+async fn seed_once_task(db: &Db, id: &str, folder_id: &str, days_ahead: i64) {
+    let ts = chrono::Utc::now().to_rfc3339();
+    let at = (chrono::Utc::now() + chrono::Duration::days(days_ahead))
+        .format("%Y-%m-%dT%H:%M:%S")
+        .to_string();
+    let schedule_value = serde_json::json!({ "at": at }).to_string();
+    let draft = peckboard::db::models::RepeatingTask {
+        id: id.into(),
+        name: id.into(),
+        description: "".into(),
+        folder_id: folder_id.into(),
+        prompt: "go".into(),
+        schedule_kind: "once".into(),
+        schedule_value: schedule_value.clone(),
+        model: Some("mock:happy-path".into()),
+        effort: None,
+        enabled: true,
+        next_run_at: None,
+        last_run_at: None,
+        created_at: ts.clone(),
+        updated_at: ts.clone(),
+        timezone: None,
+    };
+    let next = initial_next_run_at(&draft);
+    db.create_repeating_task(NewRepeatingTask {
+        id: id.into(),
+        name: id.into(),
+        description: "".into(),
+        folder_id: folder_id.into(),
+        prompt: "go".into(),
+        schedule_kind: "once".into(),
+        schedule_value,
+        model: Some("mock:happy-path".into()),
+        effort: None,
+        enabled: true,
+        next_run_at: next,
+        last_run_at: None,
+        created_at: ts.clone(),
+        updated_at: ts,
+        timezone: None,
+    })
+    .await
+    .unwrap();
+}
+
+#[tokio::test]
+async fn force_run_refuses_to_refire_a_consumed_once_task() {
+    // A `once` schedule is consumed by firing: the dispatch disables the
+    // task precisely so "Run now" can't fire it a second time. Force-run
+    // passes respect_enabled=false, so that `enabled` flag alone doesn't
+    // stop it — the explicit consumed-once guard must.
+    let env = fresh_state().await;
+    let tmp = tempfile::tempdir().unwrap();
+    seed_folder(&env.db, "f1", tmp.path().to_str().unwrap()).await;
+    seed_once_task(&env.db, "t1", "f1", 1).await;
+
+    let first = env
+        .rtm
+        .try_run_now("t1", env.run_ctx(), false)
+        .await
+        .unwrap();
+    assert_eq!(first, StartOutcome::Spawned);
+    let sessions = env.db.list_sessions_by_repeating_task("t1").await.unwrap();
+    assert_eq!(sessions.len(), 1);
+    env.session_manager.cancel_and_wait(&sessions[0].id).await;
+
+    let task = env.db.get_repeating_task("t1").await.unwrap().unwrap();
+    assert!(!task.enabled, "a fired once task disables itself");
+    assert!(task.last_run_at.is_some());
+
+    let second = env
+        .rtm
+        .try_run_now("t1", env.run_ctx(), false)
+        .await
+        .unwrap();
+    assert_eq!(
+        second,
+        StartOutcome::ConsumedOnce,
+        "force-run must not re-fire a consumed once task",
+    );
+    let sessions = env.db.list_sessions_by_repeating_task("t1").await.unwrap();
+    assert_eq!(
+        sessions.len(),
+        1,
+        "refused force-run must not spawn a second session; got {:?}",
+        sessions.iter().map(|s| &s.id).collect::<Vec<_>>(),
+    );
+    // The refusal writes no run-history row: the `status` CHECK
+    // constraint on repeating_task_runs doesn't admit a refusal status,
+    // so the dispatch history stays at the single real run.
+    let runs = env.db.list_repeating_task_runs("t1", 10).await.unwrap();
+    assert_eq!(
+        runs.iter().map(|r| r.status.as_str()).collect::<Vec<_>>(),
+        vec!["spawned"],
+    );
+}
+
+#[tokio::test]
+async fn force_run_works_again_after_a_once_task_is_re_armed() {
+    // Guard against over-refusing: re-arming the task (the update route
+    // recomputes next_run_at when the schedule or `enabled` changes) puts
+    // it back in a state the scheduler would fire, so force-run must work.
+    let env = fresh_state().await;
+    let tmp = tempfile::tempdir().unwrap();
+    seed_folder(&env.db, "f1", tmp.path().to_str().unwrap()).await;
+    seed_once_task(&env.db, "t1", "f1", 1).await;
+
+    let first = env
+        .rtm
+        .try_run_now("t1", env.run_ctx(), false)
+        .await
+        .unwrap();
+    assert_eq!(first, StartOutcome::Spawned);
+    let sessions = env.db.list_sessions_by_repeating_task("t1").await.unwrap();
+    env.session_manager.cancel_and_wait(&sessions[0].id).await;
+
+    // Re-arm: enabled back on with a pending occurrence, exactly what the
+    // PATCH route writes when the operator edits `at` / flips enabled.
+    let re_armed_at = (chrono::Utc::now() + chrono::Duration::days(2)).to_rfc3339();
+    env.db
+        .update_repeating_task(
+            "t1",
+            peckboard::db::models::UpdateRepeatingTask {
+                enabled: Some(true),
+                next_run_at: Some(Some(re_armed_at)),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+
+    let second = env
+        .rtm
+        .try_run_now("t1", env.run_ctx(), false)
+        .await
+        .unwrap();
+    assert_eq!(
+        second,
+        StartOutcome::Spawned,
+        "a re-armed once task must still be manually runnable",
+    );
+    let sessions = env.db.list_sessions_by_repeating_task("t1").await.unwrap();
+    assert_eq!(sessions.len(), 2);
+    for s in &sessions {
+        env.session_manager.cancel_and_wait(&s.id).await;
+    }
+}

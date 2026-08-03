@@ -453,6 +453,18 @@ async fn run_repeating_task(
         StartOutcome::Spawned => ("spawned", None),
         StartOutcome::AlreadyRunning => ("already_running", None),
         StartOutcome::Disabled => ("disabled", None),
+        // A spent `once` schedule is a refusal, not an outcome to report
+        // as a 200: the task fired already and must not fire again. 409
+        // so the store's `!res.ok` path surfaces the message as run
+        // status text in the UI.
+        StartOutcome::ConsumedOnce => {
+            return Err((
+                StatusCode::CONFLICT,
+                Json(serde_json::json!({
+                    "error": "This one-off task has already run. Edit its scheduled time to run it again.",
+                })),
+            ));
+        }
         // The force-run route never throttles (Manual trigger always
         // passes the policy check), so this branch is unreachable in
         // practice. We still spell it out so any future code that

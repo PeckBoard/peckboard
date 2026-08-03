@@ -305,3 +305,75 @@ test('disabled task: force-run respects enabled when using PATCH but bypasses it
   const runBody = (await runRes.json()) as { status: string }
   expect(runBody.status).toBe('spawned')
 })
+
+test('once task: force-run refuses to re-fire a consumed one-off, works again once re-armed', async ({
+  request,
+}) => {
+  const { authHeader } = await authenticate(request)
+  const folderPath = mkdtempSync(path.join(tmpdir(), 'peckboard-e2e-rt-once-'))
+  const folderRes = await request.post('/api/folders', {
+    headers: authHeader,
+    data: { name: 'e2e-rt-once', path: folderPath },
+  })
+  expect(folderRes.ok()).toBeTruthy()
+  const folder = (await folderRes.json()) as { id: string }
+
+  // `at` far enough ahead that it parses and stays pending in any host
+  // timezone; force-run doesn't wait for it.
+  const at = (d: number) => new Date(Date.now() + d * 86_400_000).toISOString().slice(0, 19)
+
+  const createRes = await request.post('/api/repeating-tasks', {
+    headers: authHeader,
+    data: {
+      name: 'one-off',
+      folder_id: folder.id,
+      prompt: 'go',
+      schedule_kind: 'once',
+      schedule_value: { at: at(1) },
+      model: 'mock:happy-path',
+      enabled: true,
+    },
+  })
+  expect(createRes.ok(), `create failed: ${await createRes.text()}`).toBeTruthy()
+  const task = (await createRes.json()) as { id: string }
+
+  const firstRun = await request.post(`/api/repeating-tasks/${task.id}/run`, {
+    headers: authHeader,
+  })
+  expect(firstRun.ok()).toBeTruthy()
+  expect(((await firstRun.json()) as { status: string }).status).toBe('spawned')
+
+  // Firing consumes the schedule. A second force-run must be refused —
+  // `enabled = false` alone doesn't stop it, since the run endpoint
+  // deliberately ignores that flag.
+  const secondRun = await request.post(`/api/repeating-tasks/${task.id}/run`, {
+    headers: authHeader,
+  })
+  expect(secondRun.status()).toBe(409)
+  const err = (await secondRun.json()) as { error: string }
+  expect(err.error).toContain('already run')
+
+  const sessions = (await (
+    await request.get(`/api/repeating-tasks/${task.id}/sessions`, { headers: authHeader })
+  ).json()) as Array<{ id: string }>
+  expect(sessions.length).toBe(1)
+
+  // Re-arm via PATCH (new `at` + enabled) — the route recomputes
+  // next_run_at, so the one-off is pending again and runnable.
+  const patchRes = await request.patch(`/api/repeating-tasks/${task.id}`, {
+    headers: authHeader,
+    data: { schedule_kind: 'once', schedule_value: { at: at(2) }, enabled: true },
+  })
+  expect(patchRes.ok(), `patch failed: ${await patchRes.text()}`).toBeTruthy()
+  expect(((await patchRes.json()) as { next_run_at: string | null }).next_run_at).not.toBeNull()
+
+  const thirdRun = await request.post(`/api/repeating-tasks/${task.id}/run`, {
+    headers: authHeader,
+  })
+  expect(thirdRun.ok(), `re-armed run was refused: ${await thirdRun.text()}`).toBeTruthy()
+  // Either it spawned, or the first run's session is still in flight and
+  // the lock reported already_running. Both mean "not refused".
+  expect(['spawned', 'already_running']).toContain(
+    ((await thirdRun.json()) as { status: string }).status,
+  )
+})
