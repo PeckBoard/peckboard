@@ -35,6 +35,13 @@ pub const MAX_STDERR_BYTES: usize = 16 * 1024;
 /// session forever, since nothing else in the pipeline reaps it.
 pub const DEFAULT_TIMEOUT_SECS: u64 = 600;
 
+/// Grace given to a turn whose card was already transitioned by a terminal
+/// MCP tool (`complete_step`, `finish_card`, `wont_do_card`) before the child
+/// is wound down. Long enough for the agent to take the in-flight tool
+/// response and write a closing line; short enough that the card isn't left
+/// waiting on output nobody will read. See [`TurnSpec::retire`].
+pub const RETIRE_GRACE_SECS: u64 = 15;
+
 /// A stderr substring the harness reacts to, and the crash message it maps
 /// to. Auth failures are the reason this exists: an unauthenticated CLI
 /// either blocks on a device prompt (`abort`) or exits non-zero with an
@@ -94,6 +101,20 @@ pub struct TurnSpec<'a> {
     pub broadcaster: &'a crate::ws::broadcaster::Broadcaster,
     pub timeout_secs: u64,
     pub cancel: Arc<Notify>,
+    /// Signalled by [`crate::provider::agent::AgentProvider::shutdown_after_turn`]:
+    /// the work this turn was dispatched for is already done — its card was
+    /// transitioned by a terminal MCP tool — so the agent should wrap up.
+    ///
+    /// The in-flight tool response and any closing assistant text still reach
+    /// the transcript for [`RETIRE_GRACE_SECS`]; after that the child is wound
+    /// down through the same SIGINT-then-drain path a cancel uses, and the
+    /// turn is reported as a clean completion rather than a crash or an
+    /// interrupt — the transition it was working towards did succeed.
+    pub retire: Arc<Notify>,
+    /// Grace allowed after [`retire`](Self::retire) fires, normally
+    /// [`RETIRE_GRACE_SECS`]. A field rather than a bare const so tests can
+    /// exercise the expiry path without sleeping for the real window.
+    pub retire_grace_secs: u64,
     /// Auth-failure (and any other) stderr markers, as data.
     pub stderr_markers: &'static [StderrMarker],
     /// Extra sentence appended to the "failed to spawn" crash reason, e.g.
@@ -159,6 +180,9 @@ impl TurnResult {
 enum TurnOutcome {
     Eof,
     Cancelled,
+    /// `shutdown_after_turn` fired and the child was still going when the
+    /// retire grace ran out.
+    Retired,
     /// An `abort` stderr marker fired.
     Aborted,
     Timeout,
@@ -180,6 +204,8 @@ pub async fn run_turn(spec: TurnSpec<'_>, stream: &mut dyn TurnStream) -> TurnRe
         broadcaster,
         timeout_secs,
         cancel,
+        retire,
+        retire_grace_secs,
         stderr_markers,
         spawn_hint,
         empty_exit_reason,
@@ -276,6 +302,11 @@ pub async fn run_turn(spec: TurnSpec<'_>, stream: &mut dyn TurnStream) -> TurnRe
     let mut lines = BufReader::new(stdout).lines();
     let deadline = tokio::time::sleep(std::time::Duration::from_secs(timeout_secs));
     tokio::pin!(deadline);
+    // Armed only once `retire` fires; until then the branch that awaits it is
+    // switched off by its `if retiring` guard.
+    let retire_grace = tokio::time::sleep(std::time::Duration::from_secs(retire_grace_secs));
+    tokio::pin!(retire_grace);
+    let mut retiring = false;
 
     let outcome = loop {
         tokio::select! {
@@ -292,6 +323,36 @@ pub async fn run_turn(spec: TurnSpec<'_>, stream: &mut dyn TurnStream) -> TurnRe
                     &mut saw_any,
                 )
                 .await;
+            }
+            _ = retire.notified(), if !retiring => {
+                // The card this turn was working has already been
+                // transitioned, so everything from here on is spend nobody
+                // will read. Give the agent a short window to take the
+                // in-flight tool response and finish its sentence.
+                tracing::info!(
+                    session_id = %session_id,
+                    "{provider}: retiring turn after its card was transitioned"
+                );
+                retiring = true;
+                let grace = std::time::Duration::from_secs(retire_grace_secs);
+                retire_grace
+                    .as_mut()
+                    .reset(tokio::time::Instant::now() + grace);
+            }
+            _ = &mut retire_grace, if retiring => {
+                let _ = graceful_cancel(
+                    &mut child,
+                    &mut lines,
+                    stream,
+                    db,
+                    broadcaster,
+                    session_id,
+                    provider,
+                    plugins,
+                    &mut saw_any,
+                )
+                .await;
+                break TurnOutcome::Retired;
             }
             _ = abort_notify.notified() => {
                 let _ = child.start_kill();
@@ -422,6 +483,22 @@ pub async fn run_turn(spec: TurnSpec<'_>, stream: &mut dyn TurnStream) -> TurnRe
             )
             .await;
             TurnResult::cancelled()
+        }
+        TurnOutcome::Retired => {
+            // Neither a crash nor a user interrupt: the card was already
+            // transitioned by a terminal MCP tool, so the work this turn
+            // existed to do succeeded. Report a clean completion.
+            emit_event(
+                db,
+                broadcaster,
+                session_id,
+                ProviderEvent::Completed {
+                    conversation_id: stream.take_conversation_id(),
+                    result_meta: serde_json::Value::Null,
+                },
+            )
+            .await;
+            TurnResult::ok()
         }
         TurnOutcome::Aborted => {
             let (reason, kind) = matched
@@ -863,6 +940,10 @@ mod tests {
             empty_exit_reason: "test CLI exited without a successful result",
             started_up_front: true,
             success_on_output: false,
+            // Never signalled unless a test overrides it via struct-update
+            // syntax; the short grace keeps the expiry path testable.
+            retire: Arc::new(Notify::new()),
+            retire_grace_secs: 1,
             plugins: None,
         }
     }
@@ -1012,6 +1093,115 @@ mod tests {
         assert!(
             elapsed < std::time::Duration::from_secs(10),
             "hard kill should follow the grace window promptly: {elapsed:?}",
+        );
+    }
+
+    /// `shutdown_after_turn` must not truncate the agent mid-thought: the
+    /// grace window exists precisely so the in-flight tool response and the
+    /// closing assistant text still reach the transcript. A child that wraps
+    /// up inside the window ends on the ordinary EOF path.
+    #[tokio::test]
+    async fn retire_lets_a_child_that_wraps_up_inside_the_grace_finish_normally() {
+        let db = session_db().await;
+        let broadcaster = Broadcaster::new();
+        let env = HashMap::new();
+        let script = "printf '{\"text\":\"first\"}\\n'\nsleep 0.3\nprintf '{\"text\":\"second\"}\\n'\nexit 0\n";
+        let args = vec!["-c".to_string(), script.to_string()];
+        let mut stream = EchoStream::default();
+        let retire = Arc::new(Notify::new());
+        let notifier = retire.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            notifier.notify_one();
+        });
+
+        let result = run_turn(
+            TurnSpec {
+                retire,
+                ..spec(
+                    "bash",
+                    &args,
+                    &env,
+                    &db,
+                    &broadcaster,
+                    Arc::new(Notify::new()),
+                    30,
+                )
+            },
+            &mut stream,
+        )
+        .await;
+
+        assert!(result.completed, "error: {:?}", result.error);
+        assert_eq!(
+            stream.seen,
+            vec!["first".to_string(), "second".to_string()],
+            "text written after the retire signal must still be streamed",
+        );
+    }
+
+    /// A child still going when the grace expires is wound down through the
+    /// same SIGINT-then-drain path a cancel uses — but the turn is reported
+    /// as a COMPLETION, not a crash and not an interrupt. Its card was
+    /// already transitioned by the terminal MCP tool that triggered the
+    /// retire, so the work this turn existed to do did succeed; reporting a
+    /// crash here would fire the auto-pause counter on a healthy worker.
+    ///
+    /// A builtin-only busy loop, not `sleep`: bash defers a signal until the
+    /// current foreground *external* command returns, which would hide how
+    /// promptly the wind-down actually lands.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn retire_winds_down_an_overrunning_child_and_still_reports_completion() {
+        let db = session_db().await;
+        let broadcaster = Broadcaster::new();
+        let env = HashMap::new();
+        let script = "printf '{\"text\":\"still-working\"}\\n'\nwhile :; do :; done\n";
+        let args = vec!["-c".to_string(), script.to_string()];
+        let mut stream = EchoStream::default();
+        let retire = Arc::new(Notify::new());
+        let notifier = retire.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            notifier.notify_one();
+        });
+
+        let result = run_turn(
+            TurnSpec {
+                retire,
+                ..spec(
+                    "bash",
+                    &args,
+                    &env,
+                    &db,
+                    &broadcaster,
+                    Arc::new(Notify::new()),
+                    30,
+                )
+            },
+            &mut stream,
+        )
+        .await;
+
+        assert!(
+            result.completed,
+            "a retired turn is a completion, not a crash: {:?}",
+            result.error
+        );
+        assert!(result.error.is_none());
+        assert!(result.error_kind.is_none());
+        assert_eq!(stream.seen, vec!["still-working".to_string()]);
+        let kinds: Vec<String> = db
+            .events_tail("s1", 100)
+            .await
+            .unwrap()
+            .iter()
+            .map(|e| e.kind.clone())
+            .collect();
+        assert_eq!(
+            kinds.last().map(String::as_str),
+            Some("agent-end"),
+            "the turn must terminate with a completion event: {kinds:?}",
         );
     }
     /// The plugin todo hook on the shared harness — the seam `cursor`,

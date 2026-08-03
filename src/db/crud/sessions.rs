@@ -174,6 +174,32 @@ impl Db {
         .await
     }
 
+    /// List worker sessions attached to a specific card, newest activity
+    /// first.
+    ///
+    /// Backs the orchestrator's "one running worker per card" invariant.
+    /// `card.worker_session_id` only names the *current* claim, so a session
+    /// whose claim was released while its turn was still live — which is
+    /// exactly what the terminal MCP tools (`complete_step`, `finish_card`,
+    /// `wont_do_card`) do — is invisible through the card row and has to be
+    /// found by card id instead.
+    pub async fn list_worker_sessions_by_card(
+        &self,
+        card_id: &str,
+    ) -> anyhow::Result<Vec<Session>> {
+        let card_id = card_id.to_string();
+        self.with_conn(move |conn| {
+            sessions::table
+                .filter(sessions::is_worker.eq(true))
+                .filter(sessions::card_id.eq(&card_id))
+                .select(Session::as_select())
+                .order(sessions::last_activity.desc())
+                .load(conn)
+                .map_err(Into::into)
+        })
+        .await
+    }
+
     pub async fn list_worker_sessions(&self) -> anyhow::Result<Vec<Session>> {
         self.with_conn(move |conn| {
             sessions::table

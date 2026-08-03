@@ -514,6 +514,40 @@ async fn spawn_worker_for_card(
         .await?
         .ok_or_else(|| anyhow::anyhow!("folder not found: {}", project.folder_id))?;
 
+    // 1.5 INVARIANT: at most one live agent run per card.
+    //
+    // The card row cannot answer this on its own. `worker_session_id` names
+    // the current claim, but the terminal MCP tools (`complete_step`,
+    // `finish_card`, `wont_do_card`) release the claim from *inside* a live
+    // turn and lean on `AgentProvider::shutdown_after_turn` to wind the agent
+    // down. Between that release and the run actually ending, the card looks
+    // unassigned while an agent is still streaming — and because those tools
+    // also advance the step, the resume filter below no longer matches that
+    // session, so we would mint a brand-new one and end up with two
+    // concurrent agents on one card.
+    //
+    // Checked here, before any session is created or claimed, so bailing out
+    // costs nothing and leaves `last_worker_session_id` pointing at the run
+    // that is actually still going. Serialisation comes from `SPAWN_GATE`,
+    // which `check_and_spawn_workers_at` — the sole caller — holds for the
+    // whole pass, so no other spawn path can slip in between this check and
+    // the dispatch below.
+    for sibling in state
+        .db
+        .list_worker_sessions_by_card(&card.id)
+        .await
+        .unwrap_or_default()
+    {
+        if state.session_manager.is_running(&sibling.id).await {
+            tracing::info!(
+                card_id = %card.id,
+                running_session_id = %sibling.id,
+                "Card already has a running worker; deferring spawn to a later tick"
+            );
+            return Ok(());
+        }
+    }
+
     let now = chrono::Utc::now().to_rfc3339();
 
     // The step the worker will actually run. Cards picked up from the
@@ -1298,8 +1332,9 @@ pub async fn handle_worker_done(state: &Arc<AppState>, session_id: &str) {
 /// * If no message is queued, this is a no-op.
 /// * If an agent is currently running on this session, this is a no-op —
 ///   the next completion will drain instead.
-/// * If draining fails (e.g. spawn error), the queued message is already
-///   consumed; we log and let the user retry.
+/// * If draining fails (e.g. spawn error), the queued message is left in
+///   the queue — `drain_queued` only deletes the row once delivery
+///   succeeded — so the next drain (or a manual force-send) retries it.
 ///
 /// Called by the completion listener for every session on every completion
 /// path (success, crash, interrupt) so a `send while busy` reliably

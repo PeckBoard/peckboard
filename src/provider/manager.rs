@@ -103,6 +103,31 @@ impl SessionManager {
             env_unlock: None,
         }
     }
+    /// A second handle onto `other`'s **per-session lock map**, for observers
+    /// that must be able to tell whether a dispatcher is mid-flight on a
+    /// session.
+    ///
+    /// The lock map and the provider registry are the only shared state: the
+    /// clone gets its own (unused) completion channel because it dispatches
+    /// nothing, and no plugin/askpass/env-unlock wiring.
+    ///
+    /// Built for the worker watchdog. Handing it a plain
+    /// [`SessionManager::new`] makes its `try_lock_session` guard inert — a
+    /// fresh manager starts with an empty map, so every try-lock trivially
+    /// succeeds and the sweeps can clear a card's claim out from under a live
+    /// dispatch.
+    pub fn sharing_locks_with(other: &SessionManager) -> Self {
+        let (completion_tx, completion_rx) = mpsc::channel(1);
+        SessionManager {
+            registry: other.registry.clone(),
+            completion_tx,
+            completion_rx: Arc::new(Mutex::new(Some(completion_rx))),
+            session_locks: other.session_locks.clone(),
+            plugins: Arc::new(PluginManager::empty()),
+            askpass: None,
+            env_unlock: None,
+        }
+    }
 
     /// Wire the sudo-askpass bridge so dispatched sessions can run
     /// `sudo -A` (masked password dialog in the UI, see `service::askpass`).
@@ -814,6 +839,15 @@ impl SessionManager {
     /// triggers the next drain, so a backlog delivers as separate turns
     /// in FIFO order.
     ///
+    /// The row is deleted only AFTER delivery succeeded. Dispatch fails
+    /// for reasons that have nothing to do with the message (folder
+    /// gone, provider/account deleted, spawn error) and the completion
+    /// listener only logs the error — popping the row first meant the
+    /// message vanished with no transcript trace, and every later
+    /// completion ate the next row the same way. A failed drain leaves
+    /// the head queued where the user can see it, force it, or delete
+    /// it; it starts no run, so nothing re-fires the drain in a loop.
+    ///
     /// Holds the per-session lock so it can't race with `send_or_queue`,
     /// the orchestrator, or another completion handler.
     pub async fn drain_queued(
@@ -835,15 +869,22 @@ impl SessionManager {
             None => return Ok(false),
         };
 
-        let _ = db.delete_queued_message_by_id(session_id, queued.id).await;
-
         tracing::info!(
             session_id = %session_id,
             queued_id = queued.id,
             "Draining queued message and spawning agent run"
         );
+        let queued_id = queued.id;
         self.deliver_queued_row(&lock, queued, db, broadcaster, config, data_dir)
             .await?;
+        // Delivered — only now drop the row and announce the drain. A
+        // failed dispatch returns above and leaves the row queued.
+        let _ = db.delete_queued_message_by_id(session_id, queued_id).await;
+        broadcaster.broadcast(WsEvent {
+            event_type: "queue".into(),
+            session_id: session_id.to_string(),
+            data: serde_json::json!({ "action": "drained", "id": queued_id }),
+        });
         Ok(true)
     }
 
@@ -887,13 +928,23 @@ impl SessionManager {
             self.cancel_and_wait(session_id).await;
         }
 
+        let queued_id = queued.id;
         self.deliver_queued_row(&lock, queued, db, broadcaster, config, data_dir)
-            .await
+            .await?;
+        // The caller already removed the row; announce the drain now that
+        // dispatch actually succeeded.
+        broadcaster.broadcast(WsEvent {
+            event_type: "queue".into(),
+            session_id: session_id.to_string(),
+            data: serde_json::json!({ "action": "drained", "id": queued_id }),
+        });
+        Ok(())
     }
 
     /// Shared delivery tail for `drain_queued` / `force_queued`: append
-    /// the `user` event when the enqueuer didn't, announce the drain,
-    /// rebuild attachments from their ids, and dispatch.
+    /// the `user` event when the enqueuer didn't, rebuild attachments
+    /// from their ids, and dispatch. Callers announce the drain
+    /// themselves, once the row is actually gone.
     async fn deliver_queued_row(
         &self,
         lock: &SessionLock,
@@ -928,6 +979,20 @@ impl SessionManager {
                             "data": user_data,
                         }),
                     });
+                    // The event is durable now. Persist that fact so a
+                    // retry of this row (dispatch below can still fail,
+                    // and the drain leaves a failed row queued) doesn't
+                    // append a second copy of the same user message.
+                    if let Err(e) = db
+                        .mark_queued_message_user_event_appended(&session_id, queued.id)
+                        .await
+                    {
+                        tracing::warn!(
+                            session_id = %session_id,
+                            queued_id = queued.id,
+                            "deliver_queued_row: failed to mark user event appended: {e}"
+                        );
+                    }
                 }
                 Err(e) => {
                     tracing::error!(
@@ -937,12 +1002,6 @@ impl SessionManager {
                 }
             }
         }
-
-        broadcaster.broadcast(WsEvent {
-            event_type: "queue".into(),
-            session_id: session_id.clone(),
-            data: serde_json::json!({ "action": "drained", "id": queued.id }),
-        });
 
         let attachment_ids: Vec<String> = queued
             .attachment_ids
@@ -1244,6 +1303,41 @@ mod tests {
     fn manager() -> SessionManager {
         SessionManager::new(Arc::new(ProviderRegistry::new()))
     }
+    /// The watchdog's `try_lock_session` guard is only worth anything if its
+    /// manager shares the dispatchers' lock map. Built with a plain `new` it
+    /// gets an empty map of its own, every try-lock trivially succeeds, and
+    /// the sweeps are free to clear a card's claim out from under a live
+    /// dispatch.
+    #[tokio::test]
+    async fn sharing_locks_with_sees_a_lock_the_other_manager_holds() {
+        let registry = Arc::new(ProviderRegistry::new());
+        let primary = SessionManager::new(registry.clone());
+        let observer = SessionManager::sharing_locks_with(&primary);
+
+        assert!(
+            observer.try_lock_session("s1").await.is_some(),
+            "nothing held: the observer can take the lock"
+        );
+
+        let held = primary.lock_session("s1").await;
+        assert!(
+            observer.try_lock_session("s1").await.is_none(),
+            "a shared-lock observer must see a dispatcher mid-flight"
+        );
+        // The regression this constructor exists to prevent.
+        let detached = SessionManager::new(registry);
+        assert!(
+            detached.try_lock_session("s1").await.is_some(),
+            "a detached manager is blind to it — which is exactly the bug"
+        );
+        drop(held);
+
+        assert!(
+            observer.try_lock_session("s1").await.is_some(),
+            "and it must be takeable again once the dispatcher lets go"
+        );
+    }
+
     #[test]
     fn resolve_working_dir_blank_uses_folder() {
         assert_eq!(resolve_working_dir("", "/some/folder"), "/some/folder");

@@ -60,6 +60,8 @@ const DEFAULT_TIMEOUT_SECS: u64 = turn::DEFAULT_TIMEOUT_SECS;
 struct CursorRun {
     handle: JoinHandle<()>,
     cancel: Arc<Notify>,
+    /// Graceful "your card is done, wrap up" signal — see `TurnSpec::retire`.
+    retire: Arc<Notify>,
 }
 
 /// TTL cache for the model-discovery probe.
@@ -228,6 +230,8 @@ impl AgentProvider for CursorProvider {
 
         let cancel = Arc::new(Notify::new());
         let cancel_for_task = cancel.clone();
+        let retire = Arc::new(Notify::new());
+        let retire_for_task = retire.clone();
         let runs = self.runs.clone();
         let sid = session_id.clone();
         let model_label = config.model.clone();
@@ -252,6 +256,8 @@ impl AgentProvider for CursorProvider {
                     broadcaster: broadcaster.as_ref(),
                     timeout_secs: DEFAULT_TIMEOUT_SECS,
                     cancel: cancel_for_task,
+                    retire: retire_for_task,
+                    retire_grace_secs: turn::RETIRE_GRACE_SECS,
                     // An unauthenticated cursor-agent exits non-zero rather
                     // than printing an interactive prompt to stderr, so
                     // there is nothing to watch for.
@@ -284,10 +290,14 @@ impl AgentProvider for CursorProvider {
                 .await;
         });
 
-        self.runs
-            .lock()
-            .await
-            .insert(session_id, CursorRun { handle, cancel });
+        self.runs.lock().await.insert(
+            session_id,
+            CursorRun {
+                handle,
+                cancel,
+                retire,
+            },
+        );
         Ok(())
     }
 
@@ -299,6 +309,28 @@ impl AgentProvider for CursorProvider {
         if let Some(c) = cancel {
             tracing::info!(session_id = %session_id, "Cancelling cursor run");
             c.notify_one();
+        }
+    }
+
+    /// Graceful stop for the terminal MCP tools (`complete_step`,
+    /// `finish_card`, `wont_do_card`): the card this run was working has
+    /// already been transitioned, so let the in-flight tool response land and
+    /// give the agent a short window to close out before the child is wound
+    /// down. `cursor-agent` has no stdin control channel (the harness spawns
+    /// it with `Stdio::null()`), so the grace lives in `run_turn` rather than
+    /// in an EOF the child could observe — see `TurnSpec::retire`.
+    ///
+    /// Without this the CLI keeps running its own tool loop long after the
+    /// card was freed, and the orchestrator's next tick used to start a
+    /// second worker on top of it.
+    async fn shutdown_after_turn(&self, session_id: &str) {
+        let retire = {
+            let runs = self.runs.lock().await;
+            runs.get(session_id).map(|r| r.retire.clone())
+        };
+        if let Some(r) = retire {
+            tracing::info!(session_id = %session_id, "Retiring cursor run after turn");
+            r.notify_one();
         }
     }
 

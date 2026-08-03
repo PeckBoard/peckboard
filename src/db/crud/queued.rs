@@ -73,6 +73,29 @@ impl Db {
         })
         .await
     }
+    /// Record that the `user` event for this queued row has been written
+    /// to the transcript. The drain appends that event for machine-queued
+    /// rows *before* dispatch, and dispatch can fail — the row then stays
+    /// queued for a retry, which must not append a second copy. Returns
+    /// false if the row is already gone.
+    pub async fn mark_queued_message_user_event_appended(
+        &self,
+        session_id: &str,
+        message_id: i64,
+    ) -> anyhow::Result<bool> {
+        let session_id = session_id.to_string();
+        self.with_conn(move |conn| {
+            let count = diesel::update(
+                queued_messages::table
+                    .filter(queued_messages::session_id.eq(&session_id))
+                    .filter(queued_messages::id.eq(message_id)),
+            )
+            .set(queued_messages::user_event_appended.eq(true))
+            .execute(conn)?;
+            Ok(count > 0)
+        })
+        .await
+    }
 
     /// Remove one queued message. Returns false if it was already gone
     /// (e.g. the drain delivered it between the click and the request).

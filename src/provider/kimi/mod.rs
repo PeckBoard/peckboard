@@ -103,6 +103,8 @@ const STDERR_MARKERS: &[StderrMarker] = &[StderrMarker {
 struct KimiRun {
     handle: JoinHandle<()>,
     cancel: Arc<Notify>,
+    /// Graceful "your card is done, wrap up" signal — see `TurnSpec::retire`.
+    retire: Arc<Notify>,
 }
 
 /// TTL cache for the model-discovery probe.
@@ -415,6 +417,8 @@ impl AgentProvider for KimiProvider {
 
         let cancel = Arc::new(Notify::new());
         let cancel_for_task = cancel.clone();
+        let retire = Arc::new(Notify::new());
+        let retire_for_task = retire.clone();
         let runs = self.runs.clone();
         let sid = session_id.clone();
         let model_label = config.model.clone();
@@ -435,6 +439,8 @@ impl AgentProvider for KimiProvider {
                     broadcaster: broadcaster.as_ref(),
                     timeout_secs: DEFAULT_TIMEOUT_SECS,
                     cancel: cancel_for_task,
+                    retire: retire_for_task,
+                    retire_grace_secs: turn::RETIRE_GRACE_SECS,
                     stderr_markers: STDERR_MARKERS,
                     spawn_hint: Some(
                         "Install Kimi Code with `curl -fsSL \
@@ -466,10 +472,14 @@ impl AgentProvider for KimiProvider {
                 .await;
         });
 
-        self.runs
-            .lock()
-            .await
-            .insert(session_id, KimiRun { handle, cancel });
+        self.runs.lock().await.insert(
+            session_id,
+            KimiRun {
+                handle,
+                cancel,
+                retire,
+            },
+        );
         Ok(())
     }
 
@@ -481,6 +491,21 @@ impl AgentProvider for KimiProvider {
         if let Some(c) = cancel {
             tracing::info!(session_id = %session_id, "Cancelling kimi run");
             c.notify_one();
+        }
+    }
+
+    /// Graceful stop for the terminal MCP tools: the card this run was
+    /// working has already been transitioned, so let the in-flight tool
+    /// response land and give the agent a short window to close out before
+    /// the child is wound down. See `TurnSpec::retire`.
+    async fn shutdown_after_turn(&self, session_id: &str) {
+        let retire = {
+            let runs = self.runs.lock().await;
+            runs.get(session_id).map(|r| r.retire.clone())
+        };
+        if let Some(r) = retire {
+            tracing::info!(session_id = %session_id, "Retiring kimi run after turn");
+            r.notify_one();
         }
     }
 

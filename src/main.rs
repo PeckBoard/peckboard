@@ -382,7 +382,10 @@ async fn main() -> anyhow::Result<()> {
     // Start worker watchdog (orphan cleanup every 60s)
     {
         let watchdog_db = state.db.clone();
-        let watchdog_sm = SessionManager::new(state.provider_registry.clone());
+        // Shares the real per-session lock map, so the sweeps'
+        // `try_lock_session` guard actually observes a dispatcher mid-flight
+        // instead of trivially succeeding against an empty map of its own.
+        let watchdog_sm = SessionManager::sharing_locks_with(&state.session_manager);
         let watchdog_bc = state.broadcaster.clone();
         tokio::spawn(watchdog::start_watchdog(
             watchdog_db,

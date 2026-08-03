@@ -15,12 +15,15 @@ use peckboard::config::Config;
 use peckboard::db::Db;
 use peckboard::db::models::{
     NewCard, NewFolder, NewProject, NewQueuedMessage, NewSession, UpdateCard, UpdateProject,
+    UpdateSession,
 };
 use peckboard::plugin::builtin::BuiltinPluginRegistry;
 use peckboard::plugin::manager::PluginManager;
 use peckboard::provider::manager::SessionManager;
+use peckboard::provider::message::UserMessage;
 use peckboard::provider::mock::register_mock_provider;
 use peckboard::provider::registry::ProviderRegistry;
+use peckboard::provider::stream::SpawnConfig;
 use peckboard::service::mcp_server::McpTokenRegistry;
 use peckboard::service::push::PushService;
 use peckboard::state::AppState;
@@ -643,4 +646,121 @@ async fn worker_done_without_intent_keeps_resume_link() {
         Some("ws1"),
         "resume link must point at the interrupted session"
     );
+}
+
+// ── one running worker per card ─────────────────────────────────────
+
+/// Spin until the provider reports a live run, so the test observes the
+/// dispatch rather than racing it.
+async fn wait_until_running(state: &Arc<AppState>, session_id: &str) {
+    for _ in 0..200 {
+        if state.session_manager.is_running(session_id).await {
+            return;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    panic!("{session_id} never started running");
+}
+
+/// Put a real, parked agent run in flight on `session_id` (`mock:block`
+/// blocks until cancelled) and return once the provider reports it running.
+async fn start_blocking_run(state: &Arc<AppState>, session_id: &str) {
+    state
+        .db
+        .update_session(
+            session_id,
+            UpdateSession {
+                model: Some(Some("mock:block".into())),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    let lock = state.session_manager.lock_session(session_id).await;
+    state
+        .session_manager
+        .send_message_locked(
+            &lock,
+            UserMessage::from_text("work"),
+            &state.db,
+            &state.broadcaster,
+            SpawnConfig::default(),
+        )
+        .await
+        .expect("mock dispatch succeeds");
+    drop(lock);
+    wait_until_running(state, session_id).await;
+}
+
+/// The invariant behind the "cursor started two agents on one card" bug: a
+/// card must never carry two live worker runs at once.
+///
+/// The terminal MCP tools (`complete_step`, `finish_card`, `wont_do_card`)
+/// advance the step and free `worker_session_id` from INSIDE a live turn,
+/// leaning on `AgentProvider::shutdown_after_turn` to wind the agent down.
+/// A provider whose CLI keeps going through that grace leaves the card
+/// looking unassigned while an agent is still streaming — and because the
+/// step moved, the resume filter no longer matches that session, so the
+/// orchestrator used to mint a SECOND one right on top of it.
+#[tokio::test]
+async fn orchestrator_defers_spawn_while_the_cards_previous_worker_still_runs() {
+    let state = build_state().await;
+    seed_project(&state).await;
+    // Fresh spawns inherit the project model, so the replacement dispatch at
+    // the end of this test resolves to the mock provider too.
+    state
+        .db
+        .update_project(
+            "p1",
+            UpdateProject {
+                model: Some(Some("mock:block".into())),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    seed_card_with_worker(&state, "c1", "in_progress", "ws1").await;
+    start_blocking_run(&state, "ws1").await;
+
+    // Exactly what `complete_step` does mid-turn: advance the step and free
+    // the slot, while ws1's agent is still going.
+    state
+        .db
+        .update_card(
+            "c1",
+            UpdateCard {
+                step: Some("review".into()),
+                worker_session_id: Some(None),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+
+    check_and_spawn_workers(&state).await;
+
+    let sessions = state.db.list_worker_sessions_by_card("c1").await.unwrap();
+    assert_eq!(
+        sessions.len(),
+        1,
+        "a card whose previous worker is still running must not get a second one: {:?}",
+        sessions.iter().map(|s| &s.id).collect::<Vec<_>>(),
+    );
+    let card = state.db.get_card("c1").await.unwrap().unwrap();
+    assert!(
+        card.worker_session_id.is_none(),
+        "the spawn must be deferred, not claimed and abandoned",
+    );
+
+    // Once that run really ends, the very next tick picks the card up.
+    state.session_manager.cancel_and_wait("ws1").await;
+    check_and_spawn_workers(&state).await;
+
+    let card = state.db.get_card("c1").await.unwrap().unwrap();
+    assert!(
+        card.worker_session_id.is_some(),
+        "the card must be picked up once its previous worker has finished",
+    );
+    let sessions = state.db.list_worker_sessions_by_card("c1").await.unwrap();
+    assert_eq!(sessions.len(), 2, "the deferred spawn should now have run");
 }

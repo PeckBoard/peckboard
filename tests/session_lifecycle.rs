@@ -392,6 +392,78 @@ async fn drain_queued_is_noop_while_already_running() {
     let _ = wait_for_completion(&mut rx, "s6").await;
 }
 
+/// A drain whose dispatch fails must NOT consume the queue row: the row
+/// is the only copy of the message, and the completion listener merely
+/// logs the error. Regression test for `drain_queued` popping the head
+/// before delivery — every later completion then ate the next row too.
+#[tokio::test]
+async fn drain_queued_keeps_row_when_dispatch_fails() {
+    let (manager, db, broadcaster) = build_env().await;
+    let mut rx = manager.take_completion_rx().await.unwrap();
+    make_session(&db, "s7").await;
+
+    db.enqueue_message(NewQueuedMessage {
+        session_id: "s7".into(),
+        text: "must-survive".into(),
+        queued_at: chrono::Utc::now().to_rfc3339(),
+        ..Default::default()
+    })
+    .await
+    .unwrap();
+
+    // Dispatch fails: no such provider is registered. Stands in for the
+    // real-world causes (folder gone, Claude account deleted, spawn error).
+    let err = manager
+        .drain_queued(
+            "s7",
+            &db,
+            &broadcaster,
+            cfg("nosuchprovider:x"),
+            std::path::Path::new("/tmp"),
+        )
+        .await
+        .expect_err("dispatch with an unknown provider must fail");
+    assert!(
+        err.to_string().contains("unknown agent provider"),
+        "unexpected error: {err}"
+    );
+    let still = db.next_queued_message("s7").await.unwrap();
+    assert!(
+        still.is_some(),
+        "a failed dispatch must leave the queued message in place"
+    );
+    // The user event was already written, so the retry must not duplicate it.
+    assert!(still.unwrap().user_event_appended);
+
+    // Cause fixed — the retry delivers and only now removes the row.
+    let drained = manager
+        .drain_queued(
+            "s7",
+            &db,
+            &broadcaster,
+            cfg("mock:echo"),
+            std::path::Path::new("/tmp"),
+        )
+        .await
+        .unwrap();
+    assert!(drained);
+    assert!(db.next_queued_message("s7").await.unwrap().is_none());
+    let done = wait_for_completion(&mut rx, "s7").await;
+    assert!(done.completed);
+
+    let user_events = db
+        .events_tail("s7", 100)
+        .await
+        .unwrap()
+        .into_iter()
+        .filter(|e| e.kind == "user")
+        .count();
+    assert_eq!(
+        user_events, 1,
+        "the retry must not re-append the user event"
+    );
+}
+
 // ── 4. Concurrent send_or_queue does not double-spawn ──────────────────
 
 #[tokio::test]
