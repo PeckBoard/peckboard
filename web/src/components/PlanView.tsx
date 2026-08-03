@@ -8,6 +8,7 @@ import ConfirmDialog from './ConfirmDialog'
 import FieldError from './FieldError'
 import PlanImplementWizard from './PlanImplementWizard'
 import ModelPicker from './ModelPicker'
+import PickerLoadError from './PickerLoadError'
 import { useResourcesStore } from '../store/resources'
 import { useTabsStore } from '../store/tabs'
 import { createReview, listReviews, openReview } from '../lib/review'
@@ -41,6 +42,7 @@ export default function PlanView({ planId, onBack, onOpenSession }: PlanViewProp
   const [implModel, setImplModel] = useState('')
   const models = useResourcesStore((s) => s.models)
   const fetchModels = useResourcesStore((s) => s.fetchModels)
+  const modelsLoadError = useResourcesStore((s) => s.resourceErrors.models)
   useEffect(() => {
     void fetchModels()
   }, [fetchModels])
@@ -170,6 +172,9 @@ export default function PlanView({ planId, onBack, onOpenSession }: PlanViewProp
               defaultLabel="Same model"
               testId="plan-impl-model"
             />
+            {modelsLoadError && models.length === 0 && (
+              <PickerLoadError label="models" onRetry={fetchModels} />
+            )}
           </div>
           <button
             className="btn-primary"

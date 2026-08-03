@@ -5,6 +5,7 @@ import { effortOptionsForModel, useResourcesStore } from '../store/resources'
 import { authedFetch } from '../store/auth'
 import Modal from './Modal'
 import ModelPicker from './ModelPicker'
+import PickerLoadError from './PickerLoadError'
 import WorkflowSelect from './WorkflowSelect'
 import WorkflowInstructionsModal, {
   type WorkflowInstructionsDraft,
@@ -25,6 +26,7 @@ export default function NewProjectModal({ onClose }: Props) {
   const providers = useResourcesStore((s) => s.providers)
   const fetchWorkflows = useResourcesStore((s) => s.fetchWorkflows)
   const fetchModels = useResourcesStore((s) => s.fetchModels)
+  const modelsLoadError = useResourcesStore((s) => s.resourceErrors.models)
 
   const [name, setName] = useState('')
   // `chosenFolderId` is what the user explicitly picked; until they pick,
@@ -334,6 +336,9 @@ export default function NewProjectModal({ onClose }: Props) {
                   defaultLabel="App default"
                   testId="new-project-model"
                 />
+                {modelsLoadError && models.length === 0 && (
+                  <PickerLoadError label="models" onRetry={fetchModels} />
+                )}
                 <p className="form-hint">
                   Project-level model override. Cards and workflow steps can further override this.
                 </p>

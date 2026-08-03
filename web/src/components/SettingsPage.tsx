@@ -1058,6 +1058,7 @@ export default function SettingsPage({ onBack, initialSubPage = null }: Props) {
                 value={defaultModel}
                 onChange={changeDefaultModel}
                 models={models}
+                defaultLabel="None — route by effort"
                 ariaLabel="Default model"
                 testId="default-model"
                 emptyHint="Loading models…"

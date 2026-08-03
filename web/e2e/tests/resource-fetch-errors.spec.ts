@@ -122,3 +122,66 @@ test('failed worker-comms project fetch shows an error notice with Retry', async
 
   await expect(errorNotice).toHaveCount(0, { timeout: 10_000 })
 })
+
+test('failed /api/models shows a retry row in the chat kebab Model submenu; reopening recovers', async ({
+  request,
+  page,
+}) => {
+  const { token, authHeader } = await authenticate(request)
+  const folderId = await createFolder(request, authHeader)
+  const sessionRes = await request.post('/api/sessions', {
+    headers: authHeader,
+    data: { name: 'models-error-menu', folder_id: folderId },
+  })
+  expect(sessionRes.ok(), `create session failed: ${await sessionRes.text()}`).toBeTruthy()
+  const sessionId = ((await sessionRes.json()) as { id: string }).id
+
+  const modelsPattern = '**/api/models'
+  await page.route(modelsPattern, (route) => route.abort())
+
+  await loadAt(page, token, `/sessions/${sessionId}`)
+  await page.locator('.chat-toolbar-menu').click()
+  await page.getByRole('menuitem', { name: /^Model\b/ }).click()
+  // The submenu used to sit on "Loading models…" forever after a failed
+  // fetch; it must say so instead. (The searchable submenu renders its
+  // rows as listbox options, not menuitems.)
+  await expect(
+    page.getByRole('option', { name: 'Failed to load models — reopen to retry' }),
+  ).toBeVisible()
+
+  // Reopening the kebab re-arms the fetch (its onOpen clears the error
+  // flag); with the route restored the catalogue loads.
+  await page.unroute(modelsPattern)
+  await page.keyboard.press('Escape')
+  await page.locator('.chat-toolbar-menu').click()
+  await page.getByRole('menuitem', { name: /^Model\b/ }).click()
+  await expect(page.getByRole('option', { name: 'Mock: happy path' })).toBeVisible({
+    timeout: 10_000,
+  })
+})
+
+test('failed /api/models fetch shows a Retry in the Edit Project modal, and Retry recovers', async ({
+  request,
+  page,
+}) => {
+  const { token, authHeader } = await authenticate(request)
+  const projectId = await createProject(request, authHeader)
+
+  const modelsPattern = '**/api/models'
+  await page.route(modelsPattern, (route) => route.abort())
+
+  await loadAt(page, token, `/projects/${projectId}`)
+  await page.getByRole('button', { name: 'Project menu' }).click()
+  await page.getByRole('menuitem', { name: 'Edit project' }).click()
+  await expect(page.locator('#edit-project-model')).toBeVisible({ timeout: 10_000 })
+
+  const errorNotice = page.locator('.picker-load-error', { hasText: "Couldn't load models" })
+  await expect(errorNotice).toBeVisible({ timeout: 10_000 })
+
+  await page.unroute(modelsPattern)
+  await errorNotice.getByRole('button', { name: 'Retry' }).click()
+
+  await expect(errorNotice).toHaveCount(0, { timeout: 10_000 })
+  await page.locator('#edit-project-model').click()
+  await expect(page.getByRole('option', { name: 'Mock: happy path' })).toBeVisible()
+})
