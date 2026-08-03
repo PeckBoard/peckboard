@@ -1075,11 +1075,7 @@ pub(crate) async fn resolve_references(
                 } else {
                     content.trim()
                 };
-                let truncated = if body.len() > 2000 {
-                    format!("{}... (truncated)", &body[..2000])
-                } else {
-                    body.to_string()
-                };
+                let truncated = truncate_on_char_boundary(body, 2000);
                 report_replacements.push((
                     full_match,
                     format!(
@@ -1100,4 +1096,44 @@ pub(crate) async fn resolve_references(
     }
 
     result
+}
+
+/// Truncate `s` to at most `max_bytes`, backing up to the nearest char
+/// boundary so a multi-byte codepoint is never split (`&str` byte-slicing
+/// panics otherwise). Appends a marker when anything was cut.
+fn truncate_on_char_boundary(s: &str, max_bytes: usize) -> String {
+    if s.len() <= max_bytes {
+        return s.to_string();
+    }
+    let mut end = max_bytes;
+    while end > 0 && !s.is_char_boundary(end) {
+        end -= 1;
+    }
+    format!("{}... (truncated)", &s[..end])
+}
+
+#[cfg(test)]
+mod truncate_tests {
+    use super::truncate_on_char_boundary;
+
+    #[test]
+    fn keeps_short_body_untouched() {
+        assert_eq!(truncate_on_char_boundary("hello", 2000), "hello");
+    }
+
+    #[test]
+    fn does_not_split_a_multi_byte_codepoint() {
+        // Pad so that byte 2000 lands inside the em dash (3 bytes).
+        let body = format!("{}\u{2014}{}", "a".repeat(1999), "b".repeat(100));
+        assert!(!body.is_char_boundary(2000));
+        let out = truncate_on_char_boundary(&body, 2000);
+        assert_eq!(out, format!("{}... (truncated)", "a".repeat(1999)));
+    }
+
+    #[test]
+    fn cuts_exactly_at_boundary_when_aligned() {
+        let body = "a".repeat(2500);
+        let out = truncate_on_char_boundary(&body, 2000);
+        assert_eq!(out, format!("{}... (truncated)", "a".repeat(2000)));
+    }
 }
