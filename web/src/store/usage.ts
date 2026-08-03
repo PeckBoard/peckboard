@@ -246,6 +246,13 @@ interface UsageState {
   fetchCostTable: () => Promise<void>
 }
 
+// Incremented on every `fetchUsage`; a completed batch only commits if it is
+// still the latest request. Two quick range changes overlap their
+// `Promise.all` batches, and without this the earlier (slower) batch can land
+// last and overwrite the newer window's figures — leaving the preset buttons
+// saying one range while every number describes another.
+let usageRequestId = 0
+
 export const useUsageStore = create<UsageState>((set, get) => ({
   costTable: EMPTY_COST_TABLE,
   dashboard: EMPTY_DASHBOARD,
@@ -273,6 +280,7 @@ export const useUsageStore = create<UsageState>((set, get) => ({
     // fetched for exactly the window the caption will name, even though
     // "now" moves while the requests are in flight.
     const resolved = resolveRange(get().range, Date.now())
+    const reqId = ++usageRequestId
     const params = new URLSearchParams()
     appendRange(params, resolved)
     const win = `?${params.toString()}`
@@ -307,6 +315,10 @@ export const useUsageStore = create<UsageState>((set, get) => ({
       if (trends.failed) failedPanels.push('trends')
       if (opLists.some((r) => r.failed)) failedPanels.push('operations')
 
+      // A newer fetch started while this batch was in flight: drop it whole,
+      // including `loading`, which the newer request owns.
+      if (reqId !== usageRequestId) return
+
       set({
         costTable: costTable.data,
         dashboard: {
@@ -326,6 +338,7 @@ export const useUsageStore = create<UsageState>((set, get) => ({
         error: '',
       })
     } catch (err) {
+      if (reqId !== usageRequestId) return
       set({
         loaded: true,
         loading: false,
