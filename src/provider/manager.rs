@@ -295,7 +295,18 @@ impl SessionManager {
             .await?
             .ok_or_else(|| anyhow::anyhow!("folder not found: {}", session.folder_id))?;
 
-        let working_dir = resolve_working_dir(&config.working_dir, &folder.path);
+        // A blank `working_dir` means "caller didn't care" — but for a
+        // worker on a worktree-isolated card that must still be the card's
+        // worktree, not the shared checkout. Every resume path that builds a
+        // SpawnConfig without the orchestrator (the chat route, question
+        // answers, keepalive, handover) passes blank, and dispatching those
+        // into the shared folder would drop edits outside the branch that
+        // gets merged back.
+        let working_dir = if config.working_dir.is_empty() {
+            card_worktree_or_folder(db, &session, &folder.path).await
+        } else {
+            resolve_working_dir(&config.working_dir, &folder.path)
+        };
 
         let conversation_id = if session.conversation_id.is_some() {
             session.conversation_id.clone()
@@ -1042,6 +1053,41 @@ impl SessionManager {
         resume_conversation_id_from_tail(&tail)
     }
 }
+/// Default working directory for a dispatch whose caller left `working_dir`
+/// blank: the card's existing worktree when the session belongs to a card on
+/// a `worktree_isolation` project, otherwise the shared folder.
+///
+/// Never creates a worktree — that stays with the orchestrator's spawn path
+/// (`ensure_worktree`). A missing directory (isolation turned on after the
+/// card started, or the worktree already merged away) means the shared
+/// folder is the right answer.
+async fn card_worktree_or_folder(
+    db: &Db,
+    session: &crate::db::models::Session,
+    folder_path: &str,
+) -> String {
+    let (Some(project_id), Some(card_id)) = (&session.project_id, &session.card_id) else {
+        return folder_path.to_string();
+    };
+    let isolation = db
+        .get_project(project_id)
+        .await
+        .ok()
+        .flatten()
+        .map(|p| p.worktree_isolation)
+        .unwrap_or(false);
+    if !isolation {
+        return folder_path.to_string();
+    }
+    let id8 = crate::worker::worktree::card_id8(card_id);
+    let wt = crate::worker::worktree::worktree_path(folder_path, &id8);
+    if wt.is_dir() {
+        wt.to_string_lossy().to_string()
+    } else {
+        folder_path.to_string()
+    }
+}
+
 /// Resolves the working directory a dispatch should run in: an explicit,
 /// contained `requested` dir (e.g. a card's worktree from `ensure_worktree`)
 /// if valid, otherwise the session's shared folder.

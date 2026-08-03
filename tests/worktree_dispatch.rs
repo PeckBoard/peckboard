@@ -12,7 +12,9 @@ use peckboard::auth::rate_limit::RateLimiter;
 use peckboard::auth::token::{create_token, generate_jwt_secret, hash_token};
 use peckboard::config::Config;
 use peckboard::db::Db;
-use peckboard::db::models::{NewAuthSession, NewFolder, NewSession, NewUser};
+use peckboard::db::models::{
+    NewAuthSession, NewCard, NewFolder, NewProject, NewSession, NewUser, UpdateSession,
+};
 use peckboard::plugin::builtin::BuiltinPluginRegistry;
 use peckboard::plugin::manager::PluginManager;
 use peckboard::provider::manager::SessionManager;
@@ -214,4 +216,116 @@ async fn working_dir_outside_folder_is_rejected() {
     assert_eq!(seen, folder_dir.to_str().unwrap());
 
     std::mem::forget(folder_tmp);
+}
+
+/// The card-worktree fallback: a worker session on a `worktree_isolation`
+/// project whose caller left `working_dir` blank (the chat route, question
+/// answers, keepalive, handover all do) must still dispatch into the card's
+/// existing worktree, not the shared folder.
+#[tokio::test]
+async fn blank_working_dir_uses_card_worktree_when_isolated() {
+    let folder_tmp = tempfile::tempdir().unwrap();
+    let worktree_dir = folder_tmp
+        .path()
+        .join(".peckboard")
+        .join("worktrees")
+        .join("abcd1234");
+    std::fs::create_dir_all(&worktree_dir).unwrap();
+
+    let (state, _token) = build_state(folder_tmp.path()).await;
+    attach_card(&state, true).await;
+
+    let seen = dispatch_and_read_working_dir(&state, "").await;
+    assert_eq!(
+        std::fs::canonicalize(&seen).unwrap(),
+        std::fs::canonicalize(&worktree_dir).unwrap(),
+        "an isolated card's worker must resume in its worktree"
+    );
+
+    std::mem::forget(folder_tmp);
+}
+
+/// With isolation off, a stale worktree directory on disk must NOT capture
+/// the dispatch — the shared folder stays the working dir.
+#[tokio::test]
+async fn blank_working_dir_ignores_worktree_when_isolation_off() {
+    let folder_tmp = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(
+        folder_tmp
+            .path()
+            .join(".peckboard")
+            .join("worktrees")
+            .join("abcd1234"),
+    )
+    .unwrap();
+
+    let (state, _token) = build_state(folder_tmp.path()).await;
+    attach_card(&state, false).await;
+
+    let seen = dispatch_and_read_working_dir(&state, "").await;
+    assert_eq!(seen, folder_tmp.path().to_str().unwrap());
+
+    std::mem::forget(folder_tmp);
+}
+
+/// Point session `s1` at a card on a project with the given isolation flag.
+/// The card id8 (`abcd1234`) is what `worktree_path` uses for the directory.
+async fn attach_card(state: &Arc<AppState>, worktree_isolation: bool) {
+    let ts = chrono::Utc::now().to_rfc3339();
+    state
+        .db
+        .create_project(NewProject {
+            id: "p1".into(),
+            name: "P".into(),
+            context: String::new(),
+            folder_id: "f1".into(),
+            worker_count: 1,
+            status: "active".into(),
+            workflow: "[]".into(),
+            model: None,
+            effort: None,
+            parallel_instructions: false,
+            auto_notify_changes: false,
+            worker_communication: false,
+            created_at: ts.clone(),
+            worktree_isolation,
+            last_accessed_at: ts.clone(),
+            budget_usd_cents: None,
+            budget_period: None,
+        })
+        .await
+        .unwrap();
+    let card_id = "abcd1234-1111-2222-3333-444455556666";
+    state
+        .db
+        .create_card(NewCard {
+            id: card_id.into(),
+            project_id: "p1".into(),
+            title: "card".into(),
+            description: String::new(),
+            step: "in_progress".into(),
+            priority: 1,
+            workflow: "task".into(),
+            model: None,
+            effort: None,
+            blocked: false,
+            block_reason: None,
+            created_at: ts.clone(),
+            updated_at: ts,
+            system_prompt_name: None,
+        })
+        .await
+        .unwrap();
+    state
+        .db
+        .update_session(
+            "s1",
+            UpdateSession {
+                project_id: Some(Some("p1".into())),
+                card_id: Some(Some(card_id.into())),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
 }
