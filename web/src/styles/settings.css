@@ -1941,3 +1941,42 @@ a.wasm-plugin-repo:hover {
   border-radius: 50%;
   border: 1px solid var(--border);
 }
+
+/* ─── TLS / HTTPS ─────────────────────────────────── */
+/* The SAN chips are the payload of the TLS page: every hostname/IP the
+   certificate covers, scannable at a glance and monospace so addresses
+   read as addresses. */
+.tls-san-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+.tls-san {
+  font-family: var(--font-mono);
+  font-size: var(--text-xs);
+  color: var(--text2);
+  background: var(--surface2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: 3px 8px;
+}
+.tls-upload-field {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 6px;
+  margin-bottom: 16px;
+}
+.tls-upload-field .settings-label {
+  min-width: 0;
+}
+.tls-pem-input {
+  width: 100%;
+  min-height: 96px;
+  resize: vertical;
+  font-family: var(--font-mono);
+  font-size: var(--text-xs);
+}

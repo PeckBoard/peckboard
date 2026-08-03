@@ -452,6 +452,21 @@ export interface HealthResponse {
   ok: boolean
 }
 
+/** `GET /api/settings/tls` — mirrors `tls_status_json` in
+ *  `src/routes/settings.rs`. The mutating TLS routes answer with the
+ *  same shape on success. */
+export interface TlsStatus {
+  https_enabled: boolean
+  https_port: number
+  /** What the HTTPS listener is serving. */
+  source: 'self-signed' | 'uploaded' | 'none'
+  /** Hostnames and IPs the certificate is valid for. */
+  sans: string[]
+  /** Certificate expiry (RFC 3339), if a certificate is loaded. */
+  not_after: string | null
+  /** Why TLS failed at startup, if it did. */
+  error: string | null
+}
 // ── Usage dashboard ──────────────────────────────────────────────────
 // Mirrors the Rust contract in `src/routes/usage/mod.rs` (and the cost
 // model in `src/routes/usage/cost.rs`). snake_case throughout, matching

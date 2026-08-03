@@ -37,6 +37,7 @@ import PluginSettingsSection from './PluginSettingsSection'
 import PluginRegistryPanel from './PluginRegistryPanel'
 import McpServersSection from './McpServersSection'
 import RetentionSettingsSection from './RetentionSettingsSection'
+import TlsSettingsSection from './TlsSettingsSection'
 import EnvVarsSection from './EnvVarsSection'
 import AgentVarsSection from './AgentVarsSection'
 import ConfirmDialog from './ConfirmDialog'
@@ -92,6 +93,7 @@ type SubPage =
   | 'variables'
   | 'registry'
   | 'server'
+  | 'tls'
 
 /**
  * The settings hub lists these sub-pages; each groups related sections
@@ -162,6 +164,12 @@ const SUB_PAGES: { id: SubPage; title: string; blurb: string; adminOnly?: boolea
     blurb: 'Ports, data directory, approved commands, software updates',
     adminOnly: true,
   },
+  {
+    id: 'tls',
+    title: 'TLS / HTTPS',
+    blurb: 'Certificate, hostnames, upload or regenerate',
+    adminOnly: true,
+  },
 ]
 
 /** 16×16 stroke icons for the section rail — one per sub-page, in the
@@ -227,6 +235,12 @@ const NAV_ICON_PATHS: Record<SubPage, ReactNode> = {
     <>
       <rect x="2.5" y="6" width="11" height="4.5" rx="1" />
       <path d="M4.5 6 6 3.5h4L11.5 6M11.25 8.25h.01" />
+    </>
+  ),
+  tls: (
+    <>
+      <rect x="3.5" y="7" width="9" height="6.5" rx="1.5" />
+      <path d="M5.5 7V4.75a2.5 2.5 0 0 1 5 0V7M8 9.5v1.75" />
     </>
   ),
 }
@@ -951,6 +965,7 @@ export default function SettingsPage({ onBack, initialSubPage = null }: Props) {
           </>
         )}
 
+        {activeSubPage === 'tls' && <TlsSettingsSection />}
         {activeSubPage === 'mcp' && <McpServersSection />}
         {activeSubPage === 'env' && <EnvVarsSection />}
         {activeSubPage === 'variables' && <AgentVarsSection />}
