@@ -29,6 +29,7 @@ import ModelPicker from './ModelPicker'
 import TodoPanel from './TodoPanel'
 import PreHatchActivity from './chat/PreHatchActivity'
 import { chatMarkdownComponents } from './chat/markdown'
+import { type AnswerValue, answerText, selectedOptions, toggleOption } from '../lib/questionAnswers'
 import { fetchPlanId, openPlan } from '../lib/plan'
 import { openReport } from '../lib/reports'
 import { describeActionError } from '../utils/actionError'
@@ -308,25 +309,17 @@ function QuestionCard({
   requestId?: string
   questions: QuestionItem[]
 }) {
-  const [answers, setAnswers] = useState<Record<number, string>>({})
+  const [answers, setAnswers] = useState<Record<number, AnswerValue>>({})
   const [submitting, setSubmitting] = useState(false)
 
   const setAnswer = (idx: number, value: string) => {
     setAnswers((prev) => ({ ...prev, [idx]: value }))
   }
 
-  const toggleMulti = (idx: number, option: string) => {
-    setAnswers((prev) => {
-      const current = prev[idx] ?? ''
-      const selected = current ? current.split(',') : []
-      const next = selected.includes(option)
-        ? selected.filter((s) => s !== option)
-        : [...selected, option]
-      return { ...prev, [idx]: next.join(',') }
-    })
-  }
+  const toggleMulti = (idx: number, option: string) =>
+    setAnswers((prev) => ({ ...prev, [idx]: toggleOption(prev[idx], option) }))
 
-  const hasAnswers = questions.some((_, idx) => (answers[idx] ?? '').trim().length > 0)
+  const hasAnswers = questions.some((_, idx) => answerText(answers[idx]).length > 0)
 
   const handleSubmit = async () => {
     if (!hasAnswers || submitting) return
@@ -334,7 +327,7 @@ function QuestionCard({
     try {
       const answerMap: Record<string, string> = {}
       questions.forEach((_, idx) => {
-        const val = (answers[idx] ?? '').trim()
+        const val = answerText(answers[idx])
         if (val) answerMap[String(idx)] = val
       })
       await authedFetch(`/api/sessions/${sessionId}/events`, {
@@ -394,7 +387,7 @@ function QuestionCard({
                     {q.multiSelect ? (
                       <input
                         type="checkbox"
-                        checked={(answers[idx] ?? '').split(',').includes(opt)}
+                        checked={selectedOptions(answers[idx]).includes(opt)}
                         onChange={() => toggleMulti(idx, opt)}
                         disabled={submitting}
                       />
@@ -422,7 +415,7 @@ function QuestionCard({
               className="question-input"
               type="text"
               placeholder="Type your answer..."
-              value={answers[idx] ?? ''}
+              value={typeof answers[idx] === 'string' ? answers[idx] : ''}
               onChange={(e) => setAnswer(idx, e.target.value)}
               onKeyDown={(e) => {
                 if (e.key === 'Enter' && questions.length === 1) handleSubmit()

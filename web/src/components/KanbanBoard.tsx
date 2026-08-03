@@ -19,6 +19,7 @@ import { highlightPlugins } from './markdownHighlight'
 import { fetchPlanId, openPlan } from '../lib/plan'
 import { openReport } from '../lib/reports'
 import { describeActionError } from '../utils/actionError'
+import { type AnswerValue, answerText, selectedOptions, toggleOption } from '../lib/questionAnswers'
 import { useProjectTodos } from '../hooks/useProjectTodos'
 import {
   EMPTY_QUESTIONS,
@@ -194,7 +195,9 @@ export default function KanbanBoard({
     (s) => s.pendingQuestionsByProject[projectId] ?? EMPTY_QUESTIONS,
   )
   const fetchPendingQuestions = useProjectsStore((s) => s.fetchPendingQuestions)
-  const [questionAnswers, setQuestionAnswers] = useState<Record<string, Record<number, string>>>({})
+  const [questionAnswers, setQuestionAnswers] = useState<
+    Record<string, Record<number, AnswerValue>>
+  >({})
   const [submittingQuestion, setSubmittingQuestion] = useState<string | null>(null)
   const [questionError, setQuestionError] = useState<string | null>(null)
   const [questionDialogOpen, setQuestionDialogOpen] = useState(false)
@@ -400,7 +403,7 @@ export default function KanbanBoard({
 
   const handleAnswerQuestion = async (pq: PendingQuestion): Promise<boolean> => {
     const answers = questionAnswers[pq.eventId] ?? {}
-    const hasAnswers = pq.questions.some((_, idx) => (answers[idx] ?? '').trim().length > 0)
+    const hasAnswers = pq.questions.some((_, idx) => answerText(answers[idx]).length > 0)
     if (!hasAnswers || submittingQuestion) return false
 
     setSubmittingQuestion(pq.eventId)
@@ -408,7 +411,7 @@ export default function KanbanBoard({
     try {
       const answerMap: Record<string, string> = {}
       pq.questions.forEach((_, idx) => {
-        const val = (answers[idx] ?? '').trim()
+        const val = answerText(answers[idx])
         if (val) answerMap[String(idx)] = val
       })
       await postQuestionResolved(pq, { question_id: pq.eventId, answers: answerMap })
@@ -465,7 +468,8 @@ export default function KanbanBoard({
   }
 
   const insertMentionInAnswer = (eventId: string, idx: number, mention: { ref: string }) => {
-    const current = questionAnswers[eventId]?.[idx] ?? ''
+    const raw = questionAnswers[eventId]?.[idx]
+    const current = typeof raw === 'string' ? raw : ''
     const atIdx = current.lastIndexOf('@')
     const newVal = current.slice(0, atIdx) + mention.ref
     setQuestionAnswers((prev) => ({
@@ -475,16 +479,14 @@ export default function KanbanBoard({
     setMentionAutocomplete(null)
   }
 
-  const toggleQuestionMulti = (eventId: string, idx: number, option: string) => {
-    setQuestionAnswers((prev) => {
-      const current = (prev[eventId] ?? {})[idx] ?? ''
-      const selected = current ? current.split(',') : []
-      const next = selected.includes(option)
-        ? selected.filter((s) => s !== option)
-        : [...selected, option]
-      return { ...prev, [eventId]: { ...(prev[eventId] ?? {}), [idx]: next.join(',') } }
-    })
-  }
+  const toggleQuestionMulti = (eventId: string, idx: number, option: string) =>
+    setQuestionAnswers((prev) => ({
+      ...prev,
+      [eventId]: {
+        ...(prev[eventId] ?? {}),
+        [idx]: toggleOption((prev[eventId] ?? {})[idx], option),
+      },
+    }))
 
   useEffect(() => {
     fetchCards(projectId)
@@ -923,7 +925,7 @@ export default function KanbanBoard({
             const pq = pendingQuestions[0]
             const answers = questionAnswers[pq.eventId] ?? {}
             const isSubmitting = submittingQuestion === pq.eventId
-            const hasAnswers = pq.questions.some((_, idx) => (answers[idx] ?? '').trim().length > 0)
+            const hasAnswers = pq.questions.some((_, idx) => answerText(answers[idx]).length > 0)
             const remaining = pendingQuestions.length - 1
 
             return (
@@ -965,7 +967,7 @@ export default function KanbanBoard({
                                 {q.multiSelect ? (
                                   <input
                                     type="checkbox"
-                                    checked={(answers[idx] ?? '').split(',').includes(opt)}
+                                    checked={selectedOptions(answers[idx]).includes(opt)}
                                     onChange={() => toggleQuestionMulti(pq.eventId, idx, opt)}
                                     disabled={isSubmitting}
                                   />
@@ -996,7 +998,7 @@ export default function KanbanBoard({
                             className="question-input"
                             type="text"
                             placeholder="Type your answer... (@ to reference a report)"
-                            value={answers[idx] ?? ''}
+                            value={typeof answers[idx] === 'string' ? answers[idx] : ''}
                             onChange={(e) => setQuestionAnswer(pq.eventId, idx, e.target.value)}
                             onKeyDown={(e) => {
                               if (

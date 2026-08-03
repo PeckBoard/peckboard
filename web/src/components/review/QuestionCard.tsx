@@ -3,6 +3,7 @@ import { useState } from 'react'
 import type { QuestionItem } from '../chat/events'
 import { authedFetch } from '../../store/auth'
 import { type DocAnchor } from '../../lib/review'
+import { type AnswerValue, answerParts, toggleOption } from '../../lib/questionAnswers'
 import { describeActionError } from '../../utils/actionError'
 import './Review.css'
 
@@ -53,8 +54,7 @@ export default function QuestionCard({
   anchor = null,
   onJump,
 }: Props) {
-  const [answers, setAnswers] = useState<Record<number, string>>({})
-  /** Free text typed against an "Other" option, per question. */
+  const [answers, setAnswers] = useState<Record<number, AnswerValue>>({})
   const [otherText, setOtherText] = useState<Record<number, string>>({})
   const [submitting, setSubmitting] = useState(false)
   const [submitted, setSubmitted] = useState<Record<string, string> | null>(null)
@@ -62,26 +62,16 @@ export default function QuestionCard({
 
   const setAnswer = (idx: number, value: string) => setAnswers((p) => ({ ...p, [idx]: value }))
 
-  const toggleMulti = (idx: number, option: string) => {
-    setAnswers((prev) => {
-      const selected = prev[idx] ? prev[idx].split(',') : []
-      const next = selected.includes(option)
-        ? selected.filter((s) => s !== option)
-        : [...selected, option]
-      return { ...prev, [idx]: next.join(',') }
-    })
-  }
+  const toggleMulti = (idx: number, option: string) =>
+    setAnswers((prev) => ({ ...prev, [idx]: toggleOption(prev[idx], option) }))
 
   /** The selection with any "Other" label swapped for what was typed. */
   const resolveAnswer = (idx: number): string => {
-    const raw = (answers[idx] ?? '').trim()
-    if (!raw) return ''
+    const parts = answerParts(answers[idx])
+    if (parts.length === 0) return ''
     const typed = (otherText[idx] ?? '').trim()
-    if (!typed) return raw
-    return raw
-      .split(',')
-      .map((part) => (isOtherOption(part) ? typed : part))
-      .join(', ')
+    if (!typed) return parts.join(', ')
+    return parts.map((part) => (isOtherOption(part) ? typed : part)).join(', ')
   }
 
   const answered = questions.some((_, idx) => resolveAnswer(idx).length > 0)
@@ -161,7 +151,7 @@ export default function QuestionCard({
       aria-label="The reviewer needs an answer"
     >
       {questions.map((q, idx) => {
-        const selected = (answers[idx] ?? '').split(',')
+        const selected = answerParts(answers[idx])
         const otherSelected = selected.some(isOtherOption)
         return (
           <div key={idx} className="review-ask__item">
@@ -221,7 +211,7 @@ export default function QuestionCard({
                 placeholder="Type your answer…"
                 aria-label={q.question}
                 data-testid="review-question-input"
-                value={answers[idx] ?? ''}
+                value={typeof answers[idx] === 'string' ? answers[idx] : ''}
                 disabled={submitting}
                 onChange={(e) => setAnswer(idx, e.target.value)}
                 onKeyDown={(e) => {
