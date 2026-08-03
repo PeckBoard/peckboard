@@ -21,14 +21,12 @@ use crate::provider::registry::ProviderRegistry;
 /// Max self-service switches recorded for one session. A money-loop-adjacent
 /// defense against a model flip-flopping between tiers indefinitely.
 const SWITCH_CAP: usize = 3;
-
-/// Utilization (%) above which the server nudges harder toward downgrading.
 const DOWNGRADE_PRESSURE_PCT: f64 = 70.0;
 
 /// Normalize a stored model id (possibly bare, possibly account-scoped) to a
 /// full `provider:model[@account]` id so it can be matched against the
 /// registry catalog, whose ids always carry the provider prefix.
-fn full_model_id(model_id: &str) -> String {
+pub(crate) fn full_model_id(model_id: &str) -> String {
     let (provider, rest) = ProviderRegistry::parse_model_id(model_id, "claude");
     format!("{provider}:{rest}")
 }

@@ -99,22 +99,37 @@ pub(super) async fn list_events(
         )
     })?;
 
-    // Parse data field from string to JSON for each event
-    let events_json: Vec<serde_json::Value> = events
-        .iter()
-        .map(|e| {
-            serde_json::json!({
-                "id": e.id,
-                "session_id": e.session_id,
-                "seq": e.seq,
-                "ts": e.ts,
-                "kind": e.kind,
-                "data": serde_json::from_str::<serde_json::Value>(&e.data).unwrap_or_default(),
-            })
+    // `data` is already a JSON string in the DB — splice it into the
+    // response verbatim as a RawValue (validate-only scan) instead of
+    // DOM-parsing and re-serializing every blob, which dominated handler
+    // CPU on large pages. A corrupt blob degrades to `null`, matching the
+    // old `unwrap_or_default()` behavior.
+    #[derive(serde::Serialize)]
+    struct EventJson {
+        id: String,
+        session_id: String,
+        seq: i32,
+        ts: i64,
+        kind: String,
+        data: Box<serde_json::value::RawValue>,
+    }
+    let events_json: Vec<EventJson> = events
+        .into_iter()
+        .map(|e| EventJson {
+            id: e.id,
+            session_id: e.session_id,
+            seq: e.seq,
+            ts: e.ts,
+            kind: e.kind,
+            data: serde_json::value::RawValue::from_string(e.data).unwrap_or_else(|_| {
+                serde_json::value::RawValue::from_string("null".into()).expect("null is valid JSON")
+            }),
         })
         .collect();
 
-    Ok::<_, (StatusCode, Json<serde_json::Value>)>(Json(serde_json::json!(events_json)))
+    // Json(events_json) directly — `json!(events_json)` would parse every
+    // RawValue back into a Value tree and undo the passthrough.
+    Ok::<_, (StatusCode, Json<serde_json::Value>)>(Json(events_json))
 }
 
 /// POST /api/sessions/:id/events -- append an event

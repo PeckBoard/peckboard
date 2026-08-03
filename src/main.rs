@@ -26,7 +26,7 @@ use axum::middleware;
 use std::sync::Arc;
 use tokio::net::TcpListener;
 use tokio::signal;
-use tower_http::trace::TraceLayer;
+use tower_http::{compression::CompressionLayer, trace::TraceLayer};
 use tracing_subscriber::EnvFilter;
 
 #[tokio::main]
@@ -361,6 +361,12 @@ async fn main() -> anyhow::Result<()> {
         .layer(middleware::from_fn(security_headers))
         .layer(middleware::from_fn(origin_check))
         .layer(TraceLayer::new_for_http())
+        // Outermost: gzip API/static responses when the client asks for it.
+        // Event pages are large, highly compressible JSON and the UI is
+        // typically remote — transfer time dominates the load, not the query.
+        // Default predicate already skips images and tiny bodies; the WS
+        // upgrade has no body so /ws is unaffected.
+        .layer(CompressionLayer::new())
         .with_state(state.clone());
 
     tracing::info!("Peckboard listening on http://{addr}");

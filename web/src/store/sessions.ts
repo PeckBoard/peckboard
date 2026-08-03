@@ -343,46 +343,68 @@ export const useSessionsStore = create<SessionsState>((set, get) => ({
     }
   },
   fetchEvents: async (sessionId: string) => {
+    // Stale-while-revalidate: on a revisit we already hold this session's
+    // events, so keep them on screen and refresh in the background — no
+    // wipe, no full-screen spinner. Cold opens keep the old spinner path.
+    const hadCache = (get().eventsBySession[sessionId] ?? []).length > 0
     set((s) => ({
-      loadingEventsBySession: { ...s.loadingEventsBySession, [sessionId]: true },
+      loadingEventsBySession: { ...s.loadingEventsBySession, [sessionId]: !hadCache },
       eventsErrorBySession: { ...s.eventsErrorBySession, [sessionId]: false },
-      eventsBySession: { ...s.eventsBySession, [sessionId]: [] },
-      // Reset older-page bookkeeping for a fresh session open. We
-      // assume "more history exists" until a short page proves
-      // otherwise; the "Load older" button hides immediately when
-      // hasMore flips false.
-      hasMoreOlderEventsBySession: {
-        ...s.hasMoreOlderEventsBySession,
-        [sessionId]: true,
-      },
+      ...(hadCache
+        ? {}
+        : {
+            eventsBySession: { ...s.eventsBySession, [sessionId]: [] },
+            // Reset older-page bookkeeping for a fresh session open. We
+            // assume "more history exists" until a short page proves
+            // otherwise; the "Load older" button hides immediately when
+            // hasMore flips false.
+            hasMoreOlderEventsBySession: {
+              ...s.hasMoreOlderEventsBySession,
+              [sessionId]: true,
+            },
+          }),
     }))
     try {
       const res = await authedFetch(`/api/sessions/${sessionId}/events?limit=${EVENTS_PAGE_SIZE}`)
       if (!res.ok) throw new Error(`events fetch failed: ${res.status}`)
       const events: Event[] = await res.json()
       set((s) => {
-        // Merge rather than replace: events broadcast over the WS while
-        // this fetch was in flight have already been appended to the
-        // store but may post-date the HTTP snapshot — a wholesale
-        // replace would silently drop them.
+        // Merge rather than replace: cached scrollback from a previous
+        // visit (older pages) and events broadcast over the WS while this
+        // fetch was in flight both live outside the HTTP snapshot — a
+        // wholesale replace would silently drop them.
         const fetchedIds = new Set(events.map((e) => e.id))
-        const liveExtras = (s.eventsBySession[sessionId] ?? []).filter((e) => !fetchedIds.has(e.id))
-        const merged = [...events, ...liveExtras].sort((a, b) => a.seq - b.seq)
+        const extras = (s.eventsBySession[sessionId] ?? []).filter((e) => !fetchedIds.has(e.id))
+        const merged = [...events, ...extras].sort((a, b) => a.seq - b.seq)
         return {
           eventsBySession: { ...s.eventsBySession, [sessionId]: merged },
           loadingEventsBySession: { ...s.loadingEventsBySession, [sessionId]: false },
-          // If the first page came back short, there are no older
-          // events to load — hide the button up-front.
           hasMoreOlderEventsBySession: {
             ...s.hasMoreOlderEventsBySession,
-            [sessionId]: events.length >= EVENTS_PAGE_SIZE,
+            // A short page means the whole history fit in one page — no
+            // older events, cached or not. A full page on a cold open
+            // means history continues past it. A full page on a revisit
+            // says nothing about our (possibly deeper) cached oldest, so
+            // keep the flag the previous visit earned.
+            [sessionId]:
+              events.length >= EVENTS_PAGE_SIZE
+                ? hadCache
+                  ? (s.hasMoreOlderEventsBySession[sessionId] ?? true)
+                  : true
+                : false,
           },
         }
       })
     } catch {
       set((s) => ({
         loadingEventsBySession: { ...s.loadingEventsBySession, [sessionId]: false },
-        eventsErrorBySession: { ...s.eventsErrorBySession, [sessionId]: true },
+        // A failed background refresh must not blank a perfectly good
+        // cached transcript — only surface the error pane when there is
+        // nothing to show instead.
+        eventsErrorBySession: {
+          ...s.eventsErrorBySession,
+          [sessionId]: (s.eventsBySession[sessionId] ?? []).length === 0,
+        },
       }))
     }
   },

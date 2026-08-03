@@ -16,6 +16,11 @@
   display: flex;
   flex-direction: column;
   gap: 6px;
+  /* The virtualizer owns scroll position (autoscroll, load-older restore,
+     session-switch snap). Browser scroll anchoring fights it: row
+     remeasures trigger anchoring adjustments whose scroll events read as
+     "user scrolled up" and strand the viewport mid-transcript. */
+  overflow-anchor: none;
 }
 
 .chat-loading,

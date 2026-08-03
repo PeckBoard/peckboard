@@ -43,7 +43,6 @@ impl McpToolRegistry {
                 "subagents cannot spawn subagents; return your findings and let the parent fan out"
             );
         }
-
         let limits = crate::subagent::load_limits(&ctx.db).await;
         let active = ctx.db.count_active_subagents(&ctx.session_id).await?;
         if active >= limits.max_concurrent {
@@ -65,6 +64,22 @@ impl McpToolRegistry {
             .and_then(|v| v.as_str())
             .map(str::to_string)
             .or_else(|| caller.effort.clone());
+
+        // Reject an unknown/typo'd/deleted-account model immediately rather
+        // than creating a child row that can never dispatch: a bad model
+        // here would otherwise leak a concurrency slot until the async
+        // first-turn dispatch fails minutes later (or forever, since that
+        // failure path used to only log).
+        if let (Some(m), Some(registry)) = (model.as_deref(), ctx.provider_registry.as_ref()) {
+            let full = super::model_control::full_model_id(m);
+            let catalog = registry.list_all_models().await;
+            if !catalog.iter().any(|(id, _)| *id == full) {
+                anyhow::bail!(
+                    "unknown model '{full}' (see list_models); spawn_subagent refused so it \
+                     doesn't leak a concurrency slot"
+                );
+            }
+        }
 
         // Optional library system prompt for the child (research/review/…).
         let resolved = ctx

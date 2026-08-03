@@ -590,7 +590,36 @@ async fn spawn_worker_for_card(
         None => None,
     };
 
-    let (session, is_resume) = match resume_session {
+    // A previous session that was claimed but never actually dispatched
+    // (e.g. `send_message_locked` failed immediately -- dead model,
+    // deleted account, uninstalled provider) has neither a
+    // `conversation_id` nor a `pending_handover_doc`, so it fails the
+    // resume filter above and is otherwise abandoned: every 5s tick then
+    // mints a brand-new session row for the same card, forever. Reuse
+    // that dead row instead of minting another -- same identity, full
+    // (non-resume) prompt.
+    let reusable_dead_session = if resume_session.is_none() {
+        match card.last_worker_session_id.as_deref() {
+            Some(prev_sid) => state
+                .db
+                .get_session(prev_sid)
+                .await
+                .ok()
+                .flatten()
+                .filter(|prev| {
+                    prev.is_worker
+                        && prev.card_id.as_deref() == Some(card.id.as_str())
+                        && prev.worker_step.as_deref() == Some(effective_step.as_str())
+                        && prev.conversation_id.is_none()
+                        && prev.pending_handover_doc.is_none()
+                }),
+            None => None,
+        }
+    } else {
+        None
+    };
+
+    let (session, is_resume, created_now) = match resume_session {
         Some(prev) => {
             tracing::info!(
                 session_id = %prev.id,
@@ -600,73 +629,86 @@ async fn spawn_worker_for_card(
                 "Resuming previous worker session for card \"{}\"",
                 card.title
             );
-            (prev, true)
+            (prev, true, false)
         }
-        None => {
-            // Resolve the card's selected library prompt (if any) into a body
-            // and stamp both the body and the reference onto the fresh worker
-            // session. Card selection is applied here, at spawn. A stale name
-            // (prompt since deleted) shouldn't block the whole card, so log
-            // and fall through with no prompt rather than erroring out.
-            let (worker_system_prompt, worker_system_prompt_name) = match state
-                .db
-                .resolve_system_prompt(card.system_prompt_name.as_deref())
-                .await
-            {
-                Ok(Some((name, body))) => (Some(body), Some(name)),
-                Ok(None) => (None, None),
-                Err(e) => {
-                    tracing::warn!(
-                        card_id = %card.id,
-                        "Card system prompt could not be resolved, spawning worker without it: {e}"
-                    );
-                    (None, None)
-                }
-            };
-            let session = state
-                .db
-                .create_session(NewSession {
-                    id: uuid::Uuid::new_v4().to_string(),
-                    name: format!("worker: {}", card.title),
-                    folder_id: project.folder_id.clone(),
-                    model: card.model.clone().or_else(|| project.model.clone()),
-                    // Default to medium effort when neither the card nor the
-                    // project sets one — unset effort otherwise falls through
-                    // to the provider's own default (high thinking on capable
-                    // models), which measurably doubles worker output tokens.
-                    effort: card
-                        .effort
-                        .clone()
-                        .or_else(|| project.effort.clone())
-                        .or_else(|| Some("medium".into())),
-                    is_worker: true,
-                    project_id: Some(project.id.clone()),
-                    card_id: Some(card.id.clone()),
-                    conversation_id: None,
-                    created_at: now.clone(),
-                    last_activity: now.clone(),
-                    worker_step: Some(effective_step.clone()),
-                    // Owner: workers have no authed user in scope; inherit the
-                    // sole-user fallback (multi-user installs stay NULL).
-                    // Carry the card's explicit auto-switch choice onto the
-                    // worker row. NULL inherits the worker default (ON), so we
-                    // only need to propagate a card-level override.
-                    model_autoswitch: card.model_autoswitch,
-                    system_prompt: worker_system_prompt,
-                    system_prompt_name: worker_system_prompt_name,
-                    user_id: state.db.resolve_spawned_session_owner(None).await,
-                    ..Default::default()
-                })
-                .await?;
-            tracing::info!(
-                session_id = %session.id,
-                card_id = %card.id,
-                project_id = %project.id,
-                "Created worker session for card \"{}\"",
-                card.title
-            );
-            (session, false)
-        }
+        None => match reusable_dead_session {
+            Some(prev) => {
+                tracing::info!(
+                    session_id = %prev.id,
+                    card_id = %card.id,
+                    project_id = %project.id,
+                    step = %effective_step,
+                    "Reusing never-dispatched worker session for card \"{}\"",
+                    card.title
+                );
+                (prev, false, false)
+            }
+            None => {
+                // Resolve the card's selected library prompt (if any) into a body
+                // and stamp both the body and the reference onto the fresh worker
+                // session. Card selection is applied here, at spawn. A stale name
+                // (prompt since deleted) shouldn't block the whole card, so log
+                // and fall through with no prompt rather than erroring out.
+                let (worker_system_prompt, worker_system_prompt_name) = match state
+                    .db
+                    .resolve_system_prompt(card.system_prompt_name.as_deref())
+                    .await
+                {
+                    Ok(Some((name, body))) => (Some(body), Some(name)),
+                    Ok(None) => (None, None),
+                    Err(e) => {
+                        tracing::warn!(
+                            card_id = %card.id,
+                            "Card system prompt could not be resolved, spawning worker without it: {e}"
+                        );
+                        (None, None)
+                    }
+                };
+                let session = state
+                    .db
+                    .create_session(NewSession {
+                        id: uuid::Uuid::new_v4().to_string(),
+                        name: format!("worker: {}", card.title),
+                        folder_id: project.folder_id.clone(),
+                        model: card.model.clone().or_else(|| project.model.clone()),
+                        // Default to medium effort when neither the card nor the
+                        // project sets one -- unset effort otherwise falls through
+                        // to the provider's own default (high thinking on capable
+                        // models), which measurably doubles worker output tokens.
+                        effort: card
+                            .effort
+                            .clone()
+                            .or_else(|| project.effort.clone())
+                            .or_else(|| Some("medium".into())),
+                        is_worker: true,
+                        project_id: Some(project.id.clone()),
+                        card_id: Some(card.id.clone()),
+                        conversation_id: None,
+                        created_at: now.clone(),
+                        last_activity: now.clone(),
+                        worker_step: Some(effective_step.clone()),
+                        // Owner: workers have no authed user in scope; inherit the
+                        // sole-user fallback (multi-user installs stay NULL).
+                        // Carry the card's explicit auto-switch choice onto the
+                        // worker row. NULL inherits the worker default (ON), so we
+                        // only need to propagate a card-level override.
+                        model_autoswitch: card.model_autoswitch,
+                        system_prompt: worker_system_prompt,
+                        system_prompt_name: worker_system_prompt_name,
+                        user_id: state.db.resolve_spawned_session_owner(None).await,
+                        ..Default::default()
+                    })
+                    .await?;
+                tracing::info!(
+                    session_id = %session.id,
+                    card_id = %card.id,
+                    project_id = %project.id,
+                    "Created worker session for card \"{}\"",
+                    card.title
+                );
+                (session, false, true)
+            }
+        },
     };
     let session_id = session.id.clone();
 
@@ -687,7 +729,7 @@ async fn spawn_worker_for_card(
         );
         // Only a freshly-minted session is ours to discard; a resumed one
         // predates this spawn attempt and keeps its history.
-        if !is_resume {
+        if created_now {
             let _ = state.db.delete_session(&session_id).await;
         }
         return Ok(());
@@ -893,8 +935,38 @@ async fn spawn_worker_for_card(
     drop(lock);
     if let Err(e) = dispatched {
         // No agent is running — release the claim so the next tick can
-        // retry the card instead of treating it as actively worked.
+        // retry the card instead of treating it as actively worked. A
+        // dispatch failure (dead model, deleted account, uninstalled
+        // provider) never produces a real agent run, so nothing else
+        // records it as a crash. Without a synthetic `agent-end` here,
+        // `count_consecutive_crashes` never sees it, `maybe_auto_pause_
+        // after_crash` never fires, and the card silently respawns
+        // forever instead of pausing the project once it keeps failing.
+        let crash_data = serde_json::json!({
+            "status": "crashed",
+            "reason": "dispatch-failure",
+            "stderr": e.to_string(),
+        });
+        if let Ok(ev) = state
+            .db
+            .append_event(&session_id, "agent-end", crash_data.clone())
+            .await
+        {
+            state.broadcaster.broadcast(WsEvent {
+                event_type: "event".into(),
+                session_id: session_id.clone(),
+                data: serde_json::json!({
+                    "id": ev.id,
+                    "seq": ev.seq,
+                    "ts": ev.ts,
+                    "kind": ev.kind,
+                    "data": crash_data,
+                }),
+            });
+        }
         release_claim("dispatch failure").await;
+        maybe_auto_pause_after_crash(state, &card.id, Some(&e.to_string())).await;
+        broadcast_card_update(state, &card.id, &project.id);
         return Err(e);
     }
 

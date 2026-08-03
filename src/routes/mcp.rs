@@ -375,6 +375,7 @@ async fn mcp_handler(
                     }) {
                         let dispatcher =
                             crate::service::mcp_server::AppExpertDispatcher::new(state.clone());
+                        let dispatch_state = state.clone();
                         tokio::spawn(async move {
                             use crate::service::mcp_server::ExpertDispatcher;
                             if let Err(e) = dispatcher.resume_session(&child_id, &text).await {
@@ -382,6 +383,12 @@ async fn mcp_handler(
                                     session_id = %child_id,
                                     "subagent first-turn dispatch failed: {e}"
                                 );
+                                crate::subagent::fail_subagent_dispatch(
+                                    &dispatch_state,
+                                    &child_id,
+                                    &e.to_string(),
+                                )
+                                .await;
                             }
                         });
                     }

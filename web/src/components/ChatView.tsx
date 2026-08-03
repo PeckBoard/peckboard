@@ -1068,6 +1068,14 @@ export default function ChatView({
   } | null>(null)
   const scrollRef = useRef<HTMLDivElement>(null)
   const userScrolledUp = useRef(false)
+  /** Session switch wants the viewport pinned to the newest message.
+   *  With cached events rendering instantly, the content swap fires a
+   *  clamped scroll event at the OLD session's scrollTop before the
+   *  virtualizer has measured the new rows — which used to flag
+   *  `userScrolledUp` and strand the viewport mid-transcript. While
+   *  this is set, scroll events re-snap instead of flagging; it clears
+   *  on the first observation of an at-bottom viewport. */
+  const pendingSwitchSnap = useRef(false)
   /** Saved scroll-height immediately before a "Load older" fetch so
    *  we can restore the user's viewport position after the new rows
    *  splice in at the top. Without this the entire conversation
@@ -1213,6 +1221,7 @@ export default function ChatView({
   // search state that described the previous transcript.
   useEffect(() => {
     userScrolledUp.current = false
+    pendingSwitchSnap.current = true
     setScrolledUp(false)
     setNewBelow(false)
     setSearchOpen(false)
@@ -1299,6 +1308,18 @@ export default function ChatView({
     if (!el) return
     const threshold = 60
     const atBottom = el.scrollHeight - el.scrollTop - el.clientHeight < threshold
+    // Session-switch settle window: scroll events here are the browser
+    // clamping/measuring the swapped-in transcript, not user intent.
+    // Re-pin to the bottom instead of flagging scrolled-up; the first
+    // at-bottom observation ends the window and normal rules resume.
+    if (pendingSwitchSnap.current) {
+      if (atBottom) {
+        pendingSwitchSnap.current = false
+      } else {
+        el.scrollTop = el.scrollHeight
+        return
+      }
+    }
     userScrolledUp.current = !atBottom
     setScrolledUp(!atBottom)
     if (atBottom) setNewBelow(false)
@@ -1352,7 +1373,18 @@ export default function ChatView({
       }
       // Falls through to auto-scroll-to-bottom.
     }
-    if (!userScrolledUp.current) {
+    if (pendingSwitchSnap.current) {
+      // Settling a session switch: pin to the newest message, overriding
+      // any scrolled-up flag the content swap's clamped scroll event
+      // managed to set before this effect ran. Cleared immediately — the
+      // guard only needs to cover the swap commit itself; leaving it
+      // armed would fight the user's (or a test's) first upward scroll.
+      pendingSwitchSnap.current = false
+      userScrolledUp.current = false
+      setScrolledUp(false)
+      setNewBelow(false)
+      el.scrollTop = el.scrollHeight
+    } else if (!userScrolledUp.current) {
       el.scrollTop = el.scrollHeight
     }
   }, [events, virtualTotal])
@@ -1969,7 +2001,9 @@ export default function ChatView({
     },
   ]
 
-  if (loading) {
+  // Cached transcripts render immediately on a revisit; the full-screen
+  // states are reserved for a cold open with nothing to show.
+  if (loading && events.length === 0) {
     return (
       <div className="chat-container">
         <div className="chat-loading">Loading events...</div>
@@ -1977,7 +2011,7 @@ export default function ChatView({
     )
   }
 
-  if (eventsError) {
+  if (eventsError && events.length === 0) {
     return (
       <div className="chat-container">
         <div className="fetch-error-pane" role="alert" data-testid="chat-events-error">

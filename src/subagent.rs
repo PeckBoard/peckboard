@@ -164,6 +164,29 @@ pub async fn handle_subagent_done(
     }
 }
 
+/// Report a subagent's *first-turn dispatch* failure (the async
+/// `ExpertDispatcher::resume_session` call the `mcp` route fires off right
+/// after `spawn_subagent` returns). Without this, a dispatch failure only
+/// logged a `tracing::warn!` and left `subagent_completed_at` NULL forever,
+/// so `count_active_subagents` counted the row until server restart
+/// (`reconcile_orphan_subagents`) — eventually exhausting the parent's
+/// concurrency slots. Delegates to [`handle_subagent_done`] so the slot is
+/// freed and the parent gets the same CRASHED report shape as a real crash.
+pub async fn fail_subagent_dispatch(state: &Arc<AppState>, child_id: &str, error: &str) {
+    let session = match state.db.get_session(child_id).await {
+        Ok(Some(s)) => s,
+        Ok(None) => {
+            tracing::warn!(session_id = %child_id, "subagent dispatch failure: child session not found");
+            return;
+        }
+        Err(e) => {
+            tracing::warn!(session_id = %child_id, "subagent dispatch failure: session lookup failed: {e}");
+            return;
+        }
+    };
+    handle_subagent_done(state, &session, false, Some(error)).await;
+}
+
 /// The DB half of [`handle_subagent_done`], separated so it is testable
 /// without an `AppState`: claim the completion (idempotent) and compose the
 /// report text. Returns `(parent_session_id, text)` only for the call that
