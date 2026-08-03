@@ -382,12 +382,12 @@ impl SessionManager {
             self.find_conversation_id_from_events(db, session_id).await
         };
 
-        // Session-level model overrides the request, matching the
-        // pre-refactor behaviour.
-        let requested_model = session
-            .model
-            .clone()
-            .unwrap_or_else(|| config.model.clone());
+        // Precedence: request body > session > card > project > "default"
+        // (see routes/sessions/dispatch.rs). `config.model` is the caller's
+        // already-resolved value; it wins unless it's an unresolved
+        // auto-placeholder, in which case the session's own model — set by
+        // e.g. a prior in-session model switch — fills in.
+        let requested_model = resolve_requested_model(&config.model, session.model.as_deref());
 
         // Resolve effort once — it rides the spawn config AND drives the
         // auto-model routing below.
@@ -1339,10 +1339,57 @@ pub async fn shutdown_after_turn_via_registry(registry: &ProviderRegistry, sessi
     }
 }
 
+/// Resolve the model precedence for a dispatch: request body > session >
+/// card > project > "default" (routes/sessions/dispatch.rs already folds
+/// body/card/project into `config_model`, resolving to the auto-placeholder
+/// only when none of them set a concrete model). A concrete `config_model`
+/// wins outright; an auto-placeholder (`"default"`/`"auto"`/empty) falls
+/// back to the session's own model — e.g. set by a prior in-session model
+/// switch — or passes the placeholder through unchanged with no session
+/// model set.
+fn resolve_requested_model(config_model: &str, session_model: Option<&str>) -> String {
+    if crate::provider::is_auto_model(config_model) {
+        session_model
+            .map(str::to_string)
+            .unwrap_or_else(|| config_model.to_string())
+    } else {
+        config_model.to_string()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::provider::registry::ProviderRegistry;
+
+    #[test]
+    fn resolve_requested_model_prefers_concrete_config_over_session() {
+        assert_eq!(
+            resolve_requested_model("claude:opus", Some("claude:sonnet")),
+            "claude:opus"
+        );
+    }
+
+    #[test]
+    fn resolve_requested_model_falls_back_to_session_when_config_is_placeholder() {
+        assert_eq!(
+            resolve_requested_model("default", Some("claude:sonnet")),
+            "claude:sonnet"
+        );
+        assert_eq!(
+            resolve_requested_model("auto", Some("claude:sonnet")),
+            "claude:sonnet"
+        );
+        assert_eq!(
+            resolve_requested_model("", Some("claude:sonnet")),
+            "claude:sonnet"
+        );
+    }
+
+    #[test]
+    fn resolve_requested_model_passes_placeholder_through_with_no_session_model() {
+        assert_eq!(resolve_requested_model("default", None), "default");
+    }
 
     fn manager() -> SessionManager {
         SessionManager::new(Arc::new(ProviderRegistry::new()))

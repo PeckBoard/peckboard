@@ -319,11 +319,7 @@ pub async fn emit_event(
                 // session's model id. `None` for the implicit Default
                 // account (host credentials) or any non-Claude provider.
                 let account_id = match db.get_session(session_id).await {
-                    Ok(Some(s)) => s.model.as_deref().and_then(|m| {
-                        crate::provider::registry::split_model_account(m)
-                            .1
-                            .map(str::to_string)
-                    }),
+                    Ok(Some(s)) => s.model.as_deref().and_then(usage_account_id),
                     _ => None,
                 };
                 let new_usage = crate::db::models::NewUsageEvent {
@@ -461,5 +457,43 @@ pub async fn emit_event(
                 e
             );
         }
+    }
+}
+
+/// Usage-event account attribution for a session's model id. Only Claude
+/// accounts are tracked in `claude_accounts`/rollups — a non-Claude model id
+/// (e.g. `ollama:qwen@gpu-box`) must not have its `@`-suffix mistaken for a
+/// Claude account id, so this checks the parsed provider before extracting
+/// the account.
+fn usage_account_id(model: &str) -> Option<String> {
+    let (provider, account) = crate::handover::continuity_key(model);
+    if provider == "claude" { account } else { None }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn usage_account_id_none_for_non_claude_provider_with_at_suffix() {
+        assert_eq!(usage_account_id("ollama:qwen@gpu-box"), None);
+    }
+
+    #[test]
+    fn usage_account_id_some_for_scoped_claude_model() {
+        assert_eq!(
+            usage_account_id("claude:opus@acc_1"),
+            Some("acc_1".to_string())
+        );
+    }
+
+    #[test]
+    fn usage_account_id_some_for_bare_legacy_claude_model() {
+        assert_eq!(usage_account_id("opus@acc_1"), Some("acc_1".to_string()));
+    }
+
+    #[test]
+    fn usage_account_id_none_for_unscoped_claude_model() {
+        assert_eq!(usage_account_id("claude:opus"), None);
     }
 }
