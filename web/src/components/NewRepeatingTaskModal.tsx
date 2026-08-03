@@ -1,10 +1,16 @@
 import { useEffect, useMemo, useState, type FormEvent } from 'react'
 import type { RepeatingScheduleKind, RepeatingTask } from '../types/api'
 import { useFoldersStore } from '../store/folders'
-import { useRepeatingTasksStore } from '../store/repeatingTasks'
-import { effortOptionsForModel, useResourcesStore, type ModelInfo } from '../store/resources'
+import { useRepeatingTasksStore, type UpdateRepeatingTaskInput } from '../store/repeatingTasks'
+import {
+  effortOptionsForModel,
+  modelGoneFromCatalogue,
+  useResourcesStore,
+  type ModelInfo,
+} from '../store/resources'
 import Modal from './Modal'
 import ModelPicker from './ModelPicker'
+import ModelGoneNotice from './ModelGoneNotice'
 import RepeatingTaskScheduleEditor from './RepeatingTaskScheduleEditor'
 import { scheduleProblem } from '../utils/repeatingSchedule'
 
@@ -49,8 +55,11 @@ export default function NewRepeatingTaskModal({ initial, onClose, onSaved }: Pro
   const [timezone, setTimezone] = useState<string>(initial?.timezone ?? '')
   const [chosenModel, setChosenModel] = useState<string | null>(null)
   // The app-wide default model (Settings → Default Model) preselects — for
-  // a new task and for a legacy task saved without one.
-  const model = chosenModel ?? initial?.model ?? defaultModel
+  // a new task and for a legacy task saved without one — unless it's gone
+  // from the catalogue (provider removed): a dead id must not preselect,
+  // an untouched save would pin it. Treat it as unset and warn instead.
+  const defaultModelGone = modelGoneFromCatalogue(defaultModel, models)
+  const model = chosenModel ?? initial?.model ?? (defaultModelGone ? '' : defaultModel)
   const [effort, setEffort] = useState<string>(initial?.effort ?? '')
   // Effort options follow the chosen model's provider.
   const effortOptions = useMemo(() => effortOptionsForModel(model, providers), [model, providers])
@@ -104,17 +113,22 @@ export default function NewRepeatingTaskModal({ initial, onClose, onSaved }: Pro
     setError('')
     try {
       if (editing && initial) {
-        const task = await updateTask(initial.id, {
+        const updates: UpdateRepeatingTaskInput = {
           name: name.trim(),
           description,
           prompt,
           schedule_kind: scheduleKind,
           schedule_value: scheduleValue,
-          model: model || null,
           effort: effort || null,
           enabled,
           timezone: timezone || null,
-        })
+        }
+        // Only write `model` when the user actually opened the picker —
+        // same rule as CardFormModal. Sending it unconditionally would
+        // materialize the displayed default onto a legacy no-model task on
+        // any save; an omitted key leaves the stored value untouched.
+        if (chosenModel !== null) updates.model = chosenModel || null
+        const task = await updateTask(initial.id, updates)
         onSaved?.(task)
       } else {
         const task = await createTask({
@@ -238,6 +252,9 @@ export default function NewRepeatingTaskModal({ initial, onClose, onSaved }: Pro
             testId="repeating-task-model"
           />
           <p className="form-help">Each spawned run starts on this model.</p>
+          {chosenModel === null && !initial?.model && defaultModelGone && (
+            <ModelGoneNotice modelId={defaultModel} />
+          )}
         </div>
 
         <div className="form-field">

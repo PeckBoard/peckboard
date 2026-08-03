@@ -571,6 +571,17 @@ select.form-input {
   line-height: 1.4;
 }
 
+/* Same slot as .form-field-error but warning-toned: the form still
+   submits, just not the way the stale value suggests (e.g. a default
+   model whose provider was removed). */
+.form-field-warning {
+  font-size: var(--text-xs);
+  color: var(--warning);
+  font-weight: 500;
+  margin: 2px 0 0;
+  line-height: 1.4;
+}
+
 .form-link {
   display: inline-block;
   font-size: var(--text-sm);

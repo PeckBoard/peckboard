@@ -1,11 +1,16 @@
 import { useEffect, useMemo, useState, type FormEvent } from 'react'
 import { useProjectsStore } from '../store/projects'
-import { effortOptionsForModel, useResourcesStore } from '../store/resources'
+import {
+  effortOptionsForModel,
+  modelGoneFromCatalogue,
+  useResourcesStore,
+} from '../store/resources'
 import { authedFetch } from '../store/auth'
 import type { Card } from '../types/api'
 import DependencyPickerModal from './DependencyPickerModal'
 import Modal from './Modal'
 import ModelPicker from './ModelPicker'
+import ModelGoneNotice from './ModelGoneNotice'
 import PickerLoadError from './PickerLoadError'
 import SystemPromptPicker from './SystemPromptPicker'
 import WorkflowSelect from './WorkflowSelect'
@@ -78,7 +83,11 @@ export default function CardFormModal(props: CardFormProps) {
   // default; an existing card shows its own pin, or the inherit row when it
   // has none — materializing the default into the value here would silently
   // pin it onto an inherit card the next time any field is saved.
-  const model = chosenModel ?? card?.model ?? (mode === 'create' ? defaultModel : '')
+  // A gone default (provider removed) must not preselect on create either —
+  // an untouched form would send it as an explicit dead pin. Unset + warn.
+  const defaultModelGone = modelGoneFromCatalogue(defaultModel, models)
+  const model =
+    chosenModel ?? card?.model ?? (mode === 'create' && !defaultModelGone ? defaultModel : '')
   // What an unpinned card actually dispatches workers on, so the inherit row
   // names the effective model instead of leaving the user guessing.
   const inheritedModel = project?.model ?? defaultModel
@@ -291,6 +300,9 @@ export default function CardFormModal(props: CardFormProps) {
             />
             {modelsLoadError && models.length === 0 && (
               <PickerLoadError label="models" onRetry={fetchModels} />
+            )}
+            {mode === 'create' && chosenModel === null && defaultModelGone && (
+              <ModelGoneNotice modelId={defaultModel} />
             )}
           </div>
           <div className="form-field">

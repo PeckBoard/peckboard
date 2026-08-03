@@ -39,7 +39,7 @@ import {
   type PrState,
 } from '../../lib/review'
 import { authedFetch } from '../../store/auth'
-import { useResourcesStore } from '../../store/resources'
+import { modelGoneFromCatalogue, useResourcesStore } from '../../store/resources'
 import { useSessionsStore } from '../../store/sessions'
 import { useTabsStore } from '../../store/tabs'
 import { useWsStore } from '../../store/ws'
@@ -236,7 +236,10 @@ export default function ReviewView({ reviewId, onBack }: Props) {
   const fetchModels = useResourcesStore((s) => s.fetchModels)
   const defaultModel = useResourcesStore((s) => s.defaultModel)
   const fetchDefaultModel = useResourcesStore((s) => s.fetchDefaultModel)
-  const pendingModel = chosenPendingModel ?? defaultModel
+  // A default gone from the catalogue (provider removed) must not become
+  // the pass's explicit model — treat it as unset so the backend routes.
+  const defaultModelGone = modelGoneFromCatalogue(defaultModel, models)
+  const pendingModel = chosenPendingModel ?? (defaultModelGone ? '' : defaultModel)
   useEffect(() => {
     void fetchModels()
     void fetchDefaultModel()
@@ -708,6 +711,11 @@ export default function ReviewView({ reviewId, onBack }: Props) {
             testId="review-model"
             emptyHint="Loading models…"
           />
+          {!sessionId && chosenPendingModel === null && defaultModelGone && (
+            <span className="form-field-warning" data-testid="model-gone-notice">
+              Default model no longer available
+            </span>
+          )}
           {!isMobile &&
             (running ? (
               <button

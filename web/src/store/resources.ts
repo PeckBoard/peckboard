@@ -106,6 +106,17 @@ export function effortOptionsForModel(
   return [DEFAULT_EFFORT_OPTION, ...levels.map((l) => ({ value: l.id, label: l.label }))]
 }
 
+/** True when a stored model id no longer exists in the live catalogue —
+ *  e.g. the app default after its provider was removed (`ollama rm`, a
+ *  plugin uninstall). An empty id or a still-loading catalogue is never
+ *  gone, so preselection doesn't flash a warning while models load. */
+export function modelGoneFromCatalogue(
+  modelId: string | null | undefined,
+  models: Pick<ModelInfo, 'id'>[],
+): boolean {
+  return !!modelId && models.length > 0 && !models.some((m) => m.id === modelId)
+}
+
 /** The provider entry a (possibly bare) model id belongs to. Bare ids
  *  default to `claude`, matching the backend's `parse_model_id`. */
 export function providerForModel(

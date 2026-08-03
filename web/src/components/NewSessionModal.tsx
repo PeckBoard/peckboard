@@ -2,9 +2,14 @@ import { useEffect, useMemo, useState, type FormEvent } from 'react'
 import { useSessionsStore } from '../store/sessions'
 import { authedFetch } from '../store/auth'
 import { useFoldersStore } from '../store/folders'
-import { effortOptionsForModel, useResourcesStore } from '../store/resources'
+import {
+  effortOptionsForModel,
+  modelGoneFromCatalogue,
+  useResourcesStore,
+} from '../store/resources'
 import Modal from './Modal'
 import ModelPicker from './ModelPicker'
+import ModelGoneNotice from './ModelGoneNotice'
 import SystemPromptPicker from './SystemPromptPicker'
 import PickerLoadError from './PickerLoadError'
 import { PRESET_PROMPTS, presetSessionName } from '../utils/presetPrompts'
@@ -39,7 +44,11 @@ export default function NewSessionModal({ onClose, onCreated }: Props) {
   // Same derived-default pattern as the folder above: the app-wide default
   // model (Settings → Default Model) preselects until the user picks one.
   const [chosenModel, setChosenModel] = useState<string | null>(null)
-  const model = chosenModel ?? defaultModel
+  // …unless that default's provider is gone (ollama rm, plugin uninstall):
+  // preselecting the dead id would submit it as an explicit dead pin from
+  // an untouched form. Treat it as unset and warn instead.
+  const defaultModelGone = modelGoneFromCatalogue(defaultModel, models)
+  const model = chosenModel ?? (defaultModelGone ? '' : defaultModel)
   const [effort, setEffort] = useState('')
   // Chat sessions default OFF (workers default ON); a NULL column inherits
   // that, so an unchecked box just leaves auto-switch off.
@@ -260,6 +269,7 @@ export default function NewSessionModal({ onClose, onCreated }: Props) {
           {modelsLoadError && models.length === 0 && (
             <PickerLoadError label="models" onRetry={fetchModels} />
           )}
+          {chosenModel === null && defaultModelGone && <ModelGoneNotice modelId={defaultModel} />}
         </div>
         <div className="form-field">
           <label className="form-label" htmlFor="new-session-effort">
