@@ -628,6 +628,30 @@ impl Db {
                 .map_err(Into::into)
         })
     }
+
+    /// Synchronous twin of [`set_session_system_prompt`](Self::set_session_system_prompt),
+    /// for the `peckboard_set_session_system_prompt` host function. Same
+    /// body-plus-reference write: pass `name = Some(_)` only when the body
+    /// came from a named library prompt.
+    pub(crate) fn set_session_system_prompt_blocking(
+        &self,
+        id: &str,
+        prompt: Option<String>,
+        name: Option<String>,
+    ) -> anyhow::Result<Option<Session>> {
+        let id = id.to_string();
+        self.with_conn_blocking(move |conn| {
+            diesel::update(sessions::table.find(&id))
+                .set((
+                    sessions::system_prompt.eq(prompt),
+                    sessions::system_prompt_name.eq(name),
+                ))
+                .returning(Session::as_returning())
+                .get_result(conn)
+                .optional()
+                .map_err(Into::into)
+        })
+    }
 }
 
 #[cfg(test)]

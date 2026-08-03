@@ -899,6 +899,19 @@ struct UpdateSessionRequest {
 }
 
 #[derive(Deserialize)]
+struct SetSessionSystemPromptRequest {
+    session_id: String,
+    /// A raw prompt body. Wins over `name` — a raw body has no library name,
+    /// so the recorded reference is cleared along with it.
+    #[serde(default)]
+    system_prompt: Option<String>,
+    /// A library prompt to resolve by name: its body is written AND the name
+    /// recorded on the session, so the UI can show where the prompt came from.
+    #[serde(default)]
+    name: Option<String>,
+}
+
+#[derive(Deserialize)]
 struct ListSessionsRequest {
     /// When true, only sessions in the caller's *own* project (and globals)
     /// are returned; otherwise all sessions the caller may see (its folder,
@@ -1081,6 +1094,68 @@ pub(crate) fn update_session_impl(
             }
             serde_json::json!({ "session": session }).to_string()
         }
+        Ok(None) => error_json("session not found"),
+        Err(e) => error_json(e),
+    }
+}
+
+/// `peckboard_set_session_system_prompt` — set (or clear) the standing
+/// instructions a session's agent runs under. Mirrors core's MCP tool of the
+/// same name, down to the length cap and the error wording.
+///
+/// Authorized by **visibility only** (`fetch_visible_session`), not ownership:
+/// the whole point of this capability is steering a session the plugin did not
+/// create — e.g. graphify aiming an existing research session at its analyst
+/// prompt — which is precisely the case `fetch_visible_session` exists for.
+/// The boundary that still holds is "no cross-folder/project escalation".
+///
+/// An explicit `system_prompt` body wins (and clears the library reference,
+/// since a raw body has no name); otherwise a library `name` resolves to that
+/// prompt's body AND records the reference; with neither, both columns are
+/// cleared and the session reverts to the standing Peckboard prompt.
+pub(crate) fn set_session_system_prompt_impl(
+    db: &Db,
+    input: &str,
+    inv: &InvocationContext,
+) -> String {
+    // Cap to a sane size so a runaway prompt can't bloat a session row.
+    const MAX_LEN: usize = 100_000;
+
+    let req: SetSessionSystemPromptRequest = match serde_json::from_str(input) {
+        Ok(r) => r,
+        Err(e) => return error_json(format!("invalid request: {e}")),
+    };
+    let (prompt, prompt_name) = if let Some(raw) = req.system_prompt {
+        (Some(raw), None)
+    } else if let Some(name) = req.name {
+        match db.get_system_prompt_by_name_blocking(&name) {
+            Ok(Some(entry)) => (Some(entry.body), Some(entry.name)),
+            Ok(None) => return error_json(format!("no system prompt named '{name}'")),
+            Err(e) => return error_json(e),
+        }
+    } else {
+        (None, None)
+    };
+    if let Some(ref p) = prompt
+        && p.len() > MAX_LEN
+    {
+        return error_json(format!(
+            "system_prompt too long ({} > {MAX_LEN} chars)",
+            p.len()
+        ));
+    }
+    // Authorize against the current row before writing.
+    if let Err(e) = fetch_visible_session(db, req.session_id.trim(), inv) {
+        return error_json(e);
+    }
+    let was_set = prompt.is_some();
+    match db.set_session_system_prompt_blocking(req.session_id.trim(), prompt, prompt_name) {
+        Ok(Some(session)) => serde_json::json!({
+            "session_id": session.id,
+            "session_name": session.name,
+            "system_prompt_set": was_set,
+        })
+        .to_string(),
         Ok(None) => error_json("session not found"),
         Err(e) => error_json(e),
     }
@@ -2842,6 +2917,13 @@ host_fn!(peckboard_update_session(user_data: HostState; input: String) -> String
     Ok(update_session_impl(&db, &plugin_id, &input, &inv, live))
 });
 
+host_fn!(peckboard_set_session_system_prompt(user_data: HostState; input: String) -> String {
+    let (db, _plugin_id, ok, inv) = state_permission_and_invocation(&user_data, "session_prompt_write")?;
+    if !ok { return Ok(error_json("plugin lacks the 'session_prompt_write' permission")); }
+    let Some(inv) = inv else { return Ok(error_json("no caller context; peckboard_set_session_system_prompt is only callable during a tool invocation")); };
+    Ok(set_session_system_prompt_impl(&db, &input, &inv))
+});
+
 host_fn!(peckboard_append_event(user_data: HostState; input: String) -> String {
     let (db, plugin_id, ok, inv) = state_permission_and_invocation(&user_data, "event_append")?;
     if !ok { return Ok(error_json("plugin lacks the 'event_append' permission")); }
@@ -3391,6 +3473,13 @@ pub(crate) fn host_functions(
             [PTR],
             ud.clone(),
             peckboard_update_session,
+        ),
+        Function::new(
+            "peckboard_set_session_system_prompt",
+            [PTR],
+            [PTR],
+            ud.clone(),
+            peckboard_set_session_system_prompt,
         ),
         Function::new(
             "peckboard_append_event",
@@ -4082,6 +4171,140 @@ mod tests {
             lv2["sessions"].as_array().unwrap().len(),
             1,
             "foreign leaked into list: {list2}"
+        );
+    }
+
+    /// `peckboard_set_session_system_prompt` is gated by **visibility only**
+    /// (a plugin may steer a session it never marked), so the folder/project
+    /// floor is the whole boundary. Also covers library-name resolution, the
+    /// clear-both-columns case, and the length cap.
+    #[tokio::test]
+    async fn set_session_system_prompt_impl_resolves_scopes_and_caps() {
+        let db = setup().await; // folder f1 / project p1
+        let ts = chrono::Utc::now().to_rfc3339();
+        db.create_folder(NewFolder {
+            id: "f2".into(),
+            name: "Other".into(),
+            path: "/tmp/f2sp".into(),
+            created_at: ts.clone(),
+        })
+        .await
+        .unwrap();
+        db.create_project(NewProject {
+            id: "p2".into(),
+            name: "Other".into(),
+            context: String::new(),
+            folder_id: "f2".into(),
+            worker_count: 1,
+            status: "active".into(),
+            workflow: "task".into(),
+            model: None,
+            effort: None,
+            parallel_instructions: false,
+            auto_notify_changes: false,
+            worker_communication: false,
+            created_at: ts.clone(),
+            last_accessed_at: ts.clone(),
+            budget_usd_cents: None,
+            budget_period: None,
+            worktree_isolation: false,
+        })
+        .await
+        .unwrap();
+        let mk = |id: &str, folder: &str, project: &str| crate::db::models::NewSession {
+            id: id.into(),
+            name: id.into(),
+            folder_id: folder.into(),
+            project_id: Some(project.into()),
+            created_at: ts.clone(),
+            last_activity: ts.clone(),
+            ..Default::default()
+        };
+        db.create_session(mk("near", "f1", "p1")).await.unwrap();
+        db.create_session(mk("far", "f2", "p2")).await.unwrap();
+        db.create_system_prompt("reviewer", "Review hard.", None)
+            .await
+            .unwrap();
+        let caller = inv(Some("p1"), Some("f1"));
+
+        // A raw body wins and carries no library reference.
+        let out = set_session_system_prompt_impl(
+            &db,
+            r#"{"session_id":"near","system_prompt":"Be terse."}"#,
+            &caller,
+        );
+        let v: serde_json::Value = serde_json::from_str(&out).unwrap();
+        assert_eq!(v["system_prompt_set"], true, "set: {out}");
+        assert_eq!(v["session_id"], "near");
+        assert_eq!(v["session_name"], "near");
+        let s = db.get_session("near").await.unwrap().unwrap();
+        assert_eq!(s.system_prompt.as_deref(), Some("Be terse."));
+        assert_eq!(s.system_prompt_name, None);
+
+        // A library name writes the body AND records where it came from.
+        let out = set_session_system_prompt_impl(
+            &db,
+            r#"{"session_id":"near","name":"reviewer"}"#,
+            &caller,
+        );
+        assert!(out.contains("\"system_prompt_set\":true"), "by name: {out}");
+        let s = db.get_session("near").await.unwrap().unwrap();
+        assert_eq!(s.system_prompt.as_deref(), Some("Review hard."));
+        assert_eq!(s.system_prompt_name.as_deref(), Some("reviewer"));
+
+        // An unknown library name is an error, and leaves the row alone.
+        let out =
+            set_session_system_prompt_impl(&db, r#"{"session_id":"near","name":"nope"}"#, &caller);
+        assert!(
+            out.contains("no system prompt named 'nope'"),
+            "unknown: {out}"
+        );
+        assert_eq!(
+            db.get_session("near")
+                .await
+                .unwrap()
+                .unwrap()
+                .system_prompt_name
+                .as_deref(),
+            Some("reviewer")
+        );
+
+        // Neither field clears BOTH columns.
+        let out = set_session_system_prompt_impl(&db, r#"{"session_id":"near"}"#, &caller);
+        assert!(out.contains("\"system_prompt_set\":false"), "clear: {out}");
+        let s = db.get_session("near").await.unwrap().unwrap();
+        assert_eq!(s.system_prompt, None);
+        assert_eq!(s.system_prompt_name, None);
+
+        // Over the cap → refused, nothing written.
+        let huge = "x".repeat(100_001);
+        let out = set_session_system_prompt_impl(
+            &db,
+            &serde_json::json!({ "session_id": "near", "system_prompt": huge }).to_string(),
+            &caller,
+        );
+        assert!(out.contains("too long"), "oversize: {out}");
+        assert_eq!(
+            db.get_session("near").await.unwrap().unwrap().system_prompt,
+            None
+        );
+
+        // A session outside the caller's folder AND project is invisible — the
+        // same uniform framing the other scoped session host functions use.
+        let out = set_session_system_prompt_impl(
+            &db,
+            r#"{"session_id":"far","system_prompt":"pwn"}"#,
+            &caller,
+        );
+        assert!(out.contains("session not found"), "cross-folder: {out}");
+        assert_eq!(
+            db.get_session("far").await.unwrap().unwrap().system_prompt,
+            None
+        );
+        // ...as is a session that doesn't exist at all.
+        assert!(
+            set_session_system_prompt_impl(&db, r#"{"session_id":"ghost"}"#, &caller)
+                .contains("session not found")
         );
     }
 

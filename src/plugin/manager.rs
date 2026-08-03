@@ -114,15 +114,15 @@ pub const ALLOWED_HOOKS: &[&str] = &[
 /// Each maps to one or more host functions in `src/plugin/host.rs` (or a
 /// manifest capability) that refuse unless the permission was granted.
 pub const ALLOWED_PERMISSIONS: &[&str] = &[
-    "cards_write",         // peckboard_update_card — update an existing card's fields
-    "ask_user",            // peckboard_ask_user / peckboard_get_answer — prompt the caller's user
-    "broadcast",           // peckboard_broadcast — push a namespaced ws event
-    "browser_runs_read",   // peckboard_browser_runs / _run / _run_frame — recorded test runs
-    "contribute_sidebar",  // declare sidebar_items
-    "data_store",          // peckboard_store_* — plugin-owned document store
-    "event_append",        // peckboard_append_event
-    "http_fetch",          // peckboard_http_fetch — outbound public-web GET/HEAD
-    "process_exec",        // peckboard_exec — run an allowlisted command in the caller's folder
+    "cards_write",          // peckboard_update_card — update an existing card's fields
+    "ask_user",             // peckboard_ask_user / peckboard_get_answer — prompt the caller's user
+    "broadcast",            // peckboard_broadcast — push a namespaced ws event
+    "browser_runs_read",    // peckboard_browser_runs / _run / _run_frame — recorded test runs
+    "contribute_sidebar",   // declare sidebar_items
+    "data_store",           // peckboard_store_* — plugin-owned document store
+    "event_append",         // peckboard_append_event
+    "http_fetch",           // peckboard_http_fetch — outbound public-web GET/HEAD
+    "process_exec",         // peckboard_exec — run an allowlisted command in the caller's folder
     "http_request", // peckboard_http_request — outbound HTTP, any method, LAN/loopback allowed (integrating self-hosted services)
     "process_exec_any", // peckboard_exec_any — run ANY folder-contained command (after approval)
     "project_files_read", // peckboard_list_project_files / read_file / read_file_base64
@@ -134,7 +134,8 @@ pub const ALLOWED_PERMISSIONS: &[&str] = &[
     "session_control", // peckboard_interrupt_session / terminate_agent / clear_session / send_message — full cross-folder control of any session
     "session_read",    // peckboard_get_session / list_sessions
     "session_write",   // peckboard_create_session / update_session
-    "user_authority",  // serve authenticated UI + act under the user (ui_routes)
+    "session_prompt_write", // peckboard_set_session_system_prompt — set/clear a visible session's standing instructions
+    "user_authority",       // serve authenticated UI + act under the user (ui_routes)
     "worker_questions", // peckboard_session_questions / peckboard_answer_question — read pending user questions (full payloads) and resolve them under user authority
 ];
 

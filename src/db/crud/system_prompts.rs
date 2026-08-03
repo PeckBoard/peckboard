@@ -51,6 +51,23 @@ impl Db {
         })
         .await
     }
+    /// Synchronous twin of [`get_system_prompt_by_name`](Self::get_system_prompt_by_name),
+    /// for the `peckboard_set_session_system_prompt` host function — WASM host
+    /// functions run inside a blocking extism call and cannot await.
+    pub(crate) fn get_system_prompt_by_name_blocking(
+        &self,
+        name: &str,
+    ) -> anyhow::Result<Option<SystemPrompt>> {
+        let name = name.to_string();
+        self.with_conn_blocking(move |conn| {
+            system_prompts::table
+                .filter(system_prompts::name.eq(&name))
+                .select(SystemPrompt::as_select())
+                .first(conn)
+                .optional()
+                .map_err(Into::into)
+        })
+    }
 
     /// Resolve a selected library-prompt name into its stored `(name, body)`.
     ///

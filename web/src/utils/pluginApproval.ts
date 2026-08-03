@@ -57,6 +57,10 @@ export const PERMISSION_META: Record<string, HookMeta> = {
     title: 'Write sessions',
     description: 'Creates sessions and writes their plugin metadata',
   },
+  session_prompt_write: {
+    title: 'Set session instructions',
+    description: 'Changes the standing instructions given to an agent in a session',
+  },
   session_dispatch: {
     title: 'Dispatch sessions',
     description: 'Resumes sessions and spawns agent runs',
