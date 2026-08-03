@@ -102,6 +102,47 @@ async fn seed_session(
     .unwrap();
 }
 
+/// Same as `seed_session` but with an explicit owner — for tests that
+/// exercise the per-user ownership boundary on plain chat sessions
+/// (`may_access_session`), which `seed_session` leaves unowned.
+async fn seed_owned_session(db: &Db, id: &str, folder_id: &str, owner: &str) {
+    let ts = chrono::Utc::now().to_rfc3339();
+    db.create_session(NewSession {
+        id: id.into(),
+        name: id.into(),
+        folder_id: folder_id.into(),
+        model: None,
+        effort: None,
+        is_worker: false,
+        project_id: None,
+        card_id: None,
+        conversation_id: None,
+        created_at: ts.clone(),
+        last_activity: ts,
+        is_expert: false,
+        expert_kind: None,
+        knowledge_summary: None,
+        knowledge_area: None,
+        scope_path: None,
+        is_permanent: false,
+        repeating_task_id: None,
+        system_prompt: None,
+        handover_run_id: None,
+        handover_to_model: None,
+        pending_handover_doc: None,
+        worker_step: None,
+        user_id: Some(owner.to_string()),
+        model_autoswitch: None,
+        context_reset_ts: None,
+        system_prompt_name: None,
+        is_temp: false,
+        parent_session_id: None,
+        subagent_completed_at: None,
+    })
+    .await
+    .unwrap();
+}
+
 fn ctx(
     db: &Arc<Db>,
     session_id: &str,
@@ -367,8 +408,8 @@ async fn search_sessions_greps_a_chat_session_and_filters_errors() {
     // worker-only framing didn't serve.
     let db = Arc::new(Db::in_memory().unwrap());
     seed_folder(&db, "f1").await;
-    seed_session(&db, "chat-a", "f1", None, false, false, None).await;
-    seed_session(&db, "chat-b", "f1", None, false, false, None).await;
+    seed_owned_session(&db, "chat-a", "f1", "u1").await;
+    seed_owned_session(&db, "chat-b", "f1", "u1").await;
 
     // chat-b's transcript: plain text, a failed tool call, a clean one.
     db.append_event(
@@ -520,10 +561,10 @@ async fn set_session_system_prompt_cross_folder_is_not_found() {
 async fn set_session_system_prompt_sets_then_clears() {
     let db = Arc::new(Db::in_memory().unwrap());
     seed_folder(&db, "f1").await;
-    seed_session(&db, "chat-a", "f1", None, false, false, None).await;
-    seed_session(&db, "chat-b", "f1", None, false, false, None).await;
-    let registry = McpToolRegistry::new();
+    seed_owned_session(&db, "chat-a", "f1", "u1").await;
+    seed_owned_session(&db, "chat-b", "f1", "u1").await;
     let caller = ctx(&db, "chat-a", "f1", None);
+    let registry = McpToolRegistry::new();
 
     // Set chat-b's prompt from chat-a.
     let set = registry

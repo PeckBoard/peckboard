@@ -449,6 +449,11 @@ impl McpToolRegistry {
     ///    exactly like a non-existent id (no 403 existence leak).
     /// 2. Project boundary for worker tokens — a token scoped to project A
     ///    can only reach sessions in project A.
+    /// 3. Ownership boundary — a plain chat session (`project_id IS NULL`)
+    ///    is reachable only by its owner or an admin, matching the
+    ///    `may_access_session` rule the HTTP/WS layers already enforce.
+    ///    Board-attached sessions (worker/expert, `project_id.is_some()`)
+    ///    stay shared across the folder/project.
     ///
     /// Returns "not found" framing on every rejection so a caller can't
     /// probe for sessions outside its scope by guessing ids.
@@ -468,13 +473,52 @@ impl McpToolRegistry {
         if my_project.is_some() && target_session.project_id != my_project {
             anyhow::bail!("session not found: {target_session_id}");
         }
+
+        if target_session_id != ctx.session_id {
+            let (is_admin, caller_user_id) = self.caller_identity(ctx).await;
+            if !crate::auth::access::may_access_session(
+                is_admin,
+                caller_user_id.as_deref().unwrap_or(""),
+                target_session.user_id.as_deref(),
+                target_session.project_id.as_deref(),
+            ) {
+                anyhow::bail!("session not found: {target_session_id}");
+            }
+        }
         Ok(target_session)
+    }
+
+    /// Resolve the caller's own identity (admin flag + user id) from the
+    /// session row backing this MCP token. `ToolCallContext` doesn't carry
+    /// `user_id` directly — it's looked up here, the same session row
+    /// `resolve_project_id` already reads. A caller session with no owner
+    /// (legacy/system row) resolves to `(false, None)`, which only ever
+    /// matches board-attached (project-scoped) target sessions.
+    async fn caller_identity(&self, ctx: &ToolCallContext) -> (bool, Option<String>) {
+        let Some(caller_session) = ctx.db.get_session(&ctx.session_id).await.ok().flatten() else {
+            return (false, None);
+        };
+        let is_admin = match &caller_session.user_id {
+            Some(uid) => ctx
+                .db
+                .get_user(uid)
+                .await
+                .ok()
+                .flatten()
+                .map(|u| u.role == "admin")
+                .unwrap_or(false),
+            None => false,
+        };
+        (is_admin, caller_session.user_id)
     }
 
     /// Every session the caller may read: all sessions in the caller's
     /// folder, narrowed to the caller's project when the token is
-    /// project-scoped. Mirrors the boundary in [`Self::scope_readable_session`]
-    /// for the "search across all sessions" path of `search_worker_session`.
+    /// project-scoped, and to sessions the caller may access per
+    /// `may_access_session` (own chats, board-attached sessions, or
+    /// anything when the caller is an admin). Mirrors the boundary in
+    /// [`Self::scope_readable_session`] for the "search across all
+    /// sessions" path of `search_worker_session`.
     async fn readable_sessions_in_scope(
         &self,
         ctx: &ToolCallContext,
@@ -484,6 +528,16 @@ impl McpToolRegistry {
         if my_project.is_some() {
             sessions.retain(|s| s.project_id == my_project);
         }
+        let (is_admin, caller_user_id) = self.caller_identity(ctx).await;
+        sessions.retain(|s| {
+            s.id == ctx.session_id
+                || crate::auth::access::may_access_session(
+                    is_admin,
+                    caller_user_id.as_deref().unwrap_or(""),
+                    s.user_id.as_deref(),
+                    s.project_id.as_deref(),
+                )
+        });
         Ok(sessions)
     }
 
