@@ -745,6 +745,35 @@ function App() {
     }
   }, [authenticated, connect, disconnect, fetchSessions, fetchProjects, fetchFolders])
 
+  // The WS store dispatches this event for both 'created' and 'dismissed'
+  // announcement broadcasts (ws.ts) — without a listener here, live
+  // announcements only showed up after a manual reload.
+  useEffect(() => {
+    const onAnnouncement = (e: Event) => {
+      const frame = (e as CustomEvent).detail as { data?: Record<string, unknown> }
+      const msg = (frame.data ?? {}) as {
+        action?: string
+        id?: string
+        title?: string
+        message?: string
+      }
+      if (msg.action === 'created' && msg.id) {
+        setAnnouncement({
+          id: msg.id,
+          kind: 'info',
+          title: msg.title ?? '',
+          message: msg.message ?? '',
+          detail: null,
+          created_at: new Date().toISOString(),
+        })
+      } else if (msg.action === 'dismissed') {
+        setAnnouncement((prev) => (prev && prev.id === msg.id ? null : prev))
+      }
+    }
+    window.addEventListener('peckboard:announcement', onAnnouncement)
+    return () => window.removeEventListener('peckboard:announcement', onAnnouncement)
+  }, [])
+
   // Debounce the sessions-sidebar search box: fire the server query
   // ~250ms after the user stops typing rather than on every keystroke,
   // since each query is a paginated network round trip.
