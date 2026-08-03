@@ -64,6 +64,29 @@ async fn build_prehatch_history(state: &Arc<AppState>, session_id: &str) -> Stri
     kept.reverse();
     kept.join("\n\n")
 }
+/// Resolve an unpinned ("default"/"auto") model to a concrete `provider:model`
+/// id, the same way `provider::manager` resolves it for an actual dispatch:
+/// the app-wide default-model setting wins; with none configured, fall back
+/// to effort-based auto-candidate routing. A pinned model passes through
+/// unchanged. Used so the pre-hatch hook derives its cheap-model provider
+/// from what will ACTUALLY run this turn, not from the literal "default".
+async fn resolve_effective_model(
+    state: &Arc<AppState>,
+    resolved_model: &str,
+    resolved_effort: Option<&str>,
+) -> String {
+    if !crate::provider::is_auto_model(resolved_model) {
+        return resolved_model.to_string();
+    }
+    if let Some(configured) = crate::routes::settings::default_model_setting(state).await {
+        return configured;
+    }
+    let candidates = state.provider_registry.auto_model_candidates().await;
+    match crate::provider::resolve_auto_model(&candidates, resolved_effort, false) {
+        Ok(m) => m,
+        Err(_) => resolved_model.to_string(),
+    }
+}
 
 #[derive(Deserialize)]
 pub(super) struct SendMessageRequest {
@@ -193,8 +216,10 @@ pub(super) async fn send_message(
             .has_listeners(crate::plugin::hooks::MESSAGE_BEFORE_HOOK)
             .await
     {
+        let effective_model =
+            resolve_effective_model(&state, &resolved_model, resolved_effort.as_deref()).await;
         let (provider_id, _) = crate::provider::registry::ProviderRegistry::parse_model_id(
-            &resolved_model,
+            &effective_model,
             crate::provider::manager::DEFAULT_PROVIDER,
         );
         // The model the pre-hatcher researches on: the user's Settings
@@ -229,7 +254,7 @@ pub(super) async fn send_message(
                 serde_json::json!({
                     "session_id": id,
                     "text": resolved_text,
-                    "model": resolved_model,
+                    "model": effective_model,
                     "effort": resolved_effort,
                     "cheap_model": cheap_model,
                     "history": history,
@@ -1122,4 +1147,84 @@ fn derive_status(events: &[crate::db::models::Event]) -> &'static str {
     }
 
     "idle"
+}
+
+#[cfg(test)]
+#[cfg(test)]
+mod resolve_effective_model_tests {
+    use super::*;
+    use crate::auth::middleware::tests::test_state;
+    use crate::provider::mock::{MockProvider, mock_model_infos};
+    use crate::provider::registry::{ProviderCapabilities, ProviderInfo};
+
+    async fn register_ollama(state: &Arc<AppState>) {
+        state
+            .provider_registry
+            .register(
+                Arc::new(MockProvider::new()),
+                ProviderInfo {
+                    id: "ollama".into(),
+                    display_name: "Ollama".into(),
+                    models: mock_model_infos(),
+                    effort_levels: vec![],
+                    capabilities: ProviderCapabilities::default(),
+                },
+            )
+            .await;
+    }
+
+    async fn set_default_model(state: &Arc<AppState>, model: &str) {
+        let db = state.db.clone();
+        let value = serde_json::json!({ "model": model }).to_string();
+        tokio::task::spawn_blocking(move || {
+            db.plugin_store_put_blocking(
+                crate::routes::settings::SETTINGS_NS,
+                crate::routes::settings::SETTINGS_COLLECTION,
+                crate::routes::settings::DEFAULT_MODEL_KEY,
+                &value,
+            )
+        })
+        .await
+        .unwrap()
+        .unwrap();
+    }
+
+    #[tokio::test]
+    async fn unset_session_model_with_ollama_default_resolves_to_ollamas_cheapest() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = test_state(dir.path());
+        register_ollama(&state).await;
+        set_default_model(&state, "ollama:llama3").await;
+
+        let effective = resolve_effective_model(&state, "default", None).await;
+        assert_eq!(effective, "ollama:llama3");
+
+        let (provider_id, _) = crate::provider::registry::ProviderRegistry::parse_model_id(
+            &effective,
+            crate::provider::manager::DEFAULT_PROVIDER,
+        );
+        assert_eq!(provider_id, "ollama");
+        let cheap = state.provider_registry.cheapest_model(&provider_id).await;
+        assert_eq!(cheap.as_deref(), Some("echo"));
+    }
+
+    #[tokio::test]
+    async fn pinned_model_bypasses_default_setting() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = test_state(dir.path());
+        register_ollama(&state).await;
+        set_default_model(&state, "ollama:llama3").await;
+
+        let effective = resolve_effective_model(&state, "claude:opus", None).await;
+        assert_eq!(effective, "claude:opus");
+    }
+
+    #[tokio::test]
+    async fn no_configured_default_and_no_usable_candidate_passes_literal_through() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = test_state(dir.path());
+
+        let effective = resolve_effective_model(&state, "default", None).await;
+        assert_eq!(effective, "default");
+    }
 }
