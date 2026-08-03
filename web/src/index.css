@@ -300,20 +300,90 @@ select {
   border: 0;
 }
 
-/* Scrollbar styling */
+/* ─── Scrollbars & scroll indicators ─── */
+/* Scrollbars are hidden everywhere — wheel/touch/keyboard scrolling
+   still works. "More content this way" is signalled by edge fades
+   instead: initScrollIndicators() (util/scrollIndicators.ts) stamps
+   every overflowing scroll container with data-scroll="up down left
+   right" (only the sides with more content) and the mask below fades
+   those edges. Containers can opt out of the fade (scrollbars stay
+   hidden) with data-scroll-indicators="off". */
+* {
+  scrollbar-width: none;
+}
 ::-webkit-scrollbar {
-  width: 6px;
-  height: 6px;
+  display: none;
+  width: 0;
+  height: 0;
 }
-::-webkit-scrollbar-track {
-  background: transparent;
+
+[data-scroll] {
+  --fade-top: 0px;
+  --fade-bottom: 0px;
+  --fade-left: 0px;
+  --fade-right: 0px;
+  -webkit-mask-image:
+    linear-gradient(
+      to bottom,
+      transparent 0,
+      #000 var(--fade-top),
+      #000 calc(100% - var(--fade-bottom)),
+      transparent 100%
+    ),
+    linear-gradient(
+      to right,
+      transparent 0,
+      #000 var(--fade-left),
+      #000 calc(100% - var(--fade-right)),
+      transparent 100%
+    );
+  -webkit-mask-composite: source-in;
+  mask-image:
+    linear-gradient(
+      to bottom,
+      transparent 0,
+      #000 var(--fade-top),
+      #000 calc(100% - var(--fade-bottom)),
+      transparent 100%
+    ),
+    linear-gradient(
+      to right,
+      transparent 0,
+      #000 var(--fade-left),
+      #000 calc(100% - var(--fade-right)),
+      transparent 100%
+    );
+  mask-composite: intersect;
 }
-::-webkit-scrollbar-thumb {
-  background: var(--border-strong);
-  border-radius: var(--radius-full);
+[data-scroll~='up'] {
+  --fade-top: var(--scroll-fade, 28px);
 }
-::-webkit-scrollbar-thumb:hover {
-  background: var(--text3);
+[data-scroll~='down'] {
+  --fade-bottom: var(--scroll-fade, 28px);
+}
+[data-scroll~='left'] {
+  --fade-left: var(--scroll-fade, 28px);
+}
+[data-scroll~='right'] {
+  --fade-right: var(--scroll-fade, 28px);
+}
+/* Sticky children pinned to a scroller's edge would be ghosted by that
+   edge's fade — and they already signal "more content" themselves
+   (pinned header/banner up top, jump-pill/CTA down below), so drop the
+   fade on the side they occupy. */
+[data-scroll]:has(
+  :is(
+    .plan-view__header,
+    .plan-view__toolbar,
+    .review-version-view__banner,
+    .kanban-column-header,
+    .expert-group-title
+  )
+) {
+  --fade-top: 0px;
+}
+[data-scroll]:has(:is(.chat-jump-latest, .review-rail__cta)) {
+  --fade-bottom: 0px;
 }
 
 /* ─── Density ─── */

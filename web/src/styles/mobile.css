@@ -377,7 +377,6 @@
   gap: 6px;
   overflow-x: auto;
   overflow-y: visible;
-  scrollbar-width: thin;
   /* Native momentum scrolling on iOS for the tab strip. */
   -webkit-overflow-scrolling: touch;
   /* Allow horizontal scroll on the strip without taking over the
