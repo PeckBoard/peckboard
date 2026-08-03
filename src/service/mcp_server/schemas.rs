@@ -13,18 +13,21 @@ use super::context::McpToolDef;
 pub fn tool_names() -> Vec<String> {
     tool_definitions().into_iter().map(|t| t.name).collect()
 }
-/// Core tools NOT advertised to worker sessions via `tools/list`. Workers
-/// never legitimately administer projects, folders, schedules, plugins, or
-/// other chat sessions — and every schema dropped here is context that every
-/// worker API call stops paying for. This trims ADVERTISEMENT only; the
-/// per-handler scope checks (e.g. `ScopedFolderId`) remain the enforcement
-/// point if a worker calls a hidden tool by name anyway.
+/// Core tools a worker session may NOT use. Workers never legitimately
+/// administer projects, folders, schedules, plugins, or other chat sessions.
+/// This list is BOTH trimmed from a worker's `tools/list` (every schema
+/// dropped here is context every worker API call stops paying for) AND
+/// hard-enforced at dispatch in `routes/mcp.rs` — advertisement alone is not
+/// a gate: the per-handler checks (`scope_project` / `scope_card`) enforce the
+/// folder/project BOUNDARY, never the ROLE, so a project-scoped worker token
+/// resolved `delete_project` with no args to its OWN project and cascaded it.
 ///
 /// The document-review tools (`get_review_doc`, `submit_review_revision`)
 /// sit in BOTH this list and the chat one: they mean nothing without a
 /// review bound to the session, so only sessions with
 /// `expert_kind == "doc-review"` see them — `routes/mcp.rs` re-admits them
-/// there, and their handlers reject any other session.
+/// there (in both `tools/list` and the dispatch gate), and their handlers
+/// reject any other session.
 pub fn worker_hidden_tool_names() -> &'static [&'static str] {
     &[
         "list_projects",
@@ -53,10 +56,16 @@ pub fn worker_hidden_tool_names() -> &'static [&'static str] {
 /// Core tools NOT advertised to non-worker (chat/expert) sessions: the
 /// card-lifecycle and worker-coordination tools only make sense with a
 /// card/worker scope, so their schemas are dead weight in every chat API
-/// call. Advertisement-only, same as the worker list — the per-handler
-/// scope checks remain the enforcement point. Chats keep the read-side
-/// worker tools (list/read worker sessions, search_sessions, reports) for
-/// supervising projects.
+/// call. Chats keep the read-side worker tools (list/read worker sessions,
+/// search_sessions, reports) for supervising projects.
+///
+/// Advertisement-only, DELIBERATELY — unlike the worker list above this one
+/// is not hard-gated at dispatch. It trims context, not privilege: a chat is
+/// the human-driven, higher-privilege surface, so refusing it
+/// `send_worker_message` or `notify_workers` would take away a legitimate way
+/// to nudge a stuck worker while buying no security (a chat token already
+/// outranks a worker token). The card-lifecycle entries fail closed on their
+/// own anyway — `scope_card(None)` errors when no card is bound.
 pub fn chat_hidden_tool_names() -> &'static [&'static str] {
     &[
         "complete_step",

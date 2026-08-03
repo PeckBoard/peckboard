@@ -176,7 +176,9 @@ async fn http_transport_serves_full_mcp_lifecycle_without_a_proxy() {
         "missing create_card: {names:?}"
     );
 
-    // 4. tools/call — a real tool round-trips end to end over HTTP.
+    // 4. tools/call — a real tool round-trips end to end over HTTP. Use a
+    // worker-allowed tool: the admin tools in `worker_hidden_tool_names()`
+    // are refused at dispatch for this (worker) session.
     let resp = client
         .post(&url)
         .header("Authorization", &bearer)
@@ -184,7 +186,7 @@ async fn http_transport_serves_full_mcp_lifecycle_without_a_proxy() {
             "jsonrpc": "2.0",
             "id": 3,
             "method": "tools/call",
-            "params": { "name": "list_workflows", "arguments": {} },
+            "params": { "name": "math", "arguments": { "expression": "1 + 1" } },
         }))
         .send()
         .await

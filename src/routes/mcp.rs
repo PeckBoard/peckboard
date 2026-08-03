@@ -355,6 +355,43 @@ async fn mcp_handler(
                     )),
                 );
             }
+            // HARD gate, not advertisement: a worker session is a card
+            // executor, never an administrator. `worker_hidden_tool_names()`
+            // used to be trimmed from `tools/list` only, and the per-handler
+            // checks (`scope_project` / `scope_card`) enforce the folder and
+            // project BOUNDARY, never the ROLE — a worker token is
+            // project-scoped, so `delete_project` with no args resolved to the
+            // worker's OWN project and cascaded it away, and `update_project`
+            // with a huge `worker_count` raised the orchestrator's spawn cap.
+            // Both are one confused (or prompt-poisoned) worker away. Refuse
+            // by name at dispatch, same shape as the pre-hatcher gate above.
+            //
+            // The two document-review tools sit in this list but are
+            // re-admitted for a review's own session, exactly as `tools/list`
+            // above does; their handlers still reject any other session.
+            let doc_review_session = session_row.expert_kind.as_deref()
+                == Some(crate::service::doc_reviews::EXPERT_KIND);
+            if session_row.is_worker
+                && crate::service::mcp_server::worker_hidden_tool_names().contains(&tool_name)
+                && !(doc_review_session
+                    && matches!(tool_name, "get_review_doc" | "submit_review_revision"))
+            {
+                return (
+                    StatusCode::OK,
+                    rpc_json(JsonRpcResponse::error(
+                        id.clone(),
+                        -32000,
+                        format!(
+                            "tool '{tool_name}' is blocked: worker sessions execute their \
+                             own card and cannot administer projects, folders, workflows, \
+                             schedules, plugins, or other sessions. Use the card tools \
+                             (complete_step, finish_card, create_card, …); ask a human \
+                             via ask_user for anything else."
+                        ),
+                    )),
+                );
+            }
+
             let card_id = session_row.card_id.clone();
             let folder_id = session_row.folder_id.clone();
 
