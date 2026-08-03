@@ -232,6 +232,7 @@ impl AgentProvider for GrokProvider {
             db,
             broadcaster,
             config,
+            run_id,
             conversation_id,
             completion_tx,
             // grok runs its own tool loop, so the WASM plugin tool host
@@ -369,6 +370,7 @@ impl AgentProvider for GrokProvider {
                     session_id: sid,
                     completed: result.completed,
                     error: result.error,
+                    run_id,
                     error_kind: result.error_kind,
                 })
                 .await;

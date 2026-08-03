@@ -107,6 +107,7 @@ impl AgentProvider for MockProvider {
             db,
             broadcaster,
             config,
+            run_id,
             conversation_id: _,
             completion_tx,
             plugins,
@@ -165,6 +166,7 @@ impl AgentProvider for MockProvider {
                     session_id: sid.clone(),
                     completed,
                     error: None,
+                    run_id,
                     error_kind: None,
                 })
                 .await;

@@ -259,21 +259,29 @@ impl SessionManager {
             .ok_or_else(|| anyhow::anyhow!("session not found: {}", session_id))?;
 
         // If a finalized handover/compaction left a doc waiting, prepend it
-        // so the first turn of the fresh conversation opens with the
-        // preserved context. Done here — the single dispatch chokepoint — so
-        // the HTTP route, the queue drain, and the worker/repeating paths
-        // all inject consistently.
+        // If a finalized handover/compaction left a doc waiting, or a review
+        // switch / doc-review pass armed an injection, prepend it so the turn
+        // opens with that context. Done here — the single dispatch chokepoint
+        // — so the HTTP route, the queue drain, and the worker/repeating
+        // paths all inject consistently.
         //
         // PEEK, not take: everything below here can still fail (folder
         // lookup, provider resolution, account env injection, spawn), and the
-        // doc is the only surviving copy of the pre-reset conversation. It is
-        // cleared at the very bottom, only once `provider.send_message`
-        // returned Ok — so a failed dispatch leaves it parked for the retry.
-        let mut handover_doc_used = false;
-        let message = if session.pending_handover_doc.is_some() {
+        // handover doc is the only surviving copy of the pre-reset
+        // conversation. The columns are cleared at the very bottom, only once
+        // `provider.send_message` returned Ok — so a failed dispatch leaves
+        // them parked for the retry.
+        //
+        // The guard is a pure read of the already-loaded session row: skip
+        // the extra DB round-trip when nothing at all is armed.
+        let mut pending_used = crate::handover::PendingUsed::default();
+        let message = if session.pending_handover_doc.is_some()
+            || session.pending_plan_review
+            || session.pending_doc_review.is_some()
+        {
             let (text, used) =
                 crate::handover::peek_pending_injection(db, session_id, &message.text).await;
-            handover_doc_used = used;
+            pending_used = used;
             UserMessage {
                 text,
                 attachments: message.attachments,
@@ -282,7 +290,6 @@ impl SessionManager {
         } else {
             message
         };
-
         let folder = db
             .get_folder(&session.folder_id)
             .await?
@@ -503,17 +510,23 @@ impl SessionManager {
             config: final_config,
             conversation_id,
             completion_tx: self.completion_tx.clone(),
+            // Stamp for this dispatch. The provider copies it into the
+            // `ProcessCompletion` it emits, which is how the completion
+            // listener tells a handover's doc turn from a completion left
+            // over from an older run (see `handover::begin_handover`).
+            run_id: crate::provider::agent::next_run_id(),
             plugins: self.plugins.clone(),
         };
 
         let result = provider.send_message(ctx).await;
 
-        // The turn is away: only now is it safe to drop the handover doc.
-        // Every `?` above returns without clearing, so a dispatch that failed
-        // (missing folder, unknown provider, deleted account, spawn error)
-        // leaves the doc parked for the user's retry.
-        if result.is_ok() && handover_doc_used {
-            crate::handover::clear_pending_handover_doc(db, session_id).await;
+        // The turn is away: only now is it safe to drop the one-shot
+        // injection columns. Every `?` above returns without clearing, so a
+        // dispatch that failed (missing folder, unknown provider, deleted
+        // account, spawn error) leaves the handover doc, the plan review and
+        // the doc review parked for the user's retry.
+        if result.is_ok() {
+            crate::handover::clear_pending_injections(db, session_id, &pending_used).await;
         }
         result
     }

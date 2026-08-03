@@ -401,6 +401,92 @@ async fn handover_runs_to_completion() {
     assert!(events.iter().any(|e| e.kind == "handover-start"));
 }
 
+/// A completion for a run that ended BEFORE the handover started must not
+/// be mistaken for the doc-generation turn's.
+///
+/// The race: completions are queued and handled one at a time, and a
+/// provider removes its run from the map BEFORE sending one — so the idle
+/// reaper's clean recycle of the previous child can still be sitting in the
+/// channel when `begin_handover` parks the target and dispatches the doc
+/// turn to a fresh child. Consuming it as the doc turn's completion would
+/// finalize while the doc is still streaming (empty `extract_doc` → the
+/// model flips with `EMPTY_DOC_FALLBACK` and the context is gone), or abort
+/// a compaction that never failed.
+#[tokio::test]
+async fn a_stale_completion_neither_finalizes_nor_aborts_the_handover() {
+    let (state, token) = build_state("mock:echo").await;
+    seed_turn(&state.db, true).await;
+
+    let mut completion_rx = state
+        .session_manager
+        .take_completion_rx()
+        .await
+        .expect("completion rx available");
+
+    let (status, _body) = patch_model(&state, &token, "mock:echo@acct2").await;
+    assert_eq!(status, StatusCode::OK);
+
+    let s = state.db.get_session("s1").await.unwrap().unwrap();
+    let watermark = s.handover_run_id.expect("doc turn stamped a watermark");
+
+    // Two stale completions, one of each shape: a clean recycle (would have
+    // finalized) and a crash (would have aborted). Both report on a run
+    // dispatched before the handover, so both are dropped.
+    for completed in [true, false] {
+        let consumed = peckboard::handover::handle_completion(
+            &state,
+            &peckboard::provider::agent::ProcessCompletion {
+                session_id: "s1".into(),
+                completed,
+                error: (!completed).then(|| "idle recycle".to_string()),
+                error_kind: None,
+                run_id: (watermark as u64) - 1,
+            },
+        )
+        .await;
+        assert!(
+            consumed,
+            "a stale completion is swallowed, not fed to worker bookkeeping"
+        );
+
+        let s = state.db.get_session("s1").await.unwrap().unwrap();
+        assert_eq!(
+            s.handover_to_model.as_deref(),
+            Some("mock:echo@acct2"),
+            "handover still parked (completed={completed})"
+        );
+        assert_eq!(s.model.as_deref(), Some("mock:echo"), "model not flipped");
+        assert_eq!(s.pending_handover_doc, None, "no doc captured");
+        let events = state.db.events_tail("s1", 50).await.unwrap();
+        assert!(
+            !events
+                .iter()
+                .any(|e| e.kind == "handover" || e.kind == "handover-aborted"),
+            "handover neither finalized nor aborted, events: {events:?}"
+        );
+    }
+
+    // The doc turn's own completion carries a run id at or above the
+    // watermark, and finalizes.
+    let completion = tokio::time::timeout(std::time::Duration::from_secs(5), completion_rx.recv())
+        .await
+        .expect("doc turn delivers a completion")
+        .expect("channel open");
+    assert!(
+        completion.run_id >= watermark as u64,
+        "doc turn run_id {} must not predate the watermark {watermark}",
+        completion.run_id
+    );
+    assert!(peckboard::handover::handle_completion(&state, &completion).await);
+
+    let s = state.db.get_session("s1").await.unwrap().unwrap();
+    assert_eq!(s.model.as_deref(), Some("mock:echo@acct2"), "model flipped");
+    assert_eq!(s.handover_to_model, None);
+    assert_eq!(s.handover_run_id, None, "stamp cleared with the handover");
+    let doc = s.pending_handover_doc.expect("doc stashed for injection");
+    assert!(doc.contains("HANDOVER"), "doc was: {doc}");
+}
+
 // ─── Auto-compaction ──────────────────────────────────────────────────────────
 
 /// Record a usage row so `latest_context_tokens` reports `context` occupancy.
@@ -1074,4 +1160,228 @@ async fn failed_dispatch_keeps_the_handover_doc_for_the_retry() {
         .filter(|e| e.kind == "agent-text" && e.data.contains("remember the plan"))
         .count();
     assert_eq!(echoed, 1, "doc injected exactly once, events: {events:?}");
+}
+
+// --- Plan-review / doc-review injections without a handover doc -------------
+
+/// Drive one turn through the real dispatcher under `mock:echo` and return
+/// the session's event log. The mock echoes the message it was handed, so
+/// an `agent-text` event carrying injected text proves the injection
+/// actually reached the provider.
+async fn dispatch_one_turn(
+    state: &Arc<AppState>,
+    completion_rx: &mut tokio::sync::mpsc::Receiver<peckboard::provider::agent::ProcessCompletion>,
+    text: &str,
+) -> Vec<peckboard::db::models::Event> {
+    let lock = state.session_manager.lock_session("s1").await;
+    state
+        .session_manager
+        .send_message_locked(
+            &lock,
+            UserMessage::from_text(text),
+            &state.db,
+            &state.broadcaster,
+            SpawnConfig::default(),
+        )
+        .await
+        .expect("mock dispatch succeeds");
+    drop(lock);
+    tokio::time::timeout(std::time::Duration::from_secs(5), completion_rx.recv())
+        .await
+        .expect("turn completes")
+        .expect("channel open");
+    state.db.events_tail("s1", 50).await.unwrap()
+}
+
+fn echoed(events: &[peckboard::db::models::Event], needle: &str) -> usize {
+    events
+        .iter()
+        .filter(|e| e.kind == "agent-text" && e.data.contains(needle))
+        .count()
+}
+
+/// The bug this card is about: `send_message_locked` only built the
+/// injection when `pending_handover_doc` was set, so a doc-review pass --
+/// which arms `pending_doc_review` and nothing else -- dispatched a bare
+/// instruction. The document and its open annotations never reached the
+/// model, which was then asked to revise a document it couldn't see.
+#[tokio::test]
+async fn a_doc_review_pass_delivers_the_document_without_a_handover_doc() {
+    let (state, _token) = build_state("mock:echo").await;
+    let review = state
+        .db
+        .create_doc_review(
+            "Doc",
+            "file",
+            "f1:docs/doc.md",
+            Some("f1"),
+            None,
+            "# Doc\n\nthe body paragraph\n",
+        )
+        .await
+        .unwrap();
+    state
+        .db
+        .set_doc_review_session(&review.id, Some("s1"))
+        .await
+        .unwrap();
+    state
+        .db
+        .add_doc_review_comment(
+            &review.id,
+            1,
+            (3, 3),
+            Some("the body paragraph"),
+            "expand",
+            "say more here",
+        )
+        .await
+        .unwrap();
+    state
+        .db
+        .set_pending_doc_review("s1", &review.id)
+        .await
+        .unwrap();
+
+    let s = state.db.get_session("s1").await.unwrap().unwrap();
+    assert_eq!(s.pending_handover_doc, None, "no handover doc in play");
+
+    let mut rx = state
+        .session_manager
+        .take_completion_rx()
+        .await
+        .expect("completion rx available");
+    let events = dispatch_one_turn(&state, &mut rx, "Run the pass.").await;
+    assert_eq!(
+        echoed(&events, "   1 | # Doc"),
+        1,
+        "the line-numbered document reached the provider, events: {events:?}"
+    );
+    assert_eq!(
+        echoed(&events, "say more here"),
+        1,
+        "and so did the open annotation, events: {events:?}"
+    );
+
+    let s = state.db.get_session("s1").await.unwrap().unwrap();
+    assert_eq!(
+        s.pending_doc_review, None,
+        "a dispatched pass consumes the flag"
+    );
+
+    // The next ordinary turn is a plain message again.
+    let events = dispatch_one_turn(&state, &mut rx, "And again.").await;
+    assert_eq!(
+        echoed(&events, "   1 | # Doc"),
+        1,
+        "still just the one injection, events: {events:?}"
+    );
+}
+
+/// Same gate, the other victim: a review-mode model switch that does NOT
+/// compact arms `pending_plan_review` alone, so the plan the model is meant
+/// to review against was silently dropped.
+#[tokio::test]
+async fn a_plan_review_switch_delivers_the_plan_without_a_handover_doc() {
+    let (state, _token) = build_state("mock:echo").await;
+    state
+        .db
+        .upsert_plan("s1", None, None, "The plan", "## Step 1\nwiden the guard")
+        .await
+        .unwrap();
+    state
+        .db
+        .update_session(
+            "s1",
+            UpdateSession {
+                pending_plan_review: Some(true),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+
+    let mut rx = state
+        .session_manager
+        .take_completion_rx()
+        .await
+        .expect("completion rx available");
+    let events = dispatch_one_turn(&state, &mut rx, "Review the work.").await;
+    assert_eq!(
+        echoed(&events, "widen the guard"),
+        1,
+        "the saved plan reached the provider, events: {events:?}"
+    );
+
+    let s = state.db.get_session("s1").await.unwrap().unwrap();
+    assert!(!s.pending_plan_review, "the flag is one-shot");
+}
+
+/// Both flags get the same failed-dispatch protection the handover doc now
+/// has: they were cleared eagerly inside `peek_pending_injection`, so a
+/// dispatch that errored afterwards lost the plan / the document for good.
+#[tokio::test]
+async fn a_failed_dispatch_keeps_the_plan_and_doc_review_armed() {
+    let (state, _token) = build_state("mock:echo").await;
+    let review = state
+        .db
+        .create_doc_review("Doc", "file", "f1:docs/doc.md", Some("f1"), None, "# Doc\n")
+        .await
+        .unwrap();
+    state
+        .db
+        .set_doc_review_session(&review.id, Some("s1"))
+        .await
+        .unwrap();
+    state
+        .db
+        .set_pending_doc_review("s1", &review.id)
+        .await
+        .unwrap();
+    state
+        .db
+        .upsert_plan("s1", None, None, "The plan", "## Step 1\nwiden the guard")
+        .await
+        .unwrap();
+    state
+        .db
+        .update_session(
+            "s1",
+            UpdateSession {
+                model: Some(Some("nosuchprovider:whatever".into())),
+                pending_plan_review: Some(true),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+
+    let lock = state.session_manager.lock_session("s1").await;
+    let err = state
+        .session_manager
+        .send_message_locked(
+            &lock,
+            UserMessage::from_text("Review the work."),
+            &state.db,
+            &state.broadcaster,
+            SpawnConfig::default(),
+        )
+        .await
+        .expect_err("unknown provider must fail the dispatch");
+    assert!(
+        err.to_string().contains("unknown agent provider"),
+        "err was: {err}"
+    );
+    drop(lock);
+
+    let s = state.db.get_session("s1").await.unwrap().unwrap();
+    assert!(
+        s.pending_plan_review,
+        "a dispatch that never reached the provider must not eat the plan review"
+    );
+    assert_eq!(
+        s.pending_doc_review.as_deref(),
+        Some(review.id.as_str()),
+        "nor the doc review"
+    );
 }

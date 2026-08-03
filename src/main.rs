@@ -404,66 +404,18 @@ async fn main() -> anyhow::Result<()> {
 
                     // 0. Handover finalize. If this completion is the
                     //    outgoing model's doc-generation turn (session has a
-                    //    parked `handover_to_model`), capture the doc, flip
-                    //    the model, and stash the doc for the incoming model.
-                    //    Runs before worker bookkeeping and short-circuits the
-                    //    rest: a doc-gen turn isn't a normal worker/queue
-                    //    completion and must not respawn anything.
+                    //    parked `handover_to_model` AND the completion's run
+                    //    stamp matches the one begin_handover recorded),
+                    //    capture the doc, flip the model, and stash the doc
+                    //    for the incoming model. Runs before worker
+                    //    bookkeeping and short-circuits the rest: a doc-gen
+                    //    turn isn't a normal worker/queue completion and must
+                    //    not respawn anything. See `handover::handle_completion`
+                    //    for the stale-completion guard.
+                    if peckboard::handover::handle_completion(&orchestrator_state, &completion)
+                        .await
                     {
-                        let is_handover = matches!(
-                            orchestrator_state.db.get_session(&sid).await,
-                            Ok(Some(s)) if s.handover_to_model.is_some()
-                        );
-                        if is_handover {
-                            {
-                                let _guard =
-                                    orchestrator_state.session_manager.lock_session(&sid).await;
-                                // Only a CLEAN doc turn switches the model.
-                                // A crashed or interrupted doc turn aborts
-                                // the handover instead — leaving the model
-                                // and conversation_id untouched so no context
-                                // is lost ("don't switch if the switch
-                                // fails", and the hook that lets the user
-                                // interrupt a handover).
-                                let res = if completion.completed {
-                                    peckboard::handover::finalize_handover(
-                                        &orchestrator_state,
-                                        &sid,
-                                    )
-                                    .await
-                                } else {
-                                    peckboard::handover::abort_handover(
-                                        &orchestrator_state,
-                                        &sid,
-                                        completion.error.as_deref(),
-                                    )
-                                    .await
-                                };
-                                if let Err(e) = res {
-                                    tracing::error!(
-                                        session_id = %sid,
-                                        completed = completion.completed,
-                                        "Handover finalize/abort failed: {e}"
-                                    );
-                                }
-                            } // drop the lock — the drain re-acquires it
-                            // A message may have queued behind the doc turn;
-                            // deliver it now. Its dispatch injects the freshly
-                            // stashed doc via `take_pending_injection`.
-                            if let Err(e) =
-                                peckboard::worker::orchestrator::drain_queue_for_session(
-                                    &orchestrator_state,
-                                    &sid,
-                                )
-                                .await
-                            {
-                                tracing::warn!(
-                                    session_id = %sid,
-                                    "Post-handover queue drain failed: {e}"
-                                );
-                            }
-                            continue;
-                        }
+                        continue;
                     }
 
                     // 1. Worker-specific bookkeeping. Hold the per-session

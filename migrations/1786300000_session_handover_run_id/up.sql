@@ -1,0 +1,14 @@
+-- Stamp for the handover doc-generation turn.
+--
+-- `handover_run_id` holds the monotonic run-id watermark taken the moment
+-- `begin_handover` parks `handover_to_model` and dispatches the doc turn.
+-- The completion listener only finalizes/aborts the handover for a
+-- `ProcessCompletion` whose `run_id` is at or above it: a completion left
+-- over from a run that started EARLIER (e.g. the idle reaper recycling the
+-- previous child while the switch was requested) reports on an unrelated
+-- turn and must be handled as an ordinary completion.
+--
+-- Nullable + additive, so existing rows need no backfill; a NULL stamp
+-- (legacy row, or a handover parked by an older build) falls back to the
+-- previous "any completion finalizes" behaviour.
+ALTER TABLE sessions ADD COLUMN handover_run_id BIGINT;

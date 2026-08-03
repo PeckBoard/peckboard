@@ -9,6 +9,28 @@ use crate::provider::message::UserMessage;
 use crate::provider::stream::{CrashKind, ModelInfo, ProviderEvent, SpawnConfig};
 use crate::ws::broadcaster::{Broadcaster, WsEvent};
 
+/// Monotonic counter behind [`next_run_id`] / [`current_run_id`].
+static RUN_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+
+/// Allocate the id of a new agent run (one dispatch through
+/// `SessionManager::send_message_locked`). Globally monotonic across
+/// sessions, so ids are also a total order over dispatches.
+pub fn next_run_id() -> u64 {
+    RUN_ID.fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+}
+
+/// The current high-water mark: every run dispatched so far has an id
+/// STRICTLY LESS than this, every future run an id greater or equal.
+///
+/// [`crate::handover::begin_handover`] snapshots it before dispatching the
+/// doc-generation turn and stores it on the session, so the completion
+/// listener can tell that turn's completion (`run_id >= watermark`) from a
+/// completion left over from a run that started earlier — e.g. the idle
+/// reaper recycling the previous child — and only finalize on the former.
+pub fn current_run_id() -> u64 {
+    RUN_ID.load(std::sync::atomic::Ordering::SeqCst)
+}
+
 /// Notification sent when an agent run finishes streaming.
 ///
 /// Delivered to the dispatcher's completion channel so the worker
@@ -30,6 +52,15 @@ pub struct ProcessCompletion {
     /// provider that reports an error it cannot classify sends
     /// `Some(CrashKind::Unknown)`.
     pub error_kind: Option<CrashKind>,
+    /// Id of the run this completion reports on — the [`next_run_id`] value
+    /// of the LAST dispatch delivered to the finished run (for a provider
+    /// that keeps one long-lived child across turns, that's the last turn
+    /// written to it, not the one that spawned it).
+    ///
+    /// Ties a completion to a dispatch: a completion whose `run_id` predates
+    /// a handover's watermark reports on an older run and must not be
+    /// mistaken for the handover's doc-generation turn.
+    pub run_id: u64,
 }
 
 /// Context handed to an `AgentProvider` when a new run is requested.
@@ -44,6 +75,10 @@ pub struct SendMessageContext {
     pub broadcaster: Arc<Broadcaster>,
     pub config: SpawnConfig,
     pub conversation_id: Option<String>,
+    /// Id allocated for this dispatch by `SessionManager` — providers copy
+    /// it into the [`ProcessCompletion`] they emit for it. See
+    /// [`ProcessCompletion::run_id`].
+    pub run_id: u64,
     pub completion_tx: mpsc::Sender<ProcessCompletion>,
     /// Plugin host for this dispatch. A non-Claude provider runs its raw
     /// output through `crate::plugin::todo_hook::emit_plugin_todos` to let a

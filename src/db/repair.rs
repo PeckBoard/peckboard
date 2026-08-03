@@ -536,10 +536,11 @@ fn ensure_sessions_system_prompt_column(conn: &mut SqliteConnection) -> anyhow::
     Ok(())
 }
 
-/// Heal DBs that predate the `session_handover` migration, whose two
-/// statements are non-idempotent `ALTER TABLE sessions ADD COLUMN`s. Each is
-/// detected-and-added independently so a DB that ran one half but not the
-/// other still converges. Both are additive + nullable, so no backfill.
+/// Heal DBs that predate the `session_handover` migration (and the later
+/// `session_handover_run_id` one), whose statements are non-idempotent
+/// `ALTER TABLE sessions ADD COLUMN`s. Each is detected-and-added
+/// independently so a DB that ran one but not the others still converges.
+/// All are additive + nullable, so no backfill.
 fn ensure_sessions_handover_columns(conn: &mut SqliteConnection) -> anyhow::Result<()> {
     let rows: Vec<PragmaColumn> = sql_query("PRAGMA table_info(sessions)").load(conn)?;
     let existing: Vec<String> = rows.into_iter().map(|r| r.name).collect();
@@ -553,6 +554,10 @@ fn ensure_sessions_handover_columns(conn: &mut SqliteConnection) -> anyhow::Resu
     if !existing.iter().any(|c| c == "pending_handover_doc") {
         tracing::info!("Repairing schema: adding sessions.pending_handover_doc");
         sql_query("ALTER TABLE sessions ADD COLUMN pending_handover_doc TEXT").execute(conn)?;
+    }
+    if !existing.iter().any(|c| c == "handover_run_id") {
+        tracing::info!("Repairing schema: adding sessions.handover_run_id");
+        sql_query("ALTER TABLE sessions ADD COLUMN handover_run_id BIGINT").execute(conn)?;
     }
     Ok(())
 }

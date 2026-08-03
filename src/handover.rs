@@ -190,12 +190,23 @@ pub async fn begin_handover(
 ) -> anyhow::Result<()> {
     // Park the target. Leaving `model` alone keeps the doc-gen turn routed
     // to the outgoing provider/account so it can resume the conversation.
+    //
+    // `handover_run_id` is the run-id watermark: every run dispatched so far
+    // has a LOWER id, the doc turn dispatched just below has this one or a
+    // higher one. It is what lets the completion listener
+    // ([`handle_completion`]) tell the doc turn's completion from one still
+    // queued for a run that ended before the handover was even requested —
+    // e.g. the idle reaper recycling the previous child. Finalizing on that
+    // stale completion would capture an empty doc and flip the model with
+    // `EMPTY_DOC_FALLBACK`, losing the context the handover exists to move.
+    let run_watermark = crate::provider::agent::current_run_id();
     state
         .db
         .update_session(
             session_id,
             UpdateSession {
                 handover_to_model: Some(Some(to_model.to_string())),
+                handover_run_id: Some(Some(run_watermark as i64)),
                 ..Default::default()
             },
         )
@@ -517,6 +528,7 @@ pub async fn finalize_handover(state: &Arc<AppState>, session_id: &str) -> anyho
                 model: Some(Some(to_model.clone())),
                 conversation_id: Some(None),
                 handover_to_model: Some(None),
+                handover_run_id: Some(None),
                 pending_handover_doc: Some(Some(doc)),
                 context_reset_ts: Some(Some(chrono::Utc::now().timestamp_millis())),
                 ..Default::default()
@@ -607,6 +619,7 @@ pub async fn abort_handover(
             session_id,
             UpdateSession {
                 handover_to_model: Some(None),
+                handover_run_id: Some(None),
                 ..Default::default()
             },
         )
@@ -627,6 +640,87 @@ pub async fn abort_handover(
         "Handover aborted — model and context left unchanged"
     );
     Ok(())
+}
+/// Handover half of the completion listener (`main.rs`): decide whether an
+/// arriving [`ProcessCompletion`] belongs to an in-flight handover and, when
+/// it does, finish the handover and drain anything queued behind the doc
+/// turn. Returns whether the completion was consumed here — `true` means the
+/// listener must NOT run its normal worker/queue bookkeeping for it.
+///
+/// A doc turn isn't a normal turn, so a completion for one short-circuits
+/// the rest of the listener. The catch this function exists for: completions
+/// are queued and handled sequentially, and a provider removes its run from
+/// the map BEFORE sending one — so a completion for a run that ended BEFORE
+/// the handover started (the idle reaper recycling the previous child, an
+/// interrupted turn) can be consumed after `begin_handover` already parked
+/// the target and dispatched the doc turn to a fresh child. Treating that
+/// stale completion as the doc turn's would finalize while the doc is still
+/// streaming (empty `extract_doc` → model flipped with
+/// `EMPTY_DOC_FALLBACK`, context lost) or abort a perfectly good compaction.
+///
+/// The `handover_run_id` watermark stamped by [`begin_handover`] is the
+/// discriminator: only a completion whose `run_id` is at or above it can be
+/// reporting on the doc turn. A stale one is dropped (still consumed: the
+/// session is mid-handover, so respawning or advancing a card off an old
+/// run's result would race the doc turn) and the real doc-turn completion
+/// finishes the handover when it lands. A `None` watermark — a legacy row,
+/// or a handover parked by an older build — keeps the previous behaviour of
+/// treating any completion as the doc turn's.
+pub async fn handle_completion(
+    state: &Arc<AppState>,
+    completion: &crate::provider::agent::ProcessCompletion,
+) -> bool {
+    let session_id = completion.session_id.as_str();
+    let Ok(Some(session)) = state.db.get_session(session_id).await else {
+        return false;
+    };
+    if session.handover_to_model.is_none() {
+        return false;
+    }
+
+    if let Some(watermark) = session.handover_run_id
+        && (completion.run_id as i64) < watermark
+    {
+        tracing::warn!(
+            session_id = %session_id,
+            run_id = completion.run_id,
+            watermark,
+            completed = completion.completed,
+            "Ignoring completion from a run that predates the in-flight handover"
+        );
+        return true;
+    }
+
+    {
+        let _guard = state.session_manager.lock_session(session_id).await;
+        // Only a CLEAN doc turn switches the model. A crashed or interrupted
+        // doc turn aborts the handover instead — leaving the model and
+        // conversation_id untouched so no context is lost ("don't switch if
+        // the switch fails", and the hook that lets the user interrupt a
+        // handover).
+        let res = if completion.completed {
+            finalize_handover(state, session_id).await
+        } else {
+            abort_handover(state, session_id, completion.error.as_deref()).await
+        };
+        if let Err(e) = res {
+            tracing::error!(
+                session_id = %session_id,
+                completed = completion.completed,
+                "Handover finalize/abort failed: {e}"
+            );
+        }
+    } // drop the lock — the drain re-acquires it
+
+    // A message may have queued behind the doc turn; deliver it now. Its
+    // dispatch injects the freshly stashed doc via `take_pending_injection`.
+    if let Err(e) = crate::worker::orchestrator::drain_queue_for_session(state, session_id).await {
+        tracing::warn!(
+            session_id = %session_id,
+            "Post-handover queue drain failed: {e}"
+        );
+    }
+    true
 }
 
 /// Concatenate the `agent-text` the outgoing model emitted during the
@@ -665,30 +759,50 @@ pub(crate) fn extract_doc(events: &[crate::db::models::Event]) -> String {
     }
     parts.join("")
 }
-
-/// If a finalized handover left a doc waiting, consume it (clearing the
-/// column) and return the injection-wrapped message. Otherwise return
-/// `text` unchanged.
+/// If a finalized handover, a review switch, or a doc-review pass left an
+/// injection waiting, consume it (clearing the columns) and return the
+/// injection-wrapped message. Otherwise return `text` unchanged.
 ///
-/// Prefer [`peek_pending_injection`] + [`clear_pending_handover_doc`] on any
+/// Prefer [`peek_pending_injection`] + [`clear_pending_injections`] on any
 /// path that can still fail before the turn actually reaches the provider —
-/// the doc is the only surviving copy of the pre-reset conversation, so
-/// clearing it before a dispatch that then errors loses it permanently.
-/// This wrapper is the eager (peek-then-clear) form, kept for callers that
+/// the handover doc is the only surviving copy of the pre-reset
+/// conversation, so clearing it before a dispatch that then errors loses it
+/// permanently. This wrapper is the eager (peek-then-clear) form, kept for
+/// callers that have nothing left to fail.
 /// have nothing left to fail.
 pub async fn take_pending_injection(db: &crate::db::Db, session_id: &str, text: &str) -> String {
-    let (out, used_doc) = peek_pending_injection(db, session_id, text).await;
-    if used_doc {
-        clear_pending_handover_doc(db, session_id).await;
-    }
+    let (out, used) = peek_pending_injection(db, session_id, text).await;
+    clear_pending_injections(db, session_id, &used).await;
     out
 }
 
-/// Build the injected message WITHOUT consuming `pending_handover_doc`.
+/// What [`peek_pending_injection`] actually consumed from the session row, so
+/// the caller can clear exactly those columns once the turn has really
+/// reached the provider — and leave them armed when it hasn't.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct PendingUsed {
+    /// `sessions.pending_handover_doc` was non-empty and got injected.
+    pub handover_doc: bool,
+    /// `sessions.pending_plan_review` was set (whether or not a plan was
+    /// found — the flag is one-shot either way, or it sticks forever).
+    pub plan_review: bool,
+    /// `sessions.pending_doc_review` held this review id.
+    pub doc_review: Option<String>,
+}
+
+impl PendingUsed {
+    /// Nothing was armed — the caller has nothing to clear.
+    pub fn is_empty(&self) -> bool {
+        !self.handover_doc && !self.plan_review && self.doc_review.is_none()
+    }
+}
+
+/// Build the injected message WITHOUT consuming any of the one-shot columns.
 ///
-/// Returns `(text, used_handover_doc)`. When the bool is true the caller owns
-/// the doc's lifetime: call [`clear_pending_handover_doc`] once the turn has
-/// actually been handed to the provider, and leave the column alone on every
+/// Returns `(text, used)`. The caller owns their lifetime: call
+/// [`clear_pending_injections`] once the turn has actually been handed to the
+/// provider, and leave the columns alone on every error path so the user's
+/// retry still carries the context.
 /// error path so the user's retry still carries the context.
 ///
 /// Called from `send_message_locked` — the single dispatch chokepoint — so
@@ -700,20 +814,20 @@ pub async fn peek_pending_injection(
     db: &crate::db::Db,
     session_id: &str,
     text: &str,
-) -> (String, bool) {
+) -> (String, PendingUsed) {
+    let mut used = PendingUsed::default();
     let session = match db.get_session(session_id).await {
         Ok(Some(s)) => s,
-        _ => return (text.to_string(), false),
+        _ => return (text.to_string(), used),
     };
 
     // 1. Handover / compaction doc. NOT cleared here — see the doc comment.
     let mut out = text.to_string();
-    let mut used_doc = false;
     if let Some(doc) = session
         .pending_handover_doc
         .filter(|d| !d.trim().is_empty())
     {
-        used_doc = true;
+        used.handover_doc = true;
         out = match latest_handover_meta(db, session_id).await {
             Some((_, true)) => build_compaction_injection(&doc, text),
             Some((from, false)) => build_injection(&from, &doc, text),
@@ -723,18 +837,11 @@ pub async fn peek_pending_injection(
 
     // 2. Parent-model review: when a review switch armed `pending_plan_review`,
     //    prepend the saved plan + a "review the work against this plan"
-    //    directive to the resumed turn. One-shot — clear the flag whether or
-    //    not a plan is found so it can't get stuck.
+    //    directive to the resumed turn. One-shot, but cleared by the caller
+    //    after dispatch — flagged whether or not a plan is found so it can't
+    //    get stuck.
     if session.pending_plan_review {
-        let _ = db
-            .update_session(
-                session_id,
-                UpdateSession {
-                    pending_plan_review: Some(false),
-                    ..Default::default()
-                },
-            )
-            .await;
+        used.plan_review = true;
         let plan = match session.card_id.as_deref() {
             Some(card_id) => db.get_plan_for_card(card_id).await.ok().flatten(),
             None => db.get_plan_for_session(session_id).await.ok().flatten(),
@@ -747,42 +854,52 @@ pub async fn peek_pending_injection(
     // 3. Document review: a review pass armed `sessions.pending_doc_review`
     //    with the review id. Prepend the document the user is looking at —
     //    line-numbered, so the annotations' line ranges address something —
-    //    plus every annotation still open. One-shot: `take_pending_doc_review`
-    //    clears the flag as it reads it, whether or not the review survives.
-    if let Ok(Some(review_id)) = db.take_pending_doc_review(session_id).await
-        && let Ok(Some(review)) = db.get_doc_review(&review_id).await
-    {
-        let markdown = db
-            .get_doc_review_version(&review_id, review.current_version)
-            .await
-            .ok()
-            .flatten()
-            .map(|v| v.markdown)
-            .unwrap_or_default();
-        let comments = db
-            .list_doc_review_comments(&review_id, true)
-            .await
-            .unwrap_or_default();
-        out = build_doc_review_injection(&review, &markdown, &comments, &out);
+    //    plus every annotation still open. One-shot, cleared by the caller
+    //    after dispatch, whether or not the review survives.
+    if let Some(review_id) = session.pending_doc_review {
+        used.doc_review = Some(review_id.clone());
+        if let Ok(Some(review)) = db.get_doc_review(&review_id).await {
+            let markdown = db
+                .get_doc_review_version(&review_id, review.current_version)
+                .await
+                .ok()
+                .flatten()
+                .map(|v| v.markdown)
+                .unwrap_or_default();
+            let comments = db
+                .list_doc_review_comments(&review_id, true)
+                .await
+                .unwrap_or_default();
+            out = build_doc_review_injection(&review, &markdown, &comments, &out);
+        }
     }
 
-    (out, used_doc)
+    (out, used)
 }
 
-/// Clear `sessions.pending_handover_doc` after the turn that carries it has
-/// actually been dispatched. Best-effort: a failed write only means the doc
-/// gets injected again on the next turn, which is strictly safer than losing
-/// it. Paired with [`peek_pending_injection`].
-pub async fn clear_pending_handover_doc(db: &crate::db::Db, session_id: &str) {
-    let _ = db
-        .update_session(
-            session_id,
-            UpdateSession {
-                pending_handover_doc: Some(None),
-                ..Default::default()
-            },
-        )
-        .await;
+/// Clear every one-shot injection column [`peek_pending_injection`] reported
+/// as used, once the turn carrying them has actually been dispatched.
+/// Best-effort: a failed write only means the injection repeats on the next
+/// turn, which is strictly safer than losing it.
+pub async fn clear_pending_injections(db: &crate::db::Db, session_id: &str, used: &PendingUsed) {
+    if used.is_empty() {
+        return;
+    }
+    if used.handover_doc || used.plan_review {
+        let _ = db
+            .update_session(
+                session_id,
+                UpdateSession {
+                    pending_handover_doc: used.handover_doc.then_some(None),
+                    pending_plan_review: used.plan_review.then_some(false),
+                    ..Default::default()
+                },
+            )
+            .await;
+    }
+    if used.doc_review.is_some() {
+        let _ = db.take_pending_doc_review(session_id).await;
+    }
 }
 
 /// Wrap the (already-injected) turn text with a parent-model review

@@ -34,6 +34,9 @@ export interface Session {
   repeating_task_id: string | null
   /** Target model while a provider/account handover is mid-flight; null otherwise. */
   handover_to_model?: string | null
+  /** Run-id watermark for the in-flight handover's doc turn — backend-only
+   *  staleness guard for completions; null when no handover is parked. */
+  handover_run_id?: number | null
   /** Handover doc awaiting the incoming model's first turn; null otherwise. */
   pending_handover_doc?: string | null
   /** Latest context-window occupancy (tokens) from the session's usage

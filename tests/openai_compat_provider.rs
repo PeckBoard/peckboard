@@ -176,6 +176,7 @@ async fn run_turn(
             working_dir: "/tmp/oc".into(),
             ..Default::default()
         },
+        run_id: peckboard::provider::agent::next_run_id(),
         conversation_id,
         completion_tx,
         plugins: plugins.clone(),

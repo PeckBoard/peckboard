@@ -57,6 +57,14 @@ pub struct Session {
     /// `Some` means "a switch is pending, don't accept new user turns yet".
     /// Cleared to `None` once the switch finalizes. See [`crate::handover`].
     pub handover_to_model: Option<String>,
+    /// Run-id watermark taken when the doc-generation turn for the pending
+    /// handover was dispatched. A `ProcessCompletion` counts as that turn's
+    /// only when its `run_id` is at or above this; anything lower reports on
+    /// a run that started before the handover began (e.g. the idle reaper
+    /// recycling the old child) and is handled as an ordinary completion.
+    /// `None` = no stamp (legacy row / handover parked by an older build):
+    /// any completion finalizes, as before. See [`crate::handover`].
+    pub handover_run_id: Option<i64>,
     /// Handover document produced by the outgoing model, waiting to be read
     /// by the incoming model on its first turn. Set the moment a switch
     /// finalizes; cleared (consumed) when the next user message under the
@@ -137,6 +145,7 @@ pub struct NewSession {
     pub is_permanent: bool,
     pub repeating_task_id: Option<String>,
     pub system_prompt: Option<String>,
+    pub handover_run_id: Option<i64>,
     pub handover_to_model: Option<String>,
     pub pending_handover_doc: Option<String>,
     pub worker_step: Option<String>,
@@ -165,6 +174,7 @@ pub struct UpdateSession {
     pub scope_path: Option<Option<String>>,
     pub is_permanent: Option<bool>,
     pub system_prompt: Option<Option<String>>,
+    pub handover_run_id: Option<Option<i64>>,
     pub handover_to_model: Option<Option<String>>,
     pub pending_handover_doc: Option<Option<String>>,
     pub system_prompt_name: Option<Option<String>>,

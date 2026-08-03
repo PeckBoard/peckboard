@@ -145,6 +145,7 @@ impl AgentProvider for CursorProvider {
             db,
             broadcaster,
             config,
+            run_id,
             conversation_id,
             completion_tx,
             // cursor-agent runs its own tool loop, so the plugin host isn't
@@ -276,6 +277,7 @@ impl AgentProvider for CursorProvider {
                     session_id: sid,
                     completed: result.completed,
                     error: result.error,
+                    run_id,
                     error_kind: result.error_kind,
                 })
                 .await;

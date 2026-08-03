@@ -315,6 +315,7 @@ impl AgentProvider for KimiProvider {
             db,
             broadcaster,
             config,
+            run_id,
             conversation_id,
             completion_tx,
             // kimi runs its own tool loop; the WASM plugin tool host isn't
@@ -458,6 +459,7 @@ impl AgentProvider for KimiProvider {
                     session_id: sid,
                     completed: result.completed,
                     error: result.error,
+                    run_id,
                     error_kind: result.error_kind,
                 })
                 .await;

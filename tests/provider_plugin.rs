@@ -109,6 +109,7 @@ async fn run_turn(
             ..Default::default()
         },
         conversation_id,
+        run_id: peckboard::provider::agent::next_run_id(),
         completion_tx,
         plugins: plugins.clone(),
     };
@@ -330,6 +331,7 @@ async fn provider_send_crash_trap_and_interrupt_do_not_wedge_the_session() {
             ..Default::default()
         },
         conversation_id: None,
+        run_id: peckboard::provider::agent::next_run_id(),
         completion_tx,
         plugins: plugins.clone(),
     };
@@ -427,6 +429,7 @@ async fn mid_stream_injection_reaches_the_live_turn() {
             ..Default::default()
         },
         conversation_id: None,
+        run_id: peckboard::provider::agent::next_run_id(),
         completion_tx: completion_tx.clone(),
         plugins: plugins.clone(),
     };

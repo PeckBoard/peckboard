@@ -223,6 +223,7 @@ async fn ollama_provider_streams_text_and_completes() {
             ..Default::default()
         },
         conversation_id: None,
+        run_id: peckboard::provider::agent::next_run_id(),
         completion_tx,
         plugins,
     };
@@ -393,6 +394,7 @@ async fn non_tool_model_gets_tool_free_request() {
             ..Default::default()
         },
         conversation_id: None,
+        run_id: peckboard::provider::agent::next_run_id(),
         completion_tx,
         plugins,
     };
@@ -555,6 +557,7 @@ async fn ollama_provider_runs_tool_call_loop() {
             ..Default::default()
         },
         conversation_id: None,
+        run_id: peckboard::provider::agent::next_run_id(),
         completion_tx,
         plugins,
     };
@@ -1008,6 +1011,7 @@ async fn ollama_provider_cancel_stops_continuous_stream() {
             ..Default::default()
         },
         conversation_id: None,
+        run_id: peckboard::provider::agent::next_run_id(),
         completion_tx,
         plugins,
     };
@@ -1128,6 +1132,7 @@ async fn ollama_provider_cancel_terminates_in_progress_stream() {
             ..Default::default()
         },
         conversation_id: None,
+        run_id: peckboard::provider::agent::next_run_id(),
         completion_tx,
         plugins,
     };

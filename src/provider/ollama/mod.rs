@@ -631,6 +631,7 @@ impl AgentProvider for OllamaProvider {
             db,
             broadcaster,
             config,
+            run_id,
             conversation_id: _,
             completion_tx,
             // The plugin host backs MCP tool calls (and the tool-observer
@@ -761,6 +762,7 @@ impl AgentProvider for OllamaProvider {
                     session_id: sid,
                     completed: result.completed,
                     error: result.error,
+                    run_id,
                     error_kind: result.error_kind,
                 })
                 .await;

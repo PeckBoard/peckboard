@@ -37,6 +37,11 @@ struct ClaudeRun {
     /// child authenticated as; `None` is the Default/host account.
     /// Checked on reuse in `send_message` so a turn is never written
     /// into a child billing a different account.
+    /// Id of the LAST turn dispatched into this child. One child serves many
+    /// turns, so the completion emitted when it exits must report the turn it
+    /// last carried — not the one that spawned it — for the handover listener
+    /// to tell a doc-generation turn from an older run's completion.
+    last_run_id: Arc<AtomicU64>,
     account_id: Option<String>,
 }
 
@@ -299,6 +304,7 @@ impl AgentProvider for ClaudeProvider {
             broadcaster,
             config,
             conversation_id,
+            run_id,
             completion_tx,
             // Claude parses its own TodoWrite calls into `todo` events
             // (see process.rs); it has no need for the plugin todo path.
@@ -382,6 +388,9 @@ impl AgentProvider for ClaudeProvider {
                 let mut runs = self.runs.lock().await;
 
                 if let Some(existing) = runs.get(&session_id) {
+                    // Reusing a live child: this turn becomes the one its
+                    // eventual completion reports on.
+                    existing.last_run_id.store(run_id, Ordering::SeqCst);
                     (existing.stdin_tx.clone(), false)
                 } else {
                     let process = process::spawn_claude(
@@ -393,12 +402,14 @@ impl AgentProvider for ClaudeProvider {
                     let (tx, rx) = mpsc::channel::<StdinMsg>(64);
                     let cancel = Arc::new(Notify::new());
                     let turn_active = Arc::new(AtomicBool::new(false));
+                    let last_run_id = Arc::new(AtomicU64::new(run_id));
                     let last_activity = Arc::new(AtomicU64::new(now_ms()));
 
                     let run = ClaudeRun {
                         cancel: cancel.clone(),
                         stdin_tx: tx.clone(),
                         turn_active: turn_active.clone(),
+                        last_run_id: last_run_id.clone(),
                         last_activity: last_activity.clone(),
                         account_id: account_id.map(str::to_string),
                     };
@@ -407,6 +418,7 @@ impl AgentProvider for ClaudeProvider {
                     let allowed_dir = cli_config.working_dir.clone();
                     let runs_arc = self.runs.clone();
                     let sid = session_id.clone();
+                    let completion_run_id = last_run_id.clone();
                     let completion_tx_clone = completion_tx.clone();
                     let loop_db = db.clone();
                     let queue_db = db.clone();
@@ -459,6 +471,9 @@ impl AgentProvider for ClaudeProvider {
                             .send(ProcessCompletion {
                                 session_id: sid,
                                 completed: outcome.completed,
+                                // The turn this child last carried — later
+                                // turns written into it bump the counter.
+                                run_id: completion_run_id.load(Ordering::SeqCst),
                                 error: outcome.error,
                                 error_kind: outcome.error_kind,
                             })
@@ -781,6 +796,7 @@ mod tests {
             cancel: Arc::new(Notify::new()),
             stdin_tx: tx,
             turn_active: Arc::new(AtomicBool::new(true)),
+            last_run_id: Arc::new(AtomicU64::new(0)),
             last_activity: Arc::new(AtomicU64::new(now_ms())),
             account_id: None,
         };
@@ -923,6 +939,7 @@ mod tests {
             cancel: cancel.clone(),
             stdin_tx: tx,
             turn_active: Arc::new(AtomicBool::new(true)),
+            last_run_id: Arc::new(AtomicU64::new(0)),
             last_activity: Arc::new(AtomicU64::new(now_ms())),
             account_id: None,
         };

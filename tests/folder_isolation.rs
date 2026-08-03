@@ -86,6 +86,7 @@ async fn seed_session(
         is_permanent: false,
         repeating_task_id: None,
         system_prompt: None,
+        handover_run_id: None,
         handover_to_model: None,
         pending_handover_doc: None,
         worker_step: None,

@@ -42,6 +42,7 @@ diesel::table! {
         is_temp -> Bool,
         parent_session_id -> Nullable<Text>,
         pending_doc_review -> Nullable<Text>,
+        handover_run_id -> Nullable<BigInt>,
         subagent_completed_at -> Nullable<Text>,
     }
 }

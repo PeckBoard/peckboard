@@ -592,6 +592,7 @@ impl AgentProvider for PluginProviderAdapter {
         let db = ctx.db.clone();
         let broadcaster = ctx.broadcaster.clone();
         let completion_tx = ctx.completion_tx.clone();
+        let run_id = ctx.run_id;
         tokio::spawn(async move {
             let result = manager.dispatch_provider_send(&plugin_id, payload).await;
             let terminal = runtime.end_turn(&session_id);
@@ -627,6 +628,7 @@ impl AgentProvider for PluginProviderAdapter {
                     session_id,
                     completed,
                     error,
+                    run_id,
                     error_kind,
                 })
                 .await;
