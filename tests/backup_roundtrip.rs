@@ -180,6 +180,26 @@ async fn restore_refuses_without_force_when_db_exists() {
     restore_from(archive.path(), dest.path(), true).unwrap();
     assert!(dest.path().join("peckboard.db").exists());
 }
+#[tokio::test]
+async fn restore_removes_stale_wal_sidecars() {
+    let src = tempfile::tempdir().unwrap();
+    let db = Db::open(src.path()).unwrap();
+    let bytes = create_snapshot(&db, src.path()).await.unwrap();
+
+    let archive = tempfile::NamedTempFile::new().unwrap();
+    std::fs::write(archive.path(), &bytes).unwrap();
+
+    let dest = tempfile::tempdir().unwrap();
+    std::fs::write(dest.path().join("peckboard.db"), b"").unwrap();
+    std::fs::write(dest.path().join("peckboard.db-wal"), b"stale wal").unwrap();
+    std::fs::write(dest.path().join("peckboard.db-shm"), b"stale shm").unwrap();
+
+    restore_from(archive.path(), dest.path(), true).unwrap();
+
+    assert!(!dest.path().join("peckboard.db-wal").exists());
+    assert!(!dest.path().join("peckboard.db-shm").exists());
+    assert!(dest.path().join("peckboard.db").exists());
+}
 
 // ── retention pruning ─────────────────────────────────────────────────────────
 #[test]

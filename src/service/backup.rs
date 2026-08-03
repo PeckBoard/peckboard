@@ -288,6 +288,20 @@ pub fn restore_from(archive_path: &Path, data_dir: &Path, force: bool) -> anyhow
         );
     }
 
+    // 3b. Drop the previous DB's WAL/SHM sidecars. They belong to the OLD
+    // database; leaving them next to a freshly restored peckboard.db makes
+    // SQLite replay stale frames onto it on the next open.
+    for sidecar in ["peckboard.db-wal", "peckboard.db-shm"] {
+        let p = data_dir.join(sidecar);
+        match std::fs::remove_file(&p) {
+            Ok(()) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => {
+                return Err(e).with_context(|| format!("cannot remove {}", p.display()));
+            }
+        }
+    }
+
     // 4. Unpack
     std::fs::create_dir_all(data_dir)
         .with_context(|| format!("cannot create {}", data_dir.display()))?;
