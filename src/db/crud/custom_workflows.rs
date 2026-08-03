@@ -193,4 +193,26 @@ impl Db {
         })
         .await
     }
+
+    /// Cards on this workflow that are still in flight (step is neither
+    /// `done` nor `wont_do`), as `(card_id, title, step)`. Used to block a
+    /// workflow edit that would delete the step such a card is sitting on:
+    /// without the guard the card's next `complete_step` finds no matching
+    /// step and would jump straight to `done`.
+    pub async fn custom_workflow_in_flight_cards(
+        &self,
+        workflow_id: &str,
+    ) -> anyhow::Result<Vec<(String, String, String)>> {
+        let workflow_id = workflow_id.to_string();
+        self.with_conn(move |conn| {
+            cards::table
+                .filter(cards::workflow.eq(&workflow_id))
+                .filter(cards::step.ne("done"))
+                .filter(cards::step.ne("wont_do"))
+                .select((cards::id, cards::title, cards::step))
+                .load::<(String, String, String)>(conn)
+                .map_err(Into::into)
+        })
+        .await
+    }
 }

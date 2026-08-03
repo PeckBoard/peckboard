@@ -158,3 +158,127 @@ test('create custom workflow, assign to a card, orchestrator resolves its custom
   //      advances off `backlog` straight into the CUSTOM step name ─────
   await waitForCardStep(request, auth, project.id, card!.id, customStepName, 20_000)
 })
+
+/**
+ * Editing a workflow step that an in-flight card is currently sitting on
+ * must be refused (409) instead of silently stranding the card: before the
+ * guard, that card's next `complete_step` found no matching step and
+ * jumped straight to `done`, skipping every gate in between. The Workflows
+ * editor surfaces the backend message in its `form-error`.
+ */
+test('editing a step an in-flight card sits on is rejected with the reason shown', async ({
+  request,
+  page,
+  baseURL,
+}) => {
+  expect(baseURL, 'baseURL configured').toBeTruthy()
+  const { token, auth } = await authenticate(request)
+
+  const stamp = Date.now()
+  const reviewStep = `review_gate_${stamp}`
+  const workflowName = `E2E Gated Flow ${stamp}`
+
+  const wfRes = await request.post('/api/workflows', {
+    headers: auth,
+    data: {
+      name: workflowName,
+      description: 'e2e gated workflow',
+      steps: [
+        { step: 'backlog', instructions: '' },
+        { step: 'execution', instructions: 'Do the thing.' },
+        { step: reviewStep, instructions: 'Review the thing.' },
+        { step: 'done', instructions: '' },
+      ],
+    },
+  })
+  expect(wfRes.ok(), `create workflow failed: ${await wfRes.text()}`).toBeTruthy()
+  const workflowId = ((await wfRes.json()) as { id: string }).id
+
+  const folderPath = mkdtempSync(path.join(tmpdir(), 'peckboard-e2e-gated-wf-'))
+  const folderRes = await request.post('/api/folders', {
+    headers: auth,
+    data: { name: `e2e-gated-wf-${stamp}`, path: folderPath },
+  })
+  expect(folderRes.ok()).toBeTruthy()
+  const folder = (await folderRes.json()) as { id: string }
+
+  const projectRes = await request.post('/api/projects', {
+    headers: auth,
+    data: {
+      name: `gated workflow project ${stamp}`,
+      folder_id: folder.id,
+      worker_count: 1,
+      workflow: workflowId,
+      model: 'mock:happy-path',
+    },
+  })
+  expect(projectRes.ok()).toBeTruthy()
+  const project = (await projectRes.json()) as { id: string }
+
+  // Blocked, so no worker picks it up and moves it off the review step
+  // while the edit is being attempted.
+  const cardRes = await request.post(`/api/projects/${project.id}/cards`, {
+    headers: auth,
+    data: {
+      title: 'Sitting on the review gate',
+      description: '',
+      step: reviewStep,
+      priority: 1,
+      workflow: workflowId,
+      blocked: true,
+      block_reason: 'held for the e2e edit guard',
+    },
+  })
+  expect(cardRes.ok(), `create card failed: ${await cardRes.text()}`).toBeTruthy()
+  const card = (await cardRes.json()) as { id: string }
+
+  const seeded = await request.get(`/api/projects/${project.id}/cards`, { headers: auth })
+  expect(seeded.ok()).toBeTruthy()
+  const seededCards = (await seeded.json()) as Array<{ id: string; step: string }>
+  expect(seededCards.find((c) => c.id === card.id)?.step).toBe(reviewStep)
+
+  // The API refuses the rename outright …
+  const renameBody = {
+    name: workflowName,
+    description: 'e2e gated workflow',
+    steps: [
+      { step: 'backlog', instructions: '' },
+      { step: 'execution', instructions: 'Do the thing.' },
+      { step: `${reviewStep}_renamed`, instructions: 'Review the thing.' },
+      { step: 'done', instructions: '' },
+    ],
+  }
+  const apiPut = await request.put(`/api/workflows/${workflowId}`, {
+    headers: auth,
+    data: renameBody,
+  })
+  expect(apiPut.status(), `PUT body: ${await apiPut.text()}`).toBe(409)
+
+  // ── Rename the step the card is on, in Settings → Workflows ────────
+  await loadAt(page, token, '/settings')
+  await page.getByTestId('settings-nav-workflows').click()
+  await expect(page.getByTestId('custom-workflows-section')).toBeVisible({ timeout: 10_000 })
+
+  await page.getByTestId(`workflow-edit-${workflowId}`).click()
+  const editor = page.getByTestId('workflow-editor')
+  await expect(editor).toBeVisible()
+  await page.getByTestId('workflow-step-name-2').fill(`${reviewStep}_renamed`)
+  await page.getByTestId('workflow-save').click()
+
+  // Rejected: the editor stays open and the 409 reason is shown.
+  const formError = page.locator('.form-error')
+  await expect(formError).toContainText(reviewStep, { timeout: 10_000 })
+  await expect(editor).toBeVisible()
+
+  // The card never moved.
+  const cardsRes = await request.get(`/api/projects/${project.id}/cards`, { headers: auth })
+  expect(cardsRes.ok()).toBeTruthy()
+  const cards = (await cardsRes.json()) as Array<{ id: string; step: string }>
+  expect(cards.find((c) => c.id === card.id)?.step).toBe(reviewStep)
+
+  // An edit that keeps that step still saves.
+  await page.getByTestId('workflow-step-name-2').fill(reviewStep)
+  await page.getByTestId('workflow-description-input').fill('e2e gated workflow, edited')
+  await page.getByTestId('workflow-save').click()
+  await expect(editor).toBeHidden({ timeout: 10_000 })
+})

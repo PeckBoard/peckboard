@@ -720,6 +720,33 @@ pub fn find_next_step(current_step: &str, workflow_steps: &[String]) -> Option<S
     workflow_steps.get(pos + 1).cloned()
 }
 
+/// Where a card goes when its current step completes.
+///
+/// `find_next_step` collapses two very different situations into `None`:
+/// "this was the last step" and "this step isn't in the workflow at all".
+/// The second happens when a custom workflow is edited underneath an
+/// in-flight card (see the guard in `routes::workflows::update_workflow`),
+/// and treating it as "card is done" silently skips every remaining gate.
+#[derive(Debug, PartialEq, Eq)]
+pub enum NextStep {
+    /// Advance to this step.
+    Advance(String),
+    /// Current step is the workflow's last step — the card is done.
+    Terminal,
+    /// Current step is not part of the workflow. Do not advance.
+    UnknownStep,
+}
+
+pub fn resolve_next_step(current_step: &str, workflow_steps: &[String]) -> NextStep {
+    match workflow_steps.iter().position(|s| s == current_step) {
+        None => NextStep::UnknownStep,
+        Some(pos) => match workflow_steps.get(pos + 1) {
+            Some(next) => NextStep::Advance(next.clone()),
+            None => NextStep::Terminal,
+        },
+    }
+}
+
 /// Auto-pause threshold: a card whose worker crashes this many times in a
 /// row (without a successful turn or step change in between) pauses the
 /// owning project. Set deliberately low — a single "out of tokens" or
@@ -1197,6 +1224,26 @@ mod tests {
     fn test_find_next_step_empty() {
         let steps: Vec<String> = vec![];
         assert_eq!(find_next_step("todo", &steps), None);
+    }
+    /// A step the workflow doesn't declare must NOT read as "card is done":
+    /// that's the regression where editing a workflow jumped in-flight cards
+    /// straight to `done`.
+    #[test]
+    fn resolve_next_step_separates_terminal_from_unknown() {
+        let steps: Vec<String> = vec![
+            "backlog".into(),
+            "execution".into(),
+            "code_review".into(),
+            "done".into(),
+        ];
+
+        assert_eq!(
+            resolve_next_step("execution", &steps),
+            NextStep::Advance("code_review".into())
+        );
+        assert_eq!(resolve_next_step("done", &steps), NextStep::Terminal);
+        assert_eq!(resolve_next_step("review", &steps), NextStep::UnknownStep);
+        assert_eq!(resolve_next_step("backlog", &[]), NextStep::UnknownStep);
     }
 
     #[test]

@@ -236,8 +236,24 @@ impl McpToolRegistry {
                     );
                 }
                 let workflow_steps = crate::workflow::steps_for(Some(&card.workflow));
-                let new_step = crate::worker::pipeline::find_next_step(&card.step, &workflow_steps)
-                    .unwrap_or_else(|| "done".to_string());
+                // Belt-and-braces for the workflow-edit guard in
+                // `routes::workflows::update_workflow`: if the card's step
+                // isn't in its workflow at all, refuse rather than fall back
+                // to `done` — that fallback would skip every remaining gate
+                // and prematurely unblock dependents.
+                use crate::worker::pipeline::NextStep;
+                let new_step =
+                    match crate::worker::pipeline::resolve_next_step(&card.step, &workflow_steps) {
+                        NextStep::Advance(next) => next,
+                        NextStep::Terminal => "done".to_string(),
+                        NextStep::UnknownStep => anyhow::bail!(
+                            "complete-step-policy: step '{}' is not part of workflow '{}' — \
+                         the workflow was edited underneath this card; move it to a valid \
+                         step before completing",
+                            card.step,
+                            card.workflow
+                        ),
+                    };
                 *prev_step_writer.lock().unwrap() = Some(card.step.clone());
 
                 Ok(UpdateCard {

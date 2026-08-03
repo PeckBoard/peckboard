@@ -1048,8 +1048,22 @@ pub async fn handle_worker_done(state: &Arc<AppState>, session_id: &str) {
                     to = %next_step,
                     "Worker completed step, advancing"
                 );
+            } else if !workflow_steps.iter().any(|s| s == &card.step) {
+                // The card's step isn't in its workflow at all — the
+                // workflow was edited underneath it (see the guard in
+                // `routes::workflows::update_workflow`). Stamping `done`
+                // here would skip every remaining gate and prematurely
+                // unblock dependents, so leave the card exactly where it
+                // is and surface the inconsistency.
+                tracing::error!(
+                    card_id = %card_id,
+                    step = %card.step,
+                    workflow = %card.workflow,
+                    "Worker completed a step that is not part of the card's workflow; \
+                     leaving the card in place instead of advancing it to done"
+                );
             } else {
-                // No next step means card is done
+                // Last step in the workflow means the card is done
                 let _ = state
                     .db
                     .update_card(

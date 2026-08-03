@@ -206,6 +206,54 @@ async fn update_workflow(
         return Err(err(StatusCode::BAD_REQUEST, e));
     }
 
+    // Editing steps is not free: a card sitting on a step this edit removes
+    // (or renames) would, on its next `complete_step`, find no matching step
+    // in the workflow and get stamped straight to `done` — silently skipping
+    // every gate in between. Block the edit instead, the same way
+    // `delete_workflow` blocks on references. Only steps the OLD workflow
+    // actually declares are considered, so a card already sitting on an
+    // unknown step (bad data) can't wedge every future edit.
+    let old_steps: Vec<String> = existing
+        .as_ref()
+        .map(|w| w.steps.iter().map(|s| s.step.clone()).collect())
+        .unwrap_or_default();
+    let new_step_names: std::collections::HashSet<&str> =
+        steps.iter().map(|s| s.step.as_str()).collect();
+    let in_flight = state
+        .db
+        .custom_workflow_in_flight_cards(&id)
+        .await
+        .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e))?;
+    let blocking: Vec<(String, String, String)> = in_flight
+        .into_iter()
+        .filter(|(_, _, step)| {
+            old_steps.iter().any(|s| s == step) && !new_step_names.contains(step.as_str())
+        })
+        .collect();
+    if !blocking.is_empty() {
+        let mut missing: Vec<&str> = blocking.iter().map(|(_, _, s)| s.as_str()).collect();
+        missing.sort_unstable();
+        missing.dedup();
+        let card_count = blocking.len();
+        return Err((
+            StatusCode::CONFLICT,
+            Json(serde_json::json!({
+                "error": format!(
+                    "{card_count} card(s) are currently on step(s) this edit removes: {}. \
+                     Move those cards first, or keep the step(s).",
+                    missing.join(", ")
+                ),
+                "steps": missing,
+                "cards": blocking.iter().map(|(cid, title, step)| serde_json::json!({
+                    "id": cid,
+                    "title": title,
+                    "step": step,
+                })).collect::<Vec<_>>(),
+                "card_count": card_count,
+            })),
+        ));
+    }
+
     let now = chrono::Utc::now().to_rfc3339();
     let step_rows: Vec<CustomWorkflowStepRow> = steps
         .iter()
