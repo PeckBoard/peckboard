@@ -166,54 +166,52 @@ const EMPTY_DOC_FALLBACK: &str = "(The previous model could not produce a handov
      generation turn ended without output. Ask the user to recap anything \
      you need.)";
 
-/// Kick off a handover: dispatch a doc-generation turn to the *outgoing*
-/// model and park the target model in `handover_to_model`. The session's
-/// stored `model` is intentionally left unchanged here — [`finalize_handover`]
-/// flips it once the doc is ready. Returns `Ok(())` once the turn is
-/// dispatched; the finalize step runs later off the completion listener.
-///
-/// `lock`: pass the already-held session lock to dispatch immediately
-/// without queueing (the auto-compaction path, which decides under the lock
-/// that the session is idle and must not queue a doc turn behind a racing
-/// dispatch); pass `None` to go through `send_or_queue` (the route paths,
-/// where queueing behind an in-flight turn is the desired behaviour).
-///
-/// Preconditions (enforced by the callers): for a model switch, `from` and
-/// `to` cross a continuity boundary and the session has real history to
-/// summarize; for a compaction, `from == to`.
-pub async fn begin_handover(
+/// The dispatch shape of a handover doc-generation turn: the OUTGOING
+/// model, no MCP config and no attachments — the model summarizes from
+/// conversation context alone; it must not go make further changes.
+fn doc_turn_config(from_model: &str) -> SpawnConfig {
+    SpawnConfig {
+        model: from_model.to_string(),
+        effort: None,
+        working_dir: String::new(),
+        mcp_config_path: None,
+        env: Default::default(),
+        permission_mode: None, // host default: enforced unless the bypass setting is on
+        timeout_ms: None,
+        metadata: serde_json::Value::Null,
+        system_prompt_suffix: None,
+        system_prompt_override: None,
+        // Populated in SessionManager::final_config from the plugin registry.
+        extra_allowed_tools: Vec::new(),
+        extra_disallowed_tools: Vec::new(),
+        // Set from the session row in SessionManager::final_config.
+        is_worker: false,
+        is_pre_hatcher: false,
+    }
+}
+
+/// The doc-generation prompt: a compaction when the model isn't changing,
+/// a cross-provider handover otherwise.
+fn doc_turn_message(from_model: &str, to_model: &str) -> UserMessage {
+    UserMessage::from_text(if from_model == to_model {
+        compaction_prompt().to_string()
+    } else {
+        handover_prompt(to_model)
+    })
+}
+
+/// Record the `handover-start` marker. Visible in the transcript, and it
+/// bounds `extract_doc`'s scan in `finalize_handover` to exactly the doc
+/// turn's output — so it is written immediately BEFORE that turn is
+/// dispatched, never when the handover is merely parked. A deferred doc
+/// turn marked at park time would sweep up the rest of the live turn's
+/// text as its "doc".
+async fn append_handover_start(
     state: &Arc<AppState>,
     session_id: &str,
     from_model: &str,
     to_model: &str,
-    lock: Option<&crate::provider::manager::SessionLock>,
-) -> anyhow::Result<()> {
-    // Park the target. Leaving `model` alone keeps the doc-gen turn routed
-    // to the outgoing provider/account so it can resume the conversation.
-    //
-    // `handover_run_id` is the run-id watermark: every run dispatched so far
-    // has a LOWER id, the doc turn dispatched just below has this one or a
-    // higher one. It is what lets the completion listener
-    // ([`handle_completion`]) tell the doc turn's completion from one still
-    // queued for a run that ended before the handover was even requested —
-    // e.g. the idle reaper recycling the previous child. Finalizing on that
-    // stale completion would capture an empty doc and flip the model with
-    // `EMPTY_DOC_FALLBACK`, losing the context the handover exists to move.
-    let run_watermark = crate::provider::agent::current_run_id();
-    state
-        .db
-        .update_session(
-            session_id,
-            UpdateSession {
-                handover_to_model: Some(Some(to_model.to_string())),
-                handover_run_id: Some(Some(run_watermark as i64)),
-                ..Default::default()
-            },
-        )
-        .await?;
-
-    // Visible marker that also bounds the text scan in `finalize_handover`
-    // to exactly this turn's output.
+) {
     let start_data = serde_json::json!({
         "from": from_model,
         "to": to_model,
@@ -236,59 +234,102 @@ pub async fn begin_handover(
             }),
         });
     }
+}
 
-    // Dispatch the doc-generation turn on the OUTGOING model. No MCP config
-    // and no attachments — the model summarizes from conversation context
-    // alone; it must not go make further changes.
-    let config = SpawnConfig {
-        model: from_model.to_string(),
-        effort: None,
-        working_dir: String::new(),
-        mcp_config_path: None,
-        env: Default::default(),
-        permission_mode: None, // host default: enforced unless the bypass setting is on
-        timeout_ms: None,
-        metadata: serde_json::Value::Null,
-        system_prompt_suffix: None,
-        system_prompt_override: None,
-        // Populated in SessionManager::final_config from the plugin registry.
-        extra_allowed_tools: Vec::new(),
-        extra_disallowed_tools: Vec::new(),
-        // Set from the session row in SessionManager::final_config.
-        is_worker: false,
-        is_pre_hatcher: false,
-    };
+/// Kick off a handover: dispatch a doc-generation turn to the *outgoing*
+/// model and park the target model in `handover_to_model`. The session's
+/// stored `model` is intentionally left unchanged here — [`finalize_handover`]
+/// flips it once the doc is ready. Returns `Ok(())` once the turn is
+/// dispatched; the finalize step runs later off the completion listener.
+///
+/// `lock`: pass the already-held session lock to dispatch immediately (the
+/// auto-compaction path, which decides under the lock that the session is
+/// idle); pass `None` to take the lock here (the route and MCP paths).
+///
+/// The doc turn is NEVER persisted to `queued_messages`. A provider that
+/// can't absorb a mid-stream send has no way to take it while its turn is
+/// running, so the dispatch is DEFERRED instead: the target and watermark
+/// are parked and [`handle_completion`] dispatches the doc turn when that
+/// live run reports in. Queueing it would strand it — the stale-completion
+/// guard there returns before both drain paths, so the doc turn would never
+/// run and `handover_to_model` would stay set forever.
+///
+/// Preconditions (enforced by the callers): for a model switch, `from` and
+/// `to` cross a continuity boundary and the session has real history to
+/// summarize; for a compaction, `from == to`.
+pub async fn begin_handover(
+    state: &Arc<AppState>,
+    session_id: &str,
+    from_model: &str,
+    to_model: &str,
+    lock: Option<&crate::provider::manager::SessionLock>,
+) -> anyhow::Result<()> {
+    // Park the target. Leaving `model` alone keeps the doc-gen turn routed
+    // to the outgoing provider/account so it can resume the conversation.
+    //
+    // `handover_run_id` is the run-id watermark: every run dispatched so far
+    // has a LOWER id, and the doc turn — dispatched just below, or deferred
+    // to [`handle_completion`] — has this one or a higher one. It is what
+    // lets the completion listener tell the doc turn's completion from one
+    // still queued for a run that ended before the handover was even
+    // requested — e.g. the idle reaper recycling the previous child.
+    // Finalizing on that stale completion would capture an empty doc and
+    // flip the model with `EMPTY_DOC_FALLBACK`, losing the context the
+    // handover exists to move.
+    let run_watermark = crate::provider::agent::current_run_id();
+    state
+        .db
+        .update_session(
+            session_id,
+            UpdateSession {
+                handover_to_model: Some(Some(to_model.to_string())),
+                handover_run_id: Some(Some(run_watermark as i64)),
+                ..Default::default()
+            },
+        )
+        .await?;
 
-    let message = UserMessage::from_text(if from_model == to_model {
-        compaction_prompt().to_string()
-    } else {
-        handover_prompt(to_model)
-    });
+    // Dispatch the doc-generation turn on the OUTGOING model — or defer it.
+    //
+    // `send_or_queue` is deliberately NOT used: it persists the prompt to
+    // `queued_messages` whenever the session is mid-turn on a provider that
+    // can't absorb a mid-stream send (ollama/grok/cursor/kimi, most
+    // plugins), and nothing would ever deliver it — `handle_completion`'s
+    // stale-completion guard returns before both drain paths, so the
+    // handover would stay parked forever. Dispatch under the lock when the
+    // session can take the turn; otherwise leave it to `handle_completion`.
+    let config = doc_turn_config(from_model);
+    let message = doc_turn_message(from_model, to_model);
     match lock {
         Some(lock) => {
+            append_handover_start(state, session_id, from_model, to_model).await;
             state
                 .session_manager
                 .send_message_locked(lock, message, &state.db, &state.broadcaster, config)
                 .await?;
         }
         None => {
-            // Inject: the doc turn must not park behind the durable queue
-            // — the handover is already claimed and the completion
-            // listener is waiting on this turn's result. Appended=true:
-            // the synthetic prompt stays out of the transcript, matching
-            // the locked dispatch path.
-            state
-                .session_manager
-                .send_or_queue(
-                    session_id,
-                    message,
-                    &state.db,
-                    &state.broadcaster,
-                    config,
-                    crate::provider::manager::MidTurnPolicy::Inject,
-                    true,
-                )
-                .await?;
+            let lock = state.session_manager.lock_session(session_id).await;
+            if state.session_manager.is_running(session_id).await
+                && !state
+                    .session_manager
+                    .supports_mid_stream_for_session(session_id, from_model)
+                    .await
+            {
+                tracing::info!(
+                    session_id = %session_id,
+                    from = %from_model,
+                    to = %to_model,
+                    "Handover doc turn deferred — the live turn's provider can't take a \
+                     mid-stream send; it dispatches when that turn completes"
+                );
+            } else {
+                append_handover_start(state, session_id, from_model, to_model).await;
+                state
+                    .session_manager
+                    .send_message_locked(&lock, message, &state.db, &state.broadcaster, config)
+                    .await?;
+            }
         }
     }
 
@@ -688,6 +729,12 @@ pub async fn handle_completion(
             completed = completion.completed,
             "Ignoring completion from a run that predates the in-flight handover"
         );
+        // The doc turn may never have been dispatched: `begin_handover`
+        // defers it when the session is mid-turn on a provider that can't
+        // take a mid-stream send, and THIS is that live turn's completion
+        // (its run predates the watermark by construction). Dispatch it
+        // here, before the `return true` that short-circuits every drain.
+        dispatch_deferred_doc_turn(state, session_id).await;
         return true;
     }
 
@@ -721,6 +768,64 @@ pub async fn handle_completion(
         );
     }
     true
+}
+
+/// Dispatch a handover doc turn that [`begin_handover`] had to defer.
+///
+/// A provider that can't absorb a mid-stream send has no way to take the
+/// doc prompt while its turn is running, so `begin_handover` parks the
+/// handover and leaves the prompt undispatched rather than persisting it to
+/// `queued_messages`, where the stale-completion guard above would strand
+/// it forever. This is the other half: the live turn's completion is stale
+/// by construction — its run was dispatched before the watermark — so when
+/// it lands with the session idle, the doc turn goes out now.
+///
+/// `is_running` under the session lock is what tells a deferred doc turn
+/// from the case the stale guard was written for (a leftover completion
+/// from an older child while the real doc turn streams): a doc turn already
+/// in flight keeps the session busy. A doc turn that already FINISHED can't
+/// reach here — it cleared `handover_to_model`, so `handle_completion`
+/// returned `false` before the guard.
+async fn dispatch_deferred_doc_turn(state: &Arc<AppState>, session_id: &str) {
+    let lock = state.session_manager.lock_session(session_id).await;
+    if state.session_manager.is_running(session_id).await {
+        return;
+    }
+    // Re-read under the lock: a route may have aborted the handover (the
+    // Cancel button) between this completion arriving and the lock.
+    let Ok(Some(session)) = state.db.get_session(session_id).await else {
+        return;
+    };
+    let Some(to_model) = session.handover_to_model.clone() else {
+        return;
+    };
+    // Still the OUTGOING model: a handover parks the target and only
+    // `finalize_handover` flips `model`.
+    let from_model = session.model.clone().unwrap_or_else(|| "default".into());
+
+    tracing::info!(
+        session_id = %session_id,
+        from = %from_model,
+        to = %to_model,
+        "Dispatching the handover doc turn deferred while the session was mid-turn"
+    );
+    append_handover_start(state, session_id, &from_model, &to_model).await;
+    if let Err(e) = state
+        .session_manager
+        .send_message_locked(
+            &lock,
+            doc_turn_message(&from_model, &to_model),
+            &state.db,
+            &state.broadcaster,
+            doc_turn_config(&from_model),
+        )
+        .await
+    {
+        tracing::error!(
+            session_id = %session_id,
+            "Deferred handover doc turn failed to dispatch: {e}"
+        );
+    }
 }
 
 /// Concatenate the `agent-text` the outgoing model emitted during the

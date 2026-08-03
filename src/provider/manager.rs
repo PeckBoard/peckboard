@@ -775,7 +775,11 @@ impl SessionManager {
     /// Cursor/Mock session — dispatching a second concurrent run. Falls
     /// back to the model string only when no run is tracked, where the
     /// answer doesn't gate anything.
-    async fn supports_mid_stream_for_session(&self, session_id: &str, model: &str) -> bool {
+    pub(crate) async fn supports_mid_stream_for_session(
+        &self,
+        session_id: &str,
+        model: &str,
+    ) -> bool {
         match self.running_provider(session_id).await {
             Some(p) => p.supports_mid_stream_injection(),
             None => self.provider_for_model_supports_mid_stream(model).await,

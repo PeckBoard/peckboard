@@ -489,6 +489,107 @@ async fn a_stale_completion_neither_finalizes_nor_aborts_the_handover() {
     assert!(doc.contains("HANDOVER"), "doc was: {doc}");
 }
 
+/// A compaction requested MID-TURN on a provider that can't absorb a
+/// mid-stream send must still run its doc turn.
+///
+/// The wedge this covers: MCP `switch_session_model{compact:true}` is by
+/// construction called from inside a live turn, and `POST
+/// /api/sessions/:id/compact` has no mid-turn guard. On ollama/grok/cursor/
+/// kimi/mock, `send_or_queue` used to persist the doc prompt into
+/// `queued_messages` — and the live turn's completion predates the handover
+/// watermark, so `handle_completion`'s stale guard returned before both
+/// queue drains. The doc turn never ran and `handover_to_model` stayed set
+/// forever: every later switch 409s and `begin_compaction` bails "already
+/// in progress".
+#[tokio::test]
+async fn compaction_mid_turn_on_a_per_turn_provider_still_runs_the_doc_turn() {
+    let (state, _token) = build_state("mock:echo").await;
+    seed_turn(&state.db, true).await;
+    seed_context(&state.db, "u1", "s1", 120_000).await;
+
+    let mut completion_rx = state
+        .session_manager
+        .take_completion_rx()
+        .await
+        .expect("completion rx available");
+
+    // A live turn that blocks until cancelled. The mock provider reports
+    // `supports_mid_stream_injection() == false`, like every per-turn
+    // provider; the session row still says `mock:echo`, so the doc turn
+    // routes to the echo scenario.
+    let lock = state.session_manager.lock_session("s1").await;
+    state
+        .session_manager
+        .send_message_locked(
+            &lock,
+            UserMessage::from_text("work on it"),
+            &state.db,
+            &state.broadcaster,
+            SpawnConfig {
+                model: "mock:block".into(),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("mock dispatch succeeds");
+    drop(lock);
+    assert!(state.session_manager.is_running("s1").await);
+
+    peckboard::handover::begin_compaction(&state, "s1")
+        .await
+        .expect("compaction dispatches");
+
+    let s = state.db.get_session("s1").await.unwrap().unwrap();
+    assert_eq!(s.handover_to_model.as_deref(), Some("mock:echo"));
+    let watermark = s.handover_run_id.expect("watermark stamped");
+    // Deferred, not queued: a durable row here would sit behind the
+    // stale-completion guard forever.
+    assert!(
+        state
+            .db
+            .list_queued_messages("s1")
+            .await
+            .unwrap()
+            .is_empty(),
+        "the doc prompt must never park in the durable queue"
+    );
+    // Not marked yet either — the marker bounds `extract_doc`'s scan, so it
+    // belongs to the doc turn, not to the tail of the live turn.
+    let events = state.db.events_tail("s1", 50).await.unwrap();
+    assert!(!events.iter().any(|e| e.kind == "handover-start"));
+
+    // The live turn ends. Its completion predates the watermark, so it hits
+    // the stale branch — which is where the deferred doc turn goes out.
+    state.session_manager.cancel_and_wait("s1").await;
+    let live = tokio::time::timeout(std::time::Duration::from_secs(5), completion_rx.recv())
+        .await
+        .expect("the live turn delivers a completion")
+        .expect("channel open");
+    assert!(
+        live.run_id < watermark as u64,
+        "live run {} must predate the watermark {watermark}",
+        live.run_id
+    );
+    assert!(peckboard::handover::handle_completion(&state, &live).await);
+
+    // The doc turn runs now, and its completion finalizes the compaction.
+    let doc_turn = tokio::time::timeout(std::time::Duration::from_secs(5), completion_rx.recv())
+        .await
+        .expect("the deferred doc turn must run (the handover wedges forever otherwise)")
+        .expect("channel open");
+    assert!(doc_turn.run_id >= watermark as u64);
+    assert!(peckboard::handover::handle_completion(&state, &doc_turn).await);
+
+    let s = state.db.get_session("s1").await.unwrap().unwrap();
+    assert_eq!(s.handover_to_model, None, "handover cleared, not wedged");
+    assert_eq!(s.handover_run_id, None);
+    let doc = s.pending_handover_doc.expect("compaction doc stashed");
+    assert!(doc.contains("COMPACTED"), "doc was: {doc}");
+    // The marker landed with the doc turn, so the live turn's own output is
+    // not swept into the doc.
+    assert!(!doc.contains("working"), "doc was: {doc}");
+}
+
 // ─── Auto-compaction ──────────────────────────────────────────────────────────
 
 /// Record a usage row so `latest_context_tokens` reports `context` occupancy.
