@@ -135,6 +135,9 @@ test.describe('first-run setup wizard', () => {
       await page.getByTestId('setup-next').click()
 
       // ── Step 4: register a folder ──────────────────────────────────
+      // The folder step is skippable: Next stays enabled with nothing filled in.
+      await expect(page.getByTestId('setup-next')).toBeEnabled()
+
       const folderPath = mkdtempSync(path.join(tmpdir(), 'peckboard-e2e-wizard-'))
       const folderName = `setup-wiz-${Date.now()}`
       await page.getByTestId('setup-folder-name').fill(folderName)
@@ -159,6 +162,11 @@ test.describe('first-run setup wizard', () => {
 
       await page.getByTestId('setup-finish').click()
       await expect(wizard).toBeHidden({ timeout: 10_000 })
+
+      const setupRes = await request.get('/api/settings/setup', { headers: auth })
+      expect((await setupRes.json()).completed, 'setup must be marked complete after finish').toBe(
+        true,
+      )
 
       // With the stub gone the real (completed) state keeps it hidden.
       await page.unroute('**/api/settings/setup')
