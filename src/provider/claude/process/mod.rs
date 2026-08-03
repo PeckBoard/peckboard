@@ -342,11 +342,11 @@ pub async fn stream_events(
                 },
             )
             .await;
-            state.turn_active.store(false, Ordering::Release);
             return StreamOutcome {
                 completed: false,
                 error: Some("no stdout handle".into()),
                 error_kind: Some(CrashKind::SpawnFailed),
+                undelivered: Vec::new(),
             };
         }
     };
@@ -976,6 +976,30 @@ pub async fn stream_events(
         }
     }
 
+    // Close the stdin channel and reclaim anything still sitting in it.
+    //
+    // The provider keeps this run in its map until this function returns,
+    // so a `send_message` racing the break above hands its `UserTurn` to a
+    // channel nobody reads any more: the send succeeds, no event is
+    // emitted, and the turn silently disappears. `close()` shuts the door
+    // (later sends fail loudly, and the provider respawns for them) and
+    // the drain hands back whatever made it in, so the caller can persist
+    // it in the durable `queued_messages` FIFO instead of losing it.
+    stdin_rx.close();
+    let mut undelivered: Vec<UserMessage> = Vec::new();
+    while let Ok(msg) = stdin_rx.try_recv() {
+        if let StdinMsg::UserTurn(message) = msg {
+            undelivered.push(message);
+        }
+    }
+    if !undelivered.is_empty() {
+        tracing::warn!(
+            session_id = %session_id,
+            count = undelivered.len(),
+            "User turn(s) raced the stream-loop shutdown; handing them back to the queue"
+        );
+    }
+
     // Drop stdin pipe to signal EOF to the child process
     drop(stdin_pipe);
 
@@ -1159,6 +1183,7 @@ pub async fn stream_events(
         completed: is_completed,
         error,
         error_kind,
+        undelivered,
     }
 }
 
@@ -1174,6 +1199,11 @@ pub struct StreamOutcome {
     /// above, [`CrashKind::Interrupted`] for a cancel, and so on. `None`
     /// exactly when `error` is `None`.
     pub error_kind: Option<CrashKind>,
+    /// User turns that reached the stdin channel after the loop had
+    /// already decided to exit, so the child never saw them. The caller
+    /// MUST re-queue these (durable `queued_messages`) — dropping them
+    /// loses a user message with no crash, no event, and no trace.
+    pub undelivered: Vec<UserMessage>,
 }
 
 /// Error text of a `result` event; `None` when it reports success. The CLI
@@ -1487,6 +1517,27 @@ mod tests {
         Arc<AtomicBool>,
         tokio::task::JoinHandle<StreamOutcome>,
     ) {
+        spawn_loop_preloaded(session_id, cmd, turn_timeout, interrupt_grace, Vec::new()).await
+    }
+
+    /// `spawn_loop_with` that seeds the stdin channel BEFORE the loop
+    /// starts consuming it. Ordering inside an mpsc channel is FIFO, so
+    /// this is the only way to pin down what the loop has and hasn't read
+    /// at the moment it breaks out — a `send` racing a live loop is
+    /// inherently timing-dependent.
+    async fn spawn_loop_preloaded(
+        session_id: &str,
+        cmd: Command,
+        turn_timeout: Option<std::time::Duration>,
+        interrupt_grace: std::time::Duration,
+        preload: Vec<StdinMsg>,
+    ) -> (
+        Db,
+        mpsc::Sender<StdinMsg>,
+        Arc<Notify>,
+        Arc<AtomicBool>,
+        tokio::task::JoinHandle<StreamOutcome>,
+    ) {
         let db = Db::in_memory().unwrap();
         let ts = chrono::Utc::now().to_rfc3339();
         db.create_folder(crate::db::models::NewFolder {
@@ -1516,6 +1567,9 @@ mod tests {
 
         let broadcaster = Broadcaster::new();
         let (tx, rx) = mpsc::channel::<StdinMsg>(16);
+        for msg in preload {
+            tx.send(msg).await.expect("preload stdin channel");
+        }
         let cancel = Arc::new(Notify::new());
         let turn_active = Arc::new(AtomicBool::new(false));
         let last_activity = Arc::new(AtomicU64::new(0));
@@ -1764,6 +1818,42 @@ mod tests {
                 assert_ne!(status, "crashed", "expected silent exit, got {data}");
             }
         }
+    }
+
+    #[tokio::test]
+    async fn user_turn_racing_shutdown_is_handed_back_undelivered() {
+        // The silent-message-loss race: the provider keeps the run in its
+        // map for the whole teardown, so a `send_message` that lands
+        // between the loop's `break` and the run's removal writes a
+        // `UserTurn` nobody will ever read. Preloading the channel pins
+        // the ordering down: the loop reads ShutdownAfterTurn first, sees
+        // no turn in flight, breaks — and the UserTurn behind it is still
+        // sitting in the channel. It must come back out in
+        // `StreamOutcome::undelivered` so the caller can re-queue it.
+        let session = "loop-shutdown-race";
+        let (_db, _tx, _cancel, _turn_active, handle) = spawn_loop_preloaded(
+            session,
+            Command::new("cat"),
+            None,
+            INTERRUPT_GRACE,
+            vec![
+                StdinMsg::ShutdownAfterTurn,
+                StdinMsg::UserTurn(UserMessage::from_text("do not lose me")),
+            ],
+        )
+        .await;
+
+        let outcome = timeout(std::time::Duration::from_secs(5), handle)
+            .await
+            .expect("stream loop must exit within 5s")
+            .expect("task must not panic");
+
+        assert_eq!(
+            outcome.undelivered.len(),
+            1,
+            "the raced user turn must be handed back, not dropped"
+        );
+        assert_eq!(outcome.undelivered[0].text, "do not lose me");
     }
 
     #[tokio::test]

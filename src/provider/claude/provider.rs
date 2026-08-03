@@ -323,6 +323,13 @@ impl AgentProvider for ClaudeProvider {
             self.inject_account_env(account_id, &mut env).await?;
         }
 
+        // Kept before `config` is consumed below: the full model id
+        // (prefix + `@account` suffix intact) and effort a re-queued turn
+        // must be respawned with. `cli_config.model` is the bare CLI id and
+        // would lose the account binding.
+        let queue_model = config.model.clone();
+        let queue_effort = config.effort.clone();
+
         let cli_config = crate::provider::stream::SpawnConfig {
             model: base_model,
             env,
@@ -358,87 +365,143 @@ impl AgentProvider for ClaudeProvider {
             conversation_id
         };
 
-        // Lock the runs map ONCE, then either reuse the existing run's
-        // stdin or spawn a new child and insert. The lock spans the
-        // is-present check + insert so two concurrent first-sends for
-        // the same session can't both spawn.
-        let stdin_tx = {
-            let mut runs = self.runs.lock().await;
+        // Deliver the user turn, spawning the child when this session has
+        // no live run. Up to two attempts: a run whose stream loop already
+        // broke out stays in the map for the whole teardown (drop stdin,
+        // `child.wait()`, stderr join) and closes its stdin channel on the
+        // way out, so the send is rejected; the retry — after the teardown
+        // removed the run from the map — spawns a fresh child with
+        // `--resume` and delivers the message there instead of dropping it.
+        let mut message = message;
+        for attempt in 0..2 {
+            // Lock the runs map ONCE, then either reuse the existing run's
+            // stdin or spawn a new child and insert. The lock spans the
+            // is-present check + insert so two concurrent first-sends for
+            // the same session can't both spawn.
+            let (stdin_tx, spawned) = {
+                let mut runs = self.runs.lock().await;
 
-            if let Some(existing) = runs.get(&session_id) {
-                existing.stdin_tx.clone()
-            } else {
-                let process =
-                    process::spawn_claude(&session_id, &cli_config, conversation_id.as_deref())?;
+                if let Some(existing) = runs.get(&session_id) {
+                    (existing.stdin_tx.clone(), false)
+                } else {
+                    let process = process::spawn_claude(
+                        &session_id,
+                        &cli_config,
+                        conversation_id.as_deref(),
+                    )?;
 
-                let (tx, rx) = mpsc::channel::<StdinMsg>(64);
-                let cancel = Arc::new(Notify::new());
-                let turn_active = Arc::new(AtomicBool::new(false));
-                let last_activity = Arc::new(AtomicU64::new(now_ms()));
+                    let (tx, rx) = mpsc::channel::<StdinMsg>(64);
+                    let cancel = Arc::new(Notify::new());
+                    let turn_active = Arc::new(AtomicBool::new(false));
+                    let last_activity = Arc::new(AtomicU64::new(now_ms()));
 
-                let run = ClaudeRun {
-                    cancel: cancel.clone(),
-                    stdin_tx: tx.clone(),
-                    turn_active: turn_active.clone(),
-                    last_activity: last_activity.clone(),
-                    account_id: account_id.map(str::to_string),
-                };
-                runs.insert(session_id.clone(), run);
+                    let run = ClaudeRun {
+                        cancel: cancel.clone(),
+                        stdin_tx: tx.clone(),
+                        turn_active: turn_active.clone(),
+                        last_activity: last_activity.clone(),
+                        account_id: account_id.map(str::to_string),
+                    };
+                    runs.insert(session_id.clone(), run);
 
-                let allowed_dir = cli_config.working_dir.clone();
-                let runs_arc = self.runs.clone();
-                let sid = session_id.clone();
-                let completion_tx_clone = completion_tx.clone();
-                let state = LoopState {
-                    turn_active,
-                    last_activity,
-                    turn_timeout: cli_config.timeout_ms.map(Duration::from_millis),
-                    interrupt_grace: process::INTERRUPT_GRACE,
-                };
-                tokio::spawn(async move {
-                    let outcome = process::stream_events(
-                        process,
-                        db,
-                        broadcaster,
-                        rx,
-                        allowed_dir,
-                        cancel,
-                        state,
-                    )
-                    .await;
-
-                    runs_arc.lock().await.remove(&sid);
-
-                    tracing::debug!(
-                        session_id = %sid,
-                        "Claude stream task finished, run removed from manager"
-                    );
-
-                    let _ = completion_tx_clone
-                        .send(ProcessCompletion {
-                            session_id: sid,
-                            completed: outcome.completed,
-                            error: outcome.error,
-                            error_kind: outcome.error_kind,
-                        })
+                    let allowed_dir = cli_config.working_dir.clone();
+                    let runs_arc = self.runs.clone();
+                    let sid = session_id.clone();
+                    let completion_tx_clone = completion_tx.clone();
+                    let loop_db = db.clone();
+                    let queue_db = db.clone();
+                    let loop_broadcaster = broadcaster.clone();
+                    let queue_broadcaster = broadcaster.clone();
+                    let queue_model = queue_model.clone();
+                    let queue_effort = queue_effort.clone();
+                    let state = LoopState {
+                        turn_active,
+                        last_activity,
+                        turn_timeout: cli_config.timeout_ms.map(Duration::from_millis),
+                        interrupt_grace: process::INTERRUPT_GRACE,
+                    };
+                    tokio::spawn(async move {
+                        let outcome = process::stream_events(
+                            process,
+                            loop_db,
+                            loop_broadcaster,
+                            rx,
+                            allowed_dir,
+                            cancel,
+                            state,
+                        )
                         .await;
-                });
 
-                tx
+                        runs_arc.lock().await.remove(&sid);
+
+                        tracing::debug!(
+                            session_id = %sid,
+                            "Claude stream task finished, run removed from manager"
+                        );
+
+                        // Before the completion goes out: park any turn that
+                        // raced this loop's shutdown in the durable queue.
+                        // The completion listener drains the queue for every
+                        // outcome, so the message ships with the next child.
+                        if !outcome.undelivered.is_empty() {
+                            requeue_undelivered(
+                                &queue_db,
+                                &queue_broadcaster,
+                                &sid,
+                                outcome.undelivered,
+                                &queue_model,
+                                queue_effort.as_deref(),
+                            )
+                            .await;
+                        }
+
+                        let _ = completion_tx_clone
+                            .send(ProcessCompletion {
+                                session_id: sid,
+                                completed: outcome.completed,
+                                error: outcome.error,
+                                error_kind: outcome.error_kind,
+                            })
+                            .await;
+                    });
+
+                    (tx, true)
+                }
+            };
+
+            // The `UserMessage` carries any attachments; the stream loop
+            // builds the multimodal envelope in `build_user_message_frame`.
+            match stdin_tx.send(StdinMsg::UserTurn(message)).await {
+                Ok(()) => return Ok(()),
+                Err(mpsc::error::SendError(StdinMsg::UserTurn(returned))) => {
+                    // A channel we just created can only be closed if the
+                    // stream task died on the spot — that is a real fault,
+                    // not the shutdown race, so surface it.
+                    if spawned || attempt > 0 {
+                        return Err(anyhow::anyhow!(
+                            "stdin channel closed for session {session_id}"
+                        ));
+                    }
+                    tracing::warn!(
+                        session_id = %session_id,
+                        "User turn raced a winding-down claude run; respawning to deliver it"
+                    );
+                    // The run leaves the map only once its teardown is
+                    // complete; waiting keeps the retry from reusing it.
+                    self.wait_for_termination(&session_id).await;
+                    message = returned;
+                }
+                Err(_) => {
+                    return Err(anyhow::anyhow!(
+                        "stdin channel closed for session {session_id}"
+                    ));
+                }
             }
-        };
+        }
 
-        // Dispatch the user turn. Errors here mean the stream task
-        // has already shut down (channel closed) — return the error
-        // so the caller can append a Crashed and let the user retry.
-        // The `UserMessage` carries any attachments; the stream loop
-        // builds the multimodal envelope in `build_user_message_frame`.
-        stdin_tx
-            .send(StdinMsg::UserTurn(message))
-            .await
-            .map_err(|e| anyhow::anyhow!("stdin channel closed: {e}"))?;
-
-        Ok(())
+        Err(anyhow::anyhow!(
+            "could not deliver user turn for session {session_id}"
+        ))
     }
 
     async fn cancel(&self, session_id: &str) {
@@ -638,6 +701,66 @@ fn now_ms() -> u64 {
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_millis() as u64)
         .unwrap_or(0)
+}
+/// Park user turns the stream loop handed back (see
+/// [`process::StreamOutcome::undelivered`]) in the durable
+/// `queued_messages` FIFO.
+///
+/// These raced the loop's shutdown: the send succeeded into a channel the
+/// loop had stopped reading, so without this the message is lost with no
+/// crash event and no queue row. Called before the run's
+/// `ProcessCompletion` goes out, and the completion listener drains the
+/// queue for every outcome, so the next child delivers it.
+///
+/// `user_event_appended: true` — the message already went through
+/// `send_message_locked`, so whichever dispatcher owned the transcript
+/// entry has written it; letting the drain append another would show the
+/// user's line twice. Attachment bytes are dropped and re-resolved from
+/// their ids at delivery, matching `SessionManager::send_or_queue`.
+async fn requeue_undelivered(
+    db: &crate::db::Db,
+    broadcaster: &Arc<crate::ws::broadcaster::Broadcaster>,
+    session_id: &str,
+    messages: Vec<crate::provider::message::UserMessage>,
+    model: &str,
+    effort: Option<&str>,
+) {
+    for message in messages {
+        let attachment_ids = if message.attachment_ids.is_empty() {
+            None
+        } else {
+            serde_json::to_string(&message.attachment_ids).ok()
+        };
+        match db
+            .enqueue_message(crate::db::models::NewQueuedMessage {
+                session_id: session_id.to_string(),
+                text: message.text,
+                queued_at: chrono::Utc::now().to_rfc3339(),
+                model: Some(model.to_string()),
+                effort: effort.map(str::to_string),
+                attachment_ids,
+                user_event_appended: true,
+            })
+            .await
+        {
+            Ok(row) => {
+                broadcaster.broadcast(crate::ws::broadcaster::WsEvent {
+                    event_type: "queue".into(),
+                    session_id: session_id.to_string(),
+                    data: serde_json::json!({ "action": "set", "id": row.id }),
+                });
+                tracing::info!(
+                    session_id = %session_id,
+                    queued_id = row.id,
+                    "Re-queued a user turn that raced the claude shutdown"
+                );
+            }
+            Err(e) => tracing::error!(
+                session_id = %session_id,
+                "Failed to re-queue a user turn that raced the claude shutdown: {e}"
+            ),
+        }
+    }
 }
 
 #[cfg(test)]
@@ -853,6 +976,61 @@ mod tests {
         // A drained channel accepts again.
         while rx.try_recv().is_ok() {}
         assert!(provider.write_stdin("s-full", "{}").await);
+    }
+
+    /// The other half of the shutdown race: turns the stream loop hands
+    /// back must land in the durable queue (with the FULL model id, so the
+    /// respawn keeps the account binding) instead of being dropped.
+    #[tokio::test]
+    async fn undelivered_turns_are_parked_in_the_durable_queue() {
+        let db = crate::db::Db::in_memory().unwrap();
+        let ts = chrono::Utc::now().to_rfc3339();
+        db.create_folder(crate::db::models::NewFolder {
+            id: "f1".into(),
+            name: "f".into(),
+            path: "/tmp".into(),
+            created_at: ts.clone(),
+        })
+        .await
+        .unwrap();
+        db.create_session(crate::db::models::NewSession {
+            id: "s-race".into(),
+            name: "test".into(),
+            folder_id: "f1".into(),
+            created_at: ts.clone(),
+            last_activity: ts,
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+
+        let broadcaster = crate::ws::broadcaster::Broadcaster::new();
+        let mut message = crate::provider::message::UserMessage::from_text("do not lose me");
+        message.attachment_ids = vec!["att-1".into()];
+
+        requeue_undelivered(
+            &db,
+            &broadcaster,
+            "s-race",
+            vec![message],
+            "claude:claude-opus-5@acct-1",
+            Some("high"),
+        )
+        .await;
+
+        let queued = db.list_queued_messages("s-race").await.unwrap();
+        assert_eq!(queued.len(), 1);
+        assert_eq!(queued[0].text, "do not lose me");
+        assert_eq!(
+            queued[0].model.as_deref(),
+            Some("claude:claude-opus-5@acct-1")
+        );
+        assert_eq!(queued[0].effort.as_deref(), Some("high"));
+        assert_eq!(queued[0].attachment_ids.as_deref(), Some("[\"att-1\"]"));
+        assert!(
+            queued[0].user_event_appended,
+            "the dispatcher already wrote the transcript entry; the drain must not add a second"
+        );
     }
 }
 
