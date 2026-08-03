@@ -46,29 +46,64 @@ export default function TabBar({ kinds, onNewSession }: TabBarProps) {
   const closeTab = useTabsStore((s) => s.closeTab)
   const moveTab = useTabsStore((s) => s.moveTab)
 
-  // Cmd/Ctrl+1..9 activates the Nth visible tab (global shortcut; the
-  // cheat sheet in ShortcutsModal lists it). Lives here rather than in
-  // App.tsx because this component owns the kind registry that knows how
-  // to activate each tab type. The registry object is rebuilt on every
-  // parent render, so the handler reads it through a ref (updated in an
-  // effect) instead of re-binding the listener each time.
+  // `g` then 1..9 activates the Nth visible tab (global shortcut; the
+  // cheat sheet in ShortcutsModal lists it). Deliberately NOT Cmd/Ctrl+1..9:
+  // every major browser reserves those for its OWN tab strip (Chrome and
+  // Safari on 1..9, Firefox on 1..8, plus Alt+1..8 on Firefox/Windows+Linux)
+  // and never delivers the keydown to the page, so preventDefault can't
+  // reclaim them. A bare two-key sequence is reserved by nobody.
+  // Lives here rather than in App.tsx because this component owns the kind
+  // registry that knows how to activate each tab type. The registry object is
+  // rebuilt on every parent render, so the handler reads it through a ref
+  // (updated in an effect) instead of re-binding the listener each time.
   const kindsRef = useRef(kinds)
   useEffect(() => {
     kindsRef.current = kinds
   })
   useEffect(() => {
+    // Set while `g` is armed; the timer disarms it so a stray `g` can't
+    // silently swallow a digit typed minutes later.
+    let armed: ReturnType<typeof setTimeout> | null = null
+    const disarm = () => {
+      if (armed) clearTimeout(armed)
+      armed = null
+    }
     const onKey = (e: KeyboardEvent) => {
-      if (!(e.metaKey || e.ctrlKey) || e.altKey || e.shiftKey) return
-      if (e.key < '1' || e.key > '9') return
-      const reg = kindsRef.current
-      const shown = useTabsStore.getState().tabs.filter((t) => reg[t.itemType])
-      const tab = shown[Number(e.key) - 1]
-      if (!tab) return
-      e.preventDefault()
-      reg[tab.itemType].onActivate(tab)
+      if (e.metaKey || e.ctrlKey || e.altKey) return
+      // Same guards as App.tsx's bare-key shortcuts: never steal keys from a
+      // text field, and never fire underneath an open modal.
+      const t = e.target as HTMLElement | null
+      if (
+        t &&
+        (t.tagName === 'INPUT' ||
+          t.tagName === 'TEXTAREA' ||
+          t.tagName === 'SELECT' ||
+          t.isContentEditable)
+      ) {
+        return
+      }
+      if (document.querySelector('.modal-backdrop')) return
+      if (armed && e.key >= '1' && e.key <= '9') {
+        disarm()
+        const reg = kindsRef.current
+        const shown = useTabsStore.getState().tabs.filter((tab) => reg[tab.itemType])
+        const tab = shown[Number(e.key) - 1]
+        if (!tab) return
+        e.preventDefault()
+        reg[tab.itemType].onActivate(tab)
+        return
+      }
+      disarm()
+      if (e.key === 'g') {
+        e.preventDefault()
+        armed = setTimeout(disarm, 2000)
+      }
     }
     window.addEventListener('keydown', onKey)
-    return () => window.removeEventListener('keydown', onKey)
+    return () => {
+      disarm()
+      window.removeEventListener('keydown', onKey)
+    }
   }, [])
   // Index of the chip currently being dragged. A ref (not state)
   // because it only needs to survive from dragstart to drop and

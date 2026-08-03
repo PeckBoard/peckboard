@@ -229,11 +229,18 @@
   gap: 12px;
 }
 .shortcuts-keys {
-  flex: 0 0 96px;
+  flex: 0 0 108px;
   display: flex;
   align-items: center;
   gap: 3px;
   white-space: nowrap;
+}
+/* The '+' / 'then' word between keys — the row's flex `gap` only applies
+   between key spans, so the separator needs its own trailing space. */
+.shortcuts-keys .shortcuts-sep {
+  margin-right: 3px;
+  color: var(--text2);
+  font-size: var(--text-xs);
 }
 .shortcuts-keys kbd {
   padding: 2px 7px;

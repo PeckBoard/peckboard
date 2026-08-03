@@ -5,10 +5,14 @@ import Modal from './Modal'
 const isApple = /Mac|iP(hone|ad|od)/.test(navigator.platform)
 const MOD = isApple ? '⌘' : 'Ctrl'
 
-const SHORTCUTS: { keys: string[]; action: string }[] = [
+// `sep` is the word rendered between keys — '+' for a chord, 'then' for a
+// sequence pressed one key after the other.
+const SHORTCUTS: { keys: string[]; action: string; sep?: string }[] = [
   { keys: [MOD, 'K'], action: 'Search sessions' },
   { keys: ['N'], action: 'New session' },
-  { keys: [MOD, '1…9'], action: 'Switch to the nth open tab' },
+  // NOT Cmd/Ctrl+1…9 — browsers reserve those for their own tab strip and
+  // never deliver the keydown to the page. See the note in TabBar.tsx.
+  { keys: ['G', '1…9'], sep: 'then', action: 'Switch to the nth open tab' },
   { keys: [MOD, 'F'], action: 'Search the open chat transcript' },
   { keys: ['?'], action: 'Show this cheat sheet' },
 ]
@@ -24,7 +28,11 @@ export default function ShortcutsModal({ onClose }: { onClose: () => void }) {
             <dt className="shortcuts-keys">
               {s.keys.map((k, i) => (
                 <span key={k}>
-                  {i > 0 && <span aria-hidden="true">+</span>}
+                  {i > 0 && (
+                    <span className="shortcuts-sep" aria-hidden="true">
+                      {s.sep ?? '+'}
+                    </span>
+                  )}
                   <kbd>{k}</kbd>
                 </span>
               ))}

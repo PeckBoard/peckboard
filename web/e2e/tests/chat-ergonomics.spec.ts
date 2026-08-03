@@ -162,7 +162,10 @@ test('dragging files over the chat shows the drop overlay and dropping attaches 
   })
 })
 
-test('global shortcuts: ?, n, Ctrl+K, Ctrl+1, and the typing guard', async ({ request, page }) => {
+test('global shortcuts: ?, n, Ctrl+K, g-then-digit, and the typing guard', async ({
+  request,
+  page,
+}) => {
   const { token, authHeader } = await authenticate(request)
   const sessionId = await seedSession(request, authHeader, 'shortcut target')
   await injectEvent(request, authHeader, sessionId, 'agent-text', { text: 'shortcut chat body' })
@@ -198,9 +201,15 @@ test('global shortcuts: ?, n, Ctrl+K, Ctrl+1, and the typing guard', async ({ re
   await expect(search).toBeVisible()
   await expect(search).toBeFocused()
 
-  // Ctrl+1 activates the first open tab — back to the session's chat.
-  // (Focus sits in the search input, proving modifier combos fire there.)
-  await page.keyboard.press('Control+1')
+  // `g` then `1` activates the first open tab — back to the session's chat.
+  // The sequence must be typed with focus OUT of the search input, since the
+  // shortcut (like `n` / `?`) deliberately ignores keys aimed at a text field.
+  // Do NOT "simplify" this back to Ctrl/Cmd+1: browsers reserve those for
+  // their own tab strip and never deliver the keydown to the page, so the
+  // shortcut would only ever work under Playwright's synthetic events.
+  await page.getByTestId('session-filter').blur()
+  await page.keyboard.press('g')
+  await page.keyboard.press('1')
   await expect(page.getByText('shortcut chat body')).toBeVisible({ timeout: 10_000 })
   expect(page.url()).toContain(`/sessions/${sessionId}`)
 })
