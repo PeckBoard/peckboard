@@ -315,3 +315,38 @@ select {
 ::-webkit-scrollbar-thumb:hover {
   background: var(--text3);
 }
+
+/* ─── Density ─── */
+/* Compact mode — `data-density` on the root, set from Settings →
+   Appearance (per-browser, applied pre-render by initAppearance()).
+   Tightens the shared spacing scale, then the highest-traffic surfaces
+   that use fixed paddings. Comfortable is the absence of the attribute.
+   Specificity (root attribute + class) beats the component defaults
+   regardless of import order. */
+:root[data-density='compact'] {
+  --space-1: 0.2rem;
+  --space-2: 0.4rem;
+  --space-3: 0.55rem;
+  --space-4: 0.8rem;
+  --space-5: 1rem;
+  --space-6: 1.2rem;
+  --space-8: 1.6rem;
+  --leading: 1.4;
+}
+:root[data-density='compact'] .chat-messages {
+  padding: 12px 16px;
+  gap: 4px;
+}
+:root[data-density='compact'] .chat-bubble {
+  padding: 6px 10px;
+  line-height: 1.45;
+}
+:root[data-density='compact'] .settings-row {
+  padding: 5px 0;
+}
+:root[data-density='compact'] .settings-section {
+  margin-bottom: 22px;
+}
+:root[data-density='compact'] .settings-nav-item {
+  padding: 9px 12px;
+}
