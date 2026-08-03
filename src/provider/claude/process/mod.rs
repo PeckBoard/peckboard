@@ -256,6 +256,20 @@ fn now_ms() -> u64 {
         .unwrap_or(0)
 }
 
+/// Truncate `s` to at most `max_bytes`, backing up to the nearest UTF-8 char
+/// boundary. Slicing a `str` at a raw byte offset panics mid-codepoint, and the
+/// text here is arbitrary provider stdout, so the cut point must be checked.
+fn truncate_on_char_boundary(s: &str, max_bytes: usize) -> &str {
+    if s.len() <= max_bytes {
+        return s;
+    }
+    let mut end = max_bytes;
+    while end > 0 && !s.is_char_boundary(end) {
+        end -= 1;
+    }
+    &s[..end]
+}
+
 /// Grace given to an in-band `control_request{subtype:"interrupt"}`
 /// before the loop falls back to hard-killing the child.
 pub(crate) const INTERRUPT_GRACE: std::time::Duration = std::time::Duration::from_secs(10);
@@ -636,7 +650,7 @@ pub async fn stream_events(
                 tracing::warn!(
                     session_id = %session_id,
                     "Non-JSON line from claude: {} (error: {})",
-                    &line[..line.len().min(200)],
+                    truncate_on_char_boundary(&line, 200),
                     e
                 );
                 continue;
@@ -1495,6 +1509,34 @@ mod tests {
     use std::sync::atomic::{AtomicBool, AtomicU64};
     use tokio::process::Command;
     use tokio::time::timeout;
+
+    /// A non-JSON stdout line longer than the 200-byte warning cap whose
+    /// 200th byte lands inside a multi-byte codepoint must not panic the
+    /// stream task — the cut backs up to the nearest char boundary.
+    #[test]
+    fn truncate_on_char_boundary_does_not_split_codepoints() {
+        // 199 ASCII bytes + '…' (3 bytes) => bytes 200 and 201 are
+        // continuation bytes, so a raw `&line[..200]` would panic.
+        let line = format!("{}\u{2026} trailing text", "x".repeat(199));
+        assert!(!line.is_char_boundary(200));
+
+        let cut = truncate_on_char_boundary(&line, 200);
+        assert_eq!(cut, "x".repeat(199));
+
+        // Also exercise the real call site's expression shape.
+        let json: Result<serde_json::Value, _> = serde_json::from_str(&line);
+        assert!(json.is_err());
+        let _ = format!("{}", truncate_on_char_boundary(&line, 200));
+    }
+
+    #[test]
+    fn truncate_on_char_boundary_passes_through_short_input() {
+        assert_eq!(
+            truncate_on_char_boundary("short\u{2026}", 200),
+            "short\u{2026}"
+        );
+        assert_eq!(truncate_on_char_boundary("", 200), "");
+    }
 
     /// An injected account credential must mask the credential vars the
     /// child would otherwise inherit from peckboard's own environment —
