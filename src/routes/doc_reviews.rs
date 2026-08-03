@@ -545,16 +545,21 @@ async fn run_pass(
         }),
         Err(e) => tracing::warn!(review_id = %id, "doc review pass: user event failed: {e}"),
     }
-
     // Same seam every other in-process resume uses: spawn if idle, queue or
     // inject if the session is mid-turn. A dispatch failure (no provider
-    // configured, CLI missing) is logged rather than fatal — the pass is
-    // already durable, and the user can retry it from the same state.
+    // configured, CLI missing) must not leave the review spinning forever —
+    // same treatment as the startup path (`resume_running_reviews`): hand
+    // it back to `annotating` (approved stays approved, matching the status
+    // write above) so the UI unlocks, and surface the error to the caller.
     if let Err(e) = crate::service::mcp_server::AppExpertDispatcher::new(state.clone())
         .resume_session(&session_id, &instruction)
         .await
     {
         tracing::warn!(review_id = %id, session_id = %session_id, "doc review pass dispatch failed: {e}");
+        if review.status != "approved" {
+            review_service::set_status(&state.db, &state.broadcaster, &id, "annotating").await;
+        }
+        return Err(err(StatusCode::INTERNAL_SERVER_ERROR, e));
     }
 
     let updated = state
@@ -1361,6 +1366,11 @@ mod tests {
             })
             .await
             .unwrap();
+        // Registered here (not per-test) so every `run_pass` dispatch in this
+        // module has a real provider behind it — a dispatch failure now
+        // errors the route (see `run_pass`), so tests that used to rely on
+        // dispatch silently failing need a working one.
+        crate::provider::mock::register_mock_provider(&state.provider_registry).await;
         (state, token)
     }
 
@@ -1951,7 +1961,15 @@ mod tests {
         let id = seed_review(&state, &token).await;
         add_annotation(&state, &token, &id, "this is wrong").await;
 
-        let response = run_pass(&state, &token, &id, None).await;
+        // `mock:block` parks the turn so the assertions below race nothing:
+        // the pass is still "running" no matter how the scheduler interleaves.
+        let response = run_pass(
+            &state,
+            &token,
+            &id,
+            Some(serde_json::json!({ "model": "mock:block" })),
+        )
+        .await;
         assert_eq!(response.status(), StatusCode::OK);
         let body = json_body(response).await;
         assert_eq!(body["annotations_sent"], 1, "got: {body}");
@@ -1986,7 +2004,8 @@ mod tests {
                 .await
                 .unwrap()
                 .as_deref(),
-            Some(id.as_str())
+            None,
+            "the successful dispatch already consumed it"
         );
 
         // The instruction is on the session's log, digest and all.
@@ -2027,6 +2046,7 @@ mod tests {
             Some(id.as_str()),
             "the injection is re-armed for every pass"
         );
+        state.session_manager.interrupt(&session_id).await;
     }
 
     #[tokio::test]
@@ -2084,6 +2104,7 @@ mod tests {
             Some(serde_json::json!({
                 "include_annotations": false,
                 "message": "why is section 2 here at all?",
+                "model": "mock:echo",
             })),
         )
         .await;
@@ -2178,7 +2199,13 @@ mod tests {
         let (state, token) = fixture(dir.path(), workspace.path()).await;
         let id = seed_review(&state, &token).await;
         add_annotation(&state, &token, &id, "this is wrong").await;
-        let response = run_pass(&state, &token, &id, None).await;
+        let response = run_pass(
+            &state,
+            &token,
+            &id,
+            Some(serde_json::json!({ "model": "mock:block" })),
+        )
+        .await;
         assert_eq!(response.status(), StatusCode::OK);
         let session_id = json_body(response).await["session_id"]
             .as_str()
@@ -2255,7 +2282,13 @@ mod tests {
         let id = seed_review(&state, &token).await;
         add_annotation(&state, &token, &id, "first problem").await;
         add_annotation(&state, &token, &id, "second problem").await;
-        let response = run_pass(&state, &token, &id, None).await;
+        let response = run_pass(
+            &state,
+            &token,
+            &id,
+            Some(serde_json::json!({ "model": "mock:block" })),
+        )
+        .await;
         assert_eq!(response.status(), StatusCode::OK);
         let session_id = json_body(response).await["session_id"]
             .as_str()
@@ -2317,9 +2350,11 @@ mod tests {
             &state,
             &token,
             &id,
-            Some(
-                serde_json::json!({ "message": "how does this read?", "include_annotations": false }),
-            ),
+            Some(serde_json::json!({
+                "message": "how does this read?",
+                "include_annotations": false,
+                "model": "mock:block",
+            })),
         )
         .await;
         assert_eq!(response.status(), StatusCode::OK);
@@ -2350,6 +2385,7 @@ mod tests {
             .await
             .unwrap();
         assert!(!events.iter().any(|e| e.kind == "interrupt"));
+        state.session_manager.interrupt(&session_id).await;
     }
 
     #[tokio::test]
@@ -2363,7 +2399,7 @@ mod tests {
             &state,
             &token,
             &id,
-            Some(serde_json::json!({ "message": "hello", "include_annotations": false })),
+            Some(serde_json::json!({ "message": "hello", "include_annotations": false, "model": "mock:echo" })),
         )
         .await;
         assert_eq!(response.status(), StatusCode::OK);
@@ -2741,9 +2777,10 @@ mod tests {
         let workspace = tempfile::tempdir().unwrap();
         let (state, token) = fixture(dir.path(), workspace.path()).await;
         let id = seed_review(&state, &token).await;
-        add_annotation(&state, &token, &id, "this is wrong").await;
-        // No provider is registered on this state, so the spawn fails.
-        let session_id = seed_dead_session(&state, &id, "mock:doc-review").await;
+        // `fixture` registers the mock provider, so pin the session to a
+        // provider id nothing registers instead — that's what actually
+        // fails a dispatch (missing credentials looks the same to this path).
+        let session_id = seed_dead_session(&state, &id, "no-such-provider:x").await;
         seed_interrupted_pass(&state, &id, &session_id).await;
 
         resume_running_reviews(&state).await;
@@ -2752,6 +2789,43 @@ mod tests {
             state.db.get_doc_review(&id).await.unwrap().unwrap().status,
             "annotating"
         );
+    }
+
+    /// The route mirrors the startup path (above): a pass whose dispatch
+    /// cannot start must hand the review back to `annotating` instead of
+    /// leaving it stuck on `running` with no run in flight and Run Pass
+    /// disabled.
+    #[tokio::test]
+    async fn a_failed_dispatch_hands_the_review_back_through_the_route() {
+        let dir = tempfile::tempdir().unwrap();
+        let workspace = tempfile::tempdir().unwrap();
+        let (state, token) = fixture(dir.path(), workspace.path()).await;
+        let id = seed_review(&state, &token).await;
+        add_annotation(&state, &token, &id, "this is wrong").await;
+
+        // `fixture` registers the mock provider; pin the session to a
+        // provider id nothing registers so the dispatch itself fails.
+        let response = run_pass(
+            &state,
+            &token,
+            &id,
+            Some(serde_json::json!({ "model": "no-such-provider:x" })),
+        )
+        .await;
+
+        assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        let body = json_body(response).await;
+        assert!(body["error"].as_str().is_some(), "got: {body}");
+
+        let review = state.db.get_doc_review(&id).await.unwrap().unwrap();
+        assert_eq!(
+            review.status, "annotating",
+            "a failed dispatch must not leave the pass spinning"
+        );
+        // The annotation stays handed over — durable, ready to ride along
+        // on the next (working) pass, same as the startup path.
+        let comments = state.db.list_doc_review_comments(&id, false).await.unwrap();
+        assert_eq!(comments[0].status, "sent");
     }
 
     #[tokio::test]
