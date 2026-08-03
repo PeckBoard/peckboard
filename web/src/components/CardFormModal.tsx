@@ -73,10 +73,17 @@ export default function CardFormModal(props: CardFormProps) {
   const modelsLoadError = useResourcesStore((s) => s.resourceErrors.models)
   const defaultModel = useResourcesStore((s) => s.defaultModel)
   const fetchDefaultModel = useResourcesStore((s) => s.fetchDefaultModel)
-  // The app-wide default model (Settings → Default Model) preselects for a
-  // new card — and for a legacy card that never pinned one — until the user
-  // picks explicitly.
-  const model = chosenModel ?? card?.model ?? defaultModel
+  // A card's model is an inherit chain: card → step → project → app-wide
+  // default (Settings → Default Model). A new card preselects the app
+  // default; an existing card shows its own pin, or the inherit row when it
+  // has none — materializing the default into the value here would silently
+  // pin it onto an inherit card the next time any field is saved.
+  const model = chosenModel ?? card?.model ?? (mode === 'create' ? defaultModel : '')
+  // What an unpinned card actually dispatches workers on, so the inherit row
+  // names the effective model instead of leaving the user guessing.
+  const inheritedModel = project?.model ?? defaultModel
+  const inheritedLabel = models.find((m) => m.id === inheritedModel)?.display_name ?? inheritedModel
+  const inheritLabel = inheritedModel ? `Default (${inheritedLabel})` : 'Default'
   const [priorities, setPriorities] = useState<{ label: string; value: number }[]>([
     { label: 'Critical', value: 0 },
     { label: 'High', value: 1 },
@@ -96,13 +103,17 @@ export default function CardFormModal(props: CardFormProps) {
       .catch(() => {})
   }, [fetchWorkflows, fetchModels, fetchDefaultModel])
 
-  // Effort options follow the chosen model's provider.
-  const effortOptions = useMemo(() => effortOptionsForModel(model, providers), [model, providers])
+  // Effort options follow the effective model's provider — for an inherit
+  // card that is the inherited model, not an empty id.
+  const effortOptions = useMemo(
+    () => effortOptionsForModel(model || inheritedModel, providers),
+    [model, inheritedModel, providers],
+  )
   // Clear a now-invalid effort back to Default on model change so we never
   // save one the provider can't use.
   const handleModelChange = (id: string) => {
     setChosenModel(id)
-    const opts = effortOptionsForModel(id, providers)
+    const opts = effortOptionsForModel(id || inheritedModel, providers)
     if (providers.length > 0 && effort && !opts.some((o) => o.value === effort)) setEffort('')
   }
 
@@ -139,12 +150,16 @@ export default function CardFormModal(props: CardFormProps) {
           priority,
           blocked,
           block_reason: blocked ? blockReason.trim() || null : null,
-          model: model || null,
           effort: effort || null,
           depends_on: dependsOn,
           model_autoswitch: modelAutoswitch,
           system_prompt_name: systemPromptName ?? '',
         }
+        // Only write `model` when the user actually opened the picker.
+        // Sending it unconditionally would pin whatever the form displays
+        // onto a card that deliberately inherits; an omitted key leaves the
+        // stored value untouched, an explicit null un-pins.
+        if (chosenModel !== null) updates.model = chosenModel || null
         if (isBacklog) {
           updates.description = description.trim()
           // card.workflow is NOT NULL — when the picker is set to the
@@ -271,6 +286,7 @@ export default function CardFormModal(props: CardFormProps) {
               value={model}
               onChange={handleModelChange}
               models={models as ModelInfo[]}
+              defaultLabel={inheritLabel}
               testId="card-model"
             />
             {modelsLoadError && models.length === 0 && (

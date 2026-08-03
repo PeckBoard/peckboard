@@ -44,6 +44,11 @@ pub(super) struct UpdateCardRequest {
     step: Option<String>,
     priority: Option<i32>,
     workflow: Option<String>,
+    /// Explicit `null` clears the pin (see `explicit_null`), so the card
+    /// falls back to the inherit chain (step → project → app default); an
+    /// absent key leaves the pin alone. Without this, a caller could never
+    /// un-pin a model.
+    #[serde(default, deserialize_with = "explicit_null")]
     model: Option<Option<String>>,
     effort: Option<Option<String>>,
     worker_session_id: Option<Option<String>>,
@@ -955,4 +960,25 @@ pub(super) async fn list_card_reports(
     }
 
     Json(serde_json::json!({ "reports": reports }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The three states of a model pin have to survive deserialization
+    /// distinctly: absent = leave alone, `null` = un-pin (inherit chain),
+    /// a string = pin. Without `explicit_null`, serde collapses `null` into
+    /// the outer `None` and a pinned card can never be un-pinned.
+    #[test]
+    fn model_pin_distinguishes_absent_null_and_value() {
+        let absent: UpdateCardRequest = serde_json::from_str(r#"{"title":"x"}"#).unwrap();
+        assert_eq!(absent.model, None);
+
+        let cleared: UpdateCardRequest = serde_json::from_str(r#"{"model":null}"#).unwrap();
+        assert_eq!(cleared.model, Some(None));
+
+        let pinned: UpdateCardRequest = serde_json::from_str(r#"{"model":"mock:echo"}"#).unwrap();
+        assert_eq!(pinned.model, Some(Some("mock:echo".to_string())));
+    }
 }
