@@ -958,6 +958,22 @@ impl McpToolRegistry {
                 None
             };
 
+        // Same terminal-state + backlog-freeze policy the HTTP route applies.
+        // Without it, MCP callers could re-point `workflow` on an in-flight
+        // card, stranding it on a step the new workflow doesn't contain — the
+        // next `complete_step` finds no successor and jumps it to `done`.
+        let policy_intent = crate::card_policy::CardUpdateIntent {
+            step: new_step.is_some(),
+            title: title.is_some(),
+            description: description.is_some(),
+            priority: priority.is_some(),
+            workflow: workflow.is_some(),
+            model: model.is_some(),
+            effort: effort.is_some(),
+            blocked: blocked.is_some(),
+            block_reason: block_reason.is_some(),
+            depends_on: validated_deps.is_some(),
+        };
         // Capture the previously assigned worker if this update is going
         // to change the step out from under it. The cancel runs after the
         // DB write succeeds so a failed update doesn't kill a worker for
@@ -967,6 +983,7 @@ impl McpToolRegistry {
         let card = ctx
             .db
             .update_card_atomic(card_id, move |existing| {
+                crate::card_policy::enforce_card_update_policy(&existing.step, &policy_intent)?;
                 let step_changing = new_step.as_deref().is_some_and(|s| s != existing.step);
                 let (worker_session_id, last_worker_session_id) =
                     if step_changing && let Some(sid) = existing.worker_session_id.clone() {

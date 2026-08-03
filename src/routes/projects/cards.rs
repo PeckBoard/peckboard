@@ -449,39 +449,23 @@ pub(super) async fn update_card(
     let card = state
         .db
         .update_card_atomic(&card_id, move |existing| {
-            let is_terminal = existing.step == "done" || existing.step == "wont_do";
-
-            // Terminal cards: only step changes allowed (to reopen / move).
-            // depends_on edits are also blocked in terminal states.
-            if is_terminal {
-                let only_step = body.step.is_some()
-                    && body.title.is_none()
-                    && body.description.is_none()
-                    && body.priority.is_none()
-                    && body.workflow.is_none()
-                    && body.model.is_none()
-                    && body.effort.is_none()
-                    && body.blocked.is_none()
-                    && body.block_reason.is_none()
-                    && !depends_on_present;
-                if !only_step {
-                    anyhow::bail!(
-                        "card-update-policy: card is in terminal state — only step changes allowed"
-                    );
-                }
-            }
-
-            // description/workflow are locked once a card leaves backlog.
-            // model, effort, title, priority, blocked, block_reason stay
-            // editable in any non-terminal state.
-            if existing.step != "backlog"
-                && !is_terminal
-                && (body.workflow.is_some() || body.description.is_some())
-            {
-                anyhow::bail!(
-                    "card-update-policy: description and workflow are locked after leaving backlog"
-                );
-            }
+            // Terminal-state + backlog-freeze policy, shared with the MCP
+            // `update_card` handler so both writers enforce one policy.
+            crate::card_policy::enforce_card_update_policy(
+                &existing.step,
+                &crate::card_policy::CardUpdateIntent {
+                    step: body.step.is_some(),
+                    title: body.title.is_some(),
+                    description: body.description.is_some(),
+                    priority: body.priority.is_some(),
+                    workflow: body.workflow.is_some(),
+                    model: body.model.is_some(),
+                    effort: body.effort.is_some(),
+                    blocked: body.blocked.is_some(),
+                    block_reason: body.block_reason.is_some(),
+                    depends_on: depends_on_present,
+                },
+            )?;
 
             // If this update changes the step and the caller did NOT
             // explicitly touch worker_session_id, force-clear the

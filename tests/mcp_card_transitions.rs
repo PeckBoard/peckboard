@@ -1324,3 +1324,143 @@ async fn list_cards_scopes_filters_and_slims() {
     assert_eq!(none["count"], 0);
     assert!(none["cards"].as_array().unwrap().is_empty());
 }
+
+// ── update_card transition policy ─────────────────────────────────────
+//
+// The MCP `update_card` handler is a second writer against the same rows
+// as the HTTP route. It used to apply title/description/workflow/step with
+// no state guard, so a worker could re-point `workflow` on an in-flight
+// card and strand it on a step the new workflow doesn't contain — the next
+// `complete_step` then found no successor and jumped it straight to `done`,
+// skipping every real step and prematurely unblocking dependents. Both
+// paths now go through `peckboard::card_policy::enforce_card_update_policy`,
+// so these tests pin the MCP side of one shared policy.
+
+#[tokio::test]
+async fn update_card_refuses_workflow_change_after_backlog() {
+    let state = build_state().await;
+    let (card_id, session_id) = seed_card_with_worker(&state, "in_progress", "task", "task").await;
+    let registry = McpToolRegistry::new();
+    let ctx = ctx_for_card(&state, &session_id, &card_id);
+
+    let err = registry
+        .handle_tool_call(
+            "update_card",
+            serde_json::json!({ "card_id": card_id, "workflow": "research" }),
+            &ctx,
+        )
+        .await
+        .expect_err("workflow is frozen once the card leaves backlog");
+    assert!(
+        err.to_string()
+            .contains("description and workflow are locked after leaving backlog"),
+        "unexpected error: {err}"
+    );
+
+    // Nothing was written: the card keeps a workflow its step belongs to.
+    let card = state.db.get_card(&card_id).await.unwrap().unwrap();
+    assert_eq!(card.workflow, "task");
+    assert_eq!(card.step, "in_progress");
+}
+
+#[tokio::test]
+async fn update_card_refuses_description_change_after_backlog() {
+    let state = build_state().await;
+    let (card_id, session_id) = seed_card_with_worker(&state, "in_progress", "task", "task").await;
+    let registry = McpToolRegistry::new();
+    let ctx = ctx_for_card(&state, &session_id, &card_id);
+
+    let err = registry
+        .handle_tool_call(
+            "update_card",
+            serde_json::json!({ "card_id": card_id, "description": "rewritten mid-flight" }),
+            &ctx,
+        )
+        .await
+        .expect_err("description is frozen once the card leaves backlog");
+    assert!(
+        err.to_string()
+            .contains("description and workflow are locked after leaving backlog"),
+        "unexpected error: {err}"
+    );
+
+    let card = state.db.get_card(&card_id).await.unwrap().unwrap();
+    assert_eq!(card.description, "desc");
+}
+
+#[tokio::test]
+async fn update_card_allows_description_and_workflow_in_backlog() {
+    let state = build_state().await;
+    let (card_id, session_id) = seed_card_with_worker(&state, "backlog", "task", "task").await;
+    let registry = McpToolRegistry::new();
+    let ctx = ctx_for_card(&state, &session_id, &card_id);
+
+    registry
+        .handle_tool_call(
+            "update_card",
+            serde_json::json!({
+                "card_id": card_id,
+                "workflow": "research",
+                "description": "sharpened brief",
+            }),
+            &ctx,
+        )
+        .await
+        .unwrap();
+
+    let card = state.db.get_card(&card_id).await.unwrap().unwrap();
+    assert_eq!(card.workflow, "research");
+    assert_eq!(card.description, "sharpened brief");
+}
+
+#[tokio::test]
+async fn update_card_on_terminal_card_allows_step_only() {
+    let state = build_state().await;
+    let (card_id, session_id) = seed_card_with_worker(&state, "done", "task", "task").await;
+    let registry = McpToolRegistry::new();
+    let ctx = ctx_for_card(&state, &session_id, &card_id);
+
+    // Reopening a done card by moving its step is still allowed.
+    registry
+        .handle_tool_call(
+            "update_card",
+            serde_json::json!({ "card_id": card_id, "step": "in_progress" }),
+            &ctx,
+        )
+        .await
+        .unwrap();
+    let card = state.db.get_card(&card_id).await.unwrap().unwrap();
+    assert_eq!(card.step, "in_progress");
+}
+
+#[tokio::test]
+async fn update_card_refuses_non_step_edits_on_terminal_card() {
+    for (step, args) in [
+        ("done", serde_json::json!({ "title": "renamed" })),
+        (
+            "wont_do",
+            serde_json::json!({ "step": "in_progress", "priority": 9 }),
+        ),
+    ] {
+        let state = build_state().await;
+        let (card_id, session_id) = seed_card_with_worker(&state, step, "task", "task").await;
+        let registry = McpToolRegistry::new();
+        let ctx = ctx_for_card(&state, &session_id, &card_id);
+
+        let mut args = args;
+        args["card_id"] = serde_json::json!(card_id);
+        let err = registry
+            .handle_tool_call("update_card", args, &ctx)
+            .await
+            .expect_err("terminal cards accept step changes only");
+        assert!(
+            err.to_string()
+                .contains("card is in terminal state — only step changes allowed"),
+            "unexpected error for {step}: {err}"
+        );
+
+        let card = state.db.get_card(&card_id).await.unwrap().unwrap();
+        assert_eq!(card.step, step, "refused update must not write");
+        assert_eq!(card.title, "card");
+    }
+}
