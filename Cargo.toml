@@ -37,6 +37,7 @@ tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 rcgen = "0.13"
 tokio-rustls = "0.26"
 rustls-pemfile = "2"
+if-addrs = "0.13"
 
 # mDNS
 mdns-sd = "0.12"

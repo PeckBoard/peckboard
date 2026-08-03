@@ -3103,6 +3103,7 @@ dependencies = [
  "futures-util",
  "hex",
  "hyper-util",
+ "if-addrs",
  "jsonwebtoken",
  "libc",
  "libsqlite3-sys",

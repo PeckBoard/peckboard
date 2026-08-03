@@ -555,10 +555,10 @@ async fn main() -> anyhow::Result<()> {
     // Start HTTPS listener if TLS certs can be loaded
     let https_addr = format!("{}:{}", state.config.host, state.config.https_port);
     let tls_handle = match tls::ensure_certs(&state.config.data_dir) {
-        Ok(tls_config) => {
+        Ok(tls_material) => {
             // Install the default crypto provider for rustls (idempotent)
             let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
-            match tls::load_tls_config(&tls_config) {
+            match tls::load_tls_config(&tls_material) {
                 Ok(tls_acceptor) => {
                     let https_app = app.clone();
                     let https_listener = TcpListener::bind(&https_addr).await?;
