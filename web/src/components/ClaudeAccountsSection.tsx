@@ -1,6 +1,11 @@
 import { useEffect, useRef, useState } from 'react'
 import { useAuthStore } from '../store/auth'
 import { useClaudeAccountsStore } from '../store/claudeAccounts'
+import {
+  AccountDeleteConflict,
+  describeAccountRefs,
+  type AccountDeleteRefs,
+} from '../store/accountDeleteGuard'
 import type { ClaudeAccount, PlanUsageEntry, WarnLevel } from '../types/api'
 import ClaudeAccountModal from './ClaudeAccountModal'
 import ConfirmDialog from './ConfirmDialog'
@@ -243,6 +248,10 @@ export default function ClaudeAccountsSection() {
 
   const [modal, setModal] = useState<{ account: ClaudeAccount | null } | null>(null)
   const [confirmDelete, setConfirmDelete] = useState<ClaudeAccount | null>(null)
+  const [forceDelete, setForceDelete] = useState<{
+    account: ClaudeAccount
+    refs: AccountDeleteRefs
+  } | null>(null)
 
   useEffect(() => {
     void fetchAccounts()
@@ -326,11 +335,30 @@ export default function ClaudeAccountsSection() {
             const target = confirmDelete
             setConfirmDelete(null)
             setError(null)
-            // A rejected delete must not vanish silently: the row stays and
-            // the reason lands in this section's inline error slot.
-            void deleteAccount(target.id).catch((e: Error) => setError(e.message))
+            void deleteAccount(target.id).catch((e: unknown) => {
+              if (e instanceof AccountDeleteConflict) {
+                setForceDelete({ account: target, refs: e.refs })
+              } else if (e instanceof Error) {
+                setError(e.message)
+              }
+            })
           }}
           onCancel={() => setConfirmDelete(null)}
+        />
+      )}
+      {forceDelete && (
+        <ConfirmDialog
+          title="Account still in use"
+          message={describeAccountRefs(forceDelete.account.name, forceDelete.refs)}
+          confirmLabel="Delete anyway"
+          danger
+          onConfirm={() => {
+            const target = forceDelete.account
+            setForceDelete(null)
+            setError(null)
+            void deleteAccount(target.id, true).catch((e: Error) => setError(e.message))
+          }}
+          onCancel={() => setForceDelete(null)}
         />
       )}
     </section>

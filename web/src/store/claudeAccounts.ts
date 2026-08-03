@@ -6,6 +6,7 @@ import type {
   PlanUsageMap,
 } from '../types/api'
 import { authedFetch } from './auth'
+import { AccountDeleteConflict, type AccountDeleteRefs } from './accountDeleteGuard'
 import { useResourcesStore } from './resources'
 
 interface ClaudeAccountsState {
@@ -24,7 +25,8 @@ interface ClaudeAccountsState {
   updateAccount: (id: string, input: ClaudeAccountInput) => Promise<void>
   /** Surface a mutation failure in the section's inline error slot. */
   setError: (message: string | null) => void
-  deleteAccount: (id: string) => Promise<void>
+  /** `force` skips the reference guard (409) and rewrites pinned refs. */
+  deleteAccount: (id: string, force?: boolean) => Promise<void>
 }
 
 /** Surface a `{ error }` JSON body (or a generic message) from a non-2xx. */
@@ -119,8 +121,16 @@ export const useClaudeAccountsStore = create<ClaudeAccountsState>((set, get) => 
     refreshModels()
   },
 
-  deleteAccount: async (id) => {
-    const res = await authedFetch(`/api/claude-accounts/${id}`, { method: 'DELETE' })
+  deleteAccount: async (id, force) => {
+    const url = `/api/claude-accounts/${id}${force ? '?force=true' : ''}`
+    const res = await authedFetch(url, { method: 'DELETE' })
+    if (res.status === 409) {
+      const body = await res.json().catch(() => null)
+      throw new AccountDeleteConflict(
+        (body && typeof body.error === 'string' && body.error) || 'Account is still referenced',
+        body as AccountDeleteRefs,
+      )
+    }
     if (!res.ok && res.status !== 204) {
       throw new Error(await errorFrom(res, 'Failed to delete account'))
     }

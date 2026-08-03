@@ -431,21 +431,29 @@ async fn update_account(
 async fn delete_account(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
+    axum::extract::Query(query): axum::extract::Query<
+        crate::routes::account_delete_guard::DeleteAccountQuery,
+    >,
 ) -> impl IntoResponse {
     // Stop any in-flight login before removing the row / its GROK_HOME.
     GROK_LOGIN.cancel(&id).await;
-    match state.db.delete_grok_account(&id).await {
-        Ok(Some(config_dir)) => {
+    let db = state.db.clone();
+    let del_id = id.clone();
+    let result = crate::routes::account_delete_guard::guarded_delete(
+        &state,
+        &id,
+        query.force,
+        move || async move { db.delete_grok_account(&del_id).await },
+    )
+    .await;
+    match result {
+        Ok(config_dir) => {
             if let Some(dir) = config_dir {
                 let _ = std::fs::remove_dir_all(&dir);
             }
             Ok(StatusCode::NO_CONTENT)
         }
-        Ok(None) => Err((
-            StatusCode::NOT_FOUND,
-            Json(serde_json::json!({ "error": "account not found" })),
-        )),
-        Err(e) => Err(server_error(e)),
+        Err(e) => Err(e),
     }
 }
 

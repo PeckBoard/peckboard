@@ -370,10 +370,12 @@ async fn get_default_model(State(state): State<Arc<AppState>>) -> impl IntoRespo
 struct DefaultModelBody {
     model: String,
 }
-
 /// PUT /api/settings/default-model `{"model": "provider:model" | ""}` → 204.
 /// Empty clears the setting. Applies to every session, card, and review
-/// dispatched without an explicit model, from its next turn.
+/// dispatched without an explicit model, from its next turn. A non-empty
+/// value must resolve against the live provider/model/account registry —
+/// otherwise every "default"-routed dispatch would silently hard-fail on a
+/// typo'd or since-deleted model/account until someone re-picks it.
 async fn set_default_model(
     State(state): State<Arc<AppState>>,
     Json(body): Json<DefaultModelBody>,
@@ -385,6 +387,27 @@ async fn set_default_model(
             Json(serde_json::json!({ "error": "model id too long" })),
         ));
     }
+    if !model.is_empty() && !crate::provider::is_auto_model(&model) {
+        let (provider, rest) =
+            crate::provider::registry::ProviderRegistry::parse_model_id(&model, "claude");
+        let full = format!("{provider}:{rest}");
+        let catalog = state.provider_registry.list_all_models().await;
+        if !catalog.iter().any(|(id, _)| *id == full) {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({ "error": format!("unknown model '{full}'") })),
+            ));
+        }
+    }
+    set_default_model_value(&state, &model).await
+}
+
+/// Shared by the route above and the account-delete guard (clearing a
+/// default pinned to the account being force-deleted).
+pub(crate) async fn set_default_model_value(
+    state: &Arc<AppState>,
+    model: &str,
+) -> Result<StatusCode, (StatusCode, Json<serde_json::Value>)> {
     let db = state.db.clone();
     let value = serde_json::json!({ "model": model }).to_string();
     let res = tokio::task::spawn_blocking(move || {

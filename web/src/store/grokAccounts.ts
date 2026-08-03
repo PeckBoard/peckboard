@@ -1,6 +1,7 @@
 import { create } from 'zustand'
 import type { GrokAccount, GrokAccountInput, GrokLoginStart } from '../types/api'
 import { authedFetch } from './auth'
+import { AccountDeleteConflict, type AccountDeleteRefs } from './accountDeleteGuard'
 import { useResourcesStore } from './resources'
 
 interface GrokAccountsState {
@@ -11,7 +12,7 @@ interface GrokAccountsState {
   fetchAccounts: () => Promise<void>
   createAccount: (input: GrokAccountInput) => Promise<GrokAccount>
   updateAccount: (id: string, input: GrokAccountInput) => Promise<void>
-  deleteAccount: (id: string) => Promise<void>
+  deleteAccount: (id: string, force?: boolean) => Promise<void>
   /** Begin a device login for an account; returns the sign-in URL to open. */
   /** Surface a mutation failure in the section's inline error slot. */
   setError: (message: string | null) => void
@@ -82,8 +83,16 @@ export const useGrokAccountsStore = create<GrokAccountsState>((set, get) => ({
     refreshModels()
   },
 
-  deleteAccount: async (id) => {
-    const res = await authedFetch(`/api/grok-accounts/${id}`, { method: 'DELETE' })
+  deleteAccount: async (id, force) => {
+    const url = `/api/grok-accounts/${id}${force ? '?force=true' : ''}`
+    const res = await authedFetch(url, { method: 'DELETE' })
+    if (res.status === 409) {
+      const body = await res.json().catch(() => null)
+      throw new AccountDeleteConflict(
+        (body && typeof body.error === 'string' && body.error) || 'Account is still referenced',
+        body as AccountDeleteRefs,
+      )
+    }
     if (!res.ok && res.status !== 204) {
       throw new Error(await errorFrom(res, 'Failed to delete account'))
     }

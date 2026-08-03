@@ -1,6 +1,7 @@
 //! Inherent `impl Db` blocks for each entity, grouped one module per entity.
 //! All methods land on `Db` regardless of which submodule defines them.
 
+mod account_refs;
 mod agent_vars;
 mod announcements;
 mod auth_sessions;
@@ -33,6 +34,7 @@ mod usage;
 mod users;
 mod workflow_instructions;
 
+pub use account_refs::AccountModelRefs;
 pub use claude_accounts::AccountModelUsage;
 pub use custom_workflows::{CustomWorkflowWithSteps, WorkflowReference};
 pub use doc_reviews::RESOLUTION_ACTIONS;

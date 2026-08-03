@@ -535,20 +535,31 @@ async fn update_account(
 async fn delete_account(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
+    axum::extract::Query(query): axum::extract::Query<
+        crate::routes::account_delete_guard::DeleteAccountQuery,
+    >,
 ) -> impl IntoResponse {
-    match state.db.delete_claude_account(&id).await {
-        Ok(Some(config_dir)) => {
-            // Best-effort cleanup of the isolated CLI state dir.
+    let db = state.db.clone();
+    let del_id = id.clone();
+    let result = crate::routes::account_delete_guard::guarded_delete(
+        &state,
+        &id,
+        query.force,
+        move || async move { db.delete_claude_account(&del_id).await },
+    )
+    .await;
+    match result {
+        Ok(config_dir) => {
+            // Best-effort cleanup of the isolated CLI state dir. Skipped
+            // (config_dir is None) when a live session still referenced
+            // this account — its child process would lose CLI state
+            // mid-turn if the dir vanished under it.
             if let Some(dir) = config_dir {
                 let _ = std::fs::remove_dir_all(&dir);
             }
             Ok(StatusCode::NO_CONTENT)
         }
-        Ok(None) => Err((
-            StatusCode::NOT_FOUND,
-            Json(serde_json::json!({ "error": "account not found" })),
-        )),
-        Err(e) => Err(server_error(e)),
+        Err(e) => Err(e),
     }
 }
 

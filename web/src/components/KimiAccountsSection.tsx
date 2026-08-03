@@ -1,6 +1,11 @@
 import { useEffect, useState } from 'react'
 import { useAuthStore } from '../store/auth'
 import { useKimiAccountsStore } from '../store/kimiAccounts'
+import {
+  AccountDeleteConflict,
+  describeAccountRefs,
+  type AccountDeleteRefs,
+} from '../store/accountDeleteGuard'
 import type { KimiAccount, WarnLevel } from '../types/api'
 import ConfirmDialog from './ConfirmDialog'
 import KimiAccountModal from './KimiAccountModal'
@@ -120,10 +125,13 @@ export default function KimiAccountsSection() {
   const fetchAccounts = useKimiAccountsStore((s) => s.fetchAccounts)
   const deleteAccount = useKimiAccountsStore((s) => s.deleteAccount)
   const setError = useKimiAccountsStore((s) => s.setError)
-
   const [modal, setModal] = useState<{ account: KimiAccount | null } | null>(null)
   const [signIn, setSignIn] = useState<KimiAccount | null>(null)
   const [confirmDelete, setConfirmDelete] = useState<KimiAccount | null>(null)
+  const [forceDelete, setForceDelete] = useState<{
+    account: KimiAccount
+    refs: AccountDeleteRefs
+  } | null>(null)
 
   useEffect(() => {
     void fetchAccounts()
@@ -190,11 +198,30 @@ export default function KimiAccountsSection() {
             const target = confirmDelete
             setConfirmDelete(null)
             setError(null)
-            // A rejected delete must not vanish silently: the row stays and
-            // the reason lands in this section's inline error slot.
-            void deleteAccount(target.id).catch((e: Error) => setError(e.message))
+            void deleteAccount(target.id).catch((e: unknown) => {
+              if (e instanceof AccountDeleteConflict) {
+                setForceDelete({ account: target, refs: e.refs })
+              } else if (e instanceof Error) {
+                setError(e.message)
+              }
+            })
           }}
           onCancel={() => setConfirmDelete(null)}
+        />
+      )}
+      {forceDelete && (
+        <ConfirmDialog
+          title="Account still in use"
+          message={describeAccountRefs(forceDelete.account.name, forceDelete.refs)}
+          confirmLabel="Delete anyway"
+          danger
+          onConfirm={() => {
+            const target = forceDelete.account
+            setForceDelete(null)
+            setError(null)
+            void deleteAccount(target.id, true).catch((e: Error) => setError(e.message))
+          }}
+          onCancel={() => setForceDelete(null)}
         />
       )}
     </section>
