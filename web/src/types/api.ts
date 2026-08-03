@@ -156,7 +156,7 @@ export interface Card {
   /** Named system prompt to inject at the top of this card's worker context. */
   system_prompt_name?: string | null
   /** Why this card's git worktree is still unmerged ('dirty' | 'conflict' |
-   *  'cleanup_failed'); null when there is nothing pending. Survives a
+   *  'cleanup_failed' | 'worktree_missing'); null when there is nothing pending. Survives a
    *  restart — the transcript's "Retry merge" re-runs the merge + cleanup. */
   worktree_unmerged_reason?: string | null
   /** Git stderr / status output behind `worktree_unmerged_reason`. */

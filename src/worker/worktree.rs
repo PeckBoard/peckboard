@@ -161,7 +161,7 @@ async fn append_downgrade_event(session_id: &str, db: &Db, reason: &str) {
 pub struct MergeOutcome {
     /// True when the card's branch is merged into the main folder's HEAD.
     pub merged: bool,
-    /// `dirty` | `conflict` | `cleanup_failed`; `None` when fully done.
+    /// `dirty` | `conflict` | `cleanup_failed` | `worktree_missing`; `None` when fully done.
     pub reason: Option<String>,
     /// Git stderr / explanation behind `reason`.
     pub detail: Option<String>,
@@ -208,7 +208,11 @@ pub async fn finalize_worktree(folder_path: &str, card_id: &str, session_id: &st
 
 /// Merge a card's worktree back into the main folder, then clean it up.
 ///
-/// - Worktree missing → noop (`merged: true`), no event.
+/// - Worktree missing, nothing pending on the card → noop (`merged: true`), no event.
+/// - Worktree missing but the card still carries an unmerged flag and its
+///   branch has commits not on HEAD (deleted out from under an unresolved
+///   conflict, e.g. by the watchdog) → `reason: "worktree_missing"`, so a
+///   retry doesn't falsely report success.
 /// - Worktree dirty → leave it, `reason: "dirty"`.
 /// - Main folder dirty or merge conflict → abort the merge, leave the
 ///   worktree, `reason: "conflict"` carrying the git stderr.
@@ -231,11 +235,26 @@ pub async fn merge_worktree(
     let branch = branch_name(&id8);
     let card = db.get_card(card_id).await.ok().flatten();
 
-    // No worktree: nothing to merge. Stay silent (this runs for every card
-    // in non-isolated projects too) but clear any stale flag.
+    // No worktree: nothing to merge in the common case (this runs for every
+    // card in non-isolated projects too). But if the card still carries an
+    // unmerged flag and its branch has commits not on HEAD, the worktree was
     if !wt_path.exists() {
-        persist_outcome(db, card_id, card.as_ref(), &MergeOutcome::done()).await;
-        return MergeOutcome::done();
+        let still_unmerged = card
+            .as_ref()
+            .is_some_and(|c| c.worktree_unmerged_reason.is_some())
+            && branch_has_unmerged_commits(folder_path, &branch).await;
+        let outcome = if still_unmerged {
+            MergeOutcome::unmerged(
+                "worktree_missing",
+                "the worktree was removed before its commits were merged; the branch \
+                 still exists but was not merged into the main folder",
+            )
+        } else {
+            MergeOutcome::done()
+        };
+        persist_outcome(db, card_id, card.as_ref(), &outcome).await;
+        emit_done_event(db, session_id, card.as_ref(), card_id, &branch, &outcome).await;
+        return outcome;
     }
 
     let wt_str = wt_path.to_string_lossy().to_string();
@@ -403,13 +422,46 @@ async fn is_dirty(repo_path: &str) -> bool {
     dirty_status(repo_path).await.is_some()
 }
 
+/// True if `branch` exists and is not fully merged into `folder_path`'s HEAD
+/// (i.e. it carries commits HEAD doesn't have). False if the branch is gone
+/// (already cleaned up) or fully merged.
+async fn branch_has_unmerged_commits(folder_path: &str, branch: &str) -> bool {
+    let exists = git_command(&["-C", folder_path, "rev-parse", "--verify", branch])
+        .output()
+        .await
+        .is_ok_and(|out| out.status.success());
+    if !exists {
+        return false;
+    }
+    let is_ancestor = git_command(&[
+        "-C",
+        folder_path,
+        "merge-base",
+        "--is-ancestor",
+        branch,
+        "HEAD",
+    ])
+    .output()
+    .await
+    .is_ok_and(|out| out.status.success());
+    !is_ancestor
+}
+
 // ── prune_worktrees ───────────────────────────────────────────────────────────
 
 /// Janitor: run `git worktree prune` and remove clean worktrees whose card is
 /// terminal or deleted.
 ///
 /// `terminal_id8s` — id8 values whose card is done/wont_do/deleted.
-pub async fn prune_worktrees(folder_path: &str, terminal_id8s: &[String]) {
+/// `unmerged_id8s` — id8 values whose card still carries an unresolved
+/// `worktree_unmerged_reason` (dirty/conflict/cleanup_failed); their worktree
+/// is left for the user to resolve even if it's terminal, so a retry-merge
+/// doesn't find the worktree gone and falsely report success.
+pub async fn prune_worktrees(
+    folder_path: &str,
+    terminal_id8s: &[String],
+    unmerged_id8s: &[String],
+) {
     if !Path::new(folder_path).join(".git").exists() {
         return;
     }
@@ -420,6 +472,9 @@ pub async fn prune_worktrees(folder_path: &str, terminal_id8s: &[String]) {
     }
 
     for id8 in terminal_id8s {
+        if unmerged_id8s.contains(id8) {
+            continue;
+        }
         let wt_path = worktree_path(folder_path, id8);
         if !wt_path.exists() {
             continue;
@@ -631,5 +686,78 @@ mod tests {
         assert!(retry.is_clean(), "{retry:?}");
         let card = db.get_card(&card_id).await.unwrap().unwrap();
         assert_eq!(card.worktree_unmerged_reason, None);
+    }
+
+    /// Prune skips a worktree whose card is flagged unmerged even though the
+    /// card is terminal, so a conflict left for the user isn't deleted out
+    /// from under them.
+    #[tokio::test]
+    async fn test_prune_worktrees_skips_unmerged_flagged_card() {
+        let (dir, db, card_id) = repo_with_card().await;
+        let folder = dir.path().to_string_lossy().to_string();
+        let id8 = card_id8(&card_id);
+
+        let wt = ensure_worktree(&folder, &card_id, true, "s1", &db).await;
+        std::fs::write(std::path::Path::new(&wt).join("new.txt"), "work\n").unwrap();
+        let wt_path = std::path::PathBuf::from(&wt);
+        git(&wt_path, &["add", "."]);
+        git(&wt_path, &["commit", "-m", "card work"]);
+
+        db.update_card(
+            &card_id,
+            crate::db::models::UpdateCard {
+                worktree_unmerged_reason: Some(Some("conflict".into())),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+
+        prune_worktrees(&folder, &[id8.clone()], &[id8.clone()]).await;
+        assert!(wt_path.exists(), "flagged worktree was pruned");
+
+        prune_worktrees(&folder, &[id8], &[]).await;
+        assert!(
+            !wt_path.exists(),
+            "worktree should be prunable once unflagged"
+        );
+    }
+
+    /// A worktree deleted out from under an unresolved conflict (e.g. by the
+    /// watchdog before this fix) is reported as still unmerged, not silently
+    /// marked done, so retry-merge doesn't lie about the state.
+    #[tokio::test]
+    async fn test_merge_worktree_reports_missing_when_flagged_and_unmerged() {
+        let (dir, db, card_id) = repo_with_card().await;
+        let folder = dir.path().to_string_lossy().to_string();
+
+        let wt = ensure_worktree(&folder, &card_id, true, "s1", &db).await;
+        std::fs::write(std::path::Path::new(&wt).join("new.txt"), "work\n").unwrap();
+        let wt_path = std::path::PathBuf::from(&wt);
+        git(&wt_path, &["add", "."]);
+        git(&wt_path, &["commit", "-m", "card work"]);
+
+        db.update_card(
+            &card_id,
+            crate::db::models::UpdateCard {
+                worktree_unmerged_reason: Some(Some("conflict".into())),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+
+        // Simulate the worktree being deleted out from under the flag.
+        std::fs::remove_dir_all(&wt_path).unwrap();
+
+        let outcome = merge_worktree(&folder, &card_id, None, &db).await;
+        assert!(!outcome.merged, "{outcome:?}");
+        assert_eq!(outcome.reason.as_deref(), Some("worktree_missing"));
+
+        let card = db.get_card(&card_id).await.unwrap().unwrap();
+        assert_eq!(
+            card.worktree_unmerged_reason.as_deref(),
+            Some("worktree_missing")
+        );
     }
 }

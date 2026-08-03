@@ -366,7 +366,7 @@ pub struct Card {
     /// session's `system_prompt` at spawn. `None` = none attached.
     pub system_prompt_name: Option<String>,
     /// Why this card's git worktree is still unmerged: `dirty`, `conflict`,
-    /// or `cleanup_failed`. `None` = nothing pending. Durable so the state
+    /// `cleanup_failed`, or `worktree_missing`. `None` = nothing pending. Durable so the state
     /// survives a restart and the UI can offer a retry.
     pub worktree_unmerged_reason: Option<String>,
     /// Git stderr / explanation behind `worktree_unmerged_reason`.

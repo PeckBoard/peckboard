@@ -353,7 +353,13 @@ async fn sweep_worktrees(db: &Db) {
             .filter(|c| c.step == "done" || c.step == "wont_do")
             .map(|c| crate::worker::worktree::card_id8(&c.id))
             .collect();
-        crate::worker::worktree::prune_worktrees(&folder.path, &terminal_id8s).await;
+        let unmerged_id8s: Vec<String> = cards
+            .iter()
+            .filter(|c| c.worktree_unmerged_reason.is_some())
+            .map(|c| crate::worker::worktree::card_id8(&c.id))
+            .collect();
+        crate::worker::worktree::prune_worktrees(&folder.path, &terminal_id8s, &unmerged_id8s)
+            .await;
     }
 }
 
