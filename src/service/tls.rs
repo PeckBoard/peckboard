@@ -173,20 +173,46 @@ fn read_sidecar(path: &Path) -> Option<SelfSignedSidecar> {
     serde_json::from_str(&fs::read_to_string(path).ok()?).ok()
 }
 
-/// Structural check on a PEM pair: at least one certificate, exactly one
-/// usable private key. It does not verify that the two match — that is
-/// `certified_key`'s job when it builds the resolver's key.
-fn validate_pem_pair(cert_pem: &[u8], key_pem: &[u8]) -> Result<()> {
+/// Reject anything `rustls` would reject at handshake time: a malformed
+/// PEM, a missing private key, or a key that doesn't match the leaf —
+/// `with_single_cert` compares the two. Built against an explicit
+/// provider rather than the process default so validation never depends
+/// on `main` having installed one.
+///
+/// Every path that puts material on disk or picks material up off disk
+/// goes through here, so a mismatched pair is never installed and never
+/// served: a torn write degrades to the self-signed fallback instead of
+/// a certificate whose key can't sign for it.
+pub fn validate_pem_pair(cert_pem: &[u8], key_pem: &[u8]) -> Result<()> {
     let certs: Vec<_> = rustls_pemfile::certs(&mut BufReader::new(cert_pem))
         .collect::<std::result::Result<Vec<_>, _>>()
         .context("failed to parse certificate PEM")?;
     if certs.is_empty() {
-        anyhow::bail!("no certificate found in PEM");
+        anyhow::bail!("no certificate found in the certificate PEM");
     }
-    rustls_pemfile::private_key(&mut BufReader::new(key_pem))
+    let key = rustls_pemfile::private_key(&mut BufReader::new(key_pem))
         .context("failed to parse private key PEM")?
-        .context("no private key found in PEM")?;
+        .context("no private key found in the key PEM")?;
+
+    rustls::ServerConfig::builder_with_provider(Arc::new(
+        rustls::crypto::aws_lc_rs::default_provider(),
+    ))
+    .with_safe_default_protocol_versions()
+    .context("failed to build a TLS config")?
+    .with_no_client_auth()
+    .with_single_cert(certs, key)
+    .context("certificate and private key do not work together")?;
+
     Ok(())
+}
+
+/// Whether the pair on disk at these two paths is readable and usable.
+fn pem_pair_on_disk_ok(cert_path: &Path, key_path: &Path) -> Result<()> {
+    let cert_pem =
+        fs::read(cert_path).with_context(|| format!("failed to read {}", cert_path.display()))?;
+    let key_pem =
+        fs::read(key_path).with_context(|| format!("failed to read {}", key_path.display()))?;
+    validate_pem_pair(&cert_pem, &key_pem)
 }
 
 /// Operator-uploaded material, but only when both halves are present and
@@ -198,9 +224,7 @@ fn uploaded_material(data_dir: &Path) -> Option<TlsMaterial> {
         return None;
     }
 
-    let cert_pem = fs::read(&cert_path).ok()?;
-    let key_pem = fs::read(&key_path).ok()?;
-    if let Err(e) = validate_pem_pair(&cert_pem, &key_pem) {
+    if let Err(e) = pem_pair_on_disk_ok(&cert_path, &key_path) {
         tracing::warn!("Ignoring uploaded TLS material: {e:#}");
         return None;
     }
@@ -222,8 +246,24 @@ pub fn install_uploaded(data_dir: &Path, cert_pem: &str, key_pem: &str) -> Resul
 
     let cert_path = uploaded_cert_path(data_dir);
     let key_path = uploaded_key_path(data_dir);
-    fs::write(&cert_path, cert_pem).context("failed to write uploaded-cert.pem")?;
-    write_secret_pem(&key_path, key_pem).context("failed to write uploaded-key.pem")?;
+
+    // Stage both halves beside their targets and rename them into place,
+    // so a failure part-way through can't leave a new certificate next to
+    // the previous key. The key is staged at 0o600 like the final file,
+    // and `rename` preserves the mode, so the secret is never readable by
+    // anyone else even for an instant.
+    let cert_tmp = dir.join("uploaded-cert.pem.tmp");
+    let key_tmp = dir.join("uploaded-key.pem.tmp");
+    let staged = fs::write(&cert_tmp, cert_pem)
+        .and_then(|()| write_secret_pem(&key_tmp, key_pem))
+        .context("failed to stage uploaded TLS material");
+    if let Err(e) = staged {
+        let _ = fs::remove_file(&cert_tmp);
+        let _ = fs::remove_file(&key_tmp);
+        return Err(e);
+    }
+    fs::rename(&key_tmp, &key_path).context("failed to write uploaded-key.pem")?;
+    fs::rename(&cert_tmp, &cert_path).context("failed to write uploaded-cert.pem")?;
 
     tracing::info!("Installed operator-uploaded TLS certificate at {:?}", dir);
 
@@ -269,14 +309,21 @@ pub fn ensure_certs(data_dir: &Path) -> Result<TlsMaterial> {
         // A sidecar we can't read means we can't prove the cert covers the
         // current addresses, so treat it as drift and regenerate.
         let sans_changed = read_sidecar(&sidecar).is_none_or(|recorded| recorded.sans != sans);
-        if !sans_changed && !needs_renewal(&cert_path) {
+        // A pair that no longer validates — a truncated write, a key that
+        // doesn't match the cert beside it — is unserveable, so mint a new
+        // one rather than handing the resolver material every handshake
+        // will fail on.
+        let pair_err = pem_pair_on_disk_ok(&cert_path, &key_path).err();
+        if pair_err.is_none() && !sans_changed && !needs_renewal(&cert_path) {
             return Ok(TlsMaterial {
                 cert_path,
                 key_path,
                 source: TlsSource::SelfSigned,
             });
         }
-        if sans_changed {
+        if let Some(e) = pair_err {
+            tracing::warn!("Self-signed TLS material is unusable, regenerating: {e:#}");
+        } else if sans_changed {
             tracing::info!("TLS certificate SANs are out of date, regenerating...");
         } else {
             tracing::info!("TLS certificate needs renewal, regenerating...");
@@ -839,6 +886,74 @@ mod tests {
             ensure_certs(tmp.path()).unwrap().source,
             TlsSource::SelfSigned
         );
+    }
+
+    /// A crash between the two halves of an install leaves a new
+    /// certificate next to the previous key. That pair can't complete a
+    /// handshake, so it must be ignored in favour of the self-signed
+    /// fallback rather than served.
+    #[test]
+    fn test_a_torn_uploaded_pair_is_ignored() {
+        let tmp = TempDir::new().unwrap();
+        let (cert_pem, key_pem) = generate_pem_pair();
+        install_uploaded(tmp.path(), &cert_pem, &key_pem).unwrap();
+        assert_eq!(
+            ensure_certs(tmp.path()).unwrap().source,
+            TlsSource::Uploaded
+        );
+
+        let (foreign_cert, _) = generate_pem_pair();
+        fs::write(uploaded_cert_path(tmp.path()), &foreign_cert).unwrap();
+
+        assert_eq!(
+            ensure_certs(tmp.path()).unwrap().source,
+            TlsSource::SelfSigned,
+            "a certificate whose key doesn't match it must not be served"
+        );
+    }
+
+    /// Same failure for the self-signed pair, except here we own both
+    /// halves, so the fix is to mint a fresh pair instead of handing the
+    /// resolver material every handshake would fail on.
+    #[test]
+    fn test_a_torn_self_signed_pair_is_regenerated() {
+        let tmp = TempDir::new().unwrap();
+        let material = ensure_certs(tmp.path()).unwrap();
+        let (_, foreign_key) = generate_pem_pair();
+        fs::write(&material.key_path, &foreign_key).unwrap();
+
+        let healed = ensure_certs(tmp.path()).unwrap();
+        assert_eq!(healed.source, TlsSource::SelfSigned);
+        assert_ne!(
+            fs::read_to_string(&healed.key_path).unwrap(),
+            foreign_key,
+            "the mismatched key must have been replaced"
+        );
+        validate_pem_pair(
+            &fs::read(&healed.cert_path).unwrap(),
+            &fs::read(&healed.key_path).unwrap(),
+        )
+        .unwrap();
+    }
+
+    /// The service layer rejects a mismatched pair on its own, without
+    /// depending on the route in front of it having checked first.
+    #[test]
+    fn test_install_uploaded_rejects_a_mismatched_pair() {
+        let tmp = TempDir::new().unwrap();
+        let (cert_pem, _) = generate_pem_pair();
+        let (_, key_pem) = generate_pem_pair();
+
+        let err = install_uploaded(tmp.path(), &cert_pem, &key_pem).unwrap_err();
+        assert!(
+            format!("{err:#}").contains("do not work together"),
+            "got {err:#}"
+        );
+        assert!(
+            !uploaded_cert_path(tmp.path()).exists(),
+            "a rejected pair must not leave anything on disk"
+        );
+        assert!(!uploaded_key_path(tmp.path()).exists());
     }
 
     #[cfg(unix)]

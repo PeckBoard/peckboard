@@ -987,43 +987,14 @@ struct TlsCertBody {
     key_pem: String,
 }
 
-/// Reject anything `rustls` would reject at handshake time: a malformed
-/// PEM, a missing private key, or a key that doesn't match the leaf —
-/// `with_single_cert` compares the two. We build against an explicit
-/// provider rather than the process default so validation doesn't depend
-/// on `main` having installed one.
-///
-/// This runs before anything touches the disk, so a bad upload can never
-/// displace working material.
-fn validate_cert_pair(cert_pem: &str, key_pem: &str) -> Result<(), String> {
-    let certs = rustls_pemfile::certs(&mut std::io::BufReader::new(cert_pem.as_bytes()))
-        .collect::<Result<Vec<_>, _>>()
-        .map_err(|e| format!("failed to parse certificate PEM: {e}"))?;
-    if certs.is_empty() {
-        return Err("no certificate found in the certificate PEM".to_string());
-    }
-
-    let key = rustls_pemfile::private_key(&mut std::io::BufReader::new(key_pem.as_bytes()))
-        .map_err(|e| format!("failed to parse private key PEM: {e}"))?
-        .ok_or_else(|| "no private key found in the key PEM".to_string())?;
-
-    rustls::ServerConfig::builder_with_provider(Arc::new(
-        rustls::crypto::aws_lc_rs::default_provider(),
-    ))
-    .with_safe_default_protocol_versions()
-    .map_err(|e| format!("failed to build a TLS config: {e}"))?
-    .with_no_client_auth()
-    .with_single_cert(certs, key)
-    .map_err(|e| format!("certificate and private key do not work together: {e}"))?;
-
-    Ok(())
-}
-
-/// Shared tail for the three mutating TLS routes. On success the startup
-/// failure banner is cleared and `https_enabled` is recomputed: the HTTPS
-/// listener is bound once at boot and serves whatever the resolver hands
-/// out, so a cert that loads now means HTTPS works now — as long as the
-/// socket bound in the first place.
+/// Shared tail for the three mutating TLS routes. On success
+/// `https_enabled` is recomputed and the startup failure banner is
+/// cleared: the HTTPS listener is bound once at boot and serves whatever
+/// the resolver hands out, so a cert that loads now means HTTPS works now
+/// — as long as the socket bound in the first place. When it didn't, new
+/// material changes nothing that is actually being served, so the banner
+/// stays up (refreshed to say what is really wrong) instead of telling
+/// the operator the problem is fixed.
 async fn finish_tls_change(
     state: &Arc<AppState>,
     res: Result<anyhow::Result<()>, tokio::task::JoinError>,
@@ -1036,11 +1007,22 @@ async fn finish_tls_change(
     };
     match res {
         Ok(Ok(())) => {
-            state
-                .tls
-                .set_https_enabled(state.tls.snapshot().listener_bound);
-            if let Err(e) = tls::clear_failure_announcement(&state.db).await {
-                tracing::warn!("Failed to clear TLS failure announcement: {e}");
+            let bound = state.tls.snapshot().listener_bound;
+            state.tls.set_https_enabled(bound);
+            let announced = if bound {
+                tls::clear_failure_announcement(&state.db).await
+            } else {
+                tls::announce_failure(
+                    &state.db,
+                    &format!(
+                        "the HTTPS listener never bound on port {}; free the port and restart Peckboard",
+                        state.config.https_port
+                    ),
+                )
+                .await
+            };
+            if let Err(e) = announced {
+                tracing::warn!("Failed to update TLS failure announcement: {e}");
             }
             Ok(Json(tls_status_json(state)))
         }
@@ -1055,7 +1037,8 @@ async fn upload_tls_cert(
     State(state): State<Arc<AppState>>,
     Json(body): Json<TlsCertBody>,
 ) -> impl IntoResponse {
-    if let Err(msg) = validate_cert_pair(&body.cert_pem, &body.key_pem) {
+    if let Err(e) = tls::validate_pem_pair(body.cert_pem.as_bytes(), body.key_pem.as_bytes()) {
+        let msg = format!("{e:#}");
         return Err((
             StatusCode::BAD_REQUEST,
             Json(serde_json::json!({ "error": msg })),
@@ -1379,6 +1362,43 @@ mod tests {
             dir.path().join("certs/cert.pem").exists(),
             "the self-signed fallback is refreshed even while uploaded material serves"
         );
+    }
+    /// New material only fixes HTTPS if the socket is there. When the
+    /// listener never bound (port already in use at boot), a successful
+    /// upload must leave the "HTTPS is disabled" banner up rather than
+    /// telling the operator it's fixed while nothing is serving.
+    #[tokio::test]
+    async fn a_successful_upload_keeps_the_banner_while_the_listener_is_down() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = test_state(dir.path());
+        let token = seed_authenticated_user(&state, "admin").await;
+        let (cert_pem, key_pem) = generate_pem_pair("uploaded.example");
+        tls::announce_failure(&state.db, "failed to bind HTTPS listener")
+            .await
+            .unwrap();
+
+        // listener_bound is false on a bare test state: nothing bound.
+        let (status, body) = call(
+            &state,
+            &token,
+            "POST",
+            "/api/settings/tls/cert",
+            Some(serde_json::json!({ "cert_pem": cert_pem, "key_pem": key_pem })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "got {body}");
+        assert_eq!(body["https_enabled"], false);
+        let banners = state.db.list_announcements().await.unwrap();
+        assert_eq!(banners.len(), 1, "the banner must survive, not duplicate");
+        assert_eq!(banners[0].id, tls::TLS_FAILURE_ANNOUNCEMENT_ID);
+
+        // Once the socket is there, the same route clears it.
+        state.tls.set_listener_bound(true);
+        let (status, body) =
+            call(&state, &token, "POST", "/api/settings/tls/regenerate", None).await;
+        assert_eq!(status, StatusCode::OK, "got {body}");
+        assert_eq!(body["https_enabled"], true);
+        assert!(state.db.list_announcements().await.unwrap().is_empty());
     }
 
     /// A non-admin may check whether setup is done (the UI needs this to

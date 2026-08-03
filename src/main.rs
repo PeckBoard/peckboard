@@ -693,8 +693,21 @@ async fn serve_https(
     loop {
         let (tcp_stream, remote_addr) = match listener.accept().await {
             Ok(conn) => conn,
-            Err(e) => {
+            // A per-connection error (the peer went away between the SYN
+            // and the accept) is transient and the next accept succeeds.
+            // A resource error — the process is out of file descriptors,
+            // the kernel is out of memory — persists, and `accept` then
+            // returns immediately every time: without this pause the loop
+            // would spin a core flat out for as long as the condition
+            // lasts. `axum::serve` backs the plain-HTTP listener off the
+            // same way.
+            Err(e) if is_transient_accept_error(&e) => {
                 tracing::debug!("HTTPS accept error: {e}");
+                continue;
+            }
+            Err(e) => {
+                tracing::warn!("HTTPS accept failed, backing off: {e}");
+                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
                 continue;
             }
         };
@@ -730,6 +743,21 @@ async fn serve_https(
             }
         });
     }
+}
+
+/// Whether an `accept` error is about the connection that failed rather
+/// than the process's ability to accept at all. Transient errors are
+/// retried immediately; everything else is treated as a condition that
+/// will still be there on the next iteration and gets a short pause.
+fn is_transient_accept_error(e: &std::io::Error) -> bool {
+    use std::io::ErrorKind;
+    matches!(
+        e.kind(),
+        ErrorKind::ConnectionAborted
+            | ErrorKind::ConnectionRefused
+            | ErrorKind::ConnectionReset
+            | ErrorKind::Interrupted
+    )
 }
 
 /// Print the first-run admin credentials in a hard-to-miss banner.
