@@ -3,8 +3,8 @@ import type { Event } from '../types/api'
 import { useUiStore } from './ui'
 import { useSessionsStore } from './sessions'
 import { appendEventOrdered, nextLastSeq } from './eventOrder'
+import { getToken } from './auth'
 
-const TOKEN_KEY = 'peckboard_token'
 const SEQ_KEY = 'peckboard_last_seq'
 
 type EventListener = (event: Event) => void
@@ -97,7 +97,7 @@ export const useWsStore = create<WsState>((set, get) => ({
 
     ws.addEventListener('open', () => {
       reconnectAttempts = 0
-      const token = localStorage.getItem(TOKEN_KEY)
+      const token = getToken()
       if (token) {
         sendJson({ type: 'auth', token })
       }

@@ -398,3 +398,24 @@ test('a failed “load older” page keeps the affordance and offers Retry', asy
   // An empty page that actually arrived is the honest end-of-history signal.
   await expect(page.getByTestId('chat-load-older')).toHaveCount(0)
 })
+
+test('WS connects when the token lives only in sessionStorage (no Remember me)', async ({
+  request,
+  page,
+  baseURL,
+}) => {
+  // Regression: the WS open handler read localStorage directly instead
+  // of the shared getToken() helper, so a non-"Remember me" login (token
+  // in sessionStorage only) never sent an auth frame and the app never
+  // came online for the whole session.
+  expect(baseURL, 'baseURL configured').toBeTruthy()
+  const { token, authHeader } = await authenticate(request)
+  const { sessionId } = await seedAuthedSession(request, authHeader)
+
+  await page.addInitScript((injectedToken) => {
+    sessionStorage.setItem('peckboard_token', injectedToken)
+  }, token)
+  await page.goto(`/sessions/${sessionId}`)
+
+  await expect(page.locator('.rail-status.online')).toBeVisible({ timeout: 10_000 })
+})

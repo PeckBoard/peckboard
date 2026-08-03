@@ -2,7 +2,7 @@ import { create } from 'zustand'
 
 const TOKEN_KEY = 'peckboard_token'
 
-function getToken(): string | null {
+export function getToken(): string | null {
   // Check localStorage first (remember-me), then sessionStorage
   return localStorage.getItem(TOKEN_KEY) ?? sessionStorage.getItem(TOKEN_KEY)
 }
