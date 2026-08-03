@@ -13,6 +13,7 @@
 //! bearer tokens, so it covers the gate where it actually runs.
 
 use std::net::SocketAddr;
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use peckboard::auth::rate_limit::RateLimiter;
@@ -20,6 +21,7 @@ use peckboard::config::Config;
 use peckboard::db::Db;
 use peckboard::db::models::{NewFolder, NewProject, NewSession};
 use peckboard::plugin::builtin::BuiltinPluginRegistry;
+use peckboard::plugin::host::LiveHost;
 use peckboard::plugin::manager::PluginManager;
 use peckboard::provider::manager::SessionManager;
 use peckboard::provider::registry::ProviderRegistry;
@@ -323,4 +325,99 @@ async fn worker_allowed_tools_still_work() {
     )
     .await;
     assert!(body["error"].is_null(), "math was refused: {body}");
+}
+
+struct NoopLiveHost;
+impl LiveHost for NoopLiveHost {
+    fn dispatch_capture(&self, _session_id: String, _prompt: String) {}
+    fn resume_session(&self, _session_id: String, _text: String) {}
+}
+
+fn session_control_plugin_wasm() -> Option<PathBuf> {
+    let p = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(
+        "../peck-plugins/session-control/target/wasm32-unknown-unknown/release/\
+         peckboard_session_control_plugin.wasm",
+    );
+    p.exists().then_some(p)
+}
+
+/// Regression: `worker_hidden_tool_names()` only ever covered CORE tool
+/// names, so a plugin-owned administrative tool (here session-control's
+/// `clear_session`, which is folder-blind by design — see
+/// `src/plugin/host.rs`) reached `invoke_mcp_tool` ungated for a worker
+/// session. `ToolGate::with_plugin_tools` now denies it the same way core
+/// admin tools are denied. Skips when the wasm isn't built locally.
+#[tokio::test]
+async fn worker_cannot_use_a_plugin_owned_administrative_tool() {
+    let Some(wasm) = session_control_plugin_wasm() else {
+        eprintln!(
+            "SKIP worker_cannot_use_a_plugin_owned_administrative_tool: plugin wasm not built \
+             (run peck-plugins/session-control/build.sh)"
+        );
+        return;
+    };
+
+    let fx = fixture().await;
+
+    let plugins_dir = fx.state.config.data_dir.join("plugins");
+    std::fs::create_dir_all(&plugins_dir).unwrap();
+    std::fs::copy(&wasm, plugins_dir.join("session-control.wasm")).unwrap();
+    fx.state.plugins.load_all().await.unwrap();
+    fx.state.plugins.set_live_host(Arc::new(NoopLiveHost));
+    let info = fx
+        .state
+        .plugins
+        .decide("session-control", true)
+        .await
+        .unwrap()
+        .expect("session-control plugin should be loaded");
+    assert_eq!(info.status, "approved", "plugin must be active: {info:?}");
+
+    // Sanity: the tool is real and a chat session may still use it.
+    let body = call_tool(
+        &fx.url,
+        &fx.chat_token,
+        "clear_session",
+        serde_json::json!({ "session_id": "w1" }),
+    )
+    .await;
+    assert!(
+        body["error"].is_null(),
+        "chat call to a plugin admin tool was refused: {body}"
+    );
+
+    // The worker session must be refused, same as a core admin tool.
+    let body = call_tool(
+        &fx.url,
+        &fx.worker_token,
+        "clear_session",
+        serde_json::json!({ "session_id": "c1" }),
+    )
+    .await;
+    let msg = body["error"]["message"].as_str().unwrap_or_default();
+    assert!(
+        msg.contains("clear_session") && msg.contains("blocked"),
+        "expected a role refusal, got: {body}"
+    );
+
+    // …and it must not even be advertised.
+    let resp = reqwest::Client::new()
+        .post(&fx.url)
+        .header("Authorization", format!("Bearer {}", fx.worker_token))
+        .json(&serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "tools/list",
+        }))
+        .send()
+        .await
+        .unwrap();
+    let body: serde_json::Value = resp.json().await.unwrap();
+    let names: Vec<&str> = body["result"]["tools"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|t| t["name"].as_str().unwrap())
+        .collect();
+    assert!(!names.contains(&"clear_session"), "{names:?}");
 }

@@ -137,6 +137,32 @@ pub const ALLOWED_PERMISSIONS: &[&str] = &[
     "user_authority",  // serve authenticated UI + act under the user (ui_routes)
     "worker_questions", // peckboard_session_questions / peckboard_answer_question — read pending user questions (full payloads) and resolve them under user authority
 ];
+
+/// Plugin permissions that grant folder-blind, cross-session administrative
+/// power (`session_control`'s `find_session` / `clear_session` /
+/// `send_message` / `interrupt_session` / `terminate_agent` are deliberately
+/// NOT scoped to a folder — see `src/plugin/host.rs`'s session-control host
+/// functions). A worker session's role gate
+/// (`worker_hidden_tool_names` in `service/mcp_server/schemas.rs`) refuses
+/// this same class of core tool by name; plugin-owned tools need the same
+/// treatment, but by declaring plugin rather than by name, since a plugin
+/// can ship new administrative tools without a core change. Every mcp_tool
+/// of a plugin holding one of these permissions is worker-denied by default
+/// in [`PluginManager::mcp_tools`] — a manifest can opt a specific tool back
+/// in via `PluginMcpTool::worker_allowed`.
+pub const WORKER_FORBIDDEN_PLUGIN_PERMISSIONS: &[&str] = &["session_control"];
+
+/// Resolve one `mcp_tool`'s worker-role verdict from its declaring plugin's
+/// permissions and its own manifest override. Pure and standalone (no
+/// loaded-plugin/wasm dependency) so it's unit-testable without spinning up
+/// a real plugin — [`PluginManager::mcp_tools`] is the only caller.
+fn resolve_worker_allowed(plugin_permissions: &[String], tool_worker_allowed: bool) -> bool {
+    let plugin_forbidden = plugin_permissions
+        .iter()
+        .any(|p| WORKER_FORBIDDEN_PLUGIN_PERMISSIONS.contains(&p.as_str()));
+    !plugin_forbidden || tool_worker_allowed
+}
+
 /// Whether an operator has approved the set of hooks a loaded plugin
 /// declares. A plugin is **inert** — no hook fires, no `/plugin-api`
 /// route dispatches, no ui_panel surfaces, and its `init` is not even
@@ -2481,6 +2507,10 @@ impl PluginManager {
                     name: tool.name.clone(),
                     description: tool.description.clone(),
                     input_schema: tool.input_schema.clone(),
+                    worker_allowed: resolve_worker_allowed(
+                        &loaded.manifest.permissions,
+                        tool.worker_allowed,
+                    ),
                 });
             }
         }
@@ -3083,7 +3113,26 @@ mod tests {
             name: name.into(),
             description: "does a thing".into(),
             input_schema: serde_json::json!({ "type": "object" }),
+            worker_allowed: false,
         }
+    }
+
+    #[test]
+    fn resolve_worker_allowed_denies_by_default_for_a_session_control_plugin() {
+        let perms = vec!["session_control".to_string()];
+        assert!(!resolve_worker_allowed(&perms, false));
+    }
+
+    #[test]
+    fn resolve_worker_allowed_honours_per_tool_override() {
+        let perms = vec!["session_control".to_string()];
+        assert!(resolve_worker_allowed(&perms, true));
+    }
+
+    #[test]
+    fn resolve_worker_allowed_true_when_plugin_holds_no_forbidden_permission() {
+        let perms = vec!["provide_mcp_tools".to_string(), "data_store".to_string()];
+        assert!(resolve_worker_allowed(&perms, false));
     }
 
     #[test]

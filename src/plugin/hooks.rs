@@ -193,6 +193,14 @@ pub struct PluginMcpTool {
     pub description: String,
     #[serde(default)]
     pub input_schema: serde_json::Value,
+    /// Escape hatch: re-admit this specific tool to worker sessions even
+    /// though the declaring plugin holds a permission in
+    /// [`crate::plugin::manager::WORKER_FORBIDDEN_PLUGIN_PERMISSIONS`].
+    /// Default `false` — a tool from such a plugin is worker-denied unless
+    /// explicitly opted in here. Plugins that hold none of those
+    /// permissions (e.g. `common-tools`) are unaffected either way.
+    #[serde(default)]
+    pub worker_allowed: bool,
 }
 
 /// A left-rail entry a plugin contributes, declared in the manifest's
@@ -261,6 +269,13 @@ pub struct PluginMcpToolEntry {
     pub name: String,
     pub description: String,
     pub input_schema: serde_json::Value,
+    /// Resolved worker-role verdict: `false` means a worker session must
+    /// never dispatch this tool, whatever `tools/list` advertised — derived
+    /// in [`crate::plugin::manager::PluginManager::mcp_tools`] from the
+    /// declaring plugin's permissions and this tool's manifest
+    /// `worker_allowed` override. Consulted by
+    /// [`crate::service::mcp_server::ToolGate`].
+    pub worker_allowed: bool,
 }
 
 /// The hook fired when a plugin is asked to fully serve a public HTTP

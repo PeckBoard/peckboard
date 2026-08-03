@@ -187,10 +187,12 @@ async fn mcp_handler(
             // enforcement point, and `tools/call` below re-checks the gate
             // as the hard enforcement point.
             let session_row = state.db.get_session(&session_id).await.ok().flatten();
+            let plugin_tools = state.plugins.mcp_tools().await;
             let gate = session_row
                 .as_ref()
                 .map(crate::service::mcp_server::ToolGate::from_session)
-                .unwrap_or_else(crate::service::mcp_server::ToolGate::none);
+                .unwrap_or_else(crate::service::mcp_server::ToolGate::none)
+                .with_plugin_tools(&plugin_tools);
             let advertised = |name: &str| gate.advertised(name);
             let mut tools: Vec<Value> = registry
                 .tool_definitions()
@@ -213,7 +215,7 @@ async fn mcp_handler(
                 .iter()
                 .map(|t| t.name.as_str())
                 .collect();
-            for t in state.plugins.mcp_tools().await {
+            for t in plugin_tools {
                 if core_names.contains(t.name.as_str()) {
                     tracing::warn!(
                         plugin = %t.plugin, tool = %t.name,
@@ -281,7 +283,8 @@ async fn mcp_handler(
             // in `tools/list` above — and by the Ollama in-process tool
             // path, so the two can't drift apart — and refuse outright if
             // it blocks this tool, whatever the model asked for by name.
-            let gate = crate::service::mcp_server::ToolGate::from_session(&session_row);
+            let gate = crate::service::mcp_server::ToolGate::from_session(&session_row)
+                .with_plugin_tools(&state.plugins.mcp_tools().await);
             if let Some(reason) = gate.blocked(tool_name) {
                 return (
                     StatusCode::OK,

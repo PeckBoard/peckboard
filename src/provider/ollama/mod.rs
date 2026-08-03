@@ -1290,7 +1290,7 @@ async fn run_chat_stream(args: ChatStreamArgs<'_>) -> turn::TurnResult {
     // fall back to a plain, tool-free chat rather than failing the turn.
     let registry = McpToolRegistry::new();
     let (tools, tool_ctx, gate) = if enable_tools {
-        match build_tool_context(db, broadcaster_arc, session_id).await {
+        match build_tool_context(db, broadcaster_arc, session_id, plugins).await {
             Some((ctx, gate)) => {
                 let defs = collect_ollama_tools(&registry, plugins, &gate).await;
                 if defs.is_empty() {
@@ -1837,6 +1837,7 @@ async fn build_tool_context(
     db: &crate::db::Db,
     broadcaster: &Arc<crate::ws::broadcaster::Broadcaster>,
     session_id: &str,
+    plugins: &PluginManager,
 ) -> Option<(ToolCallContext, ToolGate)> {
     let session = match db.get_session(session_id).await {
         Ok(Some(s)) => s,
@@ -1848,7 +1849,7 @@ async fn build_tool_context(
             return None;
         }
     };
-    let gate = ToolGate::from_session(&session);
+    let gate = ToolGate::from_session(&session).with_plugin_tools(&plugins.mcp_tools().await);
     Some((
         ToolCallContext {
             session_id: session_id.to_string(),

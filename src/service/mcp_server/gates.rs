@@ -23,6 +23,13 @@ pub struct ToolGate {
     pre_hatcher: bool,
     doc_review: bool,
     autoswitch_on: bool,
+    /// Names of plugin-owned tools this session's role must never dispatch
+    /// — populated via [`Self::with_plugin_tools`] from each active plugin's
+    /// `mcp_tools()` entries whose `worker_allowed` is `false`. Empty (and so
+    /// a no-op) until a caller supplies the plugin tool list; a `ToolGate`
+    /// built via `from_session`/`none` alone never blocks a plugin tool by
+    /// name, only by the core `worker_hidden_tool_names` list below.
+    worker_denied_plugin_tools: std::collections::HashSet<String>,
 }
 
 impl ToolGate {
@@ -37,6 +44,7 @@ impl ToolGate {
             pre_hatcher,
             doc_review,
             autoswitch_on,
+            worker_denied_plugin_tools: std::collections::HashSet::new(),
         }
     }
 
@@ -50,7 +58,25 @@ impl ToolGate {
             pre_hatcher: false,
             doc_review: false,
             autoswitch_on: false,
+            worker_denied_plugin_tools: std::collections::HashSet::new(),
         }
+    }
+
+    /// Fold in the active plugins' declared MCP tools: any entry with
+    /// `worker_allowed == false` becomes name-blocked for a worker session
+    /// via both [`Self::advertised`] and [`Self::blocked`]. Call once per
+    /// gate, after `from_session`/`none`, with
+    /// `PluginManager::mcp_tools()`'s result — a no-op for a non-worker gate.
+    pub fn with_plugin_tools(
+        mut self,
+        plugin_tools: &[crate::plugin::hooks::PluginMcpToolEntry],
+    ) -> Self {
+        self.worker_denied_plugin_tools = plugin_tools
+            .iter()
+            .filter(|t| !t.worker_allowed)
+            .map(|t| t.name.clone())
+            .collect();
+        self
     }
 
     /// Should this tool be advertised in `tools/list`? Advertisement is a
@@ -65,6 +91,9 @@ impl ToolGate {
         }
         if matches!(name, "get_review_doc" | "submit_review_revision") {
             return self.doc_review;
+        }
+        if self.is_worker && self.worker_denied_plugin_tools.contains(name) {
+            return false;
         }
         let hidden: &[&str] = if self.is_worker {
             worker_hidden_tool_names()
@@ -103,6 +132,15 @@ impl ToolGate {
                 "tool '{name}' is blocked: worker sessions execute their \
                  own card and cannot administer projects, folders, workflows, \
                  schedules, plugins, or other sessions. Use the card tools \
+                 (complete_step, finish_card, create_card, …); ask a human \
+                 via ask_user for anything else."
+            ));
+        }
+
+        if self.is_worker && self.worker_denied_plugin_tools.contains(name) {
+            return Some(format!(
+                "tool '{name}' is blocked: worker sessions cannot use this \
+                 plugin-provided administrative tool. Use the card tools \
                  (complete_step, finish_card, create_card, …); ask a human \
                  via ask_user for anything else."
             ));
@@ -153,6 +191,16 @@ mod tests {
         }
     }
 
+    fn plugin_tool(name: &str, worker_allowed: bool) -> crate::plugin::hooks::PluginMcpToolEntry {
+        crate::plugin::hooks::PluginMcpToolEntry {
+            plugin: "test-plugin".into(),
+            name: name.into(),
+            description: "d".into(),
+            input_schema: serde_json::json!({}),
+            worker_allowed,
+        }
+    }
+
     #[test]
     fn worker_session_is_blocked_from_delete_project() {
         let gate = ToolGate::from_session(&session(true, None, None));
@@ -191,5 +239,29 @@ mod tests {
         let gate = ToolGate::none();
         assert!(gate.blocked("switch_session_model").is_some());
         assert!(gate.blocked("complete_step").is_none());
+    }
+
+    #[test]
+    fn worker_session_is_blocked_from_a_worker_denied_plugin_tool() {
+        let tools = vec![plugin_tool("clear_session", false)];
+        let gate = ToolGate::from_session(&session(true, None, None)).with_plugin_tools(&tools);
+        assert!(gate.blocked("clear_session").is_some());
+        assert!(!gate.advertised("clear_session"));
+    }
+
+    #[test]
+    fn worker_session_may_use_a_worker_allowed_plugin_tool() {
+        let tools = vec![plugin_tool("read_file", true)];
+        let gate = ToolGate::from_session(&session(true, None, None)).with_plugin_tools(&tools);
+        assert!(gate.blocked("read_file").is_none());
+        assert!(gate.advertised("read_file"));
+    }
+
+    #[test]
+    fn chat_session_is_unaffected_by_worker_denied_plugin_tools() {
+        let tools = vec![plugin_tool("clear_session", false)];
+        let gate = ToolGate::from_session(&session(false, None, None)).with_plugin_tools(&tools);
+        assert!(gate.blocked("clear_session").is_none());
+        assert!(gate.advertised("clear_session"));
     }
 }
