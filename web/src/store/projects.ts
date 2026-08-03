@@ -69,6 +69,14 @@ interface ProjectsState {
   fetchPendingQuestions: (projectId: string) => Promise<void>
 }
 
+/** Monotonic token for `fetchCards`. A response is only committed while its
+ *  request is still the newest one — otherwise switching projects while a slow
+ *  fetch is in flight lets the old project's cards land on the new project's
+ *  board (`cards` is global and the board doesn't filter by `project_id`), and
+ *  card actions then POST to `/api/projects/<new>/cards/<old-card-id>` and 404.
+ *  Same pattern as `sessionSearchRequestId` in `store/sessions.ts`. */
+let cardsRequestId = 0
+
 export const useProjectsStore = create<ProjectsState>((set) => ({
   projects: [],
   projectsLoaded: false,
@@ -144,20 +152,26 @@ export const useProjectsStore = create<ProjectsState>((set) => ({
     const current = useProjectsStore.getState().activeProjectId
     // Don't clear cards if re-selecting the same project
     if (id === current) return
+    // Invalidate any in-flight `fetchCards` for the project we're leaving,
+    // even if no new fetch has started yet.
+    cardsRequestId++
     set({ activeProjectId: id, cards: [], cardsError: '', cardsLoadedProjectId: null })
   },
 
   fetchCards: async (projectId: string) => {
+    const requestId = ++cardsRequestId
     try {
       const res = await authedFetch(`/api/projects/${projectId}/cards`)
+      if (requestId !== cardsRequestId) return
       if (!res.ok) {
         set({ cardsError: 'Couldn’t load cards.' })
         return
       }
       const cards: Card[] = await res.json()
+      if (requestId !== cardsRequestId) return
       set({ cards, cardsError: '', cardsLoadedProjectId: projectId })
     } catch {
-      set({ cardsError: 'Couldn’t load cards.' })
+      if (requestId === cardsRequestId) set({ cardsError: 'Couldn’t load cards.' })
     }
   },
 
