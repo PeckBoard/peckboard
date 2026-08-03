@@ -654,12 +654,16 @@ impl SessionManager {
     ) -> anyhow::Result<SendOutcome> {
         let lock = self.lock_session(session_id).await;
         let was_running = self.is_running(session_id).await;
-        let supports_mid_stream = self
-            .provider_for_model_supports_mid_stream(&config.model)
-            .await;
+        // Only meaningful when a run is live, and it MUST be answered by
+        // the provider that owns that run — `config.model` can still be
+        // unresolved ("default"), which parses to the default provider
+        // regardless of what the session actually runs on.
+        let supports_mid_stream = was_running
+            && self
+                .supports_mid_stream_for_session(session_id, &config.model)
+                .await;
 
         if was_running && (policy == MidTurnPolicy::Queue || !supports_mid_stream) {
-            // Durable FIFO: the completion listener delivers this when
             // the current run finishes. Attachment ids ride along so a
             // queued send keeps its images — bytes are re-resolved from
             // the attachments dir at delivery time.
@@ -722,6 +726,23 @@ impl SessionManager {
             Ok(SendOutcome::Queued)
         } else {
             Ok(SendOutcome::Started)
+        }
+    }
+
+    /// Whether a mid-turn message for `session_id` can be injected into
+    /// the live turn.
+    ///
+    /// Asks the provider that actually owns the run — callers may pass an
+    /// unresolved model (`"default"`/`"auto"`, as the ask_user answer path
+    /// does), which `parse_model_id` maps to [`DEFAULT_PROVIDER`] and would
+    /// wrongly report Claude's mid-stream support for an Ollama/Grok/
+    /// Cursor/Mock session — dispatching a second concurrent run. Falls
+    /// back to the model string only when no run is tracked, where the
+    /// answer doesn't gate anything.
+    async fn supports_mid_stream_for_session(&self, session_id: &str, model: &str) -> bool {
+        match self.running_provider(session_id).await {
+            Some(p) => p.supports_mid_stream_injection(),
+            None => self.provider_for_model_supports_mid_stream(model).await,
         }
     }
 
@@ -802,7 +823,7 @@ impl SessionManager {
 
         if self.is_running(session_id).await
             && !self
-                .provider_for_model_supports_mid_stream(&config.model)
+                .supports_mid_stream_for_session(session_id, &config.model)
                 .await
         {
             tracing::info!(
@@ -950,15 +971,27 @@ impl SessionManager {
         false
     }
 
-    pub async fn is_running(&self, session_id: &str) -> bool {
+    /// The provider that currently owns a run for `session_id`, if any.
+    ///
+    /// The single source of truth for "which provider is this session
+    /// actually on right now" — model strings can't answer that (they may
+    /// be unresolved, and the session may have been switched since).
+    pub async fn running_provider(
+        &self,
+        session_id: &str,
+    ) -> Option<Arc<dyn crate::provider::agent::AgentProvider>> {
         for info in self.registry.list_providers().await {
             if let Some(p) = self.registry.get_provider(&info.id).await {
                 if p.is_running(session_id).await {
-                    return true;
+                    return Some(p);
                 }
             }
         }
-        false
+        None
+    }
+
+    pub async fn is_running(&self, session_id: &str) -> bool {
+        self.running_provider(session_id).await.is_some()
     }
 
     pub async fn cleanup(&self) {
@@ -1197,5 +1230,147 @@ mod tests {
             resume_conversation_id_from_tail(&events),
             Some("conv-fresh".into())
         );
+    }
+
+    /// Stand-in provider with a scriptable run state and mid-stream
+    /// capability, so the dispatch decision can be tested without a real
+    /// CLI behind it.
+    struct StubProvider {
+        id: &'static str,
+        running: bool,
+        mid_stream: bool,
+    }
+
+    #[async_trait::async_trait]
+    impl crate::provider::agent::AgentProvider for StubProvider {
+        fn id(&self) -> &str {
+            self.id
+        }
+        async fn send_message(
+            &self,
+            _ctx: crate::provider::agent::SendMessageContext,
+        ) -> anyhow::Result<()> {
+            Ok(())
+        }
+        async fn cancel(&self, _session_id: &str) {}
+        async fn interrupt(&self, _session_id: &str) {}
+        async fn write_stdin(&self, _session_id: &str, _text: &str) -> bool {
+            true
+        }
+        async fn is_running(&self, _session_id: &str) -> bool {
+            self.running
+        }
+        fn supports_mid_stream_injection(&self) -> bool {
+            self.mid_stream
+        }
+        async fn cleanup(&self) {}
+        async fn shutdown(&self) {}
+    }
+
+    async fn manager_with(stubs: Vec<StubProvider>) -> SessionManager {
+        let registry = Arc::new(ProviderRegistry::new());
+        for stub in stubs {
+            let info = crate::provider::registry::ProviderInfo {
+                id: stub.id.to_string(),
+                display_name: stub.id.to_string(),
+                models: Vec::new(),
+                effort_levels: Vec::new(),
+                capabilities: Default::default(),
+            };
+            registry.register(Arc::new(stub), info).await;
+        }
+        SessionManager::new(registry)
+    }
+
+    fn claude_stub(running: bool) -> StubProvider {
+        StubProvider {
+            id: DEFAULT_PROVIDER,
+            running,
+            mid_stream: true,
+        }
+    }
+
+    fn mock_stub(running: bool) -> StubProvider {
+        StubProvider {
+            id: "mock",
+            running,
+            mid_stream: false,
+        }
+    }
+
+    #[tokio::test]
+    async fn unresolved_model_uses_the_running_providers_capability() {
+        // Regression: `"default"` has no provider prefix, so parsing it
+        // yields `claude` — which DOES support mid-stream injection — even
+        // though the live run belongs to the mock provider, which does not.
+        let m = manager_with(vec![claude_stub(false), mock_stub(true)]).await;
+        assert!(m.provider_for_model_supports_mid_stream("default").await);
+        assert!(!m.supports_mid_stream_for_session("s1", "default").await);
+    }
+
+    #[tokio::test]
+    async fn running_mid_stream_provider_still_injects() {
+        let m = manager_with(vec![claude_stub(true), mock_stub(false)]).await;
+        assert!(m.supports_mid_stream_for_session("s1", "default").await);
+        // A stale model string from another provider doesn't demote the
+        // live run either.
+        assert!(m.supports_mid_stream_for_session("s1", "mock:echo").await);
+    }
+
+    #[tokio::test]
+    async fn falls_back_to_the_model_string_when_nothing_runs() {
+        let m = manager_with(vec![claude_stub(false), mock_stub(false)]).await;
+        assert!(m.supports_mid_stream_for_session("s1", "default").await);
+        assert!(!m.supports_mid_stream_for_session("s1", "mock:echo").await);
+    }
+
+    #[tokio::test]
+    async fn inject_with_unresolved_model_queues_on_non_mid_stream_provider() {
+        // The ask_user answer path hardcodes model `"default"` + Inject.
+        // With the mock provider mid-turn, that answer MUST land in the
+        // queue — dispatching it would spawn a second concurrent run on
+        // the same session.
+        let m = manager_with(vec![claude_stub(false), mock_stub(true)]).await;
+        let db = crate::db::Db::in_memory().unwrap();
+        let broadcaster = crate::ws::broadcaster::Broadcaster::new();
+        let now = chrono::Utc::now().to_rfc3339();
+        db.create_folder(crate::db::models::NewFolder {
+            id: "f1".into(),
+            name: "f1".into(),
+            path: "/tmp/f1".into(),
+            created_at: now.clone(),
+        })
+        .await
+        .unwrap();
+        db.create_session(crate::db::models::NewSession {
+            id: "s1".into(),
+            name: "s1".into(),
+            folder_id: "f1".into(),
+            created_at: now.clone(),
+            last_activity: now,
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+
+        let outcome = m
+            .send_or_queue(
+                "s1",
+                crate::provider::message::UserMessage::from_text("answer"),
+                &db,
+                &broadcaster,
+                SpawnConfig {
+                    model: "default".into(),
+                    ..Default::default()
+                },
+                MidTurnPolicy::Inject,
+                true,
+            )
+            .await
+            .unwrap();
+
+        assert!(matches!(outcome, SendOutcome::Queued));
+        let queued = db.next_queued_message("s1").await.unwrap();
+        assert_eq!(queued.map(|q| q.text).as_deref(), Some("answer"));
     }
 }
