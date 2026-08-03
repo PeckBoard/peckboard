@@ -63,6 +63,8 @@ pub fn ensure_schema(conn: &mut SqliteConnection) -> anyhow::Result<()> {
     ensure_sessions_is_temp_column(conn)?;
     ensure_repeating_tasks_timezone_column(conn)?;
     ensure_repeating_task_runs_table(conn)?;
+    ensure_env_vars_table(conn)?;
+    ensure_agent_vars_table(conn)?;
     backfill_session_owners(conn)?;
     Ok(())
 }
@@ -1527,6 +1529,110 @@ fn ensure_repeating_task_runs_table(conn: &mut SqliteConnection) -> anyhow::Resu
     Ok(())
 }
 
+/// Heal DBs that predate `1784900000_env_vars` / `1785000000_env_var_folder_scope`.
+/// Creates the table in its current (post-folder-scope) shape if missing,
+/// recovers a DB caught mid-rebuild by the folder-scope migration (which
+/// does `CREATE env_vars_new` -> `INSERT ... SELECT` -> `DROP TABLE env_vars`
+/// -> `RENAME`), and adds `folder_id` (+ the two partial unique indexes) to
+/// any pre-folder-scope table. The legacy table has an inline `UNIQUE(name)`
+/// constraint SQLite can't drop with a plain `ALTER TABLE ADD COLUMN`, so a
+/// missing `folder_id` is healed the same way the migration does: rebuild.
+fn ensure_env_vars_table(conn: &mut SqliteConnection) -> anyhow::Result<()> {
+    let has_env_vars = table_exists(conn, "env_vars")?;
+    let has_scratch = table_exists(conn, "env_vars_new")?;
+    if !has_env_vars && has_scratch {
+        tracing::info!("Repairing schema: resuming interrupted env_vars folder-scope rebuild");
+        sql_query("ALTER TABLE env_vars_new RENAME TO env_vars").execute(conn)?;
+    } else if has_env_vars && has_scratch {
+        tracing::info!("Repairing schema: dropping stale env_vars_new scratch table");
+        sql_query("DROP TABLE env_vars_new").execute(conn)?;
+    }
+
+    log_if_healing_table(conn, "env_vars")?;
+    sql_query(
+        "CREATE TABLE IF NOT EXISTS env_vars (
+            id           TEXT PRIMARY KEY NOT NULL,
+            name         TEXT NOT NULL,
+            value        TEXT,
+            ciphertext   TEXT,
+            nonce        TEXT,
+            kdf_salt     TEXT,
+            encrypted    BOOLEAN NOT NULL DEFAULT 0,
+            encrypted_by TEXT,
+            folder_id    TEXT,
+            created_at   TEXT NOT NULL,
+            updated_at   TEXT NOT NULL
+        )",
+    )
+    .execute(conn)?;
+
+    let rows: Vec<PragmaColumn> = sql_query("PRAGMA table_info(env_vars)").load(conn)?;
+    let existing: Vec<String> = rows.into_iter().map(|r| r.name).collect();
+    if !existing.iter().any(|c| c == "folder_id") {
+        tracing::info!("Repairing schema: adding env_vars.folder_id");
+        sql_query(
+            "CREATE TABLE env_vars_new (
+                id           TEXT PRIMARY KEY NOT NULL,
+                name         TEXT NOT NULL,
+                value        TEXT,
+                ciphertext   TEXT,
+                nonce        TEXT,
+                kdf_salt     TEXT,
+                encrypted    BOOLEAN NOT NULL DEFAULT 0,
+                encrypted_by TEXT,
+                folder_id    TEXT,
+                created_at   TEXT NOT NULL,
+                updated_at   TEXT NOT NULL
+            )",
+        )
+        .execute(conn)?;
+        sql_query(
+            "INSERT INTO env_vars_new
+                (id, name, value, ciphertext, nonce, kdf_salt, encrypted, encrypted_by, folder_id, created_at, updated_at)
+                SELECT id, name, value, ciphertext, nonce, kdf_salt, encrypted, encrypted_by, NULL, created_at, updated_at
+                FROM env_vars",
+        )
+        .execute(conn)?;
+        sql_query("DROP TABLE env_vars").execute(conn)?;
+        sql_query("ALTER TABLE env_vars_new RENAME TO env_vars").execute(conn)?;
+    }
+
+    sql_query(
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_env_vars_global_name ON env_vars(name) WHERE folder_id IS NULL",
+    )
+    .execute(conn)?;
+    sql_query(
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_env_vars_folder_name ON env_vars(folder_id, name) WHERE folder_id IS NOT NULL",
+    )
+    .execute(conn)?;
+    Ok(())
+}
+
+/// Heal DBs that predate `1785000001_agent_vars`.
+fn ensure_agent_vars_table(conn: &mut SqliteConnection) -> anyhow::Result<()> {
+    log_if_healing_table(conn, "agent_vars")?;
+    sql_query(
+        "CREATE TABLE IF NOT EXISTS agent_vars (
+            id         TEXT PRIMARY KEY NOT NULL,
+            name       TEXT NOT NULL,
+            value      TEXT NOT NULL,
+            folder_id  TEXT,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        )",
+    )
+    .execute(conn)?;
+    sql_query(
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_agent_vars_global_name ON agent_vars(name) WHERE folder_id IS NULL",
+    )
+    .execute(conn)?;
+    sql_query(
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_agent_vars_folder_name ON agent_vars(folder_id, name) WHERE folder_id IS NOT NULL",
+    )
+    .execute(conn)?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2193,6 +2299,125 @@ mod tests {
         assert_eq!(tables.n, 1);
 
         // Second run must be a no-op (no double-add error).
+        ensure_schema(&mut conn).unwrap();
+    }
+
+    /// Fresh DB (post-migrations state simulated as empty) must get both
+    /// tables, `env_vars.folder_id`, and all four partial unique indexes.
+    #[test]
+    fn ensure_schema_creates_env_and_agent_var_tables() {
+        let mut conn = SqliteConnection::establish(":memory:").unwrap();
+        // Other ensure_schema steps prod this table; stub the minimum.
+        sql_query(
+            "CREATE TABLE projects (
+                id TEXT PRIMARY KEY NOT NULL,
+                auto_notify_changes BOOLEAN NOT NULL DEFAULT 1,
+                worker_communication BOOLEAN NOT NULL DEFAULT 1
+            )",
+        )
+        .execute(&mut conn)
+        .unwrap();
+
+        ensure_schema(&mut conn).unwrap();
+
+        for table in ["env_vars", "agent_vars"] {
+            assert!(table_exists(&mut conn, table).unwrap(), "missing {table}");
+        }
+        let env_cols = {
+            let rows: Vec<PragmaColumn> = sql_query("PRAGMA table_info(env_vars)")
+                .load(&mut conn)
+                .unwrap();
+            rows.into_iter().map(|r| r.name).collect::<Vec<_>>()
+        };
+        assert!(env_cols.iter().any(|c| c == "folder_id"));
+
+        for idx in [
+            "idx_env_vars_global_name",
+            "idx_env_vars_folder_name",
+            "idx_agent_vars_global_name",
+            "idx_agent_vars_folder_name",
+        ] {
+            let hit: CountRow = sql_query(format!(
+                "SELECT count(*) AS n FROM sqlite_master WHERE type = 'index' AND name = '{idx}'"
+            ))
+            .get_result(&mut conn)
+            .unwrap();
+            assert_eq!(hit.n, 1, "missing index {idx}");
+        }
+
+        // Second run must be a no-op (no double-add / duplicate-index error).
+        ensure_schema(&mut conn).unwrap();
+    }
+
+    /// A pre-folder-scope `env_vars` table (inline `UNIQUE(name)`, no
+    /// `folder_id`) must be rebuilt with `folder_id` added and the row
+    /// preserved.
+    #[test]
+    fn ensure_schema_adds_env_vars_folder_id() {
+        let mut conn = SqliteConnection::establish(":memory:").unwrap();
+        // Other ensure_schema steps prod this table; stub the minimum.
+        sql_query(
+            "CREATE TABLE projects (
+                id TEXT PRIMARY KEY NOT NULL,
+                auto_notify_changes BOOLEAN NOT NULL DEFAULT 1,
+                worker_communication BOOLEAN NOT NULL DEFAULT 1
+            )",
+        )
+        .execute(&mut conn)
+        .unwrap();
+
+        sql_query(
+            "CREATE TABLE env_vars (
+                id           TEXT PRIMARY KEY NOT NULL,
+                name         TEXT NOT NULL UNIQUE,
+                value        TEXT,
+                ciphertext   TEXT,
+                nonce        TEXT,
+                kdf_salt     TEXT,
+                encrypted    BOOLEAN NOT NULL DEFAULT 0,
+                encrypted_by TEXT,
+                created_at   TEXT NOT NULL,
+                updated_at   TEXT NOT NULL
+            )",
+        )
+        .execute(&mut conn)
+        .unwrap();
+        sql_query(
+            "INSERT INTO env_vars (id, name, value, encrypted, created_at, updated_at)
+                VALUES ('v1', 'API_KEY', 'secret', 0, '2026-01-01', '2026-01-01')",
+        )
+        .execute(&mut conn)
+        .unwrap();
+
+        ensure_schema(&mut conn).unwrap();
+
+        let cols = {
+            let rows: Vec<PragmaColumn> = sql_query("PRAGMA table_info(env_vars)")
+                .load(&mut conn)
+                .unwrap();
+            rows.into_iter().map(|r| r.name).collect::<Vec<_>>()
+        };
+        assert!(
+            cols.iter().any(|c| c == "folder_id"),
+            "got columns {cols:?}"
+        );
+
+        let hit: CountRow = sql_query(
+            "SELECT count(*) AS n FROM env_vars WHERE id = 'v1' AND name = 'API_KEY' AND value = 'secret'",
+        )
+        .get_result(&mut conn)
+        .unwrap();
+        assert_eq!(hit.n, 1, "row lost during rebuild");
+
+        for idx in ["idx_env_vars_global_name", "idx_env_vars_folder_name"] {
+            let hit: CountRow = sql_query(format!(
+                "SELECT count(*) AS n FROM sqlite_master WHERE type = 'index' AND name = '{idx}'"
+            ))
+            .get_result(&mut conn)
+            .unwrap();
+            assert_eq!(hit.n, 1, "missing index {idx}");
+        }
+
         ensure_schema(&mut conn).unwrap();
     }
 }
