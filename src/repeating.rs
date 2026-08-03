@@ -633,6 +633,28 @@ impl RepeatingTaskManager {
                 Some(e.to_string()),
             )
             .await;
+            // Bump next_run_at/last_run_at even on a failed dispatch.
+            // Without this the row keeps a stale (already-due)
+            // next_run_at, `check_run_policy` compares against the last
+            // *success* (unchanged), and the scheduler picks the same
+            // row up again next tick -- one crashed session per 30s
+            // tick, forever, since run history is capped but sessions
+            // are not. Reschedule to the task's next slot before
+            // surfacing the error, same as every other refusal path
+            // above.
+            let (next, disable) = next_run_fields(&task, now_dt);
+            let _ = db
+                .update_repeating_task(
+                    task_id,
+                    UpdateRepeatingTask {
+                        last_run_at: Some(Some(now.clone())),
+                        next_run_at: Some(next),
+                        enabled: disable,
+                        updated_at: Some(now.clone()),
+                        ..Default::default()
+                    },
+                )
+                .await;
             return Err(e);
         }
 

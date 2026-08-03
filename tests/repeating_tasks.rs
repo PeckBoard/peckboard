@@ -872,3 +872,65 @@ async fn force_run_works_again_after_a_once_task_is_re_armed() {
         env.session_manager.cancel_and_wait(&s.id).await;
     }
 }
+
+#[tokio::test]
+async fn failed_dispatch_reschedules_next_run_at_instead_of_refiring_every_tick() {
+    // Regression: a task pinned to a model no registered provider can serve
+    // (deleted ollama alias, uninstalled provider, deleted account) used to
+    // fail dispatch, record a "failed" run, then return early *before*
+    // bumping next_run_at. The row stayed due, so every 30s scheduler tick
+    // spawned another crashed session forever -- run history is capped but
+    // sessions are not.
+    let env = fresh_state().await;
+    let tmp = tempfile::tempdir().unwrap();
+    seed_folder(&env.db, "f1", tmp.path().to_str().unwrap()).await;
+    // "ghost" has no registered provider in this test registry (only
+    // "mock" is registered by `fresh_state`), so dispatch fails exactly
+    // like a deleted account / uninstalled provider would.
+    seed_task(&env.db, "t1", "f1", "go", Some("ghost:nope")).await;
+    env.db
+        .update_repeating_task(
+            "t1",
+            peckboard::db::models::UpdateRepeatingTask {
+                next_run_at: Some(Some("2020-01-01T00:00:00Z".into())),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+
+    env.rtm.run_due_tasks(env.run_ctx()).await;
+
+    let after_first = env.db.get_repeating_task("t1").await.unwrap().unwrap();
+    assert!(
+        after_first.last_run_at.is_some(),
+        "a failed dispatch must still record last_run_at",
+    );
+    let next_after_first: chrono::DateTime<chrono::Utc> = after_first
+        .next_run_at
+        .as_deref()
+        .expect("failed dispatch must still advance next_run_at")
+        .parse()
+        .unwrap();
+    assert!(
+        next_after_first > chrono::Utc::now(),
+        "next_run_at must move to the future after a failed dispatch, not stay due; got {next_after_first}",
+    );
+
+    let sessions_after_first = env.db.list_sessions_by_repeating_task("t1").await.unwrap();
+    assert_eq!(
+        sessions_after_first.len(),
+        1,
+        "exactly one crashed session should be spawned by the first tick",
+    );
+
+    // A second tick immediately after must NOT spawn another session: the
+    // task is no longer due (next_run_at is in the future).
+    env.rtm.run_due_tasks(env.run_ctx()).await;
+    let sessions_after_second = env.db.list_sessions_by_repeating_task("t1").await.unwrap();
+    assert_eq!(
+        sessions_after_second.len(),
+        1,
+        "a dead-model task must not refire on the very next scheduler tick",
+    );
+}
