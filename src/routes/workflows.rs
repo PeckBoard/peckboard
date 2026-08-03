@@ -17,19 +17,41 @@ use axum::{
 };
 use std::sync::Arc;
 
-use crate::auth::middleware::require_auth;
+use crate::auth::middleware::{require_admin, require_auth};
 use crate::db::models::{CustomWorkflowRow, CustomWorkflowStepRow};
 use crate::state::AppState;
 use crate::workflow::{self, WorkflowStepDef};
 
 pub fn router(state: Arc<AppState>) -> Router<Arc<AppState>> {
     Router::new()
-        .route("/api/workflows", get(list_workflows).post(create_workflow))
+        .merge(admin_router())
+        .merge(user_router())
+        .route_layer(middleware::from_fn_with_state(state, require_auth))
+}
+
+/// Custom workflows are global, unpartitioned config: a step's `instructions`
+/// text is injected verbatim into the worker prompt of every project that uses
+/// the workflow, in folders the editor may have no access to. Writing one is
+/// therefore host-wide privilege — admin-only, same reasoning as
+/// `routes/settings.rs` and `routes/folders.rs`.
+///
+/// Layers run outer-to-inner, so `require_admin` is appended here and
+/// `require_auth` in [`router`] afterwards, which puts `AuthUser` into the
+/// extensions before this middleware reads it.
+fn admin_router() -> Router<Arc<AppState>> {
+    Router::new()
+        .route("/api/workflows", axum::routing::post(create_workflow))
         .route(
             "/api/workflows/{id}",
             axum::routing::put(update_workflow).delete(delete_workflow),
         )
-        .route_layer(middleware::from_fn_with_state(state, require_auth))
+        .route_layer(middleware::from_fn(require_admin))
+}
+
+/// Listing is readable by any authenticated user — the card and project
+/// editors need the merged built-in + custom list to render a workflow picker.
+fn user_router() -> Router<Arc<AppState>> {
+    Router::new().route("/api/workflows", get(list_workflows))
 }
 
 fn err(status: StatusCode, msg: impl std::fmt::Display) -> (StatusCode, Json<serde_json::Value>) {

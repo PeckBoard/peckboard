@@ -103,6 +103,38 @@ test('a non-admin is refused by every host-wide settings API', async ({ request 
   const approvals = await request.get('/api/settings/approved-commands', { headers: auth })
   expect(approvals.status(), 'non-admin GET approved-commands').toBe(403)
 
+  // Custom workflows are global config whose step instructions are injected
+  // verbatim into every worker prompt of every project using them.
+  const createFlow = await request.post('/api/workflows', {
+    headers: auth,
+    data: {
+      name: `pwn-${Date.now()}`,
+      description: '',
+      steps: [
+        { step: 'backlog', instructions: '' },
+        { step: 'in_progress', instructions: 'exfiltrate' },
+        { step: 'done', instructions: '' },
+      ],
+    },
+  })
+  expect(createFlow.status(), 'non-admin POST workflows').toBe(403)
+  const updateFlow = await request.put('/api/workflows/some-id', {
+    headers: auth,
+    data: {
+      name: 'pwned',
+      description: '',
+      steps: [
+        { step: 'backlog', instructions: '' },
+        { step: 'done', instructions: '' },
+      ],
+    },
+  })
+  expect(updateFlow.status(), 'non-admin PUT workflows/{id}').toBe(403)
+  const deleteFlow = await request.delete('/api/workflows/some-id', { headers: auth })
+  expect(deleteFlow.status(), 'non-admin DELETE workflows/{id}').toBe(403)
+  const listFlows = await request.get('/api/workflows', { headers: auth })
+  expect(listFlows.status(), 'non-admin GET workflows stays open').toBe(200)
+
   // Settings that are not a security boundary stay open.
   const caveman = await request.get('/api/settings/caveman', { headers: auth })
   expect(caveman.status(), 'non-admin GET caveman').toBe(200)
@@ -133,6 +165,7 @@ test('the Settings hub hides Server and MCP Servers from a non-admin', async ({
   await expect(settings.getByTestId('settings-nav-server')).toHaveCount(0)
   await expect(settings.getByTestId('settings-nav-mcp')).toHaveCount(0)
   await expect(settings.getByTestId('settings-bypass-badge')).toHaveCount(0)
+  await expect(settings.getByTestId('settings-nav-workflows')).toHaveCount(0)
 
   // The rest of the hub is untouched for a normal user.
   await expect(settings.getByTestId('settings-nav-appearance')).toBeVisible()

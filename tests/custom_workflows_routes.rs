@@ -337,3 +337,158 @@ async fn put_and_delete_reject_builtin_ids() {
         .unwrap();
     assert_eq!(resp.status(), StatusCode::NOT_FOUND);
 }
+
+/// Seed a second, non-admin user and return its bearer token. Custom
+/// workflows are global config whose step `instructions` land verbatim in
+/// every worker prompt, so only admins may write them.
+async fn member_token(state: &Arc<AppState>) -> String {
+    let now_secs = 1_000_000i64;
+    state
+        .db
+        .create_user(NewUser {
+            id: "u2".into(),
+            username: "member".into(),
+            email: None,
+            password_hash: "h".into(),
+            role: "user".into(),
+            created_at: chrono::Utc::now().to_rfc3339(),
+            updated_at: chrono::Utc::now().to_rfc3339(),
+        })
+        .await
+        .unwrap();
+    let (token, _exp) = create_token(&state.jwt_secret, "u2", "user", "as2").unwrap();
+    state
+        .db
+        .create_auth_session(NewAuthSession {
+            id: "as2".into(),
+            user_id: "u2".into(),
+            token_hash: hash_token(&token),
+            created_at: now_secs,
+            expires_at: now_secs + 7 * 24 * 60 * 60,
+            user_agent: None,
+            ip_address: None,
+        })
+        .await
+        .unwrap();
+    token
+}
+
+async fn call(
+    state: &Arc<AppState>,
+    token: &str,
+    method: &str,
+    uri: &str,
+    body: Option<serde_json::Value>,
+) -> StatusCode {
+    let mut builder = Request::builder()
+        .method(method)
+        .uri(uri)
+        .header(header::AUTHORIZATION, format!("Bearer {token}"));
+    let body = match body {
+        Some(json) => {
+            builder = builder.header(header::CONTENT_TYPE, "application/json");
+            Body::from(json.to_string())
+        }
+        None => Body::empty(),
+    };
+    router(state.clone())
+        .with_state(state.clone())
+        .oneshot(builder.body(body).unwrap())
+        .await
+        .unwrap()
+        .status()
+}
+
+#[tokio::test]
+async fn non_admin_cannot_create_update_or_delete_custom_workflows() {
+    let _guard = REGISTRY_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+    peckboard::workflow::set_custom_workflows(Vec::new());
+    let (state, admin) = build_state().await;
+    let member = member_token(&state).await;
+
+    let (status, created) = post_workflow(&state, &admin, create_body()).await;
+    assert_eq!(status, StatusCode::CREATED, "{created:?}");
+    let id = created
+        .get("id")
+        .and_then(|v| v.as_str())
+        .unwrap()
+        .to_string();
+
+    assert_eq!(
+        call(
+            &state,
+            &member,
+            "POST",
+            "/api/workflows",
+            Some(create_body())
+        )
+        .await,
+        StatusCode::FORBIDDEN
+    );
+    assert_eq!(
+        call(
+            &state,
+            &member,
+            "PUT",
+            &format!("/api/workflows/{id}"),
+            Some(create_body()),
+        )
+        .await,
+        StatusCode::FORBIDDEN
+    );
+    assert_eq!(
+        call(
+            &state,
+            &member,
+            "DELETE",
+            &format!("/api/workflows/{id}"),
+            None
+        )
+        .await,
+        StatusCode::FORBIDDEN
+    );
+
+    // The workflow the admin created is untouched.
+    assert!(
+        state
+            .db
+            .get_custom_workflow(&id)
+            .await
+            .unwrap()
+            .is_some_and(|w| w.steps.iter().any(|s| s.instructions == "Do the thing.")),
+    );
+}
+
+#[tokio::test]
+async fn non_admin_can_still_list_workflows() {
+    let _guard = REGISTRY_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+    peckboard::workflow::set_custom_workflows(Vec::new());
+    let (state, admin) = build_state().await;
+    let member = member_token(&state).await;
+    let (status, _) = post_workflow(&state, &admin, create_body()).await;
+    assert_eq!(status, StatusCode::CREATED);
+
+    let req = Request::builder()
+        .method("GET")
+        .uri("/api/workflows")
+        .header(header::AUTHORIZATION, format!("Bearer {member}"))
+        .body(Body::empty())
+        .unwrap();
+    let resp = router(state.clone())
+        .with_state(state.clone())
+        .oneshot(req)
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    let workflows = json.get("workflows").and_then(|v| v.as_array()).unwrap();
+    assert!(
+        workflows
+            .iter()
+            .any(|w| w.get("source").and_then(|v| v.as_str()) == Some("custom")),
+        "non-admin list must still include custom workflows: {json:?}"
+    );
+}

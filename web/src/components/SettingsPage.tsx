@@ -118,6 +118,7 @@ const SUB_PAGES: { id: SubPage; title: string; blurb: string; adminOnly?: boolea
     id: 'workflows',
     title: 'Workflows',
     blurb: 'Define custom step sequences for projects and cards',
+    adminOnly: true,
   },
   {
     id: 'providers',
