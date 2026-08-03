@@ -648,14 +648,23 @@ async fn delete_session(
 
 /// Full session-delete cleanup, shared by DELETE /api/sessions/:id, the
 /// temp-session last-tab-close hook in `routes::me::delete_tab`, and the
-/// startup orphan sweep [`sweep_orphan_temp_sessions`]. Deletes the
-/// session's events, its attachments directory, its MCP config + tokens,
-/// then the row itself (which also drops its `user_tabs` entries), and
-/// broadcasts `session-deleted` so every connected client closes the tab
-/// strip entry and unmounts ChatView. Returns `Ok(false)` when the session
-/// row didn't exist. Policy checks (e.g. the worker refusal above) are the
-/// caller's job.
+/// startup orphan sweep [`sweep_orphan_temp_sessions`]. Cancels the agent
+/// (a running one keeps billing and emitting into a session row that is
+/// about to vanish; an idle child survives between turns until the reaper),
+/// then deletes the session's events, its attachments directory, its MCP
+/// config + tokens, then the row itself (which also drops its `user_tabs`,
+/// `todos`, and `queued_messages` entries), and broadcasts `session-deleted`
+/// so every connected client closes the tab strip entry and unmounts
+/// ChatView. Returns `Ok(false)` when the session row didn't exist. Policy
+/// checks (e.g. the worker refusal above) are the caller's job.
 pub async fn delete_session_core(state: &AppState, id: &str) -> anyhow::Result<bool> {
+    // First: stop the agent. Unconditional, like `clear_session_core` —
+    // `is_running` is only true mid-turn, but an idle child survives
+    // between turns and would leak until the ~30-min idle reap. Doing this
+    // before the row goes away also stops a live turn from appending
+    // events against a session id whose FK is about to break.
+    state.session_manager.cancel_and_wait(id).await;
+
     // Delete associated events first
     state.db.delete_events_by_session(id).await?;
 

@@ -434,6 +434,12 @@ impl Db {
             )
             .execute(conn)?;
             diesel::delete(todos::table.filter(todos::session_id.eq(&id))).execute(conn)?;
+            // `queued_messages` has no FK to sessions (the FIFO table is
+            // rebuilt by migration 1785340000_queued_messages_fifo), so a
+            // deleted session's pending queue would otherwise survive
+            // forever and could be re-attached to a recycled id.
+            diesel::delete(queued_messages::table.filter(queued_messages::session_id.eq(&id)))
+                .execute(conn)?;
             // A doc review outlives the review session driving it — its
             // document and history are the user's work, so only the link is
             // severed; the next pass creates a fresh session.
