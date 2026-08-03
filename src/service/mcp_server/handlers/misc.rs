@@ -450,13 +450,11 @@ impl McpToolRegistry {
 
         // Resolve effective (settings-derived) model lists once, then
         // derive both the flat list and per-provider counts from it.
-        let providers = registry.list_providers_with_models().await;
+        // Hidden (disabled) providers are excluded before resolution so
+        // they are never probed for models.
         let hidden =
             crate::routes::settings::hidden_providers_for_db(ctx.db.as_ref().clone()).await;
-        let providers: Vec<_> = providers
-            .into_iter()
-            .filter(|p| !hidden.contains(&p.id))
-            .collect();
+        let providers = registry.list_providers_with_models_except(&hidden).await;
 
         let models: Vec<Value> = providers
             .iter()

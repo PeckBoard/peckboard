@@ -254,10 +254,24 @@ impl ProviderRegistry {
     /// `get_provider` (send/interrupt/cancel paths) app-wide for the
     /// whole probe.
     pub async fn list_providers_with_models(&self) -> Vec<ProviderInfo> {
+        self.list_providers_with_models_except(&std::collections::HashSet::new())
+            .await
+    }
+
+    /// [`list_providers_with_models`](Self::list_providers_with_models)
+    /// minus the providers in `exclude` (the hidden/disabled set from
+    /// Settings → Providers & Accounts). Excluded providers are skipped
+    /// BEFORE `dynamic_models()` runs, so a disabled provider is never
+    /// probed for its catalog (Ollama HTTP discovery, CLI probes, …).
+    pub async fn list_providers_with_models_except(
+        &self,
+        exclude: &std::collections::HashSet<String>,
+    ) -> Vec<ProviderInfo> {
         let entries: Vec<(ProviderInfo, Arc<dyn AgentProvider>)> = {
             let providers = self.providers.lock().await;
             providers
                 .values()
+                .filter(|r| !exclude.contains(&r.info.id))
                 .map(|r| (r.info.clone(), r.provider.clone()))
                 .collect()
         };
@@ -334,16 +348,27 @@ impl ProviderRegistry {
     /// optional `@account` suffix.
     pub async fn is_thinking_model(&self, model_id: &str) -> bool {
         let (base, _account) = split_model_account(model_id);
-        let (provider, model) = Self::parse_model_id(base, "claude");
-        for info in self.list_providers_with_models().await {
-            if info.id != provider {
-                continue;
-            }
-            if let Some(m) = info.models.iter().find(|m| m.id == model) {
-                return m.is_thinking();
-            }
-        }
-        false
+        let (provider_id, model) = Self::parse_model_id(base, "claude");
+        // Resolve only the addressed provider's effective catalog — going
+        // through list_providers_with_models() here ran every provider's
+        // dynamic_models() probe (disabled ones included) to answer a
+        // single-provider question.
+        let Some((info, provider)) = ({
+            let providers = self.providers.lock().await;
+            providers
+                .get(provider_id.as_str())
+                .map(|r| (r.info.clone(), r.provider.clone()))
+        }) else {
+            return false;
+        };
+        let models = match provider.dynamic_models().await {
+            Some(models) => models,
+            None => info.models,
+        };
+        models
+            .iter()
+            .find(|m| m.id == model)
+            .is_some_and(|m| m.is_thinking())
     }
     /// The cheapest model `provider_id` offers, ranked by the provider's own
     /// published price (input + output USD per million tokens, via

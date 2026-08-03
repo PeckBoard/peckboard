@@ -59,13 +59,14 @@ async fn list_models(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     // Resolve providers with their effective (settings-derived) model
     // lists once, then derive the flat list from the same snapshot so a
     // provider's `dynamic_models` is only computed a single time per call.
-    let providers = state.provider_registry.list_providers_with_models().await;
-    let auth = state.provider_registry.provider_auth_status().await;
+    // Hidden (disabled) providers are excluded up front so they are never
+    // probed for models at all.
     let hidden = hidden_providers(&state).await;
-    let providers: Vec<_> = providers
-        .into_iter()
-        .filter(|p| !hidden.contains(&p.id))
-        .collect();
+    let providers = state
+        .provider_registry
+        .list_providers_with_models_except(&hidden)
+        .await;
+    let auth = state.provider_registry.provider_auth_status().await;
 
     Json(serde_json::json!({
         "providers": providers.iter().map(|p| serde_json::json!({
