@@ -521,6 +521,12 @@ pub async fn stream_events(
                         let frame = super::build_user_message_frame(&message);
                         if write_stdin_line(&mut stdin_pipe, &frame, &session_id).await {
                             state.turn_active.store(true, Ordering::Release);
+                            // A new turn starts with a clean error slate:
+                            // the previous turn's `result` error must not
+                            // be reported as *this* turn's crash reason
+                            // (a kill mid-turn N+1 would otherwise carry
+                            // turn N's 401 and its login-expired kind).
+                            last_result_error = None;
                             state.last_activity.store(now_ms(), Ordering::Release);
                             turn_deadline = state
                                 .turn_timeout
@@ -1981,6 +1987,45 @@ mod tests {
             "outcome must carry the CLI's error text, got {:?}",
             outcome.error
         );
+    }
+
+    #[tokio::test]
+    async fn new_turn_clears_previous_turns_result_error() {
+        // Turn N settles with an is_error result (transient 401); turn N+1
+        // is cancelled mid-flight. The outcome must report *this* exit's
+        // interrupt, not turn N's stale auth error — otherwise
+        // maybe_auto_pause_after_crash sees login-expired and trips the
+        // crash-pause ladder for a failure that did not happen here.
+        let session = "loop-stale-result-error";
+        let (_db, tx, cancel, turn_active, handle) = spawn_cat_loop(session).await;
+
+        tx.send(StdinMsg::UserTurn(UserMessage::from_text("first")))
+            .await
+            .unwrap();
+        wait_for_turn_active(&turn_active, true, 2_000).await;
+        tx.send(StdinMsg::RawLine(fake_error_result_frame("conv-stale")))
+            .await
+            .unwrap();
+        wait_for_turn_active(&turn_active, false, 2_000).await;
+
+        tx.send(StdinMsg::UserTurn(UserMessage::from_text("second")))
+            .await
+            .unwrap();
+        wait_for_turn_active(&turn_active, true, 2_000).await;
+
+        cancel.notify_one();
+        let outcome = timeout(std::time::Duration::from_secs(5), handle)
+            .await
+            .expect("stream loop must exit within 5s")
+            .expect("task must not panic");
+
+        assert!(!outcome.completed);
+        assert_eq!(
+            outcome.error.as_deref(),
+            Some("interrupted"),
+            "cancelled turn must report the interrupt, not the previous turn's error"
+        );
+        assert_eq!(outcome.error_kind, Some(CrashKind::Interrupted));
     }
 
     #[tokio::test]
