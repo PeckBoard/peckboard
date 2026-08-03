@@ -542,6 +542,14 @@ pub fn validate_workflow_steps(steps: &[WorkflowStepDef]) -> Result<(), String> 
             return Err(format!("step '{}' is defined more than once", s.step));
         }
     }
+    for s in &steps[1..steps.len() - 1] {
+        if matches!(s.step.as_str(), "backlog" | "todo" | "done" | "wont_do") {
+            return Err(format!(
+                "step '{}' is reserved and may not be used as a working step",
+                s.step
+            ));
+        }
+    }
     for (i, s) in steps.iter().enumerate() {
         let is_terminal = i == 0 || i == steps.len() - 1;
         if is_terminal && !s.instructions.trim().is_empty() {
@@ -690,6 +698,20 @@ mod tests {
         let mut steps = valid_custom_steps();
         steps[1].step = "In Progress".to_string();
         assert!(validate_workflow_steps(&steps).is_err());
+    }
+
+    #[test]
+    fn validate_workflow_steps_rejects_reserved_names_in_middle_positions() {
+        // The orchestrator gives these names special meaning (intake rewind /
+        // terminal filtering); re-declaring one as a working step would loop or
+        // wedge the card.
+        for reserved in ["backlog", "todo", "done", "wont_do"] {
+            let mut steps = valid_custom_steps();
+            steps[1].step = reserved.to_string();
+            let err = validate_workflow_steps(&steps)
+                .expect_err("reserved step name must be rejected in a middle position");
+            assert!(err.contains(reserved), "unexpected error: {err}");
+        }
     }
 
     #[test]
