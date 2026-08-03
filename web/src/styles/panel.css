@@ -98,3 +98,11 @@
   background: var(--danger-bg);
   color: var(--danger);
 }
+.status-corrupt_schedule {
+  background: var(--danger-bg);
+  color: var(--danger);
+}
+.status-consumed_once {
+  background: var(--surface3);
+  color: var(--text3);
+}

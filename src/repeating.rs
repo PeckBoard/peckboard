@@ -367,10 +367,16 @@ impl RepeatingTaskManager {
                 ?trigger,
                 "Refusing dispatch: `once` schedule already fired",
             );
-            // No `record_run` row: the `repeating_task_runs.status` CHECK
-            // constraint only admits spawned/already_running/throttled/
-            // failed, and a rejected insert would just log a warning.
-            // The refusal surfaces as a 409 on the force-run route.
+            record_run(
+                db,
+                task_id,
+                None,
+                "consumed_once",
+                trigger,
+                Some("`once` schedule already fired".to_string()),
+            )
+            .await;
+            // The refusal also surfaces as a 409 on the force-run route.
             return Ok(StartOutcome::ConsumedOnce);
         }
 

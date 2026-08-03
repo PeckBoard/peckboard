@@ -39,6 +39,8 @@ const RUN_STATUS_LABEL: Record<string, string> = {
   already_running: 'Already running',
   throttled: 'Throttled',
   failed: 'Failed',
+  corrupt_schedule: 'Corrupt schedule',
+  consumed_once: 'Already ran (once)',
 }
 
 export default function RepeatingTasksView({ activeTaskId, onNavigate, onOpenSession }: Props) {

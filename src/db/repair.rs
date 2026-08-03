@@ -1507,21 +1507,78 @@ fn ensure_repeating_tasks_timezone_column(conn: &mut SqliteConnection) -> anyhow
 }
 
 /// Heal DBs that predate `1785657542_repeating_task_tz_and_runs`:
-/// per-dispatch run history for repeating tasks.
+/// per-dispatch run history for repeating tasks. Also relaxes the
+/// `status` CHECK to the post-`1786400000_repeating_task_run_status_widen`
+/// shape (adds `corrupt_schedule` / `consumed_once`) — CHECK constraints
+/// can only be changed by recreating the table, and SQLite has no
+/// IF-CHECK-IS-RELAXED guard, so a detect-then-rebuild heals data dirs
+/// that skipped the migration or died halfway through it.
 fn ensure_repeating_task_runs_table(conn: &mut SqliteConnection) -> anyhow::Result<()> {
+    const CURRENT_STATUS_CHECK: &str = "CHECK (status IN ('spawned', 'already_running', 'throttled', 'failed', 'corrupt_schedule', 'consumed_once'))";
+
+    // Recover from a rebuild (migration or a previous repair pass) that
+    // died between DROP and RENAME, or that left its scratch table behind.
+    let has_runs = table_exists(conn, "repeating_task_runs")?;
+    let has_scratch = table_exists(conn, "repeating_task_runs_new")?;
+    if !has_runs && has_scratch {
+        tracing::info!("Repairing schema: resuming interrupted repeating_task_runs rebuild");
+        sql_query("ALTER TABLE repeating_task_runs_new RENAME TO repeating_task_runs")
+            .execute(conn)?;
+    } else if has_runs && has_scratch {
+        tracing::info!("Repairing schema: dropping stale repeating_task_runs_new scratch table");
+        sql_query("DROP TABLE repeating_task_runs_new").execute(conn)?;
+    }
+
     log_if_healing_table(conn, "repeating_task_runs")?;
-    sql_query(
+    sql_query(&format!(
         "CREATE TABLE IF NOT EXISTS repeating_task_runs (
             id          TEXT    PRIMARY KEY NOT NULL,
             task_id     TEXT    NOT NULL REFERENCES repeating_tasks(id),
             session_id  TEXT,
             started_at  TEXT    NOT NULL,
-            status      TEXT    NOT NULL CHECK (status IN ('spawned', 'already_running', 'throttled', 'failed')),
+            status      TEXT    NOT NULL {CURRENT_STATUS_CHECK},
             trigger     TEXT    NOT NULL CHECK (trigger IN ('scheduler', 'manual')),
             detail      TEXT
-        )",
-    )
+        )"
+    ))
     .execute(conn)?;
+
+    #[derive(QueryableByName)]
+    struct MasterRow {
+        #[diesel(sql_type = diesel::sql_types::Text)]
+        sql: String,
+    }
+    let row: Option<MasterRow> = sql_query(
+        "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'repeating_task_runs'",
+    )
+    .get_result(conn)
+    .optional()?;
+    // A table whose CHECK doesn't mention the newest status predates the
+    // widening migration. Rebuild it, preserving every existing row.
+    if row.is_some_and(|r| !r.sql.contains("'consumed_once'")) {
+        tracing::info!("Repairing schema: relaxing repeating_task_runs.status CHECK constraint");
+        sql_query(&format!(
+            "CREATE TABLE repeating_task_runs_new (
+                id          TEXT    PRIMARY KEY NOT NULL,
+                task_id     TEXT    NOT NULL REFERENCES repeating_tasks(id),
+                session_id  TEXT,
+                started_at  TEXT    NOT NULL,
+                status      TEXT    NOT NULL {CURRENT_STATUS_CHECK},
+                trigger     TEXT    NOT NULL CHECK (trigger IN ('scheduler', 'manual')),
+                detail      TEXT
+            )"
+        ))
+        .execute(conn)?;
+        sql_query(
+            "INSERT INTO repeating_task_runs_new (id, task_id, session_id, started_at, status, trigger, detail)
+                SELECT id, task_id, session_id, started_at, status, trigger, detail FROM repeating_task_runs",
+        )
+        .execute(conn)?;
+        sql_query("DROP TABLE repeating_task_runs").execute(conn)?;
+        sql_query("ALTER TABLE repeating_task_runs_new RENAME TO repeating_task_runs")
+            .execute(conn)?;
+    }
+
     sql_query(
         "CREATE INDEX IF NOT EXISTS idx_repeating_task_runs_task ON repeating_task_runs (task_id, started_at)",
     )
@@ -1839,6 +1896,84 @@ mod tests {
         // Idempotent: second run is a no-op on the relaxed schema.
         ensure_schema(&mut conn).unwrap();
         let count2: CountRow = sql_query("SELECT count(*) AS n FROM user_tabs")
+            .get_result(&mut conn)
+            .unwrap();
+        assert_eq!(count2.n, 3);
+    }
+
+    /// A DB created before `1786400000_repeating_task_run_status_widen`
+    /// has the narrow `repeating_task_runs.status` CHECK, which rejects
+    /// the `corrupt_schedule` / `consumed_once` refusal rows the
+    /// dispatcher writes. ensure_schema must rebuild the table with the
+    /// relaxed CHECK, preserving existing rows.
+    #[test]
+    fn ensure_schema_relaxes_repeating_task_runs_status_check() {
+        let mut conn = SqliteConnection::establish(":memory:").unwrap();
+        sql_query(
+            "CREATE TABLE projects (
+                id TEXT PRIMARY KEY NOT NULL,
+                auto_notify_changes BOOLEAN NOT NULL DEFAULT 1,
+                worker_communication BOOLEAN NOT NULL DEFAULT 1
+            )",
+        )
+        .execute(&mut conn)
+        .unwrap();
+        sql_query("CREATE TABLE repeating_tasks (id TEXT PRIMARY KEY NOT NULL)")
+            .execute(&mut conn)
+            .unwrap();
+        // The pre-widening table, byte-for-byte the original CHECK.
+        sql_query(
+            "CREATE TABLE repeating_task_runs (
+                id          TEXT    PRIMARY KEY NOT NULL,
+                task_id     TEXT    NOT NULL REFERENCES repeating_tasks(id),
+                session_id  TEXT,
+                started_at  TEXT    NOT NULL,
+                status      TEXT    NOT NULL CHECK (status IN ('spawned', 'already_running', 'throttled', 'failed')),
+                trigger     TEXT    NOT NULL CHECK (trigger IN ('scheduler', 'manual')),
+                detail      TEXT
+            )",
+        )
+        .execute(&mut conn)
+        .unwrap();
+        sql_query("INSERT INTO repeating_tasks (id) VALUES ('t1')")
+            .execute(&mut conn)
+            .unwrap();
+        sql_query(
+            "INSERT INTO repeating_task_runs (id, task_id, started_at, status, trigger) \
+             VALUES ('r1', 't1', '2026-08-03T00:00:00Z', 'spawned', 'scheduler')",
+        )
+        .execute(&mut conn)
+        .unwrap();
+        // The old CHECK really does reject the refusal statuses.
+        assert!(
+            sql_query(
+                "INSERT INTO repeating_task_runs (id, task_id, started_at, status, trigger) \
+                 VALUES ('r0', 't1', '2026-08-03T00:00:00Z', 'corrupt_schedule', 'scheduler')",
+            )
+            .execute(&mut conn)
+            .is_err(),
+        );
+
+        ensure_schema(&mut conn).unwrap();
+
+        let count: CountRow =
+            sql_query("SELECT count(*) AS n FROM repeating_task_runs WHERE id = 'r1'")
+                .get_result(&mut conn)
+                .unwrap();
+        assert_eq!(count.n, 1, "pre-heal run row must survive");
+
+        for status in ["corrupt_schedule", "consumed_once"] {
+            sql_query(&format!(
+                "INSERT INTO repeating_task_runs (id, task_id, started_at, status, trigger) \
+                 VALUES ('r_{status}', 't1', '2026-08-03T00:00:00Z', '{status}', 'scheduler')"
+            ))
+            .execute(&mut conn)
+            .unwrap_or_else(|e| panic!("{status} insert should succeed after heal: {e}"));
+        }
+
+        // Idempotent: second run is a no-op on the relaxed schema.
+        ensure_schema(&mut conn).unwrap();
+        let count2: CountRow = sql_query("SELECT count(*) AS n FROM repeating_task_runs")
             .get_result(&mut conn)
             .unwrap();
         assert_eq!(count2.n, 3);

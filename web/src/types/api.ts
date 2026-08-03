@@ -71,7 +71,13 @@ export interface RepeatingTask {
   timezone: string | null
 }
 
-export type RepeatingTaskRunStatus = 'spawned' | 'already_running' | 'throttled' | 'failed'
+export type RepeatingTaskRunStatus =
+  | 'spawned'
+  | 'already_running'
+  | 'throttled'
+  | 'failed'
+  | 'corrupt_schedule'
+  | 'consumed_once'
 export type RepeatingTaskRunTrigger = 'scheduler' | 'manual'
 
 export interface RepeatingTaskRun {

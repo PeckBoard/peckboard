@@ -693,6 +693,23 @@ async fn scheduler_disables_task_with_corrupt_schedule_instead_of_refiring() {
     let task = env.db.get_repeating_task("t1").await.unwrap().unwrap();
     assert!(!task.enabled, "corrupt-schedule task must be disabled");
     assert!(task.next_run_at.is_none());
+    // The refusal is the one thing an operator needs in the history:
+    // "why did my task stop?".
+    let runs = env.db.list_repeating_task_runs("t1", 10).await.unwrap();
+    assert_eq!(
+        runs.iter().map(|r| r.status.as_str()).collect::<Vec<_>>(),
+        vec!["corrupt_schedule"],
+    );
+    assert!(
+        runs[0]
+            .detail
+            .as_deref()
+            .unwrap_or_default()
+            .contains("corrupt schedule"),
+        "expected the parse error in detail; got {:?}",
+        runs[0].detail,
+    );
+    assert_eq!(runs[0].trigger.as_str(), "scheduler");
 
     // Second tick: the row is disabled, so it isn't even due any more.
     env.rtm.run_due_tasks(env.run_ctx()).await;
@@ -795,14 +812,14 @@ async fn force_run_refuses_to_refire_a_consumed_once_task() {
         "refused force-run must not spawn a second session; got {:?}",
         sessions.iter().map(|s| &s.id).collect::<Vec<_>>(),
     );
-    // The refusal writes no run-history row: the `status` CHECK
-    // constraint on repeating_task_runs doesn't admit a refusal status,
-    // so the dispatch history stays at the single real run.
+    // The refusal writes its own run-history row, so the view can show
+    // why "Run now" did nothing. Rows come back newest-first.
     let runs = env.db.list_repeating_task_runs("t1", 10).await.unwrap();
     assert_eq!(
         runs.iter().map(|r| r.status.as_str()).collect::<Vec<_>>(),
-        vec!["spawned"],
+        vec!["consumed_once", "spawned"],
     );
+    assert_eq!(runs[0].trigger.as_str(), "manual");
 }
 
 #[tokio::test]
