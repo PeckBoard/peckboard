@@ -639,12 +639,59 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         let m1 = ensure_certs(tmp.path()).unwrap();
         let cert1 = fs::read_to_string(&m1.cert_path).unwrap();
+        let key1 = fs::read_to_string(&m1.key_path).unwrap();
+        let sidecar1 = read_sidecar(&sidecar_path(tmp.path())).unwrap();
 
         // Second call should reuse existing certs (unless renewal needed)
         let m2 = ensure_certs(tmp.path()).unwrap();
         let cert2 = fs::read_to_string(&m2.cert_path).unwrap();
+        let key2 = fs::read_to_string(&m2.key_path).unwrap();
+        let sidecar2 = read_sidecar(&sidecar_path(tmp.path())).unwrap();
 
         assert_eq!(cert1, cert2);
+        assert_eq!(
+            key1, key2,
+            "unchanged SANs + healthy expiry must not touch the key"
+        );
+        assert_eq!(
+            sidecar1.generated_at, sidecar2.generated_at,
+            "unchanged SANs + healthy expiry must not rewrite the sidecar"
+        );
+    }
+
+    #[test]
+    fn test_is_usable_san_ip_excludes_link_local_v6() {
+        assert!(!is_usable_san_ip(&"fe80::1".parse().unwrap()));
+        assert!(!is_usable_san_ip(&"fe80::abcd:1234".parse().unwrap()));
+        // fec0::/10 is outside the fe80::/10 link-local range and must not
+        // be excluded by the same check.
+        assert!(is_usable_san_ip(&"fec0::1".parse().unwrap()));
+        // A routable global-unicast address stays usable.
+        assert!(is_usable_san_ip(&"2001:db8::1".parse().unwrap()));
+    }
+
+    #[test]
+    fn test_san_targets_include_a_detected_non_loopback_address() {
+        let detected: Vec<_> = if_addrs::get_if_addrs()
+            .unwrap()
+            .into_iter()
+            .map(|iface| iface.addr.ip())
+            .filter(is_usable_san_ip)
+            .collect();
+
+        if detected.is_empty() {
+            // No non-loopback interface on this host (e.g. a locked-down
+            // container) — nothing to assert.
+            return;
+        }
+
+        let targets = san_targets();
+        assert!(
+            detected
+                .iter()
+                .any(|ip| targets.contains(&SanType::IpAddress(*ip))),
+            "expected at least one detected non-loopback address in san_targets(), got {targets:?}"
+        );
     }
 
     #[test]

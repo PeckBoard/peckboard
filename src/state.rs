@@ -234,8 +234,46 @@ mod tests {
         let state = TlsState::new();
         state.set_https_enabled(true);
         assert!(state.snapshot().https_enabled);
-
         state.set_error("boom");
         assert_eq!(state.snapshot().last_error.as_deref(), Some("boom"));
+    }
+
+    /// Mirrors main.rs's startup sequence: `ensure_certs` reuses an
+    /// existing self-signed cert whenever the sidecar SANs match and the
+    /// cert itself isn't near expiry — it never re-validates the paired
+    /// key. A key corrupted after generation (bad edit, partial deploy)
+    /// therefore only surfaces when `load_from` tries to build the
+    /// `CertifiedKey`, which is exactly the "corrupted certificate" startup
+    /// failure this test drives end to end, including the announcement.
+    #[tokio::test]
+    async fn corrupted_key_leaves_https_disabled_and_announces_failure() {
+        let tmp = TempDir::new().unwrap();
+        let material = tls::ensure_certs(tmp.path()).unwrap();
+        std::fs::write(&material.key_path, "not actually a key").unwrap();
+
+        let db = Db::in_memory().unwrap();
+        let state = TlsState::new();
+
+        let reloaded = tls::ensure_certs(tmp.path()).unwrap();
+        let err = state
+            .load_from(tmp.path(), &reloaded)
+            .expect_err("a corrupt key must fail load_from");
+        tls::announce_failure(&db, &format!("{err:#}"))
+            .await
+            .unwrap();
+
+        assert!(state.snapshot().last_error.is_some());
+        assert!(state.current.read().unwrap().is_none());
+        let all = db.list_announcements().await.unwrap();
+        assert_eq!(all.len(), 1);
+        assert_eq!(all[0].id, tls::TLS_FAILURE_ANNOUNCEMENT_ID);
+
+        // A subsequent healthy start (key restored) must clear the same
+        // announcement id.
+        let healthy = tls::regenerate_self_signed(tmp.path()).unwrap();
+        state.load_from(tmp.path(), &healthy).unwrap();
+        tls::clear_failure_announcement(&db).await.unwrap();
+        assert!(db.list_announcements().await.unwrap().is_empty());
+        assert!(state.current.read().unwrap().is_some());
     }
 }
