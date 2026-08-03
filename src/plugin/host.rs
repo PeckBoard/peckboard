@@ -2162,14 +2162,23 @@ pub(crate) fn exec_impl(
 
     // Commands run WITH the custom env vars (Settings → Environment
     // Variables) visible to this folder — globals plus the folder's own,
-    // folder winning on a name collision; plain always, encrypted while an
-    // owner's unlock cache is warm — layered over the inherited host env
-    // (custom wins on collision: user-configured beats ambient). The agent
-    // itself never gets these values: its own process env carries no custom
-    // vars, and any secret a command prints is masked below before the
-    // agent can read it.
-    let (inject_env, masker) =
-        crate::service::secret_mask::command_env_blocking(db, inv.folder_id.as_deref());
+    // folder winning on a name collision; plain always, encrypted only while
+    // the CALLING session's own owner has an open unlock window (another
+    // user's warm unlock is never injected, even in a shared scope) —
+    // layered over the inherited host env (custom wins on collision:
+    // user-configured beats ambient). The agent itself never gets these
+    // values: its own process env carries no custom vars, and any secret a
+    // command prints is masked below before the agent can read it.
+    let user_id = inv
+        .session_id
+        .as_deref()
+        .and_then(|sid| db.get_session_blocking(sid).ok().flatten())
+        .and_then(|s| s.user_id);
+    let (inject_env, masker) = crate::service::secret_mask::command_env_blocking(
+        db,
+        inv.folder_id.as_deref(),
+        user_id.as_deref(),
+    );
     use std::process::{Command, Stdio};
     let mut child = match Command::new(command)
         .args(&req.args)
@@ -2238,6 +2247,18 @@ fn mask_console_envelope(db: &Db, out: String) -> String {
     };
     let masker = crate::service::secret_mask::masker_blocking(db);
     crate::service::secret_mask::mask_console_fields(&mut v, &masker);
+    v.to_string()
+}
+
+/// Mask every string field of a JSON tool envelope (not just `stdout`/
+/// `stderr`) — for read-style host calls (e.g. `peckboard_ssh_read_file`)
+/// whose secret-bearing output isn't confined to a console field.
+fn mask_full_envelope(db: &Db, out: String) -> String {
+    let Ok(mut v) = serde_json::from_str::<serde_json::Value>(&out) else {
+        return out;
+    };
+    let masker = crate::service::secret_mask::masker_blocking(db);
+    crate::service::secret_mask::mask_json_strings(&mut v, &masker);
     v.to_string()
 }
 
@@ -2959,9 +2980,12 @@ host_fn!(peckboard_ssh_exec(user_data: HostState; input: String) -> String {
 });
 
 host_fn!(peckboard_ssh_read_file(user_data: HostState; input: String) -> String {
-    let (_db, _plugin_id, ok) = state_and_permission(&user_data, "ssh")?;
+    let (db, _plugin_id, ok) = state_and_permission(&user_data, "ssh")?;
     if !ok { return Ok(error_json("plugin lacks the 'ssh' permission")); }
-    Ok(super::ssh::read_file_impl(&input))
+    // A remote file can contain a secret value verbatim (e.g. the target
+    // wrote out its own env) — mask it the same as any other tool output.
+    let out = super::ssh::read_file_impl(&input);
+    Ok(mask_full_envelope(&db, out))
 });
 
 host_fn!(peckboard_ssh_write_file(user_data: HostState; input: String) -> String {
@@ -5130,6 +5154,34 @@ mod tests {
         }
     }
 
+    /// Same as `exec_inv`, but carrying a caller session id so `exec_impl`
+    /// can resolve the calling user for per-user encrypted-var injection.
+    fn exec_inv_for(session_id: &str) -> InvocationContext {
+        InvocationContext {
+            folder_id: Some("fx".into()),
+            session_id: Some(session_id.into()),
+            ..Default::default()
+        }
+    }
+
+    /// Create a session in folder `fx` owned by `user_id`, returning its id.
+    async fn session_for_user(db: &Db, user_id: &str) -> String {
+        let ts = chrono::Utc::now().to_rfc3339();
+        let session = db
+            .create_session(crate::db::models::NewSession {
+                id: uuid::Uuid::new_v4().to_string(),
+                name: "test".into(),
+                folder_id: "fx".into(),
+                created_at: ts.clone(),
+                last_activity: ts,
+                user_id: Some(user_id.into()),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        session.id
+    }
+
     fn custom_var(
         name: &str,
         value: &str,
@@ -5159,6 +5211,22 @@ mod tests {
         let out = tokio::task::spawn_blocking(move || {
             let req = serde_json::json!({ "command": "sh", "args": ["-c", script] }).to_string();
             exec_impl(&db, &req, &exec_inv(), false)
+        })
+        .await
+        .unwrap();
+        serde_json::from_str(&out).unwrap()
+    }
+
+    /// Same as `exec_sh`, but scoped to a caller session (so `exec_impl`
+    /// resolves that session's `user_id` for per-user encrypted-var
+    /// injection).
+    async fn exec_sh_as(db: &Db, script: &str, session_id: &str) -> serde_json::Value {
+        let db = db.clone();
+        let script = script.to_string();
+        let inv = exec_inv_for(session_id);
+        let out = tokio::task::spawn_blocking(move || {
+            let req = serde_json::json!({ "command": "sh", "args": ["-c", script] }).to_string();
+            exec_impl(&db, &req, &inv, false)
         })
         .await
         .unwrap();
@@ -5237,10 +5305,63 @@ mod tests {
         vals.insert(row.id.clone(), "unlockedsecret4321".to_string());
         reg.cache_put("owner-x", vals).await;
 
-        let v = exec_sh(&db, "echo len=${#PB_TEST_ENC}; echo $PB_TEST_ENC").await;
+        // Run as the unlocking user's own session: the value is injected.
+        let owner_session = session_for_user(&db, "owner-x").await;
+        let v = exec_sh_as(
+            &db,
+            "echo len=${#PB_TEST_ENC}; echo $PB_TEST_ENC",
+            &owner_session,
+        )
+        .await;
         let stdout = v["stdout"].as_str().unwrap();
         assert!(stdout.contains("len=18"), "stdout: {stdout}");
         assert!(!stdout.contains("unlockedsecret4321"), "stdout: {stdout}");
+        assert!(stdout.contains("********"), "stdout: {stdout}");
+    }
+
+    #[tokio::test]
+    async fn exec_does_not_inject_another_users_unlocked_value() {
+        let (db, _dir) = exec_fixture().await;
+        let ts = chrono::Utc::now().to_rfc3339();
+        let row = db
+            .upsert_env_var(crate::db::models::NewEnvVar {
+                id: uuid::Uuid::new_v4().to_string(),
+                name: "PB_TEST_ENC2".into(),
+                value: None,
+                ciphertext: Some("irrelevant".into()),
+                nonce: Some("irrelevant".into()),
+                kdf_salt: Some("irrelevant".into()),
+                encrypted: true,
+                encrypted_by: Some("owner-x".into()),
+                folder_id: None,
+                created_at: ts.clone(),
+                updated_at: ts,
+            })
+            .await
+            .unwrap();
+
+        crate::service::env_vars::set_global_registry(std::sync::Arc::new(
+            crate::service::env_vars::EnvUnlockRegistry::new(),
+        ));
+        let reg = crate::service::env_vars::global_registry().unwrap();
+        let mut vals = std::collections::HashMap::new();
+        vals.insert(row.id.clone(), "ownerxsecret999888".to_string());
+        // Only owner-x's unlock window is open.
+        reg.cache_put("owner-x", vals).await;
+
+        // A DIFFERENT user's session, in the same (global) scope, must not
+        // get owner-x's warm-unlocked value injected — encrypted_by + the
+        // per-var salt imply per-user ownership of the unlock capability.
+        let other_session = session_for_user(&db, "owner-y").await;
+        let v = exec_sh_as(&db, "echo got=${PB_TEST_ENC2:-unset}", &other_session).await;
+        let stdout = v["stdout"].as_str().unwrap();
+        assert!(stdout.contains("got=unset"), "stdout: {stdout}");
+
+        // The masker still knows the value from ANY owner's cache, so a
+        // leak via some other channel is caught regardless.
+        let v = exec_sh_as(&db, "echo ownerxsecret999888", &other_session).await;
+        let stdout = v["stdout"].as_str().unwrap();
+        assert!(!stdout.contains("ownerxsecret999888"), "stdout: {stdout}");
         assert!(stdout.contains("********"), "stdout: {stdout}");
     }
 

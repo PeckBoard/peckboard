@@ -242,6 +242,39 @@ pub fn mask_console_fields(v: &mut serde_json::Value, masker: &SecretMasker) {
     }
 }
 
+/// Mask every string value anywhere in a JSON tool result — recursively,
+/// through nested objects and arrays — not just the conventional console
+/// fields. Read-oriented tools (`read_file`, `search_files`, `file_outline`,
+/// `read_symbol`, `list_files`, `git`, `run_tests`) can surface a secret
+/// value in any string field (file content, a search match's line text, a
+/// diff), so their output needs the same "agents never see secret values"
+/// treatment `mask_console_fields` gives `exec_impl`. No-op when the masker
+/// is empty. Object keys are never masked — only values — so field names
+/// stay readable.
+pub fn mask_json_strings(v: &mut serde_json::Value, masker: &SecretMasker) {
+    if masker.is_empty() {
+        return;
+    }
+    match v {
+        serde_json::Value::String(s) => {
+            if let Cow::Owned(masked) = masker.mask(s) {
+                *s = masked;
+            }
+        }
+        serde_json::Value::Array(items) => {
+            for item in items {
+                mask_json_strings(item, masker);
+            }
+        }
+        serde_json::Value::Object(obj) => {
+            for (_, val) in obj.iter_mut() {
+                mask_json_strings(val, masker);
+            }
+        }
+        _ => {}
+    }
+}
+
 /// Assemble what a command child process needs: the env vars to inject and
 /// the masker for its console output.
 ///
@@ -259,6 +292,7 @@ pub fn mask_console_fields(v: &mut serde_json::Value, masker: &SecretMasker) {
 pub fn command_env_blocking(
     db: &crate::db::Db,
     folder_id: Option<&str>,
+    user_id: Option<&str>,
 ) -> (Vec<(String, String)>, SecretMasker) {
     let rows = match db.list_env_vars_blocking() {
         Ok(rows) => rows,
@@ -267,22 +301,39 @@ pub fn command_env_blocking(
             Vec::new()
         }
     };
-    // Unlocked encrypted values, var id → plaintext. Keyed by id because
-    // names are only unique per scope. Stale cache entries for since-deleted
-    // vars never match a row, so they are neither injected nor masked.
-    let unlocked = crate::service::env_vars::unlocked_values_blocking();
+    // Masking stays DB-wide: a leaked value must be caught regardless of
+    // which user's unlock produced it. Injection is scoped tighter, below.
+    let unlocked_all = crate::service::env_vars::unlocked_values_blocking();
+    // `encrypted_by` and per-var salts imply per-user ownership of the
+    // unlock capability, so a command only ever gets the CALLING user's own
+    // warm-unlocked values injected — another user's open unlock window
+    // must never leak into this caller's process, even in a shared scope
+    // (a global var, or the same folder). `user_id: None` (no session owner
+    // resolved) injects no encrypted values at all.
+    let unlocked_mine: std::collections::HashMap<String, String> = match user_id {
+        Some(uid) => crate::service::env_vars::unlocked_values_for_user_blocking(uid),
+        None => std::collections::HashMap::new(),
+    };
 
     let mut global: BTreeMap<String, String> = BTreeMap::new();
     let mut folder: BTreeMap<String, String> = BTreeMap::new();
     let mut secrets: Vec<String> = Vec::new();
     for r in &rows {
-        let value = if r.encrypted {
-            unlocked.get(&r.id).cloned()
+        let mask_value = if r.encrypted {
+            unlocked_all.get(&r.id).cloned()
         } else {
             r.value.clone()
         };
-        let Some(value) = value else { continue };
-        secrets.push(value.clone());
+        if let Some(v) = mask_value {
+            secrets.push(v);
+        }
+
+        let inject_value = if r.encrypted {
+            unlocked_mine.get(&r.id).cloned()
+        } else {
+            r.value.clone()
+        };
+        let Some(value) = inject_value else { continue };
         if r.folder_id.is_none() {
             global.insert(r.name.clone(), value);
         } else if folder_id.is_some() && r.folder_id.as_deref() == folder_id {
@@ -304,7 +355,7 @@ pub fn command_env_blocking(
 /// host env), for output paths that don't spawn a local child (e.g. remote
 /// `ssh_run` output). Blocking — call from a blocking thread only.
 pub fn masker_blocking(db: &crate::db::Db) -> SecretMasker {
-    command_env_blocking(db, None).1
+    command_env_blocking(db, None, None).1
 }
 
 #[cfg(test)]
@@ -439,5 +490,43 @@ mod tests {
         assert_eq!(v["stdout"], "value is ********");
         assert_eq!(v["stderr"], "warn: ********");
         assert_eq!(v["command"], "printenv");
+        assert_eq!(v["command"], "printenv");
+    }
+
+    #[test]
+    fn json_strings_masked_recursively_through_nesting() {
+        let m = masker(&["secret123"]);
+        let mut v = serde_json::json!({
+            "path": "secret123",
+            "matches": [
+                {"line": "export TOKEN=secret123", "n": 3},
+                {"line": "unrelated", "n": 4}
+            ],
+            "nested": {"deep": {"value": "s-e-c-r-e-t-1-2-3"}},
+        });
+        mask_json_strings(&mut v, &m);
+        assert_eq!(v["path"], "********");
+        assert_eq!(v["matches"][0]["line"], "export TOKEN=********");
+        assert_eq!(v["matches"][0]["n"], 3);
+        assert_eq!(v["matches"][1]["line"], "unrelated");
+        assert_eq!(v["nested"]["deep"]["value"], "********");
+    }
+
+    #[test]
+    fn json_strings_untouched_when_masker_empty() {
+        let m = masker(&[]);
+        let mut v = serde_json::json!({"path": "secret123"});
+        mask_json_strings(&mut v, &m);
+        assert_eq!(v["path"], "secret123");
+    }
+
+    #[test]
+    fn json_object_keys_never_masked() {
+        // A key that happens to match a secret value stays intact — only
+        // string VALUES are candidates for masking.
+        let m = masker(&["secret123"]);
+        let mut v = serde_json::json!({"secret123": "fine"});
+        mask_json_strings(&mut v, &m);
+        assert_eq!(v["secret123"], "fine");
     }
 }

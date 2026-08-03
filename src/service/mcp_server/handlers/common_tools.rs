@@ -28,7 +28,16 @@ impl McpToolRegistry {
         let name = name.to_string();
         let result = tokio::task::spawn_blocking(move || {
             let hc = common_tools::host_bridge::HostCtx { db: &db, inv };
-            common_tools::dispatch_sync(&name, args, &hc)
+            let mut out = common_tools::dispatch_sync(&name, args, &hc);
+            // Any of these 14 tools can surface a secret env value in a
+            // string field — file content, a search match's line text, a
+            // diff — not just an exec's stdout/stderr. Mask every string in
+            // the result the same way exec_impl masks console output.
+            if let Ok(v) = &mut out {
+                let masker = crate::service::secret_mask::masker_blocking(&db);
+                crate::service::secret_mask::mask_json_strings(v, &masker);
+            }
+            out
         })
         .await?;
         let mut value = result.map_err(|e| anyhow::anyhow!(e))?;
@@ -399,6 +408,71 @@ mod tests {
         assert!(
             edited["diff"].as_str().unwrap().contains("+TWO"),
             "got: {edited}"
+        );
+    }
+
+    /// Regression: a custom env var's value persisted inside the jail (e.g.
+    /// via `env > .leak`) must not be readable back verbatim through
+    /// `read_file` — masking previously covered only exec's stdout/stderr,
+    /// leaving every non-exec common tool as a bypass for the stated
+    /// "agents never see secret values" contract.
+    #[tokio::test]
+    async fn read_file_masks_env_secret_leaked_into_a_file() {
+        let (ctx, _dir) = ctx_with_folder(false).await;
+        let reg = McpToolRegistry::new();
+
+        let ts = chrono::Utc::now().to_rfc3339();
+        ctx.db
+            .upsert_env_var(crate::db::models::NewEnvVar {
+                id: uuid::Uuid::new_v4().to_string(),
+                name: "MY_SECRET".into(),
+                value: Some("supersecretvalue123".into()),
+                ciphertext: None,
+                nonce: None,
+                kdf_salt: None,
+                encrypted: false,
+                encrypted_by: None,
+                folder_id: None,
+                created_at: ts.clone(),
+                updated_at: ts,
+            })
+            .await
+            .unwrap();
+
+        // Simulate the `env > .leak` bypass: the secret value ends up
+        // verbatim in a file's content, not in exec's stdout/stderr.
+        reg.handle_common_tool(
+            "write_file",
+            serde_json::json!({
+                "path": ".leak",
+                "content": "MY_SECRET=supersecretvalue123\nPATH=/usr/bin\n",
+            }),
+            &ctx,
+        )
+        .await
+        .unwrap();
+
+        let read = reg
+            .handle_common_tool("read_file", serde_json::json!({ "path": ".leak" }), &ctx)
+            .await
+            .unwrap();
+        let content = read["content"].as_str().unwrap();
+        assert!(!content.contains("supersecretvalue123"), "got: {read}");
+        assert!(content.contains("********"), "got: {read}");
+        assert!(content.contains("PATH=/usr/bin"), "got: {read}");
+
+        // search_files' match text is masked too (same output boundary).
+        let searched = reg
+            .handle_common_tool(
+                "search_files",
+                serde_json::json!({ "query": "MY_SECRET" }),
+                &ctx,
+            )
+            .await
+            .unwrap();
+        assert!(
+            !searched.to_string().contains("supersecretvalue123"),
+            "got: {searched}"
         );
     }
 }
