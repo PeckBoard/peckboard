@@ -2,10 +2,45 @@ use axum::{Json, extract::Path, extract::State, http::StatusCode, response::Into
 use serde::Deserialize;
 use std::sync::Arc;
 
-use crate::db::models::{NewCard, UpdateCard};
+use crate::db::models::{Card, NewCard, UpdateCard};
 use crate::state::AppState;
 
 use super::{apply_dependencies, card_json_with_deps};
+
+/// Load a card and enforce that it really belongs to the project named in
+/// the URL. Every `/api/projects/:id/cards/:card_id/*` route addresses a
+/// card *through* a project, so a card living in a different project has to
+/// be indistinguishable from one that doesn't exist -- otherwise a handler
+/// runs against the URL project's folder/state while carrying a foreign
+/// card's id. That is how retry-merge came to clear the merge state of a
+/// card in a project it was never asked about.
+async fn load_scoped_card(
+    state: &AppState,
+    project_id: &str,
+    card_id: &str,
+) -> Result<Card, (StatusCode, Json<serde_json::Value>)> {
+    let not_found = || {
+        (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({ "error": "card not found" })),
+        )
+    };
+    let card = state
+        .db
+        .get_card(card_id)
+        .await
+        .map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({ "error": e.to_string() })),
+            )
+        })?
+        .ok_or_else(not_found)?;
+    if card.project_id != project_id {
+        return Err(not_found());
+    }
+    Ok(card)
+}
 
 #[derive(Deserialize)]
 pub(super) struct CreateCardRequest {
@@ -343,10 +378,11 @@ pub(super) async fn list_cards(
 /// PUT /api/projects/:id/cards/:card_id
 pub(super) async fn update_card(
     State(state): State<Arc<AppState>>,
-    Path((_project_id, card_id)): Path<(String, String)>,
+    Path((project_id, card_id)): Path<(String, String)>,
     Json(mut body): Json<UpdateCardRequest>,
 ) -> impl IntoResponse {
     tracing::info!(card_id = %card_id, "Updating card");
+    load_scoped_card(&state, &project_id, &card_id).await?;
 
     // Validate priority if being updated
     if let Some(priority) = body.priority {
@@ -620,18 +656,10 @@ pub(super) async fn update_card(
 /// DELETE /api/projects/:id/cards/:card_id
 pub(super) async fn delete_card(
     State(state): State<Arc<AppState>>,
-    Path((_project_id, card_id)): Path<(String, String)>,
+    Path((project_id, card_id)): Path<(String, String)>,
 ) -> impl IntoResponse {
     tracing::info!(card_id = %card_id, "Deleting card");
-    // Grab the project_id before we delete so we can still broadcast a
-    // card-delete event with it.
-    let project_id = state
-        .db
-        .get_card(&card_id)
-        .await
-        .ok()
-        .flatten()
-        .map(|c| c.project_id);
+    load_scoped_card(&state, &project_id, &card_id).await?;
 
     // Atomic cascade. Replaces a sequence of separate awaits with
     // `let _ = …` that silently swallowed errors and could leave
@@ -652,15 +680,13 @@ pub(super) async fn delete_card(
         "Card cascade-deleted"
     );
 
-    if let Some(pid) = project_id {
-        state
-            .broadcaster
-            .broadcast(crate::ws::broadcaster::WsEvent {
-                event_type: "card-delete".into(),
-                session_id: pid.clone(),
-                data: serde_json::json!({ "cardId": card_id, "projectId": pid }),
-            });
-    }
+    state
+        .broadcaster
+        .broadcast(crate::ws::broadcaster::WsEvent {
+            event_type: "card-delete".into(),
+            session_id: project_id.clone(),
+            data: serde_json::json!({ "cardId": card_id, "projectId": project_id }),
+        });
 
     Ok::<_, (StatusCode, Json<serde_json::Value>)>(StatusCode::NO_CONTENT)
 }
@@ -668,19 +694,10 @@ pub(super) async fn delete_card(
 /// POST /api/projects/:id/cards/:card_id/stop -- stop the card's active worker
 pub(super) async fn stop_card_worker(
     State(state): State<Arc<AppState>>,
-    Path((_project_id, card_id)): Path<(String, String)>,
+    Path((project_id, card_id)): Path<(String, String)>,
 ) -> impl IntoResponse {
     tracing::info!(card_id = %card_id, "Stopping card worker");
-    let card = state.db.get_card(&card_id).await.map_err(|e| {
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(serde_json::json!({ "error": e.to_string() })),
-        )
-    })?;
-    let card = card.ok_or((
-        StatusCode::NOT_FOUND,
-        Json(serde_json::json!({ "error": "card not found" })),
-    ))?;
+    let card = load_scoped_card(&state, &project_id, &card_id).await?;
 
     if let Some(session_id) = &card.worker_session_id {
         state.session_manager.cancel(session_id).await;
@@ -709,19 +726,10 @@ pub(super) async fn stop_card_worker(
 /// POST /api/projects/:id/cards/:card_id/restart -- restart the card's worker
 pub(super) async fn restart_card_worker(
     State(state): State<Arc<AppState>>,
-    Path((_project_id, card_id)): Path<(String, String)>,
+    Path((project_id, card_id)): Path<(String, String)>,
 ) -> impl IntoResponse {
     tracing::info!(card_id = %card_id, "Restarting card worker");
-    let card = state.db.get_card(&card_id).await.map_err(|e| {
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(serde_json::json!({ "error": e.to_string() })),
-        )
-    })?;
-    let card = card.ok_or((
-        StatusCode::NOT_FOUND,
-        Json(serde_json::json!({ "error": "card not found" })),
-    ))?;
+    let card = load_scoped_card(&state, &project_id, &card_id).await?;
 
     // Stop existing worker if running
     if let Some(session_id) = &card.worker_session_id {
@@ -780,19 +788,10 @@ pub(super) async fn restart_card_worker(
 /// POST /api/projects/:id/cards/:card_id/cancel-wont-do -- cancel worker and mark card as wont_do
 pub(super) async fn cancel_card_wont_do(
     State(state): State<Arc<AppState>>,
-    Path((_project_id, card_id)): Path<(String, String)>,
+    Path((project_id, card_id)): Path<(String, String)>,
 ) -> impl IntoResponse {
     tracing::info!(card_id = %card_id, "Cancelling card as wont_do");
-    let card = state.db.get_card(&card_id).await.map_err(|e| {
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(serde_json::json!({ "error": e.to_string() })),
-        )
-    })?;
-    let card = card.ok_or((
-        StatusCode::NOT_FOUND,
-        Json(serde_json::json!({ "error": "card not found" })),
-    ))?;
+    let card = load_scoped_card(&state, &project_id, &card_id).await?;
 
     // Stop existing worker
     if let Some(session_id) = &card.worker_session_id {
@@ -857,12 +856,7 @@ pub(super) async fn retry_card_merge(
         )
     };
 
-    let card = state
-        .db
-        .get_card(&card_id)
-        .await
-        .map_err(err500)?
-        .ok_or_else(|| not_found("card"))?;
+    let card = load_scoped_card(&state, &project_id, &card_id).await?;
     let project = state
         .db
         .get_project(&project_id)
@@ -907,8 +901,9 @@ pub(super) async fn retry_card_merge(
 /// GET /api/projects/:id/cards/:card_id/reports -- list reports written by this card's worker
 pub(super) async fn list_card_reports(
     State(state): State<Arc<AppState>>,
-    Path((_project_id, card_id)): Path<(String, String)>,
+    Path((project_id, card_id)): Path<(String, String)>,
 ) -> impl IntoResponse {
+    load_scoped_card(&state, &project_id, &card_id).await?;
     let reports_dir = state.config.data_dir.join("reports");
 
     let mut reports = Vec::new();
@@ -959,7 +954,7 @@ pub(super) async fn list_card_reports(
         }
     }
 
-    Json(serde_json::json!({ "reports": reports }))
+    Ok::<_, (StatusCode, Json<serde_json::Value>)>(Json(serde_json::json!({ "reports": reports })))
 }
 
 #[cfg(test)]
