@@ -143,10 +143,14 @@ impl Db {
         })
         .await
     }
-
     /// Trim `session_id`'s events down to the newest `max_count`, deleting
     /// the rest. Used by the retention sweeper's per-session event-count
     /// bound.
+    ///
+    /// Deletes by a `(ts, seq)` cutoff rather than a `NOT IN (keep ids)`
+    /// list: the id list needs one bound variable per kept row, which blows
+    /// past SQLite's `SQLITE_MAX_VARIABLE_NUMBER` (32_766 by default) once
+    /// `max_count` is large — and the settings bound allows up to 36_500.
     pub async fn trim_events_to_count(
         &self,
         session_id: &str,
@@ -154,19 +158,30 @@ impl Db {
     ) -> anyhow::Result<usize> {
         let session_id = session_id.to_string();
         self.with_conn(move |conn| {
-            let keep_ids: Vec<String> = events::table
-                .filter(events::session_id.eq(&session_id))
-                .order((events::ts.desc(), events::seq.desc()))
-                .limit(max_count)
-                .select(events::id)
-                .load(conn)?;
-            if keep_ids.is_empty() {
+            if max_count <= 0 {
                 return Ok(0);
             }
+            // (ts, seq) of the oldest event we keep: the `max_count`-th
+            // newest. None => the session has fewer events than the bound.
+            let cutoff: Option<(i64, i32)> = events::table
+                .filter(events::session_id.eq(&session_id))
+                .order((events::ts.desc(), events::seq.desc()))
+                .limit(1)
+                .offset(max_count - 1)
+                .select((events::ts, events::seq))
+                .first(conn)
+                .optional()?;
+            let Some((cutoff_ts, cutoff_seq)) = cutoff else {
+                return Ok(0);
+            };
             diesel::delete(
                 events::table
                     .filter(events::session_id.eq(&session_id))
-                    .filter(diesel::dsl::not(events::id.eq_any(&keep_ids))),
+                    .filter(
+                        events::ts
+                            .lt(cutoff_ts)
+                            .or(events::ts.eq(cutoff_ts).and(events::seq.lt(cutoff_seq))),
+                    ),
             )
             .execute(conn)
             .map_err(Into::into)

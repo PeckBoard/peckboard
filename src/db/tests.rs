@@ -1814,6 +1814,87 @@ mod tests {
         assert_eq!(ids, vec!["e2", "e3", "e4"]);
     }
 
+    // Regression: the count-trim used to delete via `NOT IN (keep ids)`,
+    // one bound variable per kept row, so any bound above SQLite's
+    // SQLITE_MAX_VARIABLE_NUMBER (32_766) failed with "too many SQL
+    // variables" and the sweep never trimmed anything. The settings bound
+    // allows up to 36_500, so 35_000 is a reachable setting.
+    #[tokio::test]
+    async fn test_trim_events_to_count_above_sqlite_variable_limit() {
+        use crate::db::schema::events;
+        use diesel::prelude::*;
+
+        const TOTAL: i32 = 40_000;
+        const KEEP: i64 = 35_000;
+
+        let db = test_db();
+        let ts = now();
+
+        db.create_folder(NewFolder {
+            id: "f".into(),
+            name: "F".into(),
+            path: "/tmp/f".into(),
+            created_at: ts.clone(),
+        })
+        .await
+        .unwrap();
+        db.create_session(NewSession {
+            id: "s1".into(),
+            name: "s1".into(),
+            folder_id: "f".into(),
+            created_at: ts.clone(),
+            last_activity: ts.clone(),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+
+        db.with_conn(move |conn| {
+            conn.transaction::<_, anyhow::Error, _>(|conn| {
+                for chunk in (0..TOTAL).collect::<Vec<_>>().chunks(1_000) {
+                    let rows: Vec<NewEvent> = chunk
+                        .iter()
+                        .map(|&i| NewEvent {
+                            id: format!("e{i:06}"),
+                            session_id: "s1".into(),
+                            seq: i,
+                            ts: i as i64 * 1000,
+                            kind: "message".into(),
+                            data: "{}".into(),
+                        })
+                        .collect();
+                    diesel::insert_into(events::table)
+                        .values(&rows)
+                        .execute(conn)?;
+                }
+                Ok(())
+            })
+        })
+        .await
+        .unwrap();
+
+        let trimmed = db.trim_events_to_count("s1", KEEP).await.unwrap();
+        assert_eq!(trimmed, TOTAL as usize - KEEP as usize);
+
+        let (remaining, oldest_kept) = db
+            .with_conn(|conn| {
+                let remaining: i64 = events::table
+                    .filter(events::session_id.eq("s1"))
+                    .count()
+                    .get_result(conn)?;
+                let oldest_kept: String = events::table
+                    .filter(events::session_id.eq("s1"))
+                    .order((events::ts.asc(), events::seq.asc()))
+                    .select(events::id)
+                    .first(conn)?;
+                Ok((remaining, oldest_kept))
+            })
+            .await
+            .unwrap();
+        assert_eq!(remaining, KEEP);
+        assert_eq!(oldest_kept, format!("e{:06}", TOTAL as i64 - KEEP));
+    }
+
     // ── repeating-task tabs are a first-class kind ──────────────────
 
     #[tokio::test]
