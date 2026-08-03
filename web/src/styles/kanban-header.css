@@ -131,6 +131,14 @@
   padding: 20px 24px;
 }
 
+.question-dialog-error {
+  flex-shrink: 0;
+  padding: 10px 24px;
+  font-size: var(--text-sm);
+  color: var(--danger);
+  background: var(--danger-bg);
+  border-top: 1px solid var(--border);
+}
 .question-dialog-footer {
   flex-shrink: 0;
   display: flex;

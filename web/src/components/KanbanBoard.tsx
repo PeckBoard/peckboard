@@ -18,6 +18,7 @@ import { chatMarkdownComponents } from './chat/markdown'
 import { highlightPlugins } from './markdownHighlight'
 import { fetchPlanId, openPlan } from '../lib/plan'
 import { openReport } from '../lib/reports'
+import { describeActionError } from '../utils/actionError'
 import { useProjectTodos } from '../hooks/useProjectTodos'
 import {
   EMPTY_QUESTIONS,
@@ -195,6 +196,7 @@ export default function KanbanBoard({
   const fetchPendingQuestions = useProjectsStore((s) => s.fetchPendingQuestions)
   const [questionAnswers, setQuestionAnswers] = useState<Record<string, Record<number, string>>>({})
   const [submittingQuestion, setSubmittingQuestion] = useState<string | null>(null)
+  const [questionError, setQuestionError] = useState<string | null>(null)
   const [questionDialogOpen, setQuestionDialogOpen] = useState(false)
 
   const addEventListener = useWsStore((s) => s.addEventListener)
@@ -384,51 +386,59 @@ export default function KanbanBoard({
     }
   }, [addEventListener, removeEventListener])
 
-  const handleAnswerQuestion = async (pq: PendingQuestion) => {
+  const postQuestionResolved = async (pq: PendingQuestion, data: Record<string, unknown>) => {
+    const res = await authedFetch(`/api/sessions/${pq.sessionId}/events`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ kind: 'question-resolved', data }),
+    })
+    if (!res.ok) {
+      const body = (await res.json().catch(() => null)) as { error?: string } | null
+      throw new Error(body?.error || `HTTP ${res.status}`)
+    }
+  }
+
+  const handleAnswerQuestion = async (pq: PendingQuestion): Promise<boolean> => {
     const answers = questionAnswers[pq.eventId] ?? {}
     const hasAnswers = pq.questions.some((_, idx) => (answers[idx] ?? '').trim().length > 0)
-    if (!hasAnswers || submittingQuestion) return
+    if (!hasAnswers || submittingQuestion) return false
 
     setSubmittingQuestion(pq.eventId)
+    setQuestionError(null)
     try {
       const answerMap: Record<string, string> = {}
       pq.questions.forEach((_, idx) => {
         const val = (answers[idx] ?? '').trim()
         if (val) answerMap[String(idx)] = val
       })
-      await authedFetch(`/api/sessions/${pq.sessionId}/events`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          kind: 'question-resolved',
-          data: { question_id: pq.eventId, answers: answerMap },
-        }),
-      })
-      // Clear answers and refresh
+      await postQuestionResolved(pq, { question_id: pq.eventId, answers: answerMap })
+      // Only discard the typed answers once the server accepted them.
       setQuestionAnswers((prev) => {
         const next = { ...prev }
         delete next[pq.eventId]
         return next
       })
       fetchPendingQuestions(projectId)
+      return true
+    } catch (e) {
+      setQuestionError(describeActionError(e, "Couldn't send that answer."))
+      return false
     } finally {
       setSubmittingQuestion(null)
     }
   }
 
-  const handleDismissQuestion = async (pq: PendingQuestion) => {
-    if (submittingQuestion) return
+  const handleDismissQuestion = async (pq: PendingQuestion): Promise<boolean> => {
+    if (submittingQuestion) return false
     setSubmittingQuestion(pq.eventId)
+    setQuestionError(null)
     try {
-      await authedFetch(`/api/sessions/${pq.sessionId}/events`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          kind: 'question-resolved',
-          data: { question_id: pq.eventId, rejected: true },
-        }),
-      })
+      await postQuestionResolved(pq, { question_id: pq.eventId, rejected: true })
       fetchPendingQuestions(projectId)
+      return true
+    } catch (e) {
+      setQuestionError(describeActionError(e, "Couldn't dismiss that question."))
+      return false
     } finally {
       setSubmittingQuestion(null)
     }
@@ -1036,6 +1046,15 @@ export default function KanbanBoard({
                   ))}
                 </div>
 
+                {questionError && (
+                  <div
+                    className="question-dialog-error"
+                    role="alert"
+                    data-testid="question-dialog-error"
+                  >
+                    {questionError}
+                  </div>
+                )}
                 {/* Footer */}
                 <div className="question-dialog-footer">
                   <div className="question-dialog-left-actions">
@@ -1045,8 +1064,8 @@ export default function KanbanBoard({
                     <button
                       className="btn-secondary btn-danger-text"
                       onClick={async () => {
-                        await handleDismissQuestion(pq)
-                        if (pendingQuestions.length <= 1) setQuestionDialogOpen(false)
+                        const ok = await handleDismissQuestion(pq)
+                        if (ok && pendingQuestions.length <= 1) setQuestionDialogOpen(false)
                       }}
                       disabled={isSubmitting}
                     >
@@ -1056,8 +1075,8 @@ export default function KanbanBoard({
                   <button
                     className="btn-primary"
                     onClick={async () => {
-                      await handleAnswerQuestion(pq)
-                      if (pendingQuestions.length <= 1) setQuestionDialogOpen(false)
+                      const ok = await handleAnswerQuestion(pq)
+                      if (ok && pendingQuestions.length <= 1) setQuestionDialogOpen(false)
                     }}
                     disabled={!hasAnswers || isSubmitting}
                   >
