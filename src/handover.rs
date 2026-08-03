@@ -300,13 +300,13 @@ pub async fn begin_handover(
     // session can take the turn; otherwise leave it to `handle_completion`.
     let config = doc_turn_config(from_model);
     let message = doc_turn_message(from_model, to_model);
-    match lock {
+    let dispatch_result: anyhow::Result<()> = match lock {
         Some(lock) => {
             append_handover_start(state, session_id, from_model, to_model).await;
             state
                 .session_manager
                 .send_message_locked(lock, message, &state.db, &state.broadcaster, config)
-                .await?;
+                .await
         }
         None => {
             let lock = state.session_manager.lock_session(session_id).await;
@@ -323,14 +323,32 @@ pub async fn begin_handover(
                     "Handover doc turn deferred — the live turn's provider can't take a \
                      mid-stream send; it dispatches when that turn completes"
                 );
+                Ok(())
             } else {
                 append_handover_start(state, session_id, from_model, to_model).await;
                 state
                     .session_manager
                     .send_message_locked(&lock, message, &state.db, &state.broadcaster, config)
-                    .await?;
+                    .await
             }
         }
+    };
+
+    // A synchronous dispatch failure (deleted account, uninstalled
+    // provider, missing folder) leaves the flag parked in the DB above with
+    // no run ever started — no `ProcessCompletion` will arrive to trigger
+    // `finalize_handover`/`abort_handover` via `handle_completion`. Without
+    // this, the session would be stuck: every send and model-switch 409s
+    // forever, surviving even a restart. Abort right here instead.
+    if let Err(e) = dispatch_result {
+        let msg = e.to_string();
+        if let Err(abort_err) = abort_handover(state, session_id, Some(&msg)).await {
+            tracing::error!(
+                session_id = %session_id,
+                "Failed to abort handover after dispatch failure: {abort_err}"
+            );
+        }
+        return Err(e);
     }
 
     // Ask the outgoing provider to exit once the doc turn's result lands.
@@ -362,7 +380,6 @@ pub async fn begin_handover(
 
     Ok(())
 }
-
 /// Auto-compaction: a same-model handover dispatched automatically when a
 /// **worker** session's context occupancy has crossed
 /// [`WORKER_COMPACT_CONTEXT_THRESHOLD`]. Called by the completion listener
@@ -682,6 +699,40 @@ pub async fn abort_handover(
     );
     Ok(())
 }
+
+/// Startup reconciliation: abort every handover left parked by the last
+/// shutdown. A parked `handover_to_model` with no live run behind it (the
+/// process died — or was killed — between `begin_handover` parking the
+/// flag and the doc turn's completion landing) has no in-process listener
+/// left to ever call `finalize_handover`/`abort_handover` for it; unlike a
+/// synchronous dispatch failure, `begin_handover` itself is long gone by
+/// the time a fresh process boots. Every row this finds is therefore
+/// stuck — abort unconditionally. Returns the number reconciled.
+pub async fn reconcile_parked_handovers(state: &Arc<AppState>) -> usize {
+    let ids = match state.db.list_session_ids_with_parked_handover().await {
+        Ok(ids) => ids,
+        Err(e) => {
+            tracing::warn!("Failed to list sessions with a parked handover: {e}");
+            return 0;
+        }
+    };
+    let mut reconciled = 0;
+    for id in ids {
+        match abort_handover(
+            state,
+            &id,
+            Some("server restarted while the handover was in flight"),
+        )
+        .await
+        {
+            Ok(()) => reconciled += 1,
+            Err(e) => {
+                tracing::warn!(session_id = %id, "Failed to abort parked handover at startup: {e}")
+            }
+        }
+    }
+    reconciled
+}
 /// Handover half of the completion listener (`main.rs`): decide whether an
 /// arriving [`ProcessCompletion`] belongs to an in-flight handover and, when
 /// it does, finish the handover and drain anything queued behind the doc
@@ -825,6 +876,16 @@ async fn dispatch_deferred_doc_turn(state: &Arc<AppState>, session_id: &str) {
             session_id = %session_id,
             "Deferred handover doc turn failed to dispatch: {e}"
         );
+        // Same reasoning as `begin_handover`'s dispatch guard: with no run
+        // started, no completion will ever arrive to clear the parked
+        // flag. Abort now instead of leaving the session stuck.
+        let msg = e.to_string();
+        if let Err(abort_err) = abort_handover(state, session_id, Some(&msg)).await {
+            tracing::error!(
+                session_id = %session_id,
+                "Failed to abort handover after deferred dispatch failure: {abort_err}"
+            );
+        }
     }
 }
 
@@ -1343,5 +1404,191 @@ mod tests {
             second, "And again.",
             "the flag is consumed by the first turn"
         );
+    }
+
+    /// A synchronous dispatch failure (deleted account, uninstalled
+    /// provider, missing folder) must not leave `handover_to_model` parked:
+    /// nothing will ever complete to clear it, and every future send would
+    /// 409 forever. `begin_handover` must abort itself on that path.
+    #[tokio::test]
+    async fn begin_handover_clears_the_flag_when_dispatch_fails() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = crate::auth::middleware::tests::test_state(dir.path());
+        let ts = chrono::Utc::now().to_rfc3339();
+        state
+            .db
+            .create_folder(crate::db::models::NewFolder {
+                id: "f1".into(),
+                name: "F".into(),
+                path: dir.path().to_string_lossy().into_owned(),
+                created_at: ts.clone(),
+            })
+            .await
+            .unwrap();
+        // A model with no registered provider: `send_message_locked` fails
+        // resolving it ("unknown agent provider") before any process is
+        // ever spawned — a stand-in for any synchronous dispatch failure
+        // (deleted account, uninstalled provider, missing folder).
+        state
+            .db
+            .create_session(crate::db::models::NewSession {
+                id: "s1".into(),
+                name: "Chat".into(),
+                folder_id: "f1".into(),
+                model: Some("nosuchprovider:foo".into()),
+                created_at: ts.clone(),
+                last_activity: ts,
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+
+        let err = begin_handover(&state, "s1", "nosuchprovider:foo", "claude:opus", None)
+            .await
+            .expect_err("dispatch should fail — the provider isn't registered");
+        assert!(
+            err.to_string().contains("unknown agent provider"),
+            "got: {err}"
+        );
+
+        let session = state.db.get_session("s1").await.unwrap().unwrap();
+        assert_eq!(
+            session.handover_to_model, None,
+            "a failed dispatch must not leave the handover parked"
+        );
+        assert_eq!(session.handover_run_id, None);
+        // `model`/`conversation_id` are untouched — same contract as an
+        // ordinary abort.
+        assert_eq!(session.model.as_deref(), Some("nosuchprovider:foo"));
+
+        let events = state.db.events_tail("s1", 20).await.unwrap();
+        assert!(
+            events.iter().any(|e| e.kind == "handover-aborted"),
+            "expected a handover-aborted marker, got kinds: {:?}",
+            events.iter().map(|e| &e.kind).collect::<Vec<_>>()
+        );
+    }
+
+    /// Same failure mode, but on the deferred-dispatch path: a handover
+    /// parked while the session was mid-turn on a provider that can't take
+    /// a mid-stream send, whose deferred dispatch then itself fails once
+    /// the live turn completes.
+    #[tokio::test]
+    async fn dispatch_deferred_doc_turn_clears_the_flag_when_dispatch_fails() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = crate::auth::middleware::tests::test_state(dir.path());
+        let ts = chrono::Utc::now().to_rfc3339();
+        state
+            .db
+            .create_folder(crate::db::models::NewFolder {
+                id: "f1".into(),
+                name: "F".into(),
+                path: dir.path().to_string_lossy().into_owned(),
+                created_at: ts.clone(),
+            })
+            .await
+            .unwrap();
+        state
+            .db
+            .create_session(crate::db::models::NewSession {
+                id: "s1".into(),
+                name: "Chat".into(),
+                folder_id: "f1".into(),
+                model: Some("nosuchprovider:foo".into()),
+                created_at: ts.clone(),
+                last_activity: ts,
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        // Simulate what `begin_handover` would have parked before deferring.
+        state
+            .db
+            .update_session(
+                "s1",
+                crate::db::models::UpdateSession {
+                    handover_to_model: Some(Some("claude:opus".into())),
+                    handover_run_id: Some(Some(0)),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+
+        dispatch_deferred_doc_turn(&state, "s1").await;
+
+        let session = state.db.get_session("s1").await.unwrap().unwrap();
+        assert_eq!(
+            session.handover_to_model, None,
+            "a failed deferred dispatch must not leave the handover parked"
+        );
+        let events = state.db.events_tail("s1", 20).await.unwrap();
+        assert!(
+            events.iter().any(|e| e.kind == "handover-aborted"),
+            "expected a handover-aborted marker, got kinds: {:?}",
+            events.iter().map(|e| &e.kind).collect::<Vec<_>>()
+        );
+    }
+
+    /// Startup reconciliation: any handover left parked by the last
+    /// shutdown has nothing left to ever clear it (the process that would
+    /// have finalized/aborted it is gone) — reconcile must abort every one
+    /// it finds and report how many.
+    #[tokio::test]
+    async fn reconcile_parked_handovers_clears_every_parked_row() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = crate::auth::middleware::tests::test_state(dir.path());
+        let ts = chrono::Utc::now().to_rfc3339();
+        state
+            .db
+            .create_folder(crate::db::models::NewFolder {
+                id: "f1".into(),
+                name: "F".into(),
+                path: dir.path().to_string_lossy().into_owned(),
+                created_at: ts.clone(),
+            })
+            .await
+            .unwrap();
+        for id in ["s1", "s2", "s3"] {
+            state
+                .db
+                .create_session(crate::db::models::NewSession {
+                    id: id.into(),
+                    name: "Chat".into(),
+                    folder_id: "f1".into(),
+                    model: Some("claude:opus".into()),
+                    created_at: ts.clone(),
+                    last_activity: ts.clone(),
+                    ..Default::default()
+                })
+                .await
+                .unwrap();
+        }
+        // Only s1 and s3 have a handover parked; s2 is an ordinary session.
+        for id in ["s1", "s3"] {
+            state
+                .db
+                .update_session(
+                    id,
+                    crate::db::models::UpdateSession {
+                        handover_to_model: Some(Some("grok:grok-4".into())),
+                        handover_run_id: Some(Some(0)),
+                        ..Default::default()
+                    },
+                )
+                .await
+                .unwrap();
+        }
+
+        let reconciled = reconcile_parked_handovers(&state).await;
+        assert_eq!(reconciled, 2);
+
+        for id in ["s1", "s2", "s3"] {
+            let session = state.db.get_session(id).await.unwrap().unwrap();
+            assert_eq!(
+                session.handover_to_model, None,
+                "session {id} should have no handover parked after reconciliation"
+            );
+        }
     }
 }

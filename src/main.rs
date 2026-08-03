@@ -342,6 +342,19 @@ async fn main() -> anyhow::Result<()> {
             "Reconciled orphaned subagent sessions at startup"
         );
     }
+
+    // Handover reconcile: a `handover_to_model` still parked at boot has no
+    // in-process listener left to ever clear it — the process that dispatched
+    // the doc turn (or was about to) is gone. Left alone the session 409s on
+    // every send and model switch forever. One-shot at boot, before any
+    // provider traffic starts.
+    let handovers_reconciled = peckboard::handover::reconcile_parked_handovers(&state).await;
+    if handovers_reconciled > 0 {
+        tracing::info!(
+            count = handovers_reconciled,
+            "Reconciled parked handovers at startup"
+        );
+    }
     peckboard::routes::sessions::sweep_orphan_temp_sessions(&state).await;
     let app = api_router(state.clone())
         .layer(axum::extract::DefaultBodyLimit::max(20 * 1024 * 1024))

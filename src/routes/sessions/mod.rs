@@ -920,6 +920,12 @@ pub(crate) async fn clear_session_core(state: &AppState, id: &str) -> anyhow::Re
             UpdateSession {
                 conversation_id: Some(None),
                 context_reset_ts: Some(Some(chrono::Utc::now().timestamp_millis())),
+                // A handover parked here (dispatch never got a chance to
+                // run, or crashed before any completion arrived) would
+                // otherwise survive the clear and keep 409ing every send —
+                // clearing is the escape hatch, so it must also clear this.
+                handover_to_model: Some(None),
+                handover_run_id: Some(None),
                 ..Default::default()
             },
         )

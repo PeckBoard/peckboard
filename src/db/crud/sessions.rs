@@ -554,6 +554,20 @@ impl Db {
         .await
     }
 
+    /// Sessions with a handover parked (`handover_to_model` set) as of this
+    /// call — used by startup reconciliation to abort any handover whose
+    /// dispatch never got the chance to run before the last shutdown.
+    pub async fn list_session_ids_with_parked_handover(&self) -> anyhow::Result<Vec<String>> {
+        self.with_conn(move |conn| {
+            sessions::table
+                .filter(sessions::handover_to_model.is_not_null())
+                .select(sessions::id)
+                .load(conn)
+                .map_err(Into::into)
+        })
+        .await
+    }
+
     /// Ids of non-worker sessions whose event count exceeds `min_count` —
     /// candidates for the event sweeper's per-session count trim.
     pub async fn list_non_worker_session_ids_over_event_count(
