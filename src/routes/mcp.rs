@@ -179,48 +179,19 @@ async fn mcp_handler(
             )
         }
         "tools/list" => {
-            // Every session gets a role-trimmed tool surface: workers lose
-            // the admin tools, chats/experts lose the card-lifecycle and
-            // worker-coordination tools — schemas they can never legitimately
-            // use stop occupying context on every API call. Advertisement
-            // only for those two lists; the per-handler scope checks remain
-            // their enforcement point. Pre-hatcher research sessions instead
-            // see ONLY the read-only allowlist — for them the same list is
-            // also hard-enforced in `tools/call` below.
+            // Every session gets a role-trimmed tool surface via
+            // `ToolGate` — the same hard-gate logic the Ollama in-process
+            // tool path uses (see `service::mcp_server::gates`), so this
+            // route and that path can't drift apart again. Advertisement
+            // only here; the per-handler scope checks remain the boundary
+            // enforcement point, and `tools/call` below re-checks the gate
+            // as the hard enforcement point.
             let session_row = state.db.get_session(&session_id).await.ok().flatten();
-            let is_worker = session_row.as_ref().map(|s| s.is_worker).unwrap_or(false);
-            let pre_hatcher = session_row.as_ref().and_then(|s| s.expert_kind.as_deref())
-                == Some(crate::service::mcp_server::PRE_HATCHER_EXPERT_KIND);
-            // The document-review tools are hidden from workers AND chats
-            // (they are in both lists), then re-admitted here for the one
-            // session kind they mean anything on: the review's own session.
-            let doc_review = session_row.as_ref().and_then(|s| s.expert_kind.as_deref())
-                == Some(crate::service::doc_reviews::EXPERT_KIND);
-            let hidden: &[&str] = if is_worker {
-                crate::service::mcp_server::worker_hidden_tool_names()
-            } else {
-                crate::service::mcp_server::chat_hidden_tool_names()
-            };
-            // The cost-aware auto-switch tools are advertised only when this
-            // session's resolved toggle is ON (matching the hard gate in
-            // tools/call below).
-            let autoswitch_on = session_row
+            let gate = session_row
                 .as_ref()
-                .map(|s| {
-                    crate::service::mcp_server::autoswitch_enabled(s.model_autoswitch, s.is_worker)
-                })
-                .unwrap_or(false);
-            let advertised = |name: &str| {
-                if pre_hatcher {
-                    crate::service::mcp_server::pre_hatcher_allowed_tool_names().contains(&name)
-                } else if matches!(name, "get_model_guidance" | "switch_session_model") {
-                    autoswitch_on
-                } else if matches!(name, "get_review_doc" | "submit_review_revision") {
-                    doc_review
-                } else {
-                    !hidden.contains(&name)
-                }
-            };
+                .map(crate::service::mcp_server::ToolGate::from_session)
+                .unwrap_or_else(crate::service::mcp_server::ToolGate::none);
+            let advertised = |name: &str| gate.advertised(name);
             let mut tools: Vec<Value> = registry
                 .tool_definitions()
                 .iter()
@@ -306,89 +277,15 @@ async fn mcp_handler(
                 }
             };
 
-            // HARD gate, not advertisement: a pre-hatcher research session
-            // exists only to gather read-only context for the main model.
-            // Its prompt already forbids mutation, but a prompt is advisory —
-            // one pre-hatcher run ignored it and edited source files while
-            // the main session worked the same repo. Anything outside the
-            // read-only allowlist is refused here, whatever the model asks.
-            if session_row.expert_kind.as_deref()
-                == Some(crate::service::mcp_server::PRE_HATCHER_EXPERT_KIND)
-                && !crate::service::mcp_server::pre_hatcher_allowed_tool_names()
-                    .contains(&tool_name)
-            {
+            // Hard gate, not advertisement: derive the same `ToolGate` used
+            // in `tools/list` above — and by the Ollama in-process tool
+            // path, so the two can't drift apart — and refuse outright if
+            // it blocks this tool, whatever the model asked for by name.
+            let gate = crate::service::mcp_server::ToolGate::from_session(&session_row);
+            if let Some(reason) = gate.blocked(tool_name) {
                 return (
                     StatusCode::OK,
-                    rpc_json(JsonRpcResponse::error(
-                        id.clone(),
-                        -32000,
-                        format!(
-                            "tool '{tool_name}' is blocked: pre-hatcher sessions are \
-                             read-only context gatherers. Use the read tools \
-                             (read_file, search_files, file_outline, read_symbol, \
-                             list_files) and hand off with pre_hatch_result; code \
-                             changes are the main model's job."
-                        ),
-                    )),
-                );
-            }
-
-            // HARD gate, not advertisement: the cost-aware auto-switch tools
-            // are usable only by sessions whose resolved toggle is ON (ON for
-            // workers, OFF for chats, unless overridden). Copy the pre-hatcher
-            // shape — refuse by name at dispatch, since trimming the
-            // advertisement alone wouldn't stop a session calling by name.
-            if matches!(tool_name, "get_model_guidance" | "switch_session_model")
-                && !crate::service::mcp_server::autoswitch_enabled(
-                    session_row.model_autoswitch,
-                    session_row.is_worker,
-                )
-            {
-                return (
-                    StatusCode::OK,
-                    rpc_json(JsonRpcResponse::error(
-                        id.clone(),
-                        -32000,
-                        format!(
-                            "tool '{tool_name}' is unavailable: model auto-switch is off for this session."
-                        ),
-                    )),
-                );
-            }
-            // HARD gate, not advertisement: a worker session is a card
-            // executor, never an administrator. `worker_hidden_tool_names()`
-            // used to be trimmed from `tools/list` only, and the per-handler
-            // checks (`scope_project` / `scope_card`) enforce the folder and
-            // project BOUNDARY, never the ROLE — a worker token is
-            // project-scoped, so `delete_project` with no args resolved to the
-            // worker's OWN project and cascaded it away, and `update_project`
-            // with a huge `worker_count` raised the orchestrator's spawn cap.
-            // Both are one confused (or prompt-poisoned) worker away. Refuse
-            // by name at dispatch, same shape as the pre-hatcher gate above.
-            //
-            // The two document-review tools sit in this list but are
-            // re-admitted for a review's own session, exactly as `tools/list`
-            // above does; their handlers still reject any other session.
-            let doc_review_session = session_row.expert_kind.as_deref()
-                == Some(crate::service::doc_reviews::EXPERT_KIND);
-            if session_row.is_worker
-                && crate::service::mcp_server::worker_hidden_tool_names().contains(&tool_name)
-                && !(doc_review_session
-                    && matches!(tool_name, "get_review_doc" | "submit_review_revision"))
-            {
-                return (
-                    StatusCode::OK,
-                    rpc_json(JsonRpcResponse::error(
-                        id.clone(),
-                        -32000,
-                        format!(
-                            "tool '{tool_name}' is blocked: worker sessions execute their \
-                             own card and cannot administer projects, folders, workflows, \
-                             schedules, plugins, or other sessions. Use the card tools \
-                             (complete_step, finish_card, create_card, …); ask a human \
-                             via ask_user for anything else."
-                        ),
-                    )),
+                    rpc_json(JsonRpcResponse::error(id.clone(), -32000, reason)),
                 );
             }
 

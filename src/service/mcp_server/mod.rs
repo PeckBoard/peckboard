@@ -9,6 +9,7 @@ pub mod command_check;
 pub(crate) mod common_tools;
 mod config;
 mod context;
+mod gates;
 mod handlers;
 pub mod oauth;
 mod schemas;
@@ -18,6 +19,7 @@ pub mod user_servers;
 pub use auth::McpTokenRegistry;
 pub use config::{delete_mcp_config, write_mcp_config};
 pub use context::{ExpertDispatcher, McpToolDef, ScopedFolderId, ScopedProjectId, ToolCallContext};
+pub use gates::ToolGate;
 pub use handlers::autoswitch_enabled;
 pub use schemas::{
     PRE_HATCHER_EXPERT_KIND, chat_hidden_tool_names, pre_hatcher_allowed_tool_names, tool_names,

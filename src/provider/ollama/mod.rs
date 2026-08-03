@@ -62,7 +62,7 @@ use crate::plugin::settings::PluginSettingsStore;
 use crate::provider::agent::{AgentProvider, ProcessCompletion, SendMessageContext, emit_event};
 use crate::provider::stream::{CrashKind, ModelInfo, ProviderEvent};
 use crate::provider::turn::{self, setting_bool, setting_str, setting_str_list};
-use crate::service::mcp_server::{McpToolRegistry, ToolCallContext, dispatch_tool_call};
+use crate::service::mcp_server::{McpToolRegistry, ToolCallContext, ToolGate, dispatch_tool_call};
 
 /// Default request timeout used when the user hasn't set one. Generous
 /// because Ollama on CPU can take a while to load a fresh model.
@@ -1289,14 +1289,20 @@ async fn run_chat_stream(args: ChatStreamArgs<'_>) -> turn::TurnResult {
     // `ToolCallContext` (folder/project boundary); if we can't resolve one we
     // fall back to a plain, tool-free chat rather than failing the turn.
     let registry = McpToolRegistry::new();
-    let (tools, tool_ctx) = if enable_tools {
-        let defs = collect_ollama_tools(&registry, plugins).await;
+    let (tools, tool_ctx, gate) = if enable_tools {
         match build_tool_context(db, broadcaster_arc, session_id).await {
-            Some(ctx) if !defs.is_empty() => (Some(defs), Some(ctx)),
-            _ => (None, None),
+            Some((ctx, gate)) => {
+                let defs = collect_ollama_tools(&registry, plugins, &gate).await;
+                if defs.is_empty() {
+                    (None, None, gate)
+                } else {
+                    (Some(defs), Some(ctx), gate)
+                }
+            }
+            None => (None, None, ToolGate::none()),
         }
     } else {
-        (None, None)
+        (None, None, ToolGate::none())
     };
 
     // User-defined MCP servers (Settings → MCP Servers): connect native
@@ -1315,8 +1321,6 @@ async fn run_chat_stream(args: ChatStreamArgs<'_>) -> turn::TurnResult {
                 let mut set = crate::service::mcp_client::McpClientSet::connect(&entries).await;
                 if !set.is_empty() {
                     let ext_tools = set.list_all_tools().await;
-                    // Per-tool switches (Settings → MCP Servers): drop tools
-                    // the user disabled before they are offered to the model.
                     let ext_tools: Vec<_> = ext_tools
                         .into_iter()
                         .filter(|t| {
@@ -1324,6 +1328,11 @@ async fn run_chat_stream(args: ChatStreamArgs<'_>) -> turn::TurnResult {
                                 .iter()
                                 .any(|d| *d == format!("mcp__{}__{}", t.server, t.name))
                         })
+                        // Hard-gated sessions (pre-hatcher's read-only
+                        // allowlist) never see user-defined MCP tools
+                        // either — `ToolGate::advertised` returns false for
+                        // any name outside the allowlist.
+                        .filter(|t| gate.advertised(&format!("{}__{}", t.server, t.name)))
                         .collect();
                     let offered: HashSet<String> = tools
                         .as_deref()
@@ -1453,13 +1462,13 @@ async fn run_chat_stream(args: ChatStreamArgs<'_>) -> turn::TurnResult {
                     match (external_routes.get(&call.function.name), external.as_mut()) {
                         (Some((server, tool)), Some(ext)) => {
                             run_one_external_tool(
-                                ext, server, tool, db, broadcaster, session_id, &call,
+                                ext, server, tool, &gate, db, broadcaster, session_id, &call,
                             )
                             .await
                         }
                         _ => {
                             run_one_tool(
-                                plugins, &registry, ctx, db, broadcaster, session_id, &call,
+                                plugins, &registry, ctx, &gate, db, broadcaster, session_id, &call,
                             )
                             .await
                         }
@@ -1777,11 +1786,13 @@ async fn stream_one_round(round: StreamRound<'_>) -> RoundOutcome {
 async fn collect_ollama_tools(
     registry: &McpToolRegistry,
     plugins: &PluginManager,
+    gate: &ToolGate,
 ) -> Vec<serde_json::Value> {
     let core = registry.tool_definitions();
     let core_names: HashSet<&str> = core.iter().map(|t| t.name.as_str()).collect();
     let mut tools: Vec<serde_json::Value> = core
         .iter()
+        .filter(|t| gate.advertised(t.name.as_str()))
         .map(|t| ollama_tool_def(&t.name, &t.description, &t.input_schema))
         .collect();
     for t in plugins.mcp_tools().await {
@@ -1790,6 +1801,9 @@ async fn collect_ollama_tools(
                 plugin = %t.plugin, tool = %t.name,
                 "plugin mcp_tool collides with a core tool name; dropping"
             );
+            continue;
+        }
+        if !gate.advertised(t.name.as_str()) {
             continue;
         }
         tools.push(ollama_tool_def(&t.name, &t.description, &t.input_schema));
@@ -1823,7 +1837,7 @@ async fn build_tool_context(
     db: &crate::db::Db,
     broadcaster: &Arc<crate::ws::broadcaster::Broadcaster>,
     session_id: &str,
-) -> Option<ToolCallContext> {
+) -> Option<(ToolCallContext, ToolGate)> {
     let session = match db.get_session(session_id).await {
         Ok(Some(s)) => s,
         _ => {
@@ -1834,25 +1848,31 @@ async fn build_tool_context(
             return None;
         }
     };
-    Some(ToolCallContext {
-        session_id: session_id.to_string(),
-        project_id: session.project_id.clone(),
-        card_id: session.card_id.clone(),
-        folder_id: session.folder_id.clone(),
-        db: Arc::new(db.clone()),
-        broadcaster: broadcaster.clone(),
-        provider_registry: None,
-        data_dir: None,
-    })
+    let gate = ToolGate::from_session(&session);
+    Some((
+        ToolCallContext {
+            session_id: session_id.to_string(),
+            project_id: session.project_id.clone(),
+            card_id: session.card_id.clone(),
+            folder_id: session.folder_id.clone(),
+            db: Arc::new(db.clone()),
+            broadcaster: broadcaster.clone(),
+            provider_registry: None,
+            data_dir: None,
+        },
+        gate,
+    ))
 }
 
 /// Execute one tool call and turn it into a `role:"tool"` reply. Emits
 /// `ToolStart`/`ToolEnd` around the dispatch. A tool error is fed back to the
 /// model as `{"error": …}` (not a hard failure) so it can recover or retry.
+#[allow(clippy::too_many_arguments)]
 async fn run_one_tool(
     plugins: &PluginManager,
     registry: &McpToolRegistry,
     ctx: &ToolCallContext,
+    gate: &ToolGate,
     db: &crate::db::Db,
     broadcaster: &crate::ws::broadcaster::Broadcaster,
     session_id: &str,
@@ -1873,6 +1893,27 @@ async fn run_one_tool(
         },
     )
     .await;
+
+    // Hard gate, not advertisement: `collect_ollama_tools` already trims
+    // what's offered by name, but the model can still call a hidden tool
+    // by name (a prompt-poisoned or confused worker did exactly this for
+    // `delete_project` before this gate existed). Refuse before dispatch,
+    // same shape as the `/mcp` route's `tools/call` hard gate.
+    if let Some(reason) = gate.blocked(&name) {
+        emit_event(
+            db,
+            broadcaster,
+            session_id,
+            ProviderEvent::ToolEnd {
+                tool_use_id,
+                output: None,
+                error: Some(reason.clone()),
+                images: Vec::new(),
+            },
+        )
+        .await;
+        return ChatMessage::tool_result(name, serde_json::json!({ "error": reason }).to_string());
+    }
 
     match dispatch_tool_call(plugins, registry, &name, args, ctx).await {
         Ok(value) => {
@@ -1942,10 +1983,12 @@ fn external_tool_defs(
 /// Execute one user-server tool call over MCP, shaped exactly like
 /// [`run_one_tool`]'s reply — same events, error fed back as `{"error": …}`
 /// content so the model can recover or retry.
+#[allow(clippy::too_many_arguments)]
 async fn run_one_external_tool(
     external: &mut crate::service::mcp_client::McpClientSet,
     server: &str,
     tool: &str,
+    gate: &ToolGate,
     db: &crate::db::Db,
     broadcaster: &crate::ws::broadcaster::Broadcaster,
     session_id: &str,
@@ -1966,6 +2009,24 @@ async fn run_one_external_tool(
         },
     )
     .await;
+
+    // Hard gate, not advertisement — same rationale as `run_one_tool`: the
+    // model can call an external tool by name even if it wasn't offered.
+    if let Some(reason) = gate.blocked(&name) {
+        emit_event(
+            db,
+            broadcaster,
+            session_id,
+            ProviderEvent::ToolEnd {
+                tool_use_id,
+                output: None,
+                error: Some(reason.clone()),
+                images: Vec::new(),
+            },
+        )
+        .await;
+        return ChatMessage::tool_result(name, serde_json::json!({ "error": reason }).to_string());
+    }
 
     match external.call(server, tool, args).await {
         Ok(text) => {
@@ -2270,6 +2331,93 @@ mod tests {
             &("github".to_string(), "list_issues".to_string())
         );
         assert!(!routes.contains_key("clash__tool"));
+    }
+
+    /// The bug this gate exists to fix: the Ollama in-process tool path
+    /// used to call `dispatch_tool_call` directly, consulting none of the
+    /// `/mcp` route's role gates — a worker session on `ollama:*` could
+    /// call `delete_project` with no gate at all. `run_one_tool` now
+    /// hard-refuses by name before dispatch, same as the route.
+    #[tokio::test]
+    async fn worker_session_is_refused_delete_project_via_ollama_tool_path() {
+        let registry = McpToolRegistry::new();
+        let db = crate::db::Db::in_memory().unwrap();
+        let tmp = tempfile::tempdir().unwrap();
+        let plugins = crate::plugin::manager::PluginManager::new(tmp.path(), db.clone());
+        let broadcaster = crate::ws::broadcaster::Broadcaster::new();
+        let ctx = ToolCallContext {
+            session_id: "s1".into(),
+            project_id: Some("p1".into()),
+            card_id: None,
+            folder_id: "f1".into(),
+            db: Arc::new(db.clone()),
+            broadcaster: broadcaster.clone(),
+            provider_registry: None,
+            data_dir: None,
+        };
+        let session = crate::db::models::Session {
+            id: "s1".into(),
+            name: "worker".into(),
+            folder_id: "f1".into(),
+            model: None,
+            effort: None,
+            is_worker: true,
+            project_id: Some("p1".into()),
+            card_id: None,
+            conversation_id: None,
+            created_at: "now".into(),
+            last_activity: "now".into(),
+            is_expert: false,
+            expert_kind: None,
+            knowledge_summary: None,
+            knowledge_area: None,
+            scope_path: None,
+            is_permanent: false,
+            repeating_task_id: None,
+            system_prompt: None,
+            handover_to_model: None,
+            handover_run_id: None,
+            pending_handover_doc: None,
+            worker_step: None,
+            user_id: None,
+            context_reset_ts: None,
+            model_autoswitch: None,
+            system_prompt_name: None,
+            pending_plan_review: false,
+            pending_doc_review: None,
+            is_temp: false,
+            parent_session_id: None,
+            subagent_completed_at: None,
+        };
+        let gate = ToolGate::from_session(&session);
+
+        let call = ToolCall {
+            function: ToolCallFunction {
+                name: "delete_project".into(),
+                arguments: serde_json::json!({}),
+            },
+        };
+        let msg = run_one_tool(
+            &plugins,
+            &registry,
+            &ctx,
+            &gate,
+            &db,
+            &broadcaster,
+            "s1",
+            &call,
+        )
+        .await;
+        assert_eq!(msg.role, "tool");
+        assert!(
+            msg.content.contains("blocked"),
+            "worker session must be refused delete_project via the ollama tool path: {}",
+            msg.content
+        );
+
+        // Never reached dispatch: the project row (if any existed) is
+        // untouched. No project was created here, so this simply confirms
+        // the call didn't panic or attempt a lookup against a missing one.
     }
 
     #[test]
