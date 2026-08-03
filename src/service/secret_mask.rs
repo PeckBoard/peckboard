@@ -274,16 +274,28 @@ pub fn mask_json_strings(v: &mut serde_json::Value, masker: &SecretMasker) {
         _ => {}
     }
 }
-
 /// Assemble what a command child process needs: the env vars to inject and
 /// the masker for its console output.
 ///
 /// - inject: every custom env var (Settings → Environment Variables) visible
 ///   to `folder_id` — globals plus that folder's own vars, a folder var
 ///   shadowing a global one with the same name. Plain values come from the
-///   DB, encrypted values from the unlock cache while an owner's unlock is
+///   DB, encrypted values from the unlock cache while ANY user's unlock is
 ///   warm. Layered over the inherited host env by the caller (custom wins on
 ///   collision: user-configured beats ambient).
+///
+///   Deliberate design decision (confirmed 2026-08-03, not a bug): an
+///   encrypted var's warm-unlocked plaintext is shared DB-wide, not scoped
+///   to the user who unlocked it. While user A's 30-minute unlock window is
+///   open, ANY session in a matching scope (a global var, or the same
+///   folder) — including one belonging to a different user — gets the
+///   value injected, exactly like a plain (unencrypted) var. `encrypted_by`
+///   and the per-var salt record who last set the password-derived
+///   ciphertext; they are not an ACL. If per-user isolation of the unlock
+///   capability is wanted later, that is a distinct feature (thread the
+///   caller's `user_id` through and resolve from
+///   `env_vars::unlocked_values_for_user_blocking` instead of the pooled
+///   snapshot below), not an implicit side effect of this function.
 /// - masker: every resolvable value from EVERY scope (output must not leak
 ///   another folder's secret either), plus host env values whose NAME is
 ///   sensitive ([`is_sensitive_env_name`]).
@@ -292,7 +304,6 @@ pub fn mask_json_strings(v: &mut serde_json::Value, masker: &SecretMasker) {
 pub fn command_env_blocking(
     db: &crate::db::Db,
     folder_id: Option<&str>,
-    user_id: Option<&str>,
 ) -> (Vec<(String, String)>, SecretMasker) {
     let rows = match db.list_env_vars_blocking() {
         Ok(rows) => rows,
@@ -301,39 +312,24 @@ pub fn command_env_blocking(
             Vec::new()
         }
     };
-    // Masking stays DB-wide: a leaked value must be caught regardless of
-    // which user's unlock produced it. Injection is scoped tighter, below.
-    let unlocked_all = crate::service::env_vars::unlocked_values_blocking();
-    // `encrypted_by` and per-var salts imply per-user ownership of the
-    // unlock capability, so a command only ever gets the CALLING user's own
-    // warm-unlocked values injected — another user's open unlock window
-    // must never leak into this caller's process, even in a shared scope
-    // (a global var, or the same folder). `user_id: None` (no session owner
-    // resolved) injects no encrypted values at all.
-    let unlocked_mine: std::collections::HashMap<String, String> = match user_id {
-        Some(uid) => crate::service::env_vars::unlocked_values_for_user_blocking(uid),
-        None => std::collections::HashMap::new(),
-    };
+    // Unlocked encrypted values, var id → plaintext, pooled across EVERY
+    // owner (see the DB-wide-sharing note on this function's doc comment).
+    // Keyed by id because names are only unique per scope. Stale cache
+    // entries for since-deleted vars never match a row, so they are neither
+    // injected nor masked.
+    let unlocked = crate::service::env_vars::unlocked_values_blocking();
 
     let mut global: BTreeMap<String, String> = BTreeMap::new();
     let mut folder: BTreeMap<String, String> = BTreeMap::new();
     let mut secrets: Vec<String> = Vec::new();
     for r in &rows {
-        let mask_value = if r.encrypted {
-            unlocked_all.get(&r.id).cloned()
+        let value = if r.encrypted {
+            unlocked.get(&r.id).cloned()
         } else {
             r.value.clone()
         };
-        if let Some(v) = mask_value {
-            secrets.push(v);
-        }
-
-        let inject_value = if r.encrypted {
-            unlocked_mine.get(&r.id).cloned()
-        } else {
-            r.value.clone()
-        };
-        let Some(value) = inject_value else { continue };
+        let Some(value) = value else { continue };
+        secrets.push(value.clone());
         if r.folder_id.is_none() {
             global.insert(r.name.clone(), value);
         } else if folder_id.is_some() && r.folder_id.as_deref() == folder_id {
@@ -355,7 +351,7 @@ pub fn command_env_blocking(
 /// host env), for output paths that don't spawn a local child (e.g. remote
 /// `ssh_run` output). Blocking — call from a blocking thread only.
 pub fn masker_blocking(db: &crate::db::Db) -> SecretMasker {
-    command_env_blocking(db, None, None).1
+    command_env_blocking(db, None).1
 }
 
 #[cfg(test)]

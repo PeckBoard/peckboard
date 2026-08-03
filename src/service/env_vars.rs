@@ -274,22 +274,6 @@ impl EnvUnlockRegistry {
         }
         out
     }
-
-    /// Snapshot of one user's unexpired cached plaintexts, var id → value.
-    /// Purges every expired entry (any user's) as a side effect. This is the
-    /// injection-side counterpart to [`Self::all_cached_values_blocking`]:
-    /// `encrypted_by` and per-var salts imply per-user ownership of the
-    /// unlock capability, so a command must only ever be handed the
-    /// CALLING user's own warm-unlocked values, never another owner's.
-    pub fn cached_values_for_user_blocking(&self, user_id: &str) -> HashMap<String, String> {
-        let now = Instant::now();
-        let mut g = self.lock_inner();
-        g.cache.retain(|_, e| e.expires_at > now);
-        g.cache
-            .get(user_id)
-            .map(|e| e.values.clone())
-            .unwrap_or_default()
-    }
 }
 
 /// Process-global handle to the app's unlock registry, late-bound by `main`
@@ -320,16 +304,6 @@ pub fn unlocked_values_blocking() -> HashMap<String, String> {
     }
 }
 
-/// One user's unlocked (cached) encrypted env var values, var id →
-/// plaintext, from the process-global registry. Empty when no registry is
-/// bound or that user has nothing cached. Blocking — call from a blocking
-/// thread only.
-pub fn unlocked_values_for_user_blocking(user_id: &str) -> HashMap<String, String> {
-    match GLOBAL_REGISTRY.get() {
-        Some(reg) => reg.cached_values_for_user_blocking(user_id),
-        None => HashMap::new(),
-    }
-}
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -466,39 +440,5 @@ mod tests {
         // panic poisoned the extism instance lock and wedged the plugin.
         let all = reg.all_cached_values_blocking();
         assert_eq!(all.get("id1").map(String::as_str), Some("v"));
-    }
-
-    #[tokio::test]
-    async fn cached_values_for_user_is_scoped_to_that_user() {
-        let reg = EnvUnlockRegistry::new();
-        let mut a_vals = ValueMap::new();
-        a_vals.insert("id1".into(), "a-secret".into());
-        let mut b_vals = ValueMap::new();
-        b_vals.insert("id2".into(), "b-secret".into());
-        reg.cache_put("userA", a_vals).await;
-        reg.cache_put("userB", b_vals).await;
-
-        let mine = reg.cached_values_for_user_blocking("userA");
-        assert_eq!(mine.get("id1").map(String::as_str), Some("a-secret"));
-        assert!(
-            !mine.contains_key("id2"),
-            "userA must not see userB's value"
-        );
-
-        let theirs = reg.cached_values_for_user_blocking("userB");
-        assert_eq!(theirs.get("id2").map(String::as_str), Some("b-secret"));
-
-        assert!(reg.cached_values_for_user_blocking("nobody").is_empty());
-    }
-
-    #[tokio::test]
-    async fn cached_values_for_user_respects_ttl() {
-        let reg = EnvUnlockRegistry::new();
-        let now = Instant::now();
-        let mut vals = ValueMap::new();
-        vals.insert("id1".into(), "v".into());
-
-        reg.cache_put_at("u1", vals.clone(), now).await;
-        assert!(reg.cached_values_for_user_blocking("u1").is_empty());
     }
 }
