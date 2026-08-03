@@ -1008,12 +1008,55 @@ pub fn min_run_gap_seconds(task: &RepeatingTask) -> i64 {
     schedule_floor.max(MIN_SCHEDULER_GAP_SECONDS)
 }
 
+/// Minimum gap the guard *expects* between the run at `last` and the
+/// next scheduler-initiated run, derived from where the schedule's next
+/// occurrence actually lands rather than from a nominal constant.
+///
+/// Calendar schedules have no fixed spacing in seconds: a DST
+/// spring-forward day is 23 hours long, a fall-back day 25, and months
+/// run 28-31 days. Flooring those at the nominal `86_400` / `7d` / `28d`
+/// throttled the very run the timezone-aware scheduler had correctly
+/// placed — a daily 09:00 `America/New_York` task is due 82_800s after
+/// its previous run on the spring-forward day — which skipped the run
+/// and left a gap the watchdog would kill-switch the task over. Asking
+/// [`next_run_at_after`] where the following occurrence lands makes the
+/// floor track the calendar instead.
+///
+/// `interval` keeps its exact `minutes * 60` cadence (pure duration
+/// math, no calendar involved) and `once` has no cadence at all; both
+/// behave exactly as before.
+pub fn expected_gap_seconds(task: &RepeatingTask, last: DateTime<Utc>) -> i64 {
+    let spacing = match Schedule::parse(&task.schedule_kind, &task.schedule_value) {
+        Ok(Schedule::Interval { minutes }) => minutes.saturating_mul(60),
+        // A one-shot has no recurrence cadence, and a corrupt schedule
+        // gets the absolute floor rather than a guessed one.
+        Ok(Schedule::Once { .. }) | Err(_) => MIN_SCHEDULER_GAP_SECONDS,
+        Ok(Schedule::Daily { .. } | Schedule::Weekly { .. } | Schedule::Monthly { .. }) => {
+            next_run_at_after(task, last)
+                .and_then(|s| DateTime::parse_from_rfc3339(&s).ok())
+                .map(|next| (next.with_timezone(&Utc) - last).num_seconds())
+                .unwrap_or_else(|| min_run_gap_seconds(task))
+        }
+    };
+    spacing.max(MIN_SCHEDULER_GAP_SECONDS)
+}
+
+/// The gap actually enforced: [`expected_gap_seconds`] minus the
+/// scheduler-tick slop, never below the hard floor.
+///
+/// Shared by the inline policy and the watchdog on purpose — if the two
+/// derived their floors independently, the watchdog could kill-switch a
+/// task for a dispatch the policy deliberately allowed.
+pub fn allowed_gap_seconds(task: &RepeatingTask, last: DateTime<Utc>) -> i64 {
+    (expected_gap_seconds(task, last) - SCHEDULER_GAP_SLOP_SECONDS).max(MIN_SCHEDULER_GAP_SECONDS)
+}
+
 /// Decide whether `task` may dispatch a fresh run *right now*.
 ///
 /// Manual triggers always return [`PolicyDecision::Allow`] — see the
 /// note on [`RunTrigger::Manual`]. Scheduler triggers require either:
 ///   - no previous run on record, or
-///   - `now - last_run_at >= min_run_gap_seconds(task) - SCHEDULER_GAP_SLOP_SECONDS`,
+///   - `now - last_run_at >= allowed_gap_seconds(task, last_run_at)`,
 ///     AND `now - last_run_at >= MIN_SCHEDULER_GAP_SECONDS` (the slop
 ///     never lets the hard floor be breached).
 ///
@@ -1041,8 +1084,7 @@ pub fn check_run_policy(
              {MIN_SCHEDULER_GAP_SECONDS}s)",
         ));
     }
-    let schedule_floor = min_run_gap_seconds(task);
-    let allowed = (schedule_floor - SCHEDULER_GAP_SLOP_SECONDS).max(MIN_SCHEDULER_GAP_SECONDS);
+    let allowed = allowed_gap_seconds(task, last);
     if gap < allowed {
         return PolicyDecision::Throttle(format!(
             "scheduler run blocked: only {gap}s since last run for task with \
@@ -1185,18 +1227,23 @@ impl RunAuditor {
             if hist.len() < 2 {
                 continue;
             }
-            let min_gap = min_run_gap_seconds(task);
-            // Walk the history once, record the tightest gap.
-            let mut tightest: Option<i64> = None;
+            // Walk the history once, record the tightest offending gap.
+            // The floor is derived per pair from `prev`, so a
+            // DST-shortened day (or a short month) is not mistaken for a
+            // runaway loop.
+            let mut tightest: Option<(i64, i64)> = None;
             let mut prev = hist[0];
             for &ts in hist.iter().skip(1) {
                 let gap = (ts - prev).num_seconds();
-                if gap < min_gap && tightest.is_none_or(|t| gap < t) {
-                    tightest = Some(gap);
+                let min_gap = expected_gap_seconds(task, prev);
+                if gap < min_gap - SCHEDULER_GAP_SLOP_SECONDS
+                    && tightest.is_none_or(|(t, _)| gap < t)
+                {
+                    tightest = Some((gap, min_gap));
                 }
                 prev = ts;
             }
-            if let Some(gap) = tightest {
+            if let Some((gap, min_gap)) = tightest {
                 out.push(WatchdogViolation {
                     task_id: task.id.clone(),
                     gap_seconds: gap,
@@ -1252,17 +1299,20 @@ impl RunAuditor {
                 continue;
             }
             scheduled.sort();
-            let min_gap = min_run_gap_seconds(task);
-            let mut tightest: Option<i64> = None;
+            // Same per-pair, calendar-aware floor as `audit_in_memory`.
+            let mut tightest: Option<(i64, i64)> = None;
             let mut prev = scheduled[0];
             for ts in scheduled.iter().skip(1) {
                 let gap = (*ts - prev).num_seconds();
-                if gap < min_gap && tightest.is_none_or(|t| gap < t) {
-                    tightest = Some(gap);
+                let min_gap = expected_gap_seconds(task, prev);
+                if gap < min_gap - SCHEDULER_GAP_SLOP_SECONDS
+                    && tightest.is_none_or(|(t, _)| gap < t)
+                {
+                    tightest = Some((gap, min_gap));
                 }
                 prev = *ts;
             }
-            if let Some(gap) = tightest {
+            if let Some((gap, min_gap)) = tightest {
                 out.push(WatchdogViolation {
                     task_id: task.id.clone(),
                     gap_seconds: gap,
@@ -1957,5 +2007,150 @@ mod tests {
         let now = Utc.with_ymd_and_hms(2026, 11, 1, 4, 0, 0).unwrap();
         let next: DateTime<Utc> = next_run_at_after(&task, now).unwrap().parse().unwrap();
         assert_eq!(next, Utc.with_ymd_and_hms(2026, 11, 1, 5, 30, 0).unwrap());
+    }
+
+    // ── Calendar / DST run-gap regression tests ───────────────────
+    //
+    // Every instant here is injected, never `Utc::now()`.
+
+    /// 2026-03-08 is the US spring-forward day: 09:00
+    /// `America/New_York` moves from 14:00 UTC (EST) to 13:00 UTC
+    /// (EDT), so the daily task is legitimately due only 23h after its
+    /// previous run. The old fixed 86_400 floor throttled it, which
+    /// pushed `next_run_at` to the following day (the run was silently
+    /// skipped) and left a sub-floor gap for the watchdog to kill the
+    /// task over.
+    #[test]
+    fn policy_allows_daily_run_across_spring_forward() {
+        let task = make_task_tz("daily", r#"{"hour":9,"minute":0}"#, "America/New_York");
+        let last = Utc.with_ymd_and_hms(2026, 3, 7, 14, 0, 0).unwrap();
+        let now = Utc.with_ymd_and_hms(2026, 3, 8, 13, 0, 0).unwrap();
+        assert_eq!((now - last).num_seconds(), 82_800);
+        assert_eq!(expected_gap_seconds(&task, last), 82_800);
+        assert_eq!(
+            check_run_policy(&task, Some(&last.to_rfc3339()), now, RunTrigger::Scheduler),
+            PolicyDecision::Allow,
+        );
+    }
+
+    /// Fall-back day: 09:00 New York moves from 13:00 UTC to 14:00 UTC,
+    /// a 25-hour spacing. Already allowed before, pinned so a future
+    /// tightening of the floor can't regress it.
+    #[test]
+    fn policy_allows_daily_run_across_fall_back() {
+        let task = make_task_tz("daily", r#"{"hour":9,"minute":0}"#, "America/New_York");
+        let last = Utc.with_ymd_and_hms(2026, 10, 31, 13, 0, 0).unwrap();
+        let now = Utc.with_ymd_and_hms(2026, 11, 1, 14, 0, 0).unwrap();
+        assert_eq!((now - last).num_seconds(), 90_000);
+        assert_eq!(expected_gap_seconds(&task, last), 90_000);
+        assert_eq!(
+            check_run_policy(&task, Some(&last.to_rfc3339()), now, RunTrigger::Scheduler),
+            PolicyDecision::Allow,
+        );
+    }
+
+    /// 2026-03-08 is a Sunday, so a weekly Sunday 09:00 New York task
+    /// hits the same short week (601_200s, not 7 * 86_400).
+    #[test]
+    fn policy_allows_weekly_run_across_spring_forward() {
+        let task = make_task_tz(
+            "weekly",
+            r#"{"weekday":6,"hour":9,"minute":0}"#,
+            "America/New_York",
+        );
+        let last = Utc.with_ymd_and_hms(2026, 3, 1, 14, 0, 0).unwrap();
+        let now = Utc.with_ymd_and_hms(2026, 3, 8, 13, 0, 0).unwrap();
+        assert_eq!(expected_gap_seconds(&task, last), 601_200);
+        assert_eq!(
+            check_run_policy(&task, Some(&last.to_rfc3339()), now, RunTrigger::Scheduler),
+            PolicyDecision::Allow,
+        );
+    }
+
+    /// Monthly day-8 09:00 New York: Feb 8 -> Mar 8 is 28 days *minus*
+    /// the spring-forward hour, below the old `28 * 86_400` floor.
+    #[test]
+    fn policy_allows_monthly_run_across_spring_forward() {
+        let task = make_task_tz(
+            "monthly",
+            r#"{"day":8,"hour":9,"minute":0}"#,
+            "America/New_York",
+        );
+        let last = Utc.with_ymd_and_hms(2026, 2, 8, 14, 0, 0).unwrap();
+        let now = Utc.with_ymd_and_hms(2026, 3, 8, 13, 0, 0).unwrap();
+        assert_eq!(expected_gap_seconds(&task, last), 2_415_600);
+        assert_eq!(
+            check_run_policy(&task, Some(&last.to_rfc3339()), now, RunTrigger::Scheduler),
+            PolicyDecision::Allow,
+        );
+    }
+
+    /// The calendar-derived floor still refuses an early re-fire: one
+    /// day into a monthly cadence is nowhere near due.
+    #[test]
+    fn policy_still_throttles_daily_task_refiring_an_hour_later() {
+        let task = make_task_tz("daily", r#"{"hour":9,"minute":0}"#, "America/New_York");
+        let last = Utc.with_ymd_and_hms(2026, 3, 7, 14, 0, 0).unwrap();
+        let now = last + Duration::hours(1);
+        assert!(matches!(
+            check_run_policy(&task, Some(&last.to_rfc3339()), now, RunTrigger::Scheduler),
+            PolicyDecision::Throttle(_),
+        ));
+    }
+
+    /// `interval` cadence is pure duration math and must be untouched
+    /// by the calendar-aware derivation.
+    #[test]
+    fn expected_gap_seconds_keeps_interval_cadence_exact() {
+        let last = Utc.with_ymd_and_hms(2026, 3, 8, 6, 30, 17).unwrap();
+        let five_min = make_task_tz("interval", r#"{"minutes":5}"#, "America/New_York");
+        assert_eq!(expected_gap_seconds(&five_min, last), 300);
+        let one_min = make_task("interval", r#"{"minutes":1}"#);
+        assert_eq!(expected_gap_seconds(&one_min, last), 60);
+    }
+
+    /// The watchdog uses the same per-pair floor, so the DST-shortened
+    /// gap it observes after the fix is not a violation. Previously
+    /// this pair tripped the kill switch and disabled the task.
+    #[tokio::test]
+    async fn auditor_in_memory_clean_across_spring_forward() {
+        let task = make_task_tz("daily", r#"{"hour":9,"minute":0}"#, "America/New_York");
+        let auditor = RunAuditor::with_start(Utc.with_ymd_and_hms(2026, 3, 1, 0, 0, 0).unwrap());
+        auditor
+            .record_scheduler_dispatch(
+                &task.id,
+                Utc.with_ymd_and_hms(2026, 3, 7, 14, 0, 0).unwrap(),
+            )
+            .await;
+        auditor
+            .record_scheduler_dispatch(
+                &task.id,
+                Utc.with_ymd_and_hms(2026, 3, 8, 13, 0, 0).unwrap(),
+            )
+            .await;
+        assert!(
+            auditor
+                .audit_in_memory(std::slice::from_ref(&task))
+                .await
+                .is_empty()
+        );
+    }
+
+    /// ...but a genuine runaway loop on the same daily task is still
+    /// caught.
+    #[tokio::test]
+    async fn auditor_in_memory_still_flags_runaway_daily_task() {
+        let task = make_task_tz("daily", r#"{"hour":9,"minute":0}"#, "America/New_York");
+        let auditor = RunAuditor::with_start(Utc.with_ymd_and_hms(2026, 3, 1, 0, 0, 0).unwrap());
+        let first = Utc.with_ymd_and_hms(2026, 3, 8, 13, 0, 0).unwrap();
+        auditor.record_scheduler_dispatch(&task.id, first).await;
+        auditor
+            .record_scheduler_dispatch(&task.id, first + Duration::seconds(90))
+            .await;
+        let violations = auditor.audit_in_memory(std::slice::from_ref(&task)).await;
+        assert_eq!(violations.len(), 1);
+        assert_eq!(violations[0].gap_seconds, 90);
+        // Floor derived from the 2026-03-08 -> 2026-03-09 spacing.
+        assert_eq!(violations[0].min_gap_seconds, 86_400);
     }
 }
