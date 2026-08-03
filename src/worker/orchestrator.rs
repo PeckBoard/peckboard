@@ -1384,6 +1384,38 @@ pub async fn queued_resume_config(
         }
     }
 
+    let folder_path = state
+        .db
+        .get_folder(&session.folder_id)
+        .await
+        .ok()
+        .flatten()
+        .map(|f| f.path)
+        .unwrap_or_default();
+    // Reuse the card's existing worktree if isolation is on — mirrors the
+    // pending-worker-message resume path above.
+    let working_dir =
+        if let (Some(project_id), Some(card_id)) = (&session.project_id, &session.card_id) {
+            let isolation = state
+                .db
+                .get_project(project_id)
+                .await
+                .ok()
+                .flatten()
+                .map(|p| p.worktree_isolation)
+                .unwrap_or(false);
+            crate::worker::worktree::ensure_worktree(
+                &folder_path,
+                card_id,
+                isolation,
+                session_id,
+                &state.db,
+            )
+            .await
+        } else {
+            folder_path
+        };
+
     let mcp_token = state
         .mcp_tokens
         .issue_token(session_id.to_string(), session.project_id.clone())
@@ -1400,7 +1432,7 @@ pub async fn queued_resume_config(
     SpawnConfig {
         model: model.unwrap_or_else(|| "default".into()),
         effort,
-        working_dir: String::new(),
+        working_dir,
         mcp_config_path,
         env: Default::default(),
         permission_mode: None, // host default: enforced unless the bypass setting is on

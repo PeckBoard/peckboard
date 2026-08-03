@@ -295,7 +295,7 @@ impl SessionManager {
             .await?
             .ok_or_else(|| anyhow::anyhow!("folder not found: {}", session.folder_id))?;
 
-        let working_dir = folder.path.clone();
+        let working_dir = resolve_working_dir(&config.working_dir, &folder.path);
 
         let conversation_id = if session.conversation_id.is_some() {
             session.conversation_id.clone()
@@ -1042,6 +1042,40 @@ impl SessionManager {
         resume_conversation_id_from_tail(&tail)
     }
 }
+/// Resolves the working directory a dispatch should run in: an explicit,
+/// contained `requested` dir (e.g. a card's worktree from `ensure_worktree`)
+/// if valid, otherwise the session's shared folder.
+///
+/// Falls back to `folder_path` whenever `requested` is blank, doesn't exist,
+/// or — even after canonicalization — doesn't live inside `folder_path`. A
+/// spawn must never be pointed outside the project folder, even if some
+/// future caller computes a bad path.
+pub(crate) fn resolve_working_dir(requested: &str, folder_path: &str) -> String {
+    if requested.is_empty() || requested == folder_path {
+        return folder_path.to_string();
+    }
+    let (Ok(canon_requested), Ok(canon_folder)) = (
+        std::fs::canonicalize(requested),
+        std::fs::canonicalize(folder_path),
+    ) else {
+        tracing::warn!(
+            requested,
+            folder_path,
+            "resolve_working_dir: requested dir doesn't exist; using folder"
+        );
+        return folder_path.to_string();
+    };
+    if canon_requested.starts_with(&canon_folder) {
+        canon_requested.to_string_lossy().to_string()
+    } else {
+        tracing::warn!(
+            requested,
+            folder_path,
+            "resolve_working_dir: requested dir escapes the project folder; using folder"
+        );
+        folder_path.to_string()
+    }
+}
 
 /// Newest-first scan of an event tail for a resumable conversationId.
 ///
@@ -1146,6 +1180,46 @@ mod tests {
 
     fn manager() -> SessionManager {
         SessionManager::new(Arc::new(ProviderRegistry::new()))
+    }
+    #[test]
+    fn resolve_working_dir_blank_uses_folder() {
+        assert_eq!(resolve_working_dir("", "/some/folder"), "/some/folder");
+    }
+
+    #[test]
+    fn resolve_working_dir_keeps_subdir_inside_folder() {
+        let tmp = tempfile::tempdir().unwrap();
+        let folder_dir = tmp.path().join("folder");
+        let sub_dir = folder_dir
+            .join(".peckboard")
+            .join("worktrees")
+            .join("abcd1234");
+        std::fs::create_dir_all(&sub_dir).unwrap();
+
+        let resolved = resolve_working_dir(sub_dir.to_str().unwrap(), folder_dir.to_str().unwrap());
+        assert_eq!(
+            std::fs::canonicalize(resolved).unwrap(),
+            std::fs::canonicalize(&sub_dir).unwrap()
+        );
+    }
+
+    #[test]
+    fn resolve_working_dir_rejects_escape_outside_folder() {
+        let tmp = tempfile::tempdir().unwrap();
+        let folder_dir = tmp.path().join("folder");
+        let outside_dir = tmp.path().join("outside");
+        std::fs::create_dir_all(&folder_dir).unwrap();
+        std::fs::create_dir_all(&outside_dir).unwrap();
+
+        let resolved =
+            resolve_working_dir(outside_dir.to_str().unwrap(), folder_dir.to_str().unwrap());
+        assert_eq!(resolved, folder_dir.to_str().unwrap());
+    }
+
+    #[test]
+    fn resolve_working_dir_falls_back_when_requested_missing() {
+        let resolved = resolve_working_dir("/definitely/does/not/exist", "/some/folder");
+        assert_eq!(resolved, "/some/folder");
     }
 
     #[tokio::test]

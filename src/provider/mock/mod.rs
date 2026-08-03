@@ -131,9 +131,10 @@ impl AgentProvider for MockProvider {
         let (stdin_tx, stdin_rx) = mpsc::channel::<String>(16);
         let cancel = Arc::new(Notify::new());
         let cancel_for_task = cancel.clone();
+        let model_label = config.model.clone();
+        let working_dir = config.working_dir.clone();
         let runs = self.runs.clone();
         let sid = session_id.clone();
-        let model_label = config.model.clone();
 
         // The mock provider scripts text-only scenarios; attachments
         // (if any) ride along in the `UserMessage` but the scripted
@@ -146,6 +147,7 @@ impl AgentProvider for MockProvider {
                 &sid,
                 &message_text,
                 &model_label,
+                &working_dir,
                 &db,
                 &broadcaster,
                 &plugins,
@@ -272,6 +274,7 @@ async fn run_scenario(
     session_id: &str,
     message: &str,
     model_label: &str,
+    working_dir: &str,
     db: &crate::db::Db,
     broadcaster: &Arc<crate::ws::broadcaster::Broadcaster>,
     plugins: &crate::plugin::manager::PluginManager,
@@ -291,7 +294,7 @@ async fn run_scenario(
         ProviderEvent::Started {
             model: model_label.to_string(),
             conversation_id: Some(conv_id.clone()),
-            metadata: serde_json::json!({ "scenario": scenario }),
+            metadata: serde_json::json!({ "scenario": scenario, "working_dir": working_dir }),
         },
     )
     .await;
