@@ -70,6 +70,32 @@ export const DEFAULT_PROVIDER_CAPABILITIES: ProviderCapabilities = {
   answer_transport: 'stdin',
 }
 
+/** Fallback when the model's provider is entirely missing from the catalogue
+ *  (hidden in Settings → Providers, or its plugin uninstalled, while a live
+ *  session still references it). Conservative here means the UI must not
+ *  overclaim capabilities the vanished provider might have lacked. Bare ids
+ *  and explicit `claude:` ids keep the Claude-shaped defaults — on this
+ *  backend a bare id is only ever Claude, so "missing" there means an old
+ *  payload that predates the capabilities field, not a vanished provider. */
+export const CONSERVATIVE_PROVIDER_CAPABILITIES: ProviderCapabilities = {
+  supports_thinking: false,
+  supports_images_in: false,
+  supports_usage: false,
+  supports_resume: false,
+  interrupt_kind: 'hard_kill',
+  supports_mid_stream_injection: false,
+  answer_transport: 'new_turn',
+}
+
+/** Capabilities to assume when a model's provider can't be found in the
+ *  live catalogue at all. */
+function fallbackCapabilitiesForModel(modelId: string | null | undefined): ProviderCapabilities {
+  const providerId = modelId && modelId.includes(':') ? modelId.split(':')[0] : 'claude'
+  return providerId === 'claude'
+    ? DEFAULT_PROVIDER_CAPABILITIES
+    : CONSERVATIVE_PROVIDER_CAPABILITIES
+}
+
 export interface ProviderInfo {
   id: string
   display_name: string
@@ -134,7 +160,7 @@ export function capabilitiesForModel(
   modelId: string | null | undefined,
   providers: ProviderInfo[],
 ): ProviderCapabilities {
-  return providerForModel(modelId, providers)?.capabilities ?? DEFAULT_PROVIDER_CAPABILITIES
+  return providerForModel(modelId, providers)?.capabilities ?? fallbackCapabilitiesForModel(modelId)
 }
 
 /** Whether image attachments would actually reach the model: the
@@ -146,7 +172,7 @@ export function imagesAllowedForModel(
   providers: ProviderInfo[],
 ): boolean {
   const provider = providerForModel(modelId, providers)
-  const caps = provider?.capabilities ?? DEFAULT_PROVIDER_CAPABILITIES
+  const caps = provider?.capabilities ?? fallbackCapabilitiesForModel(modelId)
   if (!caps.supports_images_in) return false
   const model = modelId ? provider?.models.find((m) => m.id === modelId) : undefined
   return model?.images_in !== false
@@ -166,6 +192,8 @@ export function interruptAffordanceForModel(
       return { label: 'Stop', title: 'Ask the agent to stop — it halts at the next safe point' }
     case 'hard_kill':
       return { label: 'Stop', title: 'Stop the agent — the in-flight run is killed' }
+    default:
+      return { label: 'Stop', title: 'Stop the agent — the in-flight run is killed' }
   }
 }
 
@@ -177,7 +205,7 @@ export function modelThinks(
   providers: ProviderInfo[],
 ): boolean {
   const provider = providerForModel(modelId, providers)
-  const caps = provider?.capabilities ?? DEFAULT_PROVIDER_CAPABILITIES
+  const caps = provider?.capabilities ?? fallbackCapabilitiesForModel(modelId)
   if (!caps.supports_thinking) return false
   const model = modelId ? provider?.models.find((m) => m.id === modelId) : undefined
   return model?.thinking !== false
