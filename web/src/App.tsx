@@ -1257,7 +1257,10 @@ function App() {
           ))}
           <button
             className={`rail-btn ${view === 'repeatingTasks' ? 'active' : ''}`}
-            onClick={() => navigate('repeatingTasks', null)}
+            onClick={() => {
+              setActiveRepeatingTaskId(null)
+              navigate('repeatingTasks', null)
+            }}
             title="Repeating Tasks"
             aria-label="Repeating Tasks"
           >
@@ -1301,7 +1304,10 @@ function App() {
           </button>
           <button
             className={`rail-btn ${view === 'reports' ? 'active' : ''}`}
-            onClick={() => navigate('reports')}
+            onClick={() => {
+              setActiveReportId(null)
+              navigate('reports')
+            }}
             title="Reports"
             aria-label="Reports"
           >
