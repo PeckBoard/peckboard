@@ -441,6 +441,7 @@ async fn a_stale_completion_neither_finalizes_nor_aborts_the_handover() {
                 error: (!completed).then(|| "idle recycle".to_string()),
                 error_kind: None,
                 run_id: (watermark as u64) - 1,
+                turn_end_only: false,
             },
         )
         .await;

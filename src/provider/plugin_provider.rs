@@ -630,6 +630,7 @@ impl AgentProvider for PluginProviderAdapter {
                     error,
                     run_id,
                     error_kind,
+                    turn_end_only: false,
                 })
                 .await;
         });

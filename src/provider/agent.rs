@@ -61,6 +61,16 @@ pub struct ProcessCompletion {
     /// a handover's watermark reports on an older run and must not be
     /// mistaken for the handover's doc-generation turn.
     pub run_id: u64,
+    /// `true` when this completion does NOT mean the process/run ended —
+    /// it's a lightweight turn-end signal a mid-stream provider (Claude)
+    /// sends after an ordinary turn's `result` when the durable queue has
+    /// a message waiting, specifically so the completion listener drains
+    /// it without waiting for the long-lived child to exit (idle reap or
+    /// recycle). The listener must treat this as drain-only: no handover
+    /// finalize, no worker bookkeeping, no auto-compact, no subagent
+    /// report — just `drain_queue_for_session` — since the run this
+    /// `session_id` maps to is still alive and still owns its child.
+    pub turn_end_only: bool,
 }
 
 /// Context handed to an `AgentProvider` when a new run is requested.

@@ -168,6 +168,7 @@ impl AgentProvider for MockProvider {
                     error: None,
                     run_id,
                     error_kind: None,
+                    turn_end_only: false,
                 })
                 .await;
         });

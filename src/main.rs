@@ -401,6 +401,26 @@ async fn main() -> anyhow::Result<()> {
             tokio::spawn(async move {
                 while let Some(completion) = rx.recv().await {
                     let sid = completion.session_id.clone();
+                    // -0.5. Drain-only turn-end signal: a mid-stream
+                    //    provider's child is still alive and still owns its
+                    //    run — this is NOT a real completion. Skip handover/
+                    //    worker/subagent/compaction bookkeeping entirely and
+                    //    just deliver the queued message via the same
+                    //    per-session-locked drain every other path uses.
+                    if completion.turn_end_only {
+                        if let Err(e) = peckboard::worker::orchestrator::drain_queue_for_session(
+                            &orchestrator_state,
+                            &sid,
+                        )
+                        .await
+                        {
+                            tracing::warn!(
+                                session_id = %sid,
+                                "Turn-end queue drain failed: {e}"
+                            );
+                        }
+                        continue;
+                    }
 
                     // 0. Handover finalize. If this completion is the
                     //    outgoing model's doc-generation turn (session has a

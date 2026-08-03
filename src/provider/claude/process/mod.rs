@@ -39,16 +39,15 @@ use std::process::Stdio;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
+use crate::db::Db;
+use crate::provider::agent::{ProcessCompletion, emit_event};
+use crate::provider::message::UserMessage;
+use crate::provider::stream::{CrashKind, ProviderEvent};
+use crate::ws::broadcaster::{Broadcaster, WsEvent};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::{Child, Command};
 use tokio::sync::Notify;
 use tokio::sync::mpsc;
-
-use crate::db::Db;
-use crate::provider::agent::emit_event;
-use crate::provider::message::UserMessage;
-use crate::provider::stream::{CrashKind, ProviderEvent};
-use crate::ws::broadcaster::{Broadcaster, WsEvent};
 
 use super::build_cli_args;
 use crate::provider::stream::SpawnConfig;
@@ -231,9 +230,20 @@ pub struct LoopState {
     /// watchdog.
     pub turn_timeout: Option<std::time::Duration>,
     /// How long a soft interrupt waits for its settling `result` before
-    /// the loop falls back to hard-killing the child. Production uses
-    /// [`INTERRUPT_GRACE`]; tests shrink it.
     pub interrupt_grace: std::time::Duration,
+    /// Channel to signal a lightweight, drain-only turn-end completion
+    /// on — set only for dispatches whose provider keeps a long-lived
+    /// child across turns (Claude). `None` in tests that don't exercise
+    /// the queue-drain path.
+    pub turn_end: Option<TurnEndNotify>,
+}
+
+/// Where to send a turn-end drain signal, and which run it reports on.
+/// See [`ProcessCompletion::turn_end_only`].
+#[derive(Clone)]
+pub struct TurnEndNotify {
+    pub tx: mpsc::Sender<ProcessCompletion>,
+    pub last_run_id: Arc<AtomicU64>,
 }
 
 fn now_ms() -> u64 {
@@ -959,6 +969,31 @@ pub async fn stream_events(
                     shutdown_after_turn = true;
                 }
             }
+            // Turn-end queue drain: this child is long-lived and, absent
+            // `shutdown_after_turn` above, keeps running — the provider's
+            // `ProcessCompletion` only fires when the child eventually
+            // exits (idle reap or a later recycle), which left a message
+            // queued mid-turn stuck for up to ~30 minutes. If the durable
+            // queue has something waiting, tell the completion listener
+            // to drain now via a `turn_end_only` completion: drain-only,
+            // no worker/handover/subagent bookkeeping, since this run is
+            // still alive and still owns its child.
+            if !shutdown_after_turn
+                && let Some(turn_end) = &state.turn_end
+                && matches!(db.next_queued_message(&session_id).await, Ok(Some(_)))
+            {
+                let _ = turn_end
+                    .tx
+                    .send(ProcessCompletion {
+                        session_id: session_id.clone(),
+                        completed: true,
+                        error: None,
+                        error_kind: None,
+                        run_id: turn_end.last_run_id.load(Ordering::SeqCst),
+                        turn_end_only: true,
+                    })
+                    .await;
+            }
             // Graceful-shutdown rendezvous: a tool handler (e.g.
             // `finish_card`) set the flag mid-turn so the response
             // could reach the agent. Now that the turn's `result`
@@ -1578,6 +1613,7 @@ mod tests {
             last_activity,
             turn_timeout,
             interrupt_grace,
+            turn_end: None,
         };
 
         let process =
@@ -1686,6 +1722,171 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// Shared setup for the turn-end drain tests: a `cat`-backed loop
+    /// whose `LoopState.turn_end` is wired to an observable channel,
+    /// unlike `spawn_cat_loop` (which always passes `None`).
+    async fn spawn_cat_loop_with_turn_end(
+        session_id: &str,
+    ) -> (
+        Db,
+        mpsc::Sender<StdinMsg>,
+        Arc<AtomicBool>,
+        mpsc::Receiver<ProcessCompletion>,
+        tokio::task::JoinHandle<StreamOutcome>,
+    ) {
+        let db = Db::in_memory().unwrap();
+        let ts = chrono::Utc::now().to_rfc3339();
+        db.create_folder(crate::db::models::NewFolder {
+            id: "f1".into(),
+            name: "f".into(),
+            path: "/tmp".into(),
+            created_at: ts.clone(),
+        })
+        .await
+        .unwrap();
+        db.create_session(crate::db::models::NewSession {
+            id: session_id.into(),
+            name: "test".into(),
+            folder_id: "f1".into(),
+            model: None,
+            effort: None,
+            is_worker: false,
+            project_id: None,
+            card_id: None,
+            conversation_id: None,
+            created_at: ts.clone(),
+            last_activity: ts,
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+
+        let broadcaster = Broadcaster::new();
+        let (tx, rx) = mpsc::channel::<StdinMsg>(16);
+        let cancel = Arc::new(Notify::new());
+        let turn_active = Arc::new(AtomicBool::new(false));
+        let last_activity = Arc::new(AtomicU64::new(0));
+        let (completion_tx, completion_rx) = mpsc::channel::<ProcessCompletion>(4);
+        let last_run_id = Arc::new(AtomicU64::new(1));
+        let state = LoopState {
+            turn_active: turn_active.clone(),
+            last_activity,
+            turn_timeout: None,
+            interrupt_grace: INTERRUPT_GRACE,
+            turn_end: Some(TurnEndNotify {
+                tx: completion_tx,
+                last_run_id,
+            }),
+        };
+
+        let process = ClaudeProcess::from_command_for_test(Command::new("cat"), session_id)
+            .expect("spawn test child");
+        let db_clone = db.clone();
+        let handle = tokio::spawn(async move {
+            stream_events(
+                process,
+                db_clone,
+                broadcaster,
+                rx,
+                "/tmp".into(),
+                cancel,
+                state,
+            )
+            .await
+        });
+
+        (db, tx, turn_active, completion_rx, handle)
+    }
+
+    #[tokio::test]
+    async fn turn_end_drains_queue_without_waiting_for_process_exit() {
+        // Regression test for the bug this card fixes: a message queued
+        // mid-turn on a long-lived Claude child used to sit undelivered
+        // until the child eventually exited (idle reap or recycle),
+        // because `ProcessCompletion` only fired on process exit — never
+        // at ordinary turn end. The loop must now emit a `turn_end_only`
+        // completion right after the `result` event whenever the durable
+        // queue has a message waiting, without killing or recycling the
+        // child.
+        let session = "loop-turn-end-drain";
+        let (db, tx, turn_active, mut completion_rx, handle) =
+            spawn_cat_loop_with_turn_end(session).await;
+
+        db.enqueue_message(crate::db::models::NewQueuedMessage {
+            session_id: session.into(),
+            text: "queued while busy".into(),
+            queued_at: chrono::Utc::now().to_rfc3339(),
+            model: None,
+            effort: None,
+            attachment_ids: None,
+            user_event_appended: false,
+        })
+        .await
+        .unwrap();
+
+        tx.send(StdinMsg::UserTurn(UserMessage::from_text("hello")))
+            .await
+            .unwrap();
+        wait_for_turn_active(&turn_active, true, 2_000).await;
+        tx.send(StdinMsg::RawLine(fake_result_frame("conv-1")))
+            .await
+            .unwrap();
+
+        let completion = timeout(std::time::Duration::from_secs(5), completion_rx.recv())
+            .await
+            .expect("turn-end completion must fire within 5s")
+            .expect("completion channel must stay open");
+        assert!(
+            completion.turn_end_only,
+            "must be a drain-only signal, not a real process exit"
+        );
+        assert_eq!(completion.session_id, session);
+
+        // Draining must not kill or recycle the child — the loop task
+        // is still running, waiting for the next turn.
+        assert!(
+            !handle.is_finished(),
+            "child must stay alive after a turn-end drain signal"
+        );
+
+        drop(tx);
+        let _ = timeout(std::time::Duration::from_secs(5), handle).await;
+    }
+
+    #[tokio::test]
+    async fn turn_end_signal_skipped_when_queue_empty() {
+        // An ordinary turn end with nothing queued must NOT synthesize a
+        // completion — only a message actually waiting in the durable
+        // queue justifies the extra signal.
+        let session = "loop-turn-end-no-queue";
+        let (_db, tx, turn_active, mut completion_rx, handle) =
+            spawn_cat_loop_with_turn_end(session).await;
+
+        tx.send(StdinMsg::UserTurn(UserMessage::from_text("hello")))
+            .await
+            .unwrap();
+        wait_for_turn_active(&turn_active, true, 2_000).await;
+        tx.send(StdinMsg::RawLine(fake_result_frame("conv-2")))
+            .await
+            .unwrap();
+        wait_for_turn_active(&turn_active, false, 2_000).await;
+
+        let saw_signal = timeout(std::time::Duration::from_millis(300), completion_rx.recv())
+            .await
+            .is_ok();
+        assert!(
+            !saw_signal,
+            "no queued message means no turn-end completion should fire"
+        );
+        assert!(
+            !handle.is_finished(),
+            "child stays alive after an ordinary turn end"
+        );
+
+        drop(tx);
+        let _ = timeout(std::time::Duration::from_secs(5), handle).await;
     }
 
     /// Synthetic error `result` frame — the shape the CLI emits when the

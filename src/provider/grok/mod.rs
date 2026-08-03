@@ -372,6 +372,7 @@ impl AgentProvider for GrokProvider {
                     error: result.error,
                     run_id,
                     error_kind: result.error_kind,
+                    turn_end_only: false,
                 })
                 .await;
         });

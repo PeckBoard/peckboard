@@ -6,10 +6,9 @@ use std::time::Duration;
 use async_trait::async_trait;
 use tokio::sync::{Mutex, Notify, mpsc};
 
+use super::process::{self, LoopState, StdinMsg, TurnEndNotify};
 use crate::provider::agent::{AgentProvider, ProcessCompletion, SendMessageContext};
 use crate::provider::registry::{ProviderInfo, ProviderRegistry};
-
-use super::process::{self, LoopState, StdinMsg};
 
 /// Upper bound on delivering one message into a run's stdin channel.
 /// The channel only backs up when the stream loop stops consuming, so a
@@ -431,6 +430,10 @@ impl AgentProvider for ClaudeProvider {
                         last_activity,
                         turn_timeout: cli_config.timeout_ms.map(Duration::from_millis),
                         interrupt_grace: process::INTERRUPT_GRACE,
+                        turn_end: Some(TurnEndNotify {
+                            tx: completion_tx_clone.clone(),
+                            last_run_id: completion_run_id.clone(),
+                        }),
                     };
                     tokio::spawn(async move {
                         let outcome = process::stream_events(
@@ -476,6 +479,7 @@ impl AgentProvider for ClaudeProvider {
                                 run_id: completion_run_id.load(Ordering::SeqCst),
                                 error: outcome.error,
                                 error_kind: outcome.error_kind,
+                                turn_end_only: false,
                             })
                             .await;
                     });
