@@ -103,6 +103,9 @@ export const useWsStore = create<WsState>((set, get) => ({
     })
 
     ws.addEventListener('message', (ev: MessageEvent) => {
+      // Frames from a socket we've already replaced are not ours to act on:
+      // dispatching them would double every card/project/queue refetch.
+      if (socket !== ws) return
       let msg: Record<string, unknown>
       try {
         msg = JSON.parse(String(ev.data))
@@ -334,6 +337,14 @@ export const useWsStore = create<WsState>((set, get) => ({
     })
 
     ws.addEventListener('close', () => {
+      // A superseded socket must not speak for the live one. `disconnect()`
+      // followed by `connect()` (StrictMode's mount/cleanup/mount, or a fast
+      // logout/login) leaves the OLD socket's close event to fire after a new
+      // socket is already installed — without this guard it nulls the pointer
+      // to the new socket, flaps the UI to disconnected, and schedules a
+      // reconnect that opens a THIRD socket while the second is still open
+      // and unreachable, so every frame dispatches twice.
+      if (socket !== ws) return
       socket = null
       useUiStore.getState().setConnected(false)
 
@@ -347,7 +358,10 @@ export const useWsStore = create<WsState>((set, get) => ({
     })
 
     ws.addEventListener('error', () => {
-      // The close event will fire after this, which handles reconnection.
+      // Same staleness guard as `close`: nothing to do for a socket we've
+      // already replaced. For the current socket the close event fires after
+      // this, which handles reconnection.
+      if (socket !== ws) return
     })
   },
 
