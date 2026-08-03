@@ -1394,7 +1394,7 @@ pub(super) fn tool_definitions() -> Vec<McpToolDef> {
         },
         McpToolDef {
             name: "git".into(),
-            description: "Run a READ-ONLY git subcommand in the project folder; returns exit_code, stdout, stderr. Allowed: status, log, diff, show, branch, blame, ls-files, ls-tree, rev-parse, rev-list, describe, shortlog, tag, remote, for-each-ref, cat-file, name-rev, symbolic-ref, whatchanged, reflog. Mutating commands rejected.".into(),
+            description: "Run a READ-ONLY git subcommand in the project folder; returns exit_code, stdout, stderr. Allowed: status, log, diff, show, branch, blame, ls-files, ls-tree, rev-parse, rev-list, describe, shortlog, tag, remote, for-each-ref, cat-file, name-rev, symbolic-ref, whatchanged, reflog. Mutating commands rejected. Args must stay inside the project folder: absolute/`..` paths and jail-escaping flags (--no-index, --output, --git-dir, --work-tree, …) are rejected.".into(),
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {

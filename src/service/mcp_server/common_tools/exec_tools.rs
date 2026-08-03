@@ -3,8 +3,9 @@
 //! Both shell out through the host's `peckboard_exec`, which only runs an
 //! allowlisted executable, passes args as an argv array (no shell), and pins
 //! the working directory to the caller's project folder. On top of that the
-//! `git` tool restricts itself to **read-only** subcommands, and `run_tests`
-//! only ever invokes a known test runner.
+//! `git` tool restricts itself to **read-only** subcommands whose arguments
+//! cannot escape that folder (see [`check_git_arg`]), and `run_tests` only
+//! ever invokes a known test runner.
 
 use super::host_bridge::{HostCtx, HostFn};
 
@@ -34,6 +35,71 @@ const GIT_READONLY: &[&str] = &[
     "reflog",
 ];
 
+/// Git flags that redirect git outside the pinned working directory — either
+/// by reading/writing an arbitrary host path (`--no-index`, `--output`) or by
+/// repointing git itself (`--git-dir`, `--work-tree`, …). Matched on the flag
+/// name only, so lookalikes such as `--output-indicator-new=X` stay allowed.
+///
+/// `-C` / `-c` are absent on purpose: after the subcommand git parses them as
+/// copy-detection / combined-diff, not as the global chdir/config options, and
+/// their path-bearing forms are caught by the path check below.
+const GIT_BLOCKED_FLAGS: &[&str] = &[
+    "--no-index",
+    "--output",
+    "--git-dir",
+    "--work-tree",
+    "--exec-path",
+    "--namespace",
+    "--config-env",
+    "--upload-pack",
+    "--receive-pack",
+];
+
+/// True for a path that would leave the pinned working directory: absolute
+/// (POSIX or Windows), `~`-rooted, or carrying a `..` component. Revision
+/// syntax is unaffected — `main..HEAD` has no path separator, so its only
+/// component is `main..HEAD`, not `..`.
+fn escapes_jail(s: &str) -> bool {
+    if s.starts_with('/') || s.starts_with('\\') || s.starts_with('~') {
+        return true;
+    }
+    let b = s.as_bytes();
+    if b.len() >= 3 && b[0].is_ascii_alphabetic() && b[1] == b':' && (b[2] == b'/' || b[2] == b'\\')
+    {
+        return true;
+    }
+    s.split(['/', '\\']).any(|c| c == "..")
+}
+
+/// Reject one caller-supplied git argument that would let git read or write
+/// outside the folder jail. Flags match by name (the part before `=`); any
+/// attached value and every non-flag argument is path-checked.
+fn check_git_arg(arg: &str) -> Result<(), String> {
+    if arg.starts_with('-') && arg != "-" && arg != "--" {
+        let (name, value) = match arg.split_once('=') {
+            Some((n, v)) => (n, Some(v)),
+            None => (arg, None),
+        };
+        if GIT_BLOCKED_FLAGS.contains(&name) {
+            return Err(format!(
+                "git argument '{name}' is not permitted: it lets git read or write outside the project folder"
+            ));
+        }
+        if let Some(v) = value.filter(|v| escapes_jail(v)) {
+            return Err(format!(
+                "git argument '{arg}' is not permitted: '{v}' points outside the project folder"
+            ));
+        }
+        return Ok(());
+    }
+    if escapes_jail(arg) {
+        return Err(format!(
+            "git argument '{arg}' is not permitted: it points outside the project folder"
+        ));
+    }
+    Ok(())
+}
+
 pub fn git_tool(args: serde_json::Value, ctx: &HostCtx) -> Result<serde_json::Value, String> {
     let subcommand = args
         .get("subcommand")
@@ -52,7 +118,10 @@ pub fn git_tool(args: serde_json::Value, ctx: &HostCtx) -> Result<serde_json::Va
     if let Some(extra) = args.get("args").and_then(|v| v.as_array()) {
         for a in extra {
             match a.as_str() {
-                Some(s) => argv.push(s.to_string()),
+                Some(s) => {
+                    check_git_arg(s)?;
+                    argv.push(s.to_string());
+                }
                 None => return Err("each entry in `args` must be a string".to_string()),
             }
         }
@@ -238,4 +307,49 @@ fn detect_runner(ctx: &HostCtx) -> Result<Runner, String> {
         );
     };
     named_runner(pick).ok_or_else(|| "internal: unknown detected runner".to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn rejects_jail_escaping_flags() {
+        assert!(check_git_arg("--no-index").is_err());
+        assert!(check_git_arg("--output").is_err());
+        assert!(check_git_arg("--output=/home/u/.bashrc").is_err());
+        assert!(check_git_arg("--git-dir=/tmp/x").is_err());
+        assert!(check_git_arg("--work-tree").is_err());
+    }
+
+    #[test]
+    fn rejects_paths_outside_the_jail() {
+        assert!(check_git_arg("/etc/passwd").is_err());
+        assert!(check_git_arg("/home/u/.ssh/id_ed25519").is_err());
+        assert!(check_git_arg("../other/src.rs").is_err());
+        assert!(check_git_arg("src/../../etc/passwd").is_err());
+        assert!(check_git_arg("~/.aws/credentials").is_err());
+        assert!(check_git_arg("C:\\Windows\\win.ini").is_err());
+        assert!(check_git_arg("--contents=/etc/passwd").is_err());
+    }
+
+    #[test]
+    fn allows_ordinary_git_arguments() {
+        for ok in [
+            "-n",
+            "10",
+            "--oneline",
+            "HEAD~1",
+            "main..HEAD",
+            "main...HEAD",
+            "src/foo.rs",
+            "--",
+            "--stat",
+            "--output-indicator-new=X",
+            "-C",
+            "origin/main",
+        ] {
+            assert!(check_git_arg(ok).is_ok(), "{ok} should be allowed");
+        }
+    }
 }
