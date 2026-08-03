@@ -1980,3 +1980,87 @@ a.wasm-plugin-repo:hover {
   font-family: var(--font-mono);
   font-size: var(--text-xs);
 }
+
+/* ─── First-run setup wizard ──────────────────────── */
+/* Five-step onboarding modal for the bootstrap admin. The step strip is
+   the wizard's spine: numbered dots, the current one filled with the
+   accent, finished ones swapped for a check. */
+.setup-wizard-intro {
+  margin-top: -4px;
+}
+.setup-wizard-steps {
+  display: flex;
+  gap: 4px;
+  margin: 16px 0 20px;
+  padding: 0;
+  list-style: none;
+  flex-wrap: wrap;
+}
+.setup-wizard-step {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 8px;
+  border-radius: var(--radius-sm);
+  color: var(--text3);
+  font-size: var(--text-sm);
+}
+.setup-wizard-step-dot {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  border-radius: 50%;
+  border: 1.5px solid var(--border);
+  background: var(--surface2);
+  font-size: var(--text-xs);
+  font-weight: 600;
+  flex: none;
+}
+.setup-wizard-step.current {
+  color: var(--text);
+  background: var(--accent-subtle);
+}
+.setup-wizard-step.current .setup-wizard-step-dot {
+  border-color: var(--accent);
+  background: var(--accent);
+  color: #fff;
+}
+.setup-wizard-step.done {
+  color: var(--text2);
+}
+.setup-wizard-step.done .setup-wizard-step-dot {
+  border-color: var(--success);
+  color: var(--success);
+  background: transparent;
+}
+@media (max-width: 560px) {
+  .setup-wizard-step-label {
+    display: none;
+  }
+  .setup-wizard-step.current .setup-wizard-step-label {
+    display: inline;
+  }
+}
+.setup-wizard-body {
+  min-height: 220px;
+}
+.setup-wizard-body h3 {
+  margin-top: 0;
+}
+/* The TLS section reuses `.settings-section`, which assumes the settings
+   page's spacing — tighten it inside the modal. */
+.setup-wizard-body .settings-section {
+  margin-bottom: 16px;
+}
+.setup-wizard-done {
+  color: var(--success);
+  font-size: var(--text-sm);
+}
+.setup-wizard-outro {
+  margin-top: 16px;
+}
+.setup-wizard-actions {
+  align-items: center;
+}

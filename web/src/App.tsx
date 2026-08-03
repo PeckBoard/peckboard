@@ -35,6 +35,7 @@ import RepeatingTasksView from './components/RepeatingTasksView'
 import UsageDashboard from './components/UsageDashboard'
 import UserManagement from './components/UserManagement'
 import ChangePasswordModal from './components/ChangePasswordModal'
+import SetupWizard from './components/SetupWizard'
 import TabBar from './components/TabBar'
 import { useMediaQuery } from './hooks/useMediaQuery'
 import {
@@ -244,6 +245,24 @@ function App() {
   const authenticated = useAuthStore((s) => s.authenticated)
   const user = useAuthStore((s) => s.user)
   const checkAuth = useAuthStore((s) => s.checkAuth)
+  // First-run setup wizard gate: only an admin sees it, and only while the
+  // server says setup is incomplete. `null` = not answered yet, so nothing
+  // flashes before the fetch resolves; only the wizard's explicit Finish
+  // (POST /api/settings/setup/complete) flips it for good.
+  const [setupCompleted, setSetupCompleted] = useState<boolean | null>(null)
+  useEffect(() => {
+    if (!authenticated || user?.role !== 'admin') return
+    let cancelled = false
+    authedFetch('/api/settings/setup')
+      .then((res) => (res.ok ? res.json() : null))
+      .then((data: { completed?: boolean } | null) => {
+        if (!cancelled && typeof data?.completed === 'boolean') setSetupCompleted(data.completed)
+      })
+      .catch(() => {})
+    return () => {
+      cancelled = true
+    }
+  }, [authenticated, user])
   const logout = useAuthStore((s) => s.logout)
   const connected = useUiStore((s) => s.connected)
   const connect = useWsStore((s) => s.connect)
@@ -1784,6 +1803,9 @@ function App() {
             useTabsStore.getState().openTab('session', id)
           }}
         />
+      )}
+      {setupCompleted === false && user?.role === 'admin' && (
+        <SetupWizard onDone={() => setSetupCompleted(true)} />
       )}
       {showNewProject && <NewProjectModal onClose={() => setShowNewProject(false)} />}
       {showChangePassword && (

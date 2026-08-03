@@ -63,6 +63,16 @@ export default async function globalSetup() {
       })
     }
     console.log('[e2e] Approved staged wasm plugins (if present)')
+
+    // The fresh data dir is a "fresh install", so the server seeds the
+    // first-run setup wizard as incomplete — which would overlay every
+    // page and break unrelated specs. Complete it here; the wizard's own
+    // spec stubs GET /api/settings/setup to exercise the UI.
+    await fetch(`${baseURL}/api/settings/setup/complete`, {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${token}` },
+    })
+    console.log('[e2e] Marked first-run setup complete')
   } else {
     console.warn(
       '[e2e] Could not log in to approve staged plugins — their approval prompt will block clicks',
