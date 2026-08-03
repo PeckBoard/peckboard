@@ -28,8 +28,10 @@ use peckboard::db::models::{
 use peckboard::plugin::builtin::BuiltinPluginRegistry;
 use peckboard::plugin::manager::PluginManager;
 use peckboard::provider::manager::SessionManager;
+use peckboard::provider::message::UserMessage;
 use peckboard::provider::mock::register_mock_provider;
 use peckboard::provider::registry::ProviderRegistry;
+use peckboard::provider::stream::SpawnConfig;
 use peckboard::routes::sessions::router;
 use peckboard::service::mcp_server::McpTokenRegistry;
 use peckboard::service::push::PushService;
@@ -963,4 +965,113 @@ async fn finalize_compaction_with_empty_doc_aborts() {
         !events.iter().any(|e| e.kind == "handover"),
         "no 'Context compacted' marker for a failed compaction"
     );
+}
+
+// --- Doc survives a failed dispatch -----------------------------------------
+
+/// The data-loss regression: `send_message_locked` used to consume
+/// `pending_handover_doc` at the TOP of dispatch, before the folder lookup,
+/// provider resolution, account env injection and the spawn -- all of which
+/// can error. The turn then never ran, but the doc (the only surviving copy
+/// of the pre-reset conversation) was already gone, so the user's retry went
+/// out with no context at all.
+///
+/// Here the session's model names a provider that isn't registered, which is
+/// the same shape as the real-world trigger (a deleted account making
+/// dispatch fail with "claude account not found"): dispatch must fail with
+/// the doc still parked, and the retry -- once the model resolves again --
+/// must inject it exactly once and only then clear it.
+#[tokio::test]
+async fn failed_dispatch_keeps_the_handover_doc_for_the_retry() {
+    let (state, _token) = build_state("mock:echo").await;
+    state
+        .db
+        .update_session(
+            "s1",
+            UpdateSession {
+                model: Some(Some("nosuchprovider:whatever".into())),
+                pending_handover_doc: Some(Some("## Carried context\nremember the plan".into())),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+
+    let lock = state.session_manager.lock_session("s1").await;
+    let err = state
+        .session_manager
+        .send_message_locked(
+            &lock,
+            UserMessage::from_text("next turn"),
+            &state.db,
+            &state.broadcaster,
+            SpawnConfig::default(),
+        )
+        .await
+        .expect_err("unknown provider must fail the dispatch");
+    assert!(
+        err.to_string().contains("unknown agent provider"),
+        "err was: {err}"
+    );
+    drop(lock);
+
+    let s = state.db.get_session("s1").await.unwrap().unwrap();
+    assert_eq!(
+        s.pending_handover_doc.as_deref(),
+        Some("## Carried context\nremember the plan"),
+        "a dispatch that never reached the provider must not eat the doc"
+    );
+
+    // Retry under a model that resolves: the doc rides the turn and is
+    // consumed exactly once.
+    let mut completion_rx = state
+        .session_manager
+        .take_completion_rx()
+        .await
+        .expect("completion rx available");
+    state
+        .db
+        .update_session(
+            "s1",
+            UpdateSession {
+                model: Some(Some("mock:echo".into())),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+
+    let lock = state.session_manager.lock_session("s1").await;
+    state
+        .session_manager
+        .send_message_locked(
+            &lock,
+            UserMessage::from_text("next turn"),
+            &state.db,
+            &state.broadcaster,
+            SpawnConfig::default(),
+        )
+        .await
+        .expect("mock dispatch succeeds");
+    drop(lock);
+
+    tokio::time::timeout(std::time::Duration::from_secs(5), completion_rx.recv())
+        .await
+        .expect("turn completes")
+        .expect("channel open");
+
+    let s = state.db.get_session("s1").await.unwrap().unwrap();
+    assert_eq!(
+        s.pending_handover_doc, None,
+        "a successful dispatch consumes the doc"
+    );
+
+    // mock:echo echoes the injected text back, so the event log shows the
+    // doc reached the provider -- once.
+    let events = state.db.events_tail("s1", 50).await.unwrap();
+    let echoed = events
+        .iter()
+        .filter(|e| e.kind == "agent-text" && e.data.contains("remember the plan"))
+        .count();
+    assert_eq!(echoed, 1, "doc injected exactly once, events: {events:?}");
 }

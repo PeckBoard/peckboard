@@ -668,32 +668,52 @@ pub(crate) fn extract_doc(events: &[crate::db::models::Event]) -> String {
 
 /// If a finalized handover left a doc waiting, consume it (clearing the
 /// column) and return the injection-wrapped message. Otherwise return
-/// `text` unchanged. Called from `send_message_locked` — the single dispatch
-/// chokepoint — so the HTTP route, the queue drain, and every other path
-/// inject consistently. Compactions (same-model handovers) get the
-/// compaction wording; real model switches get the predecessor's label,
-/// read back from the most recent `handover` event.
+/// `text` unchanged.
+///
+/// Prefer [`peek_pending_injection`] + [`clear_pending_handover_doc`] on any
+/// path that can still fail before the turn actually reaches the provider —
+/// the doc is the only surviving copy of the pre-reset conversation, so
+/// clearing it before a dispatch that then errors loses it permanently.
+/// This wrapper is the eager (peek-then-clear) form, kept for callers that
+/// have nothing left to fail.
 pub async fn take_pending_injection(db: &crate::db::Db, session_id: &str, text: &str) -> String {
+    let (out, used_doc) = peek_pending_injection(db, session_id, text).await;
+    if used_doc {
+        clear_pending_handover_doc(db, session_id).await;
+    }
+    out
+}
+
+/// Build the injected message WITHOUT consuming `pending_handover_doc`.
+///
+/// Returns `(text, used_handover_doc)`. When the bool is true the caller owns
+/// the doc's lifetime: call [`clear_pending_handover_doc`] once the turn has
+/// actually been handed to the provider, and leave the column alone on every
+/// error path so the user's retry still carries the context.
+///
+/// Called from `send_message_locked` — the single dispatch chokepoint — so
+/// the HTTP route, the queue drain, and every other path inject
+/// consistently. Compactions (same-model handovers) get the compaction
+/// wording; real model switches get the predecessor's label, read back from
+/// the most recent `handover` event.
+pub async fn peek_pending_injection(
+    db: &crate::db::Db,
+    session_id: &str,
+    text: &str,
+) -> (String, bool) {
     let session = match db.get_session(session_id).await {
         Ok(Some(s)) => s,
-        _ => return text.to_string(),
+        _ => return (text.to_string(), false),
     };
 
-    // 1. Handover / compaction doc (consumed exactly once).
+    // 1. Handover / compaction doc. NOT cleared here — see the doc comment.
     let mut out = text.to_string();
+    let mut used_doc = false;
     if let Some(doc) = session
         .pending_handover_doc
         .filter(|d| !d.trim().is_empty())
     {
-        let _ = db
-            .update_session(
-                session_id,
-                UpdateSession {
-                    pending_handover_doc: Some(None),
-                    ..Default::default()
-                },
-            )
-            .await;
+        used_doc = true;
         out = match latest_handover_meta(db, session_id).await {
             Some((_, true)) => build_compaction_injection(&doc, text),
             Some((from, false)) => build_injection(&from, &doc, text),
@@ -746,7 +766,23 @@ pub async fn take_pending_injection(db: &crate::db::Db, session_id: &str, text: 
         out = build_doc_review_injection(&review, &markdown, &comments, &out);
     }
 
-    out
+    (out, used_doc)
+}
+
+/// Clear `sessions.pending_handover_doc` after the turn that carries it has
+/// actually been dispatched. Best-effort: a failed write only means the doc
+/// gets injected again on the next turn, which is strictly safer than losing
+/// it. Paired with [`peek_pending_injection`].
+pub async fn clear_pending_handover_doc(db: &crate::db::Db, session_id: &str) {
+    let _ = db
+        .update_session(
+            session_id,
+            UpdateSession {
+                pending_handover_doc: Some(None),
+                ..Default::default()
+            },
+        )
+        .await;
 }
 
 /// Wrap the (already-injected) turn text with a parent-model review

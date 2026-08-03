@@ -263,8 +263,17 @@ impl SessionManager {
         // preserved context. Done here — the single dispatch chokepoint — so
         // the HTTP route, the queue drain, and the worker/repeating paths
         // all inject consistently.
+        //
+        // PEEK, not take: everything below here can still fail (folder
+        // lookup, provider resolution, account env injection, spawn), and the
+        // doc is the only surviving copy of the pre-reset conversation. It is
+        // cleared at the very bottom, only once `provider.send_message`
+        // returned Ok — so a failed dispatch leaves it parked for the retry.
+        let mut handover_doc_used = false;
         let message = if session.pending_handover_doc.is_some() {
-            let text = crate::handover::take_pending_injection(db, session_id, &message.text).await;
+            let (text, used) =
+                crate::handover::peek_pending_injection(db, session_id, &message.text).await;
+            handover_doc_used = used;
             UserMessage {
                 text,
                 attachments: message.attachments,
@@ -497,7 +506,16 @@ impl SessionManager {
             plugins: self.plugins.clone(),
         };
 
-        provider.send_message(ctx).await
+        let result = provider.send_message(ctx).await;
+
+        // The turn is away: only now is it safe to drop the handover doc.
+        // Every `?` above returns without clearing, so a dispatch that failed
+        // (missing folder, unknown provider, deleted account, spawn error)
+        // leaves the doc parked for the user's retry.
+        if result.is_ok() && handover_doc_used {
+            crate::handover::clear_pending_handover_doc(db, session_id).await;
+        }
+        result
     }
 
     /// Warm the encrypted env var unlock cache at the dispatch chokepoint.
