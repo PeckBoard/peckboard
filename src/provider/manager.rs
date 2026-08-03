@@ -711,6 +711,19 @@ impl SessionManager {
             // the attachments dir at delivery time.
             let now = chrono::Utc::now().to_rfc3339();
             let attachment_ids = if message.attachment_ids.is_empty() {
+                if !message.attachments.is_empty() {
+                    // Byte-only attachments have no durable backing — the
+                    // queue row only stores ids, so these bytes are about
+                    // to be silently dropped. Callers that build a
+                    // `UserMessage` with bytes must persist them first and
+                    // populate `attachment_ids` (see
+                    // `routes::attachments::store_attachment_payload`).
+                    tracing::warn!(
+                        session_id = %session_id,
+                        count = message.attachments.len(),
+                        "Queuing mid-turn message with byte-only attachments and no attachment_ids; these will be dropped"
+                    );
+                }
                 None
             } else {
                 serde_json::to_string(&message.attachment_ids).ok()
@@ -1521,5 +1534,59 @@ mod tests {
         assert!(matches!(outcome, SendOutcome::Queued));
         let queued = db.next_queued_message("s1").await.unwrap();
         assert_eq!(queued.map(|q| q.text).as_deref(), Some("answer"));
+    }
+
+    #[tokio::test]
+    async fn busy_send_with_attachment_ids_persists_them_on_the_queue_row() {
+        // Regression for the send_image drop bug: a caller that resolves
+        // attachment bytes to durable ids BEFORE calling send_or_queue (as
+        // `send_message_with_attachments` now does via
+        // `store_attachment_payload`) must see those ids survive on the
+        // queued row so the drain can rebuild the image later.
+        let m = manager_with(vec![claude_stub(true)]).await;
+        let db = crate::db::Db::in_memory().unwrap();
+        let broadcaster = crate::ws::broadcaster::Broadcaster::new();
+        let now = chrono::Utc::now().to_rfc3339();
+        db.create_folder(crate::db::models::NewFolder {
+            id: "f1".into(),
+            name: "f1".into(),
+            path: "/tmp/f1".into(),
+            created_at: now.clone(),
+        })
+        .await
+        .unwrap();
+        db.create_session(crate::db::models::NewSession {
+            id: "s1".into(),
+            name: "s1".into(),
+            folder_id: "f1".into(),
+            created_at: now.clone(),
+            last_activity: now,
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+
+        let mut message = crate::provider::message::UserMessage::from_text("here's a pic");
+        message.attachment_ids = vec!["att-42".into()];
+
+        let outcome = m
+            .send_or_queue(
+                "s1",
+                message,
+                &db,
+                &broadcaster,
+                SpawnConfig {
+                    model: "default".into(),
+                    ..Default::default()
+                },
+                MidTurnPolicy::Queue,
+                false,
+            )
+            .await
+            .unwrap();
+
+        assert!(matches!(outcome, SendOutcome::Queued));
+        let queued = db.next_queued_message("s1").await.unwrap().unwrap();
+        assert_eq!(queued.attachment_ids.as_deref(), Some("[\"att-42\"]"));
     }
 }

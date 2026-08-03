@@ -79,6 +79,12 @@ impl AppExpertDispatcher {
     /// the attachment-carrying twin of `resume_session`, used by the
     /// session-control plugin's `send_message`. Resumes via `send_or_queue`
     /// (spawn if idle, durable-queue if running — never interrupts the turn).
+    ///
+    /// Persists each attachment to disk first (like the `/attachments`
+    /// upload route) so `attachment_ids` is populated alongside the raw
+    /// bytes — `send_or_queue`'s busy-session branch only durably persists
+    /// `attachment_ids` (it drops `attachments` bytes), so without this the
+    /// image silently vanishes when the target is mid-turn.
     pub async fn send_message_with_attachments(
         &self,
         session_id: &str,
@@ -89,10 +95,31 @@ impl AppExpertDispatcher {
         let config = self
             .spawn_config_for(session_id, serde_json::Value::Null)
             .await?;
+
+        let mut attachment_ids = Vec::with_capacity(attachments.len());
+        for a in &attachments {
+            match crate::routes::attachments::store_attachment_payload(
+                &state.config.data_dir,
+                session_id,
+                &a.filename,
+                Some(&a.mime_type),
+                &a.data,
+            )
+            .await
+            {
+                Ok((aid, _)) => attachment_ids.push(aid),
+                Err(e) => tracing::warn!(
+                    session_id = %session_id,
+                    filename = %a.filename,
+                    "send_image: failed to persist attachment to disk; it will not survive a mid-turn queue: {e}"
+                ),
+            }
+        }
+
         let message = crate::provider::message::UserMessage {
             text,
             attachments,
-            attachment_ids: Vec::new(),
+            attachment_ids,
         };
         // Queue while busy: an agent-to-agent message never interrupts
         // the target's in-flight work. No user event exists yet, so the

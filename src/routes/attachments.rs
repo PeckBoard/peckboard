@@ -194,8 +194,6 @@ async fn upload_attachment(
         return Err(bad_request("invalid session id"));
     }
 
-    let filename = sanitize_filename(&body.filename);
-
     use base64::Engine as _;
     let decoded = base64::engine::general_purpose::STANDARD
         .decode(&body.data)
@@ -205,12 +203,46 @@ async fn upload_attachment(
         return Err(bad_request("file exceeds 10MB limit"));
     }
 
-    let attachment_id = uuid::Uuid::new_v4().to_string();
-    let dir = session_dir(&state, &session_id);
+    let (attachment_id, filename) = store_attachment_payload(
+        &state.config.data_dir,
+        &session_id,
+        &body.filename,
+        body.mime_type.as_deref(),
+        &decoded,
+    )
+    .await
+    .map_err(|e| internal(e.to_string()))?;
 
-    tokio::fs::create_dir_all(&dir)
-        .await
-        .map_err(|e| internal(e.to_string()))?;
+    Ok::<_, (StatusCode, Json<serde_json::Value>)>((
+        StatusCode::CREATED,
+        Json(serde_json::json!(UploadResponse {
+            id: attachment_id,
+            filename,
+            size: decoded.len() as u64,
+        })),
+    ))
+}
+
+/// Write a new attachment's bytes + metadata to disk under
+/// `data_dir/attachments/session_id`, mirroring the on-disk layout
+/// `load_attachment_payload` expects (bare-uuid file, `.meta` filename
+/// sidecar, optional `.mime` sidecar). Shared by `upload_attachment` (the
+/// HTTP route) and the agent-to-agent `send_image` path
+/// (`service/mcp_server/spawn.rs`), so both persist attachments the same
+/// way instead of one path writing raw bytes that never reach disk.
+/// Returns the new attachment id and the sanitized filename.
+pub async fn store_attachment_payload(
+    data_dir: &std::path::Path,
+    session_id: &str,
+    filename: &str,
+    mime_type: Option<&str>,
+    bytes: &[u8],
+) -> std::io::Result<(String, String)> {
+    let filename = sanitize_filename(filename);
+    let attachment_id = uuid::Uuid::new_v4().to_string();
+    let dir = data_dir.join("attachments").join(session_id);
+
+    tokio::fs::create_dir_all(&dir).await?;
     if let Err(e) = restrict_dir(&dir) {
         tracing::warn!(dir = %dir.display(), "Failed to restrict attachment dir permissions: {e}");
     }
@@ -218,27 +250,23 @@ async fn upload_attachment(
     // No extension on disk — the UUID is the only on-disk identifier. The
     // original filename lives in the .meta sidecar.
     let file_path = dir.join(&attachment_id);
-    tokio::fs::write(&file_path, &decoded)
-        .await
-        .map_err(|e| internal(e.to_string()))?;
+    tokio::fs::write(&file_path, bytes).await?;
     if let Err(e) = restrict_file(&file_path) {
         tracing::warn!(path = %file_path.display(), "Failed to restrict attachment permissions: {e}");
     }
 
     let meta_path = dir.join(format!("{}.meta", attachment_id));
-    tokio::fs::write(&meta_path, &filename)
-        .await
-        .map_err(|e| internal(e.to_string()))?;
+    tokio::fs::write(&meta_path, &filename).await?;
     if let Err(e) = restrict_file(&meta_path) {
         tracing::warn!(path = %meta_path.display(), "Failed to restrict attachment meta permissions: {e}");
     }
 
-    // Persist the browser-supplied MIME type next to the bytes so the
+    // Persist the caller-supplied MIME type next to the bytes so the
     // dispatch path can build the correct image content block at send
     // time. Sidecar (not extension on the main file) keeps the storage
     // model identical to existing uploads — a missing `.mime` sidecar
     // simply falls back to filename sniffing.
-    if let Some(mime) = body.mime_type.as_deref().filter(|s| !s.is_empty()) {
+    if let Some(mime) = mime_type.filter(|s| !s.is_empty()) {
         let sanitized = sanitize_mime_type(mime);
         if !sanitized.is_empty() {
             let mime_path = dir.join(format!("{}.mime", attachment_id));
@@ -253,14 +281,7 @@ async fn upload_attachment(
         }
     }
 
-    Ok::<_, (StatusCode, Json<serde_json::Value>)>((
-        StatusCode::CREATED,
-        Json(serde_json::json!(UploadResponse {
-            id: attachment_id,
-            filename,
-            size: decoded.len() as u64,
-        })),
-    ))
+    Ok((attachment_id, filename))
 }
 
 /// Read an attachment's bytes + metadata from disk. Returns `None` if the
@@ -701,5 +722,31 @@ mod tests {
                 .await
                 .is_none()
         );
+    }
+
+    #[tokio::test]
+    async fn store_attachment_payload_roundtrips_with_load_attachment_payload() {
+        // Regression: send_image (agent-to-agent) must persist bytes to
+        // disk the same way the /attachments upload route does, so a
+        // queued (busy-session) delivery can rebuild them from the id
+        // later instead of losing the bytes.
+        let tmp = tempfile::tempdir().unwrap();
+        let (aid, filename) = store_attachment_payload(
+            tmp.path(),
+            "sess-send-image",
+            "photo.png",
+            Some("image/png"),
+            b"fake-png-bytes",
+        )
+        .await
+        .unwrap();
+        assert_eq!(filename, "photo.png");
+
+        let payload = load_attachment_payload(tmp.path(), "sess-send-image", &aid)
+            .await
+            .unwrap();
+        assert_eq!(payload.filename, "photo.png");
+        assert_eq!(payload.mime_type, "image/png");
+        assert_eq!(payload.data, b"fake-png-bytes");
     }
 }
