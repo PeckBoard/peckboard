@@ -1150,7 +1150,6 @@ fn derive_status(events: &[crate::db::models::Event]) -> &'static str {
 }
 
 #[cfg(test)]
-#[cfg(test)]
 mod resolve_effective_model_tests {
     use super::*;
     use crate::auth::middleware::tests::test_state;
