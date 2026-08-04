@@ -2807,6 +2807,40 @@ host_fn!(peckboard_update_card(user_data: HostState; input: String) -> String {
     Ok(update_card_impl(&db, &input))
 });
 
+// `peckboard_caller_scope` — the folder/project/session this call is running
+// in, as core already resolved it: the in-flight MCP invocation's verified
+// scope, or the scope of the authenticated page request (see
+// `PluginManager::resolve_authed_scope`).
+//
+// Ungated: it tells a plugin only where it already *is*. Without it a plugin
+// serving its own UI has no way to name the folder it is acting in — the
+// session lookup is invocation-only and ownership-gated — so per-folder state
+// could not be keyed at all. `authority` says which of the two it is, so a
+// plugin can tell an operator's click from an agent's tool call.
+host_fn!(peckboard_caller_scope(user_data: HostState; _input: String) -> String {
+    let state = user_data.get()?;
+    let state = state
+        .lock()
+        .map_err(|_| anyhow::anyhow!("plugin host state mutex poisoned"))?;
+    let ctx = effective_context(&state)?;
+    Ok(match ctx {
+        Some(inv) => serde_json::json!({
+            "folder_id": inv.folder_id,
+            "project_id": inv.project_id,
+            "session_id": inv.session_id,
+            "authority": inv.authority,
+        })
+        .to_string(),
+        None => serde_json::json!({
+            "folder_id": null,
+            "project_id": null,
+            "session_id": null,
+            "authority": false,
+        })
+        .to_string(),
+    })
+});
+
 host_fn!(peckboard_get_plugin_setting(user_data: HostState; input: String) -> String {
     let (db, plugin_id) = state_from(&user_data)?;
     Ok(get_plugin_setting_impl(&db, &plugin_id, &input))
@@ -3361,6 +3395,13 @@ pub(crate) fn host_functions(
             [PTR],
             ud.clone(),
             peckboard_get_plugin_setting,
+        ),
+        Function::new(
+            "peckboard_caller_scope",
+            [PTR],
+            [PTR],
+            ud.clone(),
+            peckboard_caller_scope,
         ),
         Function::new(
             "peckboard_set_plugin_setting",

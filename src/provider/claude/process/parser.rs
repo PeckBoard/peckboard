@@ -792,6 +792,50 @@ mod tests {
         assert_eq!(images[0].mime_type, "image/jpeg");
         assert_eq!(images[0].data_base64, "WFla");
     }
+    #[test]
+    fn test_tool_result_plugin_image_first_reaches_the_chat() {
+        // A plugin tool that returns `_image_base64` (the graphify plugin's
+        // path diagram) comes back from `routes/mcp.rs` as the image block
+        // FIRST and the JSON text second — the opposite order from a
+        // screenshot. Both must survive: the diagram as an image the chat
+        // renders, the JSON as the output the agent reads.
+        let answer = r#"{"found":true,"hops":2,"source":"graphifyPath()"}"#;
+        let json = serde_json::json!({
+            "type": "user",
+            "message": {
+                "content": [{
+                    "type": "tool_result",
+                    "tool_use_id": "tool_graphify_path",
+                    "content": [
+                        // 8-byte PNG signature, base64 — what the driver's
+                        // renderer emits the front of.
+                        { "type": "image", "data": "iVBORw0KGgo=", "mimeType": "image/png" },
+                        { "type": "text", "text": answer },
+                    ]
+                }]
+            }
+        });
+
+        let mut state = started_state();
+        let events = parse_stream_json(&json, &mut state);
+
+        assert_eq!(events.len(), 1);
+        let ProviderEvent::ToolEnd {
+            tool_use_id,
+            output,
+            error,
+            images,
+        } = &events[0]
+        else {
+            panic!("expected ToolEnd, got {:?}", events[0]);
+        };
+        assert_eq!(tool_use_id, "tool_graphify_path");
+        assert_eq!(output.as_deref(), Some(answer));
+        assert!(error.is_none());
+        assert_eq!(images.len(), 1);
+        assert_eq!(images[0].mime_type, "image/png");
+        assert_eq!(images[0].data_base64, "iVBORw0KGgo=");
+    }
 
     #[test]
     fn test_tool_result_string_shape_has_no_images() {
