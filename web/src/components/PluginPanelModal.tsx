@@ -1,6 +1,7 @@
 import { useEffect, useRef } from 'react'
 import Modal from './Modal'
 import { authedFetch } from '../store/auth'
+import { withPluginTheme } from '../util/appearance'
 
 interface Props {
   /** Human label for the panel (the iframe/page title). */
@@ -97,7 +98,7 @@ export default function PluginPanelModal({ title, plugin, path, onClose }: Props
         data-testid="plugin-panel-frame"
         data-plugin={plugin}
         title={title}
-        src={path}
+        src={withPluginTheme(path)}
         sandbox="allow-scripts allow-forms allow-popups allow-downloads"
       />
       <div className="form-actions">

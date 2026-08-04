@@ -61,6 +61,20 @@ export function applyTheme(theme: Theme) {
   applyThemeColor(theme)
 }
 
+/** Iframe `src` for a plugin page, carrying the host's theme choice.
+ *  Explicit light/dark is appended as `?theme=` — the plugin stamps it on
+ *  its own `<html data-theme>`. Auto appends nothing: the plugin falls back
+ *  to `prefers-color-scheme`, the same query core's auto resolves through,
+ *  so host and iframe always agree. A `theme` param already present (e.g.
+ *  from a forwarded deep-link query) is dropped so the host wins.
+ *  Convention doc: docs/frontend/architecture.md § Theming. */
+export function withPluginTheme(src: string): string {
+  const url = new URL(src, window.location.origin)
+  url.searchParams.delete('theme')
+  const theme = getStoredTheme()
+  if (theme !== 'auto') url.searchParams.set('theme', theme)
+  return url.pathname + url.search + url.hash
+}
 export function getStoredHue(): number {
   const stored = localStorage.getItem(HUE_KEY)
   if (stored !== null) {

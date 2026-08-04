@@ -234,6 +234,14 @@ kept in sync: `:root` (light), `:root[data-theme='dark']`, and an
   localStorage. `util/themeColor.ts` syncs the `theme-color` meta tag.
 - Per-area styles live in `web/src/styles/*.css` and `App.css`.
 
+- Plugin iframes: `withPluginTheme` (`util/appearance.ts`) appends
+  `?theme=light|dark` to every plugin iframe `src` when the stored theme
+  is explicit, and nothing for auto. Plugin pages stamp the param on
+  their own `<html data-theme>` (stamp wins) and otherwise follow
+  `prefers-color-scheme` — the same three-block CSS structure as core, so
+  host and iframe resolve to the same scheme. Reference implementation:
+  `peck-plugins/graphify/page/style.js`.
+
 ## Mobile Patterns
 
 - Touch: 48px minimum tap targets (`styles/mobile.css`), long-press

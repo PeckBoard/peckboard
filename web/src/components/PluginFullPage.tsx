@@ -1,5 +1,6 @@
 import { useEffect, useRef } from 'react'
 import { authedFetch } from '../store/auth'
+import { withPluginTheme } from '../util/appearance'
 
 interface Props {
   /** Human label for the page (shown in the header). */
@@ -36,7 +37,9 @@ export default function PluginFullPage({ title, plugin, path, scope, onBack }: P
   // which reads its own location.search. Plugins ignore params they don't
   // know, so forwarding everything is safe.
   const search = window.location.search
-  const src = search ? `${path}${path.includes('?') ? '&' : '?'}${search.slice(1)}` : path
+  const src = withPluginTheme(
+    search ? `${path}${path.includes('?') ? '&' : '?'}${search.slice(1)}` : path,
+  )
   // Keep the latest scope in a ref so the long-lived message listener always
   // injects the current id without being torn down on every scope change.
   const scopeRef = useRef(scope)
