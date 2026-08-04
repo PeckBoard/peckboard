@@ -197,6 +197,49 @@ async fn claim_and_compose_reports_final_reply_once() {
 }
 
 #[tokio::test]
+async fn claim_and_compose_folds_streamed_chunks_verbatim() {
+    let db = Db::in_memory().unwrap();
+    seed_folder(&db, "f1").await;
+    seed_session(&db, "parent", "f1", None).await;
+    seed_session(&db, "sub: scout", "f1", Some("parent")).await;
+
+    db.append_event("sub: scout", "user", serde_json::json!({ "text": "task" }))
+        .await
+        .unwrap();
+    // One streamed message lands as several coalesced-delta rows.
+    for chunk in ["/app/components/pay", "ment_manager_v2/serv", "ice.rb:115"] {
+        db.append_event(
+            "sub: scout",
+            "agent-text",
+            serde_json::json!({ "text": chunk }),
+        )
+        .await
+        .unwrap();
+    }
+    // A tool call between text rows is a real segment boundary.
+    db.append_event(
+        "sub: scout",
+        "agent-tool-start",
+        serde_json::json!({ "name": "read_file" }),
+    )
+    .await
+    .unwrap();
+    db.append_event(
+        "sub: scout",
+        "agent-text",
+        serde_json::json!({ "text": "Done." }),
+    )
+    .await
+    .unwrap();
+
+    let session = db.get_session("sub: scout").await.unwrap().unwrap();
+    let (_, text) = peckboard::subagent::claim_and_compose(&db, &session, true, None)
+        .await
+        .unwrap();
+    assert!(text.contains("/app/components/payment_manager_v2/service.rb:115"));
+    assert!(text.contains("service.rb:115\n\nDone."));
+}
+#[tokio::test]
 async fn claim_and_compose_crash_and_missing_parent() {
     let db = Db::in_memory().unwrap();
     seed_folder(&db, "f1").await;

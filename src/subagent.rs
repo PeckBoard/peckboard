@@ -245,7 +245,11 @@ pub async fn claim_and_compose(
 }
 
 /// The child's final reply: every `agent-text` event after the last `user`
-/// event, joined. Empty when the child never produced text.
+/// event, folded the way the chat UI folds them: consecutive rows are
+/// chunks of ONE streamed message (the Claude parser flushes coalesced
+/// deltas as separate rows) and concatenate verbatim; a paragraph break is
+/// added only where a non-text event (tool call, thinking) split the reply
+/// into separate segments. Empty when the child never produced text.
 async fn final_reply(db: &crate::db::Db, session_id: &str) -> String {
     let events = match db.events_tail(session_id, 200).await {
         Ok(events) => events,
@@ -258,17 +262,25 @@ async fn final_reply(db: &crate::db::Db, session_id: &str) -> String {
         .iter()
         .rposition(|e| e.kind == "user")
         .map_or(0, |i| i + 1);
-    let parts: Vec<String> = events
-        .iter()
-        .skip(after_last_user)
-        .filter(|e| e.kind == "agent-text")
-        .filter_map(|e| {
-            serde_json::from_str::<serde_json::Value>(&e.data)
-                .ok()
-                .and_then(|d| d.get("text").and_then(|t| t.as_str()).map(str::to_string))
-        })
-        .collect();
-    let reply = parts.join("\n\n");
+    let mut reply = String::new();
+    let mut prev_was_text = false;
+    for e in events.iter().skip(after_last_user) {
+        if e.kind != "agent-text" {
+            prev_was_text = false;
+            continue;
+        }
+        let Some(text) = serde_json::from_str::<serde_json::Value>(&e.data)
+            .ok()
+            .and_then(|d| d.get("text").and_then(|t| t.as_str()).map(str::to_string))
+        else {
+            continue;
+        };
+        if !prev_was_text && !reply.is_empty() {
+            reply.push_str("\n\n");
+        }
+        reply.push_str(&text);
+        prev_was_text = true;
+    }
     let result_char_cap = load_limits(db).await.result_char_cap;
     if reply.chars().count() > result_char_cap {
         let tail: String = reply
