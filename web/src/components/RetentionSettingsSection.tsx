@@ -133,7 +133,7 @@ export default function RetentionSettingsSection() {
         <>
           <div className="settings-info-grid">
             {FIELDS.map(({ key, label, hint }) => (
-              <div className="settings-row" key={key}>
+              <div className="settings-row settings-field-row" key={key}>
                 <label htmlFor={`retention-${key}`}>
                   <span className="settings-label">{label}</span>
                   <span className="form-hint">{hint}</span>

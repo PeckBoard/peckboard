@@ -135,6 +135,40 @@
   font-weight: 500;
   color: var(--text);
 }
+/* Label-over-hint rows with a compact control on the right
+   (Data retention and similar numeric rows). */
+.settings-field-row {
+  align-items: center;
+  gap: 16px;
+}
+.settings-field-row > label {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.settings-field-row > label .settings-label {
+  min-width: 0;
+}
+.settings-field-row > input[type='number'] {
+  font: inherit;
+  font-size: var(--text-sm);
+  width: 96px;
+  padding: 7px 9px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--surface);
+  color: var(--text);
+  outline: none;
+  transition:
+    border-color var(--transition),
+    box-shadow var(--transition);
+}
+.settings-field-row > input[type='number']:focus {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px var(--accent-subtle);
+}
 .settings-update-actions {
   display: flex;
   align-items: center;
@@ -161,6 +195,7 @@
 .theme-toggle {
   display: flex;
   gap: 2px;
+  width: fit-content;
   background: var(--surface2);
   padding: 3px;
   border-radius: var(--radius);
@@ -379,6 +414,17 @@
   flex-direction: column;
   gap: 14px;
 }
+/* The <fieldset> wrapper exists only to disable every control at once
+   for non-admins — strip the browser's default fieldset chrome. */
+.plugin-settings-fields {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  margin: 0;
+  padding: 0;
+  border: 0;
+  min-width: 0;
+}
 .plugin-setting-field {
   display: flex;
   flex-direction: column;
@@ -400,19 +446,43 @@
 .plugin-setting-input,
 .plugin-setting-select {
   font: inherit;
-  padding: 6px 8px;
+  font-size: var(--text-sm);
+  padding: 8px 10px;
   border: 1px solid var(--border);
   border-radius: var(--radius);
   background: var(--surface);
   color: var(--text);
+  outline: none;
+  transition:
+    border-color var(--transition),
+    box-shadow var(--transition);
+}
+.plugin-setting-input:focus,
+.plugin-setting-select:focus {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px var(--accent-subtle);
 }
 .plugin-setting-input--inline {
   flex: 1;
 }
 .plugin-setting-checkbox {
-  display: flex;
+  flex-direction: row;
   align-items: center;
+  flex-wrap: wrap;
   gap: 8px;
+  cursor: pointer;
+}
+.plugin-setting-checkbox > input {
+  width: 15px;
+  height: 15px;
+  accent-color: var(--accent);
+  cursor: pointer;
+  margin: 0;
+}
+/* Hint drops to its own line, aligned under the label text. */
+.plugin-setting-checkbox .plugin-setting-desc {
+  flex-basis: 100%;
+  margin-left: 23px;
 }
 .plugin-setting-secret-set {
   font-size: var(--text-xs);
@@ -457,22 +527,34 @@
 .plugin-setting-kv-row > input,
 .plugin-setting-kv-row .secret-input > input {
   font: inherit;
-  padding: 6px 8px;
+  font-size: var(--text-sm);
+  padding: 8px 10px;
   border: 1px solid var(--border);
   border-radius: var(--radius);
   background: var(--surface);
   color: var(--text);
   flex: 1;
+  min-width: 0;
+  outline: none;
+  transition:
+    border-color var(--transition),
+    box-shadow var(--transition);
+}
+.plugin-setting-kv-row > input:focus,
+.plugin-setting-kv-row .secret-input > input:focus {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px var(--accent-subtle);
 }
 .plugin-setting-kv-remove,
 .plugin-setting-kv-add {
   font-size: var(--text-xs);
-  padding: 4px 8px;
+  padding: 5px 10px;
   border: 1px solid var(--border);
   border-radius: var(--radius);
   background: transparent;
   color: var(--text2);
   cursor: pointer;
+  transition: background var(--transition);
 }
 .plugin-setting-kv-add {
   align-self: flex-start;
@@ -1072,6 +1154,21 @@ a.wasm-plugin-repo:hover {
 }
 .env-var-form {
   margin-top: 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+.env-var-form h4 {
+  margin: 0;
+  font-size: var(--text-sm);
+  font-weight: 600;
+  color: var(--text);
+}
+/* Inline settings form — the action row reads better anchored left,
+   under the fields, than pushed to the far edge of the column. */
+.env-var-form .form-actions {
+  justify-content: flex-start;
+  margin-top: 0;
 }
 .env-var-encrypt-label {
   display: flex;
