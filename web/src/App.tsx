@@ -147,7 +147,9 @@ function parseRoute(): {
     case 'repeating-tasks':
       return { view: 'repeatingTasks', activeId: id, sub: 'chat' }
     case 'folders':
-      return { view: 'folders', activeId: null, sub: 'chat' }
+      // `/folders` — the folder list; `/folders/<folderId>/plugin/<itemId>` — a
+      // folder-scoped plugin page, same shape as the project/session routes.
+      return { view: 'folders', activeId: id, sub: subFor() }
     case 'settings':
       // `/settings/<sub>` deep-links a specific sub-page; bare `/settings`
       // lands on the default page (SettingsPage validates the id).
@@ -193,13 +195,15 @@ function buildPath(view: View, activeId?: string | null, sub?: SessionSub): stri
     return `/${view}/${activeId}/todos`
   }
   if (
-    (view === 'sessions' || view === 'projects') &&
+    (view === 'sessions' || view === 'projects' || view === 'folders') &&
     activeId &&
     sub &&
     sub.startsWith('plugin:')
   ) {
     return `/${view}/${activeId}/plugin/${sub.slice('plugin:'.length)}`
   }
+  // A folder id alone is not a route — the Folders page shows the whole list.
+  if (view === 'folders') return '/folders'
   if (view === 'docReview') {
     // The route segment is `review`; the View value is camelCase, so this
     // can't fall through to the generic `/${view}/...` branch below.
@@ -333,6 +337,11 @@ function App() {
   const [activeRepeatingTaskId, setActiveRepeatingTaskId] = useState<string | null>(
     initialRoute.view === 'repeatingTasks' ? initialRoute.activeId : null,
   )
+  // Folder whose plugin page is open (`/folders/<id>/plugin/<itemId>`); null
+  // on the plain folder list.
+  const [activeFolderId, setActiveFolderId] = useState<string | null>(
+    initialRoute.view === 'folders' ? initialRoute.activeId : null,
+  )
   // Active report — encoded `<folder>/<file>` pair when the route is
   // `/reports/:folder/:file`, null on the `/reports` index. Kept as a
   // single string (not split into two `useState`s) so the registry can
@@ -393,9 +402,11 @@ function App() {
   const [activeReviewId, setActiveReviewId] = useState<string | null>(
     initialRoute.view === 'docReview' ? initialRoute.activeId : null,
   )
-  // Plugin-contributed full-page entries for the project / session pages.
+  // Plugin-contributed full-page entries for the project / session pages, and
+  // for a Folders page row (scoped to that folder).
   const [projectItems, setProjectItems] = useState<SidebarItem[]>([])
   const [sessionItems, setSessionItems] = useState<SidebarItem[]>([])
+  const [folderItems, setFolderItems] = useState<SidebarItem[]>([])
   const [openPanel, setOpenPanel] = useState<UiPanel | null>(null)
   const userMenuRef = useRef<HTMLDivElement | null>(null)
   // Anchor for the portaled user-menu dropdown when the rail is the
@@ -423,12 +434,14 @@ function App() {
           sidebar_items?: SidebarItem[]
           project_items?: SidebarItem[]
           session_items?: SidebarItem[]
+          folder_items?: SidebarItem[]
         }) => {
           if (cancelled) return
           setUiPanels(data.ui_panels ?? [])
           setSidebarItems(data.sidebar_items ?? [])
           setProjectItems(data.project_items ?? [])
           setSessionItems(data.session_items ?? [])
+          setFolderItems(data.folder_items ?? [])
           setPluginsLoaded(true)
         },
       )
@@ -438,6 +451,7 @@ function App() {
           setSidebarItems([])
           setProjectItems([])
           setSessionItems([])
+          setFolderItems([])
           setPluginsLoaded(true)
         }
       })
@@ -507,6 +521,8 @@ function App() {
         setActiveRepeatingTaskId(route.activeId)
       } else if (route.view === 'reports') {
         setActiveReportId(route.activeId)
+      } else if (route.view === 'folders') {
+        setActiveFolderId(route.activeId)
       } else if (route.view === 'pluginPage') {
         setActivePluginPageId(route.activeId)
       } else if (route.view === 'plan') {
@@ -1727,7 +1743,34 @@ function App() {
                   </div>
                 )
               })()}
-            {view === 'folders' && <FoldersPage />}
+            {view === 'folders' &&
+              (activeFolderId &&
+              pluginSubItemId(sessionSub) &&
+              folderItems.find((i) => i.id === pluginSubItemId(sessionSub)) ? (
+                (() => {
+                  const item = folderItems.find((i) => i.id === pluginSubItemId(sessionSub))!
+                  return (
+                    <PluginFullPage
+                      title={item.label}
+                      plugin={item.plugin}
+                      path={item.path}
+                      scope={{ folderId: activeFolderId }}
+                      onBack={() => {
+                        setActiveFolderId(null)
+                        navigate('folders', null)
+                      }}
+                    />
+                  )
+                })()
+              ) : (
+                <FoldersPage
+                  pluginItems={folderItems}
+                  onOpenPlugin={(folderId, itemId) => {
+                    setActiveFolderId(folderId)
+                    navigate('folders', folderId, `plugin:${itemId}`)
+                  }}
+                />
+              ))}
             {view === 'reports' &&
               (activeReportId ? (
                 (() => {

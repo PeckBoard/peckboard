@@ -10,8 +10,10 @@ interface Props {
   /** Server-absolute `/plugin-api/*` path the host embeds in the iframe. */
   path: string
   /** Scope this page runs in — sent to the backend so the plugin's
-   *  folder-scoped host functions act in the project's/session's folder. */
-  scope: { projectId?: string; sessionId?: string }
+   *  folder-scoped host functions act in the project's/session's folder, or
+   *  in the folder itself for a Folders-page item. Most specific wins on the
+   *  server: session, then project, then folder. */
+  scope: { projectId?: string; sessionId?: string; folderId?: string }
   /** Return to the chat/board view. */
   onBack: () => void
 }
@@ -22,12 +24,12 @@ const ALLOWED_METHODS = new Set(['GET', 'POST', 'PUT', 'PATCH', 'DELETE'])
 
 /**
  * Renders a plugin-contributed full-page view (from a manifest `project_items`
- * / `session_items` entry) inside the project or session page. Same sandboxed
- * `<iframe>` + parent-proxied fetch bridge as {@link PluginPanelModal}, with two
+ * / `session_items` / `folder_items` entry) inside the project, session, or
+ * Folders page. Same sandboxed
  * differences: it fills the view (not a modal), and it injects the active
  * project/session id as a request header so core can resolve the plugin's
  * folder scope (see `PluginManager::serve_http_authed`). The JWT still never
- * leaves the parent; the iframe runs at an opaque origin and can only ask for
+ * project/session/folder id as a request header so core can resolve the plugin's
  * `/api/plugin-ui/*` requests, which the parent performs on its behalf.
  */
 export default function PluginFullPage({ title, plugin, path, scope, onBack }: Props) {
@@ -76,9 +78,10 @@ export default function PluginFullPage({ title, plugin, path, scope, onBack }: P
       // runs under the user's full authority.
       const headers: Record<string, string> = {}
       if (msg.body) headers['content-type'] = 'application/json'
-      const { projectId, sessionId } = scopeRef.current
+      const { projectId, sessionId, folderId } = scopeRef.current
       if (sessionId) headers['x-peckboard-session-id'] = sessionId
       if (projectId) headers['x-peckboard-project-id'] = projectId
+      if (folderId) headers['x-peckboard-folder-id'] = folderId
 
       try {
         const res = await authedFetch(reqPath, {

@@ -992,20 +992,21 @@ impl PluginManager {
         validate_mcp_tools(&name, &plugin_manifest)?;
         validate_settings(&name, &plugin_manifest)?;
 
-        // A plugin contributing sidebar / project / session items must hold
-        // `contribute_sidebar`; per-item path validity is enforced when the
+        // A plugin contributing sidebar / project / session / folder items must
+        // hold `contribute_sidebar`; per-item path validity is enforced when the
         // catalog is built (`sidebar_items()` / `scoped_items()`), mirroring
         // `ui_panels()`.
         if (!plugin_manifest.sidebar_items.is_empty()
             || !plugin_manifest.project_items.is_empty()
-            || !plugin_manifest.session_items.is_empty())
+            || !plugin_manifest.session_items.is_empty()
+            || !plugin_manifest.folder_items.is_empty())
             && !plugin_manifest
                 .permissions
                 .iter()
                 .any(|p| p == "contribute_sidebar")
         {
             return Err(anyhow::anyhow!(
-                "plugin '{name}' declares sidebar/project/session items but not \
+                "plugin '{name}' declares sidebar/project/session/folder items but not \
                  the 'contribute_sidebar' permission",
             ));
         }
@@ -2052,10 +2053,14 @@ impl PluginManager {
     }
 
     /// Resolve the folder scope for an authed plugin request from its headers.
-    /// `x-peckboard-session-id` wins over `x-peckboard-project-id`; the folder
-    /// (and project, for a session) is taken from the looked-up row. A missing
-    /// or unknown id yields an empty scope — the host functions then refuse a
-    /// folder-scoped call, which is the correct "no scope" behaviour.
+    /// Most specific wins: `x-peckboard-session-id`, then
+    /// `x-peckboard-project-id`, then `x-peckboard-folder-id` (a Folders-page
+    /// item, which names its folder directly and so carries no project or
+    /// session). The folder — and the project, for a session — is taken from
+    /// the looked-up row, never from the header itself, so a caller cannot
+    /// claim a folder that doesn't exist. A missing or unknown id yields an
+    /// empty scope — the host functions then refuse a folder-scoped call,
+    /// which is the correct "no scope" behaviour.
     async fn resolve_authed_scope(&self, headers: &BTreeMap<String, String>) -> AuthedScope {
         let Some(db) = self.db.as_ref() else {
             return AuthedScope::default();
@@ -2082,6 +2087,18 @@ impl PluginManager {
             return AuthedScope {
                 folder_id: Some(project.folder_id),
                 project_id: Some(project.id),
+                session_id: None,
+            };
+        }
+        if let Some(fid) = headers
+            .get("x-peckboard-folder-id")
+            .map(|s| s.trim())
+            .filter(|s| !s.is_empty())
+            && let Ok(Some(folder)) = db.get_folder(fid).await
+        {
+            return AuthedScope {
+                folder_id: Some(folder.id),
+                project_id: None,
                 session_id: None,
             };
         }
@@ -2478,6 +2495,13 @@ impl PluginManager {
     pub async fn session_items(&self) -> Vec<SidebarItemEntry> {
         let plugins = self.plugins.lock().await;
         collect_items(&plugins, "session_item", |m| &m.session_items)
+    }
+
+    /// Full-page entries active plugins contribute to a **Folders** page row
+    /// (manifest `folder_items`), for the `/api/plugins` catalog.
+    pub async fn folder_items(&self) -> Vec<SidebarItemEntry> {
+        let plugins = self.plugins.lock().await;
+        collect_items(&plugins, "folder_item", |m| &m.folder_items)
     }
 
     /// Every MCP tool declared by an active plugin, for merging into the
@@ -3103,6 +3127,7 @@ mod tests {
             sidebar_items: Vec::new(),
             project_items: Vec::new(),
             session_items: Vec::new(),
+            folder_items: Vec::new(),
             permissions,
             call_timeout_secs: None,
             settings: Vec::new(),
@@ -3380,6 +3405,32 @@ mod tests {
         // No scope header at all → empty scope.
         let none = mgr.resolve_authed_scope(&BTreeMap::new()).await;
         assert!(none.folder_id.is_none() && none.session_id.is_none());
+        // A Folders-page item names its folder directly — no project, no
+        // session to borrow scope from.
+        let mut fh = BTreeMap::new();
+        fh.insert("x-peckboard-folder-id".to_string(), "f1".to_string());
+        let fscope = mgr.resolve_authed_scope(&fh).await;
+        assert_eq!(fscope.folder_id.as_deref(), Some("f1"));
+        assert!(fscope.project_id.is_none() && fscope.session_id.is_none());
+
+        // An unknown folder id is not taken at face value either.
+        let mut bad_folder = BTreeMap::new();
+        bad_folder.insert("x-peckboard-folder-id".to_string(), "nope".to_string());
+        assert!(
+            mgr.resolve_authed_scope(&bad_folder)
+                .await
+                .folder_id
+                .is_none()
+        );
+
+        // The more specific header wins when both are present.
+        let mut both = BTreeMap::new();
+        both.insert("x-peckboard-session-id".to_string(), "s1".to_string());
+        both.insert("x-peckboard-folder-id".to_string(), "f1".to_string());
+        assert_eq!(
+            mgr.resolve_authed_scope(&both).await.session_id.as_deref(),
+            Some("s1")
+        );
     }
 
     #[test]

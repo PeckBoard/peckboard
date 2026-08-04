@@ -200,6 +200,24 @@
   align-items: center;
   gap: 4px;
 }
+/* Folder-scoped plugin page entry (manifest `folder_items`) on a folder row.
+   Sits left of Rename/delete and is shown to every user, not just admins. */
+.folder-plugin-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+.folder-plugin-btn .plugin-icon,
+.folder-plugin-btn svg {
+  width: 16px;
+  height: 16px;
+  flex: none;
+}
+.folder-plugin-btn .plugin-icon svg {
+  width: 100%;
+  height: 100%;
+  display: block;
+}
 /* Report list item */
 .report-list-item {
   flex: 1;

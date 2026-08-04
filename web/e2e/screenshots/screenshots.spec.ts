@@ -513,6 +513,7 @@ test('capture playwright player screenshot @screenshot', async ({ request, page 
         ],
         project_items: [],
         session_items: [],
+        folder_items: [],
       }),
     }),
   )

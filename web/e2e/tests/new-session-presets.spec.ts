@@ -134,6 +134,7 @@ test('bug-hunt preset is offered once the playwright-video plugin is active', as
         sidebar_items: [],
         project_items: [],
         session_items: [],
+        folder_items: [],
         wasm_plugins: [
           {
             name: 'playwright-video',

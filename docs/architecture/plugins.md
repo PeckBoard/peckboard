@@ -455,8 +455,9 @@ A plugin can contribute a **UI panel** — a page the Peckboard web app surfaces
 
 - skips `security_headers` for `/plugin-api/*` (core adds none of its own CSP/framing — the plugin's response headers stand), and
 
-### Sidebar, Project, and Session Items
+### Sidebar, Project, Session, and Folder Items
 
+Beyond dropdown panels, a plugin holding the **`contribute_sidebar`** permission can declare full-page entries in four manifest arrays sharing one shape: `sidebar_items` (a button in the left navigation rail), `project_items` (an entry in a project's menu), `session_items` (an entry in a session's menu), and `folder_items` (a button on each row of the Folders page). Each opens the plugin's own `/plugin-api/*` page in the same sandboxed-iframe model as UI panels, and each entry is `{ "id", "label", "icon"?, "path" }`:
 Beyond dropdown panels, a plugin holding the **`contribute_sidebar`** permission can declare full-page entries in three manifest arrays sharing one shape: `sidebar_items` (a button in the left navigation rail), `project_items` (an entry in a project's menu), and `session_items` (an entry in a session's menu). Each opens the plugin's own `/plugin-api/*` page in the same sandboxed-iframe model as UI panels, and each entry is `{ "id", "label", "icon"?, "path" }`:
 
 ```json
@@ -476,7 +477,9 @@ Beyond dropdown panels, a plugin holding the **`contribute_sidebar`** permission
 
 Plugin markup is untrusted, so icons pass two gates. At catalog build, core (`collect_items`, `src/plugin/manager.rs`) drops any icon that isn't plausibly inline SVG or exceeds **8 KiB**. Before rendering, the web app runs a **strict allowlist sanitizer** (`web/src/utils/pluginIcon.ts`): only static shape elements (`svg` / `g` / `path` / `circle` / `ellipse` / `rect` / `line` / `polyline` / `polygon` / `title` / `desc`) and geometry/paint attributes survive — scripts, event handlers, `style`, `href` / `use` / `image`, `foreignObject`, animation, filters, and `url(…)` paint references are stripped or cause rejection. A missing or rejected icon falls back to the generic placeholder; the entry itself still renders.
 
-**Surfacing.** Validated entries are aggregated into the `GET /api/plugins` catalog as top-level `sidebar_items` / `project_items` / `session_items` arrays, each entry tagged with the declaring plugin and carrying the (size-gated) `icon` through. Path validation is the same `/plugin-api/`-prefix choke point UI panels use.
+**Surfacing.** Validated entries are aggregated into the `GET /api/plugins` catalog as top-level `sidebar_items` / `project_items` / `session_items` / `folder_items` arrays, each entry tagged with the declaring plugin and carrying the (size-gated) `icon` through. Path validation is the same `/plugin-api/`-prefix choke point UI panels use.
+
+**Scope.** A page's authed `/api/plugin-ui/*` calls carry a scope-selector header the host injects (`web/src/components/PluginFullPage.tsx`), and `PluginManager::resolve_authed_scope` turns it into the `folder_id` / `project_id` / `session_id` the plugin's scoped host functions run under. Most specific wins: `x-peckboard-session-id`, then `x-peckboard-project-id`, then `x-peckboard-folder-id`. The id is always re-looked-up in the database, so an unknown id yields an **empty** scope rather than a claimed one, and every folder-scoped host call then refuses. A `sidebar_items` page is global — it carries no header at all, so a plugin whose every route needs a folder should declare `folder_items` (and/or project/session items) instead.
 
 - skips `origin_check` (CSRF) for `/plugin-api/*` — it is bearer-key-authenticated with no ambient cookie credentials, so Origin/CSRF defense is unnecessary there and would 403 the opaque-origin iframe's `Origin: null` calls.
 

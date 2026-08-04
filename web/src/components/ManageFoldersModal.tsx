@@ -6,8 +6,25 @@ import Modal from './Modal'
 import ConfirmDialog from './ConfirmDialog'
 import PathAutocomplete from './PathAutocomplete'
 import RenameModal from './RenameModal'
+import { PluginIcon } from './PluginIcon'
 
-export default function FoldersPage() {
+/** A plugin-contributed Folders-page entry (manifest `folder_items`). */
+export interface FolderPluginItem {
+  plugin: string
+  id: string
+  label: string
+  icon?: string | null
+  path: string
+}
+
+interface Props {
+  /** Folder-scoped plugin pages to offer on each folder row. */
+  pluginItems?: FolderPluginItem[]
+  /** Open one, for the given folder. */
+  onOpenPlugin?: (folderId: string, itemId: string) => void
+}
+
+export default function FoldersPage({ pluginItems = [], onOpenPlugin }: Props = {}) {
   const folders = useFoldersStore((s) => s.folders)
   const fetchFolders = useFoldersStore((s) => s.fetchFolders)
   const createFolder = useFoldersStore((s) => s.createFolder)
@@ -142,29 +159,50 @@ export default function FoldersPage() {
                 <strong>{f.name}</strong>
                 <span className="folder-path">{f.path}</span>
               </div>
-              {isAdmin && (
+              {(pluginItems.length > 0 || isAdmin) && (
                 <div className="folder-row-actions">
-                  <button
-                    className="btn-secondary"
-                    onClick={() => setRenameTarget(f)}
-                    title="Rename folder"
-                    aria-label={`Rename folder ${f.name}`}
-                    data-testid={`folder-rename-${f.name}`}
-                  >
-                    Rename
-                  </button>
-                  <button
-                    className="folder-delete"
-                    onClick={() => {
-                      setConfirmError(null)
-                      setConfirmFolder(f)
-                    }}
-                    title="Delete folder"
-                    aria-label={`Delete folder ${f.name}`}
-                    data-testid={`folder-delete-${f.name}`}
-                  >
-                    &times;
-                  </button>
+                  {/* Folder-scoped plugin pages (manifest `folder_items`).
+                      Deliberately outside the isAdmin gate: these are the same
+                      pages a non-admin already reaches from a project or
+                      session, only aimed at the folder itself. */}
+                  {pluginItems.map((item) => (
+                    <button
+                      key={`${item.plugin}:${item.id}`}
+                      className="btn-secondary folder-plugin-btn"
+                      onClick={() => onOpenPlugin?.(f.id, item.id)}
+                      title={`${item.label} — ${f.name}`}
+                      aria-label={`${item.label} for folder ${f.name}`}
+                      data-testid={`folder-plugin-${item.id}-${f.name}`}
+                    >
+                      <PluginIcon icon={item.icon} />
+                      <span>{item.label}</span>
+                    </button>
+                  ))}
+                  {isAdmin && (
+                    <>
+                      <button
+                        className="btn-secondary"
+                        onClick={() => setRenameTarget(f)}
+                        title="Rename folder"
+                        aria-label={`Rename folder ${f.name}`}
+                        data-testid={`folder-rename-${f.name}`}
+                      >
+                        Rename
+                      </button>
+                      <button
+                        className="folder-delete"
+                        onClick={() => {
+                          setConfirmError(null)
+                          setConfirmFolder(f)
+                        }}
+                        title="Delete folder"
+                        aria-label={`Delete folder ${f.name}`}
+                        data-testid={`folder-delete-${f.name}`}
+                      >
+                        &times;
+                      </button>
+                    </>
+                  )}
                 </div>
               )}
             </div>

@@ -155,6 +155,15 @@ pub struct PluginManifest {
     /// `contribute_sidebar`.
     #[serde(default)]
     pub session_items: Vec<SidebarItem>,
+    /// Full-page entries this plugin contributes to a row of the **Folders**
+    /// page. Same as [`Self::project_items`] but scoped to a single registered
+    /// folder — the host attaches the folder's id (`x-peckboard-folder-id`) so
+    /// scoped host calls run in that folder. This is the surface for a page
+    /// whose subject IS the folder, with no project or session to borrow scope
+    /// from. Surfaced in the `/api/plugins` catalog; requires
+    /// `contribute_sidebar`.
+    #[serde(default)]
+    pub folder_items: Vec<SidebarItem>,
     /// Host capabilities this plugin requests. Each must be in core's
     /// `ALLOWED_PERMISSIONS` allowlist; the granted set gates the host
     /// functions the plugin may call (see `src/plugin/host.rs`). Permissions
