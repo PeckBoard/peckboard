@@ -27,6 +27,7 @@ mod push;
 mod queued;
 mod repeating_tasks;
 mod sessions;
+mod ssh_keys;
 mod system_prompts;
 mod tabs;
 mod todos;

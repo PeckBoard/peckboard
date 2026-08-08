@@ -29,6 +29,7 @@ use peckboard::routes::mcp_oauth::router as mcp_oauth_router;
 use peckboard::routes::ollama::router as ollama_router;
 use peckboard::routes::plugins::router as plugins_router;
 use peckboard::routes::settings::router as settings_router;
+use peckboard::routes::ssh_keys::router as ssh_keys_router;
 use peckboard::routes::system_prompts::router as system_prompts_router;
 use peckboard::routes::update::router as update_router;
 use peckboard::service::mcp_server::McpTokenRegistry;
@@ -98,6 +99,8 @@ async fn build_fixture() -> Fixture {
     let provider_registry = Arc::new(ProviderRegistry::new());
     let session_manager = SessionManager::new(provider_registry.clone());
     let push_service = PushService::new(&config.data_dir);
+    let ssh_vault_key =
+        peckboard::service::ssh_keys::load_or_create_vault_key(&config.data_dir).unwrap();
 
     let admin_token = seed_user(&db, &jwt_secret, "u1", "admin", "admin", "as1").await;
     let user_token = seed_user(&db, &jwt_secret, "u2", "tester2", "user", "as2").await;
@@ -109,8 +112,9 @@ async fn build_fixture() -> Fixture {
         plugins,
         builtin_plugins: Arc::new(BuiltinPluginRegistry::new()),
         jwt_secret,
-        login_limiter: RateLimiter::new(60),
         password_change_limiter: RateLimiter::<String>::new(5),
+        login_limiter: RateLimiter::new(60),
+        ssh_vault_key,
         broadcaster: Broadcaster::new(),
         provider_registry,
         session_manager,
@@ -137,6 +141,7 @@ fn make_router(state: Arc<AppState>) -> axum::Router {
         .merge(claude_accounts_router(state.clone()))
         .merge(grok_accounts_router(state.clone()))
         .merge(kimi_accounts_router(state.clone()))
+        .merge(ssh_keys_router(state.clone()))
         .merge(env_vars_router(state.clone()))
         .merge(agent_vars_router(state.clone()))
         .merge(system_prompts_router(state.clone()))
@@ -573,4 +578,92 @@ async fn non_admin_cannot_pull_ollama_models_or_disconnect_mcp_oauth() {
     )
     .await;
     assert_eq!(disconnect_status, StatusCode::FORBIDDEN);
+}
+
+#[tokio::test]
+async fn non_admin_cannot_import_generate_rename_or_delete_ssh_keys() {
+    let f = build_fixture().await;
+
+    let (import_status, _) = call(
+        f.state.clone(),
+        Some(&f.user_token),
+        Method::POST,
+        "/api/ssh-keys",
+        Some(serde_json::json!({ "name": "probe", "private_key": "not a key" })),
+    )
+    .await;
+    assert_eq!(import_status, StatusCode::FORBIDDEN);
+
+    let (generate_status, _) = call(
+        f.state.clone(),
+        Some(&f.user_token),
+        Method::POST,
+        "/api/ssh-keys/generate",
+        Some(serde_json::json!({ "name": "probe" })),
+    )
+    .await;
+    assert_eq!(generate_status, StatusCode::FORBIDDEN);
+
+    let (rename_status, _) = call(
+        f.state.clone(),
+        Some(&f.user_token),
+        Method::PATCH,
+        "/api/ssh-keys/k1",
+        Some(serde_json::json!({ "name": "renamed" })),
+    )
+    .await;
+    assert_eq!(rename_status, StatusCode::FORBIDDEN);
+
+    let (delete_status, _) = call(
+        f.state.clone(),
+        Some(&f.user_token),
+        Method::DELETE,
+        "/api/ssh-keys/k1",
+        None,
+    )
+    .await;
+    assert_eq!(delete_status, StatusCode::FORBIDDEN);
+
+    // Listing and reading a public key stay open to any authenticated user.
+    let (list_status, _) = call(
+        f.state.clone(),
+        Some(&f.user_token),
+        Method::GET,
+        "/api/ssh-keys",
+        None,
+    )
+    .await;
+    assert_eq!(list_status, StatusCode::OK);
+
+    let (public_status, _) = call(
+        f.state.clone(),
+        Some(&f.user_token),
+        Method::GET,
+        "/api/ssh-keys/k1/public",
+        None,
+    )
+    .await;
+    assert_eq!(
+        public_status,
+        StatusCode::NOT_FOUND,
+        "no key was created, but the route itself must not be admin-gated"
+    );
+
+    // An admin can actually generate one.
+    let (admin_generate_status, body) = call(
+        f.state.clone(),
+        Some(&f.admin_token),
+        Method::POST,
+        "/api/ssh-keys/generate",
+        Some(serde_json::json!({ "name": "admin-generated" })),
+    )
+    .await;
+    assert_eq!(admin_generate_status, StatusCode::OK);
+    assert_eq!(body["key_type"], "ed25519");
+    assert!(
+        body["public_key"]
+            .as_str()
+            .unwrap()
+            .starts_with("ssh-ed25519 ")
+    );
 }

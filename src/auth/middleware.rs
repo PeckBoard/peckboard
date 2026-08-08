@@ -195,6 +195,7 @@ pub(crate) mod tests {
             plugins: Arc::new(crate::plugin::manager::PluginManager::empty()),
             builtin_plugins: Arc::new(crate::plugin::builtin::BuiltinPluginRegistry::new()),
             jwt_secret: generate_jwt_secret(),
+            ssh_vault_key: vec![0u8; 32],
             login_limiter: crate::auth::rate_limit::RateLimiter::new(100),
             password_change_limiter: crate::auth::rate_limit::RateLimiter::new(100),
             broadcaster: crate::ws::broadcaster::Broadcaster::new(),

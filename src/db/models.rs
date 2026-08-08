@@ -1000,6 +1000,60 @@ pub struct NewEnvVar {
     pub updated_at: String,
 }
 
+// ── SSH Keys ─────────────────────────────────────
+
+/// A named SSH private key, encrypted at rest under the server-held vault
+/// key (`service::ssh_keys::load_or_create_vault_key` — NOT a user
+/// password, unlike `EnvVar`, since agents/workers/repeating tasks use
+/// these headlessly). `private_key_ciphertext`/`private_key_nonce` hold the
+/// AES-256-GCM-sealed private key PEM; `passphrase_ciphertext`/
+/// `passphrase_nonce` optionally seal a passphrase the PEM itself is
+/// encrypted under (set only when the imported key was passphrase-
+/// protected). Never serialize the ciphertext/nonce fields into an API
+/// response — routes build a dedicated view type instead.
+#[derive(Queryable, Selectable, Serialize, Debug, Clone)]
+#[diesel(table_name = ssh_keys)]
+pub struct SshKey {
+    pub id: String,
+    pub name: String,
+    pub key_type: String,
+    pub public_key: String,
+    pub fingerprint: String,
+    pub private_key_ciphertext: String,
+    pub private_key_nonce: String,
+    pub passphrase_ciphertext: Option<String>,
+    pub passphrase_nonce: Option<String>,
+    pub created_at: String,
+    pub updated_at: String,
+    pub created_by: Option<String>,
+}
+
+#[derive(Insertable, Debug)]
+#[diesel(table_name = ssh_keys)]
+pub struct NewSshKey {
+    pub id: String,
+    pub name: String,
+    pub key_type: String,
+    pub public_key: String,
+    pub fingerprint: String,
+    pub private_key_ciphertext: String,
+    pub private_key_nonce: String,
+    pub passphrase_ciphertext: Option<String>,
+    pub passphrase_nonce: Option<String>,
+    pub created_at: String,
+    pub updated_at: String,
+    pub created_by: Option<String>,
+}
+
+/// Rename-only changeset — the crypto fields are immutable after import/
+/// generate (re-keying is a delete + re-import, not an update).
+#[derive(AsChangeset, Debug)]
+#[diesel(table_name = ssh_keys)]
+pub struct SshKeyRename {
+    pub name: String,
+    pub updated_at: String,
+}
+
 // ── Agent Vars ───────────────────────────────────
 
 /// A user-defined agent variable: plain name/value state agents read AND

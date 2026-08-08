@@ -25,6 +25,7 @@ pub mod repeating_tasks;
 pub mod reports;
 pub mod sessions;
 pub mod settings;
+pub mod ssh_keys;
 pub mod system_prompts;
 pub mod tool_images;
 pub mod update;
@@ -65,6 +66,7 @@ pub fn api_router(state: Arc<AppState>) -> Router<Arc<AppState>> {
         .merge(notifications::router(state.clone()))
         .merge(me::router(state.clone()))
         .merge(agent_vars::router(state.clone()))
+        .merge(ssh_keys::router(state.clone()))
         .merge(env_vars::router(state.clone()))
         .merge(settings::router(state.clone()))
         .merge(system_prompts::router(state.clone()))

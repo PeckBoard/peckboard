@@ -16,6 +16,7 @@ use peckboard::security::{origin_check, repair_dangling_sessions, security_heade
 use peckboard::service::mcp_server::McpTokenRegistry;
 use peckboard::service::mdns;
 use peckboard::service::push::PushService;
+use peckboard::service::ssh_keys::load_or_create_vault_key;
 use peckboard::service::tls;
 use peckboard::service::wake::WakeDetector;
 use peckboard::state::AppState;
@@ -119,6 +120,7 @@ async fn main() -> anyhow::Result<()> {
     plugins.load_all().await?;
     peckboard::plugin::manager::set_notify_global(plugins.clone());
     let jwt_secret = load_or_create_jwt_secret(&config.data_dir)?;
+    let ssh_vault_key = load_or_create_vault_key(&config.data_dir)?;
     // 60/min is plenty for a single-tenant LAN server; the previous 5
     // was so aggressive that even a normal user with a few tabs open
     // (each authenticating its own WS) could trip it. Rate-limiting
@@ -176,6 +178,7 @@ async fn main() -> anyhow::Result<()> {
         plugins,
         builtin_plugins,
         jwt_secret,
+        ssh_vault_key,
         login_limiter,
         password_change_limiter,
         broadcaster,

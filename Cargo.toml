@@ -26,6 +26,11 @@ libsqlite3-sys = { version = "0.30", features = ["bundled"] }
 argon2 = "0.5"
 aes-gcm = "0.11"
 rand = "0.8"
+# SSH keypair generation (ssh-key/russh::keys use this RNG version, not rand 0.8's).
+# getrandom's "sys_rng" feature provides a `rand_core` 0.10-compatible OS RNG
+# (`getrandom::SysRng`, wrapped in `rand_core::UnwrapErr` at the call site).
+rand_core = "0.10.1"
+getrandom = { version = "0.4", features = ["sys_rng"] }
 base64 = "0.22"
 p256 = { version = "0.13", features = ["ecdsa"] }
 

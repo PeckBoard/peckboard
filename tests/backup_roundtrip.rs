@@ -77,6 +77,7 @@ async fn build_state_with_dir(dir: &std::path::Path, role: &str) -> (Arc<AppStat
         plugins,
         builtin_plugins,
         jwt_secret,
+        ssh_vault_key: vec![0u8; 32],
         login_limiter: RateLimiter::new(60),
         password_change_limiter: RateLimiter::<String>::new(5),
         broadcaster: Broadcaster::new(),

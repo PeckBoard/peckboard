@@ -851,6 +851,67 @@ mod tests {
         assert!(left[0].folder_id.is_none());
     }
 
+    // ── SSH Keys ──────────────────────────────────────
+
+    fn new_ssh_key(id: &str, name: &str) -> NewSshKey {
+        NewSshKey {
+            id: id.into(),
+            name: name.into(),
+            key_type: "ed25519".into(),
+            public_key: "ssh-ed25519 AAAA...test".into(),
+            fingerprint: "SHA256:abc123".into(),
+            private_key_ciphertext: "ct".into(),
+            private_key_nonce: "nonce".into(),
+            passphrase_ciphertext: None,
+            passphrase_nonce: None,
+            created_at: now(),
+            updated_at: now(),
+            created_by: Some("u1".into()),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_ssh_key_crud_roundtrip() {
+        let db = test_db();
+
+        let inserted = db
+            .insert_ssh_key(new_ssh_key("k1", "deploy-key"))
+            .await
+            .unwrap();
+        assert_eq!(inserted.name, "deploy-key");
+
+        let by_id = db.get_ssh_key("k1").await.unwrap().unwrap();
+        assert_eq!(by_id.fingerprint, "SHA256:abc123");
+        let by_name = db.get_ssh_key_by_name("deploy-key").await.unwrap().unwrap();
+        assert_eq!(by_name.id, "k1");
+        assert!(db.get_ssh_key("missing").await.unwrap().is_none());
+
+        db.insert_ssh_key(new_ssh_key("k2", "other-key"))
+            .await
+            .unwrap();
+        let all = db.list_ssh_keys().await.unwrap();
+        assert_eq!(all.len(), 2);
+        // Ordered by name: deploy-key, other-key.
+        assert_eq!(all[0].name, "deploy-key");
+        assert_eq!(all[1].name, "other-key");
+
+        assert!(db.rename_ssh_key("k1", "renamed-key").await.unwrap());
+        assert!(!db.rename_ssh_key("missing", "x").await.unwrap());
+        let renamed = db.get_ssh_key("k1").await.unwrap().unwrap();
+        assert_eq!(renamed.name, "renamed-key");
+
+        assert!(db.delete_ssh_key("k1").await.unwrap());
+        assert!(!db.delete_ssh_key("k1").await.unwrap());
+        assert_eq!(db.list_ssh_keys().await.unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn test_ssh_key_name_is_unique() {
+        let db = test_db();
+        db.insert_ssh_key(new_ssh_key("k1", "dup")).await.unwrap();
+        assert!(db.insert_ssh_key(new_ssh_key("k2", "dup")).await.is_err());
+    }
+
     // ── Agent Vars ───────────────────────────────────────────────────
 
     fn agent_var(id: &str, name: &str, value: &str, folder_id: Option<&str>) -> NewAgentVar {

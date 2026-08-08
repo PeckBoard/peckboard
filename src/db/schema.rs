@@ -382,6 +382,22 @@ diesel::table! {
     }
 }
 diesel::table! {
+    ssh_keys (id) {
+        id -> Text,
+        name -> Text,
+        key_type -> Text,
+        public_key -> Text,
+        fingerprint -> Text,
+        private_key_ciphertext -> Text,
+        private_key_nonce -> Text,
+        passphrase_ciphertext -> Nullable<Text>,
+        passphrase_nonce -> Nullable<Text>,
+        created_at -> Text,
+        updated_at -> Text,
+        created_by -> Nullable<Text>,
+    }
+}
+diesel::table! {
     agent_vars (id) {
         id -> Text,
         name -> Text,
@@ -543,6 +559,7 @@ diesel::allow_tables_to_appear_in_same_query!(
     plans,
     env_vars,
     agent_vars,
+    ssh_keys,
     doc_reviews,
     doc_review_versions,
     doc_review_comments,
