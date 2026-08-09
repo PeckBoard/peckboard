@@ -1,5 +1,5 @@
 {
-  "name": "peckboard-linux-app-manager-plugin",
+  "name": "peckboard-app-manager-plugin",
   "version": "0.1.0",
   "private": true,
   "description": "Peckboard WASM plugin — list, install, and remove common applications on Linux targets (the local host and configured SSH hosts) via MCP tools",

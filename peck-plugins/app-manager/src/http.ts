@@ -27,8 +27,8 @@ import {
 import { errMsg, htmlResponse, jsonResponse } from "./verdict";
 import { friendlyError, targetView } from "./view";
 
-const PAGE_PATH = "/plugin-api/v1/linux-app-manager";
-const API = "/api/plugin-ui/linux-app-manager";
+const PAGE_PATH = "/plugin-api/v1/app-manager";
+const API = "/api/plugin-ui/app-manager";
 
 function up(v: unknown): string {
   return (typeof v === "string" ? v : "").toUpperCase();
@@ -56,7 +56,7 @@ export function serveHttp(payload: any): string {
   );
 }
 
-/// Authenticated app-UI endpoints under /api/plugin-ui/linux-app-manager/*.
+/// Authenticated app-UI endpoints under /api/plugin-ui/app-manager/*.
 export function serveAuthed(payload: any): string {
   const method = up(payload?.method);
   const path = str(payload?.path);

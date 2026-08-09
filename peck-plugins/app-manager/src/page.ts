@@ -308,7 +308,7 @@ export const PAGE = `<!doctype html>
     return body;
   }
 
-  var API = "/api/plugin-ui/linux-app-manager";
+  var API = "/api/plugin-ui/app-manager";
   var POLL_MS = 2000;
   var $ = function (id) { return document.getElementById(id); };
   function el(tag, cls, text) {

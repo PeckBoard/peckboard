@@ -14,7 +14,7 @@ const DESCRIPTION =
   "target, seeing what is installed, and watching install progress live.";
 
 const VERSION = "0.2.0";
-const REPOSITORY = "https://github.com/PeckBoard/linux-app-manager";
+const REPOSITORY = "https://github.com/PeckBoard/app-manager";
 
 // Inline SVG (lucide "package") for the sidebar entry; rendered sandboxed.
 const ICON =
@@ -133,24 +133,24 @@ export function manifestJson(): string {
     // Global sidebar entry → the app-manager dashboard.
     sidebar_items: [
       {
-        id: "linux-app-manager",
+        id: "app-manager",
         label: "App Manager",
         icon: ICON,
-        path: "/plugin-api/v1/linux-app-manager",
+        path: "/plugin-api/v1/app-manager",
       },
     ],
 
-    http_routes: ["GET /plugin-api/v1/linux-app-manager"],
+    http_routes: ["GET /plugin-api/v1/app-manager"],
 
     ui_routes: [
-      "GET /api/plugin-ui/linux-app-manager/targets",
-      "GET /api/plugin-ui/linux-app-manager/ssh-keys",
-      "GET /api/plugin-ui/linux-app-manager/apps",
-      "GET /api/plugin-ui/linux-app-manager/status",
-      "POST /api/plugin-ui/linux-app-manager/targets",
-      "POST /api/plugin-ui/linux-app-manager/target-remove",
-      "POST /api/plugin-ui/linux-app-manager/install",
-      "POST /api/plugin-ui/linux-app-manager/remove",
+      "GET /api/plugin-ui/app-manager/targets",
+      "GET /api/plugin-ui/app-manager/ssh-keys",
+      "GET /api/plugin-ui/app-manager/apps",
+      "GET /api/plugin-ui/app-manager/status",
+      "POST /api/plugin-ui/app-manager/targets",
+      "POST /api/plugin-ui/app-manager/target-remove",
+      "POST /api/plugin-ui/app-manager/install",
+      "POST /api/plugin-ui/app-manager/remove",
     ],
     mcp_tools: MCP_TOOLS,
   });

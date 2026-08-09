@@ -1,4 +1,4 @@
-# linux-app-manager
+# app-manager
 
 A Peckboard WASM plugin that lists, installs, and removes common
 applications on Linux targets — the local Peckboard host and any
@@ -32,7 +32,7 @@ version inert until you approve it again in Settings → Plugins.
 
 ## Dashboard Page
 
-Sidebar → **App Manager** opens `/plugin-api/v1/linux-app-manager`, served by
+Sidebar → **App Manager** opens `/plugin-api/v1/app-manager`, served by
 this plugin and framed in a sandboxed iframe (no `allow-same-origin`). It
 talks only to its own authenticated routes, through the host's
 postMessage fetch bridge:
@@ -46,7 +46,7 @@ postMessage fetch bridge:
 | `POST /targets`, `POST /target-remove` | remote-target CRUD                               |
 | `POST /install`, `POST /remove`        | start a detached job                             |
 
-(all under `/api/plugin-ui/linux-app-manager`.)
+(all under `/api/plugin-ui/app-manager`.)
 
 The page itself is a single HTML string (`src/page.ts`) that cannot import
 anything, so every display decision — badge text, action label, job headline,
@@ -134,8 +134,19 @@ tail via `app_status`.
 ```
 
 Requires `extism-js` on PATH. Output: `dist/plugin.wasm`. Copy it to
-`<dataDir>/plugins/linux-app-manager.wasm` (the file stem is the plugin id)
+`<dataDir>/plugins/app-manager.wasm` (the file stem is the plugin id)
 and approve it in Settings → Plugins.
+
+## Renamed from linux-app-manager
+
+Through 0.2.0 this plugin shipped as `linux-app-manager`, and the wasm file
+stem is the plugin id. If an older copy is still staged, **delete
+`<dataDir>/plugins/linux-app-manager.wasm` when you stage
+`app-manager.wasm`** — two staged copies declare the same `app_*` tool
+names, and core silently drops whichever set loads second. Core migrates the
+plugin's stored data (configured remote targets, job records) from the old
+plugin id to `app-manager` automatically at startup, provided the new id has
+no data yet.
 
 ## Test
 

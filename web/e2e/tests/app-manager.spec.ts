@@ -7,7 +7,7 @@ import {
 } from '@playwright/test'
 
 /**
- * UI e2e for the linux-app-manager plugin's App Manager page (sidebar →
+ * UI e2e for the app-manager plugin's App Manager page (sidebar →
  * App Manager): the page loads inside its sandboxed iframe, the target picker
  * is a real `<select>`, the distro banner reports what was detected on the
  * local host, the app grid shows installed state per app, and the add-remote-
@@ -17,14 +17,14 @@ import {
  * Deliberately does NOT install or remove anything: those run real
  * package-manager commands as root on whatever machine the suite runs on.
  * The install/remove job lifecycle is covered by the plugin's own vitest
- * suite (`peck-plugins/linux-app-manager/test/`).
+ * suite (`peck-plugins/app-manager/test/`).
  *
  * SKIPS when the plugin wasm isn't built — `playwright.config.ts` only stages
- * `peck-plugins/linux-app-manager/dist/plugin.wasm` if it exists (build it
- * with `peck-plugins/linux-app-manager/build.sh`, which needs `extism-js`).
+ * `peck-plugins/app-manager/dist/plugin.wasm` if it exists (build it
+ * with `peck-plugins/app-manager/build.sh`, which needs `extism-js`).
  */
 
-const PLUGIN = 'linux-app-manager'
+const PLUGIN = 'app-manager'
 
 async function authenticate(request: APIRequestContext): Promise<string> {
   const res = await request.post('/api/auth/login', {
@@ -60,14 +60,14 @@ async function openAppManager(page: Page): Promise<FrameLocator> {
   return frame
 }
 
-test.describe('linux-app-manager page', () => {
+test.describe('app-manager page', () => {
   test('shows the target picker, distro banner and app grid for the local host', async ({
     request,
     page,
   }) => {
     const token = await authenticate(request)
     await loadApp(page, token)
-    test.skip(!(await pluginPresent(page)), 'linux-app-manager wasm not built')
+    test.skip(!(await pluginPresent(page)), 'app-manager wasm not built')
 
     const f = await openAppManager(page)
 
@@ -96,7 +96,7 @@ test.describe('linux-app-manager page', () => {
   }) => {
     const token = await authenticate(request)
     await loadApp(page, token)
-    test.skip(!(await pluginPresent(page)), 'linux-app-manager wasm not built')
+    test.skip(!(await pluginPresent(page)), 'app-manager wasm not built')
 
     const f = await openAppManager(page)
     await f.locator('#addTargetBtn').click()

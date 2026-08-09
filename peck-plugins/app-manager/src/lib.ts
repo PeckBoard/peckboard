@@ -28,7 +28,7 @@ function handleInvoke(payload: any): string {
   const args = payload.arguments ?? {};
 
   const fn = TOOLS[tool];
-  if (!fn) return cancel(`linux-app-manager does not provide tool '${tool}'`);
+  if (!fn) return cancel(`app-manager does not provide tool '${tool}'`);
 
   try {
     return allow(fn(args));

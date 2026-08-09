@@ -8,8 +8,8 @@ import { installHost } from "./hostShim";
 import { queryParam, serveAuthed, serveHttp } from "../src/http";
 import { dispatch } from "../src/lib";
 
-const API = "/api/plugin-ui/linux-app-manager";
-const PAGE_PATH = "/plugin-api/v1/linux-app-manager";
+const API = "/api/plugin-ui/app-manager";
+const PAGE_PATH = "/plugin-api/v1/app-manager";
 
 /** Unwrap the `{verdict, payload:{status, body}}` envelope into status + JSON. */
 function res(json: string): { status: number; body: any } {

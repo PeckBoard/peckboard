@@ -3757,4 +3757,98 @@ mod tests {
         assert!(db.get_custom_workflow("wf1").await.unwrap().is_none());
         assert!(!db.delete_custom_workflow("wf1").await.unwrap());
     }
+
+    // ── Migrations ───────────────────────────────────────────────────
+
+    /// The 1786310002 migration renames the linux-app-manager plugin's
+    /// stored rows to its new id, app-manager. Proven against a NON-EMPTY,
+    /// file-backed DB through the real startup path: seed rows under the
+    /// old id, un-mark the migration, and let `Db::open` re-run it — the
+    /// way an existing install upgrades.
+    #[tokio::test]
+    async fn rename_linux_app_manager_migration_moves_plugin_rows() {
+        use diesel::RunQueryDsl;
+
+        const UNMARK: &str = "DELETE FROM __diesel_schema_migrations WHERE version = '1786310002'";
+        let dir = tempfile::tempdir().unwrap();
+
+        let db = Db::open(dir.path()).unwrap();
+        db.plugin_store_put_blocking(
+            "linux-app-manager",
+            "targets",
+            "t1",
+            r#"{"hostname":"example.com"}"#,
+        )
+        .unwrap();
+        db.plugin_store_put_blocking("linux-app-manager", "jobs", "j1", r#"{"status":"ok"}"#)
+            .unwrap();
+        db.plugin_session_meta_set_blocking("sess1", "linux-app-manager", r#"{"k":1}"#)
+            .unwrap();
+        db.with_conn(|conn| {
+            diesel::sql_query(UNMARK).execute(conn)?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+        drop(db);
+
+        // Reopen: diesel re-runs the now-pending migration on non-empty tables.
+        let db = Db::open(dir.path()).unwrap();
+        assert!(
+            db.plugin_store_get_blocking("linux-app-manager", "targets", "t1")
+                .unwrap()
+                .is_none(),
+            "old id must hold nothing after the rename"
+        );
+        assert_eq!(
+            db.plugin_store_get_blocking("app-manager", "targets", "t1")
+                .unwrap()
+                .as_deref(),
+            Some(r#"{"hostname":"example.com"}"#)
+        );
+        assert_eq!(
+            db.plugin_store_get_blocking("app-manager", "jobs", "j1")
+                .unwrap()
+                .as_deref(),
+            Some(r#"{"status":"ok"}"#)
+        );
+        assert_eq!(
+            db.plugin_session_meta_get_blocking("sess1", "app-manager")
+                .unwrap()
+                .as_deref(),
+            Some(r#"{"k":1}"#)
+        );
+        assert!(
+            db.plugin_session_meta_get_blocking("sess1", "linux-app-manager")
+                .unwrap()
+                .is_none()
+        );
+
+        // Guard: once app-manager has rows, a re-run must leave anything
+        // still under the old id untouched (no merge, no clobber).
+        db.plugin_store_put_blocking("linux-app-manager", "targets", "stale", r#"{"old":true}"#)
+            .unwrap();
+        db.with_conn(|conn| {
+            diesel::sql_query(UNMARK).execute(conn)?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+        drop(db);
+
+        let db = Db::open(dir.path()).unwrap();
+        assert_eq!(
+            db.plugin_store_get_blocking("linux-app-manager", "targets", "stale")
+                .unwrap()
+                .as_deref(),
+            Some(r#"{"old":true}"#),
+            "guard: old rows stay put when the new id already has data"
+        );
+        assert_eq!(
+            db.plugin_store_get_blocking("app-manager", "targets", "t1")
+                .unwrap()
+                .as_deref(),
+            Some(r#"{"hostname":"example.com"}"#)
+        );
+    }
 }

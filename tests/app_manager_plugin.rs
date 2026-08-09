@@ -1,4 +1,4 @@
-//! Integration test for the **linux-app-manager WASM plugin** against the
+//! Integration test for the **app-manager WASM plugin** against the
 //! real core host functions, mirroring `tests/ssh_fleet_plugin.rs`.
 //!
 //! Covers: plugin load/approval, `app_targets` (local + a remote target
@@ -10,10 +10,10 @@
 //! Deliberately does NOT kick off a real package install/remove — that
 //! would mutate the CI host, may need root or network, and could hang on a
 //! missing sudo password. The job-launch/poll/state-machine logic is
-//! covered by `peck-plugins/linux-app-manager/test/jobs.test.ts` against a
+//! covered by `peck-plugins/app-manager/test/jobs.test.ts` against a
 //! mocked exec host function instead.
 //!
-//! The wasm is built out-of-tree (`peck-plugins/linux-app-manager/build.sh`);
+//! The wasm is built out-of-tree (`peck-plugins/app-manager/build.sh`);
 //! this test **skips** with a note when the artifact is absent.
 
 use std::path::PathBuf;
@@ -23,7 +23,7 @@ use peckboard::db::models::{NewFolder, NewProject, NewSession};
 use peckboard::plugin::manager::PluginManager;
 use serde_json::{Value, json};
 
-const PLUGIN_ID: &str = "linux-app-manager";
+const PLUGIN_ID: &str = "app-manager";
 
 fn plugin_wasm_path(plugin_id: &str) -> Option<PathBuf> {
     let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
@@ -48,11 +48,11 @@ async fn invoke(plugins: &PluginManager, tool: &str, args: Value, ctx: &Value) -
 }
 
 #[tokio::test]
-async fn linux_app_manager_plugin_end_to_end() {
+async fn app_manager_plugin_end_to_end() {
     let Some(wasm) = plugin_wasm() else {
         eprintln!(
-            "SKIP linux_app_manager_plugin_end_to_end: plugin wasm not built \
-             (run peck-plugins/linux-app-manager/build.sh)"
+            "SKIP app_manager_plugin_end_to_end: plugin wasm not built \
+             (run peck-plugins/app-manager/build.sh)"
         );
         return;
     };
@@ -113,7 +113,7 @@ async fn linux_app_manager_plugin_end_to_end() {
         .decide(PLUGIN_ID, true)
         .await
         .unwrap()
-        .expect("linux-app-manager plugin should be loaded");
+        .expect("app-manager plugin should be loaded");
     assert_eq!(info.status, "approved", "plugin must be active: {info:?}");
 
     let ctx = json!({ "sessionId": "caller-1", "projectId": "proj-1", "folderId": "f1" });

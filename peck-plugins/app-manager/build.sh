@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Build the Peckboard linux-app-manager plugin to a WASM module via the
+# Build the Peckboard app-manager plugin to a WASM module via the
 # Extism js-pdk. esbuild bundles src/index.ts -> dist/index.js, then
 # extism-js compiles it to dist/plugin.wasm.
 #
