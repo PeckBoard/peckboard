@@ -9,6 +9,7 @@
 import { CatalogApp, installRecipeFor, removeRecipeFor } from "./catalog";
 import { PackageManager } from "./distro";
 import { JobRecord } from "./jobs";
+import { InstallRecord, PkgRef } from "./provenance";
 import { TargetRecord } from "./targets";
 
 // --- targets ----------------------------------------------------------------
@@ -124,6 +125,19 @@ export interface AppRowView {
   actionable: boolean;
   /** Why `actionable` is false, in prose. */
   blocked_reason: string | null;
+  /** The package-DB version of the app's own package from the last
+   * recorded install, when it maps to one — authoritative for the package,
+   * noted alongside the binary's probed version. */
+  package_version: string | null;
+  /** Provenance caveat, in prose: a vendor-script install isn't tracked by
+   * the package manager; a failed snapshot bracket is "unknown". Rendered
+   * explicitly — never as an empty package list. */
+  provenance_note: string | null;
+  /** "Installed with <app>" — the label over `added_packages`. */
+  added_label: string | null;
+  /** Packages recorded as arriving during this app's install job, each
+   * with its package-DB version. Rendered visually secondary to the app. */
+  added_packages: PkgRef[];
   /** The in-flight (or last) job for this app on this target, if any. */
   job: JobView | null;
 }
@@ -133,8 +147,22 @@ export function appRowView(
   probe: { installed: boolean; version: string | null },
   pm: PackageManager | null,
   job: JobRecord | null,
+  record: InstallRecord | null = null,
 ): AppRowView {
   const action = probe.installed ? "remove" : "install";
+  // A record for an app that's no longer installed (removed outside this
+  // plugin) would present stale provenance as current — suppress it.
+  const rec = probe.installed ? record : null;
+  let provenanceNote: string | null = null;
+  if (rec) {
+    if (rec.tracking === "unknown") {
+      provenanceNote = rec.note ?? "What this install added is unknown.";
+    } else if (rec.method === "vendor") {
+      provenanceNote =
+        "Installed by a vendor script — not tracked by the package manager.";
+    }
+  }
+  const added = rec && rec.tracking === "tracked" ? rec.added : [];
   const recipe = probe.installed
     ? removeRecipeFor(app, pm)
     : installRecipeFor(app, pm);
@@ -151,6 +179,10 @@ export function appRowView(
     blocked_reason: recipe
       ? null
       : `No ${action} recipe for ${app.name} on this distribution.`,
+    package_version: rec?.primary?.version ?? null,
+    provenance_note: provenanceNote,
+    added_label: added.length ? `Installed with ${app.name}` : null,
+    added_packages: added,
     job: job ? jobView(job, "") : null,
   };
 }

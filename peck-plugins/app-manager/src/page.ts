@@ -119,6 +119,15 @@ export const PAGE = `<!doctype html>
   }
   .approw .acts { display: flex; flex-direction: column; align-items: flex-end; gap: 4px; }
   .approw .why { color: var(--muted); font-size: 11px; max-width: 200px; text-align: right; }
+  .approw .pkgver { color: var(--muted); }
+  .approw .prov { margin-top: 3px; font-size: 11px; color: var(--warn); }
+  .approw .deps {
+    margin-top: 4px; font-size: 11px; color: var(--muted); line-height: 1.7;
+  }
+  .approw .deps .dep {
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    white-space: nowrap;
+  }
   .badge {
     font-size: 10px; border-radius: 10px; padding: 1px 8px; border: 1px solid var(--line);
     background: var(--panel2); color: var(--muted); white-space: nowrap;
@@ -417,7 +426,21 @@ export const PAGE = `<!doctype html>
     body.appendChild(name);
     body.appendChild(el("div", "desc", a.description));
     var ver = el("div", "ver", a.version || "");
+    if (a.package_version) {
+      ver.appendChild(el("span", "pkgver",
+        (a.version ? " — package: " : "package: ") + a.package_version));
+    }
     body.appendChild(ver);
+    if (a.provenance_note) body.appendChild(el("div", "prov", a.provenance_note));
+    if (a.added_packages && a.added_packages.length) {
+      var deps = el("div", "deps");
+      deps.appendChild(document.createTextNode((a.added_label || "Also installed") + ": "));
+      a.added_packages.forEach(function (p, i) {
+        if (i) deps.appendChild(document.createTextNode(" · "));
+        deps.appendChild(el("span", "dep", p.name + " " + p.version));
+      });
+      body.appendChild(deps);
+    }
     row.appendChild(body);
 
     var acts = el("div", "acts");

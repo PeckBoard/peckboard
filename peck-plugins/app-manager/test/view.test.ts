@@ -6,6 +6,7 @@
 import { describe, expect, it } from "vitest";
 import { findApp } from "../src/catalog";
 import { JobRecord } from "../src/jobs";
+import { InstallRecord } from "../src/provenance";
 import { LOCAL_TARGET } from "../src/targets";
 import {
   appRowView,
@@ -134,6 +135,90 @@ describe("appRowView", () => {
   });
 });
 
+describe("appRowView provenance", () => {
+  const installedGit = { installed: true, version: "git version 2.43.0" };
+
+  function installRecord(over: Partial<InstallRecord> = {}): InstallRecord {
+    return {
+      job_id: "j1",
+      target_id: "local",
+      app_id: "git",
+      installed_at: "2026-08-09T00:00:00.000Z",
+      method: "apt",
+      tracking: "tracked",
+      primary: { name: "git", version: "1:2.43.0-1" },
+      added: [
+        { name: "git-man", version: "1:2.43.0-1" },
+        { name: "liberror-perl", version: "0.17029-2" },
+      ],
+      changed: [],
+      ...over,
+    };
+  }
+
+  it("notes the package-DB version and lists what came with the app", () => {
+    const r = appRowView(git, installedGit, "apt", null, installRecord());
+    // The probe stays authoritative for the binary; the package version is
+    // noted alongside it.
+    expect(r.version).toBe("git version 2.43.0");
+    expect(r.package_version).toBe("1:2.43.0-1");
+    expect(r.added_label).toBe("Installed with Git");
+    expect(r.added_packages).toEqual([
+      { name: "git-man", version: "1:2.43.0-1" },
+      { name: "liberror-perl", version: "0.17029-2" },
+    ]);
+    expect(r.provenance_note).toBeNull();
+  });
+
+  it("renders a vendor install as explicitly untracked, never as 'no dependencies'", () => {
+    const r = appRowView(
+      claude,
+      { installed: true, version: "1.2.3" },
+      "apt",
+      null,
+      installRecord({
+        app_id: "claude",
+        method: "vendor",
+        primary: null,
+        added: [],
+      }),
+    );
+    expect(r.provenance_note).toMatch(/not tracked by the package manager/);
+    expect(r.added_packages).toEqual([]);
+    expect(r.added_label).toBeNull();
+    expect(r.package_version).toBeNull();
+  });
+
+  it("surfaces a failed snapshot bracket as unknown, in prose", () => {
+    const r = appRowView(
+      git,
+      installedGit,
+      "apt",
+      null,
+      installRecord({
+        tracking: "unknown",
+        note: "The package-database snapshot failed on the target, so what this install added is unknown.",
+        primary: null,
+        added: [],
+      }),
+    );
+    expect(r.provenance_note).toMatch(/unknown/);
+    expect(r.added_packages).toEqual([]);
+  });
+
+  it("suppresses stale provenance for an app that is no longer installed", () => {
+    const r = appRowView(
+      git,
+      { installed: false, version: null },
+      "apt",
+      null,
+      installRecord(),
+    );
+    expect(r.package_version).toBeNull();
+    expect(r.provenance_note).toBeNull();
+    expect(r.added_packages).toEqual([]);
+  });
+});
 describe("jobView", () => {
   it("labels a running install", () => {
     const v = jobView(job({ status: "running" }), "reading package lists");

@@ -13,7 +13,7 @@ const DESCRIPTION =
   "itself is broad. Ships an App Manager dashboard page (sidebar entry) for picking a " +
   "target, seeing what is installed, and watching install progress live.";
 
-const VERSION = "0.2.0";
+const VERSION = "0.3.0";
 const REPOSITORY = "https://github.com/PeckBoard/app-manager";
 
 // Inline SVG (lucide "package") for the sidebar entry; rendered sandboxed.
@@ -43,8 +43,11 @@ const MCP_TOOLS = [
   {
     name: "app_list",
     description:
-      "List the app catalog with per-target installed state and version. Optionally scope to a subset " +
-      "of targets and/or apps; defaults to every configured target and every catalog app.",
+      "List the app catalog with per-target installed state and version, plus the packages each " +
+      "recorded install genuinely added (snapshot-bracket provenance: name + package-DB version, " +
+      "labelled with the app that pulled them in; vendor-script installs are explicitly untracked " +
+      "by the package manager). Optionally scope to a subset of targets and/or apps; defaults to " +
+      "every configured target and every catalog app.",
     input_schema: {
       type: "object",
       properties: {

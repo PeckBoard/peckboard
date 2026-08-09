@@ -12,6 +12,8 @@ export interface ExecOutcome {
   stdout: string;
   stderr: string;
   timedOut: boolean;
+  /** Either output stream hit the host's capture cap — the text is incomplete. */
+  truncated: boolean;
 }
 
 export function runOnTarget(
@@ -27,6 +29,7 @@ export function runOnTarget(
       stdout: res.stdout,
       stderr: res.stderr,
       timedOut: res.timed_out,
+      truncated: res.stdout_truncated || res.stderr_truncated,
     };
   }
 
@@ -37,5 +40,6 @@ export function runOnTarget(
     stdout: res.stdout,
     stderr: res.stderr,
     timedOut: res.timed_out,
+    truncated: res.stdout_truncated || res.stderr_truncated,
   };
 }

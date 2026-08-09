@@ -117,6 +117,39 @@ install can run for minutes. Instead:
    sentinel line on completion, so `app_status` can tell success from
    failure without waiting on the process itself.
 
+## Install Provenance
+
+What an install _genuinely_ added is recorded by bracketing it with
+package-database snapshots inside the same detached script — never by
+parsing installer output or asking an agent:
+
+    snapshot(before) → recipe → snapshot(after) → delta = added packages
+
+Snapshots dump `name + version` per line (`dpkg-query -W`, `rpm -qa --qf`,
+`pacman -Q`) into `/tmp` files next to the job's logfile, through the same
+target abstraction as everything else (`src/exec.ts`). When a poll first
+observes the job's terminal state, the two files are read and deleted in
+one exec and the delta becomes a record in the `installs` collection
+(`src/provenance.ts`), keyed `<target_id>:<app_id>` — a re-install
+supersedes, a successful remove deletes. `app_list` and the dashboard
+surface it: the app row notes its package-DB version next to the probed
+binary version, and the packages that arrived with it render as a
+secondary "Installed with …" line, each with its version.
+
+Honest edges, deliberately visible:
+
+- **Vendor `curl | sh` installers** (claude, cursor-agent, ollama) never
+  touch the package database. Their rows say so — "not tracked by the
+  package manager" — instead of showing an empty list that would read as
+  "no dependencies". Prerequisites such an installer does `apt-get
+install` DO land in the delta and are listed normally.
+- **A failed snapshot** (unsupported package manager, permission denied,
+  truncated output) degrades to an explicit "unknown", never to a
+  silently-empty delta.
+- The record is provenance — "arrived during this job" — not a dependency
+  graph: a shared library is attributed to whichever app's install pulled
+  it in first. Real dependency edges must come from the package manager.
+
 ## sudo
 
 Recipes that need root use `sudo -A`, matching the core convention (see

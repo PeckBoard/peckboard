@@ -9,6 +9,7 @@
 // data_store and exec.ts, same split as ssh-fleet's hosts.ts.
 
 import { nextSeq } from "./counter";
+import { PackageManager } from "./distro";
 import { storeGet, storePut } from "./host";
 import { runOnTarget } from "./exec";
 import { TargetRecord } from "./targets";
@@ -33,11 +34,16 @@ export interface JobRecord {
   logfile: string;
   status: JobStatus;
   exit_code?: number | null;
+  /** Install jobs: the package manager whose snapshot bracket wraps the
+   * recipe (null = no bracket) and which recipe was chosen — set at launch,
+   * consumed when the job settles (see provenance.ts). */
+  pm?: PackageManager | null;
+  method?: PackageManager | "vendor";
 }
 
 // --- pure: script building/parsing ----------------------------------------
 
-function shQuote(s: string): string {
+export function shQuote(s: string): string {
   return `'${s.replace(/'/g, `'\\''`)}'`;
 }
 
@@ -125,6 +131,7 @@ export function createJob(
   targetId: string,
   appId: string,
   action: JobAction,
+  meta: Pick<JobRecord, "pm" | "method"> = {},
 ): JobRecord {
   const id = mintJobId();
   const job: JobRecord = {
@@ -135,6 +142,7 @@ export function createJob(
     pid: 0,
     logfile: logPathFor(id),
     status: "running",
+    ...meta,
   };
   storePut(JOBS_COLLECTION, job.id, job);
   storePut(CURRENT_COLLECTION, currentKey(targetId, appId), job.id);

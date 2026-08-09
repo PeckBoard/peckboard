@@ -88,6 +88,13 @@ test.describe('app-manager page', () => {
     const badges = await rows.locator('.badge').first().allTextContents()
     expect(badges.join()).toMatch(/Installed|Not installed/)
     await expect(rows.first().locator('.acts button').first()).toHaveText(/Install|Remove/)
+
+    // Provenance card: every listed entry carries a version. Git is
+    // certainly installed on the host running this suite (the repo itself is
+    // a git checkout), so its row must render the probed version string.
+    const gitRow = rows.filter({ hasText: 'Distributed version control' })
+    await expect(gitRow).toHaveCount(1)
+    await expect(gitRow.locator('.ver')).toContainText(/\d+\.\d+/)
   })
 
   test('picks an SSH key from a dropdown and reports save failures as prose', async ({

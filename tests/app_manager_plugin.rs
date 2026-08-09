@@ -175,6 +175,67 @@ async fn app_manager_plugin_end_to_end() {
         "installed should be a bool: {res}"
     );
 
+    // ── install-record provenance: seed a snapshot-bracket install record
+    // exactly as a settled install job writes it (see
+    // peck-plugins/app-manager/src/provenance.ts), proving the store
+    // round-trip through the plugin's own `installs` collection and that
+    // app_list surfaces the recorded packages: the app row carries the
+    // package-DB version, and every added package appears with a version,
+    // labelled with the app that pulled it in.
+    let install_record = json!({
+        "job_id": "j99",
+        "target_id": "local",
+        "app_id": "git",
+        "installed_at": "2026-08-09T00:00:00.000Z",
+        "method": "apt",
+        "tracking": "tracked",
+        "primary": { "name": "git", "version": "1:2.43.0-1" },
+        "added": [
+            { "name": "git-man", "version": "1:2.43.0-1" },
+            { "name": "liberror-perl", "version": "0.17029-2" }
+        ],
+        "changed": []
+    })
+    .to_string();
+    db.plugin_store_put_blocking(PLUGIN_ID, "installs", "local:git", &install_record)
+        .unwrap();
+
+    let res = invoke(
+        &plugins,
+        "app_list",
+        json!({ "targets": ["local"], "apps": ["git"] }),
+        &ctx,
+    )
+    .await;
+    let target_block = &res["targets"][0];
+    let git_entry = &target_block["apps"][0];
+    assert_eq!(
+        git_entry["package_version"],
+        json!("1:2.43.0-1"),
+        "app_list should carry the recorded package-DB version: {res}"
+    );
+    assert_eq!(
+        git_entry["package_tracking"],
+        json!("tracked"),
+        "a snapshot-bracketed install is tracked: {res}"
+    );
+    let added = target_block["added_packages"]
+        .as_array()
+        .expect("added_packages array");
+    assert_eq!(added.len(), 2, "both recorded packages surface: {res}");
+    assert!(
+        added
+            .iter()
+            .all(|p| p["version"].is_string() && p["installed_with"] == json!("git")),
+        "every added package carries a version and its installing app: {res}"
+    );
+    assert!(
+        added
+            .iter()
+            .any(|p| p["name"] == json!("git-man") && p["version"] == json!("1:2.43.0-1")),
+        "git-man 1:2.43.0-1 should be listed: {res}"
+    );
+
     // ── catalog/target whitelist: app_status/app_install/app_remove refuse
     // an unknown app or target BEFORE touching a shell — no process spawned.
     let res = invoke(

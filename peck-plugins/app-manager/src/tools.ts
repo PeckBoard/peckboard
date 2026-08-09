@@ -27,6 +27,13 @@ import {
   pollJob,
   putJob,
 } from "./jobs";
+import {
+  getInstallRecord,
+  listInstallRecords,
+  settleJobProvenance,
+  trackingState,
+  withSnapshotBracket,
+} from "./provenance";
 import { TargetRecord, listTargets, resolveTarget } from "./targets";
 import { appRowView, distroView, jobView, targetView } from "./view";
 
@@ -125,14 +132,31 @@ export function appList(args: any): any {
     } catch {
       packageManager = null;
     }
+    const records = listInstallRecords(target.id);
+    const scoped = apps.map((app: CatalogApp) => ({
+      app,
+      record: records.find((r) => r.app_id === app.id) ?? null,
+    }));
     return {
       target: { id: target.id, label: target.label },
       package_manager: packageManager,
-      apps: apps.map((app: CatalogApp) => ({
+      apps: scoped.map(({ app, record }) => ({
         id: app.id,
         name: app.name,
         ...probeApp(target, app),
+        ...(record?.primary ? { package_version: record.primary.version } : {}),
+        ...(record ? { package_tracking: trackingState(record) } : {}),
       })),
+      // Provenance, not dependencies: each entry arrived during the labelled
+      // app's install job (snapshot-bracket delta), with its package-DB
+      // version — see provenance.ts.
+      added_packages: scoped.flatMap(({ app, record }) =>
+        (record?.added ?? []).map((p) => ({
+          name: p.name,
+          version: p.version,
+          installed_with: app.id,
+        })),
+      ),
     };
   });
 
@@ -156,9 +180,19 @@ function appState(
   let tail = "";
   if (job) {
     try {
+      const wasRunning = job.status === "running";
       const polled = pollJob(target, job);
       job = polled.job;
       tail = polled.tail;
+      if (wasRunning && job.status !== "running") {
+        // First observation of the terminal state: consume the snapshot
+        // bracket into an install record (or drop the record on a remove).
+        try {
+          settleJobProvenance(target, job);
+        } catch {
+          /* provenance must never break status reporting */
+        }
+      }
     } catch (e) {
       tail = `(could not poll job status: ${errMsg(e)})`;
     }
@@ -196,10 +230,18 @@ function startJob(
   app: CatalogApp,
   action: JobAction,
   recipe: string,
+  meta: Pick<JobRecord, "pm" | "method"> = {},
 ): any {
-  const job = createJob(target.id, app.id, action);
+  const job = createJob(target.id, app.id, action, meta);
   try {
-    const script = buildBackgroundScript(recipe, job.logfile);
+    // Installs are bracketed by package-database snapshots inside the same
+    // detached script, so the delta covers exactly the install's lifetime
+    // — see provenance.ts.
+    const command =
+      action === "install"
+        ? withSnapshotBracket(recipe, meta.pm ?? null, job.id)
+        : recipe;
+    const script = buildBackgroundScript(command, job.logfile);
     const res = runOnTarget(target, script, LAUNCH_TIMEOUT_SECS);
     if (!res.ok) {
       throw new Error(
@@ -240,7 +282,9 @@ export function appInstall(args: any): any {
         `and no vendor script configured for this app`,
     );
   }
-  return startJob(target, app, "install", recipe);
+  const method: NonNullable<JobRecord["method"]> =
+    distro.pm && app.install[distro.pm] ? distro.pm : "vendor";
+  return startJob(target, app, "install", recipe, { pm: distro.pm, method });
 }
 
 export function appRemove(args: any): any {
@@ -284,6 +328,7 @@ export function targetOverview(targetRef: unknown): any {
           probeApp(target, app),
           probe ? probe.pm : null,
           currentJobFor(target.id, app.id),
+          getInstallRecord(target.id, app.id),
         ),
       )
     : [];
@@ -310,7 +355,7 @@ export function appProgress(targetRef: unknown, appRef: unknown): any {
   return {
     app: app.id,
     target: target.id,
-    row: appRowView(app, probe, pm, job),
+    row: appRowView(app, probe, pm, job, getInstallRecord(target.id, app.id)),
     job: job ? jobView(job, tail) : null,
   };
 }

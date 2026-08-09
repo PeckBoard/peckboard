@@ -24,6 +24,11 @@ export interface CatalogApp {
   version: string;
   install: Partial<Record<PackageManager, string>> & { vendor?: string };
   remove: Partial<Record<PackageManager, string>> & { vendor?: string };
+  /** The distro package names each PM recipe installs (space-separated,
+   * mirroring the recipe's arguments) — lets provenance attribute the app's
+   * own package in a snapshot delta (see provenance.ts). Vendor-only apps
+   * have none: their binaries never enter the package database. */
+  packages?: Partial<Record<PackageManager, string>>;
 }
 
 function aptInstall(pkg: string): string {
@@ -58,6 +63,7 @@ export const APPS: CatalogApp[] = [
     description: "Distributed version control system.",
     detect: "command -v git",
     version: "git --version",
+    packages: { apt: "git", dnf: "git", pacman: "git", zypper: "git" },
     install: {
       apt: aptInstall("git"),
       dnf: dnfInstall("git"),
@@ -117,6 +123,12 @@ export const APPS: CatalogApp[] = [
       "JavaScript runtime (distro-packaged version, may lag upstream releases).",
     detect: "command -v node",
     version: "node --version",
+    packages: {
+      apt: "nodejs npm",
+      dnf: "nodejs",
+      pacman: "nodejs npm",
+      zypper: "nodejs npm",
+    },
     install: {
       apt: aptInstall("nodejs npm"),
       dnf: dnfInstall("nodejs"),
@@ -137,6 +149,12 @@ export const APPS: CatalogApp[] = [
       "Container runtime (distro-packaged Docker Engine, not the upstream Docker CE repo).",
     detect: "command -v docker",
     version: "docker --version",
+    packages: {
+      apt: "docker.io",
+      dnf: "docker",
+      pacman: "docker",
+      zypper: "docker",
+    },
     install: {
       apt: aptInstall("docker.io"),
       dnf: dnfInstall("docker"),
@@ -156,6 +174,12 @@ export const APPS: CatalogApp[] = [
     description: "Fast recursive grep replacement (binary name: rg).",
     detect: "command -v rg",
     version: "rg --version",
+    packages: {
+      apt: "ripgrep",
+      dnf: "ripgrep",
+      pacman: "ripgrep",
+      zypper: "ripgrep",
+    },
     install: {
       apt: aptInstall("ripgrep"),
       dnf: dnfInstall("ripgrep"),
@@ -191,4 +215,16 @@ export function removeRecipeFor(
 ): string | null {
   if (pm && app.remove[pm]) return app.remove[pm] as string;
   return app.remove.vendor ?? null;
+}
+
+/** The distro package names `installRecipeFor(app, pm)`'s PM recipe would
+ * install; empty when the app resolves to its vendor script (or has no
+ * recipe at all). Used to attribute the app's own package in an install's
+ * snapshot delta — see provenance.ts. */
+export function packagesFor(
+  app: CatalogApp,
+  pm: PackageManager | null,
+): string[] {
+  if (!pm || !app.install[pm]) return [];
+  return (app.packages?.[pm] ?? "").split(/\s+/).filter(Boolean);
 }
