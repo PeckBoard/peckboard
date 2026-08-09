@@ -23,6 +23,7 @@
 //! command fans out concurrently.
 
 use std::collections::HashMap;
+use std::path::Path;
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
@@ -35,6 +36,8 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+use crate::db::Db;
 
 /// How long an idle pooled connection is kept before eviction.
 const CONN_IDLE_TTL: Duration = Duration::from_secs(120);
@@ -51,8 +54,11 @@ const CONNECT_MAX_TIMEOUT: u64 = 120;
 
 // ─────────────────────────────── input parsing ──────────────────────────────
 
-/// Auth material for one connection. Untagged: a `password` object or a
-/// `private_key` object. Kept out of `Debug`/logs.
+/// Auth material for one connection. Untagged: a `password` object, a
+/// `private_key` object, or a `key_id` referencing a vault-stored key. Kept
+/// out of `Debug`/logs. The three shapes have disjoint required field names
+/// (`password` / `private_key` / `key_id`), so `#[serde(untagged)]` picks the
+/// right one unambiguously.
 #[derive(Deserialize)]
 #[serde(untagged)]
 enum Auth {
@@ -63,6 +69,13 @@ enum Auth {
         private_key: String,
         #[serde(default)]
         passphrase: Option<String>,
+    },
+    /// References a key stored in the vault (`src/service/ssh_keys.rs`) by
+    /// id. Never carries key material itself — [`resolve_key_ref`] resolves
+    /// it to a real `Key` before a connection is ever attempted, so this
+    /// variant never reaches [`Conn::pool_key`] or [`connect`] in practice.
+    KeyRef {
+        key_id: String,
     },
 }
 
@@ -117,6 +130,16 @@ impl Conn {
                     h.update(b"\0");
                     h.update(p.as_bytes());
                 }
+            }
+            // Unreachable in practice — every *_impl/run_*_op call site
+            // resolves `KeyRef` to a real `Key` via `resolve_key_ref` before
+            // `pool_key`/`connect` ever see the auth. Kept exhaustive (rather
+            // than a partial match) so a future call site that forgets to
+            // resolve first fails loudly instead of silently pooling on the
+            // unresolved id.
+            Auth::KeyRef { key_id } => {
+                h.update(b"keyref\0");
+                h.update(key_id.as_bytes());
             }
         }
         let auth_fp = hex::encode(h.finalize());
@@ -291,6 +314,12 @@ async fn connect(conn: &Conn) -> Result<Live, String> {
                 .await
                 .map_err(|e| format!("authentication error: {e}"))?
                 .success()
+        }
+        // Unreachable in practice: every caller resolves `KeyRef` via
+        // `resolve_key_ref` before `connect`. A clean error (not a panic) in
+        // case that invariant is ever violated by a future call site.
+        Auth::KeyRef { .. } => {
+            return Err("internal error: KeyRef auth must be resolved before connecting".into());
         }
     };
     if !ok {
@@ -516,18 +545,48 @@ fn err_json(msg: impl std::fmt::Display) -> String {
     json!({ "error": msg.to_string() }).to_string()
 }
 
+/// If `conn.auth` is a `KeyRef`, resolve it to the real vault key material
+/// and replace it with a `Key` auth, so every downstream consumer
+/// (`Conn::pool_key`, `connect`) only ever sees the resolved secret — pool
+/// keys hash the actual (rotatable) key material, never the id. A bad or
+/// unknown `key_id` is a clean `Err`, never a panic. `Password`/`Key` auth
+/// passes through unchanged.
+async fn resolve_key_ref(mut conn: Conn, db: &Db, data_dir: &Path) -> Result<Conn, String> {
+    if let Auth::KeyRef { key_id } = &conn.auth {
+        let vault_key = crate::service::ssh_keys::load_or_create_vault_key(data_dir)
+            .map_err(|e| format!("failed to load ssh vault key: {e}"))?;
+        let (private_key, passphrase) =
+            crate::service::ssh_keys::resolve_for_use(db, &vault_key, key_id)
+                .await
+                .map_err(|e| format!("failed to resolve ssh key '{key_id}': {e}"))?;
+        conn.auth = Auth::Key {
+            private_key,
+            passphrase,
+        };
+    }
+    Ok(conn)
+}
+
 /// `peckboard_ssh_probe` — connect + authenticate, returning the server-key
 /// fingerprint (for TOFU pinning) and round-trip latency. Does not reuse a
 /// pooled connection.
-pub(crate) fn probe_impl(input: &str) -> String {
+pub(crate) fn probe_impl(db: &Db, data_dir: &Path, ssh_keys_granted: bool, input: &str) -> String {
     let (_, conn) = match parse_conn(input) {
         Ok(v) => v,
         Err(e) => return err_json(e),
     };
+    if matches!(conn.auth, Auth::KeyRef { .. }) && !ssh_keys_granted {
+        return err_json("plugin lacks the 'ssh_keys' permission required to use a stored SSH key");
+    }
     let started_at = now_rfc3339();
     let start = Instant::now();
     let owned = ConnOwned::from(&conn);
-    match block_on(async move { do_probe(&owned.as_conn()).await }) {
+    let db = db.clone();
+    let data_dir = data_dir.to_path_buf();
+    match block_on(async move {
+        let conn = resolve_key_ref(owned.as_conn(), &db, &data_dir).await?;
+        do_probe(&conn).await
+    }) {
         Ok((fingerprint, latency_ms)) => json!({
             "ok": true,
             "server_fingerprint": fingerprint,
@@ -543,11 +602,14 @@ pub(crate) fn probe_impl(input: &str) -> String {
 
 /// `peckboard_ssh_exec` — run `command` on the host and capture stdout/stderr
 /// (1 MiB/stream cap) and the exit code.
-pub(crate) fn exec_impl(input: &str) -> String {
+pub(crate) fn exec_impl(db: &Db, data_dir: &Path, ssh_keys_granted: bool, input: &str) -> String {
     let (map, conn) = match parse_conn(input) {
         Ok(v) => v,
         Err(e) => return err_json(e),
     };
+    if matches!(conn.auth, Auth::KeyRef { .. }) && !ssh_keys_granted {
+        return err_json("plugin lacks the 'ssh_keys' permission required to use a stored SSH key");
+    }
     let command = match map.get("command").and_then(Value::as_str) {
         Some(c) if !c.is_empty() => c.to_string(),
         _ => return err_json("`command` (non-empty string) is required"),
@@ -561,7 +623,12 @@ pub(crate) fn exec_impl(input: &str) -> String {
     let started_at = now_rfc3339();
     let start = Instant::now();
     let owned = ConnOwned::from(&conn);
-    match block_on(async move { do_exec(&owned.as_conn(), &command, timeout).await }) {
+    let db = db.clone();
+    let data_dir = data_dir.to_path_buf();
+    match block_on(async move {
+        let conn = resolve_key_ref(owned.as_conn(), &db, &data_dir).await?;
+        do_exec(&conn, &command, timeout).await
+    }) {
         Ok(o) => json!({
             "ok": true,
             "exit_code": o.exit_code,
@@ -582,18 +649,31 @@ pub(crate) fn exec_impl(input: &str) -> String {
 
 /// `peckboard_ssh_read_file` — read a remote file over SFTP; returns the bytes
 /// base64-encoded (1 MiB cap).
-pub(crate) fn read_file_impl(input: &str) -> String {
+pub(crate) fn read_file_impl(
+    db: &Db,
+    data_dir: &Path,
+    ssh_keys_granted: bool,
+    input: &str,
+) -> String {
     let (map, conn) = match parse_conn(input) {
         Ok(v) => v,
         Err(e) => return err_json(e),
     };
+    if matches!(conn.auth, Auth::KeyRef { .. }) && !ssh_keys_granted {
+        return err_json("plugin lacks the 'ssh_keys' permission required to use a stored SSH key");
+    }
     let path = match map.get("path").and_then(Value::as_str) {
         Some(p) if !p.is_empty() => p.to_string(),
         _ => return err_json("`path` (non-empty string) is required"),
     };
     let started_at = now_rfc3339();
     let owned = ConnOwned::from(&conn);
-    match block_on(async move { do_read_file(&owned.as_conn(), &path).await }) {
+    let db = db.clone();
+    let data_dir = data_dir.to_path_buf();
+    match block_on(async move {
+        let conn = resolve_key_ref(owned.as_conn(), &db, &data_dir).await?;
+        do_read_file(&conn, &path).await
+    }) {
         Ok((bytes, truncated, fingerprint)) => json!({
             "ok": true,
             "content_base64": base64::engine::general_purpose::STANDARD.encode(&bytes),
@@ -610,11 +690,19 @@ pub(crate) fn read_file_impl(input: &str) -> String {
 
 /// `peckboard_ssh_write_file` — write bytes (base64) to a remote file over
 /// SFTP, creating/truncating it.
-pub(crate) fn write_file_impl(input: &str) -> String {
+pub(crate) fn write_file_impl(
+    db: &Db,
+    data_dir: &Path,
+    ssh_keys_granted: bool,
+    input: &str,
+) -> String {
     let (map, conn) = match parse_conn(input) {
         Ok(v) => v,
         Err(e) => return err_json(e),
     };
+    if matches!(conn.auth, Auth::KeyRef { .. }) && !ssh_keys_granted {
+        return err_json("plugin lacks the 'ssh_keys' permission required to use a stored SSH key");
+    }
     let path = match map.get("path").and_then(Value::as_str) {
         Some(p) if !p.is_empty() => p.to_string(),
         _ => return err_json("`path` (non-empty string) is required"),
@@ -633,7 +721,12 @@ pub(crate) fn write_file_impl(input: &str) -> String {
     let started_at = now_rfc3339();
     let owned = ConnOwned::from(&conn);
     let n = bytes.len();
-    match block_on(async move { do_write_file(&owned.as_conn(), &path, &bytes).await }) {
+    let db = db.clone();
+    let data_dir = data_dir.to_path_buf();
+    match block_on(async move {
+        let conn = resolve_key_ref(owned.as_conn(), &db, &data_dir).await?;
+        do_write_file(&conn, &path, &bytes).await
+    }) {
         Ok(fingerprint) => json!({
             "ok": true,
             "bytes": n,
@@ -659,6 +752,7 @@ struct ConnOwned {
 enum AuthOwned {
     Password(String),
     Key(String, Option<String>),
+    KeyRef(String),
 }
 impl From<&Conn> for ConnOwned {
     fn from(c: &Conn) -> Self {
@@ -672,6 +766,7 @@ impl From<&Conn> for ConnOwned {
                     private_key,
                     passphrase,
                 } => AuthOwned::Key(private_key.clone(), passphrase.clone()),
+                Auth::KeyRef { key_id } => AuthOwned::KeyRef(key_id.clone()),
             },
             known_host: c.known_host.clone(),
             connect_timeout_secs: c.connect_timeout_secs,
@@ -691,6 +786,9 @@ impl ConnOwned {
                 AuthOwned::Key(k, pp) => Auth::Key {
                     private_key: k.clone(),
                     passphrase: pp.clone(),
+                },
+                AuthOwned::KeyRef(key_id) => Auth::KeyRef {
+                    key_id: key_id.clone(),
                 },
             },
             known_host: self.known_host.clone(),
@@ -754,7 +852,7 @@ const BATCH_CONCURRENCY: usize = 16;
 /// Execute a deferred SSH op. `op` is `{kind, ...conn, ...}`; `batch` runs its
 /// `ops` concurrently (bounded, order preserved). Never traps or panics —
 /// every failure becomes an `{"error": ...}` value the plugin can format.
-pub(crate) async fn run_op(op: &Value) -> Value {
+pub(crate) async fn run_op(op: &Value, db: &Db, data_dir: &Path, ssh_keys_granted: bool) -> Value {
     if op.get("kind").and_then(Value::as_str) == Some("batch") {
         let ops: Vec<Value> = op
             .get("ops")
@@ -766,7 +864,11 @@ pub(crate) async fn run_op(op: &Value) -> Value {
             let mut handles = Vec::with_capacity(chunk.len());
             for one in chunk {
                 let one = one.clone();
-                handles.push(tokio::spawn(async move { run_single_op(&one).await }));
+                let db = db.clone();
+                let data_dir = data_dir.to_path_buf();
+                handles.push(tokio::spawn(async move {
+                    run_single_op(&one, &db, &data_dir, ssh_keys_granted).await
+                }));
             }
             for h in handles {
                 results.push(
@@ -777,28 +879,42 @@ pub(crate) async fn run_op(op: &Value) -> Value {
         }
         json!({ "results": results })
     } else {
-        run_single_op(op).await
+        run_single_op(op, db, data_dir, ssh_keys_granted).await
     }
 }
 
 /// One non-`batch` op (leaf). Kept separate from [`run_op`] so the `batch`
 /// fan-out isn't a recursive `async fn` — which would not be `Send` and so
 /// could not be `tokio::spawn`ed. A nested `batch` is rejected here.
-async fn run_single_op(op: &Value) -> Value {
+async fn run_single_op(op: &Value, db: &Db, data_dir: &Path, ssh_keys_granted: bool) -> Value {
     match op.get("kind").and_then(Value::as_str).unwrap_or_default() {
-        "exec" => run_exec_op(op).await,
-        "probe" => run_probe_op(op).await,
-        "read_file" => run_read_file_op(op).await,
-        "write_file" => run_write_file_op(op).await,
+        "exec" => run_exec_op(op, db, data_dir, ssh_keys_granted).await,
+        "probe" => run_probe_op(op, db, data_dir, ssh_keys_granted).await,
+        "read_file" => run_read_file_op(op, db, data_dir, ssh_keys_granted).await,
+        "write_file" => run_write_file_op(op, db, data_dir, ssh_keys_granted).await,
         other => err_val(format!("unknown deferred op kind '{other}'")),
     }
 }
 
-async fn run_exec_op(op: &Value) -> Value {
+/// Reject a `KeyRef` op up front when the plugin lacks `ssh_keys` — shared by
+/// every deferred op handler below.
+fn require_ssh_keys_for_ref(conn: &Conn, ssh_keys_granted: bool) -> Result<(), Value> {
+    if matches!(conn.auth, Auth::KeyRef { .. }) && !ssh_keys_granted {
+        return Err(err_val(
+            "plugin lacks the 'ssh_keys' permission required to use a stored SSH key",
+        ));
+    }
+    Ok(())
+}
+
+async fn run_exec_op(op: &Value, db: &Db, data_dir: &Path, ssh_keys_granted: bool) -> Value {
     let (map, conn) = match op_conn(op) {
         Ok(v) => v,
         Err(e) => return err_val(e),
     };
+    if let Err(e) = require_ssh_keys_for_ref(&conn, ssh_keys_granted) {
+        return e;
+    }
     let command = match map.get("command").and_then(Value::as_str) {
         Some(c) if !c.is_empty() => c.to_string(),
         _ => return err_val("`command` (non-empty string) is required"),
@@ -812,7 +928,14 @@ async fn run_exec_op(op: &Value) -> Value {
     let started_at = now_rfc3339();
     let start = Instant::now();
     let owned = ConnOwned::from(&conn);
-    match spawn_on_pool(async move { do_exec(&owned.as_conn(), &command, timeout).await }).await {
+    let db = db.clone();
+    let data_dir = data_dir.to_path_buf();
+    match spawn_on_pool(async move {
+        let conn = resolve_key_ref(owned.as_conn(), &db, &data_dir).await?;
+        do_exec(&conn, &command, timeout).await
+    })
+    .await
+    {
         Ok(o) => json!({
             "ok": true,
             "exit_code": o.exit_code,
@@ -830,15 +953,25 @@ async fn run_exec_op(op: &Value) -> Value {
     }
 }
 
-async fn run_probe_op(op: &Value) -> Value {
+async fn run_probe_op(op: &Value, db: &Db, data_dir: &Path, ssh_keys_granted: bool) -> Value {
     let (_, conn) = match op_conn(op) {
         Ok(v) => v,
         Err(e) => return err_val(e),
     };
+    if let Err(e) = require_ssh_keys_for_ref(&conn, ssh_keys_granted) {
+        return e;
+    }
     let started_at = now_rfc3339();
     let start = Instant::now();
     let owned = ConnOwned::from(&conn);
-    match spawn_on_pool(async move { do_probe(&owned.as_conn()).await }).await {
+    let db = db.clone();
+    let data_dir = data_dir.to_path_buf();
+    match spawn_on_pool(async move {
+        let conn = resolve_key_ref(owned.as_conn(), &db, &data_dir).await?;
+        do_probe(&conn).await
+    })
+    .await
+    {
         Ok((fingerprint, latency_ms)) => json!({
             "ok": true,
             "server_fingerprint": fingerprint,
@@ -851,18 +984,28 @@ async fn run_probe_op(op: &Value) -> Value {
     }
 }
 
-async fn run_read_file_op(op: &Value) -> Value {
+async fn run_read_file_op(op: &Value, db: &Db, data_dir: &Path, ssh_keys_granted: bool) -> Value {
     let (map, conn) = match op_conn(op) {
         Ok(v) => v,
         Err(e) => return err_val(e),
     };
+    if let Err(e) = require_ssh_keys_for_ref(&conn, ssh_keys_granted) {
+        return e;
+    }
     let path = match map.get("path").and_then(Value::as_str) {
         Some(p) if !p.is_empty() => p.to_string(),
         _ => return err_val("`path` (non-empty string) is required"),
     };
     let started_at = now_rfc3339();
     let owned = ConnOwned::from(&conn);
-    match spawn_on_pool(async move { do_read_file(&owned.as_conn(), &path).await }).await {
+    let db = db.clone();
+    let data_dir = data_dir.to_path_buf();
+    match spawn_on_pool(async move {
+        let conn = resolve_key_ref(owned.as_conn(), &db, &data_dir).await?;
+        do_read_file(&conn, &path).await
+    })
+    .await
+    {
         Ok((bytes, truncated, fingerprint)) => json!({
             "ok": true,
             "content_base64": base64::engine::general_purpose::STANDARD.encode(&bytes),
@@ -876,11 +1019,14 @@ async fn run_read_file_op(op: &Value) -> Value {
     }
 }
 
-async fn run_write_file_op(op: &Value) -> Value {
+async fn run_write_file_op(op: &Value, db: &Db, data_dir: &Path, ssh_keys_granted: bool) -> Value {
     let (map, conn) = match op_conn(op) {
         Ok(v) => v,
         Err(e) => return err_val(e),
     };
+    if let Err(e) = require_ssh_keys_for_ref(&conn, ssh_keys_granted) {
+        return e;
+    }
     let path = match map.get("path").and_then(Value::as_str) {
         Some(p) if !p.is_empty() => p.to_string(),
         _ => return err_val("`path` (non-empty string) is required"),
@@ -899,7 +1045,14 @@ async fn run_write_file_op(op: &Value) -> Value {
     let started_at = now_rfc3339();
     let owned = ConnOwned::from(&conn);
     let n = bytes.len();
-    match spawn_on_pool(async move { do_write_file(&owned.as_conn(), &path, &bytes).await }).await {
+    let db = db.clone();
+    let data_dir = data_dir.to_path_buf();
+    match spawn_on_pool(async move {
+        let conn = resolve_key_ref(owned.as_conn(), &db, &data_dir).await?;
+        do_write_file(&conn, &path, &bytes).await
+    })
+    .await
+    {
         Ok(fingerprint) => json!({
             "ok": true,
             "bytes": n,
@@ -915,17 +1068,45 @@ async fn run_write_file_op(op: &Value) -> Value {
 mod tests {
     use super::*;
 
+    /// A throwaway `Db` + data dir for tests that need to call the `*_impl`
+    /// entry points but never actually exercise `KeyRef` resolution.
+    fn test_ctx() -> (crate::db::Db, tempfile::TempDir) {
+        (
+            crate::db::Db::in_memory().unwrap(),
+            tempfile::tempdir().unwrap(),
+        )
+    }
+
     #[test]
     fn missing_host_or_user_is_rejected() {
+        let (db, dir) = test_ctx();
+        let dp = dir.path();
         assert!(
-            exec_impl(r#"{"username":"u","auth":{"password":"p"},"command":"x"}"#)
-                .contains("error")
+            exec_impl(
+                &db,
+                dp,
+                false,
+                r#"{"username":"u","auth":{"password":"p"},"command":"x"}"#
+            )
+            .contains("error")
         );
         assert!(
-            exec_impl(r#"{"host":"h","auth":{"password":"p"},"command":"x"}"#).contains("error")
+            exec_impl(
+                &db,
+                dp,
+                false,
+                r#"{"host":"h","auth":{"password":"p"},"command":"x"}"#
+            )
+            .contains("error")
         );
         assert!(
-            exec_impl(r#"{"host":"h","username":"u","auth":{"password":"p"}}"#).contains("error"),
+            exec_impl(
+                &db,
+                dp,
+                false,
+                r#"{"host":"h","username":"u","auth":{"password":"p"}}"#
+            )
+            .contains("error"),
             "missing command should error"
         );
     }
@@ -961,6 +1142,135 @@ mod tests {
             }
             _ => panic!("expected key auth"),
         }
+    }
+
+    #[test]
+    fn three_auth_shapes_parse_unambiguously() {
+        let (_, pw) = parse_conn(r#"{"host":"h","username":"u","auth":{"password":"p"}}"#).unwrap();
+        assert!(matches!(pw.auth, Auth::Password { .. }));
+
+        let (_, key) =
+            parse_conn(r#"{"host":"h","username":"u","auth":{"private_key":"KEY"}}"#).unwrap();
+        assert!(matches!(key.auth, Auth::Key { .. }));
+
+        let (_, key_ref) =
+            parse_conn(r#"{"host":"h","username":"u","auth":{"key_id":"k1"}}"#).unwrap();
+        match key_ref.auth {
+            Auth::KeyRef { key_id } => assert_eq!(key_id, "k1"),
+            _ => panic!("expected key_id auth, got something else"),
+        }
+    }
+
+    #[test]
+    fn key_ref_auth_requires_ssh_keys_permission() {
+        let (db, dir) = test_ctx();
+        let dp = dir.path();
+        let input = r#"{"host":"h","username":"u","auth":{"key_id":"nope"},"command":"x"}"#;
+        let out = exec_impl(&db, dp, false, input);
+        assert!(
+            out.contains("ssh_keys"),
+            "expected a permission error mentioning 'ssh_keys', got: {out}"
+        );
+        // The permission check runs before any vault file access.
+        assert!(!dp.join("ssh_vault_key").exists());
+    }
+
+    #[test]
+    fn inline_auth_is_not_gated_by_ssh_keys_permission() {
+        let (db, dir) = test_ctx();
+        let dp = dir.path();
+        let out = exec_impl(
+            &db,
+            dp,
+            false,
+            r#"{"host":"h","username":"u","auth":{"password":"p"},"command":"x"}"#,
+        );
+        // Fails to connect to a bogus host, but never with a permission error —
+        // inline password/key auth was never gated on `ssh_keys`.
+        assert!(
+            !out.contains("ssh_keys"),
+            "inline auth should not require ssh_keys: {out}"
+        );
+    }
+
+    #[test]
+    fn unknown_key_id_is_a_clean_error_not_a_panic() {
+        let (db, dir) = test_ctx();
+        let dp = dir.path();
+        let input =
+            r#"{"host":"h","username":"u","auth":{"key_id":"does-not-exist"},"command":"x"}"#;
+        let out = exec_impl(&db, dp, true, input);
+        let v: serde_json::Value = serde_json::from_str(&out).unwrap();
+        assert!(v.get("error").is_some(), "expected a clean error: {out}");
+    }
+
+    /// Regression for the pool-key rotation invariant: resolving the SAME
+    /// `key_id` before and after its stored material changes (delete +
+    /// re-insert under the same id, simulating an edit — there is no
+    /// in-place "update material" API) must yield DIFFERENT pool keys.
+    /// Otherwise a rotated credential would silently keep reusing a
+    /// connection pooled under the old secret.
+    #[tokio::test]
+    async fn key_ref_pool_key_reflects_resolved_material_not_the_id() {
+        let (db, dir) = test_ctx();
+        let dp = dir.path();
+        let vault_key = crate::service::ssh_keys::load_or_create_vault_key(dp).unwrap();
+
+        async fn put_key(db: &crate::db::Db, vault_key: &[u8], id: &str, pem: &str) {
+            let (ciphertext, nonce) = crate::service::ssh_keys::encrypt(vault_key, pem).unwrap();
+            let now = chrono::Utc::now().to_rfc3339();
+            db.insert_ssh_key(crate::db::models::NewSshKey {
+                id: id.to_string(),
+                name: id.to_string(),
+                key_type: "ed25519".to_string(),
+                public_key: "pub".to_string(),
+                fingerprint: "fp".to_string(),
+                private_key_ciphertext: ciphertext,
+                private_key_nonce: nonce,
+                passphrase_ciphertext: None,
+                passphrase_nonce: None,
+                created_at: now.clone(),
+                updated_at: now,
+                created_by: None,
+            })
+            .await
+            .unwrap();
+        }
+
+        put_key(&db, &vault_key, "k1", "MATERIAL-A").await;
+        let conn_a = parse_conn(r#"{"host":"h","username":"u","auth":{"key_id":"k1"}}"#)
+            .unwrap()
+            .1;
+        let key_a = resolve_key_ref(conn_a, &db, dp).await.unwrap().pool_key();
+
+        assert!(db.delete_ssh_key("k1").await.unwrap());
+        put_key(&db, &vault_key, "k1", "MATERIAL-B").await;
+        let conn_b = parse_conn(r#"{"host":"h","username":"u","auth":{"key_id":"k1"}}"#)
+            .unwrap()
+            .1;
+        let key_b = resolve_key_ref(conn_b, &db, dp).await.unwrap().pool_key();
+
+        assert_ne!(
+            key_a, key_b,
+            "rotated key material must change the pool key"
+        );
+        // Neither pool key leaks the actual secret material.
+        assert!(!key_a.contains("MATERIAL-A"));
+        assert!(!key_b.contains("MATERIAL-B"));
+    }
+
+    #[tokio::test]
+    async fn resolve_key_ref_errors_cleanly_on_unknown_id() {
+        let (db, dir) = test_ctx();
+        let dp = dir.path();
+        let conn = parse_conn(r#"{"host":"h","username":"u","auth":{"key_id":"nope"}}"#)
+            .unwrap()
+            .1;
+        let err = match resolve_key_ref(conn, &db, dp).await {
+            Ok(_) => panic!("expected an error resolving an unknown key_id"),
+            Err(e) => e,
+        };
+        assert!(err.contains("resolve ssh key 'nope'"), "{err}");
     }
 
     #[test]
@@ -1025,6 +1335,7 @@ mod tests {
             Err(e) => skip!("tempdir: {e}"),
         };
         let dp = dir.path();
+        let db = crate::db::Db::in_memory().unwrap();
         let hostkey = dp.join("hostkey");
         let clientkey = dp.join("id");
         let authkeys = dp.join("authorized_keys");
@@ -1110,8 +1421,9 @@ PubkeyAuthentication yes\nLogLevel ERROR\n",
             "auth": { "private_key": private_pem },
             "connect_timeout_secs": 5
         });
-        let call =
-            |v: &Value| -> Value { serde_json::from_str(&exec_impl(&v.to_string())).unwrap() };
+        let call = |v: &Value| -> Value {
+            serde_json::from_str(&exec_impl(&db, dp, false, &v.to_string())).unwrap()
+        };
 
         // A wrong host-key pin must abort the (first, unpooled) handshake.
         let mut wrong_pin = base.clone();
@@ -1157,7 +1469,8 @@ PubkeyAuthentication yes\nLogLevel ERROR\n",
         );
 
         // probe reports the same fingerprint.
-        let probe: Value = serde_json::from_str(&probe_impl(&base.to_string())).unwrap();
+        let probe: Value =
+            serde_json::from_str(&probe_impl(&db, dp, false, &base.to_string())).unwrap();
         assert_eq!(probe["ok"], true, "probe: {probe}");
         assert_eq!(probe["server_fingerprint"].as_str().unwrap(), fp);
 
@@ -1168,13 +1481,15 @@ PubkeyAuthentication yes\nLogLevel ERROR\n",
             let mut w = base.clone();
             w["path"] = json!(remote.display().to_string());
             w["content_base64"] = json!(base64::engine::general_purpose::STANDARD.encode(content));
-            let wo: Value = serde_json::from_str(&write_file_impl(&w.to_string())).unwrap();
+            let wo: Value =
+                serde_json::from_str(&write_file_impl(&db, dp, false, &w.to_string())).unwrap();
             assert!(wo.get("error").is_none(), "write error: {wo}");
             assert_eq!(wo["bytes"], content.len(), "write bytes: {wo}");
 
             let mut r = base.clone();
             r["path"] = json!(remote.display().to_string());
-            let ro: Value = serde_json::from_str(&read_file_impl(&r.to_string())).unwrap();
+            let ro: Value =
+                serde_json::from_str(&read_file_impl(&db, dp, false, &r.to_string())).unwrap();
             assert!(ro.get("error").is_none(), "read error: {ro}");
             let got = base64::engine::general_purpose::STANDARD
                 .decode(ro["content_base64"].as_str().unwrap())

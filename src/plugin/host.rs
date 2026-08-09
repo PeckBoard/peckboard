@@ -45,7 +45,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use extism::*;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 use crate::db::Db;
 use crate::db::models::NewCard;
@@ -3072,34 +3072,103 @@ host_fn!(peckboard_exec_any(user_data: HostState; input: String) -> String {
     Ok(exec_impl(&db, &input, &inv, false))
 });
 
+/// View returned by `peckboard_ssh_key_list` — vault key METADATA only.
+/// Deliberately hand-built (never derives from `SshKey` directly, which
+/// carries `private_key_ciphertext`/`private_key_nonce`/
+/// `passphrase_ciphertext`/`passphrase_nonce`) so a serialization mistake
+/// can't leak sealed key material to a plugin.
+#[derive(Serialize)]
+struct SshKeyListItem {
+    id: String,
+    name: String,
+    key_type: String,
+    fingerprint: String,
+    has_passphrase: bool,
+    created_at: String,
+}
+
+impl From<&crate::db::models::SshKey> for SshKeyListItem {
+    fn from(k: &crate::db::models::SshKey) -> Self {
+        SshKeyListItem {
+            id: k.id.clone(),
+            name: k.name.clone(),
+            key_type: k.key_type.clone(),
+            fingerprint: k.fingerprint.clone(),
+            has_passphrase: k.passphrase_ciphertext.is_some(),
+            created_at: k.created_at.clone(),
+        }
+    }
+}
+
+/// `peckboard_ssh_key_list` backend — list vault key metadata (never the
+/// private key, its ciphertext/nonce, or the passphrase).
+pub(crate) fn ssh_key_list_impl(db: &Db) -> String {
+    match db.list_ssh_keys_blocking() {
+        Ok(keys) => {
+            let items: Vec<SshKeyListItem> = keys.iter().map(SshKeyListItem::from).collect();
+            serde_json::json!({ "keys": items }).to_string()
+        }
+        Err(e) => error_json(e),
+    }
+}
+
+/// Shared accessor for the `peckboard_ssh_*` host functions: the `ssh` and
+/// `ssh_keys` grants plus enough to resolve a `KeyRef` (`db`, and the data
+/// dir the vault key file lives under — see
+/// `service::ssh_keys::load_or_create_vault_key`).
+fn state_ssh_context(user_data: &UserData<HostState>) -> Result<(Db, bool, bool, PathBuf), Error> {
+    let state = user_data.get()?;
+    let state = state
+        .lock()
+        .map_err(|_| anyhow::anyhow!("plugin host state mutex poisoned"))?;
+    let permissions = state
+        .permissions
+        .read()
+        .map_err(|_| anyhow::anyhow!("plugin permission set poisoned"))?;
+    let has_ssh = permissions.contains("ssh");
+    let has_ssh_keys = permissions.contains("ssh_keys");
+    Ok((
+        state.db.clone(),
+        has_ssh,
+        has_ssh_keys,
+        state.data_dir.clone(),
+    ))
+}
+
+host_fn!(peckboard_ssh_key_list(user_data: HostState; _input: String) -> String {
+    let (db, _has_ssh, has_ssh_keys, _data_dir) = state_ssh_context(&user_data)?;
+    if !has_ssh_keys { return Ok(error_json("plugin lacks the 'ssh_keys' permission")); }
+    Ok(ssh_key_list_impl(&db))
+});
+
 host_fn!(peckboard_ssh_probe(user_data: HostState; input: String) -> String {
-    let (_db, _plugin_id, ok) = state_and_permission(&user_data, "ssh")?;
-    if !ok { return Ok(error_json("plugin lacks the 'ssh' permission")); }
-    Ok(super::ssh::probe_impl(&input))
+    let (db, has_ssh, has_ssh_keys, data_dir) = state_ssh_context(&user_data)?;
+    if !has_ssh { return Ok(error_json("plugin lacks the 'ssh' permission")); }
+    Ok(super::ssh::probe_impl(&db, &data_dir, has_ssh_keys, &input))
 });
 
 host_fn!(peckboard_ssh_exec(user_data: HostState; input: String) -> String {
-    let (db, _plugin_id, ok) = state_and_permission(&user_data, "ssh")?;
-    if !ok { return Ok(error_json("plugin lacks the 'ssh' permission")); }
+    let (db, has_ssh, has_ssh_keys, data_dir) = state_ssh_context(&user_data)?;
+    if !has_ssh { return Ok(error_json("plugin lacks the 'ssh' permission")); }
     // Remote console output gets the same secret masking as local exec — a
     // remote command can echo back a secret it was handed.
-    let out = super::ssh::exec_impl(&input);
+    let out = super::ssh::exec_impl(&db, &data_dir, has_ssh_keys, &input);
     Ok(mask_console_envelope(&db, out))
 });
 
 host_fn!(peckboard_ssh_read_file(user_data: HostState; input: String) -> String {
-    let (db, _plugin_id, ok) = state_and_permission(&user_data, "ssh")?;
-    if !ok { return Ok(error_json("plugin lacks the 'ssh' permission")); }
+    let (db, has_ssh, has_ssh_keys, data_dir) = state_ssh_context(&user_data)?;
+    if !has_ssh { return Ok(error_json("plugin lacks the 'ssh' permission")); }
     // A remote file can contain a secret value verbatim (e.g. the target
     // wrote out its own env) — mask it the same as any other tool output.
-    let out = super::ssh::read_file_impl(&input);
+    let out = super::ssh::read_file_impl(&db, &data_dir, has_ssh_keys, &input);
     Ok(mask_full_envelope(&db, out))
 });
 
 host_fn!(peckboard_ssh_write_file(user_data: HostState; input: String) -> String {
-    let (_db, _plugin_id, ok) = state_and_permission(&user_data, "ssh")?;
-    if !ok { return Ok(error_json("plugin lacks the 'ssh' permission")); }
-    Ok(super::ssh::write_file_impl(&input))
+    let (db, has_ssh, has_ssh_keys, data_dir) = state_ssh_context(&user_data)?;
+    if !has_ssh { return Ok(error_json("plugin lacks the 'ssh' permission")); }
+    Ok(super::ssh::write_file_impl(&db, &data_dir, has_ssh_keys, &input))
 });
 
 host_fn!(peckboard_ask_user(user_data: HostState; input: String) -> String {
@@ -3662,6 +3731,13 @@ pub(crate) fn host_functions(
             [PTR],
             ud.clone(),
             peckboard_ssh_write_file,
+        ),
+        Function::new(
+            "peckboard_ssh_key_list",
+            [PTR],
+            [PTR],
+            ud.clone(),
+            peckboard_ssh_key_list,
         ),
         Function::new(
             "peckboard_ask_user",
@@ -5607,5 +5683,101 @@ mod tests {
         let stdout = v["stdout"].as_str().unwrap();
         assert!(!stdout.contains("foreignsecret555777"), "stdout: {stdout}");
         assert!(stdout.contains("********"), "stdout: {stdout}");
+    }
+
+    #[tokio::test]
+    async fn ssh_key_list_impl_never_leaks_key_material() {
+        let db = Db::in_memory().unwrap();
+        let now = chrono::Utc::now().to_rfc3339();
+        db.insert_ssh_key(crate::db::models::NewSshKey {
+            id: "k1".to_string(),
+            name: "prod box".to_string(),
+            key_type: "ed25519".to_string(),
+            public_key: "ssh-ed25519 AAAAC3...".to_string(),
+            fingerprint: "SHA256:abc123".to_string(),
+            private_key_ciphertext: "SUPER-SECRET-CIPHERTEXT".to_string(),
+            private_key_nonce: "SECRET-NONCE-1".to_string(),
+            passphrase_ciphertext: Some("SUPER-SECRET-PASSPHRASE-CIPHERTEXT".to_string()),
+            passphrase_nonce: Some("SECRET-NONCE-2".to_string()),
+            created_at: now.clone(),
+            updated_at: now,
+            created_by: None,
+        })
+        .await
+        .unwrap();
+
+        let out = ssh_key_list_impl(&db);
+        let v: serde_json::Value = serde_json::from_str(&out).unwrap();
+        let keys = v["keys"].as_array().unwrap();
+        assert_eq!(keys.len(), 1, "{out}");
+
+        let mut field_names: Vec<&str> = keys[0]
+            .as_object()
+            .unwrap()
+            .keys()
+            .map(String::as_str)
+            .collect();
+        field_names.sort();
+        assert_eq!(
+            field_names,
+            vec![
+                "created_at",
+                "fingerprint",
+                "has_passphrase",
+                "id",
+                "key_type",
+                "name",
+            ],
+            "unexpected field set: {out}"
+        );
+        assert_eq!(keys[0]["has_passphrase"], true);
+
+        // Never the raw secret material, its ciphertext, or its nonce — not
+        // even for a key that has a passphrase set.
+        assert!(!out.contains("SUPER-SECRET-CIPHERTEXT"));
+        assert!(!out.contains("SECRET-NONCE-1"));
+        assert!(!out.contains("SUPER-SECRET-PASSPHRASE-CIPHERTEXT"));
+        assert!(!out.contains("SECRET-NONCE-2"));
+    }
+
+    #[tokio::test]
+    async fn ssh_key_list_host_fn_gate_reflects_granted_permissions() {
+        let db = Db::in_memory().unwrap();
+        let data_dir = tempfile::tempdir().unwrap();
+
+        let ctx_for = |granted: &[&str]| {
+            let permissions: Arc<std::sync::RwLock<std::collections::HashSet<String>>> = Arc::new(
+                std::sync::RwLock::new(granted.iter().map(|p| p.to_string()).collect()),
+            );
+            let ud = UserData::new(HostState {
+                db: db.clone(),
+                data_dir: data_dir.path().to_path_buf(),
+                plugin_id: "test".to_string(),
+                permissions,
+                invocation: Arc::new(std::sync::RwLock::new(None)),
+                live: Arc::new(std::sync::RwLock::new(None)),
+                user: Arc::new(std::sync::RwLock::new(None)),
+                provider_runtime: Arc::new(
+                    crate::provider::plugin_provider::PluginProviderRuntime::new(),
+                ),
+                pending_provider: Arc::new(std::sync::RwLock::new(None)),
+            });
+            state_ssh_context(&ud).unwrap()
+        };
+
+        // `peckboard_ssh_key_list` reads exactly this tuple to decide
+        // whether to serve the request — so this is the real gate, not just
+        // a permission-set lookup.
+        let (_, has_ssh, has_ssh_keys, _) = ctx_for(&[]);
+        assert!(!has_ssh && !has_ssh_keys, "no permissions granted");
+
+        let (_, has_ssh, has_ssh_keys, _) = ctx_for(&["ssh"]);
+        assert!(has_ssh && !has_ssh_keys, "ssh only, not ssh_keys");
+
+        let (_, has_ssh, has_ssh_keys, _) = ctx_for(&["ssh_keys"]);
+        assert!(!has_ssh && has_ssh_keys, "ssh_keys only, not ssh");
+
+        let (_, has_ssh, has_ssh_keys, _) = ctx_for(&["ssh", "ssh_keys"]);
+        assert!(has_ssh && has_ssh_keys, "both granted");
     }
 }

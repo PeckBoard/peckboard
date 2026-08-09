@@ -130,6 +130,7 @@ pub const ALLOWED_PERMISSIONS: &[&str] = &[
     "provide_mcp_tools", // declare mcp_tools (mcp.tool.invoke)
     "register_provider", // peckboard_register_provider / _emit_provider_event / _provider_should_stop / _provider_get_session / _provider_get_mcp_config — register an AI provider and drive its turns
     "ssh", // peckboard_ssh_probe / _exec / _read_file / _write_file — connect to remote SSH hosts, run commands, transfer files
+    "ssh_keys", // peckboard_ssh_key_list, and Auth::KeyRef in peckboard_ssh_* — list vault-key METADATA and use a vault key by id; never exposes private key material, ciphertext, nonce, or passphrase
     "session_dispatch", // peckboard_dispatch_capture / resume_session
     "session_control", // peckboard_interrupt_session / terminate_agent / clear_session / send_message — full cross-folder control of any session
     "session_read",    // peckboard_get_session / list_sessions
@@ -728,6 +729,16 @@ impl PluginManager {
         }
     }
 
+    /// The app data dir — `plugins_dir` is `<data_dir>/plugins`; some host
+    /// functions (browser-run recordings, the SSH vault key file) need the
+    /// data dir itself.
+    fn data_dir(&self) -> PathBuf {
+        self.plugins_dir
+            .parent()
+            .map(Path::to_path_buf)
+            .unwrap_or_else(|| self.plugins_dir.clone())
+    }
+
     /// Override the `provider.send` per-call budget (default 300s). Must be
     /// called before `load_all`: the budget is baked into each provider
     /// plugin's extism instance timeout at load time.
@@ -887,13 +898,7 @@ impl PluginManager {
             let invocation = invocation.clone();
             let live = self.live.clone();
             let user = user.clone();
-            // plugins_dir is `<data_dir>/plugins`; the browser-run host
-            // functions need the data dir itself.
-            let data_dir = self
-                .plugins_dir
-                .parent()
-                .map(std::path::Path::to_path_buf)
-                .unwrap_or_else(|| self.plugins_dir.clone());
+            let data_dir = self.data_dir();
             let provider_runtime = self.provider_runtime.clone();
             let pending_provider = pending_provider.clone();
             Arc::new(move |call_timeout: Duration| -> anyhow::Result<Plugin> {
@@ -2567,7 +2572,9 @@ impl PluginManager {
         // Find the single active plugin that declared this tool. Hold the
         // outer lock only long enough to clone its handle.
         type InvocationSlot = Arc<std::sync::RwLock<Option<super::host::InvocationContext>>>;
-        let target: Option<(String, Arc<Mutex<PluginCell>>, InvocationSlot, bool)> = {
+        // (name, plugin cell, invocation slot, has `ssh`, has `ssh_keys`)
+        type PluginTarget = (String, Arc<Mutex<PluginCell>>, InvocationSlot, bool, bool);
+        let target: Option<PluginTarget> = {
             let plugins = self.plugins.lock().await;
             plugins
                 .iter()
@@ -2581,10 +2588,14 @@ impl PluginManager {
                             .permissions
                             .iter()
                             .any(|perm| perm.as_str() == "ssh"),
+                        p.manifest
+                            .permissions
+                            .iter()
+                            .any(|perm| perm.as_str() == "ssh_keys"),
                     )
                 })
         };
-        let (name, plugin, invocation, has_ssh) = target?;
+        let (name, plugin, invocation, has_ssh, has_ssh_keys) = target?;
 
         // The *trusted* caller context, parsed once. It comes from `context` —
         // built by `routes/mcp.rs` from the verified `ToolCallContext` — so the
@@ -2684,7 +2695,14 @@ impl PluginManager {
                     // released above, so the dashboard and other tool calls
                     // proceed meanwhile. `op` carries connection secrets and is
                     // never logged.
-                    let op_result = super::ssh::run_op(&op).await;
+                    let op_result = match &self.db {
+                        Some(db) => {
+                            super::ssh::run_op(&op, db, &self.data_dir(), has_ssh_keys).await
+                        }
+                        None => {
+                            serde_json::json!({ "error": "no database bound to this plugin manager" })
+                        }
+                    };
                     payload = serde_json::json!({
                         "tool": tool_name,
                         "arguments": arguments.clone(),

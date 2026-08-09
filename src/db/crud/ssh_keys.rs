@@ -17,6 +17,19 @@ impl Db {
         .await
     }
 
+    /// Synchronous twin of [`Db::list_ssh_keys`] for callers that cannot
+    /// enter the async runtime — the WASM plugin host functions
+    /// (`src/plugin/host.rs`), which run inside a synchronous extism call.
+    pub(crate) fn list_ssh_keys_blocking(&self) -> anyhow::Result<Vec<SshKey>> {
+        self.with_conn_blocking(|conn| {
+            ssh_keys::table
+                .select(SshKey::as_select())
+                .order(ssh_keys::name.asc())
+                .load(conn)
+                .map_err(Into::into)
+        })
+    }
+
     /// Look up one key by id.
     pub async fn get_ssh_key(&self, id: &str) -> anyhow::Result<Option<SshKey>> {
         let id = id.to_string();
