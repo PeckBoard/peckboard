@@ -41,6 +41,7 @@ import McpServersSection from './McpServersSection'
 import RetentionSettingsSection from './RetentionSettingsSection'
 import TlsSettingsSection from './TlsSettingsSection'
 import EnvVarsSection from './EnvVarsSection'
+import SshKeysSection from './SshKeysSection'
 import AgentVarsSection from './AgentVarsSection'
 import ConfirmDialog from './ConfirmDialog'
 
@@ -91,6 +92,7 @@ type SubPage =
   | 'variables'
   | 'providers'
   | 'mcp'
+  | 'ssh-keys'
   | 'plugins'
   | 'registry'
   | 'server'
@@ -171,6 +173,11 @@ const GROUPS: { title: string | null; pages: PageDef[] }[] = [
         title: 'MCP Servers',
         blurb: 'External tool servers injected into agent sessions',
         adminOnly: true,
+      },
+      {
+        id: 'ssh-keys',
+        title: 'SSH Keys',
+        blurb: 'Keys SSH hosts and plugins authenticate with',
       },
     ],
   },
@@ -329,6 +336,12 @@ const SECTION_INDEX: { page: SubPage; section: string; anchor: string; keywords:
     keywords: 'stdio http sse oauth tools external',
   },
   {
+    page: 'ssh-keys',
+    section: 'SSH Keys',
+    anchor: 'ssh-keys',
+    keywords: 'private public key ed25519 fingerprint authorized_keys vault import generate',
+  },
+  {
     page: 'plugins',
     section: 'Installed Plugins',
     anchor: 'plugins',
@@ -388,6 +401,12 @@ const SECTION_INDEX: { page: SubPage; section: string; anchor: string; keywords:
 /** 16×16 stroke icons for the section rail — one per sub-page, in the
  *  house inline-SVG style (see the app rail buttons). */
 const NAV_ICON_PATHS: Record<SubPage, ReactNode> = {
+  'ssh-keys': (
+    <>
+      <circle cx="5" cy="10" r="2.75" />
+      <path d="M6.95 8.05 13 2m-1.5 1.5L13 5M9.5 5.5 11 7" />
+    </>
+  ),
   account: (
     <>
       <circle cx="8" cy="5.25" r="2.75" />
@@ -1386,6 +1405,11 @@ export default function SettingsPage({ onBack, initialSubPage = null }: Props) {
         {activeSubPage === 'mcp' && (
           <div data-settings-anchor="mcp">
             <McpServersSection />
+          </div>
+        )}
+        {activeSubPage === 'ssh-keys' && (
+          <div data-settings-anchor="ssh-keys">
+            <SshKeysSection />
           </div>
         )}
         {activeSubPage === 'variables' && (
