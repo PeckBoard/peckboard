@@ -172,6 +172,7 @@ export const PAGE = `<!doctype html>
   .badge.ok { background: var(--ok-bg); border-color: var(--ok-line); color: var(--ok); }
   .badge.busy { background: var(--badge-bg); border-color: var(--badge-line); color: var(--accent); }
   .badge.bad { background: var(--err-bg); border-color: var(--err-line); color: var(--err); }
+  .badge.pip { background: var(--badge-bg); border-color: var(--badge-line); color: var(--accent); }
   .empty { padding: 32px 16px; color: var(--muted); text-align: center; }
   aside.log {
     width: 420px; flex: 0 0 420px; border-left: 1px solid var(--line); background: var(--panel);
@@ -256,6 +257,7 @@ export const PAGE = `<!doctype html>
   <button id="depsRefreshBtn">Refresh dependencies</button>
 </div>
 <div class="libpanel" id="libPanel" hidden></div>
+<div class="libpanel" id="pipPanel" hidden></div>
 
 <div class="layout">
   <main>
@@ -471,6 +473,10 @@ export const PAGE = `<!doctype html>
     var badge = el("span", "badge", a.state_label);
     if (a.installed) badge.className = "badge ok";
     name.appendChild(badge);
+    if (a.namespace === "pip") {
+      // Distinct namespace marker: a pip package is not a system package.
+      name.appendChild(el("span", "badge pip", "pip"));
+    }
     body.appendChild(name);
     body.appendChild(el("div", "desc", a.description));
     var ver = el("div", "ver", a.version || "");
@@ -733,6 +739,7 @@ export const PAGE = `<!doctype html>
       : "Dependencies: not resolved yet for this target.";
     fillLibSelect(state.deps ? state.deps.libraries || [] : []);
     renderLibPanel();
+    renderPipPanel();
     Object.keys(state.rows).forEach(function (appId) { attachRowDeps(appId); });
   }
 
@@ -788,6 +795,31 @@ export const PAGE = `<!doctype html>
     panel.appendChild(sys);
   }
 
+  // pip namespace: its own block, never mixed into the system package
+  // graph above — a pip package is not a distro package.
+  function renderPipPanel() {
+    var panel = $("pipPanel");
+    clear(panel);
+    var pkgs = state.deps && state.deps.pip_packages ? state.deps.pip_packages : [];
+    if (!pkgs.length) { panel.hidden = true; return; }
+    panel.hidden = false;
+    var head = el("div", null, "");
+    head.appendChild(el("b", null, "Python packages (pip)"));
+    head.appendChild(document.createTextNode(
+      " — pip's own namespace, separate from the system packages above."));
+    panel.appendChild(head);
+    pkgs.forEach(function (p) {
+      var line = el("div", null, "");
+      line.appendChild(el("span", "mono", p.name + (p.version ? " " + p.version : "")));
+      line.appendChild(el("span", "badge pip", "pip"));
+      var bits = [];
+      if (p.requires && p.requires.length) bits.push("requires: " + p.requires.join(", "));
+      if (p.required_by && p.required_by.length) bits.push("required by: " + p.required_by.join(", "));
+      line.appendChild(document.createTextNode(
+        bits.length ? " — " + bits.join("; ") : " — no pip dependencies reported"));
+      panel.appendChild(line);
+    });
+  }
   function sysRdeps() {
     var name = $("libSel").value;
     var target = state.current;

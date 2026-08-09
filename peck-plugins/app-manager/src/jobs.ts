@@ -38,7 +38,7 @@ export interface JobRecord {
    * recipe (null = no bracket) and which recipe was chosen — set at launch,
    * consumed when the job settles (see provenance.ts). */
   pm?: PackageManager | null;
-  method?: PackageManager | "vendor";
+  method?: PackageManager | "vendor" | "pip";
 }
 
 // --- pure: script building/parsing ----------------------------------------

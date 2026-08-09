@@ -114,6 +114,9 @@ export interface AppRowView {
   id: string;
   name: string;
   description: string;
+  /** "pip" = Python package in pip's namespace, not a system package —
+   * rendered as a distinct badge so the two can't be confused. */
+  namespace: "system" | "pip";
   installed: boolean;
   version: string | null;
   /** "Installed" / "Not installed" — the badge text. */
@@ -130,7 +133,8 @@ export interface AppRowView {
    * noted alongside the binary's probed version. */
   package_version: string | null;
   /** Provenance caveat, in prose: a vendor-script install isn't tracked by
-   * the package manager; a failed snapshot bracket is "unknown". Rendered
+   * the package manager; a failed snapshot bracket is "unknown"; a pip app
+   * is tracked in pip's namespace, never the distro package DB. Rendered
    * explicitly — never as an empty package list. */
   provenance_note: string | null;
   /** "Installed with <app>" — the label over `added_packages`. */
@@ -155,7 +159,11 @@ export function appRowView(
   const rec = probe.installed ? record : null;
   let provenanceNote: string | null = null;
   if (rec) {
-    if (rec.tracking === "unknown") {
+    if (rec.tracking === "pip" || rec.method === "pip") {
+      provenanceNote =
+        rec.note ??
+        "Python package installed via pip — tracked in pip's namespace, not the distro package database.";
+    } else if (rec.tracking === "unknown") {
       provenanceNote = rec.note ?? "What this install added is unknown.";
     } else if (rec.method === "vendor") {
       provenanceNote =
@@ -170,6 +178,7 @@ export function appRowView(
     id: app.id,
     name: app.name,
     description: app.description,
+    namespace: app.namespace ?? "system",
     installed: probe.installed,
     version: probe.version,
     state_label: probe.installed ? "Installed" : "Not installed",

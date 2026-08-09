@@ -2,7 +2,9 @@
 
 A Peckboard WASM plugin that lists, installs, and removes common
 applications on Linux targets — the local Peckboard host and any
-configured remote SSH hosts — via MCP tools.
+configured remote SSH hosts — via MCP tools. System apps come from the
+distro package manager (or a vendor script); Python packages come from
+pip, tracked as their own clearly-labelled namespace.
 
 It ships both an MCP tool surface (catalog, target abstraction, `app_*`
 tools) and an **App Manager dashboard page** reachable from the sidebar.
@@ -97,7 +99,10 @@ plugin tool inside the calling session's reach.
 `src/catalog.ts` is a plain data table — one entry per app, each with a
 `detect` command, a `version` probe, per-package-manager install/remove
 recipes, and (for apps not in any distro's repos) a `vendor` install/remove
-script. Adding an app is a pure data change.
+script. Adding an app is a pure data change. Entries with
+`namespace: "pip"` are **Python packages, not system apps**: one pip
+recipe used on every distro, a `pip_package` name, and pip-based
+detect/version probes (see "The pip Namespace" below).
 
 Distro detection reads `/etc/os-release` on the target and maps
 `ID`/`ID_LIKE` to one of `apt` (debian/ubuntu), `dnf` (fedora/rhel), `pacman`
@@ -199,14 +204,46 @@ Honest limits, stated in the UI rather than papered over:
   enter the package database, so they have **no dependency edges at
   all**. Their rows say "not tracked by the package manager" — never an
   empty tree that would read as "no dependencies".
-- **pip/Python packages are NOT covered.** They are a different
-  namespace from distro packages (`pip show`'s `Requires:`/`Required-by:`
-  vs dpkg/rpm), and this plugin does not query them. A Python package
-  installed via pip simply does not appear in the graph.
+- **pip/Python packages live in their own section.** They are a different
+  namespace from distro packages, so they are never merged into the system
+  graph's nodes/edges — see "The pip Namespace" below.
 - `kind` is a display heuristic (catalog apps are "app"; `lib`-named
   packages and `.so` capabilities are "library"; everything else renders
   "binary"), and on rpm systems capabilities resolve to their first
   provider.
+
+## The pip Namespace
+
+pip packages are **not** dpkg/rpm/pacman packages: they live in pip's own
+database, are invisible to the snapshot bracket above, and must never be
+confused with system packages. The plugin treats them as a separate,
+explicitly-labelled namespace:
+
+- **Catalog**: `namespace: "pip"` entries (today: `graphifyy`, the package
+  the graphify plugin's tools need) install with one pip recipe on every
+  distro — `PIP_BREAK_SYSTEM_PACKAGES=1 python3 -m pip install --user
+<pkg>` — into the **user site**: no root, nothing outside `$HOME`. The
+  env var lifts PEP 668's externally-managed refusal on modern distros and
+  is ignored by older pips. `python3` and `pip` themselves are ordinary
+  system catalog entries (and `python3` deliberately has **no remove
+  recipe** — removing the system Python can dismantle the OS).
+- **Probes are pip's own**: presence via `pip show <pkg>`, versions via
+  `pip list --format=freeze`, dependency edges via `pip show`'s
+  `Requires:` / `Required-by:` lines. Never via the distro package DB.
+- **Provenance**: a pip install records `method: "pip"` and
+  `tracking: "pip"` (`package_tracking: "pip"` on the MCP surface) — the
+  snapshot bracket is deliberately skipped, so an unrelated background
+  distro change can never be attributed to a pip app.
+- **Dependency view**: pip packages ride along on a dependency refresh as
+  their own "Python packages (pip)" block (`pip_packages` in the
+  `app_deps` payload), never merged into the system graph's nodes/edges.
+  A host without pip just leaves the block empty.
+- **UI**: pip rows and entries carry a distinct `pip` badge.
+
+One honest limit: the plugin only tracks pip's **user/system site** for
+the target's `python3 -m pip`. Virtualenvs are invisible — in particular,
+the graphify plugin's legacy self-install into a folder-root
+`.graphify-venv/` is neither seen nor managed here.
 
 ## sudo
 

@@ -144,6 +144,7 @@ export function appList(args: any): any {
       apps: scoped.map(({ app, record }) => ({
         id: app.id,
         name: app.name,
+        namespace: app.namespace ?? "system",
         ...probeApp(target, app),
         ...(record?.primary ? { package_version: record.primary.version } : {}),
         ...(record ? { package_tracking: trackingState(record) } : {}),
@@ -286,9 +287,18 @@ export function appInstall(args: any): any {
         `and no vendor script configured for this app`,
     );
   }
-  const method: NonNullable<JobRecord["method"]> =
-    distro.pm && app.install[distro.pm] ? distro.pm : "vendor";
-  return startJob(target, app, "install", recipe, { pm: distro.pm, method });
+  // pip-namespace installs run without the package-DB snapshot bracket
+  // (pm: null): pip's packages are invisible to it, and an unrelated
+  // background distro change must not get attributed to the pip app.
+  const method: NonNullable<JobRecord["method"]> = app.install.pip
+    ? "pip"
+    : distro.pm && app.install[distro.pm]
+      ? distro.pm
+      : "vendor";
+  return startJob(target, app, "install", recipe, {
+    pm: method === "pip" ? null : distro.pm,
+    method,
+  });
 }
 
 export function appRemove(args: any): any {

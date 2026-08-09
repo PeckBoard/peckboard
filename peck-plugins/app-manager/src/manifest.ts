@@ -4,17 +4,20 @@
 
 const DESCRIPTION =
   "Lists, installs, and removes common applications (git, Claude Code, cursor-agent, " +
-  "Ollama, Node.js, Docker, ripgrep) on Linux targets — the local Peckboard host and " +
-  "any configured remote SSH hosts. Installs and removals run real package-manager " +
-  "commands (apt/dnf/pacman/zypper) or vendor installer scripts AS THE PECKBOARD HOST " +
-  "USER on the chosen target, using sudo -A for steps that need root. This plugin can " +
-  "run any bare command on the local host via the process_exec_any permission — it is " +
-  "restricted in code to the app catalog's own static recipes, but the permission grant " +
-  "itself is broad. Ships an App Manager dashboard page (sidebar entry) for picking a " +
-  "target, seeing what is installed, watching install progress live, and browsing each " +
-  "app's dependency graph as resolved from the target's package manager.";
+  "Ollama, Node.js, Docker, ripgrep, Python 3, pip) on Linux targets — the local " +
+  "Peckboard host and any configured remote SSH hosts — plus pip-namespace Python " +
+  "packages (graphifyy), which are labelled distinctly: pip's namespace is separate " +
+  "from the distro package database. Installs and removals run real package-manager " +
+  "commands (apt/dnf/pacman/zypper), vendor installer scripts, or pip AS THE PECKBOARD " +
+  "HOST USER on the chosen target, using sudo -A for steps that need root. This plugin " +
+  "can run any bare command on the local host via the process_exec_any permission — it " +
+  "is restricted in code to the app catalog's own static recipes, but the permission " +
+  "grant itself is broad. Ships an App Manager dashboard page (sidebar entry) for " +
+  "picking a target, seeing what is installed, watching install progress live, and " +
+  "browsing each app's dependency graph as resolved from the target's package manager " +
+  "(pip packages get their own pip-probed section).";
 
-const VERSION = "0.4.0";
+const VERSION = "0.5.0";
 const REPOSITORY = "https://github.com/PeckBoard/app-manager";
 
 // Inline SVG (lucide "package") for the sidebar entry; rendered sandboxed.
