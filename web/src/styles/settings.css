@@ -502,6 +502,27 @@
   flex: 1;
   min-width: 0;
 }
+/* Multi-line secret (a pasted private-key PEM): a textarea can't use
+   type="password", so mask the glyphs until the toggle reveals them. The
+   toggle sits above the field rather than beside it. */
+.secret-input--multiline {
+  flex-direction: column;
+  align-items: stretch;
+}
+.secret-input--multiline > textarea {
+  flex: 1;
+  min-width: 0;
+  resize: vertical;
+  font-family: var(--font-mono, monospace);
+  font-size: var(--text-xs);
+}
+.secret-input--multiline.secret-input--masked > textarea {
+  -webkit-text-security: disc;
+  text-security: disc;
+}
+.secret-input--multiline > .secret-input-toggle {
+  align-self: flex-end;
+}
 .secret-input-toggle {
   flex: none;
   font-size: var(--text-xs);

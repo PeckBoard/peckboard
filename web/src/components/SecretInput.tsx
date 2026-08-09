@@ -13,6 +13,11 @@ interface SecretInputProps {
   testId?: string
   revealTestId?: string
   disabled?: boolean
+  /** Render a <textarea> instead of an <input> — for secrets that are
+   *  genuinely multi-line, like a pasted private-key PEM. */
+  multiline?: boolean
+  /** Rows for the multiline variant (ignored otherwise). */
+  rows?: number
 }
 
 /**
@@ -33,22 +38,47 @@ export default function SecretInput({
   testId,
   revealTestId,
   disabled,
+  multiline,
+  rows = 6,
 }: SecretInputProps) {
   const [shown, setShown] = useState(false)
   return (
-    <span className="secret-input">
-      <input
-        id={id}
-        className={className}
-        type={shown ? 'text' : 'password'}
-        value={value}
-        placeholder={placeholder}
-        autoComplete="off"
-        spellCheck={false}
-        disabled={disabled}
-        data-testid={testId}
-        onChange={(e) => onChange(e.target.value)}
-      />
+    <span
+      className={
+        multiline
+          ? `secret-input secret-input--multiline${shown ? '' : ' secret-input--masked'}`
+          : 'secret-input'
+      }
+    >
+      {multiline ? (
+        // A textarea can't take `type="password"`, so the masking lives in
+        // CSS (`.secret-input--masked`) and the toggle flips that class.
+        <textarea
+          id={id}
+          className={className}
+          value={value}
+          rows={rows}
+          placeholder={placeholder}
+          autoComplete="off"
+          spellCheck={false}
+          disabled={disabled}
+          data-testid={testId}
+          onChange={(e) => onChange(e.target.value)}
+        />
+      ) : (
+        <input
+          id={id}
+          className={className}
+          type={shown ? 'text' : 'password'}
+          value={value}
+          placeholder={placeholder}
+          autoComplete="off"
+          spellCheck={false}
+          disabled={disabled}
+          data-testid={testId}
+          onChange={(e) => onChange(e.target.value)}
+        />
+      )}
       <button
         type="button"
         className="secret-input-toggle"

@@ -10,6 +10,7 @@ import {
 import type { Components } from 'react-markdown'
 import { authedFetch } from '../store/auth'
 import { useMediaQuery } from '../hooks/useMediaQuery'
+import { copyText } from '../utils/clipboard'
 import { extractToc, rehypeHeadingIds } from '../lib/markdownToc'
 import SafeMarkdown from './SafeMarkdown'
 import { chatMarkdownComponents } from './chat/markdown'
@@ -77,35 +78,6 @@ const markdownComponents: Components = {
 // Module scope so the identity is stable across renders (a fresh array
 // would re-run the whole markdown pipeline on every keystroke elsewhere).
 const rehypePlugins = [rehypeHeadingIds, ...highlightPlugins]
-
-/** Copy `text` to the clipboard, reporting whether it worked.
- *  `navigator.clipboard` only exists in a secure context and PeckBoard is
- *  routinely reached over plain HTTP on a LAN — hence the legacy
- *  textarea fallback. */
-async function copyText(text: string): Promise<boolean> {
-  try {
-    if (navigator.clipboard?.writeText) {
-      await navigator.clipboard.writeText(text)
-      return true
-    }
-  } catch {
-    // Permission denied / document not focused — try the legacy path.
-  }
-  try {
-    const ta = document.createElement('textarea')
-    ta.value = text
-    ta.setAttribute('readonly', '')
-    ta.style.position = 'fixed'
-    ta.style.opacity = '0'
-    document.body.appendChild(ta)
-    ta.select()
-    const ok = document.execCommand('copy')
-    document.body.removeChild(ta)
-    return ok
-  } catch {
-    return false
-  }
-}
 
 /**
  * Single-report viewer. Route-driven (mounted from App.tsx at

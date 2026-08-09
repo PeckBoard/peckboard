@@ -214,6 +214,22 @@ export interface EnvVar {
   updated_at: string
 }
 
+/** One SSH key in the server-side vault. The private key is encrypted at
+ * rest under the host's vault key and never leaves the server — this view
+ * carries public metadata only, so there is no field that could ever hold
+ * the secret. `public_key` is the half you paste into a server's
+ * `authorized_keys`. */
+export interface SshKey {
+  id: string
+  name: string
+  key_type: string
+  fingerprint: string
+  public_key: string
+  has_passphrase: boolean
+  created_at: string
+  updated_at: string
+}
+
 /** One agent-managed variable: agents read AND write these via the
  *  list_variables / set_variable / delete_variable tools. Values are plain
  *  (not secret); a folder-scoped row shadows a global one with the same
