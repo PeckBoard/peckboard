@@ -64,13 +64,20 @@ export const useSshKeysStore = create<SshKeysState>((set, get) => ({
     try {
       const res = await authedFetch('/api/ssh-keys')
       if (!res.ok) {
-        set({ error: await errorFrom(res, 'Failed to load SSH keys'), loading: false })
+        // `loaded` flips even on failure: the list is no longer *pending*,
+        // and leaving it false leaves the section reading "Loading…" forever
+        // underneath the error.
+        set({
+          error: await errorFrom(res, 'Failed to load SSH keys'),
+          loaded: true,
+          loading: false,
+        })
         return
       }
       const body = (await res.json()) as { keys: SshKey[] }
       set({ keys: body.keys, loaded: true, loading: false, error: null })
     } catch {
-      set({ error: 'Failed to load SSH keys', loading: false })
+      set({ error: 'Failed to load SSH keys', loaded: true, loading: false })
     }
   },
 

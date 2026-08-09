@@ -688,14 +688,27 @@ logged-in user unlocks it. Vault keys trade that headless-availability
 weakness for host-compromise weakness; pick whichever secret store matches
 what you're protecting against.
 
-Plugins never see key material. `peckboard_ssh_key_list` returns metadata only
-(`SshKeyListItem` in `src/plugin/host.rs`, hand-built rather than derived from
-`SshKey` so a serialization mistake can't leak sealed fields), and
-`{key_id}` auth resolves to a real key only inside `resolve_key_ref`
-(`src/plugin/ssh.rs`) just before a connection attempt — the plaintext key
-never crosses back into the plugin's WASM sandbox.
+Plugins never see key material **through the SSH surface**.
+`peckboard_ssh_key_list` returns metadata only (`SshKeyListItem` in
+`src/plugin/host.rs`, hand-built rather than derived from `SshKey` so a
+serialization mistake can't leak sealed fields), and `{key_id}` auth resolves
+to a real key only inside `resolve_key_ref` (`src/plugin/ssh.rs`) just before a
+connection attempt — the plaintext key never crosses back into the plugin's
+WASM sandbox. There is no plugin write path into the vault at all: rows are
+written only by the admin-only REST routes, and `peckboard_http_fetch` refuses
+loopback, so a plugin cannot inject a key for another plugin to use.
 
-## Sandbox
+The boundary that does **not** hold is `process_exec` / `process_exec_any`.
+Those run a real OS process as the Peckboard user, and the `peckboard_exec`
+allowlist includes general-purpose interpreters (`python3`, `node`, `ruby`,
+…), so a plugin holding either permission can read `<data_dir>/ssh_vault_key`
+and `peckboard.db` by absolute path and decrypt every stored key. The exec cwd
+for a folder-less full-authority call is deliberately `<data_dir>/plugin-exec`
+rather than `<data_dir>` so the vault isn't reachable by _relative_ path
+either, but that is friction, not a boundary. Treat `ssh_keys` + an exec
+permission on the same plugin as "this plugin can read every SSH key" when
+reviewing a manifest — `ssh-fleet` holds no exec permission; `linux-app-manager`
+holds `process_exec_any` and is therefore in this category.
 
 ## Sandbox
 

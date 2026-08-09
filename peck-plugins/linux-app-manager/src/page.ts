@@ -322,7 +322,7 @@ export const PAGE = `<!doctype html>
   var state = {
     targets: [], byId: {}, current: null,
     overview: null, rows: {}, watching: {},
-    keys: [], keysLoaded: false,
+    keys: [],
     editing: null, logApp: null, timer: null,
     lastFocus: null, confirmAction: null
   };
@@ -627,10 +627,13 @@ export const PAGE = `<!doctype html>
   // The vault keys are a fixed option set from core, so the picker is a plain
   // <select> — never free text, and metadata only (no key material).
   function loadKeys() {
-    if (state.keysLoaded) return Promise.resolve(state.keys);
+    // Always refetch. The vault is edited elsewhere (Settings → SSH Keys), so
+    // a cached list goes stale the moment a key is added or deleted and the
+    // picker would offer a key that no longer exists — or omit the one the
+    // user just created.
     return getJSON(API + "/ssh-keys").then(function (d) {
       state.keys = d.keys || [];
-      state.keysLoaded = true;
+      $("keyHint").textContent = "";
       return state.keys;
     }).catch(function (e) {
       state.keys = [];
@@ -675,7 +678,13 @@ export const PAGE = `<!doctype html>
     $("f_known").value = existing ? (existing.known_host || "") : "";
     $("targetErr").textContent = "";
     openDialog("targetBackdrop", "f_hostname");
-    loadKeys().then(function () { fillKeySelect(existing ? existing.key_id : null); });
+    // Saving before the picker is populated would post an empty key_id and
+    // come back "key_id is required", so hold Save until the keys land.
+    $("targetSave").disabled = true;
+    loadKeys().then(function () {
+      fillKeySelect(existing ? existing.key_id : null);
+      $("targetSave").disabled = false;
+    });
   }
 
   function saveTarget() {

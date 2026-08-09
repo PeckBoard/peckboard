@@ -2138,6 +2138,11 @@ const EXEC_MAX_OUTPUT_BYTES: usize = 1024 * 1024; // 1 MiB per stream
 const EXEC_DEFAULT_TIMEOUT_SECS: u64 = 120;
 const EXEC_MAX_TIMEOUT_SECS: u64 = 600;
 
+/// Scratch working directory (under the data dir) for a folder-less
+/// full-authority exec. Never the data dir itself — that is where
+/// `ssh_vault_key` / `jwt_secret` / `peckboard.db` live.
+const PLUGIN_EXEC_DIR: &str = "plugin-exec";
+
 /// Executables a plugin may run. Bare names only — resolved via `PATH` by the
 /// OS. Kept to version control, package managers, build drivers, and test
 /// runners; nothing that reads arbitrary shell input.
@@ -2196,12 +2201,17 @@ fn drain_capped<R: std::io::Read + Send + 'static>(
 /// `{"exit_code", "stdout", "stderr", "stdout_truncated", "stderr_truncated",
 /// "timed_out"}` or an `{"error"}` envelope.
 ///
-/// `authority_root` is the cwd used when the caller holds full **user**
-/// authority (a plugin's own authenticated UI page) but the request carried no
-/// folder scope — a global `sidebar_items` page has no project/session to
-/// resolve one from. `None` (the MCP tool bridge, which is never full
-/// authority) keeps the refusal: the per-folder floor is what keeps a tool call
-/// inside the calling session's reach, and no user stands behind it to widen it.
+/// `authority_root` is the data dir a folder-less full-**user**-authority
+/// caller (a plugin's own authenticated UI page — a global `sidebar_items`
+/// page has no project/session to resolve a folder from) falls back to. The
+/// cwd used is [`PLUGIN_EXEC_DIR`] *underneath* it, never the data dir
+/// itself: `<data_dir>` holds `ssh_vault_key`, `jwt_secret`, and
+/// `peckboard.db`, and the allowlist admits general-purpose interpreters
+/// (`python3`, `node`, `ruby`, …), so a cwd of `<data_dir>` would hand any
+/// `process_exec` plugin the SSH key vault by relative path. `None` (the MCP
+/// tool bridge, which is never full authority) keeps the refusal: the
+/// per-folder floor is what keeps a tool call inside the calling session's
+/// reach, and no user stands behind it to widen it.
 pub(crate) fn exec_impl(
     db: &Db,
     input: &str,
@@ -2235,13 +2245,21 @@ pub(crate) fn exec_impl(
     }
     let authority_fallback = authority_root
         .filter(|_| inv.authority && inv.folder_id.is_none())
-        .map(|p| p.to_path_buf());
+        .map(|p| p.join(PLUGIN_EXEC_DIR));
     let root = match caller_folder_root(db, inv) {
         Ok(r) => r,
         // The exec cwd is a working directory, not a jail (unlike the
         // fs_jail-backed file functions): what bounds this call is the
         // permission grant plus the bare-name check, both already applied.
-        Err(_) if authority_fallback.is_some() => authority_fallback.unwrap(),
+        // It is still deliberately a scratch dir rather than the data dir —
+        // see `authority_root` above.
+        Err(_) if authority_fallback.is_some() => {
+            let dir = authority_fallback.unwrap();
+            if let Err(e) = std::fs::create_dir_all(&dir) {
+                return error_json(format!("failed to prepare the exec working directory: {e}"));
+            }
+            dir
+        }
         Err(e) => return error_json(e),
     };
     let timeout = Duration::from_secs(
@@ -4833,8 +4851,13 @@ mod tests {
             assert!(r.contains("folder"), "unscoped: {r}");
 
             // A full-authority UI caller (a plugin's global sidebar page) has
-            // no folder to resolve, so it runs in the app data dir instead of
-            // being refused — the cwd is a working directory here, not a jail.
+            // no folder to resolve, so it runs in a scratch dir under the app
+            // data dir instead of being refused — the cwd is a working
+            // directory here, not a jail. It must NOT be the data dir itself:
+            // that is where `ssh_vault_key` and `peckboard.db` live, and the
+            // allowlist admits interpreters that can read whatever the cwd
+            // contains.
+            std::fs::write(data_root.join("ssh_vault_key"), b"pretend-vault-key").unwrap();
             let authority = InvocationContext {
                 authority: true,
                 ..Default::default()
@@ -4848,14 +4871,15 @@ mod tests {
             );
             let v: serde_json::Value = serde_json::from_str(&r).unwrap();
             assert!(v.get("error").is_none(), "authority exec: {r}");
+            let cwd = v["stdout"].as_str().unwrap_or("").trim().to_string();
             assert!(
-                v["stdout"]
-                    .as_str()
-                    .unwrap_or("")
-                    .contains(data_root.file_name().unwrap().to_str().unwrap()),
-                "authority cwd: {r}"
+                cwd.ends_with(PLUGIN_EXEC_DIR),
+                "authority cwd must be the scratch dir, got: {cwd}"
             );
-
+            assert!(
+                !std::path::Path::new(&cwd).join("ssh_vault_key").exists(),
+                "the vault key must not sit in the exec cwd: {cwd}"
+            );
             // Allowlisted command runs in the folder when the tool is present.
             let r = exec_impl(
                 &db,
@@ -5601,7 +5625,6 @@ mod tests {
         let script = script.to_string();
         let out = tokio::task::spawn_blocking(move || {
             let req = serde_json::json!({ "command": "sh", "args": ["-c", script] }).to_string();
-            // exec_inv() is folder-scoped, so the authority_root is unused here.
             // exec_inv() is folder-scoped, so no authority fallback is needed.
             exec_impl(&db, &req, &exec_inv(), false, None)
         })

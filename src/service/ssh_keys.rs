@@ -25,7 +25,10 @@ use crate::db::Db;
 const VAULT_KEY_LEN: usize = 32;
 
 /// Load the vault key from disk, or generate + persist one on first run.
-/// Stored at `<data_dir>/ssh_vault_key` with `0600` permissions on Unix.
+/// Stored at `<data_dir>/ssh_vault_key`, **created** `0600` on Unix (the mode
+/// is on the `open` itself, not a `chmod` after the bytes are already on
+/// disk, so there is no window in which the key is world-readable) and
+/// re-tightened on every load in case an older build left it `0644`.
 /// Regenerated (with a warning) if found truncated, so a partially written
 /// key can't silently brick every stored SSH key.
 pub fn load_or_create_vault_key(data_dir: &Path) -> anyhow::Result<Vec<u8>> {
@@ -34,6 +37,7 @@ pub fn load_or_create_vault_key(data_dir: &Path) -> anyhow::Result<Vec<u8>> {
     if path.exists() {
         let key = std::fs::read(&path)?;
         if key.len() == VAULT_KEY_LEN {
+            tighten(&path)?;
             return Ok(key);
         }
         tracing::warn!(
@@ -46,16 +50,46 @@ pub fn load_or_create_vault_key(data_dir: &Path) -> anyhow::Result<Vec<u8>> {
     std::fs::create_dir_all(data_dir)?;
     let mut key = vec![0u8; VAULT_KEY_LEN];
     OsRng.fill_bytes(&mut key);
-    std::fs::write(&path, &key)?;
-
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600));
-    }
+    write_private(&path, &key)?;
 
     tracing::info!("Generated new SSH vault key at {}", path.display());
     Ok(key)
+}
+
+/// Create/truncate `path` and write `bytes`, owner-read/write only. On Unix
+/// the mode is applied by `open(2)` so the file is never briefly readable by
+/// anyone else; elsewhere this is a plain write.
+fn write_private(path: &Path, bytes: &[u8]) -> anyhow::Result<()> {
+    use std::io::Write as _;
+    let mut opts = std::fs::OpenOptions::new();
+    opts.write(true).create(true).truncate(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        opts.mode(0o600);
+    }
+    let mut f = opts.open(path)?;
+    f.write_all(bytes)?;
+    f.sync_all()?;
+    Ok(())
+}
+
+/// Force `0600` on an existing key file (heals a file created by an older
+/// build, or one whose mode was widened). A failure here is fatal rather
+/// than ignored: continuing would mean serving from a key file other local
+/// users can read.
+fn tighten(path: &Path) -> anyhow::Result<()> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = std::fs::metadata(path)?.permissions().mode() & 0o777;
+        if mode != 0o600 {
+            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))?;
+        }
+    }
+    #[cfg(not(unix))]
+    let _ = path;
+    Ok(())
 }
 
 /// Encrypt `plaintext` under the vault key. A fresh random nonce is drawn
@@ -163,12 +197,18 @@ pub fn generate_keypair(key_type: &str) -> anyhow::Result<(String, ParsedKey)> {
     Ok((pem, parsed))
 }
 
-/// Decrypt a stored key's private material for use. The next card's SSH
-/// host functions call this to resolve connection credentials by key id
-/// without a plugin ever seeing the material pass through it. Kept
-/// `pub(crate)` since only core call sites should ever touch raw key
-/// material — see `SecretMasker` at the caller for console-output safety.
-#[allow(dead_code)] // wired up by the SSH host-functions card, not this one
+/// Decrypt a stored key's private material for use. `plugin::ssh`'s
+/// [`resolve_key_ref`](crate::plugin::ssh) calls this to turn a `key_id` into
+/// real connection credentials without the material ever passing through a
+/// plugin. Kept `pub(crate)` since only core call sites should ever touch
+/// raw key material.
+///
+/// The returned PEM/passphrase are **not** registered with
+/// `service::secret_mask::SecretMasker`: they are used only as russh auth
+/// input and never reach a console/tool-output path, and enrolling them
+/// would mean decrypting every vault key on every masked output. If a future
+/// caller ever routes this material somewhere an agent can read, mask it
+/// there.
 pub(crate) async fn resolve_for_use(
     db: &Db,
     vault_key: &[u8],
@@ -196,6 +236,28 @@ mod tests {
 
     fn key() -> Vec<u8> {
         vec![7u8; VAULT_KEY_LEN]
+    }
+
+    /// The vault key is the single secret that unseals every stored SSH key,
+    /// so it must never be readable by another local user — including for the
+    /// instant between creating the file and chmod-ing it.
+    #[cfg(unix)]
+    #[test]
+    fn vault_key_file_is_owner_only() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let k1 = load_or_create_vault_key(dir.path()).unwrap();
+        let path = dir.path().join("ssh_vault_key");
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600, "fresh vault key mode");
+
+        // A file left world-readable by an older build is tightened on load,
+        // and the key itself is unchanged (no silent regeneration).
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+        let k2 = load_or_create_vault_key(dir.path()).unwrap();
+        assert_eq!(k1, k2, "key must survive a reload");
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600, "reloaded vault key mode");
     }
 
     #[test]

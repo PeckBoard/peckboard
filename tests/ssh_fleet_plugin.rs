@@ -21,16 +21,25 @@ use std::process::{Child, Command};
 use std::time::Duration;
 
 use peckboard::db::Db;
-use peckboard::db::models::{NewFolder, NewProject, NewSession};
+use peckboard::db::models::{NewFolder, NewProject, NewSession, NewSshKey};
 use peckboard::plugin::manager::PluginManager;
 use serde_json::{Value, json};
 
 const PLUGIN_ID: &str = "ssh-fleet";
 
+fn plugin_wasm_path(plugin_id: &str) -> Option<PathBuf> {
+    let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    // Try in-tree first, then legacy sibling path
+    let in_tree = manifest_dir.join(format!("peck-plugins/{}/dist/plugin.wasm", plugin_id));
+    if in_tree.exists() {
+        return Some(in_tree);
+    }
+    let legacy = manifest_dir.join(format!("../peck-plugins/{}/dist/plugin.wasm", plugin_id));
+    legacy.exists().then_some(legacy)
+}
+
 fn plugin_wasm() -> Option<PathBuf> {
-    let p = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../peck-plugins/ssh-fleet/dist/plugin.wasm");
-    p.exists().then_some(p)
+    plugin_wasm_path("ssh-fleet")
 }
 
 async fn invoke(plugins: &PluginManager, tool: &str, args: Value, ctx: &Value) -> Value {
@@ -263,6 +272,80 @@ async fn ssh_fleet_plugin_end_to_end() {
         invoke(&plugins, "ssh_host_list", json!({}), &ctx).await["count"],
         json!(0)
     );
+    // ── vault-key (`key_ref`) hosts ──────────────────────────────────────────
+    // A host may reference a key in core's SSH key vault by id instead of
+    // holding key material itself. Seal one into the vault the way the import
+    // route does, then drive the registry through the real data store.
+    let vault_key = peckboard::service::ssh_keys::load_or_create_vault_key(data_dir).unwrap();
+    let vault_pem = "-----BEGIN OPENSSH PRIVATE KEY-----\nnot-a-real-key-abc123\n-----END OPENSSH PRIVATE KEY-----\n";
+    let (ciphertext, nonce) = peckboard::service::ssh_keys::encrypt(&vault_key, vault_pem).unwrap();
+    let now = chrono::Utc::now().to_rfc3339();
+    db.insert_ssh_key(NewSshKey {
+        id: "vault-key-1".into(),
+        name: "deploy key".into(),
+        key_type: "ed25519".into(),
+        public_key: "ssh-ed25519 AAAAtest".into(),
+        fingerprint: "SHA256:vault-key-1".into(),
+        private_key_ciphertext: ciphertext,
+        private_key_nonce: nonce,
+        passphrase_ciphertext: None,
+        passphrase_nonce: None,
+        created_at: now.clone(),
+        updated_at: now.clone(),
+        created_by: None,
+    })
+    .await
+    .unwrap();
+
+    let res = invoke(
+        &plugins,
+        "ssh_host_add",
+        json!({"label":"vault-box","hostname":"vault.example.com","username":"root","key_id":"vault-key-1"}),
+        &ctx,
+    )
+    .await;
+    let host = &res["host"];
+    assert_eq!(host["auth_kind"], json!("key_ref"), "key_ref host: {res}");
+    assert_eq!(host["key_id"], json!("vault-key-1"), "key_id: {res}");
+    // The name comes back from `peckboard_ssh_key_list`, so this also proves
+    // the plugin's `ssh_keys` grant reaches the vault-metadata host function.
+    assert_eq!(host["key_name"], json!("deploy key"), "key_name: {res}");
+    assert_eq!(host["has_secret"], json!(true), "has_secret: {res}");
+    let vault_host_id = host["id"].as_str().unwrap().to_string();
+
+    let list = invoke(&plugins, "ssh_host_list", json!({}), &ctx).await;
+    assert_eq!(
+        list["hosts"][0]["key_id"],
+        json!("vault-key-1"),
+        "list: {list}"
+    );
+    assert!(
+        !list.to_string().contains("not-a-real-key-abc123"),
+        "vault key material must never reach the plugin: {list}"
+    );
+
+    // Switching a vault-key host to a password drops the key reference.
+    let upd = invoke(
+        &plugins,
+        "ssh_host_update",
+        json!({"id": vault_host_id, "password": "pw"}),
+        &ctx,
+    )
+    .await;
+    assert_eq!(upd["host"]["auth_kind"], json!("password"), "switch: {upd}");
+    assert_eq!(upd["host"]["key_id"], Value::Null, "key_id cleared: {upd}");
+
+    invoke(
+        &plugins,
+        "ssh_host_remove",
+        json!({"host": vault_host_id}),
+        &ctx,
+    )
+    .await;
+    assert_eq!(
+        invoke(&plugins, "ssh_host_list", json!({}), &ctx).await["count"],
+        json!(0)
+    );
 
     // ── full SSH chain (gated on a local sshd) ────────────────────────────────
     let Some(sshd) = setup_test_sshd() else {
@@ -370,6 +453,63 @@ async fn ssh_fleet_plugin_end_to_end() {
             "edit applied: {r2}"
         );
     }
+
+    // The same client key, this time held in the vault and referenced by id:
+    // the full plugin → core → vault → sshd chain for `key_ref` auth. The
+    // plugin never sees the PEM.
+    let (ct, nc) = peckboard::service::ssh_keys::encrypt(&vault_key, &sshd.key_pem).unwrap();
+    let now = chrono::Utc::now().to_rfc3339();
+    db.insert_ssh_key(NewSshKey {
+        id: "vault-key-live".into(),
+        name: "live key".into(),
+        key_type: "ed25519".into(),
+        public_key: "ssh-ed25519 AAAAlive".into(),
+        fingerprint: "SHA256:vault-key-live".into(),
+        private_key_ciphertext: ct,
+        private_key_nonce: nc,
+        passphrase_ciphertext: None,
+        passphrase_nonce: None,
+        created_at: now.clone(),
+        updated_at: now,
+        created_by: None,
+    })
+    .await
+    .unwrap();
+
+    let add = invoke(
+        &plugins,
+        "ssh_host_add",
+        json!({
+            "label": "local-vault",
+            "hostname": "127.0.0.1",
+            "port": sshd.port,
+            "username": user,
+            "key_id": "vault-key-live",
+        }),
+        &ctx,
+    )
+    .await;
+    assert_eq!(
+        add["host"]["auth_kind"],
+        json!("key_ref"),
+        "vault-key host: {add}"
+    );
+
+    let probe = invoke(&plugins, "ssh_probe", json!({"host": "local-vault"}), &ctx).await;
+    assert_eq!(probe["ok"], json!(true), "vault-key probe: {probe}");
+
+    let run = invoke(
+        &plugins,
+        "ssh_run",
+        json!({"host": "local-vault", "command": "echo hi-from-vault"}),
+        &ctx,
+    )
+    .await;
+    assert_eq!(run["exit_code"], json!(0), "vault-key run: {run}");
+    assert!(
+        run["stdout"].as_str().unwrap().contains("hi-from-vault"),
+        "vault-key run stdout: {run}"
+    );
 }
 
 /// A slow SSH op must NOT hold the plugin's single instance — the whole point

@@ -1,4 +1,5 @@
-import { useEffect, useState, type FormEvent } from 'react'
+import { useEffect, useRef, useState, type FormEvent } from 'react'
+import { readFileAsText } from '../lib/readFileAsText'
 import { useAuthStore } from '../store/auth'
 import { useSshKeysStore } from '../store/sshKeys'
 import type { SshKey } from '../types/api'
@@ -109,7 +110,11 @@ function PublicKeyModal({ sshKey, onClose }: { sshKey: SshKey; onClose: () => vo
           className="btn-primary"
           disabled={!text}
           onClick={() => {
-            if (text) void copyText(text).then(setCopied)
+            if (!text) return
+            void copyText(text).then((ok) => {
+              setCopied(ok)
+              if (ok) setTimeout(() => setCopied(false), 2000)
+            })
           }}
           data-testid="ssh-key-public-copy"
         >
@@ -130,7 +135,9 @@ function ImportKeyModal({ onClose }: { onClose: () => void }) {
   const [passphrase, setPassphrase] = useState('')
   const [nameError, setNameError] = useState('')
   const [keyError, setKeyError] = useState('')
+  const [formError, setFormError] = useState('')
   const [busy, setBusy] = useState(false)
+  const keyFileRef = useRef<HTMLInputElement>(null)
 
   const disabledReason = !name.trim()
     ? 'Enter a name for the key.'
@@ -138,11 +145,25 @@ function ImportKeyModal({ onClose }: { onClose: () => void }) {
       ? 'Paste the private key to import.'
       : null
 
+  const pickKeyFile = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0]
+    e.target.value = ''
+    if (!file) return
+    setKeyError('')
+    setFormError('')
+    try {
+      setPrivateKey(await readFileAsText(file))
+    } catch {
+      setKeyError(`Could not read ${file.name}.`)
+    }
+  }
+
   const handleSubmit = async (e: FormEvent) => {
     e.preventDefault()
     if (disabledReason || busy) return
     setNameError('')
     setKeyError('')
+    setFormError('')
     setBusy(true)
     try {
       await importKey({
@@ -153,9 +174,13 @@ function ImportKeyModal({ onClose }: { onClose: () => void }) {
       onClose()
     } catch (err) {
       const message = err instanceof Error ? err.message : 'Failed to import key'
-      // The two rejections a user can actually fix belong on their field.
-      if (message.includes('name')) setNameError(message)
-      else setKeyError(message)
+      // Only the server's own field rejections belong on a field. Anything
+      // else (403 from a non-admin, a vault failure) is form-level — putting
+      // it under "Private key" would tell the user their key is malformed
+      // when it isn't.
+      if (/private key|passphrase/i.test(message)) setKeyError(message)
+      else if (/name/i.test(message)) setNameError(message)
+      else setFormError(message)
       setBusy(false)
     }
   }
@@ -190,21 +215,41 @@ function ImportKeyModal({ onClose }: { onClose: () => void }) {
         </div>
         <div className="form-field">
           <label className="form-label" htmlFor="ssh-import-private">
-            Private key
+            Private key (PEM)
           </label>
-          <SecretInput
+          {/* A PEM is multi-line: a single-line <input> drops the newlines on
+              paste and the server then rejects every real key. Same shape as
+              the TLS upload fields. */}
+          <textarea
             id="ssh-import-private"
             className="form-input"
-            label="private key"
+            rows={6}
             value={privateKey}
-            onChange={(v) => {
-              setPrivateKey(v)
+            spellCheck={false}
+            placeholder="-----BEGIN OPENSSH PRIVATE KEY-----"
+            onChange={(e) => {
+              setPrivateKey(e.target.value)
               setKeyError('')
             }}
-            placeholder="-----BEGIN OPENSSH PRIVATE KEY-----"
-            testId="ssh-import-private"
-            revealTestId="ssh-import-private-reveal"
+            data-testid="ssh-import-private"
           />
+          <input
+            ref={keyFileRef}
+            type="file"
+            accept=".pem,.key,.txt"
+            hidden
+            onChange={(e) => void pickKeyFile(e)}
+            data-testid="ssh-import-private-file"
+          />
+          <button
+            type="button"
+            className="btn-secondary"
+            onClick={() => keyFileRef.current?.click()}
+            disabled={busy}
+            data-testid="ssh-import-private-choose"
+          >
+            Choose key file…
+          </button>
           <FieldError message={keyError} testId="ssh-import-private-error" />
         </div>
         <div className="form-field">
@@ -222,6 +267,11 @@ function ImportKeyModal({ onClose }: { onClose: () => void }) {
           />
           <span className="form-hint">Only needed if the key is passphrase-protected.</span>
         </div>
+        {formError && (
+          <p className="form-error" data-testid="ssh-import-form-error">
+            {formError}
+          </p>
+        )}
         <div className="form-actions">
           {!busy && disabledReason && (
             <span className="form-actions-reason" data-testid="ssh-import-disabled-reason">
@@ -381,7 +431,13 @@ export default function SshKeysSection() {
   const buildMenu = (k: SshKey): MenuItem[] => [
     {
       label: copiedId === k.id ? 'Copied' : 'Copy public key',
-      onSelect: () => void copyText(k.public_key).then((ok) => setCopiedId(ok ? k.id : null)),
+      // Revert the label, or the menu reads "Copied" for the rest of the
+      // session and stops telling the user what the item does.
+      onSelect: () =>
+        void copyText(k.public_key).then((ok) => {
+          setCopiedId(ok ? k.id : null)
+          if (ok) setTimeout(() => setCopiedId((id) => (id === k.id ? null : id)), 2000)
+        }),
       testId: `ssh-key-copy-${k.id}`,
     },
     { label: 'Show public key', onSelect: () => setViewing(k) },
@@ -440,7 +496,19 @@ export default function SshKeysSection() {
         </span>
       )}
 
-      {error && <p className="form-error">{error}</p>}
+      {error && (
+        <div className="form-error" data-testid="ssh-keys-error">
+          <span>{error}</span>{' '}
+          <button
+            type="button"
+            className="btn-secondary"
+            onClick={() => void fetchKeys()}
+            data-testid="ssh-keys-retry"
+          >
+            Retry
+          </button>
+        </div>
+      )}
 
       <List<SshKey>
         items={keys}
@@ -465,7 +533,11 @@ export default function SshKeysSection() {
         )}
         emptyState={
           <div className="list-view-empty" data-testid="ssh-keys-empty">
-            {loaded ? 'No SSH keys yet — generate one or import an existing key.' : 'Loading…'}
+            {error
+              ? 'The key list could not be loaded.'
+              : loaded
+                ? 'No SSH keys yet — generate one or import an existing key.'
+                : 'Loading…'}
           </div>
         }
       />

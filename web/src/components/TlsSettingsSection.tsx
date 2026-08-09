@@ -1,19 +1,9 @@
 import { useEffect, useRef, useState } from 'react'
+import { readFileAsText } from '../lib/readFileAsText'
 import { authedFetch } from '../store/auth'
 import type { TlsStatus } from '../types/api'
 import ConfirmDialog from './ConfirmDialog'
 import FieldError from './FieldError'
-
-/** Reads a picked certificate/key file into its paste field, so either
- *  path (picker or clipboard) ends in the same PEM text. */
-function readFileAsText(file: File): Promise<string> {
-  return new Promise((resolve, reject) => {
-    const reader = new FileReader()
-    reader.onload = () => resolve(String(reader.result ?? ''))
-    reader.onerror = () => reject(reader.error ?? new Error('read failed'))
-    reader.readAsText(file)
-  })
-}
 
 function formatExpiry(at: string): string {
   const d = new Date(at)
