@@ -4,9 +4,8 @@ A Peckboard WASM plugin that lists, installs, and removes common
 applications on Linux targets — the local Peckboard host and any
 configured remote SSH hosts — via MCP tools.
 
-This is the plugin **core**: catalog, target abstraction, and MCP tools.
-The web UI (target management, app grid, live install log) is a separate
-card/plugin surface and is not implemented here.
+It ships both an MCP tool surface (catalog, target abstraction, `app_*`
+tools) and an **App Manager dashboard page** reachable from the sidebar.
 
 ## Permissions
 
@@ -20,7 +19,62 @@ card/plugin surface and is not implemented here.
   grant itself is not narrower than that.
 - `ssh` — run commands on configured **remote** targets.
 - `ssh_keys` — resolve a remote target's configured vault key by id
-  (`Auth::KeyRef`) without this plugin ever seeing key material.
+  (`Auth::KeyRef`) without this plugin ever seeing key material, and populate
+  the page's key dropdown from `peckboard_ssh_key_list` (metadata only).
+- `user_authority` — serve the page's authenticated data routes under the
+  signed-in user (`http.request.authed`).
+- `contribute_sidebar` — the App Manager sidebar entry.
+
+**Upgrading from 0.1.0 re-triggers the approval prompt.** The permission set
+grew (`user_authority`, `contribute_sidebar`) and so did the hook list
+(`http.request.before`, `http.request.authed`), so Peckboard loads the new
+version inert until you approve it again in Settings → Plugins.
+
+## Dashboard Page
+
+Sidebar → **App Manager** opens `/plugin-api/v1/linux-app-manager`, served by
+this plugin and framed in a sandboxed iframe (no `allow-same-origin`). It
+talks only to its own authenticated routes, through the host's
+postMessage fetch bridge:
+
+| Route                                  | Purpose                                          |
+| -------------------------------------- | ------------------------------------------------ |
+| `GET /targets`                         | the target dropdown (local + configured remotes) |
+| `GET /ssh-keys`                        | vault key metadata for the key dropdown          |
+| `GET /apps?target=`                    | distro banner + one grid row per catalog app     |
+| `GET /status?target=&app=`             | one app's live state + job log tail              |
+| `POST /targets`, `POST /target-remove` | remote-target CRUD                               |
+| `POST /install`, `POST /remove`        | start a detached job                             |
+
+(all under `/api/plugin-ui/linux-app-manager`.)
+
+The page itself is a single HTML string (`src/page.ts`) that cannot import
+anything, so every display decision — badge text, action label, job headline,
+and the prose an error is rendered as — is made server-side in `src/view.ts`
+and shipped as plain data. That is also what the vitest suite covers; the page
+is pure DOM plumbing on top.
+
+Notes on the shape of it:
+
+- Target picker and SSH-key picker are `<select>` elements — never free text.
+  The page never accepts or displays private key material; a target stores only
+  the vault key's id.
+- Installs never block the UI: `POST /install` returns a job id and the page
+  polls `/status` every 2s, streaming the log tail with a running / succeeded /
+  failed state.
+- Removal goes through a confirmation that states plainly that it runs a
+  package-manager command as root on the target.
+- A target that isn't a usable Linux host renders as a refusal instead of an
+  app grid; every error is a sentence, never raw JSON.
+
+### Local Target and Folder Scope
+
+`peckboard_exec_any` pins its cwd to the caller's folder, and a **global**
+sidebar page has no project or session to resolve one from. Core therefore
+falls back to the app data dir when the caller holds full user authority and
+carried no folder scope (see `exec_impl` in `src/plugin/host.rs` in the core
+repo). An MCP tool call still refuses — its per-folder floor is what keeps a
+plugin tool inside the calling session's reach.
 
 ## Targets
 
@@ -31,9 +85,9 @@ card/plugin surface and is not implemented here.
   Only a vault key reference (`key_id`) is ever stored — never a password or
   private key. Populate the key dropdown from the `peckboard_ssh_key_list`
   host function.
-- This phase does not expose a tool to add/remove remote targets — that's
-  wired up by the UI-page card alongside its HTTP routes, on top of the
-  `src/targets.ts` store functions already here.
+- No MCP tool adds or removes a remote target: that is the dashboard page's
+  job, through its own `POST /targets` / `POST /target-remove` routes on top of
+  the `src/targets.ts` store functions.
 
 ## Catalog
 

@@ -53,8 +53,10 @@ impl HostCtx<'_> {
         let s = input.to_string();
         let out = match which {
             HostFn::HttpFetch => http_fetch_impl(&s),
-            HostFn::Exec => exec_impl(self.db, &s, &self.inv, true),
-            HostFn::ExecAny => exec_impl(self.db, &s, &self.inv, false),
+            // `None` authority_root: an MCP tool call is never full user
+            // authority, so it keeps the folder-scope refusal.
+            HostFn::Exec => exec_impl(self.db, &s, &self.inv, true, None),
+            HostFn::ExecAny => exec_impl(self.db, &s, &self.inv, false, None),
             HostFn::ListProjectFiles => list_project_files_impl(self.db, &self.inv),
             HostFn::ReadFile => read_file_impl(self.db, &s, &self.inv),
             HostFn::WriteFile => write_file_impl(self.db, &s, &self.inv),

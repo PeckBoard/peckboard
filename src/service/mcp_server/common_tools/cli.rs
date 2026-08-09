@@ -180,7 +180,7 @@ fn run_now(
         req["timeout_secs"] = serde_json::json!(t);
     }
     // exec_any semantics: any bare executable, folder-pinned cwd.
-    let out = exec_impl(db, &req.to_string(), inv, false);
+    let out = exec_impl(db, &req.to_string(), inv, false, None);
     let mut result = parse_envelope(&out)?;
     if let Some(obj) = result.as_object_mut() {
         obj.insert(

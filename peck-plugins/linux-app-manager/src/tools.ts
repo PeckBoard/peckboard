@@ -20,6 +20,7 @@ import { errMsg } from "./verdict";
 import { runOnTarget } from "./exec";
 import {
   JobAction,
+  JobRecord,
   buildBackgroundScript,
   createJob,
   currentJobFor,
@@ -27,6 +28,7 @@ import {
   putJob,
 } from "./jobs";
 import { TargetRecord, listTargets, resolveTarget } from "./targets";
+import { appRowView, distroView, jobView, targetView } from "./view";
 
 const PROBE_TIMEOUT_SECS = 15;
 const LAUNCH_TIMEOUT_SECS = 30;
@@ -139,23 +141,35 @@ export function appList(args: any): any {
 
 // --- app_status -----------------------------------------------------------------
 
-export function appStatus(args: any): any {
-  const target = resolveTarget(reqStr(args?.target, "target"));
-  const app = resolveCatalogApp(reqStr(args?.app, "app"));
-
+/** The shared read path behind app_status and the UI's /status route: probe
+ * the app, then poll whatever job is (or was last) attached to it. */
+function appState(
+  target: TargetRecord,
+  app: CatalogApp,
+): {
+  probe: { installed: boolean; version: string | null; error?: string };
+  job: JobRecord | null;
+  tail: string;
+} {
   const probe = probeApp(target, app);
-
   let job = currentJobFor(target.id, app.id);
-  let logTail = "";
+  let tail = "";
   if (job) {
     try {
       const polled = pollJob(target, job);
       job = polled.job;
-      logTail = polled.tail;
+      tail = polled.tail;
     } catch (e) {
-      logTail = `(could not poll job status: ${errMsg(e)})`;
+      tail = `(could not poll job status: ${errMsg(e)})`;
     }
   }
+  return { probe, job, tail };
+}
+
+export function appStatus(args: any): any {
+  const target = resolveTarget(reqStr(args?.target, "target"));
+  const app = resolveCatalogApp(reqStr(args?.app, "app"));
+  const { probe, job, tail } = appState(target, app);
 
   return {
     app: app.id,
@@ -169,7 +183,7 @@ export function appStatus(args: any): any {
           action: job.action,
           status: job.status,
           exit_code: job.exit_code ?? null,
-          log_tail: logTail,
+          log_tail: tail,
         }
       : null,
   };
@@ -242,4 +256,66 @@ export function appRemove(args: any): any {
     );
   }
   return startJob(target, app, "remove", recipe);
+}
+
+// --- UI surface (see http.ts / page.ts) -------------------------------------
+
+/**
+ * Everything the dashboard needs for ONE target in a single round trip: the
+ * target itself, its distro/package-manager banner (or the refusal when it
+ * isn't a usable Linux target), and one row per catalog app with its installed
+ * state plus any job attached to it. Job records come from the data store, so
+ * this costs no extra exec beyond the per-app probes.
+ */
+export function targetOverview(targetRef: unknown): any {
+  const target = resolveTarget(targetRef);
+  let probe: DistroInfo | null = null;
+  let probeError: string | null = null;
+  try {
+    probe = probeDistro(target);
+  } catch (e) {
+    probeError = errMsg(e);
+  }
+  const distro = distroView(probe, probeError);
+  const apps = distro.supported
+    ? APPS.map((app) =>
+        appRowView(
+          app,
+          probeApp(target, app),
+          probe ? probe.pm : null,
+          currentJobFor(target.id, app.id),
+        ),
+      )
+    : [];
+  return { target: targetView(target), distro, apps };
+}
+
+/**
+ * The dashboard's install-progress poll: one app's live state plus the job's
+ * log tail. Returns the SAME row shape as `targetOverview` so the page can
+ * swap a row wholesale instead of patching fields (and drifting from what the
+ * server would say). The distro re-probe is a `cat /etc/os-release`, so it
+ * costs nothing next to the app probe it accompanies.
+ */
+export function appProgress(targetRef: unknown, appRef: unknown): any {
+  const target = resolveTarget(targetRef);
+  const app = resolveCatalogApp(reqStr(appRef, "app"));
+  let pm: PackageManager | null = null;
+  try {
+    pm = probeDistro(target).pm;
+  } catch {
+    pm = null;
+  }
+  const { probe, job, tail } = appState(target, app);
+  return {
+    app: app.id,
+    target: target.id,
+    row: appRowView(app, probe, pm, job),
+    job: job ? jobView(job, tail) : null,
+  };
+}
+
+/** The list behind the target dropdown. */
+export function targetChoices(): any {
+  return { targets: listTargets().map(targetView) };
 }

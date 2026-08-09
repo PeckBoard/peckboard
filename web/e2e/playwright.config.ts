@@ -52,16 +52,19 @@ process.env.PECKBOARD_E2E_DATA_DIR = DATA_DIR
 // Config evaluation happens first (it defines the webServer), making this
 // the only reliable pre-boot hook. Idempotent — worker processes re-eval
 // this file against the same DATA_DIR.
-const pluginsSrcRoot = path.resolve(
-  path.dirname(fileURLToPath(import.meta.url)),
-  '..',
-  '..',
-  '..',
-  'peck-plugins',
-)
-for (const plugin of ['openai-compat', 'chicken-coop']) {
-  const wasm = path.join(pluginsSrcRoot, plugin, 'dist', 'plugin.wasm')
-  if (existsSync(wasm)) {
+// A plugin may live in-tree (`<repo>/peck-plugins/<id>`) or in the older
+// sibling checkout next to the repo — same two candidates the Rust plugin
+// tests probe. First one with a built wasm wins.
+const e2eDir = path.dirname(fileURLToPath(import.meta.url))
+const pluginsSrcRoots = [
+  path.resolve(e2eDir, '..', '..', 'peck-plugins'),
+  path.resolve(e2eDir, '..', '..', '..', 'peck-plugins'),
+]
+for (const plugin of ['openai-compat', 'chicken-coop', 'linux-app-manager']) {
+  const wasm = pluginsSrcRoots
+    .map((root) => path.join(root, plugin, 'dist', 'plugin.wasm'))
+    .find((candidate) => existsSync(candidate))
+  if (wasm) {
     const pluginsDir = path.join(DATA_DIR, 'plugins')
     mkdirSync(pluginsDir, { recursive: true })
     copyFileSync(wasm, path.join(pluginsDir, `${plugin}.wasm`))

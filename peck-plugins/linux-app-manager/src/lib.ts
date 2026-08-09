@@ -1,9 +1,11 @@
-// Hook dispatch. This plugin only implements mcp.tool.invoke — every tool
-// here is a short, bounded exec (or a fast job-launch/poll), so unlike
-// ssh-fleet's long-lived SSH sessions there's no need for the defer/finalize
-// round-trip; each tool call resolves synchronously within one invocation.
+// Hook dispatch. Tool calls are short, bounded execs (or a fast job-launch /
+// poll), so unlike ssh-fleet's long-lived SSH sessions there's no need for the
+// defer/finalize round-trip; each tool call resolves synchronously within one
+// invocation. The two http.* hooks serve the dashboard page and its
+// authenticated data routes (see http.ts).
 
 import { appInstall, appList, appRemove, appStatus, appTargets } from "./tools";
+import { serveAuthed, serveHttp } from "./http";
 import { allow, cancel, errMsg, skip } from "./verdict";
 
 const TOOLS: Record<string, (args: any) => any> = {
@@ -41,6 +43,10 @@ export function dispatch(hook: string, payload: any): string {
   switch (hook) {
     case "mcp.tool.invoke":
       return handleInvoke(payload);
+    case "http.request.before":
+      return serveHttp(payload);
+    case "http.request.authed":
+      return serveAuthed(payload);
     default:
       return skip();
   }

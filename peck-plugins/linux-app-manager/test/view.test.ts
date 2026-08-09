@@ -1,0 +1,201 @@
+// The page (src/page.ts) is a static HTML string and cannot import anything,
+// so every display decision it makes is shaped here first. These tests pin the
+// shapes the page renders verbatim: badges, action labels, job headlines, and
+// the error prose that replaces raw stderr / JSON.
+
+import { describe, expect, it } from "vitest";
+import { findApp } from "../src/catalog";
+import { JobRecord } from "../src/jobs";
+import { LOCAL_TARGET } from "../src/targets";
+import {
+  appRowView,
+  distroView,
+  friendlyError,
+  jobView,
+  targetView,
+} from "../src/view";
+
+const git = findApp("git")!;
+const claude = findApp("claude")!;
+
+function job(over: Partial<JobRecord>): JobRecord {
+  return {
+    id: "j1",
+    target_id: "local",
+    app_id: "git",
+    action: "install",
+    pid: 42,
+    logfile: "/tmp/x.log",
+    status: "running",
+    ...over,
+  };
+}
+
+describe("targetView", () => {
+  it("describes the local target without host details", () => {
+    expect(targetView(LOCAL_TARGET)).toMatchObject({
+      id: "local",
+      kind: "local",
+      detail: "this Peckboard host",
+    });
+  });
+
+  it("describes a remote target as user@host:port and carries the key id only", () => {
+    const v = targetView({
+      id: "t1",
+      kind: "remote",
+      label: "build box",
+      hostname: "10.0.0.5",
+      port: 2222,
+      username: "ubuntu",
+      key_id: "k1",
+    });
+    expect(v.detail).toBe("ubuntu@10.0.0.5:2222");
+    expect(v.key_id).toBe("k1");
+    expect(JSON.stringify(v)).not.toContain("PRIVATE KEY");
+  });
+});
+
+describe("distroView", () => {
+  it("summarises a recognised distro with its package manager", () => {
+    const v = distroView({ id: "ubuntu", idLike: ["debian"], pm: "apt" }, null);
+    expect(v.supported).toBe(true);
+    expect(v.package_manager).toBe("apt");
+    expect(v.summary).toContain("apt");
+    expect(v.refusal).toBeNull();
+  });
+
+  it("stays supported but flags a distro with no known package manager", () => {
+    const v = distroView({ id: "nixos", idLike: [], pm: null }, null);
+    expect(v.supported).toBe(true);
+    expect(v.package_manager).toBeNull();
+    expect(v.summary).toContain("no supported package manager");
+  });
+
+  it("refuses a target that is not a readable Linux host, in prose", () => {
+    const v = distroView(
+      null,
+      "could not read /etc/os-release on target 'local'; this plugin only supports Linux targets",
+    );
+    expect(v.supported).toBe(false);
+    expect(v.refusal).toContain(
+      "could not identify this target as a Linux host",
+    );
+    expect(v.refusal).not.toContain("{");
+  });
+});
+
+describe("appRowView", () => {
+  it("offers Install for a missing app", () => {
+    const r = appRowView(git, { installed: false, version: null }, "apt", null);
+    expect(r.state_label).toBe("Not installed");
+    expect(r.action).toBe("install");
+    expect(r.action_label).toBe("Install");
+    expect(r.actionable).toBe(true);
+    expect(r.blocked_reason).toBeNull();
+  });
+
+  it("offers Remove, with the version, for an installed app", () => {
+    const r = appRowView(
+      git,
+      { installed: true, version: "git version 2.40.0" },
+      "apt",
+      null,
+    );
+    expect(r.state_label).toBe("Installed");
+    expect(r.action).toBe("remove");
+    expect(r.version).toBe("git version 2.40.0");
+  });
+
+  it("blocks the action with a reason when the distro has no recipe", () => {
+    const r = appRowView(git, { installed: false, version: null }, null, null);
+    expect(r.actionable).toBe(false);
+    expect(r.blocked_reason).toContain("No install recipe");
+  });
+
+  it("keeps a vendor-script app actionable even with no package manager", () => {
+    const r = appRowView(
+      claude,
+      { installed: false, version: null },
+      null,
+      null,
+    );
+    expect(r.actionable).toBe(true);
+  });
+
+  it("carries an attached job through to the row", () => {
+    const r = appRowView(
+      git,
+      { installed: false, version: null },
+      "apt",
+      job({ status: "running" }),
+    );
+    expect(r.job?.tone).toBe("busy");
+  });
+});
+
+describe("jobView", () => {
+  it("labels a running install", () => {
+    const v = jobView(job({ status: "running" }), "reading package lists");
+    expect(v.label).toBe("Installing…");
+    expect(v.tone).toBe("busy");
+    expect(v.log_tail).toBe("reading package lists");
+  });
+
+  it("labels a finished remove", () => {
+    const v = jobView(
+      job({ action: "remove", status: "succeeded", exit_code: 0 }),
+      "",
+    );
+    expect(v.label).toBe("Remove succeeded");
+    expect(v.tone).toBe("ok");
+  });
+
+  it("labels a failure with its exit code", () => {
+    const v = jobView(job({ status: "failed", exit_code: 100 }), "");
+    expect(v.label).toBe("Install failed (exit 100)");
+    expect(v.tone).toBe("bad");
+  });
+
+  it("labels a crashed job that left no exit code", () => {
+    const v = jobView(job({ status: "failed" }), "");
+    expect(v.label).toBe("Install failed");
+  });
+});
+
+describe("friendlyError", () => {
+  it("explains a missing sudo password instead of dumping stderr", () => {
+    const msg = friendlyError("sudo: a password is required");
+    expect(msg).toContain("needs root on the target");
+    expect(msg).toContain("sudo: a password is required");
+  });
+
+  it("explains an unreadable /etc/os-release", () => {
+    expect(
+      friendlyError("could not read /etc/os-release on target 'x'"),
+    ).toContain("Only Linux targets can be managed here.");
+  });
+
+  it("explains an unreachable host", () => {
+    expect(friendlyError("connect: Connection refused")).toContain(
+      "Could not reach the target over SSH",
+    );
+  });
+
+  it("explains rejected credentials", () => {
+    expect(friendlyError("Permission denied (publickey)")).toContain(
+      "refused the SSH credentials",
+    );
+  });
+
+  it("unwraps a JSON error envelope rather than showing raw JSON", () => {
+    expect(friendlyError('{"error":"hostname is required"}')).toBe(
+      "Hostname is required",
+    );
+  });
+
+  it("never returns an empty message", () => {
+    expect(friendlyError("")).toContain("Something went wrong");
+    expect(friendlyError(null)).toContain("Something went wrong");
+  });
+});

@@ -2195,11 +2195,19 @@ fn drain_capped<R: std::io::Read + Send + 'static>(
 /// folder. Input: `{"command", "args"?: [..], "timeout_secs"?}`. Output:
 /// `{"exit_code", "stdout", "stderr", "stdout_truncated", "stderr_truncated",
 /// "timed_out"}` or an `{"error"}` envelope.
+///
+/// `authority_root` is the cwd used when the caller holds full **user**
+/// authority (a plugin's own authenticated UI page) but the request carried no
+/// folder scope — a global `sidebar_items` page has no project/session to
+/// resolve one from. `None` (the MCP tool bridge, which is never full
+/// authority) keeps the refusal: the per-folder floor is what keeps a tool call
+/// inside the calling session's reach, and no user stands behind it to widen it.
 pub(crate) fn exec_impl(
     db: &Db,
     input: &str,
     inv: &InvocationContext,
     enforce_allowlist: bool,
+    authority_root: Option<&std::path::Path>,
 ) -> String {
     let req: ExecRequest = match serde_json::from_str(input) {
         Ok(r) => r,
@@ -2225,8 +2233,15 @@ pub(crate) fn exec_impl(
             EXEC_ALLOWLIST.join(", ")
         ));
     }
+    let authority_fallback = authority_root
+        .filter(|_| inv.authority && inv.folder_id.is_none())
+        .map(|p| p.to_path_buf());
     let root = match caller_folder_root(db, inv) {
         Ok(r) => r,
+        // The exec cwd is a working directory, not a jail (unlike the
+        // fs_jail-backed file functions): what bounds this call is the
+        // permission grant plus the bare-name check, both already applied.
+        Err(_) if authority_fallback.is_some() => authority_fallback.unwrap(),
         Err(e) => return error_json(e),
     };
     let timeout = Duration::from_secs(
@@ -2721,6 +2736,33 @@ fn state_permission_and_invocation(
     ))
 }
 
+/// Like [`state_permission_and_invocation`] but also clones the app data dir.
+/// The exec host functions need it as [`exec_impl`]'s `authority_root`: the
+/// cwd for a full-authority UI caller that carried no folder scope.
+#[allow(clippy::type_complexity)]
+fn state_permission_invocation_and_data_dir(
+    user_data: &UserData<HostState>,
+    permission: &str,
+) -> Result<(Db, PathBuf, String, bool, Option<InvocationContext>), Error> {
+    let state = user_data.get()?;
+    let state = state
+        .lock()
+        .map_err(|_| anyhow::anyhow!("plugin host state mutex poisoned"))?;
+    let granted = state
+        .permissions
+        .read()
+        .map_err(|_| anyhow::anyhow!("plugin permission set poisoned"))?
+        .contains(permission);
+    let invocation = effective_context(&state)?;
+    Ok((
+        state.db.clone(),
+        state.data_dir.clone(),
+        state.plugin_id.clone(),
+        granted,
+        invocation,
+    ))
+}
+
 /// The effective caller context a scoped host function should use: an in-flight
 /// MCP invocation's verified scope if present, else — when the plugin is in an
 /// authenticated user request — a full-authority context derived from the user.
@@ -3059,17 +3101,17 @@ host_fn!(peckboard_http_request(user_data: HostState; input: String) -> String {
     Ok(http_request_impl(&input))
 });
 host_fn!(peckboard_exec(user_data: HostState; input: String) -> String {
-    let (db, _plugin_id, ok, inv) = state_permission_and_invocation(&user_data, "process_exec")?;
+    let (db, data_dir, _plugin_id, ok, inv) = state_permission_invocation_and_data_dir(&user_data, "process_exec")?;
     if !ok { return Ok(error_json("plugin lacks the 'process_exec' permission")); }
     let Some(inv) = inv else { return Ok(error_json("no caller context; peckboard_exec is only callable during a tool invocation")); };
-    Ok(exec_impl(&db, &input, &inv, true))
+    Ok(exec_impl(&db, &input, &inv, true, Some(&data_dir)))
 });
 
 host_fn!(peckboard_exec_any(user_data: HostState; input: String) -> String {
-    let (db, _plugin_id, ok, inv) = state_permission_and_invocation(&user_data, "process_exec_any")?;
+    let (db, data_dir, _plugin_id, ok, inv) = state_permission_invocation_and_data_dir(&user_data, "process_exec_any")?;
     if !ok { return Ok(error_json("plugin lacks the 'process_exec_any' permission")); }
     let Some(inv) = inv else { return Ok(error_json("no caller context; peckboard_exec_any is only callable during a tool invocation")); };
-    Ok(exec_impl(&db, &input, &inv, false))
+    Ok(exec_impl(&db, &input, &inv, false, Some(&data_dir)))
 });
 
 /// View returned by `peckboard_ssh_key_list` — vault key METADATA only.
@@ -4731,6 +4773,10 @@ mod tests {
         .await
         .unwrap();
         let caller = inv(Some("pE"), Some("fE"));
+        // Stands in for the app data dir the exec host functions pass as
+        // `authority_root`.
+        let data_dir = tempfile::tempdir().unwrap();
+        let data_root = data_dir.path().to_path_buf();
 
         // exec_impl is blocking (DB reads + the env-var unlock snapshot's
         // blocking_lock) — run it on a blocking thread, the exec path's real
@@ -4739,7 +4785,13 @@ mod tests {
         // unlock registry.
         tokio::task::spawn_blocking(move || {
             // Not on the allowlist → refused before spawning (allowlist enforced).
-            let r = exec_impl(&db, r#"{"command":"rm","args":["-rf","/"]}"#, &caller, true);
+            let r = exec_impl(
+                &db,
+                r#"{"command":"rm","args":["-rf","/"]}"#,
+                &caller,
+                true,
+                Some(&data_root),
+            );
             assert!(r.contains("not on the allowlist"), "rm: {r}");
 
             // The unrestricted variant skips the allowlist (but still bare-name +
@@ -4749,6 +4801,7 @@ mod tests {
                 r#"{"command":"rm","args":["--version"]}"#,
                 &caller,
                 false,
+                Some(&data_root),
             );
             assert!(
                 !r.contains("not on the allowlist"),
@@ -4757,18 +4810,51 @@ mod tests {
 
             // A path component (escape attempt) → refused as not-a-bare-name, even
             // for the unrestricted variant.
-            let r = exec_impl(&db, r#"{"command":"../../bin/sh"}"#, &caller, false);
+            let r = exec_impl(
+                &db,
+                r#"{"command":"../../bin/sh"}"#,
+                &caller,
+                false,
+                Some(&data_root),
+            );
             assert!(r.contains("bare executable name"), "path: {r}");
 
-            // No folder scope → refused (cwd cannot be pinned).
+            // No folder scope on an MCP invocation → still refused (the
+            // per-folder floor is what keeps a plugin tool inside the calling
+            // session's reach).
             let unscoped = inv(Some("pE"), None);
             let r = exec_impl(
                 &db,
                 r#"{"command":"git","args":["--version"]}"#,
                 &unscoped,
                 true,
+                Some(&data_root),
             );
             assert!(r.contains("folder"), "unscoped: {r}");
+
+            // A full-authority UI caller (a plugin's global sidebar page) has
+            // no folder to resolve, so it runs in the app data dir instead of
+            // being refused — the cwd is a working directory here, not a jail.
+            let authority = InvocationContext {
+                authority: true,
+                ..Default::default()
+            };
+            let r = exec_impl(
+                &db,
+                r#"{"command":"pwd"}"#,
+                &authority,
+                false,
+                Some(&data_root),
+            );
+            let v: serde_json::Value = serde_json::from_str(&r).unwrap();
+            assert!(v.get("error").is_none(), "authority exec: {r}");
+            assert!(
+                v["stdout"]
+                    .as_str()
+                    .unwrap_or("")
+                    .contains(data_root.file_name().unwrap().to_str().unwrap()),
+                "authority cwd: {r}"
+            );
 
             // Allowlisted command runs in the folder when the tool is present.
             let r = exec_impl(
@@ -4776,6 +4862,7 @@ mod tests {
                 r#"{"command":"git","args":["--version"]}"#,
                 &caller,
                 true,
+                Some(&data_root),
             );
             let v: serde_json::Value = serde_json::from_str(&r).unwrap();
             if v.get("error").is_none() {
@@ -5514,7 +5601,9 @@ mod tests {
         let script = script.to_string();
         let out = tokio::task::spawn_blocking(move || {
             let req = serde_json::json!({ "command": "sh", "args": ["-c", script] }).to_string();
-            exec_impl(&db, &req, &exec_inv(), false)
+            // exec_inv() is folder-scoped, so the authority_root is unused here.
+            // exec_inv() is folder-scoped, so no authority fallback is needed.
+            exec_impl(&db, &req, &exec_inv(), false, None)
         })
         .await
         .unwrap();

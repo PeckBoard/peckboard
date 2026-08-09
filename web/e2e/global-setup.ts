@@ -55,7 +55,7 @@ export default async function globalSetup() {
 
   const token = await tokenFor()
   if (token) {
-    for (const plugin of ['openai-compat', 'chicken-coop']) {
+    for (const plugin of ['openai-compat', 'chicken-coop', 'linux-app-manager']) {
       await fetch(`${baseURL}/api/plugins/${plugin}/approval`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
