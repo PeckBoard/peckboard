@@ -1,0 +1,16 @@
+{
+  "name": "peckboard-linux-app-manager-plugin",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Peckboard WASM plugin — list, install, and remove common applications on Linux targets (the local host and configured SSH hosts) via MCP tools",
+  "scripts": {
+    "bundle": "node esbuild.js",
+    "build": "node esbuild.js && extism-js dist/index.js -i src/index.d.ts -o dist/plugin.wasm",
+    "test": "vitest run"
+  },
+  "devDependencies": {
+    "@extism/js-pdk": "^1.1.1",
+    "esbuild": "^0.23.1",
+    "vitest": "^2.1.9"
+  }
+}

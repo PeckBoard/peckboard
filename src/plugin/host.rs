@@ -5560,8 +5560,17 @@ mod tests {
         assert!(stdout.contains("********"), "stdout: {stdout}");
     }
 
+    // Regression guard: `exec_injects_unlocked_encrypted_vars_and_masks_them`
+    // and `exec_injects_another_users_unlocked_value_by_shared_design` each
+    // install a fresh global env-unlock registry (`set_global_registry`) and
+    // populate it. Run concurrently (the default under `cargo test`), one
+    // test's registry replaces the other's mid-flight and either can lose
+    // its cached value. Serialize just these two tests against each other.
+    static ENV_UNLOCK_TEST_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
     #[tokio::test]
     async fn exec_injects_unlocked_encrypted_vars_and_masks_them() {
+        let _guard = ENV_UNLOCK_TEST_LOCK.lock().await;
         let (db, _dir) = exec_fixture().await;
         let ts = chrono::Utc::now().to_rfc3339();
         let row = db
@@ -5602,6 +5611,7 @@ mod tests {
 
     #[tokio::test]
     async fn exec_injects_another_users_unlocked_value_by_shared_design() {
+        let _guard = ENV_UNLOCK_TEST_LOCK.lock().await;
         // Deliberate design decision (confirmed 2026-08-03, not a bug): an
         // encrypted var's warm-unlocked plaintext is shared DB-wide, not
         // scoped to the user who unlocked it — see the doc comment on
