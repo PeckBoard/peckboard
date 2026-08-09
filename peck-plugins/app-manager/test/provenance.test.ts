@@ -445,4 +445,21 @@ describe("settleJobProvenance", () => {
     );
     expect(getInstallRecord("local", "git")).toBeNull();
   });
+
+  it("records the pip namespace — no bracket exec — for a pip-method install", () => {
+    const execAny = vi.fn();
+    installHost({}, { execAny });
+    settleJobProvenance(
+      LOCAL_TARGET,
+      installJob({ app_id: "graphifyy", pm: null, method: "pip" }),
+    );
+    expect(execAny).not.toHaveBeenCalled();
+    const rec = getInstallRecord("local", "graphifyy")!;
+    expect(rec.method).toBe("pip");
+    expect(rec.tracking).toBe("pip");
+    expect(rec.note).toMatch(/pip's namespace/);
+    // Distinct machine-readable label — a pip package must never read as a
+    // tracked/untracked system package.
+    expect(trackingState(rec)).toBe("pip");
+  });
 });

@@ -47,6 +47,8 @@ const SNAPSHOT_FAILED_NOTE =
   "The package-database snapshot failed on the target, so what this install added is unknown.";
 const NO_BRACKET_NOTE =
   "The install ran without a package-database snapshot (no supported package manager was detected when it started), so what it added is unknown.";
+const PIP_NAMESPACE_NOTE =
+  "Python package installed via pip — it lives in pip's namespace, so the package-database snapshot bracket deliberately does not apply. Versions come from pip itself (pip list --format=freeze).";
 
 export interface PkgRef {
   name: string;
@@ -59,13 +61,15 @@ export interface PkgChange {
   to: string;
 }
 
-export type InstallMethod = PackageManager | "vendor";
+export type InstallMethod = PackageManager | "vendor" | "pip";
 
 /** "tracked" = a real before/after delta was recorded; "unknown" = the
  * snapshot bracket failed and we refuse to claim anything about what
- * landed. There is deliberately no state for "empty" — an empty `added`
- * on a tracked record really means nothing new arrived. */
-export type ProvenanceTracking = "tracked" | "unknown";
+ * landed; "pip" = the app lives in pip's namespace, where the package-DB
+ * bracket deliberately does not apply (versions come from pip itself).
+ * There is deliberately no state for "empty" — an empty `added` on a
+ * tracked record really means nothing new arrived. */
+export type ProvenanceTracking = "tracked" | "unknown" | "pip";
 
 export interface InstallRecord {
   job_id: string;
@@ -286,10 +290,12 @@ export function buildInstallRecord(args: {
 /** Machine-readable tracking state for the MCP surface: "tracked" (a real
  * delta was recorded), "untracked" (vendor installer — the app itself never
  * enters the package DB, though bracketed prerequisites still appear in
- * `added`), "unknown" (the snapshot bracket failed). */
+ * `added`), "unknown" (the snapshot bracket failed), "pip" (pip-namespace
+ * app — versions tracked by pip, never by the distro package DB). */
 export function trackingState(
   rec: InstallRecord,
-): "tracked" | "untracked" | "unknown" {
+): "tracked" | "untracked" | "unknown" | "pip" {
+  if (rec.method === "pip" || rec.tracking === "pip") return "pip";
   if (rec.tracking === "unknown") return "unknown";
   return rec.method === "vendor" ? "untracked" : "tracked";
 }
@@ -348,6 +354,24 @@ export function settleJobProvenance(
   if (existing && existing.job_id === job.id) return; // bracket already consumed
 
   const method: InstallMethod = job.method ?? "vendor";
+  // pip-namespace installs never touch the distro package DB, so there is
+  // no bracket to consume — record the namespace instead of pretending the
+  // snapshot failed.
+  if (method === "pip") {
+    putInstallRecord({
+      job_id: job.id,
+      target_id: job.target_id,
+      app_id: job.app_id,
+      installed_at: new Date().toISOString(),
+      method,
+      tracking: "pip",
+      note: PIP_NAMESPACE_NOTE,
+      primary: null,
+      added: [],
+      changed: [],
+    });
+    return;
+  }
   const pm = job.pm ?? null;
   const app = findApp(job.app_id);
   const primaryNames = app ? packagesFor(app, pm) : [];

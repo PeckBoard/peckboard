@@ -25,7 +25,10 @@
 // Honest limits: vendor curl|sh installs (claude, cursor-agent, ollama)
 // never enter the package database, so they get an explicit "not tracked by
 // the package manager" note instead of an empty tree; pip packages are a
-// different namespace entirely and are NOT covered here (see README).
+// different namespace entirely and are kept OUT of the system graph — they
+// ride along as `StoredDepGraph.pip`, probed with pip itself (`pip list
+// --format=freeze` for versions, `pip show` for Requires/Required-by edges)
+// and rendered as their own clearly-labelled section.
 //
 // Same layout as provenance.ts/jobs.ts: everything above the exec/store
 // calls is pure, DOM-free and host-free, unit-tested in test/deps.test.ts.
@@ -68,6 +71,8 @@ const VENDOR_NOTE =
   "Installed by a vendor script — not tracked by the package manager, so no dependency data exists for it.";
 const STALE_NOTE =
   "Not in the dependency graph — either it was not installed through the package manager, or the graph predates its install. Refresh dependencies to update.";
+const PIP_APP_NOTE =
+  "Python package in pip's namespace — never part of the system package graph. Its pip-reported dependencies are in the pip section.";
 
 export type DepNodeKind = "app" | "library" | "binary";
 
@@ -96,6 +101,10 @@ export interface StoredDepGraph {
   truncated: boolean;
   nodes: DepNode[];
   edges: DepEdge[];
+  /** pip-namespace ride-along: the catalog's pip packages as pip reports
+   * them. Beside the system graph, never merged into nodes/edges — pip is
+   * a separate namespace (absent on graphs stored before it existed). */
+  pip?: PipPkgInfo[];
 }
 
 // --- pure: classification ----------------------------------------------------
@@ -403,6 +412,82 @@ export function parseRdependsOutput(pm: PackageManager, raw: string): string[] {
       return sections.length ? sections[0].requiredBy : [];
     }
   }
+}
+
+// --- pure: pip namespace -----------------------------------------------------
+
+/** One pip-namespace package, as pip itself reports it. `requires` /
+ * `required_by` come from `pip show`'s Requires/Required-by lines — edges
+ * that live entirely inside pip's namespace and never join the system
+ * graph's nodes/edges. */
+export interface PipPkgInfo {
+  name: string;
+  version: string;
+  requires: string[];
+  required_by: string[];
+}
+
+/** Versions for every pip-visible package: `name==version` per line. */
+export function buildPipFreezeScript(): string {
+  return "python3 -m pip list --format=freeze --disable-pip-version-check 2>/dev/null";
+}
+
+/** Requires/Required-by for the catalog's pip packages: one `pip show`
+ * block per package, `---` lines between them. A package pip doesn't know
+ * is simply missing from the output (pip warns on stderr and exits 1;
+ * the parser sees neither). */
+export function buildPipShowScript(pkgs: string[]): string {
+  return (
+    "python3 -m pip show --disable-pip-version-check " +
+    pkgs.join(" ") +
+    " 2>/dev/null"
+  );
+}
+
+export function parsePipFreeze(raw: string): Map<string, string> {
+  const out = new Map<string, string>();
+  for (const line of raw.split("\n")) {
+    const m = /^([A-Za-z0-9._-]+)==(.+)$/.exec(line.trim());
+    if (m) out.set(m[1].toLowerCase(), m[2].trim());
+  }
+  return out;
+}
+
+/** Parse `pip show a b c` output: `Key: value` field lines, `---` between
+ * packages. Unknown keys are skipped, never fatal. */
+export function parsePipShow(raw: string): PipPkgInfo[] {
+  const out: PipPkgInfo[] = [];
+  let cur: PipPkgInfo | null = null;
+  for (const line of raw.split("\n")) {
+    if (line.trim() === "---") {
+      cur = null;
+      continue;
+    }
+    const m = /^([A-Za-z-]+):\s?(.*)$/.exec(line);
+    if (!m) continue;
+    const key = m[1].toLowerCase();
+    const value = m[2].trim();
+    if (key === "name") {
+      cur = { name: value, version: "", requires: [], required_by: [] };
+      out.push(cur);
+    } else if (!cur) {
+      continue;
+    } else if (key === "version") {
+      cur.version = value;
+    } else if (key === "requires") {
+      cur.requires = splitPipList(value);
+    } else if (key === "required-by") {
+      cur.required_by = splitPipList(value);
+    }
+  }
+  return out;
+}
+
+function splitPipList(v: string): string[] {
+  return v
+    .split(",")
+    .map((s) => s.trim())
+    .filter(Boolean);
 }
 
 // --- pure: graph assembly ----------------------------------------------------
@@ -781,11 +866,13 @@ export function buildDepsOverview(
       name: app.name,
       tracked: false,
       note:
-        rec && rec.method === "vendor"
-          ? VENDOR_NOTE
-          : graph
-            ? STALE_NOTE
-            : null,
+        app.namespace === "pip"
+          ? PIP_APP_NOTE
+          : rec && rec.method === "vendor"
+            ? VENDOR_NOTE
+            : graph
+              ? STALE_NOTE
+              : null,
       packages: [] as string[],
       tree: null,
       also_removed: [],
@@ -806,6 +893,8 @@ export function buildDepsOverview(
         }
       : null,
     apps,
+    // pip namespace, separate from `nodes`/`edges` — label it as such.
+    pip_packages: graph?.pip ?? [],
     libraries: graph ? reverseEntries(graph, appsByPkg) : [],
     nodes: graph ? graph.nodes : [],
     edges: graph ? graph.edges : [],
@@ -914,6 +1003,30 @@ function resolveRpmCaps(
   return out;
 }
 
+/** Probe the catalog's pip-namespace packages with pip itself: freeze for
+ * authoritative versions, `pip show` for Requires/Required-by edges.
+ * Returns only packages pip actually knows — an uninstalled one is absent,
+ * never an empty entry. */
+function probePipPackages(target: TargetRecord, pkgs: string[]): PipPkgInfo[] {
+  const freeze = runOnTarget(
+    target,
+    buildPipFreezeScript(),
+    QUERY_TIMEOUT_SECS,
+  );
+  const versions = parsePipFreeze(freeze.stdout);
+  const show = runOnTarget(
+    target,
+    buildPipShowScript(pkgs),
+    QUERY_TIMEOUT_SECS,
+  );
+  const wanted = new Set(pkgs.map((p) => p.toLowerCase()));
+  return parsePipShow(show.stdout)
+    .filter((i) => wanted.has(i.name.toLowerCase()))
+    .map((i) => ({
+      ...i,
+      version: versions.get(i.name.toLowerCase()) ?? i.version,
+    }));
+}
 /**
  * Re-resolve the whole graph for a target: one package-database dump, one
  * batched query per BFS level (plus one capability-resolution pass on rpm),
@@ -992,6 +1105,20 @@ export function refreshDepGraph(target: TargetRecord, depthArg?: unknown): any {
   });
   markShared(nodes, expansion.edges);
 
+  // pip ride-along: probed with pip itself, stored beside the system graph,
+  // never merged into its nodes/edges — pip is a separate namespace. A
+  // missing or broken pip must not sink the system refresh.
+  const pipNames = APPS.filter((a) => a.pip_package).map(
+    (a) => a.pip_package as string,
+  );
+  let pip: PipPkgInfo[] = [];
+  if (pipNames.length) {
+    try {
+      pip = probePipPackages(target, pipNames.sort());
+    } catch {
+      /* pip absent or unusable — the pip section just stays empty */
+    }
+  }
   const graph: StoredDepGraph = {
     target_id: target.id,
     pm,
@@ -1000,6 +1127,7 @@ export function refreshDepGraph(target: TargetRecord, depthArg?: unknown): any {
     truncated: expansion.truncated,
     nodes,
     edges: expansion.edges,
+    pip,
   };
   putDepGraph(graph);
   return buildDepsOverview(target.id, graph, listInstallRecords(target.id));

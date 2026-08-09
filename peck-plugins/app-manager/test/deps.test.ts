@@ -24,6 +24,10 @@ import {
   depTree,
   depsOverview,
   expandLevels,
+  buildPipFreezeScript,
+  buildPipShowScript,
+  parsePipFreeze,
+  parsePipShow,
   getDepGraph,
   markShared,
   parseAptDepends,
@@ -575,13 +579,19 @@ const RDEPS = [
 ].join("\n");
 
 /** A canned apt world: only the packages actually named in the level's
- * script are answered, exactly as apt-cache itself behaves. */
-function installAptWorld(): Store {
+ * script are answered, exactly as apt-cache itself behaves. `extra` lets a
+ * test answer additional scripts (e.g. pip probes) before the apt chain;
+ * return null to fall through. */
+function installAptWorld(extra?: (script: string) => any | null): Store {
   return installHost(
     {},
     {
       execAny: ({ args }) => {
         const script = args[1] ?? "";
+        if (extra) {
+          const answered = extra(script);
+          if (answered) return answered;
+        }
         if (script.indexOf("os-release") >= 0) {
           return { ...OK_EXEC, stdout: "ID=debian\n" };
         }
@@ -674,5 +684,99 @@ describe("refreshDepGraph (mocked apt host)", () => {
     expect(() => systemReverseDeps(LOCAL_TARGET, "evil; rm -rf /")).toThrow(
       /not in this target's dependency graph/,
     );
+  });
+
+  // --- pip namespace -----------------------------------------------------------
+
+  describe("pip namespace probes", () => {
+    it("builds the pip probe scripts", () => {
+      expect(buildPipFreezeScript()).toContain("pip list --format=freeze");
+      expect(buildPipShowScript(["graphifyy", "foo"])).toContain(
+        "pip show --disable-pip-version-check graphifyy foo",
+      );
+    });
+
+    it("parses freeze output into versions, skipping non-pinned lines", () => {
+      const m = parsePipFreeze(
+        "graphifyy==1.4.2\nNetworkX==3.3\nnot a line\n-e git+https://x#egg=y\n",
+      );
+      expect(m.get("graphifyy")).toBe("1.4.2");
+      expect(m.get("networkx")).toBe("3.3");
+      expect(m.size).toBe(2);
+    });
+
+    it("parses multi-package pip show blocks with Requires/Required-by edges", () => {
+      const raw = [
+        "Name: graphifyy",
+        "Version: 1.4.2",
+        "Summary: graphs: for code",
+        "Requires: networkx, graspologic",
+        "Required-by: ",
+        "---",
+        "Name: networkx",
+        "Version: 3.3",
+        "Requires: ",
+        "Required-by: graphifyy",
+      ].join("\n");
+      expect(parsePipShow(raw)).toEqual([
+        {
+          name: "graphifyy",
+          version: "1.4.2",
+          requires: ["networkx", "graspologic"],
+          required_by: [],
+        },
+        {
+          name: "networkx",
+          version: "3.3",
+          requires: [],
+          required_by: ["graphifyy"],
+        },
+      ]);
+    });
+
+    it("ignores field lines before the first Name", () => {
+      expect(parsePipShow("WARNING: stuff\nVersion: 9.9\n")).toEqual([]);
+    });
+  });
+
+  describe("pip ride-along in refreshDepGraph", () => {
+    it("probes pip packages via pip, labels them, and keeps them out of the system graph", () => {
+      installAptWorld((script) => {
+        if (script.indexOf("pip list --format=freeze") >= 0) {
+          return { ...OK_EXEC, stdout: "graphifyy==1.4.2\nnetworkx==3.3\n" };
+        }
+        if (script.indexOf("pip show") >= 0) {
+          return {
+            ...OK_EXEC,
+            stdout:
+              "Name: graphifyy\nVersion: 1.4.0\nRequires: networkx, graspologic\nRequired-by: \n",
+          };
+        }
+        return null;
+      });
+      const d = refreshDepGraph(LOCAL_TARGET);
+      // Freeze is authoritative for the version (1.4.2, not pip show's 1.4.0).
+      expect(d.pip_packages).toEqual([
+        {
+          name: "graphifyy",
+          version: "1.4.2",
+          requires: ["networkx", "graspologic"],
+          required_by: [],
+        },
+      ]);
+      // Separate namespace: pip names never join the system nodes, and the
+      // app entry says where its dependencies actually live.
+      expect(d.nodes.map((n: any) => n.name)).not.toContain("graphifyy");
+      const entry = d.apps.find((a: any) => a.id === "graphifyy");
+      expect(entry.tracked).toBe(false);
+      expect(entry.note).toMatch(/pip's namespace/);
+    });
+
+    it("a host without pip leaves the pip section empty without sinking the refresh", () => {
+      installAptWorld(); // pip scripts fall through to exit 1
+      const d = refreshDepGraph(LOCAL_TARGET);
+      expect(d.pip_packages).toEqual([]);
+      expect(d.graph.node_count).toBeGreaterThan(0);
+    });
   });
 });
