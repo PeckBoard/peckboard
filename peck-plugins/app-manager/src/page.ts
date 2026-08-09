@@ -128,6 +128,43 @@ export const PAGE = `<!doctype html>
     font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
     white-space: nowrap;
   }
+  /* dependency graph */
+  .depsbar {
+    padding: 6px 16px; border-bottom: 1px solid var(--line); background: var(--panel);
+    display: flex; align-items: center; gap: 8px; flex: 0 0 auto; font-size: 12px; flex-wrap: wrap;
+  }
+  .depsbar .info { color: var(--muted); }
+  .depsbar .spacer { flex: 1; }
+  .depsbar select { min-width: 200px; max-width: 320px; width: auto; }
+  .libpanel {
+    padding: 6px 16px 10px; border-bottom: 1px solid var(--line); background: var(--panel);
+    font-size: 12px; line-height: 1.8;
+  }
+  .mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+  .depstoggle { margin-top: 6px; font-size: 11px; padding: 2px 8px; }
+  .depnote { margin-top: 6px; font-size: 11px; color: var(--muted); }
+  .deptree { margin-top: 4px; }
+  .depnode { font-size: 11px; line-height: 1.8; }
+  .depnode .line { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+  .depnode .twist {
+    width: 18px; height: 18px; padding: 0; font-size: 10px; line-height: 1;
+    border: none; background: none; color: var(--muted); cursor: pointer;
+  }
+  .depnode .twist:hover:enabled { color: var(--accent); }
+  .depnode .twist.leaf { visibility: hidden; } /* keeps sibling lines aligned */
+  .depname { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+  .depver { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; color: var(--muted); }
+  .depkind {
+    font-size: 9px; border: 1px solid var(--line); border-radius: 8px; padding: 0 6px;
+    color: var(--muted); background: var(--panel2); letter-spacing: .4px;
+  }
+  .depkind.shared { background: var(--badge-bg); border-color: var(--badge-line); color: var(--accent); }
+  .libpanel .depkind { margin-right: 4px; }
+  .depnode .kids { margin-left: 22px; }
+  .depbins {
+    margin-left: 24px; color: var(--muted); font-size: 10px;
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace; word-break: break-all;
+  }
   .badge {
     font-size: 10px; border-radius: 10px; padding: 1px 8px; border: 1px solid var(--line);
     background: var(--panel2); color: var(--muted); white-space: nowrap;
@@ -210,6 +247,15 @@ export const PAGE = `<!doctype html>
 </header>
 
 <div class="banner" id="banner" role="status" aria-live="polite"><span id="bannerText">Loading…</span></div>
+<div class="depsbar" id="depsBar">
+  <span class="info" id="depsInfo">Dependencies: not resolved yet.</span>
+  <span class="spacer"></span>
+  <label class="sub" for="libSel">Reverse view</label>
+  <select id="libSel" aria-label="Select a dependency to see which apps require it"></select>
+  <button id="libSysBtn" title="Ask the target's package manager which installed packages require the selected dependency, system-wide">System-wide</button>
+  <button id="depsRefreshBtn">Refresh dependencies</button>
+</div>
+<div class="libpanel" id="libPanel" hidden></div>
 
 <div class="layout">
   <main>
@@ -331,6 +377,7 @@ export const PAGE = `<!doctype html>
   var state = {
     targets: [], byId: {}, current: null,
     overview: null, rows: {}, watching: {},
+    deps: null, libs: {},
     keys: [],
     editing: null, logApp: null, timer: null,
     lastFocus: null, confirmAction: null
@@ -380,6 +427,7 @@ export const PAGE = `<!doctype html>
       state.overview = d;
       renderBanner(d.distro);
       renderGrid(d.apps || []);
+      loadDeps();
     }).catch(function (e) {
       if (state.current !== target) return;
       setBanner(e.message, "bad");
@@ -509,11 +557,17 @@ export const PAGE = `<!doctype html>
   }
 
   function askRemove(a) {
+    var entry = depEntryFor(a.id);
+    var warn =
+      "This runs a package-manager removal command AS ROOT (via sudo) on the target. " +
+      "Anything that depends on " + a.name + " may stop working.";
+    // Autoremove-accurate impact from the dependency graph: what genuinely
+    // becomes unneeded, and which shared dependencies stay (see deps.ts).
+    if (entry && entry.removal_note) warn += " " + entry.removal_note;
     confirmDialog(
       "Remove " + a.name + "?",
       a.name + " will be removed from " + targetLabel() + ".",
-      "This runs a package-manager removal command AS ROOT (via sudo) on the target. " +
-        "Anything that depends on " + a.name + " may stop working.",
+      warn,
       "Remove " + a.name,
       function () {
         var r = state.rows[a.id];
@@ -619,6 +673,225 @@ export const PAGE = `<!doctype html>
     if (atBottom) pre.scrollTop = pre.scrollHeight;
   }
 
+  // ── dependency graph ───────────────────────────────────────────────
+  // Rendering only ever reads the cached graph (GET /deps — no execs on
+  // the target); resolution happens when a job settles or via the explicit
+  // button (POST /deps-refresh). Trees arrive as server-shaped plain data.
+  function loadDeps() {
+    var target = state.current;
+    if (!target) return Promise.resolve();
+    return getJSON(API + "/deps?target=" + encodeURIComponent(target)).then(function (d) {
+      if (state.current !== target) return;
+      state.deps = d;
+      renderDeps();
+    }).catch(function (e) {
+      if (state.current !== target) return;
+      state.deps = null;
+      renderDeps();
+      $("depsInfo").textContent = "Dependencies unavailable: " + e.message;
+    });
+  }
+
+  function refreshDeps() {
+    var target = state.current;
+    if (!target) return;
+    var btn = $("depsRefreshBtn");
+    btn.disabled = true;
+    btn.textContent = "Resolving…";
+    $("depsInfo").textContent = "Querying the package manager on " + targetLabel() + "…";
+    postJSON(API + "/deps-refresh", { target: target }).then(function (d) {
+      if (state.current !== target) return;
+      state.deps = d;
+      renderDeps();
+      toast("Dependencies resolved for " + targetLabel());
+    }).catch(function (e) {
+      if (state.current === target) {
+        renderDeps();
+        $("depsInfo").textContent = e.message;
+        toast(e.message, true);
+      }
+    }).then(function () {
+      btn.disabled = false;
+      btn.textContent = "Refresh dependencies";
+    });
+  }
+
+  function depEntryFor(appId) {
+    var apps = state.deps && state.deps.apps ? state.deps.apps : [];
+    for (var i = 0; i < apps.length; i++) {
+      if (apps[i].id === appId) return apps[i];
+    }
+    return null;
+  }
+
+  function renderDeps() {
+    var g = state.deps && state.deps.graph;
+    $("depsInfo").textContent = g
+      ? "Dependencies resolved " + fmtWhen(g.at) + " — depth " + g.depth + ", " +
+        g.node_count + " packages, " + g.edge_count + " edges" +
+        (g.truncated ? " (truncated at the size cap)" : "") + "."
+      : "Dependencies: not resolved yet for this target.";
+    fillLibSelect(state.deps ? state.deps.libraries || [] : []);
+    renderLibPanel();
+    Object.keys(state.rows).forEach(function (appId) { attachRowDeps(appId); });
+  }
+
+  function fillLibSelect(libs) {
+    var sel = $("libSel");
+    var prev = sel.value;
+    clear(sel);
+    state.libs = {};
+    if (!libs.length) {
+      var none = el("option", null, "No dependencies resolved yet");
+      none.value = "";
+      sel.appendChild(none);
+      sel.disabled = true;
+      $("libSysBtn").disabled = true;
+      return;
+    }
+    sel.disabled = false;
+    var ph = el("option", null, "Select a library or package…");
+    ph.value = "";
+    sel.appendChild(ph);
+    libs.forEach(function (l) {
+      state.libs[l.name] = l;
+      var o = el("option", null,
+        l.name + (l.version ? " " + l.version : "") + (l.shared ? " — shared" : ""));
+      o.value = l.name;
+      sel.appendChild(o);
+    });
+    sel.value = prev && state.libs[prev] ? prev : "";
+    $("libSysBtn").disabled = !sel.value;
+  }
+
+  function renderLibPanel() {
+    var panel = $("libPanel");
+    clear(panel);
+    var name = $("libSel").value;
+    var entry = name ? state.libs[name] : null;
+    $("libSysBtn").disabled = !entry;
+    if (!entry) { panel.hidden = true; return; }
+    panel.hidden = false;
+    var line = el("div", null, "");
+    line.appendChild(el("span", "mono", entry.name + (entry.version ? " " + entry.version : "")));
+    line.appendChild(document.createTextNode(" "));
+    line.appendChild(el("span", "depkind", entry.kind));
+    if (entry.shared) line.appendChild(el("span", "depkind shared", "shared"));
+    line.appendChild(document.createTextNode(
+      entry.required_by && entry.required_by.length
+        ? " Required by " + entry.required_by.join(", ") + "."
+        : " No catalog app requires it — it arrived as part of the wider dependency set."
+    ));
+    panel.appendChild(line);
+    var sys = el("div", null, "");
+    sys.id = "libSysOut";
+    panel.appendChild(sys);
+  }
+
+  function sysRdeps() {
+    var name = $("libSel").value;
+    var target = state.current;
+    var out = $("libSysOut");
+    if (!name || !out) return;
+    out.textContent = "Asking the package manager…";
+    getJSON(API + "/rdeps?target=" + encodeURIComponent(target) + "&pkg=" + encodeURIComponent(name))
+      .then(function (d) {
+        if (state.current !== target || $("libSel").value !== name) return;
+        var list = d.required_by || [];
+        if (!list.length) {
+          out.textContent = "System-wide: " + (d.note || "no installed package declares a dependency on it.");
+          return;
+        }
+        var shown = list.slice(0, 30).join(", ");
+        var more = list.length > 30 ? " and " + (list.length - 30) + " more" : "";
+        out.textContent = "System-wide, " + list.length + " installed package" +
+          (list.length === 1 ? " requires" : "s require") + " it: " + shown + more + ".";
+      })
+      .catch(function (e) { out.textContent = "System-wide query failed: " + e.message; });
+  }
+
+  function attachRowDeps(appId) {
+    var r = state.rows[appId];
+    if (!r) return;
+    if (r.depsEl && r.depsEl.parentNode) r.depsEl.parentNode.removeChild(r.depsEl);
+    r.depsEl = null;
+    if (!r.app.installed) return;
+    var entry = depEntryFor(appId);
+    var box = el("div", "depsblock");
+    if (entry && entry.tree && entry.tree.length) {
+      var btn = el("button", "depstoggle", "Dependencies ▸");
+      btn.setAttribute("aria-expanded", "false");
+      var tree = el("div", "deptree");
+      tree.hidden = true;
+      var built = false;
+      btn.onclick = function () {
+        if (!built) {
+          entry.tree.forEach(function (n) { tree.appendChild(depNodeEl(n, 0)); });
+          built = true;
+        }
+        tree.hidden = !tree.hidden;
+        btn.textContent = tree.hidden ? "Dependencies ▸" : "Dependencies ▾";
+        btn.setAttribute("aria-expanded", tree.hidden ? "false" : "true");
+      };
+      box.appendChild(btn);
+      box.appendChild(tree);
+    } else if (entry && entry.note) {
+      // e.g. a vendor curl|sh install: "not tracked by the package manager",
+      // stated plainly instead of an empty tree that reads as "no deps".
+      box.appendChild(el("div", "depnote", entry.note));
+    } else {
+      box.appendChild(el("div", "depnote", "Dependencies not resolved yet."));
+    }
+    var body = r.row.querySelector(".body");
+    if (body) { body.appendChild(box); r.depsEl = box; }
+  }
+
+  // One dependency line: name + version + kind, shared flagged, children
+  // behind the twist. The app's own package opens pre-expanded so its direct
+  // dependencies are one click away, not two; everything deeper is collapsed.
+  function depNodeEl(n, depth) {
+    var wrap = el("div", "depnode");
+    wrap.setAttribute("data-dep", n.name);
+    var line = el("div", "line");
+    var hasKids = n.children && n.children.length;
+    var twist = el("button", "twist" + (hasKids ? "" : " leaf"), "▸");
+    var kids = null;
+    if (hasKids) {
+      kids = el("div", "kids");
+      kids.hidden = true;
+      var built = false;
+      var toggleKids = function () {
+        if (!built) {
+          n.children.forEach(function (c) { kids.appendChild(depNodeEl(c, depth + 1)); });
+          built = true;
+        }
+        kids.hidden = !kids.hidden;
+        twist.textContent = kids.hidden ? "▸" : "▾";
+      };
+      twist.setAttribute("aria-label", "Expand " + n.name);
+      twist.onclick = toggleKids;
+      if (depth === 0) toggleKids();
+    } else {
+      twist.disabled = true;
+      twist.tabIndex = -1;
+    }
+    line.appendChild(twist);
+    line.appendChild(el("span", "depname", n.name));
+    if (n.version) line.appendChild(el("span", "depver", n.version));
+    line.appendChild(el("span", "depkind", n.kind));
+    if (n.shared) line.appendChild(el("span", "depkind shared", "shared"));
+    wrap.appendChild(line);
+    if (n.binaries && n.binaries.length) {
+      wrap.appendChild(el("div", "depbins", n.binaries.join("  ")));
+    }
+    if (kids) wrap.appendChild(kids);
+    return wrap;
+  }
+
+  function fmtWhen(iso) {
+    var d = new Date(iso);
+    return isNaN(d.getTime()) ? (iso || "") : d.toLocaleString();
+  }
   // ── dialogs (focus in, Escape out, focus restored) ─────────────────
   function openDialog(backdropId, firstFieldId) {
     state.lastFocus = document.activeElement;
@@ -768,12 +1041,18 @@ export const PAGE = `<!doctype html>
   $("targetSel").onchange = function () {
     state.current = $("targetSel").value;
     state.watching = {};
+    state.deps = null;
+    state.libs = {};
+    renderDeps();
     state.logApp = null;
     $("logPanel").hidden = true;
     renderTargetPicker();
     loadApps();
   };
   $("refreshBtn").onclick = function () { loadTargets(); };
+  $("depsRefreshBtn").onclick = refreshDeps;
+  $("libSel").onchange = renderLibPanel;
+  $("libSysBtn").onclick = sysRdeps;
   $("addTargetBtn").onclick = function () { openTargetModal(null); };
   $("editTargetBtn").onclick = function () { openTargetModal(state.byId[state.current]); };
   $("removeTargetBtn").onclick = removeTarget;

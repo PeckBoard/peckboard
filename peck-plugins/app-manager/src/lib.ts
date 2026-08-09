@@ -4,7 +4,14 @@
 // invocation. The two http.* hooks serve the dashboard page and its
 // authenticated data routes (see http.ts).
 
-import { appInstall, appList, appRemove, appStatus, appTargets } from "./tools";
+import {
+  appDeps,
+  appInstall,
+  appList,
+  appRemove,
+  appStatus,
+  appTargets,
+} from "./tools";
 import { serveAuthed, serveHttp } from "./http";
 import { allow, cancel, errMsg, skip } from "./verdict";
 
@@ -14,6 +21,7 @@ const TOOLS: Record<string, (args: any) => any> = {
   app_status: appStatus,
   app_install: appInstall,
   app_remove: appRemove,
+  app_deps: appDeps,
 };
 
 function handleInvoke(payload: any): string {

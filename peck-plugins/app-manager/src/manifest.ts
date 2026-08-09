@@ -11,9 +11,10 @@ const DESCRIPTION =
   "run any bare command on the local host via the process_exec_any permission — it is " +
   "restricted in code to the app catalog's own static recipes, but the permission grant " +
   "itself is broad. Ships an App Manager dashboard page (sidebar entry) for picking a " +
-  "target, seeing what is installed, and watching install progress live.";
+  "target, seeing what is installed, watching install progress live, and browsing each " +
+  "app's dependency graph as resolved from the target's package manager.";
 
-const VERSION = "0.3.0";
+const VERSION = "0.4.0";
 const REPOSITORY = "https://github.com/PeckBoard/app-manager";
 
 // Inline SVG (lucide "package") for the sidebar entry; rendered sandboxed.
@@ -111,6 +112,25 @@ const MCP_TOOLS = [
       additionalProperties: false,
     },
   },
+  {
+    name: "app_deps",
+    description:
+      "The cached dependency graph for one target, resolved from its package manager " +
+      "(apt/rpm/pacman): per-app dependency trees (name + version + app/library/binary kind, " +
+      "shared multi-parent nodes flagged), the reverse view (which apps require a library), " +
+      "and removal impact honouring autoremove semantics (a dependency still required by " +
+      "another app is never listed as collateral). Read-only — the graph refreshes when an " +
+      "install/remove job settles or on explicit refresh from the dashboard. Vendor-script " +
+      "installs are explicitly not tracked by the package manager.",
+    input_schema: {
+      type: "object",
+      properties: {
+        target: { type: "string", description: TARGET_DESC },
+      },
+      required: ["target"],
+      additionalProperties: false,
+    },
+  },
 ];
 
 export function manifestJson(): string {
@@ -150,10 +170,13 @@ export function manifestJson(): string {
       "GET /api/plugin-ui/app-manager/ssh-keys",
       "GET /api/plugin-ui/app-manager/apps",
       "GET /api/plugin-ui/app-manager/status",
+      "GET /api/plugin-ui/app-manager/deps",
+      "GET /api/plugin-ui/app-manager/rdeps",
       "POST /api/plugin-ui/app-manager/targets",
       "POST /api/plugin-ui/app-manager/target-remove",
       "POST /api/plugin-ui/app-manager/install",
       "POST /api/plugin-ui/app-manager/remove",
+      "POST /api/plugin-ui/app-manager/deps-refresh",
     ],
     mcp_tools: MCP_TOOLS,
   });

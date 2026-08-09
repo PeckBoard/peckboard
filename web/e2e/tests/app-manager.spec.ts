@@ -129,4 +129,46 @@ test.describe('app-manager page', () => {
     await page.keyboard.press('Escape')
     await expect(f.locator('#targetBackdrop')).not.toHaveClass(/open/)
   })
+
+  test('resolves and renders an installed app dependency tree with versions', async ({
+    request,
+    page,
+  }) => {
+    const token = await authenticate(request)
+    await loadApp(page, token)
+    test.skip(!(await pluginPresent(page)), 'app-manager wasm not built')
+
+    const f = await openAppManager(page)
+
+    // git is installed on the suite host (this repo is a git checkout), so
+    // its row must be present and marked Installed. Waiting on the row also
+    // gates on /apps having resolved, so the banner below has settled past
+    // its transient "Checking…" state before the skip guard reads it.
+    const gitRow = f.locator('.approw').filter({ hasText: 'Distributed version control' })
+    await expect(gitRow).toHaveCount(1)
+    await expect(gitRow.locator('.badge').first()).toHaveText('Installed', { timeout: 60_000 })
+
+    const banner = (await f.locator('#bannerText').textContent()) ?? ''
+    test.skip(!/apt|dnf|pacman|zypper/i.test(banner), 'no supported package manager on this host')
+
+    // Fresh data dir → nothing cached yet, and the bar says so instead of
+    // showing an empty graph.
+    await expect(f.locator('#depsInfo')).toContainText('not resolved yet')
+
+    await f.locator('#depsRefreshBtn').click()
+    await expect(f.locator('#depsInfo')).toContainText('Dependencies resolved', {
+      timeout: 120_000,
+    })
+
+    await gitRow.locator('.depstoggle').click()
+    // The app's own package opens pre-expanded: real dependency nodes with
+    // real package-DB versions underneath, kind chips on every line.
+    const firstDep = gitRow.locator('.depnode .depnode').first()
+    await expect(firstDep).toBeVisible()
+    await expect(firstDep.locator('.depver').first()).toContainText(/\d/)
+    await expect(gitRow.locator('.depnode .depkind').first()).not.toBeEmpty()
+
+    // The reverse-view picker filled with the resolved dependency set.
+    expect(await f.locator('#libSel option').count()).toBeGreaterThan(1)
+  })
 })

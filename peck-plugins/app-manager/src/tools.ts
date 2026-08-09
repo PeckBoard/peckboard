@@ -27,6 +27,7 @@ import {
   pollJob,
   putJob,
 } from "./jobs";
+import { depsOverview, refreshAfterJob } from "./deps";
 import {
   getInstallRecord,
   listInstallRecords,
@@ -192,6 +193,9 @@ function appState(
         } catch {
           /* provenance must never break status reporting */
         }
+        // A settled job changed the installed set, so the cached dependency
+        // graph is stale. Swallows its own failures (see deps.ts).
+        refreshAfterJob(target, job);
       }
     } catch (e) {
       tail = `(could not poll job status: ${errMsg(e)})`;
@@ -363,4 +367,14 @@ export function appProgress(targetRef: unknown, appRef: unknown): any {
 /** The list behind the target dropdown. */
 export function targetChoices(): any {
   return { targets: listTargets().map(targetView) };
+}
+
+// --- app_deps ---------------------------------------------------------------
+
+/** The cached dependency graph for one target: per-app trees, the reverse
+ * (library → apps) view, and removal impact. Read-only — resolution happens
+ * on job settle and explicit refresh (see deps.ts), never here. */
+export function appDeps(args: any): any {
+  const target = resolveTarget(reqStr(args?.target, "target"));
+  return depsOverview(target);
 }

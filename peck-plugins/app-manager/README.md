@@ -45,6 +45,9 @@ postMessage fetch bridge:
 | `GET /status?target=&app=`             | one app's live state + job log tail              |
 | `POST /targets`, `POST /target-remove` | remote-target CRUD                               |
 | `POST /install`, `POST /remove`        | start a detached job                             |
+| `GET /deps?target=`                    | cached dependency graph, trees + reverse view    |
+| `POST /deps-refresh`                   | re-resolve the graph from the package manager    |
+| `GET /rdeps?target=&pkg=`              | system-wide reverse deps of one graph package    |
 
 (all under `/api/plugin-ui/app-manager`.)
 
@@ -149,6 +152,61 @@ install` DO land in the delta and are listed normally.
 - The record is provenance — "arrived during this job" — not a dependency
   graph: a shared library is attributed to whichever app's install pulled
   it in first. Real dependency edges must come from the package manager.
+
+## Dependency Graph
+
+Provenance answers "what arrived during this job"; the dependency graph
+answers "what does this app require right now" — and the edges are
+**queried from the package manager itself** (`apt-cache depends`,
+`rpm -qR` + `--whatprovides`, `pacman -Qi`), never inferred from the
+install delta. The two live in separate `data_store` collections
+(`installs` vs `depgraphs`) and never overwrite each other.
+
+It is a DAG, not a tree: install git and node and both depend on
+`libssl3` — that node has two parents. The plugin honours that:
+
+- A shared dependency appears under **every** app that requires it,
+  flagged `shared`, instead of being attributed to whichever app's
+  install pulled it in first.
+- The remove confirmation states removal impact with **autoremove
+  semantics**: only packages nothing else still depends on are listed as
+  "would become unneeded"; a shared dependency another app needs is
+  explicitly shown as kept, so the UI never contradicts what the package
+  manager would actually do.
+
+Cost control: resolution is seeded from the installed catalog apps'
+packages plus the provenance delta set, expanded breadth-first **one
+batched exec per level**, depth-limited (default 2, max 4, configurable
+per refresh request) and capped at 600 nodes with a visible _truncated_
+marker. The graph refreshes when an install/remove job settles and on
+the explicit "Refresh dependencies" button — rendering only ever reads
+the cached snapshot, which carries an `at` timestamp because dependency
+sets drift with upgrades.
+
+The dashboard grows a slim bar under the distro banner: resolution
+state + refresh button, plus a reverse view — pick a library from the
+dropdown and see which catalog apps require it, with an optional
+system-wide `rdepends` query on demand (the package name is validated
+against the stored graph before it goes anywhere near a shell). Each
+installed app row gains a collapsed "Dependencies" toggle: name +
+version + kind (app / library / binary) per node, shared nodes marked,
+the app's own binaries listed under its root. The `app_deps` MCP tool
+returns the same payload.
+
+Honest limits, stated in the UI rather than papered over:
+
+- **Vendor `curl | sh` installs** (claude, cursor-agent, ollama) never
+  enter the package database, so they have **no dependency edges at
+  all**. Their rows say "not tracked by the package manager" — never an
+  empty tree that would read as "no dependencies".
+- **pip/Python packages are NOT covered.** They are a different
+  namespace from distro packages (`pip show`'s `Requires:`/`Required-by:`
+  vs dpkg/rpm), and this plugin does not query them. A Python package
+  installed via pip simply does not appear in the graph.
+- `kind` is a display heuristic (catalog apps are "app"; `lib`-named
+  packages and `.so` capabilities are "library"; everything else renders
+  "binary"), and on rpm systems capabilities resolve to their first
+  provider.
 
 ## sudo
 

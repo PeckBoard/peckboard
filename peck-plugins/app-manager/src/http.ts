@@ -11,12 +11,14 @@
 import { PAGE } from "./page";
 import { sshKeyList } from "./host";
 import {
+  appDeps,
   appInstall,
   appProgress,
   appRemove,
   targetChoices,
   targetOverview,
 } from "./tools";
+import { refreshDepGraph, systemReverseDeps } from "./deps";
 import {
   buildRecord,
   deleteTarget,
@@ -78,6 +80,26 @@ export function serveAuthed(payload: any): string {
       return jsonResponse(
         200,
         appProgress(queryParam(query, "target"), queryParam(query, "app")),
+      );
+    }
+    if (method === "GET" && path === `${API}/deps`) {
+      return jsonResponse(
+        200,
+        appDeps({ target: queryParam(query, "target") }),
+      );
+    }
+    if (method === "GET" && path === `${API}/rdeps`) {
+      const target = resolveTarget(queryParam(query, "target"));
+      return jsonResponse(
+        200,
+        systemReverseDeps(target, queryParam(query, "pkg")),
+      );
+    }
+    if (method === "POST" && path === `${API}/deps-refresh`) {
+      const b = parseBody(body);
+      return jsonResponse(
+        200,
+        refreshDepGraph(resolveTarget(b?.target), b?.depth),
       );
     }
     if (method === "POST" && path === `${API}/targets`) {

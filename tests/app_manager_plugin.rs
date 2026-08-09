@@ -236,6 +236,128 @@ async fn app_manager_plugin_end_to_end() {
         "git-man 1:2.43.0-1 should be listed: {res}"
     );
 
+    // ── dependency graph: seed a stored graph exactly as refreshDepGraph
+    // writes it (peck-plugins/app-manager/src/deps.ts, `depgraphs` collection,
+    // keyed by target id), proving the store round-trip through the wasm and
+    // the derived views. The graph is a DAG: libssl3 has TWO parents (git and
+    // node), so it must be flagged shared, listed under both apps, and never
+    // offered as removal collateral while the other app still needs it.
+    let dep_graph = json!({
+        "target_id": "local",
+        "pm": "apt",
+        "at": "2026-08-09T00:00:00.000Z",
+        "depth": 2,
+        "truncated": false,
+        "nodes": [
+            { "name": "git", "version": "1:2.43.0-1", "kind": "app", "binaries": ["/usr/bin/git"] },
+            { "name": "nodejs", "version": "18.19.0+dfsg-6", "kind": "app" },
+            { "name": "git-man", "version": "1:2.43.0-1", "kind": "binary" },
+            { "name": "libssl3", "version": "3.0.13-1", "kind": "library" }
+        ],
+        "edges": [
+            { "from": "git", "to": "git-man", "kind": "depends" },
+            { "from": "git", "to": "libssl3", "kind": "depends" },
+            { "from": "nodejs", "to": "libssl3", "kind": "depends" }
+        ]
+    })
+    .to_string();
+    db.plugin_store_put_blocking(PLUGIN_ID, "depgraphs", "local", &dep_graph)
+        .unwrap();
+
+    let res = invoke(&plugins, "app_deps", json!({ "target": "local" }), &ctx).await;
+    assert_eq!(
+        res["graph"]["at"],
+        json!("2026-08-09T00:00:00.000Z"),
+        "the stored snapshot round-trips with its timestamp: {res}"
+    );
+    assert_eq!(
+        res["graph"]["node_count"],
+        json!(4),
+        "all nodes surface: {res}"
+    );
+    let nodes = res["nodes"].as_array().expect("nodes array");
+    let ssl = nodes
+        .iter()
+        .find(|n| n["name"] == json!("libssl3"))
+        .expect("libssl3 node");
+    assert_eq!(
+        ssl["shared"],
+        json!(true),
+        "multi-parent node is shared: {res}"
+    );
+    assert_eq!(
+        nodes
+            .iter()
+            .find(|n| n["name"] == json!("git"))
+            .expect("git node")["binaries"],
+        json!(["/usr/bin/git"]),
+        "app-node binaries round-trip: {res}"
+    );
+
+    let apps = res["apps"].as_array().expect("apps array");
+    let git_deps = apps
+        .iter()
+        .find(|a| a["id"] == json!("git"))
+        .expect("git deps entry");
+    assert_eq!(git_deps["tracked"], json!(true));
+    let child_names = |entry: &Value| -> Vec<String> {
+        entry["tree"][0]["children"]
+            .as_array()
+            .expect("tree children")
+            .iter()
+            .filter_map(|c| c["name"].as_str().map(String::from))
+            .collect()
+    };
+    let git_children = child_names(git_deps);
+    assert!(
+        git_children.contains(&"git-man".into()) && git_children.contains(&"libssl3".into()),
+        "git's tree lists both dependencies: {res}"
+    );
+    let node_deps = apps
+        .iter()
+        .find(|a| a["id"] == json!("node"))
+        .expect("node deps entry");
+    assert!(
+        child_names(node_deps).contains(&"libssl3".into()),
+        "the shared dependency appears under node as well, not only under git: {res}"
+    );
+
+    // Removal safety (autoremove semantics): removing git frees git-man only;
+    // libssl3 survives because node still needs it, and says so.
+    let also: Vec<&str> = git_deps["also_removed"]
+        .as_array()
+        .expect("also_removed")
+        .iter()
+        .filter_map(|p| p["name"].as_str())
+        .collect();
+    assert_eq!(
+        also,
+        vec!["git-man"],
+        "shared dep is never collateral: {res}"
+    );
+    assert!(
+        git_deps["kept"].as_array().expect("kept").iter().any(|k| {
+            k["name"] == json!("libssl3")
+                && k["needed_by"]
+                    .as_array()
+                    .is_some_and(|n| n.contains(&json!("Node.js")))
+        }),
+        "libssl3 is kept and attributed to Node.js: {res}"
+    );
+
+    // Reverse view: select the library, see every app that requires it.
+    let lib = res["libraries"]
+        .as_array()
+        .expect("libraries array")
+        .iter()
+        .find(|l| l["name"] == json!("libssl3"))
+        .expect("libssl3 reverse entry");
+    assert_eq!(
+        lib["required_by"],
+        json!(["Git", "Node.js"]),
+        "reverse view lists every requiring app: {res}"
+    );
+
     // ── catalog/target whitelist: app_status/app_install/app_remove refuse
     // an unknown app or target BEFORE touching a shell — no process spawned.
     let res = invoke(
