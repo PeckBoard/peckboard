@@ -108,7 +108,9 @@ Chicken Coop draws every live session as a bird in a 3D chicken run: a hen per a
 
 ## SSH Fleet
 
-SSH Fleet keeps a registry of SSH hosts — each with a username and either a password or a private key, plus a label and tags — and gives sessions tools to act on them. An SSH Fleet page shows every command live, filterable by host. The SSH client itself is built into PeckBoard core, so credentials stay in memory and are never written to disk.
+SSH Fleet keeps a registry of SSH hosts — each with a username and either a password or a private key, plus a label and tags — and gives sessions tools to act on them. An SSH Fleet page shows every command live, filterable by host. The SSH client itself is built into PeckBoard core, so credentials stay in memory and are never written to disk. Changing which permissions SSH Fleet (or any plugin) is approved for — for example if a future update adds the `ssh_keys` permission below — re-triggers the approval prompt in Settings → Plugins; an update that keeps the same permission set stays approved.
+
+Core also has a separate **SSH key vault** (`/api/ssh-keys/*`, admin-only) that stores named private keys encrypted at rest under a server-held key, and lets an approved plugin use one by id (`{key_id}`) instead of handling raw key material — see [SSH Key Vault]({{ "/architecture/plugins.html#ssh-key-vault" | relative_url }}) for the storage and threat model. SSH Fleet does **not** use it yet: hosts you add here still carry their own password or private key inline in the plugin's host registry, and that is the only option today, not a legacy fallback.
 
 | Tool              | What it does                                                                |
 | ----------------- | --------------------------------------------------------------------------- |
