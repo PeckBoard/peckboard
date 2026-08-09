@@ -106,7 +106,18 @@ struct HostState {
     /// `provider.register` hook (see `PluginManager::sync_plugin_providers`).
     pending_provider:
         Arc<std::sync::RwLock<Option<crate::provider::plugin_provider::ProviderRegistration>>>,
+    /// Late-bound provider registry (see [`ProviderRegistrySlot`]);
+    /// `peckboard_list_models` resolves the selectable model catalog from it.
+    provider_registry: ProviderRegistrySlot,
 }
+
+/// Shared late-bound slot holding the app's provider registry. `Weak` because
+/// the registry can hold plugin-provider adapters that point back into the
+/// plugin layer — a strong ref here would cycle. Bound once by `main.rs` via
+/// `PluginManager::set_provider_registry`; `None` until then (and in
+/// registry-less tests), so `peckboard_list_models` refuses cleanly.
+pub(crate) type ProviderRegistrySlot =
+    Arc<std::sync::RwLock<Option<std::sync::Weak<crate::provider::registry::ProviderRegistry>>>>;
 
 /// Live-application capabilities a plugin host function may invoke that need
 /// the running `AppState` (agent dispatch), beyond what the `Db` alone offers.
@@ -264,6 +275,26 @@ impl UserContext {
     }
 }
 
+/// Proof token: the bearer's caller context came from one of the two trusted
+/// slots — an in-flight `mcp.tool.invoke` (scope set host-side from the
+/// verified MCP token), or an authenticated plugin-UI request
+/// (`serve_http_authed`) made by a plugin granted `user_authority`. The
+/// session-dispatch host functions take this instead of a bare
+/// `&InvocationContext`, so no call path can hand them a plugin-derived
+/// scope — only [`trusted_caller`] constructs one. See CLAUDE.md "Enforce
+/// Critical Invariants in the Type System"; `SessionLock` in
+/// `src/provider/manager.rs` is the sibling pattern.
+pub(crate) struct TrustedCaller(InvocationContext);
+
+impl std::ops::Deref for TrustedCaller {
+    type Target = InvocationContext;
+
+    /// One-way: a token yields its verified scope, but a scope never yields
+    /// a token.
+    fn deref(&self) -> &InvocationContext {
+        &self.0
+    }
+}
 /// JSON request for `peckboard_list_cards`. All fields optional; a missing
 /// `project_id` lists cards across every project, and `step` filters the
 /// result to a single workflow step.
@@ -375,6 +406,63 @@ pub(crate) fn list_projects_impl(db: &Db) -> String {
     }
 }
 
+/// `peckboard_list_models` — the model catalog a plugin may offer for
+/// session creation, across every non-hidden provider. THINKING MODELS ONLY,
+/// filtered server-side: a non-thinking model must not be selectable at all,
+/// so the filter is not left to callers. Reads the same registry that backs
+/// `GET /api/models`, but through the dynamic∪static union
+/// (`list_providers_with_models_union_except`) so a registry-known model a
+/// stale external catalog hides — `claude-fable-5` behind an older `claude`
+/// CLI — stays listed. Metadata only: id, display name, provider, account
+/// id, tier. Never credentials, tokens, or account material.
+pub(crate) fn list_models_impl(
+    db: &Db,
+    registry: Option<Arc<crate::provider::registry::ProviderRegistry>>,
+) -> String {
+    let Some(registry) = registry else {
+        return error_json("provider registry unavailable");
+    };
+    let db = db.clone();
+    // Host functions run synchronously inside a plugin call (often on a tokio
+    // worker); catalog resolution is async. Same isolation as
+    // `perform_outbound_http`: a dedicated thread with its own runtime.
+    let result = std::thread::spawn(move || -> Result<serde_json::Value, String> {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .map_err(|e| format!("runtime: {e}"))?;
+        rt.block_on(async move {
+            let hidden = crate::routes::settings::hidden_providers_for_db(db).await;
+            let providers = registry
+                .list_providers_with_models_union_except(&hidden)
+                .await;
+            let mut models = Vec::new();
+            for p in &providers {
+                for m in &p.models {
+                    if !m.is_thinking() {
+                        continue;
+                    }
+                    let (_, account_id) = crate::provider::registry::split_model_account(&m.id);
+                    models.push(serde_json::json!({
+                        "id": format!("{}:{}", p.id, m.id),
+                        "display_name": m.display_name,
+                        "provider": p.id,
+                        "account_id": account_id,
+                        "thinking": true,
+                        "tier": m.tier,
+                    }));
+                }
+            }
+            Ok(serde_json::json!({ "models": models }))
+        })
+    })
+    .join();
+    match result {
+        Ok(Ok(v)) => v.to_string(),
+        Ok(Err(e)) => error_json(e),
+        Err(_) => error_json("model listing worker panicked"),
+    }
+}
 /// `peckboard_list_cards` — list cards, optionally filtered by project and
 /// step (read).
 pub(crate) fn list_cards_impl(db: &Db, input: &str) -> String {
@@ -947,8 +1035,11 @@ fn session_visible_to(session: &crate::db::models::Session, inv: &InvocationCont
 /// `peckboard_create_session` — create a generic session in the *caller's*
 /// folder and project. Expert *knowledge* state is the plugin's own metadata
 /// (`peckboard_session_meta_set`); the optional `is_expert`/`expert_kind`
-/// flags only classify the session for usage attribution and listings.
-pub(crate) fn create_session_impl(db: &Db, input: &str, inv: &InvocationContext) -> String {
+/// flags only classify the session for usage attribution and listings. Takes
+/// the [`TrustedCaller`] proof: reachable only from a tool invocation or an
+/// authenticated `user_authority` plugin-UI request.
+pub(crate) fn create_session_impl(db: &Db, input: &str, caller: &TrustedCaller) -> String {
+    let inv: &InvocationContext = caller;
     let req: CreateSessionRequest = match serde_json::from_str(input) {
         Ok(r) => r,
         Err(e) => return error_json(format!("invalid request: {e}")),
@@ -1489,18 +1580,20 @@ struct ResumeSessionRequest {
 }
 
 /// `peckboard_dispatch_capture` — kick off a fresh capture run on a session in
-/// the caller's scope (e.g. an expert reading its slice).
+/// the caller's scope (e.g. an expert reading its slice). Takes the
+/// [`TrustedCaller`] proof: reachable only from a tool invocation or an
+/// authenticated `user_authority` plugin-UI request.
 pub(crate) fn dispatch_capture_impl(
     db: &Db,
     input: &str,
-    inv: &InvocationContext,
+    caller: &TrustedCaller,
     live: Option<Arc<dyn LiveHost>>,
 ) -> String {
     let req: DispatchCaptureRequest = match serde_json::from_str(input) {
         Ok(r) => r,
         Err(e) => return error_json(format!("invalid request: {e}")),
     };
-    if let Err(e) = fetch_visible_session(db, req.session_id.trim(), inv) {
+    if let Err(e) = fetch_visible_session(db, req.session_id.trim(), caller) {
         return error_json(e);
     }
     let Some(live) = live else {
@@ -2805,6 +2898,134 @@ fn effective_context(
         .map(UserContext::as_invocation))
 }
 
+/// Build the [`TrustedCaller`] proof for the current call, if the plugin is
+/// in a trusted caller context: an in-flight MCP invocation's verified scope,
+/// else — when the plugin is serving an authenticated user request AND holds
+/// the `user_authority` permission — the user's full-authority context.
+/// `None` otherwise (init, ordinary hooks, public requests), so session
+/// dispatch refuses. Unlike [`effective_context`], the user path here
+/// re-checks the `user_authority` grant locally instead of leaning on the
+/// manifest rule that authed routes imply it.
+fn trusted_caller(
+    state: &std::sync::MutexGuard<'_, HostState>,
+) -> Result<Option<TrustedCaller>, Error> {
+    if let Some(inv) = state
+        .invocation
+        .read()
+        .map_err(|_| anyhow::anyhow!("plugin invocation context poisoned"))?
+        .clone()
+    {
+        return Ok(Some(TrustedCaller(inv)));
+    }
+    let Some(user) = state
+        .user
+        .read()
+        .map_err(|_| anyhow::anyhow!("plugin user context poisoned"))?
+        .clone()
+    else {
+        return Ok(None);
+    };
+    let granted = state
+        .permissions
+        .read()
+        .map_err(|_| anyhow::anyhow!("plugin permission set poisoned"))?
+        .contains("user_authority");
+    Ok(granted.then(|| TrustedCaller(user.as_invocation())))
+}
+
+/// Like [`state_permission_and_invocation`] but yields the [`TrustedCaller`]
+/// proof token instead of a bare context — for the session-dispatch host
+/// functions, which must not be reachable with a context that didn't come
+/// from a trusted slot.
+fn state_permission_and_trusted_caller(
+    user_data: &UserData<HostState>,
+    permission: &str,
+) -> Result<(Db, String, bool, Option<TrustedCaller>), Error> {
+    let state = user_data.get()?;
+    let state = state
+        .lock()
+        .map_err(|_| anyhow::anyhow!("plugin host state mutex poisoned"))?;
+    let granted = state
+        .permissions
+        .read()
+        .map_err(|_| anyhow::anyhow!("plugin permission set poisoned"))?
+        .contains(permission);
+    let caller = trusted_caller(&state)?;
+    Ok((state.db.clone(), state.plugin_id.clone(), granted, caller))
+}
+
+/// [`state_permission_and_trusted_caller`] plus the late-bound [`LiveHost`].
+#[allow(clippy::type_complexity)]
+fn state_permission_trusted_caller_and_live(
+    user_data: &UserData<HostState>,
+    permission: &str,
+) -> Result<
+    (
+        Db,
+        String,
+        bool,
+        Option<TrustedCaller>,
+        Option<Arc<dyn LiveHost>>,
+    ),
+    Error,
+> {
+    let state = user_data.get()?;
+    let state = state
+        .lock()
+        .map_err(|_| anyhow::anyhow!("plugin host state mutex poisoned"))?;
+    let granted = state
+        .permissions
+        .read()
+        .map_err(|_| anyhow::anyhow!("plugin permission set poisoned"))?
+        .contains(permission);
+    let caller = trusted_caller(&state)?;
+    let live = state
+        .live
+        .read()
+        .map_err(|_| anyhow::anyhow!("plugin live host poisoned"))?
+        .clone();
+    Ok((
+        state.db.clone(),
+        state.plugin_id.clone(),
+        granted,
+        caller,
+        live,
+    ))
+}
+
+/// Like [`state_and_permission`] but also resolves the late-bound provider
+/// registry (upgraded from its `Weak`): `None` before `main.rs` binds it or
+/// when no app is running, so `peckboard_list_models` refuses cleanly.
+#[allow(clippy::type_complexity)]
+fn state_permission_and_registry(
+    user_data: &UserData<HostState>,
+    permission: &str,
+) -> Result<
+    (
+        Db,
+        String,
+        bool,
+        Option<Arc<crate::provider::registry::ProviderRegistry>>,
+    ),
+    Error,
+> {
+    let state = user_data.get()?;
+    let state = state
+        .lock()
+        .map_err(|_| anyhow::anyhow!("plugin host state mutex poisoned"))?;
+    let granted = state
+        .permissions
+        .read()
+        .map_err(|_| anyhow::anyhow!("plugin permission set poisoned"))?
+        .contains(permission);
+    let registry = state
+        .provider_registry
+        .read()
+        .map_err(|_| anyhow::anyhow!("plugin provider registry slot poisoned"))?
+        .as_ref()
+        .and_then(std::sync::Weak::upgrade);
+    Ok((state.db.clone(), state.plugin_id.clone(), granted, registry))
+}
 /// Like [`state_permission_and_invocation`] but also clones the late-bound
 /// [`LiveHost`] (if any). The live host functions need it to schedule agent
 /// dispatch after they've authorized the target session.
@@ -2851,6 +3072,13 @@ host_fn!(peckboard_list_projects(user_data: HostState; _input: String) -> String
     Ok(list_projects_impl(&db))
 });
 
+// `peckboard_list_models` — the selectable (thinking-only) model catalog,
+// metadata only; see `list_models_impl`.
+host_fn!(peckboard_list_models(user_data: HostState; _input: String) -> String {
+    let (db, _plugin_id, ok, registry) = state_permission_and_registry(&user_data, "models_read")?;
+    if !ok { return Ok(error_json("plugin lacks the 'models_read' permission")); }
+    Ok(list_models_impl(&db, registry))
+});
 host_fn!(peckboard_list_cards(user_data: HostState; input: String) -> String {
     let (db, _plugin_id) = state_from(&user_data)?;
     Ok(list_cards_impl(&db, &input))
@@ -2981,13 +3209,15 @@ host_fn!(peckboard_answer_question(user_data: HostState; input: String) -> Strin
     Ok(answer_question_impl(&db, &input, &user, live))
 });
 // ── Generic session / event host functions (gated, scoped) ────────────
-// Each refuses if called outside an `mcp.tool.invoke` (no trusted context).
+// Each requires a trusted context: an in-flight `mcp.tool.invoke`, or — for
+// the [`TrustedCaller`]-taking functions — an authenticated `user_authority`
+// plugin-UI request (`serve_http_authed`).
 
 host_fn!(peckboard_create_session(user_data: HostState; input: String) -> String {
-    let (db, _plugin_id, ok, inv) = state_permission_and_invocation(&user_data, "session_write")?;
+    let (db, _plugin_id, ok, caller) = state_permission_and_trusted_caller(&user_data, "session_write")?;
     if !ok { return Ok(error_json("plugin lacks the 'session_write' permission")); }
-    let Some(inv) = inv else { return Ok(error_json("no caller context; peckboard_create_session is only callable during a tool invocation")); };
-    Ok(create_session_impl(&db, &input, &inv))
+    let Some(caller) = caller else { return Ok(error_json("no trusted caller context; peckboard_create_session requires a tool invocation or an authenticated plugin-UI request")); };
+    Ok(create_session_impl(&db, &input, &caller))
 });
 
 host_fn!(peckboard_get_session(user_data: HostState; input: String) -> String {
@@ -3054,10 +3284,10 @@ host_fn!(peckboard_write_file(user_data: HostState; input: String) -> String {
 });
 
 host_fn!(peckboard_dispatch_capture(user_data: HostState; input: String) -> String {
-    let (db, _plugin_id, ok, inv, live) = state_permission_invocation_and_live(&user_data, "session_dispatch")?;
+    let (db, _plugin_id, ok, caller, live) = state_permission_trusted_caller_and_live(&user_data, "session_dispatch")?;
     if !ok { return Ok(error_json("plugin lacks the 'session_dispatch' permission")); }
-    let Some(inv) = inv else { return Ok(error_json("no caller context; peckboard_dispatch_capture is only callable during a tool invocation")); };
-    Ok(dispatch_capture_impl(&db, &input, &inv, live))
+    let Some(caller) = caller else { return Ok(error_json("no trusted caller context; peckboard_dispatch_capture requires a tool invocation or an authenticated plugin-UI request")); };
+    Ok(dispatch_capture_impl(&db, &input, &caller, live))
 });
 
 host_fn!(peckboard_resume_session(user_data: HostState; input: String) -> String {
@@ -3414,6 +3644,7 @@ pub(crate) fn host_functions(
     pending_provider: Arc<
         std::sync::RwLock<Option<crate::provider::plugin_provider::ProviderRegistration>>,
     >,
+    provider_registry: ProviderRegistrySlot,
 ) -> Vec<Function> {
     let ud = UserData::new(HostState {
         db: db.clone(),
@@ -3425,6 +3656,7 @@ pub(crate) fn host_functions(
         user,
         provider_runtime,
         pending_provider,
+        provider_registry,
     });
     vec![
         Function::new(
@@ -3496,6 +3728,13 @@ pub(crate) fn host_functions(
             [PTR],
             ud.clone(),
             peckboard_list_projects,
+        ),
+        Function::new(
+            "peckboard_list_models",
+            [PTR],
+            [PTR],
+            ud.clone(),
+            peckboard_list_models,
         ),
         Function::new(
             "peckboard_list_cards",
@@ -4076,12 +4315,12 @@ mod tests {
         .await
         .unwrap();
 
-        let caller = InvocationContext {
+        let caller = TrustedCaller(InvocationContext {
             session_id: Some("caller".into()),
             project_id: None,
             folder_id: Some("f1".into()),
             authority: false,
-        };
+        });
         let out = create_session_impl(
             &db,
             r#"{"name":"expert: x","is_expert":true,"expert_kind":"pm"}"#,
@@ -4160,7 +4399,7 @@ mod tests {
             let sid = serde_json::from_str::<serde_json::Value>(&create_session_impl(
                 &db,
                 r#"{"name":"expert"}"#,
-                &inv(Some(proj), Some(fold)),
+                &TrustedCaller(inv(Some(proj), Some(fold))),
             ))
             .unwrap()["session"]["id"]
                 .as_str()
@@ -4255,7 +4494,7 @@ mod tests {
         .unwrap();
 
         let pid = "experts";
-        let caller = inv(Some("p1"), Some("f1"));
+        let caller = TrustedCaller(inv(Some("p1"), Some("f1")));
 
         // create_session lands in the *caller's* folder/project, ignoring any
         // ids the plugin might try to supply.
@@ -4325,8 +4564,11 @@ mod tests {
 
         // Scope escalation: a session this plugin owns but in p2/f2 is invisible
         // to a p1/f1 caller — even with a valid id.
-        let foreign =
-            create_session_impl(&db, r#"{"name":"foreign"}"#, &inv(Some("p2"), Some("f2")));
+        let foreign = create_session_impl(
+            &db,
+            r#"{"name":"foreign"}"#,
+            &TrustedCaller(inv(Some("p2"), Some("f2"))),
+        );
         let fid = serde_json::from_str::<serde_json::Value>(&foreign).unwrap()["session"]["id"]
             .as_str()
             .unwrap()
@@ -4911,7 +5153,7 @@ mod tests {
     async fn update_session_model_change_recycles_agent() {
         let db = setup().await; // folder f1 / project p1
         let pid = "experts";
-        let caller = inv(Some("p1"), Some("f1"));
+        let caller = TrustedCaller(inv(Some("p1"), Some("f1")));
 
         let sid = serde_json::from_str::<serde_json::Value>(&create_session_impl(
             &db,
@@ -5124,7 +5366,7 @@ mod tests {
     async fn live_dispatch_is_scoped_and_requires_binding() {
         let db = setup().await; // folder f1 / project p1
         let pid = "experts";
-        let caller = inv(Some("p1"), Some("f1"));
+        let caller = TrustedCaller(inv(Some("p1"), Some("f1")));
 
         // An expert session the plugin owns.
         let sid = serde_json::from_str::<serde_json::Value>(&create_session_impl(
@@ -5226,7 +5468,7 @@ mod tests {
         let foreign = serde_json::from_str::<serde_json::Value>(&create_session_impl(
             &db,
             r#"{"name":"foreign"}"#,
-            &inv(Some("p2"), Some("f2")),
+            &TrustedCaller(inv(Some("p2"), Some("f2"))),
         ))
         .unwrap()["session"]["id"]
             .as_str()
@@ -5883,6 +6125,7 @@ mod tests {
                     crate::provider::plugin_provider::PluginProviderRuntime::new(),
                 ),
                 pending_provider: Arc::new(std::sync::RwLock::new(None)),
+                provider_registry: Arc::new(std::sync::RwLock::new(None)),
             });
             state_ssh_context(&ud).unwrap()
         };
@@ -5901,5 +6144,216 @@ mod tests {
 
         let (_, has_ssh, has_ssh_keys, _) = ctx_for(&["ssh", "ssh_keys"]);
         assert!(has_ssh && has_ssh_keys, "both granted");
+    }
+
+    /// `trusted_caller` (the proof-token constructor behind
+    /// `peckboard_create_session` / `peckboard_dispatch_capture`) accepts
+    /// exactly the two valid contexts and refuses everything else.
+    #[tokio::test]
+    async fn trusted_caller_requires_invocation_or_authed_user_authority() {
+        let db = Db::in_memory().unwrap();
+        let data_dir = tempfile::tempdir().unwrap();
+
+        let ctx_for =
+            |granted: &[&str], invocation: Option<InvocationContext>, user: Option<UserContext>| {
+                let ud = UserData::new(HostState {
+                    db: db.clone(),
+                    data_dir: data_dir.path().to_path_buf(),
+                    plugin_id: "test".to_string(),
+                    permissions: Arc::new(std::sync::RwLock::new(
+                        granted.iter().map(|p| p.to_string()).collect(),
+                    )),
+                    invocation: Arc::new(std::sync::RwLock::new(invocation)),
+                    live: Arc::new(std::sync::RwLock::new(None)),
+                    user: Arc::new(std::sync::RwLock::new(user)),
+                    provider_runtime: Arc::new(
+                        crate::provider::plugin_provider::PluginProviderRuntime::new(),
+                    ),
+                    pending_provider: Arc::new(std::sync::RwLock::new(None)),
+                    provider_registry: Arc::new(std::sync::RwLock::new(None)),
+                });
+                state_permission_and_trusted_caller(&ud, "session_write").unwrap()
+            };
+        let user_ctx = || UserContext {
+            user_id: "u1".into(),
+            folder_id: Some("f1".into()),
+            project_id: Some("p1".into()),
+            session_id: None,
+        };
+
+        // Tool-invoke path: the token carries the invocation's scope.
+        let (_, _, _, caller) =
+            ctx_for(&["session_write"], Some(inv(Some("p1"), Some("f1"))), None);
+        let caller = caller.expect("invocation context yields a token");
+        assert!(!caller.authority);
+        assert_eq!(caller.folder_id.as_deref(), Some("f1"));
+
+        // Authed-request path: requires the `user_authority` grant.
+        let (_, _, _, caller) =
+            ctx_for(&["session_write", "user_authority"], None, Some(user_ctx()));
+        let caller = caller.expect("authed user + user_authority yields a token");
+        assert!(caller.authority);
+        assert_eq!(caller.folder_id.as_deref(), Some("f1"));
+
+        // Authed request WITHOUT the grant: refused.
+        let (_, _, _, caller) = ctx_for(&["session_write"], None, Some(user_ctx()));
+        assert!(caller.is_none(), "user context without user_authority");
+
+        // Neither context: refused.
+        let (_, _, _, caller) = ctx_for(&["session_write", "user_authority"], None, None);
+        assert!(caller.is_none(), "no context at all");
+    }
+
+    /// Session calls work end-to-end under the authed-request token: creating
+    /// a session and dispatching to it succeed with a user-derived
+    /// `TrustedCaller` exactly as they do with a tool-invoke one.
+    #[tokio::test]
+    async fn session_calls_succeed_under_authed_user_token() {
+        let db = setup().await; // folder f1 / project p1
+        let user = UserContext {
+            user_id: "u1".into(),
+            folder_id: Some("f1".into()),
+            project_id: Some("p1".into()),
+            session_id: None,
+        };
+        let caller = TrustedCaller(user.as_invocation());
+
+        let out = create_session_impl(&db, r#"{"name":"installer"}"#, &caller);
+        let v: serde_json::Value = serde_json::from_str(&out).unwrap();
+        assert!(v.get("error").is_none(), "create under authority: {out}");
+        let sid = v["session"]["id"].as_str().unwrap().to_string();
+
+        let live = Arc::new(RecordingLive::default());
+        let live_dyn: Arc<dyn LiveHost> = live.clone();
+        let d = dispatch_capture_impl(
+            &db,
+            &format!(r#"{{"session_id":"{sid}","prompt":"install"}}"#),
+            &caller,
+            Some(live_dyn),
+        );
+        assert!(d.contains("\"ok\":true"), "dispatch under authority: {d}");
+        assert_eq!(*live.calls.lock().unwrap(), vec![format!("dispatch:{sid}")]);
+    }
+
+    /// `models_read` output shape: only thinking models are listed, ids stay
+    /// account-qualified, and the response carries METADATA fields only — no
+    /// credential-shaped keys.
+    #[tokio::test]
+    async fn list_models_filters_thinking_and_exposes_no_credentials() {
+        use crate::provider::registry::{ProviderCapabilities, ProviderInfo, ProviderRegistry};
+        use crate::provider::stream::ModelInfo;
+
+        let db = Db::in_memory().unwrap();
+        let registry = Arc::new(ProviderRegistry::new());
+        registry
+            .register(
+                Arc::new(crate::provider::mock::MockProvider::new()),
+                ProviderInfo {
+                    id: "claude".into(),
+                    display_name: "Claude".into(),
+                    models: vec![
+                        ModelInfo {
+                            id: "claude-fable-5".into(),
+                            display_name: "Claude Fable 5".into(),
+                            capabilities: vec!["code".into(), "reasoning".into()],
+                            tier: 4,
+                        },
+                        ModelInfo {
+                            id: "claude-sonnet-4-6@acc_1".into(),
+                            display_name: "[Work] Claude Sonnet 4.6".into(),
+                            capabilities: vec!["code".into(), "reasoning".into()],
+                            tier: 2,
+                        },
+                        ModelInfo {
+                            id: "claude-haiku-4-5".into(),
+                            display_name: "Claude Haiku 4.5".into(),
+                            capabilities: vec!["code".into()], // NOT thinking
+                            tier: 1,
+                        },
+                    ],
+                    effort_levels: vec![],
+                    capabilities: ProviderCapabilities::default(),
+                },
+            )
+            .await;
+
+        let out = list_models_impl(&db, Some(registry));
+        let v: serde_json::Value = serde_json::from_str(&out).unwrap();
+        let models = v["models"].as_array().unwrap();
+        let ids: Vec<&str> = models.iter().map(|m| m["id"].as_str().unwrap()).collect();
+        assert!(ids.contains(&"claude:claude-fable-5"), "{ids:?}");
+        assert!(ids.contains(&"claude:claude-sonnet-4-6@acc_1"), "{ids:?}");
+        // Non-thinking models are filtered SERVER-SIDE — absent, not flagged.
+        assert!(!ids.iter().any(|i| i.contains("haiku")), "{ids:?}");
+
+        // Account id comes from the last-`@` split; bare models carry null.
+        let scoped = models
+            .iter()
+            .find(|m| m["id"] == "claude:claude-sonnet-4-6@acc_1")
+            .unwrap();
+        assert_eq!(scoped["account_id"], "acc_1");
+        assert_eq!(scoped["provider"], "claude");
+        assert_eq!(scoped["tier"], 2);
+        let bare = models
+            .iter()
+            .find(|m| m["id"] == "claude:claude-fable-5")
+            .unwrap();
+        assert!(bare["account_id"].is_null());
+
+        // Metadata only: the exact key set, nothing credential-shaped.
+        for m in models {
+            let mut keys: Vec<&str> = m.as_object().unwrap().keys().map(String::as_str).collect();
+            keys.sort_unstable();
+            assert_eq!(
+                keys,
+                vec![
+                    "account_id",
+                    "display_name",
+                    "id",
+                    "provider",
+                    "thinking",
+                    "tier"
+                ]
+            );
+            assert_eq!(m["thinking"], true);
+        }
+
+        // No registry bound → clean refusal, not a panic.
+        let unbound = list_models_impl(&db, None);
+        assert!(unbound.contains("error"), "{unbound}");
+    }
+
+    /// The `models_read` gate is the tuple `peckboard_list_models` actually
+    /// reads — mirrored from the ssh gate test above.
+    #[tokio::test]
+    async fn list_models_host_fn_gate_reflects_models_read() {
+        let db = Db::in_memory().unwrap();
+        let data_dir = tempfile::tempdir().unwrap();
+        let ctx_for = |granted: &[&str]| {
+            let ud = UserData::new(HostState {
+                db: db.clone(),
+                data_dir: data_dir.path().to_path_buf(),
+                plugin_id: "test".to_string(),
+                permissions: Arc::new(std::sync::RwLock::new(
+                    granted.iter().map(|p| p.to_string()).collect(),
+                )),
+                invocation: Arc::new(std::sync::RwLock::new(None)),
+                live: Arc::new(std::sync::RwLock::new(None)),
+                user: Arc::new(std::sync::RwLock::new(None)),
+                provider_runtime: Arc::new(
+                    crate::provider::plugin_provider::PluginProviderRuntime::new(),
+                ),
+                pending_provider: Arc::new(std::sync::RwLock::new(None)),
+                provider_registry: Arc::new(std::sync::RwLock::new(None)),
+            });
+            state_permission_and_registry(&ud, "models_read").unwrap()
+        };
+        let (_, _, ok, registry) = ctx_for(&[]);
+        assert!(!ok, "no permissions granted");
+        assert!(registry.is_none(), "no registry bound");
+        let (_, _, ok, _) = ctx_for(&["models_read"]);
+        assert!(ok, "models_read granted");
+        let (_, _, ok, _) = ctx_for(&["session_read", "ssh"]);
+        assert!(!ok, "unrelated permissions don't grant models_read");
     }
 }

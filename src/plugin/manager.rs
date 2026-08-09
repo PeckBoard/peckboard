@@ -124,6 +124,7 @@ pub const ALLOWED_PERMISSIONS: &[&str] = &[
     "http_fetch",           // peckboard_http_fetch — outbound public-web GET/HEAD
     "process_exec",         // peckboard_exec — run an allowlisted command in the caller's folder
     "http_request", // peckboard_http_request — outbound HTTP, any method, LAN/loopback allowed (integrating self-hosted services)
+    "models_read", // peckboard_list_models — thinking-model catalog METADATA (ids, display names, tiers, account ids); never credentials or tokens
     "process_exec_any", // peckboard_exec_any — run ANY folder-contained command (after approval)
     "project_files_read", // peckboard_list_project_files / read_file / read_file_base64
     "project_files_write", // peckboard_write_file
@@ -690,9 +691,10 @@ pub struct PluginManager {
     provider_runtime: Arc<crate::provider::plugin_provider::PluginProviderRuntime>,
     /// Late-bound registry plugin providers are applied to (see
     /// [`PluginManager::set_provider_registry`]). `Weak` because the registry
-    /// (via a registered adapter) holds an `Arc` back to this manager.
-    provider_registry:
-        std::sync::RwLock<Option<std::sync::Weak<crate::provider::registry::ProviderRegistry>>>,
+    /// (via a registered adapter) holds an `Arc` back to this manager. Shared
+    /// (`Arc`) into every plugin's host functions — `peckboard_list_models`
+    /// reads this same slot, so a registry bound after plugin load is seen.
+    provider_registry: super::host::ProviderRegistrySlot,
     /// `Weak` self-reference, bound with the registry — lets
     /// `sync_plugin_providers` hand each adapter the `Arc<PluginManager>` it
     /// dispatches through while callers only hold `&PluginManager`.
@@ -721,7 +723,7 @@ impl PluginManager {
             provider_runtime: Arc::new(
                 crate::provider::plugin_provider::PluginProviderRuntime::new(),
             ),
-            provider_registry: std::sync::RwLock::new(None),
+            provider_registry: Arc::new(std::sync::RwLock::new(None)),
             self_weak: std::sync::RwLock::new(None),
             plugin_providers: Mutex::new(HashMap::new()),
             provider_send_timeout: DEFAULT_PROVIDER_SEND_TIMEOUT,
@@ -797,7 +799,7 @@ impl PluginManager {
             provider_runtime: Arc::new(
                 crate::provider::plugin_provider::PluginProviderRuntime::new(),
             ),
-            provider_registry: std::sync::RwLock::new(None),
+            provider_registry: Arc::new(std::sync::RwLock::new(None)),
             self_weak: std::sync::RwLock::new(None),
             plugin_providers: Mutex::new(HashMap::new()),
             provider_send_timeout: DEFAULT_PROVIDER_SEND_TIMEOUT,
@@ -900,6 +902,7 @@ impl PluginManager {
             let user = user.clone();
             let data_dir = self.data_dir();
             let provider_runtime = self.provider_runtime.clone();
+            let provider_registry = self.provider_registry.clone();
             let pending_provider = pending_provider.clone();
             Arc::new(move |call_timeout: Duration| -> anyhow::Result<Plugin> {
                 let manifest = ExtismManifest::new([wasm.clone()])
@@ -919,6 +922,7 @@ impl PluginManager {
                         data_dir.clone(),
                         provider_runtime.clone(),
                         pending_provider.clone(),
+                        provider_registry.clone(),
                     ),
                     None => Vec::new(),
                 };

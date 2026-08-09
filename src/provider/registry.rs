@@ -286,6 +286,45 @@ impl ProviderRegistry {
         out
     }
 
+    /// [`list_providers_with_models_except`](Self::list_providers_with_models_except)
+    /// but each provider's catalog is the UNION of its effective (dynamic)
+    /// list and its static seed: dynamic entries first, then any static model
+    /// the probe dropped, deduped by model id. `dynamic_models()` REPLACES the
+    /// static seed on purpose for the picker (`/api/models`) — but that also
+    /// hides a seed model an outdated external catalog doesn't advertise yet
+    /// (the Claude CLI's initialize handshake omitting `claude-fable-5`, say).
+    /// Plugin-facing listings use the union so every registry-known model
+    /// stays selectable.
+    pub async fn list_providers_with_models_union_except(
+        &self,
+        exclude: &std::collections::HashSet<String>,
+    ) -> Vec<ProviderInfo> {
+        let entries: Vec<(ProviderInfo, Arc<dyn AgentProvider>)> = {
+            let providers = self.providers.lock().await;
+            providers
+                .values()
+                .filter(|r| !exclude.contains(&r.info.id))
+                .map(|r| (r.info.clone(), r.provider.clone()))
+                .collect()
+        };
+        let mut out = Vec::with_capacity(entries.len());
+        for (info, provider) in entries {
+            let models = match provider.dynamic_models().await {
+                Some(mut dynamic) => {
+                    for m in &info.models {
+                        if !dynamic.iter().any(|d| d.id == m.id) {
+                            dynamic.push(m.clone());
+                        }
+                    }
+                    dynamic
+                }
+                None => info.models.clone(),
+            };
+            out.push(ProviderInfo { models, ..info });
+        }
+        out
+    }
+
     /// Best-effort auth status per provider id, for the model picker's
     /// "not configured" hint (see [`AgentProvider::auth_configured`]).
     /// Same locking discipline as `list_providers_with_models`: the
@@ -645,5 +684,77 @@ mod tests {
 
         let err = crate::provider::resolve_auto_model(&candidates, None, false).unwrap_err();
         assert!(err.to_string().contains("Settings"));
+    }
+
+    /// A provider whose dynamic probe returns a SUBSET of its static seed —
+    /// the shape of a stale external catalog hiding a seed model.
+    struct ProbeProvider(Vec<ModelInfo>);
+
+    #[async_trait::async_trait]
+    impl crate::provider::agent::AgentProvider for ProbeProvider {
+        fn id(&self) -> &str {
+            "probe"
+        }
+        async fn dynamic_models(&self) -> Option<Vec<ModelInfo>> {
+            Some(self.0.clone())
+        }
+        async fn send_message(
+            &self,
+            _ctx: crate::provider::agent::SendMessageContext,
+        ) -> anyhow::Result<()> {
+            Ok(())
+        }
+        async fn cancel(&self, _session_id: &str) {}
+        async fn interrupt(&self, _session_id: &str) {}
+        async fn write_stdin(&self, _session_id: &str, _text: &str) -> bool {
+            false
+        }
+        async fn is_running(&self, _session_id: &str) -> bool {
+            false
+        }
+        async fn cleanup(&self) {}
+        async fn shutdown(&self) {}
+    }
+
+    #[tokio::test]
+    async fn union_listing_restores_static_models_a_probe_dropped() {
+        let registry = ProviderRegistry::new();
+        let m = |id: &str, caps: &[&str], tier: i32| ModelInfo {
+            id: id.into(),
+            display_name: id.into(),
+            capabilities: caps.iter().map(|c| c.to_string()).collect(),
+            tier,
+        };
+        registry
+            .register(
+                Arc::new(ProbeProvider(vec![m(
+                    "old-model",
+                    &["code", "reasoning"],
+                    3,
+                )])),
+                ProviderInfo {
+                    id: "probe".into(),
+                    display_name: "Probe".into(),
+                    models: vec![
+                        m("old-model", &["code", "reasoning"], 3),
+                        m("new-model", &["code", "reasoning"], 4),
+                    ],
+                    effort_levels: vec![],
+                    capabilities: ProviderCapabilities::default(),
+                },
+            )
+            .await;
+
+        // The effective list drops `new-model`; the union restores it.
+        let effective = registry
+            .list_providers_with_models_except(&std::collections::HashSet::new())
+            .await;
+        assert!(!effective[0].models.iter().any(|m| m.id == "new-model"));
+
+        let union = registry
+            .list_providers_with_models_union_except(&std::collections::HashSet::new())
+            .await;
+        let ids: Vec<&str> = union[0].models.iter().map(|m| m.id.as_str()).collect();
+        assert_eq!(ids, vec!["old-model", "new-model"]);
     }
 }
