@@ -5,6 +5,7 @@
 // data_store, and jobs/tools also touch exec).
 
 export type Store = Record<string, Record<string, any>>;
+export type Store = Record<string, Record<string, any>>;
 
 export interface HostMocks {
   execAny?: (input: {
@@ -14,6 +15,12 @@ export interface HostMocks {
   }) => any;
   sshExec?: (input: any) => any;
   sshKeyList?: () => any;
+  listModels?: () => any;
+  createSession?: (input: any) => any;
+  dispatchCapture?: (input: any) => any;
+  sessionEvents?: (input: any) => any;
+  listSessionsBrief?: () => any;
+  callerScope?: () => any;
 }
 
 export function installHost(store: Store, mocks: HostMocks = {}): Store {
@@ -66,6 +73,50 @@ export function installHost(store: Store, mocks: HostMocks = {}): Store {
       put(JSON.stringify({ error: "no sshProbe mock installed" })),
     peckboard_ssh_key_list: () => {
       const result = mocks.sshKeyList ? mocks.sshKeyList() : { keys: [] };
+      return put(JSON.stringify(result));
+    },
+    peckboard_list_models: () => {
+      const result = mocks.listModels
+        ? mocks.listModels()
+        : { error: "no listModels mock installed" };
+      return put(JSON.stringify(result));
+    },
+    peckboard_create_session: (off) => {
+      const input = read(off);
+      const result = mocks.createSession
+        ? mocks.createSession(input)
+        : { error: "no createSession mock installed" };
+      return put(JSON.stringify(result));
+    },
+    peckboard_dispatch_capture: (off) => {
+      const input = read(off);
+      const result = mocks.dispatchCapture
+        ? mocks.dispatchCapture(input)
+        : { error: "no dispatchCapture mock installed" };
+      return put(JSON.stringify(result));
+    },
+    peckboard_session_events: (off) => {
+      const input = read(off);
+      const result = mocks.sessionEvents
+        ? mocks.sessionEvents(input)
+        : { error: "no sessionEvents mock installed" };
+      return put(JSON.stringify(result));
+    },
+    peckboard_list_sessions_brief: () => {
+      const result = mocks.listSessionsBrief
+        ? mocks.listSessionsBrief()
+        : { sessions: [] };
+      return put(JSON.stringify(result));
+    },
+    peckboard_caller_scope: () => {
+      const result = mocks.callerScope
+        ? mocks.callerScope()
+        : {
+            folder_id: null,
+            project_id: null,
+            session_id: null,
+            authority: true,
+          };
       return put(JSON.stringify(result));
     },
   };

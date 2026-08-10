@@ -152,7 +152,10 @@ const SYSTEM_PATH_PREFIXES: &[&str] = &[
 /// these trees. Arbitrary project directories under the user's home — the
 /// point of a local tool — are unaffected, including the home directory
 /// itself, which is an ancestor of the data dir but not inside it.
-fn reject_unsafe_path(path: &std::path::Path, data_dir: &std::path::Path) -> Result<(), String> {
+pub(crate) fn reject_unsafe_path(
+    path: &std::path::Path,
+    data_dir: &std::path::Path,
+) -> Result<(), String> {
     // Resolve symlinks and `..` so `/tmp/../etc` and a symlink to /etc are
     // caught too. An unresolvable path (not created yet) falls back to the
     // literal one, which still catches the plain `/etc` spelling.

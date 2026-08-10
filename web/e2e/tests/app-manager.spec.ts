@@ -171,4 +171,77 @@ test.describe('app-manager page', () => {
     // The reverse-view picker filled with the resolved dependency set.
     expect(await f.locator('#libSel option').count()).toBeGreaterThan(1)
   })
+
+  test('installs via a temporary AI session with a picked account + model', async ({
+    request,
+    page,
+  }) => {
+    const token = await authenticate(request)
+    await loadApp(page, token)
+    test.skip(!(await pluginPresent(page)), 'app-manager wasm not built')
+
+    const f = await openAppManager(page)
+    const rows = f.locator('.approw')
+    await expect(rows.first()).toBeVisible({ timeout: 60_000 })
+
+    // Any app not installed on this host will do; skip only in the unlikely
+    // case the whole catalog is already present.
+    const row = f.locator('.approw:has(button.primary:enabled)').first()
+    test.skip((await row.count()) === 0, 'every catalog app is already installed on this host')
+    const appName = ((await row.locator('.name').textContent()) ?? '')
+      .replace(/Not installed/, '')
+      .trim()
+
+    // The picker is a real <select> over server-filtered thinking models —
+    // the non-thinking mock scenarios must never be offered.
+    await row.locator('button.primary').click()
+    await expect(f.locator('#installBackdrop')).toHaveClass(/open/)
+    const modelSel = f.locator('select#f_model')
+    await expect(modelSel).toHaveCount(1)
+    await expect(modelSel.locator('option[value="mock:plan-review"]')).toHaveCount(1, {
+      timeout: 20_000,
+    })
+    expect(await modelSel.locator('option[value*="happy-path"]').count()).toBe(0)
+
+    await modelSel.selectOption('mock:plan-review')
+    await f.locator('#installStart').click()
+    await expect(f.locator('#installBackdrop')).not.toHaveClass(/open/)
+
+    // Progress panel: honest tool-level session activity, never a fake log.
+    // The mock run can finish faster than the first 2s poll, so accept any
+    // session-job status — the terminal state is asserted strictly below.
+    await expect(f.locator('#logStatus')).toHaveText(
+      /Installing via AI session…|Waiting for your answer|Install session (failed|succeeded)|Installed via AI session/,
+      { timeout: 20_000 },
+    )
+    await expect(f.locator('#sessionBar')).toBeVisible()
+    await expect(f.locator('#sessionNote')).toContainText('never command output')
+    await expect(f.locator('#openSessionBtn')).toBeEnabled({ timeout: 20_000 })
+    await expect(f.locator('#logTail')).toContainText('Agent started', { timeout: 20_000 })
+
+    // The mock run ends without installing anything, so the plugin's detect
+    // probe honestly reports failure — proving the settle path end to end.
+    await expect(f.locator('#logStatus')).toHaveText('Install session failed', {
+      timeout: 30_000,
+    })
+    await expect(f.locator('#logTail')).toContainText('not detected')
+
+    // The chosen account+model persisted as the default for next time.
+    await row.locator('button.primary').click()
+    await expect(f.locator('#installBackdrop')).toHaveClass(/open/)
+    await expect(modelSel).toHaveValue('mock:plan-review', { timeout: 20_000 })
+    await page.keyboard.press('Escape')
+
+    // Deep link: the panel's button opens the real session tab in the app.
+    await f.locator('#openSessionBtn').click()
+    await expect(page).toHaveURL(/\/sessions\//, { timeout: 20_000 })
+    await expect(page.getByText(`Install ${appName}`, { exact: false }).first()).toBeVisible({
+      timeout: 20_000,
+    })
+    // The temp session ran the mock plan-review scenario — its transcript
+    // renders, proving the deep link landed on the real conversation.
+    await expect(page.getByText('Plan saved via propose_plan.').first()).toBeVisible({
+      timeout: 20_000,
+    })
+  })
 })

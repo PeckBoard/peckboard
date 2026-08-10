@@ -965,8 +965,24 @@ struct CreateSessionRequest {
     /// on the session for display/audit. Optional and independent of the body.
     #[serde(default)]
     system_prompt_name: Option<String>,
+    /// Create the session as a *temp* session (the UI deletes it when its
+    /// tab closes), like the core install-session flow. Default false.
+    #[serde(default)]
+    is_temp: bool,
+    /// Land the session in the folder registered at this filesystem path,
+    /// registering the folder (and creating the directory) when missing —
+    /// the server-side twin of the core UI's install-folder flow
+    /// (`web/src/utils/installSession.ts`). A leading `~/` expands to the
+    /// server user's home directory. Honored only when the caller holds
+    /// full user authority (an authenticated plugin-UI request); a plugin
+    /// MCP tool call stays pinned to its caller's folder (DESIGN §7.4).
+    #[serde(default)]
+    folder_path: Option<String>,
+    /// Display name used if `folder_path` has to register the folder;
+    /// defaults to the path's last segment.
+    #[serde(default)]
+    folder_name: Option<String>,
 }
-
 #[derive(Deserialize)]
 struct GetSessionRequest {
     session_id: String,
@@ -1032,6 +1048,86 @@ fn session_visible_to(session: &crate::db::models::Session, inv: &InvocationCont
     inv.project_id.is_some() && inv.project_id == session.project_id
 }
 
+/// Expand a leading `~` / `~/` in a plugin-supplied folder path. Pure (the
+/// caller resolves `home` from HOME/USERPROFILE) so it is testable without
+/// touching the process environment. Anything not `~`-prefixed must already
+/// be absolute — a relative path would silently resolve against the server
+/// process cwd.
+fn expand_home_path(
+    path: &str,
+    home: Option<std::path::PathBuf>,
+) -> Result<std::path::PathBuf, String> {
+    if path == "~" || path.starts_with("~/") {
+        let Some(home) = home else {
+            return Err("folder_path starts with '~' but no home directory is resolvable".into());
+        };
+        let rest = path.trim_start_matches('~').trim_start_matches('/');
+        return Ok(if rest.is_empty() {
+            home
+        } else {
+            home.join(rest)
+        });
+    }
+    let p = std::path::PathBuf::from(path);
+    if !p.is_absolute() {
+        return Err(format!(
+            "folder_path must be absolute or start with '~/': {path}"
+        ));
+    }
+    Ok(p)
+}
+
+fn resolve_home() -> Option<std::path::PathBuf> {
+    std::env::var_os("HOME")
+        .or_else(|| std::env::var_os("USERPROFILE"))
+        .map(std::path::PathBuf::from)
+}
+
+/// Find-or-register the folder row for `folder_path`: the server-side twin
+/// of the core UI's install-folder flow (`startInstallSession`). Applies the
+/// same unsafe-path refusal as `POST /api/folders`, creates the directory,
+/// and reuses any folder already registered at the exact expanded path.
+fn folder_id_for_path(db: &Db, raw: &str, name: Option<&str>) -> Result<String, String> {
+    let path = expand_home_path(raw, resolve_home())?;
+    // An in-memory DB (tests) has no data dir; the system-path refusals
+    // still apply via a placeholder no real path can live under.
+    let data_dir = db
+        .data_dir()
+        .unwrap_or_else(|| std::path::Path::new("/nonexistent-peckboard-data-dir"));
+    crate::routes::folders::reject_unsafe_path(&path, data_dir)?;
+    std::fs::create_dir_all(&path).map_err(|e| {
+        format!(
+            "failed to create the folder directory {}: {e}",
+            path.display()
+        )
+    })?;
+    let path_str = path.to_string_lossy().to_string();
+    if let Some(existing) = db
+        .find_folder_by_path_blocking(&path_str)
+        .map_err(|e| e.to_string())?
+    {
+        return Ok(existing.id);
+    }
+    let fallback = path
+        .file_name()
+        .and_then(|s| s.to_str())
+        .unwrap_or("Sessions")
+        .to_string();
+    let name = name
+        .map(str::trim)
+        .filter(|n| !n.is_empty())
+        .map(str::to_string)
+        .unwrap_or(fallback);
+    let folder = db
+        .create_folder_blocking(crate::db::models::NewFolder {
+            id: uuid::Uuid::new_v4().to_string(),
+            name,
+            path: path_str,
+            created_at: chrono::Utc::now().to_rfc3339(),
+        })
+        .map_err(|e| e.to_string())?;
+    Ok(folder.id)
+}
 /// `peckboard_create_session` — create a generic session in the *caller's*
 /// folder and project. Expert *knowledge* state is the plugin's own metadata
 /// (`peckboard_session_meta_set`); the optional `is_expert`/`expert_kind`
@@ -1047,8 +1143,27 @@ pub(crate) fn create_session_impl(db: &Db, input: &str, caller: &TrustedCaller) 
     if req.name.trim().is_empty() {
         return error_json("name is required");
     }
-    let Some(folder_id) = inv.folder_id.clone() else {
-        return error_json("caller has no folder scope; cannot create a session");
+    let folder_id = match req
+        .folder_path
+        .as_deref()
+        .map(str::trim)
+        .filter(|p| !p.is_empty())
+    {
+        Some(path) => {
+            if !inv.authority {
+                return error_json(
+                    "folder_path requires an authenticated user request; a tool invocation creates sessions in its caller's folder",
+                );
+            }
+            match folder_id_for_path(db, path, req.folder_name.as_deref()) {
+                Ok(id) => id,
+                Err(e) => return error_json(e),
+            }
+        }
+        None => match inv.folder_id.clone() {
+            Some(id) => id,
+            None => return error_json("caller has no folder scope; cannot create a session"),
+        },
     };
     if let Some(id) = req.id.as_deref()
         && let Err(e) = validate_id("id", id)
@@ -1096,7 +1211,7 @@ pub(crate) fn create_session_impl(db: &Db, input: &str, caller: &TrustedCaller) 
         context_reset_ts: None,
         model_autoswitch: None,
         system_prompt_name: req.system_prompt_name,
-        is_temp: false,
+        is_temp: req.is_temp,
         parent_session_id: None,
         subagent_completed_at: None,
     };
@@ -4334,6 +4449,85 @@ mod tests {
         // Plugin/expert-spawned session inherits the caller's owner.
         assert_eq!(spawned.user_id.as_deref(), Some("u1"));
         assert!(spawned.is_expert);
+    }
+
+    #[test]
+    fn expand_home_path_rules() {
+        let home = Some(std::path::PathBuf::from("/home/u"));
+        assert_eq!(
+            expand_home_path("~/a/b", home.clone()).unwrap(),
+            std::path::PathBuf::from("/home/u/a/b")
+        );
+        assert_eq!(
+            expand_home_path("~", home.clone()).unwrap(),
+            std::path::PathBuf::from("/home/u")
+        );
+        assert_eq!(
+            expand_home_path("/abs/x", home.clone()).unwrap(),
+            std::path::PathBuf::from("/abs/x")
+        );
+        assert!(expand_home_path("relative/x", home).is_err());
+        assert!(expand_home_path("~/a", None).is_err());
+    }
+
+    /// `folder_path` (authority-only) registers the folder on first use,
+    /// reuses it afterwards, and `is_temp` lands on the session row.
+    #[tokio::test]
+    async fn create_session_impl_folder_path_and_is_temp() {
+        let db = Db::in_memory().unwrap();
+        let tmp = tempfile::tempdir().unwrap();
+        let installs = tmp.path().join("installs");
+        let req = |name: &str| {
+            serde_json::json!({
+                "name": name,
+                "model": "mock:plan-review",
+                "is_temp": true,
+                "folder_path": installs.to_string_lossy(),
+                "folder_name": "App installs",
+            })
+            .to_string()
+        };
+
+        // A tool invocation (no authority) must NOT get to pick a folder.
+        let denied = create_session_impl(
+            &db,
+            &req("Install git"),
+            &TrustedCaller(inv(None, Some("f-caller"))),
+        );
+        assert!(
+            denied.contains("authenticated user request"),
+            "non-authority folder_path must be refused: {denied}"
+        );
+
+        // An authenticated plugin-UI request registers the folder + temp session.
+        let caller = TrustedCaller(inv_user());
+        let out = create_session_impl(&db, &req("Install git"), &caller);
+        let v: serde_json::Value = serde_json::from_str(&out).unwrap();
+        let sid = v["session"]["id"].as_str().expect("session id").to_string();
+        let session = db.get_session(&sid).await.unwrap().unwrap();
+        assert!(session.is_temp, "is_temp must persist");
+        assert_eq!(session.model.as_deref(), Some("mock:plan-review"));
+        assert!(installs.is_dir(), "directory must be created on disk");
+        let folders = db.list_folders().await.unwrap();
+        assert_eq!(folders.len(), 1);
+        assert_eq!(folders[0].name, "App installs");
+        assert_eq!(folders[0].id, session.folder_id);
+
+        // Second create at the same path reuses the registered folder row.
+        let out2 = create_session_impl(&db, &req("Install ripgrep"), &caller);
+        let v2: serde_json::Value = serde_json::from_str(&out2).unwrap();
+        let sid2 = v2["session"]["id"].as_str().unwrap().to_string();
+        let session2 = db.get_session(&sid2).await.unwrap().unwrap();
+        assert_eq!(session2.folder_id, session.folder_id);
+        assert_eq!(db.list_folders().await.unwrap().len(), 1);
+
+        // A relative path is refused before touching the filesystem.
+        let bad = create_session_impl(
+            &db,
+            r#"{"name":"x","folder_path":"relative/path"}"#,
+            &caller,
+        );
+        assert!(bad.contains("absolute"), "{bad}");
     }
 
     fn inv(project: Option<&str>, folder: Option<&str>) -> InvocationContext {

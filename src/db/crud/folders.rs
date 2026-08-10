@@ -42,6 +42,35 @@ impl Db {
                 .map_err(Into::into)
         })
     }
+    /// Synchronous find-by-exact-path for the WASM plugin host functions
+    /// (`folder_id_for_path` in `src/plugin/host.rs`), which run on a
+    /// blocking thread.
+    pub(crate) fn find_folder_by_path_blocking(
+        &self,
+        path: &str,
+    ) -> anyhow::Result<Option<Folder>> {
+        let path = path.to_string();
+        self.with_conn_blocking(move |conn| {
+            folders::table
+                .filter(folders::path.eq(&path))
+                .select(Folder::as_select())
+                .first(conn)
+                .optional()
+                .map_err(Into::into)
+        })
+    }
+
+    /// Synchronous twin of [`Db::create_folder`] for the WASM plugin host
+    /// functions.
+    pub(crate) fn create_folder_blocking(&self, new: NewFolder) -> anyhow::Result<Folder> {
+        self.with_conn_blocking(move |conn| {
+            diesel::insert_into(folders::table)
+                .values(&new)
+                .returning(Folder::as_returning())
+                .get_result(conn)
+                .map_err(Into::into)
+        })
+    }
 
     pub async fn list_folders(&self) -> anyhow::Result<Vec<Folder>> {
         self.with_conn(move |conn| {

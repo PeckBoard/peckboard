@@ -189,6 +189,12 @@ export const PAGE = `<!doctype html>
     word-break: break-word; font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
     font-size: 11px; color: var(--fg);
   }
+  .sessionbar {
+    display: flex; align-items: center; gap: 8px; padding: 8px 12px;
+    border-bottom: 1px solid var(--line); font-size: 11px;
+  }
+  .sessionbar[hidden] { display: none; }
+  .sessionbar .note { flex: 1; color: var(--muted); }
   /* dialogs */
   .backdrop {
     position: fixed; inset: 0; background: var(--overlay); display: none;
@@ -270,6 +276,10 @@ export const PAGE = `<!doctype html>
       <span class="badge" id="logStatus"></span>
       <button id="logClose" aria-label="Close the log panel">✕</button>
     </div>
+    <div class="sessionbar" id="sessionBar" hidden>
+      <span class="note" id="sessionNote">Tool-level session activity only — event names, never command output. Open the session for the full conversation.</span>
+      <button id="openSessionBtn" class="primary">Open install session</button>
+    </div>
     <pre class="logbody" id="logTail" tabindex="0" aria-live="polite"></pre>
   </aside>
 </div>
@@ -328,6 +338,25 @@ export const PAGE = `<!doctype html>
   </div>
 </div>
 
+<div class="backdrop" id="installBackdrop">
+  <div class="modal" role="dialog" aria-modal="true" aria-labelledby="installModalTitle">
+    <h2 id="installModalTitle">Install</h2>
+    <div class="form">
+      <p id="installIntro" style="margin:0"></p>
+      <div class="field">
+        <label for="f_model">Account and model *</label>
+        <select id="f_model"></select>
+        <span class="hint">The install runs in a temporary AI session on this account and model. Only thinking-capable models are offered; the choice is saved as the default for next time.</span>
+      </div>
+      <p class="formerr" id="installErr"></p>
+    </div>
+    <div class="foot">
+      <button id="installCancel">Cancel</button>
+      <button id="installStart" class="primary">Start install session</button>
+    </div>
+  </div>
+</div>
+
 <div class="toast" id="toast" role="status" aria-live="polite"></div>
 
 <script>
@@ -382,7 +411,7 @@ export const PAGE = `<!doctype html>
     deps: null, libs: {},
     keys: [],
     editing: null, logApp: null, timer: null,
-    lastFocus: null, confirmAction: null
+    lastFocus: null, confirmAction: null, installApp: null, sessionId: null
   };
 
   // ── targets ────────────────────────────────────────────────────────
@@ -553,6 +582,12 @@ export const PAGE = `<!doctype html>
 
   // ── install / remove ───────────────────────────────────────────────
   function startInstall(a) {
+    var t = state.byId[state.current];
+    // Local installs run through a temporary AI session — the user picks the
+    // account + model first. Remote targets keep the scripted recipe (an AI
+    // session runs on the Peckboard host and has no path to a remote
+    // target's SSH credentials).
+    if (t && t.kind === "local") { openInstallPicker(a); return; }
     var target = state.current;
     var r = state.rows[a.id];
     if (r) r.btn.disabled = true;
@@ -560,6 +595,81 @@ export const PAGE = `<!doctype html>
     postJSON(API + "/install", { target: target, app: a.id })
       .then(function () { watch(a.id); })
       .catch(function (e) { failRow(a, e); });
+  }
+
+  // ── install picker (account + model for the AI install session) ────
+  // The option set is fixed and server-filtered to thinking-capable models
+  // (GET /install-options), so this is a plain <select> — never free text.
+  function accountLabel(m) {
+    return m.provider + " — " + (m.account_id ? "account " + m.account_id : "default account");
+  }
+
+  function fillModelSelect(models, defaultModel) {
+    var sel = $("f_model");
+    clear(sel);
+    var groups = {};
+    models.forEach(function (m) {
+      var key = accountLabel(m);
+      if (!groups[key]) {
+        groups[key] = el("optgroup");
+        groups[key].label = key;
+        sel.appendChild(groups[key]);
+      }
+      var o = el("option", null, m.display_name);
+      o.value = m.id;
+      groups[key].appendChild(o);
+    });
+    if (defaultModel && models.some(function (m) { return m.id === defaultModel; })) {
+      sel.value = defaultModel;
+    }
+  }
+
+  function openInstallPicker(a) {
+    state.installApp = a;
+    $("installModalTitle").textContent = "Install " + a.name;
+    $("installIntro").textContent =
+      "A temporary AI session performs this install on " + targetLabel() +
+      ". Steps that need root use sudo with Peckboard's masked password dialog. " +
+      "You can watch or stop the session from its tab at any time.";
+    $("installErr").textContent = "";
+    var sel = $("f_model");
+    clear(sel);
+    sel.disabled = true;
+    $("installStart").disabled = true;
+    openDialog("installBackdrop", "f_model");
+    getJSON(API + "/install-options").then(function (d) {
+      var models = d.models || [];
+      fillModelSelect(models, d.default_model || null);
+      sel.disabled = !models.length;
+      $("installStart").disabled = !models.length;
+      if (!models.length) {
+        $("installErr").textContent =
+          "No thinking-capable models are available. Configure an agent provider account first.";
+      }
+    }).catch(function (e) { $("installErr").textContent = e.message; });
+  }
+
+  function startInstallSession() {
+    var a = state.installApp;
+    if (!a) return;
+    var model = $("f_model").value;
+    if (!model) {
+      $("installErr").textContent = "Pick the account and model for the install session.";
+      return;
+    }
+    $("installStart").disabled = true;
+    postJSON(API + "/install", { target: state.current, app: a.id, model: model })
+      .then(function () {
+        closeDialog("installBackdrop");
+        var r = state.rows[a.id];
+        if (r) r.btn.disabled = true;
+        openLog(a.id, "Installing " + a.name + " via AI session");
+        watch(a.id);
+      })
+      .catch(function (e) {
+        $("installStart").disabled = false;
+        $("installErr").textContent = e.message;
+      });
   }
 
   function askRemove(a) {
@@ -659,6 +769,8 @@ export const PAGE = `<!doctype html>
     $("logTitle").textContent = title;
     $("logStatus").textContent = "Starting…";
     $("logStatus").className = "badge busy";
+    $("sessionBar").hidden = true;
+    state.sessionId = null;
     $("logTail").textContent = "(waiting for output…)";
   }
 
@@ -675,7 +787,20 @@ export const PAGE = `<!doctype html>
     $("logStatus").className = "badge " + job.tone;
     var pre = $("logTail");
     var atBottom = pre.scrollTop + pre.clientHeight >= pre.scrollHeight - 30;
-    pre.textContent = job.log_tail || "(no output yet)";
+    if (job.is_session) {
+      // AI-session installs have no log — core exposes only event kinds and
+      // tool names to plugins, never payloads. Render that activity plus the
+      // session link, and never imply it is command output.
+      $("sessionBar").hidden = false;
+      state.sessionId = job.session_id || null;
+      $("openSessionBtn").disabled = !state.sessionId;
+      var lines = (job.activity || []).join("\\n");
+      if (job.message) lines += (lines ? "\\n\\n" : "") + job.message;
+      pre.textContent = lines || "(no session activity yet)";
+    } else {
+      $("sessionBar").hidden = true;
+      pre.textContent = job.log_tail || "(no output yet)";
+    }
     if (atBottom) pre.scrollTop = pre.scrollHeight;
   }
 
@@ -939,6 +1064,7 @@ export const PAGE = `<!doctype html>
   document.addEventListener("keydown", function (e) {
     if (e.key !== "Escape") return;
     if ($("targetBackdrop").classList.contains("open")) closeDialog("targetBackdrop");
+    else if ($("installBackdrop").classList.contains("open")) closeDialog("installBackdrop");
     else if ($("confirmBackdrop").classList.contains("open")) closeDialog("confirmBackdrop");
   });
 
@@ -1100,6 +1226,21 @@ export const PAGE = `<!doctype html>
   $("logClose").onclick = function () { state.logApp = null; $("logPanel").hidden = true; };
   $("targetBackdrop").addEventListener("mousedown", function (e) {
     if (e.target === $("targetBackdrop")) closeDialog("targetBackdrop");
+  });
+  $("installCancel").onclick = function () { closeDialog("installBackdrop"); };
+  $("installStart").onclick = startInstallSession;
+  $("openSessionBtn").onclick = function () {
+    if (!state.sessionId) return;
+    // Handled by the host page (PluginFullPage): dispatches the same
+    // peckboard:open-session event the core install flow uses, so the
+    // session tab opens in the main app.
+    window.parent.postMessage(
+      { type: "plugin-ui-open-session", sessionId: state.sessionId },
+      "*"
+    );
+  };
+  $("installBackdrop").addEventListener("mousedown", function (e) {
+    if (e.target === $("installBackdrop")) closeDialog("installBackdrop");
   });
   $("confirmBackdrop").addEventListener("mousedown", function (e) {
     if (e.target === $("confirmBackdrop")) closeDialog("confirmBackdrop");

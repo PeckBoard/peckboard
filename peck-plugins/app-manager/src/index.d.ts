@@ -18,5 +18,11 @@ declare module "extism:host" {
     peckboard_ssh_probe(ptr: I64): I64;
     peckboard_ssh_exec(ptr: I64): I64;
     peckboard_ssh_key_list(ptr: I64): I64;
+    peckboard_list_models(ptr: I64): I64;
+    peckboard_create_session(ptr: I64): I64;
+    peckboard_dispatch_capture(ptr: I64): I64;
+    peckboard_session_events(ptr: I64): I64;
+    peckboard_list_sessions_brief(ptr: I64): I64;
+    peckboard_caller_scope(ptr: I64): I64;
   }
 }

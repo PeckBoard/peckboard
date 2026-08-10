@@ -208,6 +208,17 @@ export interface JobView {
   tone: "busy" | "ok" | "bad";
   exit_code: number | null;
   log_tail: string;
+  /** True for AI-session installs — the page renders the activity list and
+   * the session link instead of a log (there is no log to show, and the
+   * page must never imply event kinds are command output). */
+  is_session?: boolean;
+  /** Session jobs: the temp session doing the install (deep-link target). */
+  session_id?: string | null;
+  /** Session jobs: tool-level activity lines derived from the slim event
+   * tail — kinds and tool names only, never payloads. */
+  activity?: string[];
+  /** Session jobs: one-sentence outcome/progress note. */
+  message?: string | null;
 }
 
 export function jobView(job: JobRecord, logTail: string): JobView {
@@ -227,6 +238,30 @@ export function jobView(job: JobRecord, logTail: string): JobView {
         ? `${verb} failed (exit ${code})`
         : `${verb} failed`;
     tone = "bad";
+  }
+  if (job.kind === "session") {
+    if (job.status === "running") {
+      label = job.question_open
+        ? "Waiting for your answer in the install session…"
+        : "Installing via AI session…";
+    } else if (job.status === "succeeded") {
+      label = "Installed via AI session";
+    } else {
+      label = "Install session failed";
+    }
+    return {
+      id: job.id,
+      action: job.action,
+      status: job.status,
+      label,
+      tone,
+      exit_code: null,
+      log_tail: "",
+      is_session: true,
+      session_id: job.session_id ?? null,
+      activity: job.activity ?? [],
+      message: job.message ?? null,
+    };
   }
   return {
     id: job.id,

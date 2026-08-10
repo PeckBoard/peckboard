@@ -54,8 +54,23 @@ export default function PluginFullPage({ title, plugin, path, scope, onBack }: P
       const frame = frameRef.current
       if (!frame || e.source !== frame.contentWindow) return
       const msg = e.data
-      if (!msg || msg.type !== 'plugin-ui-fetch' || typeof msg.requestId !== 'number') return
-
+      if (!msg) return
+      // A plugin page asking the host to open a session tab (the app-manager
+      // install flow's "open the install session" link). Pure UI navigation
+      // under the signed-in user's authority — the same event the MCP
+      // install flow dispatches (web/src/utils/installSession.ts).
+      if (
+        msg.type === 'plugin-ui-open-session' &&
+        typeof msg.sessionId === 'string' &&
+        msg.sessionId.length > 0 &&
+        msg.sessionId.length <= 256
+      ) {
+        window.dispatchEvent(
+          new CustomEvent('peckboard:open-session', { detail: { session_id: msg.sessionId } }),
+        )
+        return
+      }
+      if (msg.type !== 'plugin-ui-fetch' || typeof msg.requestId !== 'number') return
       const reply = (status: number, body: string) =>
         frame.contentWindow?.postMessage(
           { type: 'plugin-ui-fetch-result', requestId: msg.requestId, status, body },

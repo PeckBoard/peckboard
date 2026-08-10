@@ -405,3 +405,268 @@ async fn app_manager_plugin_end_to_end() {
         "app_remove should reject an unknown target: {res}"
     );
 }
+
+/// The AI-session install flow end to end against the real host functions:
+/// the picker options come from `peckboard_list_models` (thinking-only — a
+/// non-thinking mock model is absent), `POST /install` creates a TEMP
+/// session on the picked model and dispatches a `sudo -A` prompt through a
+/// recording LiveHost, progress is read from the slim event tail, success
+/// is decided by the detect probe after `agent-end`, the chosen model is
+/// persisted as the default — and an abandoned session (deleted before the
+/// run ends) lands failed with no provenance record.
+#[tokio::test]
+async fn app_manager_session_install_flow() {
+    use std::collections::BTreeMap;
+    use std::sync::{Arc, Mutex};
+
+    use peckboard::plugin::hooks::PluginHttpOutcome;
+    use peckboard::plugin::host::LiveHost;
+    use peckboard::provider::mock::register_mock_provider;
+    use peckboard::provider::registry::ProviderRegistry;
+
+    let Some(wasm) = plugin_wasm() else {
+        eprintln!(
+            "SKIP app_manager_session_install_flow: plugin wasm not built \
+             (run peck-plugins/app-manager/build.sh)"
+        );
+        return;
+    };
+
+    struct RecordingLive {
+        dispatched: Arc<Mutex<Vec<(String, String)>>>,
+    }
+    impl LiveHost for RecordingLive {
+        fn dispatch_capture(&self, session_id: String, prompt: String) {
+            self.dispatched.lock().unwrap().push((session_id, prompt));
+        }
+        fn resume_session(&self, _session_id: String, _text: String) {}
+    }
+
+    let dir = tempfile::tempdir().unwrap();
+    let data_dir = dir.path();
+    let plugins_dir = data_dir.join("plugins");
+    std::fs::create_dir_all(&plugins_dir).unwrap();
+    std::fs::copy(&wasm, plugins_dir.join(format!("{PLUGIN_ID}.wasm"))).unwrap();
+
+    let db = Db::open(data_dir).unwrap();
+    let plugins = Arc::new(PluginManager::new(data_dir, db.clone()));
+    plugins.load_all().await.unwrap();
+    let info = plugins
+        .decide(PLUGIN_ID, true)
+        .await
+        .unwrap()
+        .expect("app-manager plugin should be loaded");
+    assert_eq!(info.status, "approved", "plugin must be active: {info:?}");
+
+    // Bind the model catalog (mock provider: only `plan-review` is tagged
+    // reasoning) and a LiveHost that records dispatches instead of spawning.
+    let registry = Arc::new(ProviderRegistry::new());
+    register_mock_provider(&registry).await;
+    plugins.set_provider_registry(&registry);
+    let dispatched = Arc::new(Mutex::new(Vec::new()));
+    plugins.set_live_host(Arc::new(RecordingLive {
+        dispatched: dispatched.clone(),
+    }));
+
+    let headers = BTreeMap::new();
+    let authed = |method: &'static str, path_and_query: String, body: String| {
+        let plugins = plugins.clone();
+        let headers = headers.clone();
+        async move {
+            // Route matching sees the bare path; the query rides separately.
+            let (path, query) = match path_and_query.split_once('?') {
+                Some((p, q)) => (p.to_string(), q.to_string()),
+                None => (path_and_query, String::new()),
+            };
+            match plugins
+                .serve_http_authed("u1", method, &path, &query, &headers, &body)
+                .await
+            {
+                PluginHttpOutcome::Served { status, body, .. } => {
+                    let text = String::from_utf8_lossy(&body).to_string();
+                    let v: Value = serde_json::from_str(&text)
+                        .unwrap_or_else(|_| panic!("non-JSON response ({status}): {text}"));
+                    (status, v)
+                }
+                PluginHttpOutcome::NoRoute => panic!("no route for {method} {path}"),
+            }
+        }
+    };
+
+    // ── picker options: thinking models only, no default stored yet ──────
+    let (status, v) = authed(
+        "GET",
+        "/api/plugin-ui/app-manager/install-options".into(),
+        String::new(),
+    )
+    .await;
+    assert_eq!(status, 200, "{v}");
+    let ids: Vec<&str> = v["models"]
+        .as_array()
+        .expect("models array")
+        .iter()
+        .filter_map(|m| m["id"].as_str())
+        .collect();
+    assert!(
+        ids.contains(&"mock:plan-review"),
+        "thinking mock model offered: {v}"
+    );
+    assert!(
+        !ids.iter().any(|id| id.contains("happy-path")),
+        "a non-thinking model must never be offered: {v}"
+    );
+    assert!(v["default_model"].is_null(), "no default yet: {v}");
+
+    // ── refuse a model outside the offered catalog ────────────────────
+    let (_s, v) = authed(
+        "POST",
+        "/api/plugin-ui/app-manager/install".into(),
+        json!({ "target": "local", "app": "git", "model": "mock:happy-path" }).to_string(),
+    )
+    .await;
+    assert!(
+        v["error"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("not in the selectable catalog"),
+        "non-thinking model refused: {v}"
+    );
+    assert!(dispatched.lock().unwrap().is_empty());
+
+    // ── start a session install (git) ─────────────────────────────
+    let (status, v) = authed(
+        "POST",
+        "/api/plugin-ui/app-manager/install".into(),
+        json!({ "target": "local", "app": "git", "model": "mock:plan-review" }).to_string(),
+    )
+    .await;
+    assert_eq!(status, 200, "install should start: {v}");
+    let session_id = v["session_id"].as_str().expect("session_id").to_string();
+
+    // The temp session exists on the picked model, in the shared install
+    // folder core registered server-side.
+    let session = db
+        .get_session(&session_id)
+        .await
+        .unwrap()
+        .expect("install session row");
+    assert!(session.is_temp, "install session must be temp");
+    assert_eq!(session.name, "Install Git");
+    assert_eq!(session.model.as_deref(), Some("mock:plan-review"));
+    let folder = db
+        .get_folder(&session.folder_id)
+        .await
+        .unwrap()
+        .expect("install folder row");
+    assert!(
+        folder.path.ends_with("peckboard-installs/app-manager"),
+        "session lives in the shared install folder: {}",
+        folder.path
+    );
+
+    // The prompt went through the LiveHost with the askpass sudo rule.
+    {
+        let d = dispatched.lock().unwrap();
+        assert_eq!(d.len(), 1, "exactly one dispatch");
+        assert_eq!(d[0].0, session_id);
+        assert!(d[0].1.contains("sudo -A"), "prompt: {}", d[0].1);
+        assert!(d[0].1.contains("Install Git"), "prompt: {}", d[0].1);
+    }
+
+    // The chosen account+model became the stored default.
+    let (_s, v) = authed(
+        "GET",
+        "/api/plugin-ui/app-manager/install-options".into(),
+        String::new(),
+    )
+    .await;
+    assert_eq!(v["default_model"], json!("mock:plan-review"));
+
+    // ── progress from the slim event tail; settle on agent-end ─────────
+    db.append_event(&session_id, "agent-start", json!({ "model": "mock" }))
+        .await
+        .unwrap();
+    db.append_event(&session_id, "agent-tool-start", json!({ "name": "Bash" }))
+        .await
+        .unwrap();
+    db.append_event(&session_id, "agent-end", json!({}))
+        .await
+        .unwrap();
+
+    let (status, v) = authed(
+        "GET",
+        "/api/plugin-ui/app-manager/status?target=local&app=git".into(),
+        String::new(),
+    )
+    .await;
+    assert_eq!(status, 200, "{v}");
+    let job = &v["job"];
+    // git is certainly installed on the host running this suite (the repo
+    // itself is a git checkout), so the detect probe confirms the install.
+    assert_eq!(job["status"], json!("succeeded"), "job: {v}");
+    assert_eq!(job["is_session"], json!(true), "job: {v}");
+    let activity = job["activity"].as_array().expect("activity lines");
+    assert!(
+        activity.contains(&json!("Tool: Bash")),
+        "tool-level activity from the slim tail: {v}"
+    );
+    assert!(
+        job["log_tail"].as_str().unwrap_or_default().is_empty(),
+        "a session job must not fake a log tail: {v}"
+    );
+
+    // ── abandoned session: deleted before the run ends → failed, and no
+    // provenance record may appear for the app ───────────────────────
+    let (status, v) = authed(
+        "POST",
+        "/api/plugin-ui/app-manager/install".into(),
+        json!({ "target": "local", "app": "ripgrep", "model": "mock:plan-review" }).to_string(),
+    )
+    .await;
+    assert_eq!(status, 200, "second install should start: {v}");
+    let session2 = v["session_id"].as_str().expect("session_id").to_string();
+    assert!(db.delete_session(&session2).await.unwrap());
+
+    let (status, v) = authed(
+        "GET",
+        "/api/plugin-ui/app-manager/status?target=local&app=ripgrep".into(),
+        String::new(),
+    )
+    .await;
+    assert_eq!(status, 200, "{v}");
+    let job = &v["job"];
+    assert_eq!(
+        job["status"],
+        json!("failed"),
+        "an abandoned session must land failed, never running/succeeded: {v}"
+    );
+    assert!(
+        job["message"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("ended before completing"),
+        "clear unknown-state note: {v}"
+    );
+
+    // No install record was written for the abandoned job: the dashboard
+    // row shows no recorded package version, no "installed with" packages,
+    // and no provenance note — all of which only render from a record.
+    let (_s, v) = authed(
+        "GET",
+        "/api/plugin-ui/app-manager/apps?target=local".into(),
+        String::new(),
+    )
+    .await;
+    if let Some(rows) = v["apps"].as_array() {
+        let rg = rows
+            .iter()
+            .find(|a| a["id"] == json!("ripgrep"))
+            .expect("ripgrep row");
+        assert!(
+            rg["package_version"].is_null()
+                && rg["provenance_note"].is_null()
+                && rg["added_packages"].as_array().is_none_or(Vec::is_empty),
+            "no bogus provenance record for an abandoned install: {rg}"
+        );
+    }
+}

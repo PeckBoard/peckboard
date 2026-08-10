@@ -26,11 +26,20 @@ tools) and an **App Manager dashboard page** reachable from the sidebar.
 - `user_authority` — serve the page's authenticated data routes under the
   signed-in user (`http.request.authed`).
 - `contribute_sidebar` — the App Manager sidebar entry.
+- `models_read` — the install picker's account+model catalog. Metadata only
+  (ids, display names, tiers, account ids), already filtered server-side to
+  thinking-capable models; never credentials or tokens.
+- `session_write` — create the temporary AI install session (`is_temp`, in
+  the shared `~/peckboard-installs/app-manager` folder core registers).
+- `session_dispatch` — dispatch the install prompt at that session.
+- `session_read` — poll the session's slim event tail (`{seq, kind, name}`,
+  never payloads) to render install progress.
 
-**Upgrading from 0.1.0 re-triggers the approval prompt.** The permission set
-grew (`user_authority`, `contribute_sidebar`) and so did the hook list
-(`http.request.before`, `http.request.authed`), so Peckboard loads the new
-version inert until you approve it again in Settings → Plugins.
+**Upgrading from 0.4.0 (or earlier) re-triggers the approval prompt.** The
+permission set grew again (`models_read`, `session_write`,
+`session_dispatch`, `session_read` for AI-session installs), so Peckboard
+loads the new version inert until you approve it again in Settings →
+Plugins.
 
 ## Dashboard Page
 
@@ -44,9 +53,10 @@ postMessage fetch bridge:
 | `GET /targets`                         | the target dropdown (local + configured remotes) |
 | `GET /ssh-keys`                        | vault key metadata for the key dropdown          |
 | `GET /apps?target=`                    | distro banner + one grid row per catalog app     |
-| `GET /status?target=&app=`             | one app's live state + job log tail              |
+| `GET /status?target=&app=`             | one app's live state + job progress              |
+| `GET /install-options`                 | account+model picker options + stored default    |
 | `POST /targets`, `POST /target-remove` | remote-target CRUD                               |
-| `POST /install`, `POST /remove`        | start a detached job                             |
+| `POST /install`, `POST /remove`        | start an install (session/script) / remove job   |
 | `GET /deps?target=`                    | cached dependency graph, trees + reverse view    |
 | `POST /deps-refresh`                   | re-resolve the graph from the package manager    |
 | `GET /rdeps?target=&pkg=`              | system-wide reverse deps of one graph package    |
@@ -109,11 +119,39 @@ Distro detection reads `/etc/os-release` on the target and maps
 (arch), `zypper` (suse). An unrecognised or non-Linux target is refused with
 a clear message — never a guessed command.
 
-## Installs are detached jobs
+## Installs Are Detached Jobs — and Local Installs Run in an AI Session
 
 `app_install`/`app_remove` don't block until completion — plugin calls are
 synchronous and bounded by `call_timeout_secs`, and an `ollama`/`docker`
-install can run for minutes. Instead:
+install can run for minutes.
+
+**Local installs (`app_install` on the `local` target) run through a
+TEMPORARY AI SESSION** instead of a detached script:
+
+1. The user picks the **account and model** in the dashboard (a `<select>`
+   fed by `peckboard_list_models` — thinking-capable models only, filtered
+   server-side; the chosen id is validated against that same catalog before
+   anything is created, and persisted as the default for next time).
+2. The plugin takes the BEFORE package-DB snapshot, creates a temp session
+   (`Install <app>`, `is_temp`, in `~/peckboard-installs/app-manager`) on
+   that model, and dispatches an install prompt that mirrors the core
+   install-session rules — including `sudo -A` so root steps raise the
+   masked askpass dialog in the session tab.
+3. `app_status` polls the session's **slim event tail** (`{seq, kind,
+name}` — core never exposes event payloads to plugins), so the page
+   shows tool-level activity plus an "Open install session" link. It is
+   deliberately NOT a log; the real conversation lives in the session tab.
+4. When the run ends (`agent-end` — emitted for completed and crashed runs
+   alike), the plugin takes the AFTER snapshot and decides success by
+   re-running the app's **detect probe** — never by trusting the agent's
+   own account. A session that vanishes before its run ends (temp tab
+   closed, cleared, killed) lands the job in a clear **failed** state with
+   an "unknown" note — never a bogus empty delta recorded as success.
+
+**Remote installs and every removal stay deterministic scripts.** An AI
+session runs on the Peckboard host and has no path to a remote target's
+SSH credentials; and removal is destructive, so a scripted `apt remove` is
+preferred over an agent. Those paths keep the original shape:
 
 1. The catalog recipe is wrapped and launched with `nohup sh -c '...' >
 <logfile> 2>&1 &`, its PID captured.
@@ -125,13 +163,20 @@ install can run for minutes. Instead:
    sentinel line on completion, so `app_status` can tell success from
    failure without waiting on the process itself.
 
+Session jobs reuse the same job records with `kind: "session"` plus the
+session id, event cursor, and bounded activity lines (`src/jobs.ts`,
+`src/installSession.ts`).
+
 ## Install Provenance
 
 What an install _genuinely_ added is recorded by bracketing it with
-package-database snapshots inside the same detached script — never by
-parsing installer output or asking an agent:
+package-database snapshots — never by parsing installer output or asking
+an agent. Script installs take both snapshots inside the same detached
+script; AI-session installs take them in plugin code around the session's
+lifetime (before the prompt is dispatched, after the run ends). Either
+way:
 
-    snapshot(before) → recipe → snapshot(after) → delta = added packages
+    snapshot(before) → install → snapshot(after) → delta = added packages
 
 Snapshots dump `name + version` per line (`dpkg-query -W`, `rpm -qa --qf`,
 `pacman -Q`) into `/tmp` files next to the job's logfile, through the same
@@ -248,11 +293,16 @@ the graphify plugin's legacy self-install into a folder-root
 ## sudo
 
 Recipes that need root use `sudo -A`, matching the core convention (see
-`src/service/askpass.rs` and `web/src/utils/installSession.ts`). A plugin's
-own exec calls do not currently have the askpass bridge wired in, so
-`sudo -A` fails cleanly with sudo's own stderr (e.g. "a password is
-required") rather than hanging — that message shows up in the job's log
-tail via `app_status`.
+`src/service/askpass.rs` and `web/src/utils/installSession.ts`).
+
+- **AI-session installs** (local): the agent runs `sudo -A` inside a real
+  session, so the askpass bridge works — the password prompt appears as a
+  masked dialog in the session tab (the dashboard flags it as "waiting for
+  your answer" and links there).
+- **Script installs/removals**: a plugin's own exec calls do not have the
+  askpass bridge wired in, so `sudo -A` fails cleanly with sudo's own
+  stderr (e.g. "a password is required") rather than hanging — that
+  message shows up in the job's log tail via `app_status`.
 
 ## Build
 

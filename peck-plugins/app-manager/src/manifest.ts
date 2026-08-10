@@ -15,7 +15,11 @@ const DESCRIPTION =
   "grant itself is broad. Ships an App Manager dashboard page (sidebar entry) for " +
   "picking a target, seeing what is installed, watching install progress live, and " +
   "browsing each app's dependency graph as resolved from the target's package manager " +
-  "(pip packages get their own pip-probed section).";
+  "(pip packages get their own pip-probed section). Installs on the LOCAL host run " +
+  "through a TEMPORARY AI SESSION on a user-picked account + model (thinking-capable " +
+  "models only): the plugin creates the temp session, dispatches the install prompt, " +
+  "shows tool-level session activity, and still records provenance itself via " +
+  "package-DB snapshots taken around the session — removal stays script-based.";
 
 const VERSION = "0.5.0";
 const REPOSITORY = "https://github.com/PeckBoard/app-manager";
@@ -88,13 +92,24 @@ const MCP_TOOLS = [
   {
     name: "app_install",
     description:
-      "Start installing an app on a target. Returns immediately with a job id — installs run detached " +
-      "and can take minutes; poll app_status with the same app/target to follow progress.",
+      "Start installing an app on a target. Returns immediately with a job id — poll app_status " +
+      "with the same app/target to follow progress. On the LOCAL host the install runs through a " +
+      "temporary AI session on a thinking-capable model: pass 'model' (an id from the dashboard's " +
+      "picker, account-qualified) or rely on the dashboard's stored default; without either the " +
+      "call is refused. Remote targets install via the deterministic scripted recipe and take no " +
+      "model.",
     input_schema: {
       type: "object",
       properties: {
         app: { type: "string", description: APP_DESC },
         target: { type: "string", description: TARGET_DESC },
+        model: {
+          type: "string",
+          description:
+            "Local installs only: the account-qualified model id the temporary install session " +
+            "runs on (thinking-capable models only; the server validates against its own catalog). " +
+            "Defaults to the last model chosen in the App Manager dashboard.",
+        },
       },
       required: ["app", "target"],
       additionalProperties: false,
@@ -154,6 +169,10 @@ export function manifestJson(): string {
       "ssh_keys",
       "user_authority", // serve the authenticated dashboard data routes
       "contribute_sidebar", // the App Manager sidebar page
+      "models_read", // the install picker's account+model catalog (metadata only)
+      "session_write", // create the temporary install session
+      "session_dispatch", // dispatch the install prompt at it
+      "session_read", // poll its slim event tail for progress
     ],
 
     // Global sidebar entry → the app-manager dashboard.
@@ -172,6 +191,7 @@ export function manifestJson(): string {
       "GET /api/plugin-ui/app-manager/targets",
       "GET /api/plugin-ui/app-manager/ssh-keys",
       "GET /api/plugin-ui/app-manager/apps",
+      "GET /api/plugin-ui/app-manager/install-options",
       "GET /api/plugin-ui/app-manager/status",
       "GET /api/plugin-ui/app-manager/deps",
       "GET /api/plugin-ui/app-manager/rdeps",

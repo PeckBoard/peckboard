@@ -27,6 +27,11 @@ import {
   pollJob,
   putJob,
 } from "./jobs";
+import {
+  getDefaultInstallModel,
+  pollSessionJob,
+  startSessionInstall,
+} from "./installSession";
 import { depsOverview, refreshAfterJob } from "./deps";
 import {
   getInstallRecord,
@@ -183,7 +188,10 @@ function appState(
   if (job) {
     try {
       const wasRunning = job.status === "running";
-      const polled = pollJob(target, job);
+      const polled =
+        job.kind === "session"
+          ? pollSessionJob(target, job)
+          : pollJob(target, job);
       job = polled.job;
       tail = polled.tail;
       if (wasRunning && job.status !== "running") {
@@ -223,6 +231,14 @@ export function appStatus(args: any): any {
           status: job.status,
           exit_code: job.exit_code ?? null,
           log_tail: tail,
+          ...(job.kind === "session"
+            ? {
+                kind: "session",
+                session_id: job.session_id ?? null,
+                activity: job.activity ?? [],
+                ...(job.message ? { message: job.message } : {}),
+              }
+            : {}),
         }
       : null,
   };
@@ -287,6 +303,26 @@ export function appInstall(args: any): any {
         `and no vendor script configured for this app`,
     );
   }
+
+  // LOCAL installs run through a TEMPORARY AI SESSION on a user-picked
+  // account + model (see installSession.ts). Remote targets keep the
+  // deterministic script path: an AI session runs on the Peckboard host and
+  // has no path to a remote target's SSH credentials. Removal stays
+  // script-based everywhere by design.
+  if (target.kind === "local") {
+    const model =
+      typeof args?.model === "string" && args.model.trim()
+        ? args.model.trim()
+        : getDefaultInstallModel();
+    if (!model) {
+      throw new Error(
+        `installing on the local host runs a temporary AI session; pick the account and model for it ` +
+          `(pass 'model', or choose one in the App Manager dashboard once to set the default)`,
+      );
+    }
+    return startSessionInstall(target, app, model, distro.pm);
+  }
+
   // pip-namespace installs run without the package-DB snapshot bracket
   // (pm: null): pip's packages are invisible to it, and an unrelated
   // background distro change must not get attributed to the pip app.

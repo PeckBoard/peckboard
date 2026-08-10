@@ -39,6 +39,28 @@ export interface JobRecord {
    * consumed when the job settles (see provenance.ts). */
   pm?: PackageManager | null;
   method?: PackageManager | "vendor" | "pip";
+  /** How the job runs: a detached script (default for records that predate
+   * the field) or a temporary AI install session (see installSession.ts).
+   * Session jobs have no pid and no logfile of their own — progress is the
+   * session's slim event tail, and the snapshot bracket is taken by the
+   * plugin around the session's lifetime instead of inside a script. */
+  kind?: "script" | "session";
+  /** Session jobs: the temp session performing the install. */
+  session_id?: string;
+  /** Session jobs: the account-qualified model the session runs on. */
+  model?: string;
+  /** Session jobs: the event-log cursor consumed so far. */
+  last_seq?: number;
+  /** Session jobs: rendered tool-level activity lines (bounded; event kinds
+   * and tool names only — event payloads are never available to plugins). */
+  activity?: string[];
+  /** Session jobs: total events observed so far. */
+  events_total?: number;
+  /** Session jobs: the session is waiting on a user answer (askpass or a
+   * permission question) — surfaced so the page can say "open the session". */
+  question_open?: boolean;
+  /** Session jobs: one-sentence outcome note (why it failed, how it ended). */
+  message?: string;
 }
 
 // --- pure: script building/parsing ----------------------------------------
@@ -131,7 +153,10 @@ export function createJob(
   targetId: string,
   appId: string,
   action: JobAction,
-  meta: Pick<JobRecord, "pm" | "method"> = {},
+  meta: Pick<
+    JobRecord,
+    "pm" | "method" | "kind" | "session_id" | "model" | "last_seq"
+  > = {},
 ): JobRecord {
   const id = mintJobId();
   const job: JobRecord = {

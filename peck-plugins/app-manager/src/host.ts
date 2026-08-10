@@ -126,3 +126,87 @@ export function sshKeyList(): SshKeyListItem[] {
   const result = hostCall("peckboard_ssh_key_list", {});
   return result?.keys ?? [];
 }
+
+// --- sessions (permissions: models_read / session_write / session_dispatch /
+// session_read) — the AI-session install flow (see installSession.ts) -------
+
+/** One selectable model from `peckboard_list_models`. The host filters to
+ * thinking-capable models server-side; `id` is the account-qualified id
+ * (`provider:model[@account]`) sessions are created with. */
+export interface ModelChoice {
+  id: string;
+  display_name: string;
+  provider: string;
+  account_id: string | null;
+  thinking: boolean;
+  tier: number;
+}
+
+export function listModels(): ModelChoice[] {
+  const result = hostCall("peckboard_list_models", {});
+  return result?.models ?? [];
+}
+
+export interface CreateSessionInput {
+  name: string;
+  model: string;
+  is_temp: boolean;
+  folder_path?: string;
+  folder_name?: string;
+}
+
+/** Returns the created session's id. */
+export function createSession(input: CreateSessionInput): string {
+  const result = hostCall("peckboard_create_session", input);
+  const id = result?.session?.id;
+  if (typeof id !== "string" || !id) {
+    throw new Error("session creation returned no session id");
+  }
+  return id;
+}
+
+export function dispatchCapture(sessionId: string, prompt: string): void {
+  hostCall("peckboard_dispatch_capture", { session_id: sessionId, prompt });
+}
+
+export interface SessionEventBrief {
+  seq: number;
+  kind: string;
+  name: string | null;
+}
+
+/** Slim event tail — `{seq, kind, name}` only, never payloads. */
+export function sessionEvents(
+  sessionId: string,
+  afterSeq: number,
+  limit?: number,
+): { events: SessionEventBrief[]; latest_seq: number | null } {
+  const input: any = { session_id: sessionId, after_seq: afterSeq };
+  if (typeof limit === "number") input.limit = limit;
+  const result = hostCall("peckboard_session_events", input);
+  return {
+    events: result?.events ?? [],
+    latest_seq: result?.latest_seq ?? null,
+  };
+}
+
+/** Whether a session row still exists (a temp session vanishes when its
+ * tab is closed) — via the ungated-by-scope brief listing. */
+export function sessionExists(sessionId: string): boolean {
+  const result = hostCall("peckboard_list_sessions_brief", {});
+  const sessions: any[] = result?.sessions ?? [];
+  return sessions.some((s) => s && s.session_id === sessionId);
+}
+
+/** The trusted scope core resolved for this call; `authority` is true for
+ * an authenticated plugin-UI request, false for an MCP tool invocation. */
+export function callerScope(): {
+  folder_id: string | null;
+  authority: boolean;
+} {
+  const result = hostCall("peckboard_caller_scope", {});
+  return {
+    folder_id: result?.folder_id ?? null,
+    authority: result?.authority === true,
+  };
+}

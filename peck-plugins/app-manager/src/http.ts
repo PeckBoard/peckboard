@@ -9,7 +9,8 @@
 // gets metadata only, and a target stores nothing but the vault key's id.
 
 import { PAGE } from "./page";
-import { sshKeyList } from "./host";
+import { listModels, sshKeyList } from "./host";
+import { getDefaultInstallModel, thinkingModelChoices } from "./installSession";
 import {
   appDeps,
   appInstall,
@@ -76,6 +77,15 @@ export function serveAuthed(payload: any): string {
     if (method === "GET" && path === `${API}/apps`) {
       return jsonResponse(200, targetOverview(queryParam(query, "target")));
     }
+    // The install picker: selectable accounts + models (thinking-capable
+    // only, filtered server-side by core) plus the stored default. A fixed
+    // option set for a <select> — the page never offers free-text input.
+    if (method === "GET" && path === `${API}/install-options`) {
+      return jsonResponse(200, {
+        models: thinkingModelChoices(listModels()),
+        default_model: getDefaultInstallModel(),
+      });
+    }
     if (method === "GET" && path === `${API}/status`) {
       return jsonResponse(
         200,
@@ -114,7 +124,10 @@ export function serveAuthed(payload: any): string {
     }
     if (method === "POST" && path === `${API}/install`) {
       const b = parseBody(body);
-      return jsonResponse(200, appInstall({ target: b?.target, app: b?.app }));
+      return jsonResponse(
+        200,
+        appInstall({ target: b?.target, app: b?.app, model: b?.model }),
+      );
     }
     if (method === "POST" && path === `${API}/remove`) {
       const b = parseBody(body);
