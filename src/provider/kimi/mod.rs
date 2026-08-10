@@ -64,9 +64,6 @@ use crate::provider::turn::{
     self, StderrMarker, TurnSpec, TurnStream, setting_bool, setting_str, setting_str_list,
 };
 
-/// Default per-turn timeout. Kimi turns can take several tool steps, so this
-/// is generous; an unauthenticated host fails in seconds instead.
-const DEFAULT_TIMEOUT_SECS: u64 = turn::DEFAULT_TIMEOUT_SECS;
 /// Default CLI binary name; overridable via the `cli_path` setting.
 const DEFAULT_CLI: &str = "kimi";
 
@@ -437,7 +434,9 @@ impl AgentProvider for KimiProvider {
                     session_id: &sid,
                     db: &db,
                     broadcaster: broadcaster.as_ref(),
-                    timeout_secs: DEFAULT_TIMEOUT_SECS,
+                    // No wall-clock bound: a kimi turn is the agent working,
+                    // and a long tool step is not a failure to reap.
+                    timeout_secs: None,
                     cancel: cancel_for_task,
                     retire: retire_for_task,
                     retire_grace_secs: turn::RETIRE_GRACE_SECS,

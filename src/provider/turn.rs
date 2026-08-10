@@ -30,11 +30,6 @@ use crate::provider::stream::{CrashKind, ModelInfo, ProviderEvent, SpawnConfig};
 /// Cap on stderr bytes captured for a crash message.
 pub const MAX_STDERR_BYTES: usize = 16 * 1024;
 
-/// Default wall-clock bound on a single turn. A per-turn CLI that wedges
-/// (a hung tool call, a backend that never answers) would otherwise pin the
-/// session forever, since nothing else in the pipeline reaps it.
-pub const DEFAULT_TIMEOUT_SECS: u64 = 600;
-
 /// Grace given to a turn whose card was already transitioned by a terminal
 /// MCP tool (`complete_step`, `finish_card`, `wont_do_card`) before the child
 /// is wound down. Long enough for the agent to take the in-flight tool
@@ -99,7 +94,13 @@ pub struct TurnSpec<'a> {
     pub session_id: &'a str,
     pub db: &'a crate::db::Db,
     pub broadcaster: &'a crate::ws::broadcaster::Broadcaster,
-    pub timeout_secs: u64,
+    /// Optional wall-clock bound on a single turn. `None` — what every
+    /// agent-driving CLI on this harness passes — means no deadline at all:
+    /// a turn is the user's agent thinking, and a long tool call or a slow
+    /// backend is not a failure to be reaped. Kept as an option rather than
+    /// deleted so a future non-agent caller (a probe, a one-shot query) can
+    /// still bound its child.
+    pub timeout_secs: Option<u64>,
     pub cancel: Arc<Notify>,
     /// Signalled by [`crate::provider::agent::AgentProvider::shutdown_after_turn`]:
     /// the work this turn was dispatched for is already done — its card was
@@ -300,7 +301,11 @@ pub async fn run_turn(spec: TurnSpec<'_>, stream: &mut dyn TurnStream) -> TurnRe
 
     let mut saw_any = false;
     let mut lines = BufReader::new(stdout).lines();
-    let deadline = tokio::time::sleep(std::time::Duration::from_secs(timeout_secs));
+    // Only ever polled when `timeout_secs` is set; the guard on its select
+    // branch keeps a `None` turn deadline-free.
+    let deadline = tokio::time::sleep(std::time::Duration::from_secs(
+        timeout_secs.unwrap_or_default(),
+    ));
     tokio::pin!(deadline);
     // Armed only once `retire` fires; until then the branch that awaits it is
     // switched off by its `if retiring` guard.
@@ -358,7 +363,7 @@ pub async fn run_turn(spec: TurnSpec<'_>, stream: &mut dyn TurnStream) -> TurnRe
                 let _ = child.start_kill();
                 break TurnOutcome::Aborted;
             }
-            _ = &mut deadline => {
+            _ = &mut deadline, if timeout_secs.is_some() => {
                 let _ = child.start_kill();
                 break TurnOutcome::Timeout;
             }
@@ -510,7 +515,8 @@ pub async fn run_turn(spec: TurnSpec<'_>, stream: &mut dyn TurnStream) -> TurnRe
             TurnResult::failed(reason, kind)
         }
         TurnOutcome::Timeout => {
-            let reason = format!("{provider} turn exceeded {timeout_secs}s timeout");
+            let secs = timeout_secs.unwrap_or_default();
+            let reason = format!("{provider} turn exceeded {secs}s timeout");
             crash(
                 db,
                 broadcaster,
@@ -921,7 +927,7 @@ mod tests {
         db: &'a Db,
         broadcaster: &'a Broadcaster,
         cancel: Arc<Notify>,
-        timeout_secs: u64,
+        timeout_secs: Option<u64>,
     ) -> TurnSpec<'a> {
         TurnSpec {
             provider: "test",
@@ -972,9 +978,9 @@ mod tests {
         db
     }
 
-    /// The bug this harness was extracted to fix: `cursor-agent` had no
-    /// turn timeout, so a wedged child ran forever. Every provider on the
-    /// harness now gets one.
+    /// The timeout the harness still supports for a bounded, non-agent
+    /// child: given a deadline, a wedged CLI is killed at it rather than
+    /// running forever.
     #[tokio::test]
     async fn hung_child_is_killed_at_the_turn_timeout() {
         let db = session_db().await;
@@ -992,7 +998,7 @@ mod tests {
                 &db,
                 &broadcaster,
                 Arc::new(Notify::new()),
-                1,
+                Some(1),
             ),
             &mut stream,
         )
@@ -1006,6 +1012,39 @@ mod tests {
         assert!(
             started.elapsed() < std::time::Duration::from_secs(20),
             "the turn should end at its own deadline, not the child's",
+        );
+    }
+
+    /// Agent turns are unbounded on purpose: `cursor`, `grok` and `kimi` all
+    /// pass `None`, so a child that outlives what any deadline would have
+    /// been is left alone to finish its work.
+    #[tokio::test]
+    async fn a_turn_without_a_timeout_is_never_reaped() {
+        let db = session_db().await;
+        let broadcaster = Broadcaster::new();
+        let env = HashMap::new();
+        let args = vec!["2".to_string()];
+        let mut stream = EchoStream::default();
+
+        let started = std::time::Instant::now();
+        let result = run_turn(
+            spec(
+                "sleep",
+                &args,
+                &env,
+                &db,
+                &broadcaster,
+                Arc::new(Notify::new()),
+                None,
+            ),
+            &mut stream,
+        )
+        .await;
+
+        assert!(result.completed, "error: {:?}", result.error);
+        assert!(
+            started.elapsed() >= std::time::Duration::from_secs(2),
+            "the child should have run to its own end",
         );
     }
 
@@ -1067,7 +1106,7 @@ mod tests {
         });
 
         let result = run_turn(
-            spec("bash", &args, &env, &db, &broadcaster, cancel, 30),
+            spec("bash", &args, &env, &db, &broadcaster, cancel, Some(30)),
             &mut stream,
         )
         .await;
@@ -1109,7 +1148,7 @@ mod tests {
 
         let started = std::time::Instant::now();
         let result = run_turn(
-            spec("bash", &args, &env, &db, &broadcaster, cancel, 30),
+            spec("bash", &args, &env, &db, &broadcaster, cancel, Some(30)),
             &mut stream,
         )
         .await;
@@ -1155,7 +1194,7 @@ mod tests {
                     &db,
                     &broadcaster,
                     Arc::new(Notify::new()),
-                    30,
+                    Some(30),
                 )
             },
             &mut stream,
@@ -1206,7 +1245,7 @@ mod tests {
                     &db,
                     &broadcaster,
                     Arc::new(Notify::new()),
-                    30,
+                    Some(30),
                 )
             },
             &mut stream,
@@ -1259,7 +1298,7 @@ mod tests {
             &db,
             &broadcaster,
             Arc::new(Notify::new()),
-            30,
+            Some(30),
         );
         turn_spec.plugins = Some(&plugins);
         let result = run_turn(turn_spec, &mut stream).await;
@@ -1306,7 +1345,7 @@ mod tests {
                 &db,
                 &broadcaster,
                 Arc::new(Notify::new()),
-                30,
+                Some(30),
             ),
             &mut stream,
         )
@@ -1335,7 +1374,7 @@ mod tests {
                 &db,
                 &broadcaster,
                 Arc::new(Notify::new()),
-                30,
+                Some(30),
             ),
             &mut stream,
         )
@@ -1373,7 +1412,7 @@ mod tests {
             &db,
             &broadcaster,
             Arc::new(Notify::new()),
-            30,
+            Some(30),
         );
         s.stderr_markers = MARKERS;
 
@@ -1412,7 +1451,7 @@ mod tests {
             &db,
             &broadcaster,
             Arc::new(Notify::new()),
-            30,
+            Some(30),
         );
         s.stderr_markers = MARKERS;
 
@@ -1439,7 +1478,7 @@ mod tests {
             &db,
             &broadcaster,
             Arc::new(Notify::new()),
-            30,
+            Some(30),
         );
         s.success_on_output = true;
 
@@ -1466,7 +1505,7 @@ mod tests {
             &db,
             &broadcaster,
             Arc::new(Notify::new()),
-            30,
+            Some(30),
         );
         s.success_on_output = true;
 
@@ -1488,7 +1527,7 @@ mod tests {
             &db,
             &broadcaster,
             Arc::new(Notify::new()),
-            30,
+            Some(30),
         );
         s.spawn_hint = Some("Install it first.");
 

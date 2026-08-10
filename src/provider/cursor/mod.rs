@@ -52,9 +52,6 @@ const DEFAULT_CLI: &str = "cursor-agent";
 const MODEL_DISCOVERY_TTL: Duration = Duration::from_secs(60);
 /// Bound on how long the discovery subprocess may run.
 const MODEL_DISCOVERY_TIMEOUT_SECS: u64 = 10;
-/// Wall-clock bound on a single turn. `cursor-agent` enforces no timeout of
-/// its own, so without this a wedged child pins the session forever.
-const DEFAULT_TIMEOUT_SECS: u64 = turn::DEFAULT_TIMEOUT_SECS;
 
 /// Per-session tracking for an in-flight `cursor-agent` turn.
 struct CursorRun {
@@ -254,7 +251,9 @@ impl AgentProvider for CursorProvider {
                     session_id: &sid,
                     db: &db,
                     broadcaster: broadcaster.as_ref(),
-                    timeout_secs: DEFAULT_TIMEOUT_SECS,
+                    // No wall-clock bound: a cursor-agent turn is the agent
+                    // working, and a long tool step is not a failure to reap.
+                    timeout_secs: None,
                     cancel: cancel_for_task,
                     retire: retire_for_task,
                     retire_grace_secs: turn::RETIRE_GRACE_SECS,
