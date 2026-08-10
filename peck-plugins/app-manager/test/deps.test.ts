@@ -518,6 +518,19 @@ describe("buildDepsOverview", () => {
     expect(claude.note).toContain("not tracked by the package manager");
   });
 
+  it("labels a vendor app 'not tracked' even with no install record", () => {
+    // claude installed outside app-manager (the common case): no InstallRecord
+    // exists, but it must still read as vendor-untracked — never STALE_NOTE's
+    // "Refresh dependencies to update", which can never move a vendor app into
+    // the package graph.
+    const o = buildDepsOverview("local", fixtureGraph(), []);
+    const claude = o.apps.find((a: any) => a.id === "claude");
+    expect(claude.tracked).toBe(false);
+    expect(claude.tree).toBeNull();
+    expect(claude.note).toContain("not tracked by the package manager");
+    expect(claude.note).not.toContain("Refresh dependencies");
+  });
+
   it("carries no graph block at all before the first resolution", () => {
     const o = buildDepsOverview("local", null, []);
     expect(o.graph).toBeNull();
@@ -691,8 +704,10 @@ describe("refreshDepGraph (mocked apt host)", () => {
   describe("pip namespace probes", () => {
     it("builds the pip probe scripts", () => {
       expect(buildPipFreezeScript()).toContain("pip list --format=freeze");
+      // pip names are shell-quoted like every other package name reaching a
+      // command (defense-in-depth: the sibling apt/rpm builders quote too).
       expect(buildPipShowScript(["graphifyy", "foo"])).toContain(
-        "pip show --disable-pip-version-check graphifyy foo",
+        "pip show --disable-pip-version-check 'graphifyy' 'foo'",
       );
     });
 

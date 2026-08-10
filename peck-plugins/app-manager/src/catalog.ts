@@ -13,6 +13,7 @@
 // message ends up in the job log tail (see jobs.ts / tools.ts appStatus).
 
 import { PackageManager } from "./distro";
+import { shQuote } from "./jobs";
 
 export interface CatalogApp {
   id: string;
@@ -90,7 +91,7 @@ function pipRemove(pkg: string): string {
 function pipFreezeVersion(pkg: string): string {
   return (
     "python3 -m pip list --format=freeze --disable-pip-version-check 2>/dev/null" +
-    ` | awk -F'==' '$1 == "${pkg}"'`
+    ` | awk -F'==' -v p=${shQuote(pkg)} '$1 == p'`
   );
 }
 export const APPS: CatalogApp[] = [
@@ -339,4 +340,19 @@ export function packagesFor(
 ): string[] {
   if (!pm || !app.install[pm]) return [];
   return (app.packages?.[pm] ?? "").split(/\s+/).filter(Boolean);
+}
+
+/** A vendor-only app: its sole install recipe is the upstream `vendor`
+ * script (no distro package-manager recipe), so it never enters the distro
+ * package database and has no dependency-graph footprint on any distro —
+ * unlike a normal app that simply isn't installed yet. pip-namespace apps are
+ * tracked separately (see `namespace`). Drives the honest "not tracked by the
+ * package manager" note in deps.ts regardless of whether app-manager itself
+ * ran the install. */
+export function isVendorApp(app: CatalogApp): boolean {
+  return (
+    app.namespace !== "pip" &&
+    !!app.install.vendor &&
+    Object.keys(app.install).every((k) => k === "vendor")
+  );
 }

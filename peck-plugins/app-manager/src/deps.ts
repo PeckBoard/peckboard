@@ -33,7 +33,7 @@
 // Same layout as provenance.ts/jobs.ts: everything above the exec/store
 // calls is pure, DOM-free and host-free, unit-tested in test/deps.test.ts.
 
-import { APPS, packagesFor } from "./catalog";
+import { APPS, isVendorApp, packagesFor } from "./catalog";
 import {
   OS_RELEASE_PROBE,
   PackageManager,
@@ -439,7 +439,7 @@ export function buildPipFreezeScript(): string {
 export function buildPipShowScript(pkgs: string[]): string {
   return (
     "python3 -m pip show --disable-pip-version-check " +
-    pkgs.join(" ") +
+    pkgs.map(shQuote).join(" ") +
     " 2>/dev/null"
   );
 }
@@ -868,7 +868,7 @@ export function buildDepsOverview(
       note:
         app.namespace === "pip"
           ? PIP_APP_NOTE
-          : rec && rec.method === "vendor"
+          : isVendorApp(app) || (rec && rec.method === "vendor")
             ? VENDOR_NOTE
             : graph
               ? STALE_NOTE
